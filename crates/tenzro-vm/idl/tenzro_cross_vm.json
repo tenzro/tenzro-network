@@ -1,0 +1,237 @@
+{
+  "version": "0.1.0",
+  "name": "tenzro_cross_vm",
+  "address": "AoD3kebB2bYjLKyJtaqkyXqwJy4oQ949SnVhMwEYzGXR",
+  "address_hex": "918f858b6b0dd134e9a1fcb73002428c5197093e76e536badc60382bb9f8ac78",
+  "address_derivation": "SHA-256(\"tenzro/svm/program/cross_vm/v1\")",
+  "metadata": {
+    "name": "tenzro_cross_vm",
+    "description": "Canonical SVM-side program for initiating cross-VM token transfers from Solana-flavored transactions into the Tenzro EVM cross_vm_bridge precompile at 0x1003. Native program: no stored ELF, dispatched directly by the SVM executor.",
+    "spec": "anchor-0.31",
+    "discriminator_scheme": "sha256(\"global:<snake_case_name>\")[..8]",
+    "instruction_data_layout": "[ discriminator (8 bytes) | payload (n bytes) ]",
+    "execution_model": "decoder-and-intent-emitter",
+    "consensus_authority": "EVM precompile 0x1003 (cross_vm_bridge) — this program emits a structured Log; the actual cross-VM balance transition is consensus-mediated by the EVM-side handler.",
+    "log_format": {
+      "address": "918f858b6b0dd134e9a1fcb73002428c5197093e76e536badc60382bb9f8ac78",
+      "topics": [
+        "b\"tenzro_cross_vm\"  (event family)",
+        "instruction_name (UTF-8: bridge_to_evm | bridge_from_evm | register_token_pointer | transfer_cross_vm)",
+        "sender (raw transaction.from bytes)"
+      ],
+      "data": "discriminator || payload (re-encoded canonical bytes)"
+    }
+  },
+  "instructions": [
+    {
+      "name": "bridge_to_evm",
+      "discriminator": [146, 168, 164, 92, 51, 34, 95, 37],
+      "discriminator_hex": "92a8a45c33225f25",
+      "compute_units": 5000,
+      "accounts": [
+        {
+          "name": "payer",
+          "isMut": true,
+          "isSigner": true,
+          "docs": ["Transaction signer; balance is debited for gas (in lamport-equivalent compute units)."]
+        }
+      ],
+      "args": [
+        {
+          "name": "mint",
+          "type": { "array": ["u8", 32] },
+          "docs": ["SPL mint Pubkey for the token being bridged."]
+        },
+        {
+          "name": "evm_dest",
+          "type": { "array": ["u8", 20] },
+          "docs": ["EVM-side recipient (20-byte address)."]
+        },
+        {
+          "name": "amount",
+          "type": "u64",
+          "docs": ["Amount in SPL native units (mint decimals)."]
+        },
+        {
+          "name": "nonce",
+          "type": "u64",
+          "docs": ["Replay-protection nonce; must be strictly increasing per (mint, sender) pair."]
+        }
+      ],
+      "payload_size": 68,
+      "payload_layout": "[mint(32) | evm_dest(20) | amount_le(8) | nonce_le(8)]",
+      "maps_to_evm": "cross_vm_bridge::CROSS_VM_TRANSFER with destVm = VM_TYPE_EVM"
+    },
+    {
+      "name": "bridge_from_evm",
+      "discriminator": [48, 56, 115, 50, 137, 244, 205, 117],
+      "discriminator_hex": "3038733289f4cd75",
+      "compute_units": 5000,
+      "accounts": [
+        {
+          "name": "payer",
+          "isMut": true,
+          "isSigner": true,
+          "docs": ["Transaction signer; verifies the EVM-side burn receipt."]
+        }
+      ],
+      "args": [
+        {
+          "name": "mint",
+          "type": { "array": ["u8", 32] },
+          "docs": ["SPL mint Pubkey to credit on SVM."]
+        },
+        {
+          "name": "svm_dest",
+          "type": { "array": ["u8", 32] },
+          "docs": ["SVM-side recipient (32-byte Pubkey)."]
+        },
+        {
+          "name": "amount",
+          "type": "u64",
+          "docs": ["Amount to mint on SVM (matches the EVM-side burn)."]
+        },
+        {
+          "name": "nonce",
+          "type": "u64",
+          "docs": ["Replay-protection nonce; must match the EVM-side burn nonce."]
+        }
+      ],
+      "payload_size": 80,
+      "payload_layout": "[mint(32) | svm_dest(32) | amount_le(8) | nonce_le(8)]",
+      "maps_to_evm": "cross_vm_bridge::CROSS_VM_TRANSFER with destVm = VM_TYPE_SVM"
+    },
+    {
+      "name": "register_token_pointer",
+      "discriminator": [154, 142, 1, 57, 15, 153, 69, 34],
+      "discriminator_hex": "9a8e01390f994522",
+      "compute_units": 7500,
+      "accounts": [
+        {
+          "name": "registrar",
+          "isMut": true,
+          "isSigner": true,
+          "docs": ["Token-registry administrator (governance-gated in production)."]
+        }
+      ],
+      "args": [
+        {
+          "name": "mint",
+          "type": { "array": ["u8", 32] },
+          "docs": ["SPL mint Pubkey for the SVM-side representation."]
+        },
+        {
+          "name": "evm_token_address",
+          "type": { "array": ["u8", 20] },
+          "docs": ["EVM-side ERC-20 pointer contract address."]
+        },
+        {
+          "name": "token_id",
+          "type": { "array": ["u8", 32] },
+          "docs": ["Unified token registry ID — SHA-256(creator || nonce)."]
+        }
+      ],
+      "payload_size": 84,
+      "payload_layout": "[mint(32) | evm_token_address(20) | token_id(32)]",
+      "maps_to_evm": "cross_vm_bridge token-pointer registration (binds SPL mint <-> ERC-20 pointer under the same token_id)"
+    },
+    {
+      "name": "transfer_cross_vm",
+      "discriminator": [188, 104, 65, 104, 171, 167, 171, 185],
+      "discriminator_hex": "bc684168aba7abb9",
+      "compute_units": 5000,
+      "accounts": [
+        {
+          "name": "payer",
+          "isMut": true,
+          "isSigner": true,
+          "docs": ["Transaction signer; debited the cross-VM transfer amount."]
+        }
+      ],
+      "args": [
+        {
+          "name": "mint",
+          "type": { "array": ["u8", 32] },
+          "docs": ["SPL mint Pubkey for the asset being transferred."]
+        },
+        {
+          "name": "dest_vm",
+          "type": "u8",
+          "docs": ["Destination VM type — 0=Native, 1=EVM, 2=SVM, 3=DAML."]
+        },
+        {
+          "name": "dest_address",
+          "type": { "array": ["u8", 32] },
+          "docs": ["Destination address; left-padded to 32 bytes for EVM (20-byte) recipients."]
+        },
+        {
+          "name": "amount",
+          "type": "u64",
+          "docs": ["Transfer amount in SPL native units."]
+        },
+        {
+          "name": "nonce",
+          "type": "u64",
+          "docs": ["Replay-protection nonce."]
+        }
+      ],
+      "payload_size": 81,
+      "payload_layout": "[mint(32) | dest_vm(1) | dest_address(32) | amount_le(8) | nonce_le(8)]",
+      "maps_to_evm": "cross_vm_bridge::CROSS_VM_TRANSFER with destVm = <dest_vm>"
+    }
+  ],
+  "errors": [
+    {
+      "code": 100,
+      "name": "MissingDiscriminator",
+      "msg": "Instruction data shorter than 8 bytes — discriminator missing."
+    },
+    {
+      "code": 101,
+      "name": "UnknownDiscriminator",
+      "msg": "Discriminator does not match any known instruction."
+    },
+    {
+      "code": 102,
+      "name": "PayloadSize",
+      "msg": "Instruction payload size does not match the expected size for this discriminator."
+    },
+    {
+      "code": 103,
+      "name": "InvalidDestVm",
+      "msg": "transfer_cross_vm: dest_vm must be in 0..=3 (Native | EVM | SVM | DAML)."
+    },
+    {
+      "code": 104,
+      "name": "ValueMustBeZero",
+      "msg": "Cross-VM transactions move registry-tracked tokens; tx.value (native lamports) must be zero."
+    }
+  ],
+  "constants": [
+    {
+      "name": "VM_TYPE_NATIVE",
+      "type": "u8",
+      "value": "0"
+    },
+    {
+      "name": "VM_TYPE_EVM",
+      "type": "u8",
+      "value": "1"
+    },
+    {
+      "name": "VM_TYPE_SVM",
+      "type": "u8",
+      "value": "2"
+    },
+    {
+      "name": "VM_TYPE_DAML",
+      "type": "u8",
+      "value": "3"
+    },
+    {
+      "name": "PROGRAM_ID_DERIVATION_DOMAIN",
+      "type": "string",
+      "value": "tenzro/svm/program/cross_vm/v1"
+    }
+  ]
+}

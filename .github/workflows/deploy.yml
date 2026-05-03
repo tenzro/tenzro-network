@@ -1,0 +1,70 @@
+name: Deploy to GKE
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'testnet'
+        type: choice
+        options:
+          - testnet
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: tenzro-testnet
+          location: us-central1-a
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Deploy to GKE
+        run: |
+          # Apply Kubernetes manifests
+          kubectl apply -f deploy/kubernetes/namespace.yaml
+          kubectl apply -f deploy/kubernetes/configmap.yaml
+          kubectl apply -f deploy/kubernetes/caddy-configmap.yaml
+          kubectl apply -f deploy/kubernetes/services.yaml
+          kubectl apply -f deploy/kubernetes/pdb.yaml
+          kubectl apply -f deploy/kubernetes/network-policy.yaml
+          kubectl apply -f deploy/kubernetes/caddy-deployment.yaml
+          kubectl apply -f deploy/kubernetes/validator-statefulset.yaml
+          kubectl apply -f deploy/kubernetes/rpc-deployment.yaml
+
+          # Wait for rollout
+          kubectl rollout status statefulset/tenzro-validator -n tenzro-testnet --timeout=600s
+          kubectl rollout status deployment/tenzro-rpc -n tenzro-testnet --timeout=300s
+          kubectl rollout status deployment/caddy -n tenzro-testnet --timeout=120s
+
+      - name: Verify deployment
+        run: |
+          echo "=== Validator pods ==="
+          kubectl get pods -n tenzro-testnet -l component=validator
+          echo "=== RPC pods ==="
+          kubectl get pods -n tenzro-testnet -l component=rpc
+          echo "=== Caddy pods ==="
+          kubectl get pods -n tenzro-testnet -l component=caddy
+          echo "=== Services ==="
+          kubectl get svc -n tenzro-testnet
+          echo "=== Caddy External IP ==="
+          kubectl get svc caddy-lb -n tenzro-testnet -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+          echo ""

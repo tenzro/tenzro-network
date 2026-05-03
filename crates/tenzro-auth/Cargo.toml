@@ -1,0 +1,45 @@
+[package]
+name = "tenzro-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OAuth 2.1 + DPoP + RAR authentication for Tenzro Network — DPoP-bound JWTs with RAR scopes"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-storage = { workspace = true }
+tenzro-identity = { workspace = true }
+
+# JWT + DPoP
+jsonwebtoken = { workspace = true }
+base64 = { workspace = true }
+
+# Crypto
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+
+# Serde
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Concurrency
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+
+# Time + IDs
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# Errors + logging
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Utilities
+hex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"

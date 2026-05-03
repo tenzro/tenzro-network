@@ -1,0 +1,83 @@
+{
+  "template_id": "ref-video-analyst-v1",
+  "name": "Video Analyst",
+  "description": "Autonomous agent that ingests short video clips, extracts frame embeddings via Tenzro-served video encoders, and routes the resulting feature vector to downstream consumers (search index, anomaly detector, A2A peer). Wave 1 ships the routing scaffolding — the Tenzro video catalog ships empty until a permissive ONNX-shippable encoder lands. Until then the agent dispatches frames to vision encoders (DINOv3, SigLIP2) and pools them.",
+  "template_type": "autonomous",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1745798400,
+  "updated_at": 1745798400,
+  "capabilities": [
+    {
+      "id": "embed_video",
+      "name": "Video Embedding",
+      "description": "Encodes a short video clip into a single dense feature vector by dispatching frames to a video encoder (preferred) or pooling vision-encoder embeddings (fallback)",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"model_id\":{\"type\":\"string\"},\"video_b64\":{\"type\":\"string\"},\"frame_stride\":{\"type\":\"integer\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"embedding\":{\"type\":\"array\"},\"dim\":{\"type\":\"integer\"},\"frames_used\":{\"type\":\"integer\"},\"model_used\":{\"type\":\"string\"}}}"
+    },
+    {
+      "id": "agent_handoff",
+      "name": "A2A Hand-off",
+      "description": "Forwards the computed video embedding to a downstream agent (search, anomaly, alerting) via A2A",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"target_agent\":{\"type\":\"string\"},\"embedding\":{\"type\":\"array\"},\"context\":{\"type\":\"object\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"status\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 2048,
+    "min_storage_mb": 1024,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are a video analysis agent. When a clip arrives: (1) call tenzro_listVideoCatalog and tenzro_listVideoModels — if a video encoder is registered, prefer it; (2) otherwise extract frames at the requested stride and pool embeddings from a vision encoder (DINOv3 by default); (3) return the pooled vector and per-frame count; (4) if the user requested a hand-off, dispatch the embedding to the named A2A peer. Always disclose whether the result came from a true video encoder or vision-encoder pooling.",
+  "examples": [
+    {
+      "description": "10-second clip, no native video encoder available",
+      "user_input": "Embed this 10s clip and forward to the search agent",
+      "expected_output": "Video catalog empty in wave 1 — fell back to vision pooling. Used dinov3-vitb16 over 10 frames (stride 30). Pooled 768-dim mean vector. Forwarded to agent did:tenzro:machine:search-001. Task t-789."
+    }
+  ],
+  "tags": ["video", "embedding", "vjepa", "videomae", "ai", "a2a"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/video-analyst",
+  "metadata": {},
+  "execution_spec": {
+    "backend": "MultiVm",
+    "delegation": {
+      "max_transaction_value": 10000000000000000000,
+      "max_daily_spend": 100000000000000000000,
+      "allowed_operations": ["inference", "agent_message"],
+      "allowed_chains": ["ethereum", "base"],
+      "time_bound_days": 30,
+      "kyc_tier": "Basic"
+    },
+    "required_tool_tags": ["ai"],
+    "required_skill_tags": ["openclaw-tenzro"],
+    "steps": [
+      {
+        "ToolInvoke": {
+          "tool_tag": "ai",
+          "method": "tenzro_listVideoCatalog",
+          "params_template": "{}"
+        }
+      },
+      {
+        "ToolInvoke": {
+          "tool_tag": "ai",
+          "method": "tenzro_videoEmbed",
+          "params_template": "{\"model_id\":\"{{model_id}}\",\"video_b64\":\"{{video_b64}}\",\"frame_stride\":{{frame_stride}}}"
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 10000000000000000000,
+      "per_day_value": 100000000000000000000
+    }
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "template_id": "ref-mpp-payment-agent-v1",
+  "name": "MPP Payment Agent",
+  "description": "Machine-to-machine payment agent using the MPP (Machine Payments Protocol). Creates payment challenges, signs credentials with the agent wallet, and settles via Stripe integration.",
+  "template_type": "autonomous",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1712534400,
+  "updated_at": 1712534400,
+  "capabilities": [
+    {
+      "id": "mpp_payment",
+      "name": "MPP Payment",
+      "description": "Handles HTTP 402 payment challenges and credential flows via MPP",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"resource_url\":{\"type\":\"string\"},\"amount\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"receipt_id\":{\"type\":\"string\"},\"status\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 256,
+    "min_storage_mb": 50,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are an MPP payment agent. When a resource returns HTTP 402, you create a payment challenge, sign the credential with your wallet, and submit it to complete the payment flow.",
+  "examples": [
+    {
+      "description": "Pay for an API resource",
+      "user_input": "Access the inference endpoint at https://provider.example/v1/chat and pay the required fee",
+      "expected_output": "Received 402 challenge. Signed MPP credential for 0.5 TNZO. Receipt: mpp-receipt-abc123. Resource accessible."
+    }
+  ],
+  "tags": ["payments", "mpp", "http-402", "machine-payment"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/mpp-payment",
+  "metadata": {},
+  "execution_spec": {
+    "backend": {
+      "MppPayment": {
+        "endpoint": "{{mpp_endpoint}}"
+      }
+    },
+    "delegation": {
+      "max_transaction_value": 10000000000000000000,
+      "max_daily_spend": 100000000000000000000,
+      "allowed_operations": ["mpp_pay"],
+      "allowed_chains": [],
+      "time_bound_days": 7,
+      "kyc_tier": "Unverified"
+    },
+    "required_tool_tags": [],
+    "required_skill_tags": [],
+    "steps": [
+      {
+        "MppPay": {
+          "amount": "{{amount}}",
+          "asset": "TNZO",
+          "recipient": "{{recipient}}"
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 10000000000000000000,
+      "per_day_value": 100000000000000000000
+    }
+  }
+}

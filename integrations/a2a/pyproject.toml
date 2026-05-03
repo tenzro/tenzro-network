@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tenzro-a2a-server"
+version = "0.1.0"
+description = "A2A server for Tenzro Network — 19 agent skills for AI-to-AI collaboration"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "httpx>=0.27",
+    "sse-starlette>=2.0",
+]
+
+[project.scripts]
+tenzro-a2a-server = "tenzro_a2a_server.server:main"
+
+[project.urls]
+Homepage = "https://tenzro.com"
+Repository = "https://github.com/tenzro/tenzro-a2a-server"

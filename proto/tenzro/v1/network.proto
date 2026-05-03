@@ -1,0 +1,40 @@
+syntax = "proto3";
+package tenzro.v1;
+
+import "tenzro/v1/types.proto";
+
+message PeerInfo {
+  string peer_id = 1;
+  string multiaddr = 2;
+  NetworkRole role = 3;
+  string agent_version = 4;
+  uint64 connected_since = 5;
+  uint64 latency_ms = 6;
+}
+
+message NodeInfo {
+  string node_id = 1;
+  string version = 2;
+  NetworkRole role = 3;
+  ChainId chain_id = 4;
+  uint64 block_height = 5;
+  repeated PeerInfo peers = 6;
+  uint64 uptime_seconds = 7;
+}
+
+message NetworkInfo {
+  ChainId chain_id = 1;
+  uint64 block_height = 2;
+  uint32 peer_count = 3;
+  uint64 total_transactions = 4;
+  bool syncing = 5;
+  string version = 6;
+}
+
+// Gossip topics
+message GossipMessage {
+  string topic = 1;
+  bytes data = 2;
+  string sender_peer_id = 3;
+  Timestamp timestamp = 4;
+}

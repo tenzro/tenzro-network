@@ -1,0 +1,57 @@
+[package]
+name = "tenzro-payments"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Payment protocol support for Tenzro Network — MPP, x402, Tempo, Visa TAP, and Mastercard Agent Pay"
+
+[features]
+default = ["mpp", "x402", "ap2"]
+mpp = []
+x402 = []
+tempo-bridge = []
+visa-tap = []
+mastercard-agent-pay = []
+ap2 = []
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-identity = { workspace = true }
+tenzro-settlement = { workspace = true }
+tenzro-bridge = { workspace = true }
+tenzro-wallet = { workspace = true }
+tenzro-storage = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+base64 = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hex = { workspace = true }
+bytes = { workspace = true }
+k256 = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+rlp = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+
+[[bench]]
+name = "payment_benchmarks"
+harness = false

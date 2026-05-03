@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenzro-config
+  namespace: tenzro-testnet
+data:
+  genesis.toml: |
+    chain_id = 1337
+    timestamp = 0
+
+    [[validators]]
+    public_key = "0000000000000000000000000000000000000000000000000000000000000001"
+    stake = 10000
+
+    [[validators]]
+    public_key = "0000000000000000000000000000000000000000000000000000000000000002"
+    stake = 10000
+
+    [[validators]]
+    public_key = "0000000000000000000000000000000000000000000000000000000000000003"
+    stake = 10000
+
+    [[validators]]
+    public_key = "0000000000000000000000000000000000000000000000000000000000000004"
+    stake = 10000
+
+    [[validators]]
+    public_key = "0000000000000000000000000000000000000000000000000000000000000005"
+    stake = 10000
+
+    [[accounts]]
+    address = "0000000000000000000000000000000000000000000000000000000000000010"
+    balance = 10000000
+
+    [faucet]
+    address = "0000000000000000000000000000000000000000000000000000000000ffffff"
+    amount_per_request = 100
+    cooldown_seconds = 86400
+    enabled = true

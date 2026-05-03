@@ -1,0 +1,126 @@
+version: '3.8'
+
+services:
+  validator-1:
+    build: .
+    container_name: tenzro-validator-1
+    command:
+      - "--role"
+      - "validator"
+      - "--data-dir"
+      - "/data/tenzro"
+      - "--listen-addr"
+      - "/ip4/0.0.0.0/tcp/9000"
+      - "--rpc-addr"
+      - "0.0.0.0:8545"
+      - "--genesis"
+      - "/config/genesis-local.toml"
+      - "--boot-nodes"
+      - "/dns4/validator-2/tcp/9000,/dns4/validator-3/tcp/9000"
+      - "--log-level"
+      - "debug"
+    volumes:
+      - validator1-data:/data/tenzro
+      - ./config:/config:ro
+    ports:
+      - "9001:9000"   # P2P
+      - "8546:8545"   # RPC (for debugging)
+    networks:
+      - tenzro-net
+    restart: unless-stopped
+
+  validator-2:
+    build: .
+    container_name: tenzro-validator-2
+    command:
+      - "--role"
+      - "validator"
+      - "--data-dir"
+      - "/data/tenzro"
+      - "--listen-addr"
+      - "/ip4/0.0.0.0/tcp/9000"
+      - "--rpc-addr"
+      - "0.0.0.0:8545"
+      - "--genesis"
+      - "/config/genesis-local.toml"
+      - "--boot-nodes"
+      - "/dns4/validator-1/tcp/9000,/dns4/validator-3/tcp/9000"
+      - "--log-level"
+      - "debug"
+    volumes:
+      - validator2-data:/data/tenzro
+      - ./config:/config:ro
+    ports:
+      - "9002:9000"   # P2P
+    networks:
+      - tenzro-net
+    restart: unless-stopped
+
+  validator-3:
+    build: .
+    container_name: tenzro-validator-3
+    command:
+      - "--role"
+      - "validator"
+      - "--data-dir"
+      - "/data/tenzro"
+      - "--listen-addr"
+      - "/ip4/0.0.0.0/tcp/9000"
+      - "--rpc-addr"
+      - "0.0.0.0:8545"
+      - "--genesis"
+      - "/config/genesis-local.toml"
+      - "--boot-nodes"
+      - "/dns4/validator-1/tcp/9000,/dns4/validator-2/tcp/9000"
+      - "--log-level"
+      - "debug"
+    volumes:
+      - validator3-data:/data/tenzro
+      - ./config:/config:ro
+    ports:
+      - "9003:9000"   # P2P
+    networks:
+      - tenzro-net
+    restart: unless-stopped
+
+  rpc-1:
+    build: .
+    container_name: tenzro-rpc-1
+    command:
+      - "--role"
+      - "user"
+      - "--data-dir"
+      - "/data/tenzro"
+      - "--listen-addr"
+      - "/ip4/0.0.0.0/tcp/9000"
+      - "--rpc-addr"
+      - "0.0.0.0:8545"
+      - "--genesis"
+      - "/config/genesis-local.toml"
+      - "--boot-nodes"
+      - "/dns4/validator-1/tcp/9000,/dns4/validator-2/tcp/9000,/dns4/validator-3/tcp/9000"
+      - "--log-level"
+      - "info"
+    volumes:
+      - rpc1-data:/data/tenzro
+      - ./config:/config:ro
+    ports:
+      - "8545:8545"   # JSON-RPC (public)
+      - "8080:8080"   # Web API (public)
+    networks:
+      - tenzro-net
+    restart: unless-stopped
+    depends_on:
+      - validator-1
+      - validator-2
+      - validator-3
+
+volumes:
+  validator1-data:
+  validator2-data:
+  validator3-data:
+  rpc1-data:
+
+networks:
+  tenzro-net:
+    driver: bridge

@@ -1,0 +1,106 @@
+syntax = "proto3";
+package tenzro.v1;
+
+import "tenzro/v1/types.proto";
+
+message AgentIdentity {
+  string agent_id = 1;
+  Address address = 2;
+  string name = 3;
+  string version = 4;
+  Address creator = 5;
+}
+
+message AgentConfig {
+  AgentIdentity identity = 1;
+  repeated Capability capabilities = 2;
+  string description = 3;
+  ExecutionRequirements execution_requirements = 4;
+  AgentPermissions permissions = 5;
+  ResourceLimits resource_limits = 6;
+  map<string, string> metadata = 7;
+}
+
+message Capability {
+  oneof capability {
+    NlpCapability nlp = 1;
+    VisionCapability vision = 2;
+    CodeCapability code = 3;
+    DataCapability data = 4;
+    BlockchainCapability blockchain = 5;
+    CustomCapability custom = 6;
+  }
+}
+
+message NlpCapability {
+  repeated string languages = 1;
+}
+
+message VisionCapability {
+  repeated string tasks = 1;
+}
+
+message CodeCapability {
+  repeated string languages = 1;
+}
+
+message DataCapability {
+  repeated string formats = 1;
+}
+
+message BlockchainCapability {
+  repeated string chains = 1;
+}
+
+message CustomCapability {
+  string name = 1;
+  map<string, string> parameters = 2;
+}
+
+message ExecutionRequirements {
+  bool requires_tee = 1;
+  string tee_vendor = 2;
+  uint64 min_memory = 3;
+  uint32 min_cpu_cores = 4;
+  bool requires_gpu = 5;
+  bool requires_network = 6;
+}
+
+message AgentPermissions {
+  bool can_execute_transactions = 1;
+  bool can_access_external_apis = 2;
+  bool can_interact_with_agents = 3;
+  bool can_store_data = 4;
+  uint64 max_transaction_value = 5;
+  repeated Address allowed_contracts = 6;
+}
+
+message ResourceLimits {
+  uint64 max_execution_time = 1;
+  uint64 max_memory = 2;
+  uint32 max_cpu_percent = 3;
+  uint64 max_storage = 4;
+  uint32 max_api_calls = 5;
+}
+
+message AgentMessage {
+  string message_id = 1;
+  AgentIdentity from = 2;
+  AgentIdentity to = 3;
+  AgentMessageType message_type = 4;
+  bytes payload = 5;
+  Timestamp timestamp = 6;
+  bytes signature = 7;
+  string reply_to = 8;
+}
+
+enum AgentMessageType {
+  AGENT_MESSAGE_TYPE_UNSPECIFIED = 0;
+  AGENT_MESSAGE_TYPE_TASK_REQUEST = 1;
+  AGENT_MESSAGE_TYPE_TASK_RESPONSE = 2;
+  AGENT_MESSAGE_TYPE_QUERY = 3;
+  AGENT_MESSAGE_TYPE_QUERY_RESPONSE = 4;
+  AGENT_MESSAGE_TYPE_NOTIFICATION = 5;
+  AGENT_MESSAGE_TYPE_COORDINATION = 6;
+  AGENT_MESSAGE_TYPE_ERROR = 7;
+}

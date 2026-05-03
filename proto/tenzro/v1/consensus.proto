@@ -1,0 +1,57 @@
+syntax = "proto3";
+package tenzro.v1;
+
+import "tenzro/v1/types.proto";
+import "tenzro/v1/block.proto";
+
+// HotStuff-2 consensus messages
+message ConsensusMessage {
+  oneof message {
+    Proposal proposal = 1;
+    VoteMessage vote = 2;
+    NewView new_view = 3;
+    Commit commit = 4;
+  }
+}
+
+message Proposal {
+  Block block = 1;
+  uint64 round = 2;
+  Address proposer = 3;
+  Signature signature = 4;
+  Hash justify_qc = 5;
+}
+
+message VoteMessage {
+  Hash block_hash = 1;
+  uint64 round = 2;
+  Address voter = 3;
+  Signature signature = 4;
+}
+
+message NewView {
+  uint64 round = 1;
+  Address sender = 2;
+  Hash highest_qc = 3;
+  Signature signature = 4;
+}
+
+message Commit {
+  Hash block_hash = 1;
+  uint64 round = 2;
+  repeated Signature signatures = 3;
+}
+
+message ValidatorInfo {
+  Address address = 1;
+  bytes public_key = 2;
+  Amount stake = 3;
+  bool tee_attested = 4;
+  uint64 epoch = 5;
+}
+
+message ValidatorSet {
+  repeated ValidatorInfo validators = 1;
+  uint64 epoch = 2;
+  uint64 total_stake = 3;
+}

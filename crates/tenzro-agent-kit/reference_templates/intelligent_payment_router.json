@@ -1,0 +1,115 @@
+{
+  "template_id": "ref-intelligent-payment-router-v1",
+  "name": "Intelligent Payment Router",
+  "description": "Autonomous agent that receives payment requests and evaluates MPP (Machine Payments Protocol), x402 (Coinbase), and native on-chain transfer to select the optimal path based on real-time fee estimation, latency, and settlement finality, then executes the payment end-to-end.",
+  "template_type": "autonomous",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1712534400,
+  "updated_at": 1712534400,
+  "capabilities": [
+    {
+      "id": "payment_routing",
+      "name": "Payment Routing",
+      "description": "Compares MPP, x402, and native payment rails on cost and speed, then selects and executes the optimal route",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"recipient\":{\"type\":\"string\"},\"amount\":{\"type\":\"number\"},\"currency\":{\"type\":\"string\"},\"urgency\":{\"type\":\"string\",\"enum\":[\"low\",\"medium\",\"high\"]}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"protocol_used\":{\"type\":\"string\"},\"fee\":{\"type\":\"number\"},\"tx_hash\":{\"type\":\"string\"},\"settlement_time_ms\":{\"type\":\"number\"}}}"
+    },
+    {
+      "id": "fee_estimation",
+      "name": "Fee Estimation",
+      "description": "Quotes fees for all supported payment protocols without executing",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"amount\":{\"type\":\"number\"},\"currency\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"mpp_fee\":{\"type\":\"number\"},\"x402_fee\":{\"type\":\"number\"},\"native_fee\":{\"type\":\"number\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 512,
+    "min_storage_mb": 64,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are an intelligent payment routing agent. When a payment request arrives, quote fees from MPP (Stripe-backed session payments), x402 (Coinbase stateless payments), and native on-chain transfer. Pick the cheapest option unless the user specifies urgency=high, in which case prefer the fastest settlement. Execute the payment and return the protocol used, fee paid, transaction hash, and settlement confirmation time. Never exceed delegation limits.",
+  "examples": [
+    {
+      "description": "Route a small payment via cheapest protocol",
+      "user_input": "Pay 5 TNZO to did:tenzro:human:abc123 for inference, urgency low",
+      "expected_output": "Quoted fees: MPP 0.02 TNZO, x402 0.05 TNZO, native 0.01 TNZO. Selected native (cheapest). Sent 5 TNZO, fee 0.01 TNZO. TX: 0x123... Settlement: 2.1s."
+    },
+    {
+      "description": "Route an urgent payment via fastest protocol",
+      "user_input": "Pay 50 TNZO to 0xRecipient urgency high",
+      "expected_output": "Quoted fees: MPP 0.08 TNZO (200ms), x402 0.12 TNZO (150ms), native 0.03 TNZO (3s). Selected x402 (fastest). Sent 50 TNZO, fee 0.12 TNZO. TX: 0x456... Settlement: 148ms."
+    }
+  ],
+  "tags": ["payments", "mpp", "x402", "routing", "ai"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/intelligent-payment-router",
+  "metadata": {},
+  "execution_spec": {
+    "backend": {
+      "MppPayment": {
+        "endpoint": "https://pay.tenzro.network/mpp"
+      }
+    },
+    "delegation": {
+      "max_transaction_value": 100000000000000000000,
+      "max_daily_spend": 1000000000000000000000,
+      "allowed_operations": ["pay", "transfer"],
+      "allowed_chains": ["ethereum", "base", "arbitrum"],
+      "time_bound_days": 30,
+      "kyc_tier": "Basic"
+    },
+    "required_tool_tags": ["defi"],
+    "required_skill_tags": ["ethereum-defi", "chainlink-oracle"],
+    "steps": [
+      {
+        "ToolInvoke": {
+          "tool_tag": "defi",
+          "method": "get_price",
+          "params_template": "{\"asset\":\"TNZO\",\"quote\":\"USD\"}"
+        }
+      },
+      {
+        "When": {
+          "jmespath_expr": "fees.mpp <= fees.x402 && fees.mpp <= fees.native",
+          "body": [
+            {
+              "MppPay": {
+                "recipient": "{{recipient}}",
+                "amount": "{{amount}}",
+                "asset": "TNZO",
+                "session_ttl_secs": 300
+              }
+            }
+          ]
+        }
+      },
+      {
+        "When": {
+          "jmespath_expr": "fees.x402 < fees.mpp || urgency == 'high'",
+          "body": [
+            {
+              "X402Pay": {
+                "recipient": "{{recipient}}",
+                "amount": "{{amount}}",
+                "asset": "TNZO",
+                "facilitator": "coinbase_cdp"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 100000000000000000000,
+      "per_day_value": 1000000000000000000000
+    }
+  }
+}

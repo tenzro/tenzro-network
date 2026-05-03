@@ -1,0 +1,97 @@
+{
+  "template_id": "ref-yield-rebalancer-v1",
+  "name": "Yield Rebalancer",
+  "description": "Autonomous cross-chain yield optimizer. Discovers yield sources via tagged tools, evaluates APY thresholds, and bridges + deposits funds into the highest-yield opportunity within delegation limits.",
+  "template_type": "autonomous",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1712534400,
+  "updated_at": 1712534400,
+  "capabilities": [
+    {
+      "id": "yield_optimization",
+      "name": "Yield Optimization",
+      "description": "Finds and rebalances into highest-yield DeFi positions across chains",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"min_apy\":{\"type\":\"number\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"chosen_apy\":{\"type\":\"number\"},\"tx_hash\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 512,
+    "min_storage_mb": 100,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are a DeFi yield optimizer. Your goal is to find the best yield opportunity across Ethereum, Arbitrum, and Base, then bridge and deposit funds automatically while respecting delegation limits.",
+  "examples": [
+    {
+      "description": "Rebalance to highest APY",
+      "user_input": "Find the best yield over 5% APY and deposit up to 100 TNZO",
+      "expected_output": "Found 8.2% APY on Arbitrum Aave v3. Bridged 100 TNZO via LayerZero, deposited. TX: 0xabc..."
+    }
+  ],
+  "tags": ["defi", "yield", "rebalancer", "cross-chain", "bridge"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/yield-rebalancer",
+  "metadata": {},
+  "execution_spec": {
+    "backend": {
+      "Bridge": {
+        "adapters": ["layer_zero", "debridge"]
+      }
+    },
+    "delegation": {
+      "max_transaction_value": 500000000000000000000,
+      "max_daily_spend": 2000000000000000000000,
+      "allowed_operations": ["bridge", "deposit", "rebalance"],
+      "allowed_chains": ["ethereum", "arbitrum", "base"],
+      "time_bound_days": 30,
+      "kyc_tier": "Basic"
+    },
+    "required_tool_tags": ["yield-source"],
+    "required_skill_tags": [],
+    "steps": [
+      {
+        "ForEach": {
+          "source_tool_tag": "yield-source",
+          "body": [
+            {
+              "When": {
+                "jmespath_expr": "opportunity.apy > `5.0`",
+                "body": [
+                  {
+                    "BridgeTransfer": {
+                      "from_chain": "ethereum",
+                      "to_chain": "{{opportunity.chain}}",
+                      "asset": "TNZO",
+                      "amount": "{{amount}}",
+                      "strategy": "cheapest"
+                    }
+                  },
+                  {
+                    "EvmDispatch": {
+                      "to": "{{opportunity.vault_address}}",
+                      "value": "{{amount}}",
+                      "calldata_template": "0xb6b55f25{{amount_hex_padded}}",
+                      "gas_limit": 300000
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 500000000000000000000,
+      "per_day_value": 2000000000000000000000
+    }
+  }
+}

@@ -1,0 +1,43 @@
+[package]
+name = "tenzro-zk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Zero-knowledge proof system for Tenzro Network — Plonky3 STARK over KoalaBear with hybrid ZK-in-TEE execution"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+hex = { workspace = true }
+bytes = { workspace = true }
+rand = { workspace = true }
+rand_chacha = "0.3"
+
+# Plonky3 STARK system — KoalaBear field, Poseidon2 hashes, transparent setup.
+p3-air = { workspace = true }
+p3-uni-stark = { workspace = true }
+p3-field = { workspace = true }
+p3-koala-bear = { workspace = true }
+p3-poseidon2 = { workspace = true }
+p3-poseidon2-air = { workspace = true }
+p3-merkle-tree = { workspace = true }
+p3-fri = { workspace = true }
+p3-challenger = { workspace = true }
+p3-matrix = { workspace = true }
+p3-commit = { workspace = true }
+p3-dft = { workspace = true }
+p3-symmetric = { workspace = true }
+
+sha2 = { workspace = true }
+zstd = { workspace = true }
+bincode = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

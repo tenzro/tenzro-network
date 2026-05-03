@@ -1,0 +1,112 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment & secrets (keep .env.example checked in)
+.env
+.env.local
+.env.production
+.env.development
+.env.test
+.env.*.local
+*.key
+*.pem
+*.p12
+
+# Never commit API keys
+# Use DRPC_API_KEY env var instead of hardcoding
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local tooling / editor scratch
+CLAUDE.md
+**/CLAUDE.md
+.claude/
+.claude.json
+.claude.local.json
+**/.claude/
+.cursor/
+.cursorrules
+.cursorrules.local
+.aider*
+.continue/
+.copilot/
+.windsurf/
+.codeium/
+.github/copilot/
+
+# Internal staging (not for public)
+docs/upstream-staging/
+docs/upstream-registrations.md
+docs/recognition-commands.md
+docs/recognition-roadmap.md
+
+# Node.js (desktop app, website, scripts)
+node_modules/
+dist/
+build/
+.next/
+.vercel/
+apps/tenzro-desktop/src-tauri/target/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+*.egg-info/
+.venv/
+venv/
+.coverage
+
+# Data directories
+/data/
+*.db
+*.rocksdb/
+crates/tenzro-node/data/
+
+# Logs
+*.log
+
+# Docker
+.docker/
+
+# Terraform
+deploy/terraform/terraform.tfvars
+deploy/terraform/.terraform/
+deploy/terraform/.terraform.lock.hcl
+deploy/terraform/tfplan
+deploy/terraform/*.tfstate
+deploy/terraform/*.tfstate.backup
+
+# Kubernetes secrets (never commit)
+deploy/kubernetes/secrets/
+deploy/kubernetes/*-secret.yaml
+deploy/kubernetes/*-credentials.yaml
+
+# Coverage
+*.profraw
+*.profdata
+lcov.info
+coverage/
+
+# Tauri
+apps/tenzro-desktop/src-tauri/gen/
+
+# Separate repos (not part of tenzro-network)
+website/
+apps/
+sdk/

@@ -1,0 +1,49 @@
+[package]
+name = "tenzro-agent-kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Registry-driven autonomous agent runtime for Tenzro Network — zero-hardcoding execution layer over the existing agent template, tool, and skill registries"
+
+[dependencies]
+# Workspace types & registries
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-identity = { workspace = true }
+tenzro-wallet = { workspace = true }
+tenzro-agent = { workspace = true }
+tenzro-vm = { workspace = true }
+tenzro-bridge = { workspace = true }
+tenzro-payments = { workspace = true }
+
+# Async + serde
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# HTTP client for RPC calls into the local node
+reqwest = { workspace = true }
+
+# Errors
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Utilities
+hex = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# JMESPath for the `When` step variant. Use the `jmespath_community`
+# fork because upstream `jmespath 0.3` has a long-standing `!Sync` bug
+# in its `lazy_static` DEFAULT_RUNTIME which breaks under modern rustc.
+jmespath = { package = "jmespath_community", version = "0.1" }
+
+[dev-dependencies]
+tokio = { workspace = true }

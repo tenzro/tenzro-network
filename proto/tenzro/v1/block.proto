@@ -1,0 +1,35 @@
+syntax = "proto3";
+package tenzro.v1;
+
+import "tenzro/v1/types.proto";
+import "tenzro/v1/transaction.proto";
+
+message BlockHeader {
+  uint64 height = 1;
+  Timestamp timestamp = 2;
+  Hash parent_hash = 3;
+  Hash state_root = 4;
+  Hash transactions_root = 5;
+  Address proposer = 6;
+  ConsensusProof consensus_proof = 7;
+  ChainId chain_id = 8;
+}
+
+message Block {
+  BlockHeader header = 1;
+  repeated SignedTransaction transactions = 2;
+}
+
+message ConsensusProof {
+  uint64 round = 1;
+  repeated Vote votes = 2;
+  Hash aggregate_signature = 3;
+}
+
+message Vote {
+  Address validator = 1;
+  Hash block_hash = 2;
+  uint64 round = 3;
+  Signature signature = 4;
+  Timestamp timestamp = 5;
+}

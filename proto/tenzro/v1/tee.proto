@@ -1,0 +1,59 @@
+syntax = "proto3";
+package tenzro.v1;
+
+import "tenzro/v1/types.proto";
+
+enum TeeVendor {
+  TEE_VENDOR_UNSPECIFIED = 0;
+  TEE_VENDOR_INTEL_TDX = 1;
+  TEE_VENDOR_AMD_SEV_SNP = 2;
+  TEE_VENDOR_AWS_NITRO = 3;
+}
+
+message AttestationReport {
+  TeeVendor vendor = 1;
+  bytes report_data = 2;
+  Hash measurement = 3;
+  Timestamp timestamp = 4;
+  repeated bytes certificate_chain = 5;
+  bytes raw_report = 6;
+}
+
+message AttestationResult {
+  bool valid = 1;
+  TeeVendor vendor = 2;
+  string tcb_version = 3;
+  Hash measurement = 4;
+}
+
+message TeeProviderInfo {
+  Address address = 1;
+  TeeVendor vendor = 2;
+  AttestationReport attestation = 3;
+  bool verified = 4;
+  Timestamp last_heartbeat = 5;
+  TeeCapacity capacity = 6;
+}
+
+message TeeCapacity {
+  uint32 max_enclaves = 1;
+  uint32 active_enclaves = 2;
+  uint64 available_memory_mb = 3;
+  uint32 cpu_cores = 4;
+}
+
+message EnclaveRequest {
+  string enclave_id = 1;
+  bytes code = 2;
+  bytes input = 3;
+  uint64 max_memory_mb = 4;
+  uint64 max_execution_time_ms = 5;
+}
+
+message EnclaveResponse {
+  string enclave_id = 1;
+  bytes output = 2;
+  Hash execution_hash = 3;
+  AttestationReport attestation = 4;
+  uint64 execution_time_ms = 5;
+}

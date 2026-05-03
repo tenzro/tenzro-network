@@ -1,0 +1,35 @@
+[package]
+name = "tenzro-network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "P2P networking layer for Tenzro Network — gossip, DHT, message transport"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+libp2p = { workspace = true }
+libp2p-metrics = { workspace = true }
+libp2p-connection-limits = { workspace = true }
+libp2p-allow-block-list = { workspace = true }
+prometheus-client = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+prost = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+parking_lot = { workspace = true }
+governor = { workspace = true }
+lru = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

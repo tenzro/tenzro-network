@@ -1,0 +1,100 @@
+{
+  "template_id": "ref-audio-transcriber-v1",
+  "name": "Audio Transcriber",
+  "description": "Autonomous agent that transcribes audio (WAV/MP3/FLAC) using Tenzro-served ASR models — Moonshine v2 for on-device, Distil-Whisper for fast English, Whisper-large-v3-turbo as flagship, Parakeet-TDT and Canary for multilingual. Settles per-second pricing via x402 to the serving provider.",
+  "template_type": "autonomous",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1745798400,
+  "updated_at": 1745798400,
+  "capabilities": [
+    {
+      "id": "transcribe",
+      "name": "Speech Transcription",
+      "description": "Transcribes a single audio buffer to text with optional word-level timestamps and language hint",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"model_id\":{\"type\":\"string\"},\"audio_b64\":{\"type\":\"string\"},\"language\":{\"type\":\"string\"},\"timestamps\":{\"type\":\"boolean\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"language\":{\"type\":\"string\"},\"segments\":{\"type\":\"array\"},\"latency_ms\":{\"type\":\"number\"}}}"
+    },
+    {
+      "id": "model_selection",
+      "name": "ASR Model Selection",
+      "description": "Picks the best ASR model based on duration, target language, and latency budget",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"duration_seconds\":{\"type\":\"number\"},\"language\":{\"type\":\"string\"},\"prefer_edge\":{\"type\":\"boolean\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"model_id\":{\"type\":\"string\"},\"family\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 1024,
+    "min_storage_mb": 512,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are an audio transcription agent. When an audio buffer arrives: (1) detect or accept declared language, sample rate, and duration; (2) choose the best ASR — Moonshine-v2 for tiny on-device snippets, Distil-Whisper for English under 60s, Whisper-large-v3-turbo for accuracy, Parakeet-TDT-0.6B-v3 for European languages, Canary-1B-Flash for multilingual long-form; (3) issue tenzro_transcribe; (4) settle the per-second cost via x402 to the serving provider. Always include language and duration in the receipt.",
+  "examples": [
+    {
+      "description": "Short English snippet, low latency",
+      "user_input": "Transcribe a 12-second English voicemail, fastest path",
+      "expected_output": "Selected moonshine-base-v2. Transcript returned in 60ms. Cost: 0.001 TNZO. Settled via x402."
+    },
+    {
+      "description": "Multilingual lecture with timestamps",
+      "user_input": "Transcribe this 18-minute Spanish lecture with word-level timestamps",
+      "expected_output": "Selected canary-1b-flash. 18min Spanish lecture transcribed in 14s with segment timestamps. Cost: 0.054 TNZO."
+    }
+  ],
+  "tags": ["audio", "asr", "speech-to-text", "whisper", "moonshine", "parakeet", "canary", "ai"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/audio-transcriber",
+  "metadata": {},
+  "execution_spec": {
+    "backend": {
+      "X402Payment": {
+        "endpoint": "{{provider_endpoint}}"
+      }
+    },
+    "delegation": {
+      "max_transaction_value": 10000000000000000000,
+      "max_daily_spend": 100000000000000000000,
+      "allowed_operations": ["inference", "pay"],
+      "allowed_chains": ["ethereum", "base"],
+      "time_bound_days": 30,
+      "kyc_tier": "Basic"
+    },
+    "required_tool_tags": ["ai"],
+    "required_skill_tags": ["openclaw-tenzro"],
+    "steps": [
+      {
+        "ToolInvoke": {
+          "tool_tag": "ai",
+          "method": "tenzro_listAudioModels",
+          "params_template": "{}"
+        }
+      },
+      {
+        "ToolInvoke": {
+          "tool_tag": "ai",
+          "method": "tenzro_transcribe",
+          "params_template": "{\"model_id\":\"{{model_id}}\",\"audio_b64\":\"{{audio_b64}}\",\"language\":\"{{language}}\",\"timestamps\":{{timestamps}}}"
+        }
+      },
+      {
+        "X402Pay": {
+          "recipient": "{{provider_did}}",
+          "amount": "{{transcription_cost}}",
+          "asset": "TNZO",
+          "facilitator": "coinbase_cdp"
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 10000000000000000000,
+      "per_day_value": 100000000000000000000
+    }
+  }
+}

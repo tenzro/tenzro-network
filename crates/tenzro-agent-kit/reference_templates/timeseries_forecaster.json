@@ -1,0 +1,88 @@
+{
+  "template_id": "ref-timeseries-forecaster-v1",
+  "name": "Timeseries Forecaster",
+  "description": "Autonomous agent that ingests numeric series (price, demand, telemetry) and produces probabilistic forecasts using Tenzro-served timeseries foundation models (Chronos-2, Chronos-Bolt, TimesFM 2.5, Granite-TTM). Optionally writes the forecast hash on-chain for verifiable settlement of forecast-as-a-service contracts.",
+  "template_type": "autonomous",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1745798400,
+  "updated_at": 1745798400,
+  "capabilities": [
+    {
+      "id": "forecast",
+      "name": "Probabilistic Forecast",
+      "description": "Runs a horizon-bounded probabilistic forecast over the supplied series and returns quantile predictions",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"model_id\":{\"type\":\"string\"},\"series\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"horizon\":{\"type\":\"integer\"},\"quantiles\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"forecast\":{\"type\":\"array\"},\"quantile_levels\":{\"type\":\"array\"},\"model_used\":{\"type\":\"string\"},\"latency_ms\":{\"type\":\"number\"}}}"
+    },
+    {
+      "id": "model_selection",
+      "name": "Model Selection",
+      "description": "Chooses the best timeseries model for the request based on context length, expected horizon, and provider availability",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"context_length\":{\"type\":\"integer\"},\"horizon\":{\"type\":\"integer\"},\"prefer_multivariate\":{\"type\":\"boolean\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"model_id\":{\"type\":\"string\"},\"family\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 512,
+    "min_storage_mb": 64,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are a timeseries forecasting agent. When a forecast request arrives: (1) inspect series length, requested horizon, and whether covariates are provided; (2) pick the best registered timeseries model — prefer Chronos-2 for multivariate / covariates, TimesFM 2.5 for long-context univariate, Chronos-Bolt for low-latency edge inference, Granite-TTM for short-horizon tabular; (3) issue tenzro_forecast against the chosen model; (4) return the quantile bands the user requested; (5) optionally hash the (input_series, horizon, output_quantiles) tuple and emit a verifiable receipt for settlement-grade forecasts. Never exceed delegation limits.",
+  "examples": [
+    {
+      "description": "Forecast next 24 hours of energy demand",
+      "user_input": "Forecast 24h ahead given the last 168 hours of demand series, p10/p50/p90 bands",
+      "expected_output": "Selected chronos-2 (multivariate, 8k context). 24-step quantile forecast with p10/p50/p90 returned in 280ms. Receipt hash 0xfeed... emitted on-chain."
+    },
+    {
+      "description": "Edge-tier price forecast",
+      "user_input": "Forecast next 12 minutes of TNZO/USD on the last 200 ticks, fastest path",
+      "expected_output": "Selected chronos-bolt-small (edge tier). 12-step forecast returned in 45ms."
+    }
+  ],
+  "tags": ["timeseries", "forecasting", "chronos", "timesfm", "granite-ttm", "ai"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/timeseries-forecaster",
+  "metadata": {},
+  "execution_spec": {
+    "backend": "MultiVm",
+    "delegation": {
+      "max_transaction_value": 10000000000000000000,
+      "max_daily_spend": 100000000000000000000,
+      "allowed_operations": ["inference", "settle"],
+      "allowed_chains": ["ethereum", "base"],
+      "time_bound_days": 30,
+      "kyc_tier": "Basic"
+    },
+    "required_tool_tags": ["ai"],
+    "required_skill_tags": ["openclaw-tenzro"],
+    "steps": [
+      {
+        "ToolInvoke": {
+          "tool_tag": "ai",
+          "method": "tenzro_listForecastModels",
+          "params_template": "{}"
+        }
+      },
+      {
+        "ToolInvoke": {
+          "tool_tag": "ai",
+          "method": "tenzro_forecast",
+          "params_template": "{\"model_id\":\"{{model_id}}\",\"series\":{{series}},\"horizon\":{{horizon}},\"quantiles\":{{quantiles}}}"
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 10000000000000000000,
+      "per_day_value": 100000000000000000000
+    }
+  }
+}

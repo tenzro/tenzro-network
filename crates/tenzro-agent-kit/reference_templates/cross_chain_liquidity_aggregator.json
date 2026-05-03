@@ -1,0 +1,138 @@
+{
+  "template_id": "ref-cross-chain-liquidity-aggregator-v1",
+  "name": "Cross-Chain Liquidity Aggregator",
+  "description": "Autonomous agent that aggregates liquidity quotes from LayerZero, Chainlink CCIP, deBridge, and 1inch Fusion+ to find the optimal route for any cross-chain swap. Compares fees, slippage, and settlement time, then executes via the best available bridge adapter.",
+  "template_type": "autonomous",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1712534400,
+  "updated_at": 1712534400,
+  "capabilities": [
+    {
+      "id": "multi_bridge_quoting",
+      "name": "Multi-Bridge Quoting",
+      "description": "Fetches real-time quotes from LayerZero, CCIP, deBridge, and 1inch in parallel and ranks by total cost including gas and bridge fees",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"from_chain\":{\"type\":\"string\"},\"to_chain\":{\"type\":\"string\"},\"asset\":{\"type\":\"string\"},\"amount\":{\"type\":\"number\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"quotes\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"adapter\":{\"type\":\"string\"},\"fee\":{\"type\":\"number\"},\"estimated_time_secs\":{\"type\":\"number\"},\"slippage_bps\":{\"type\":\"number\"}}}}}}"
+    },
+    {
+      "id": "optimal_route_execution",
+      "name": "Optimal Route Execution",
+      "description": "Executes the cross-chain transfer via the selected bridge adapter with slippage protection",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"route\":{\"type\":\"string\",\"enum\":[\"layerzero\",\"ccip\",\"debridge\",\"1inch\"]},\"amount\":{\"type\":\"number\"},\"max_slippage_bps\":{\"type\":\"number\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"tx_hash\":{\"type\":\"string\"},\"adapter\":{\"type\":\"string\"},\"actual_fee\":{\"type\":\"number\"},\"settlement_status\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 1024,
+    "min_storage_mb": 128,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are a cross-chain liquidity aggregator. For every swap request, fetch quotes from LayerZero V2, Chainlink CCIP, deBridge DLN, and 1inch Fusion+ in parallel. Rank routes by total cost (bridge fee + gas + slippage). If the user wants cheapest, pick the lowest total cost. If they want fastest, pick the shortest settlement time. Execute via the winning adapter. Always enforce max slippage protection and never exceed delegation caps. Report the adapter used, fee, estimated vs actual settlement time, and transaction hash.",
+  "examples": [
+    {
+      "description": "Find cheapest route for ETH to Solana bridge",
+      "user_input": "Bridge 500 TNZO from Ethereum to Solana, cheapest route",
+      "expected_output": "Quotes: LayerZero 1.2 TNZO (4min), CCIP 1.8 TNZO (2min), deBridge 0.9 TNZO (6min). Selected deBridge (cheapest). Bridged 500 TNZO, fee 0.9 TNZO. TX: 0xaaa... ETA: 6min."
+    },
+    {
+      "description": "Find fastest route for Arbitrum to Base",
+      "user_input": "Swap 200 TNZO from Arbitrum to Base, fastest",
+      "expected_output": "Quotes: LayerZero 0.4 TNZO (90s), CCIP 0.6 TNZO (60s), deBridge 0.3 TNZO (180s). Selected CCIP (fastest). Bridged 200 TNZO, fee 0.6 TNZO. TX: 0xbbb... Settlement: 58s."
+    }
+  ],
+  "tags": ["liquidity", "aggregator", "cross-chain", "bridge", "swap"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/cross-chain-liquidity-aggregator",
+  "metadata": {},
+  "execution_spec": {
+    "backend": {
+      "Bridge": {
+        "adapters": ["layer_zero", "chainlink_ccip", "debridge"]
+      }
+    },
+    "delegation": {
+      "max_transaction_value": 5000000000000000000000,
+      "max_daily_spend": 20000000000000000000000,
+      "allowed_operations": ["bridge", "swap"],
+      "allowed_chains": ["ethereum", "arbitrum", "base", "optimism", "polygon", "solana"],
+      "time_bound_days": 90,
+      "kyc_tier": "Enhanced"
+    },
+    "required_tool_tags": ["cross-chain", "bridge", "dex", "swap"],
+    "required_skill_tags": ["layerzero-bridge", "chainlink-oracle", "debridge-cross-chain", "oneinch-aggregator"],
+    "steps": [
+      {
+        "ToolInvoke": {
+          "tool_tag": "bridge",
+          "method": "quote_layerzero",
+          "params_template": "{\"from_chain\":\"{{from_chain}}\",\"to_chain\":\"{{to_chain}}\",\"asset\":\"{{asset}}\",\"amount\":\"{{amount}}\"}"
+        }
+      },
+      {
+        "ToolInvoke": {
+          "tool_tag": "bridge",
+          "method": "quote_ccip",
+          "params_template": "{\"from_chain\":\"{{from_chain}}\",\"to_chain\":\"{{to_chain}}\",\"asset\":\"{{asset}}\",\"amount\":\"{{amount}}\"}"
+        }
+      },
+      {
+        "ToolInvoke": {
+          "tool_tag": "bridge",
+          "method": "quote_debridge",
+          "params_template": "{\"from_chain\":\"{{from_chain}}\",\"to_chain\":\"{{to_chain}}\",\"asset\":\"{{asset}}\",\"amount\":\"{{amount}}\"}"
+        }
+      },
+      {
+        "ToolInvoke": {
+          "tool_tag": "dex",
+          "method": "quote_1inch_fusion",
+          "params_template": "{\"from_chain\":\"{{from_chain}}\",\"to_chain\":\"{{to_chain}}\",\"asset\":\"{{asset}}\",\"amount\":\"{{amount}}\"}"
+        }
+      },
+      {
+        "When": {
+          "jmespath_expr": "best_route.adapter == 'layerzero' || best_route.adapter == 'debridge'",
+          "body": [
+            {
+              "BridgeTransfer": {
+                "from_chain": "{{from_chain}}",
+                "to_chain": "{{to_chain}}",
+                "asset": "{{asset}}",
+                "amount": "{{amount}}",
+                "strategy": "cheapest"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "When": {
+          "jmespath_expr": "best_route.adapter == 'ccip'",
+          "body": [
+            {
+              "BridgeTransfer": {
+                "from_chain": "{{from_chain}}",
+                "to_chain": "{{to_chain}}",
+                "asset": "{{asset}}",
+                "amount": "{{amount}}",
+                "strategy": "fastest"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 5000000000000000000000,
+      "per_day_value": 20000000000000000000000
+    }
+  }
+}

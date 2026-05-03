@@ -1,0 +1,139 @@
+{
+  "template_id": "ref-autonomous-rwa-custodian-v1",
+  "name": "Autonomous RWA Custodian",
+  "description": "Specialist agent for real-world asset custody on Canton/DAML. Manages tokenized asset holdings, monitors maturity and collateral ratios, executes Delivery-versus-Payment settlements, auto-collateralizes positions below threshold, and produces regulatory settlement reports.",
+  "template_type": "specialist",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1712534400,
+  "updated_at": 1712534400,
+  "capabilities": [
+    {
+      "id": "holdings_management",
+      "name": "Holdings Management",
+      "description": "Queries and manages tokenized asset positions on Canton, tracking maturity dates, collateral ratios, and counterparty exposure",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"portfolio_id\":{\"type\":\"string\"},\"asset_classes\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"holdings\":{\"type\":\"array\"},\"total_value\":{\"type\":\"number\"},\"collateral_ratio\":{\"type\":\"number\"},\"expiring_within_7d\":{\"type\":\"integer\"}}}"
+    },
+    {
+      "id": "dvp_settlement",
+      "name": "DvP Settlement",
+      "description": "Executes atomic Delivery-versus-Payment settlements on Canton ensuring simultaneous asset and payment transfer",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"contract_id\":{\"type\":\"string\"},\"counterparty\":{\"type\":\"string\"},\"settlement_amount\":{\"type\":\"number\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"settlement_id\":{\"type\":\"string\"},\"status\":{\"type\":\"string\"},\"asset_transferred\":{\"type\":\"boolean\"},\"payment_settled\":{\"type\":\"boolean\"}}}"
+    },
+    {
+      "id": "auto_collateralization",
+      "name": "Auto-Collateralization",
+      "description": "Monitors collateral ratios and automatically posts additional collateral when ratios fall below configurable thresholds",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"min_collateral_ratio\":{\"type\":\"number\"},\"collateral_asset\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"collateral_added\":{\"type\":\"number\"},\"new_ratio\":{\"type\":\"number\"},\"tx_id\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 2048,
+    "min_storage_mb": 512,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": true,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are an autonomous real-world asset custodian operating on Canton/DAML. Your responsibilities: (1) Query all tokenized asset holdings and compute collateral coverage ratios. (2) Identify positions expiring within 7 days and either roll them forward or initiate DvP settlement. (3) When collateral ratio drops below the configured threshold, submit a DAML command to post additional collateral from the reserve pool. (4) Generate a daily settlement report with all executed DvP transactions, collateral movements, and counterparty exposure summaries. You operate under Full KYC and TEE attestation. Never exceed custody delegation limits. All settlements must be atomic DvP -- never release assets without confirmed payment.",
+  "examples": [
+    {
+      "description": "Auto-collateralize when ratio drops",
+      "user_input": "Monitor portfolio P-001, minimum collateral ratio 150%",
+      "expected_output": "Portfolio P-001: 12 holdings, total value 50,000 TNZO, collateral ratio 138% (below 150% threshold). Posted 6,500 TNZO additional collateral via DAML contract C-045. New ratio: 151.2%. TX: daml:0x789..."
+    },
+    {
+      "description": "Settle expiring position via DvP",
+      "user_input": "Settle all positions expiring within 3 days in portfolio P-001",
+      "expected_output": "Found 2 expiring positions. (1) Bond-A maturity 2026-04-10: DvP settlement with counterparty CP-003, delivered 1000 units, received 10,200 TNZO. (2) Note-B maturity 2026-04-09: rolled forward 90 days at 4.2% yield. Report generated."
+    }
+  ],
+  "tags": ["rwa", "custody", "canton", "tokenization", "dvp", "institutional"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/autonomous-rwa-custodian",
+  "metadata": {},
+  "execution_spec": {
+    "backend": {
+      "Daml": {
+        "participant_host": "localhost",
+        "participant_port": 7575
+      }
+    },
+    "delegation": {
+      "max_transaction_value": 10000000000000000000000,
+      "max_daily_spend": 50000000000000000000000,
+      "allowed_operations": ["custody", "settle", "collateralize"],
+      "allowed_chains": ["canton"],
+      "time_bound_days": 365,
+      "kyc_tier": "Full"
+    },
+    "required_tool_tags": ["canton", "enterprise", "tokenization"],
+    "required_skill_tags": ["canton-enterprise"],
+    "steps": [
+      {
+        "DamlSubmit": {
+          "template_id": "Tenzro.Custody:HoldingsQuery",
+          "choice": "QueryAll",
+          "party": "{{custodian_party}}",
+          "args_template": "{\"portfolio_id\":\"{{portfolio_id}}\"}"
+        }
+      },
+      {
+        "ForEach": {
+          "source_tool_tag": "canton",
+          "body": [
+            {
+              "When": {
+                "jmespath_expr": "position.days_to_expiry <= `7`",
+                "body": [
+                  {
+                    "DamlSubmit": {
+                      "template_id": "Tenzro.Settlement:DvP",
+                      "choice": "SettleOrRoll",
+                      "party": "{{custodian_party}}",
+                      "args_template": "{\"contract_id\":\"{{position.contract_id}}\",\"counterparty\":\"{{position.counterparty}}\",\"action\":\"{{position.recommended_action}}\"}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "When": {
+          "jmespath_expr": "portfolio.collateral_ratio < `1.5`",
+          "body": [
+            {
+              "DamlSubmit": {
+                "template_id": "Tenzro.Custody:CollateralManager",
+                "choice": "PostCollateral",
+                "party": "{{custodian_party}}",
+                "args_template": "{\"portfolio_id\":\"{{portfolio_id}}\",\"amount\":\"{{required_collateral}}\",\"asset\":\"TNZO\"}"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "DamlSubmit": {
+          "template_id": "Tenzro.Reporting:SettlementReport",
+          "choice": "Generate",
+          "party": "{{custodian_party}}",
+          "args_template": "{\"portfolio_id\":\"{{portfolio_id}}\",\"report_date\":\"{{today}}\"}"
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 10000000000000000000000,
+      "per_day_value": 50000000000000000000000
+    }
+  }
+}

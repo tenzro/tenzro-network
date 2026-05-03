@@ -1,0 +1,7 @@
+project_id                = "your-gcp-project-id"
+region                    = "us-central1"
+zone                      = "us-central1-a"
+cluster_name              = "tenzro-testnet"
+validator_machine_type    = "n2d-standard-4"
+rpc_machine_type          = "e2-standard-2"
+enable_confidential_nodes = false

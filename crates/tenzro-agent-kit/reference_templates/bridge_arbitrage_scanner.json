@@ -1,0 +1,89 @@
+{
+  "template_id": "ref-bridge-arbitrage-scanner-v1",
+  "name": "Bridge Arbitrage Scanner",
+  "description": "Scans cross-chain bridge routes for price differentials. When an arbitrage opportunity exceeds the minimum spread, executes a bridge transfer using the cheapest adapter.",
+  "template_type": "autonomous",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1712534400,
+  "updated_at": 1712534400,
+  "capabilities": [
+    {
+      "id": "bridge_arbitrage",
+      "name": "Bridge Arbitrage",
+      "description": "Detects and executes cross-chain arbitrage opportunities via bridge fee differentials",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"min_spread_bps\":{\"type\":\"integer\"},\"max_amount\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"profit\":{\"type\":\"string\"},\"route\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 256,
+    "min_storage_mb": 50,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are a bridge arbitrage scanner. You compare fees across LayerZero, Chainlink CCIP, and deBridge to find profitable cross-chain transfers.",
+  "examples": [
+    {
+      "description": "Execute a profitable bridge",
+      "user_input": "Scan for arbitrage between Ethereum and Base with at least 50bps spread",
+      "expected_output": "Found 75bps spread on TNZO: Ethereum->Base via LayerZero (0.1%) vs deBridge (0.85%). Bridged 500 TNZO. Profit: ~3.75 TNZO."
+    }
+  ],
+  "tags": ["bridge", "arbitrage", "cross-chain", "defi", "scanner"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/bridge-arbitrage-scanner",
+  "metadata": {},
+  "execution_spec": {
+    "backend": {
+      "Bridge": {
+        "adapters": ["layer_zero", "chainlink_ccip", "debridge"]
+      }
+    },
+    "delegation": {
+      "max_transaction_value": 1000000000000000000000,
+      "max_daily_spend": 5000000000000000000000,
+      "allowed_operations": ["bridge"],
+      "allowed_chains": ["ethereum", "arbitrum", "base", "polygon", "optimism"],
+      "time_bound_days": 14,
+      "kyc_tier": "Basic"
+    },
+    "required_tool_tags": ["bridge-fee-oracle"],
+    "required_skill_tags": [],
+    "steps": [
+      {
+        "ForEach": {
+          "source_tool_tag": "bridge-fee-oracle",
+          "body": [
+            {
+              "When": {
+                "jmespath_expr": "opportunity.spread_bps > `50`",
+                "body": [
+                  {
+                    "BridgeTransfer": {
+                      "from_chain": "{{opportunity.from_chain}}",
+                      "to_chain": "{{opportunity.to_chain}}",
+                      "asset": "{{opportunity.asset}}",
+                      "amount": "{{opportunity.amount}}",
+                      "strategy": "cheapest"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 1000000000000000000000,
+      "per_day_value": 5000000000000000000000
+    }
+  }
+}

@@ -1,0 +1,106 @@
+{
+  "template_id": "ref-multi-chain-portfolio-manager-v1",
+  "name": "Multi-Chain Portfolio Manager",
+  "description": "Orchestrator agent that monitors token positions across Ethereum, Solana, and Canton ledgers, detects allocation drift against target weights, and autonomously rebalances via cross-chain bridges and on-chain swaps while respecting per-transaction and daily delegation caps.",
+  "template_type": "orchestrator",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1712534400,
+  "updated_at": 1712534400,
+  "capabilities": [
+    {
+      "id": "portfolio_monitoring",
+      "name": "Portfolio Monitoring",
+      "description": "Polls balances across Ethereum, Solana, and Canton to compute real-time allocation weights and drift from targets",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"target_weights\":{\"type\":\"object\",\"additionalProperties\":{\"type\":\"number\"}},\"drift_threshold_pct\":{\"type\":\"number\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"positions\":{\"type\":\"array\"},\"drift_pct\":{\"type\":\"number\"},\"needs_rebalance\":{\"type\":\"boolean\"}}}"
+    },
+    {
+      "id": "cross_chain_rebalance",
+      "name": "Cross-Chain Rebalance",
+      "description": "Executes bridge transfers and swaps to bring portfolio allocations back to target weights",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"rebalance_plan\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"from_chain\":{\"type\":\"string\"},\"to_chain\":{\"type\":\"string\"},\"amount\":{\"type\":\"number\"}}}}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"executed_transfers\":{\"type\":\"array\"},\"total_fees\":{\"type\":\"number\"},\"new_weights\":{\"type\":\"object\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 1024,
+    "min_storage_mb": 256,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are a multi-chain portfolio management orchestrator. You monitor token positions across Ethereum, Solana, Arbitrum, and Base, compute allocation drift against the user's target weights, and execute cross-chain rebalancing when drift exceeds the configured threshold. Always choose the cheapest bridge route. Never exceed per-transaction or daily delegation limits. Report every trade with chain, amount, fee, and resulting weight.",
+  "examples": [
+    {
+      "description": "Detect drift and rebalance",
+      "user_input": "My target is 40% ETH, 30% SOL, 30% TNZO. Rebalance if drift exceeds 5%.",
+      "expected_output": "Portfolio drift detected: ETH 47% (+7%), SOL 25% (-5%), TNZO 28% (-2%). Bridged 200 TNZO worth of ETH to Solana via LayerZero (fee: 0.8 TNZO). New weights: ETH 40.1%, SOL 30.2%, TNZO 29.7%. TX: 0xdef..."
+    }
+  ],
+  "tags": ["portfolio", "multi-chain", "rebalance", "defi", "bridge"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/multi-chain-portfolio-manager",
+  "metadata": {},
+  "execution_spec": {
+    "backend": "MultiVm",
+    "delegation": {
+      "max_transaction_value": 1000000000000000000000,
+      "max_daily_spend": 5000000000000000000000,
+      "allowed_operations": ["bridge", "swap", "transfer"],
+      "allowed_chains": ["ethereum", "solana", "arbitrum", "base"],
+      "time_bound_days": 90,
+      "kyc_tier": "Basic"
+    },
+    "required_tool_tags": ["ethereum", "solana", "cross-chain", "defi"],
+    "required_skill_tags": ["ethereum-defi", "solana-defi", "layerzero-bridge"],
+    "steps": [
+      {
+        "ToolInvoke": {
+          "tool_tag": "ethereum",
+          "method": "get_balances",
+          "params_template": "{\"address\":\"{{wallet_address}}\",\"chains\":[\"ethereum\",\"arbitrum\",\"base\"]}"
+        }
+      },
+      {
+        "ToolInvoke": {
+          "tool_tag": "solana",
+          "method": "get_balances",
+          "params_template": "{\"address\":\"{{solana_address}}\"}"
+        }
+      },
+      {
+        "When": {
+          "jmespath_expr": "portfolio.drift_pct > `5.0`",
+          "body": [
+            {
+              "ForEach": {
+                "source_tool_tag": "cross-chain",
+                "body": [
+                  {
+                    "BridgeTransfer": {
+                      "from_chain": "{{rebalance.from_chain}}",
+                      "to_chain": "{{rebalance.to_chain}}",
+                      "asset": "{{rebalance.asset}}",
+                      "amount": "{{rebalance.amount}}",
+                      "strategy": "cheapest"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 1000000000000000000000,
+      "per_day_value": 5000000000000000000000
+    }
+  }
+}

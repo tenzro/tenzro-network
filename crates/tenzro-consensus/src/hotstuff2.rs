@@ -1,0 +1,3016 @@
+//! HotStuff-2 BFT consensus implementation
+//!
+//! HotStuff-2 is a two-phase BFT consensus protocol with:
+//! - O(n) linear communication complexity per view
+//! - Two phases: PREPARE and COMMIT (simplified from original HotStuff)
+//! - Optimistic responsiveness
+//! - Leader rotation for liveness
+//!
+//! Protocol flow:
+//! 1. PREPARE: Leader proposes block, validators vote
+//! 2. COMMIT: Leader collects prepare QC, validators vote again
+//! 3. DECIDE: Leader collects commit QC, block is finalized
+
+use crate::config::ConsensusConfig;
+use crate::epoch_manager::EpochManager;
+use crate::error::{ConsensusError, Result};
+use crate::finality::{FinalityNotification, FinalityTracker};
+use crate::mempool::Mempool;
+use crate::proposer::BlockProposer;
+use crate::traits::{ConsensusEngine, SlashingCallback};
+use crate::validator::ValidatorSet;
+use crate::vote_state::{LastSignState, MemoryVoteStateStore, VoteStateStore, VoteStep, VrsDecision};
+use crate::voter::{QuorumCertificate, Vote, VoteCollector, VoteType};
+use async_trait::async_trait;
+use dashmap::DashMap;
+use parking_lot::RwLock;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::broadcast;
+use tokio::time::sleep;
+use tenzro_crypto::composite::{CompositePublicKey, HybridSigner, InMemoryHybridSigner};
+use tenzro_crypto::pq::MlDsaSigningKey;
+use tenzro_crypto::signatures::Ed25519SignerImpl;
+use tenzro_crypto::KeyPair;
+use tenzro_types::block::Block;
+use tenzro_types::primitives::{Address, BlockHeight, Hash};
+use tenzro_types::transaction::{Transaction, SignedTransaction};
+
+/// Maximum number of views a peer's timeout/proposal can fast-forward our
+/// local view in a single message. Generous enough to absorb several
+/// minutes of view-timeouts but small enough to ratelimit a malicious
+/// proposer who tries to flood our view counter.
+///
+/// Used by both `on_proposal` (forward sync on higher-view proposal) and
+/// `on_timeout_msg` (DiemBFT-style backward sync from a peer's timeout
+/// broadcast).
+const MAX_VIEW_JUMP: u64 = 1024;
+
+/// Cap on the exponent applied to [`ViewChangeTimer::on_timeout`]. With
+/// `backoff_multiplier = 2.0`, a cap of 4 means the backoff saturates at
+/// `base × 2^4 = 16×` base before being clamped further by `max_timeout`.
+/// See `ViewChangeTimer::on_timeout` for the rationale (task #164).
+const MAX_BACKOFF_EXPONENT: u32 = 4;
+
+/// Trait for providing the current state root to the block proposer.
+///
+/// This provides clean dependency inversion: consensus calls this trait
+/// to get the state root without knowing about VM or storage internals.
+pub trait StateRootProvider: Send + Sync {
+    /// Returns the current state root hash.
+    fn current_state_root(&self) -> Hash;
+}
+
+/// Trait for fetching a finalized block by height.
+///
+/// Required for EIP-1559 base-fee derivation: the leader must read the
+/// parent block's metadata (`base_fee_per_gas`, `gas_used`, `gas_limit`)
+/// when proposing the next block, and validators must read the same
+/// parent when re-deriving the expected base fee. After a node restart
+/// `FinalityTracker::finalized_blocks` may be empty for old heights, so
+/// the implementation falls back to RocksDB via `BlockStorage`.
+pub trait BlockProvider: Send + Sync {
+    /// Returns the finalized block at the given height, or `None` if
+    /// missing. Implementations should consult the in-memory finality
+    /// tracker first and fall back to durable storage.
+    fn get_block(&self, height: BlockHeight) -> Option<Block>;
+}
+
+/// The current phase of the HotStuff-2 protocol
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Preparing a new block
+    Prepare,
+    /// Committing a prepared block
+    Commit,
+    /// Deciding (finalizing) a committed block
+    Decide,
+}
+
+/// View state for HotStuff-2
+#[derive(Debug, Clone)]
+struct ViewState {
+    /// Current view number
+    view: u64,
+
+    /// Current phase
+    phase: Phase,
+
+    /// Current block height
+    height: BlockHeight,
+
+    /// Proposed block for this view (if any)
+    proposed_block: Option<Block>,
+
+    /// Prepare QC for current block
+    prepare_qc: Option<QuorumCertificate>,
+
+    /// Commit QC for current block
+    commit_qc: Option<QuorumCertificate>,
+
+    /// Timestamp when this view started
+    view_start_time: Instant,
+}
+
+/// Manages view change timeouts with exponential backoff
+#[derive(Debug, Clone)]
+struct ViewChangeTimer {
+    /// Base timeout duration
+    base_timeout: Duration,
+
+    /// Current timeout duration (with backoff)
+    current_timeout: Duration,
+
+    /// Maximum timeout duration
+    max_timeout: Duration,
+
+    /// Backoff multiplier (default: 2.0)
+    backoff_multiplier: f64,
+
+    /// Number of consecutive timeouts
+    consecutive_timeouts: u32,
+}
+
+impl ViewState {
+    fn new(view: u64, height: BlockHeight) -> Self {
+        Self {
+            view,
+            phase: Phase::Prepare,
+            height,
+            proposed_block: None,
+            prepare_qc: None,
+            commit_qc: None,
+            view_start_time: Instant::now(),
+        }
+    }
+
+    fn reset_timer(&mut self) {
+        self.view_start_time = Instant::now();
+    }
+
+    fn time_in_view(&self) -> Duration {
+        Instant::now().duration_since(self.view_start_time)
+    }
+}
+
+impl ViewChangeTimer {
+    fn new(base_timeout: Duration, max_timeout: Duration) -> Self {
+        Self {
+            base_timeout,
+            current_timeout: base_timeout,
+            max_timeout,
+            backoff_multiplier: 2.0,
+            consecutive_timeouts: 0,
+        }
+    }
+
+    /// Returns the current timeout duration
+    fn current_timeout(&self) -> Duration {
+        self.current_timeout
+    }
+
+    /// Records a timeout and applies exponential backoff.
+    ///
+    /// The exponent is **capped** at [`MAX_BACKOFF_EXPONENT`] so that two
+    /// honest replicas at different consecutive-timeout counters converge to
+    /// the same tick rate within a bounded number of timeouts. Without the
+    /// cap, replicas at counters 8 and 12 ticked at 256× and 4096× base —
+    /// and `max_timeout` saturated them at different *real* schedules
+    /// because saturation depended on how recently the counter was last
+    /// reset. Capping the exponent makes saturation deterministic.
+    ///
+    /// See task #164 for the testnet halt this prevents.
+    fn on_timeout(&mut self) {
+        self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+
+        let exponent = self.consecutive_timeouts.min(MAX_BACKOFF_EXPONENT) as i32;
+        let backoff_factor = self.backoff_multiplier.powi(exponent);
+        let new_timeout = self.base_timeout.mul_f64(backoff_factor);
+
+        self.current_timeout = new_timeout.min(self.max_timeout);
+
+        tracing::debug!(
+            consecutive_timeouts = self.consecutive_timeouts,
+            exponent = exponent,
+            current_timeout_ms = self.current_timeout.as_millis(),
+            "View timeout with capped exponential backoff"
+        );
+    }
+
+    /// Resets the timeout on successful view completion
+    fn on_success(&mut self) {
+        self.consecutive_timeouts = 0;
+        self.current_timeout = self.base_timeout;
+
+        tracing::debug!("View completed successfully, timeout reset to base");
+    }
+}
+
+/// Messages the consensus engine needs to broadcast via gossipsub.
+/// Uses an mpsc channel to avoid a circular crate dependency:
+/// tenzro-consensus cannot import tenzro-network.
+pub enum ConsensusOutMessage {
+    /// A vote this node cast that peers must receive to form quorum
+    Vote(Vote),
+    /// A block proposal the leader is broadcasting to all validators.
+    /// `timeout_certificate` is `Some(_)` only when the leader is recovering
+    /// from a view timeout — it carries 2f+1 timeout signatures from the
+    /// previous view so peers can verify the new view was legitimately
+    /// abandoned (Jolteon vote rule, DiemBFT v4 §3.5).
+    ///
+    /// `high_qc_view` is the leader's local highest-Prepare-QC view at the
+    /// moment of proposing (#171, Aptos SyncInfo pattern). Receivers use it to
+    /// fast-forward their own `high_qc_view` if the proposer is ahead, which
+    /// shrinks the gap a lagging replica has to close before it can vote.
+    /// Must satisfy `high_qc_view < view`.
+    Proposal {
+        block: Block,
+        proposer: Address,
+        round: u64,
+        view: u64,
+        high_qc_view: u64,
+        timeout_certificate: Option<crate::timeout::TimeoutCertificate>,
+    },
+    /// A pacemaker timeout broadcast emitted on local view-timer expiry.
+    /// Carries the sender's current view so a lagging peer can fast-forward
+    /// (DiemBFT v4 §3.5 backward-sync channel; phase 1 of #164).
+    Timeout(crate::timeout::TimeoutMsg),
+}
+
+/// HotStuff-2 consensus engine
+pub struct HotStuff2Engine {
+    /// Node's classical keypair (Ed25519). Used for the classical leg of the
+    /// composite signature and to derive the on-chain address.
+    keypair: Arc<KeyPair>,
+
+    /// Node's ML-DSA-65 signing key (FIPS 204). Used for the post-quantum leg
+    /// of the composite vote signature. Mandatory under Wave 3d — there is no
+    /// classical-only fallback.
+    pq_signing_key: Arc<MlDsaSigningKey>,
+
+    /// Cached composite public key (classical + ML-DSA-65 verifying key) that
+    /// is embedded into every vote this node casts. Validators receiving the
+    /// vote bind this against the registered hybrid key for the voter address.
+    composite_public_key: CompositePublicKey,
+
+    /// Node's address
+    address: Address,
+
+    /// Consensus configuration
+    config: Arc<ConsensusConfig>,
+
+    /// Epoch manager
+    epoch_manager: Arc<EpochManager>,
+
+    /// Transaction mempool
+    mempool: Arc<Mempool>,
+
+    /// Block proposer
+    proposer: Arc<BlockProposer>,
+
+    /// Vote collector
+    vote_collector: Arc<RwLock<Option<Arc<VoteCollector>>>>,
+
+    /// Finality tracker
+    finality_tracker: Arc<FinalityTracker>,
+
+    /// Current view state
+    view_state: Arc<RwLock<ViewState>>,
+
+    /// View change timer
+    view_timer: Arc<RwLock<ViewChangeTimer>>,
+
+    /// Proposed blocks by hash
+    blocks: Arc<DashMap<Hash, Block>>,
+
+    /// Running state
+    is_running: Arc<RwLock<bool>>,
+
+    /// Shutdown signal
+    shutdown_tx: Arc<RwLock<Option<broadcast::Sender<()>>>>,
+
+    /// Slashing callback for punishing equivocating validators
+    slashing_callback: Option<Arc<dyn SlashingCallback>>,
+
+    /// State root provider for block proposals
+    state_root_provider: Option<Arc<dyn StateRootProvider>>,
+
+    /// Parent-block provider used during proposal and validation to
+    /// re-derive the EIP-1559 base fee. Optional only for tests; in
+    /// production the node wires a `BlockProvider` backed by the
+    /// finality tracker + RocksDB block store.
+    block_provider: Option<Arc<dyn BlockProvider>>,
+
+    /// Outbound channel for broadcasting consensus messages via gossipsub.
+    /// Uses mpsc to avoid a circular crate dependency (tenzro-consensus cannot
+    /// import tenzro-network). The event_loop in tenzro-node drains this channel
+    /// and publishes messages to the gossipsub swarm.
+    consensus_out_tx: Option<tokio::sync::mpsc::UnboundedSender<ConsensusOutMessage>>,
+
+    /// Persistent vote state — refuses to sign any (view, height, step) ≤
+    /// last persisted, and persists each new vote with fsync **before** the
+    /// vote is broadcast. Mirrors CometBFT `FilePVLastSignState`. Defaults to
+    /// an in-memory store for tests; production wires a `FileVoteStateStore`
+    /// rooted at `<data_dir>/consensus/last_sign.json`.
+    vote_state_store: Arc<dyn VoteStateStore>,
+
+    /// The highest view at which this replica has observed a Prepare QC.
+    /// Used as the `high_qc_view` field of any [`crate::timeout::TimeoutMsg`]
+    /// this replica emits. The new leader after a TC formation extends from
+    /// `max{tc.signers[i].high_qc_view}` so this monotonic value is the
+    /// load-bearing signal that the next view's proposal lands on the
+    /// freshest committed branch.
+    ///
+    /// Monotonic: only updated when a strictly higher view's Prepare QC is
+    /// observed, never reset on view advance. Initial value 0 means "no QC
+    /// observed yet" — the genesis case.
+    high_qc_view: Arc<RwLock<u64>>,
+
+    /// The most recent [`crate::timeout::TimeoutCertificate`] this replica
+    /// has formed or learned of. Set by `on_timeout_msg` once 2f+1 timeouts
+    /// at the same view aggregate; cleared (or replaced) when a new TC at a
+    /// higher view is formed. The leader at view N+1 attaches this TC to
+    /// its proposal so receivers can run `safe_to_extend` (Jolteon Fig 2
+    /// vote rule).
+    last_round_tc: Arc<RwLock<Option<crate::timeout::TimeoutCertificate>>>,
+
+    /// 2f+1 [`crate::timeout::TimeoutMsg`] aggregator. Initialized lazily on
+    /// `start()` once the validator set is known. Re-built on epoch
+    /// transition alongside the vote collector.
+    timeout_collector: Arc<RwLock<Option<Arc<crate::timeout::TimeoutCollector>>>>,
+}
+
+impl HotStuff2Engine {
+    /// Creates a new HotStuff-2 consensus engine.
+    ///
+    /// `keypair` is the classical Ed25519 keypair (for the address and the
+    /// classical leg of the composite signature). `pq_signing_key` is the
+    /// ML-DSA-65 (FIPS 204) signing key for the post-quantum leg. Both are
+    /// **mandatory** under Wave 3d — there is no classical-only fallback path.
+    pub fn new(
+        keypair: KeyPair,
+        pq_signing_key: MlDsaSigningKey,
+        config: ConsensusConfig,
+        epoch_manager: EpochManager,
+    ) -> Self {
+        // Convert tenzro_crypto::Address (20 bytes) to tenzro_types::Address (32 bytes)
+        let crypto_addr = keypair.address();
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
+        let address = Address::new(addr_bytes);
+        let config = Arc::new(config);
+        let epoch_manager = Arc::new(epoch_manager);
+        let mempool = Arc::new(Mempool::new(config.clone()));
+        let proposer = Arc::new(BlockProposer::new(mempool.clone(), config.clone()));
+        let finality_tracker = Arc::new(FinalityTracker::new());
+
+        let initial_height = finality_tracker.finalized_height() + 1u64;
+        let view_state = ViewState::new(0, initial_height);
+
+        // Create view timer with base timeout from config and max of 60 seconds
+        let base_timeout = config.view_timeout();
+        let max_timeout = Duration::from_secs(60);
+        let view_timer = ViewChangeTimer::new(base_timeout, max_timeout);
+
+        let composite_public_key = CompositePublicKey::new(
+            keypair.public_key().clone(),
+            Some(pq_signing_key.verifying_key_bytes().to_vec()),
+        );
+
+        Self {
+            keypair: Arc::new(keypair),
+            pq_signing_key: Arc::new(pq_signing_key),
+            composite_public_key,
+            address,
+            config,
+            epoch_manager,
+            mempool,
+            proposer,
+            vote_collector: Arc::new(RwLock::new(None)),
+            finality_tracker,
+            view_state: Arc::new(RwLock::new(view_state)),
+            view_timer: Arc::new(RwLock::new(view_timer)),
+            blocks: Arc::new(DashMap::new()),
+            is_running: Arc::new(RwLock::new(false)),
+            shutdown_tx: Arc::new(RwLock::new(None)),
+            slashing_callback: None,
+            state_root_provider: None,
+            block_provider: None,
+            consensus_out_tx: None,
+            vote_state_store: Arc::new(MemoryVoteStateStore::new()),
+            high_qc_view: Arc::new(RwLock::new(0)),
+            last_round_tc: Arc::new(RwLock::new(None)),
+            timeout_collector: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Sets the slashing callback for punishing equivocating validators
+    pub fn with_slashing_callback(mut self, callback: Arc<dyn SlashingCallback>) -> Self {
+        self.slashing_callback = Some(callback);
+        self
+    }
+
+    /// Sets the state root provider for block proposals.
+    ///
+    /// When set, the block proposer will query the current state root
+    /// from this provider instead of using a default empty hash.
+    pub fn with_state_root_provider(mut self, provider: Arc<dyn StateRootProvider>) -> Self {
+        self.state_root_provider = Some(provider);
+        self
+    }
+
+    /// Sets the parent-block provider used for EIP-1559 base-fee
+    /// derivation. Required in production; absent providers cause the
+    /// engine to fall back to a genesis-edge base fee on every block,
+    /// which is wrong on any non-genesis block.
+    pub fn with_block_provider(mut self, provider: Arc<dyn BlockProvider>) -> Self {
+        self.block_provider = Some(provider);
+        self
+    }
+
+    /// Wires up the outbound gossipsub channel so votes and proposals are
+    /// broadcast to peers. Must be called before `start()`.
+    pub fn with_consensus_out(
+        mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<ConsensusOutMessage>,
+    ) -> Self {
+        self.consensus_out_tx = Some(tx);
+        self
+    }
+
+    /// Installs a persistent vote-state store. Production callers should use
+    /// `vote_state::open_default_file_store(data_dir)` to get a fsync-backed
+    /// `FileVoteStateStore`. Tests can pass a `MemoryVoteStateStore` (which
+    /// is also the default if this builder is never called).
+    pub fn with_vote_state_store(mut self, store: Arc<dyn VoteStateStore>) -> Self {
+        self.vote_state_store = store;
+        self
+    }
+
+    /// Sends a message to the outbound gossipsub channel.
+    /// Silently drops the message if no channel has been wired up.
+    fn send_out(&self, msg: ConsensusOutMessage) {
+        let kind = match &msg {
+            ConsensusOutMessage::Vote(_) => "Vote",
+            ConsensusOutMessage::Proposal { .. } => "Proposal",
+            ConsensusOutMessage::Timeout(_) => "Timeout",
+        };
+        match self.consensus_out_tx {
+            Some(ref tx) => {
+                match tx.send(msg) {
+                    Ok(()) => tracing::info!(kind = kind, "consensus.send_out: queued to event_loop"),
+                    Err(e) => tracing::warn!(kind = kind, error = %e, "consensus.send_out: tx.send FAILED (rx dropped?)"),
+                }
+            }
+            None => {
+                tracing::warn!(kind = kind, "consensus.send_out: NO TX wired (consensus_out_tx is None)");
+            }
+        }
+    }
+
+    /// Resumes consensus from a previously persisted block height.
+    ///
+    /// Called during node startup to seed the consensus engine with the
+    /// last known finalized height from storage. Without this, the engine
+    /// always starts proposing from height 1, creating duplicate blocks
+    /// that overlap with already-persisted data.
+    ///
+    /// Also consults `vote_state_store` to advance the local view past any
+    /// vote already cast in a prior run. Without this jump, after an
+    /// unproductive run that votes through (say) view=62 at height=1
+    /// without finalizing, a fresh boot would propose at view=0,1,2,…
+    /// and every vote would be refused by the CometBFT-style CheckHRS rule
+    /// (`vote_state.rs::check_vrs`) — wedging the chain.
+    ///
+    /// **The persisted `last_signed_view` is a strict, height-independent
+    /// signing ceiling.** This mirrors:
+    ///   - DiemBFT v4 `SafetyData::last_voted_round` — checked
+    ///     synchronously in `verify_and_update_last_vote_round()` against
+    ///     `round`, never against `(round, height)`.
+    ///   - CometBFT privValidator `LastSignState{Height,Round,Step}` —
+    ///     `is_strictly_after` enforces lex order with view first, so a
+    ///     persisted `(v=N, h=H-1, Commit)` blocks signing any
+    ///     `(v ≤ N, h=H, *)` next height.
+    ///
+    /// The previous implementation gated the view-jump on
+    /// `persisted.height == next_height.0`, which is wrong: in the
+    /// 2026-04-30 testnet wedge we observed persisted `(v=29999, h=29988,
+    /// Commit)` and `next_height = 29989`, so the guard skipped, the
+    /// engine booted at view ~29988, advanced via timeouts up to view
+    /// 29997 < persisted ceiling 29999, and `vote_state` correctly
+    /// refused → wedge. The fix: adopt the persisted view ceiling
+    /// unconditionally — `state.view = max(state.view, persisted.view + 1)`.
+    ///
+    /// Must be called **before** `start()`.
+    pub fn resume_from_height(&self, height: BlockHeight) {
+        // Compute the next height we're going to propose at:
+        //   - if storage has a finalized tip > 0, propose at tip+1
+        //   - if nothing has finalized (height=0), propose at height=1
+        let next_height = if height.0 == 0 {
+            BlockHeight(1)
+        } else {
+            // Update the finality tracker so it knows the chain tip
+            self.finality_tracker.set_initial_height(height);
+            height + 1u64
+        };
+
+        let mut state = self.view_state.write();
+        state.height = next_height;
+        // Set view to at least match height for consistency
+        if height.0 > state.view {
+            state.view = height.0;
+        }
+
+        // Consult persisted vote state. The persisted view is a
+        // monotonic signing ceiling regardless of which height it was
+        // recorded for — adopt it unconditionally so the engine cannot
+        // boot below the safety floor and wedge.
+        match self.vote_state_store.load() {
+            Ok(persisted) => {
+                let ceiling = persisted.view.saturating_add(1);
+                if ceiling > state.view {
+                    let prev_view = state.view;
+                    state.view = ceiling;
+                    tracing::info!(
+                        prev_view,
+                        resumed_view = ceiling,
+                        next_height = %next_height,
+                        persisted_last_vote_view = persisted.view,
+                        persisted_last_vote_height = persisted.height,
+                        cross_height = persisted.height != next_height.0,
+                        "Consensus engine: jumping view past persisted last_vote ceiling to avoid CheckHRS wedge"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "vote_state_store.load() failed during resume — view not adjusted");
+            }
+        }
+
+        tracing::info!(
+            stored_height = %height,
+            next_height = %next_height,
+            view = state.view,
+            "Consensus engine resuming from stored height"
+        );
+    }
+
+    /// Submit a validated transaction to the consensus mempool.
+    ///
+    /// Called by the event loop after transaction validation (signature, gas, nonce checks).
+    /// The mempool orders transactions by gas price priority and enforces size limits.
+    pub fn submit_transaction(&self, tx: SignedTransaction) -> Result<()> {
+        self.mempool.add_transaction(tx)
+    }
+
+    /// Returns a reference to the mempool for querying stats (size, pending count).
+    pub fn mempool(&self) -> &Arc<Mempool> {
+        &self.mempool
+    }
+
+    /// Subscribe to finality notifications.
+    ///
+    /// Returns a broadcast receiver that emits `FinalityNotification` each time
+    /// a block is finalized by consensus. The event loop subscribes to this
+    /// to execute transactions and persist state.
+    pub fn subscribe_finality(&self) -> broadcast::Receiver<FinalityNotification> {
+        self.finality_tracker.subscribe()
+    }
+
+    /// Returns the current finalized block height.
+    pub fn current_finalized_height(&self) -> BlockHeight {
+        self.finality_tracker.finalized_height()
+    }
+
+    /// Returns the current validator set
+    fn validator_set(&self) -> ValidatorSet {
+        self.epoch_manager.current_validator_set()
+    }
+
+    /// Checks if this node is a validator
+    fn is_validator(&self) -> bool {
+        self.validator_set().is_validator(&self.address)
+    }
+
+    /// Gets the leader for the current view
+    fn get_leader(&self) -> Result<Address> {
+        let view = self.view_state.read().view;
+        let validator_set = self.validator_set();
+        let leader = validator_set.select_leader(view, self.config.enable_tee_priority)?;
+        Ok(leader.address)
+    }
+
+    /// Advances to the next view
+    async fn advance_view(&self) -> Result<()> {
+        let new_view = {
+            let mut state = self.view_state.write();
+
+            state.view += 1;
+            state.phase = Phase::Prepare;
+            state.proposed_block = None;
+            state.prepare_qc = None;
+            state.commit_qc = None;
+            state.reset_timer();
+
+            tracing::info!(
+                view = state.view,
+                height = %state.height,
+                "Advanced to new view"
+            );
+            state.view
+        };
+
+        // Bound consensus memory. Without this, three caches accumulate
+        // forever and eventually OOMKill the validator:
+        //   1. `self.blocks` is inserted into on every `on_proposal` and
+        //      `propose_block_internal` but never evicted — each restart of
+        //      the gossipsub dedup window for an old block re-inserts it.
+        //   2. `vote_collector.votes` and `.quorum_certificates` retain every
+        //      vote forever; with ML-DSA-65 hybrid signatures (~3.3 KB each)
+        //      and a stalled view counter that keeps ticking, this is the
+        //      dominant growth term.
+        //   3. `finality_tracker.finalized_blocks` keeps full Block payloads
+        //      for every finalized height since genesis.
+        // We retain `BLOCK_CACHE_HEIGHT_WINDOW` blocks/finality entries below
+        // the current finalized height for ancestry checks and late gossip,
+        // and `VOTE_CACHE_VIEW_WINDOW` views of vote/QC history. Both windows
+        // are generous enough to absorb timeout backoff and short partitions
+        // without wedging consensus.
+        const BLOCK_CACHE_HEIGHT_WINDOW: u64 = 256;
+        const VOTE_CACHE_VIEW_WINDOW: u64 = 256;
+
+        let finalized_height = self.finality_tracker.finalized_height();
+        let min_height = BlockHeight(finalized_height.0.saturating_sub(BLOCK_CACHE_HEIGHT_WINDOW));
+
+        let blocks_before = self.blocks.len();
+        self.blocks.retain(|_, block| block.height() >= min_height);
+        let blocks_after = self.blocks.len();
+
+        if blocks_before != blocks_after {
+            tracing::debug!(
+                evicted = blocks_before - blocks_after,
+                retained = blocks_after,
+                min_height = %min_height,
+                "Evicted old blocks from consensus cache"
+            );
+        }
+
+        self.finality_tracker.prune_blocks_below(min_height);
+
+        if let Some(collector) = self.vote_collector.read().as_ref() {
+            let min_view = new_view.saturating_sub(VOTE_CACHE_VIEW_WINDOW);
+            collector.cleanup_old_votes(min_view);
+        }
+
+        // Drop the TimeoutCollector's per-view caches for views that can no
+        // longer be useful. New TC formation is only meaningful at view ≥
+        // current view; everything below the cleanup window is dead weight.
+        if let Some(tc_collector) = self.timeout_collector.read().as_ref() {
+            let min_view = new_view.saturating_sub(VOTE_CACHE_VIEW_WINDOW);
+            tc_collector.cleanup_below(min_view);
+        }
+
+        // If our last_round_tc is for a view older than the new local view
+        // it can never be attached to a future proposal — drop it. We keep
+        // it if it's at-or-above the new view so the next leader has it.
+        {
+            let mut maybe_tc = self.last_round_tc.write();
+            if let Some(tc) = maybe_tc.as_ref() {
+                if tc.view + 1 < new_view {
+                    *maybe_tc = None;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Checks if the current view has timed out
+    fn check_view_timeout(&self) -> bool {
+        let state = self.view_state.read();
+        let timer = self.view_timer.read();
+        let time_in_view = state.time_in_view();
+
+        time_in_view >= timer.current_timeout()
+    }
+
+    /// Handles view timeout.
+    ///
+    /// Per DiemBFT v4 §3.5 / Aptos `process_local_timeout`, this **must
+    /// broadcast** a signed timeout message before advancing locally. The
+    /// broadcast is the channel that lets a lagging peer fast-forward to
+    /// our view (backward-sync). Silent `view += 1` — the previous
+    /// behaviour — is the textbook livelock fault: under partial
+    /// synchrony two replicas drift apart by N views and never reconverge,
+    /// because the only existing forward-sync channel (`on_proposal`)
+    /// requires the lagging proposer to produce a valid proposal at the
+    /// higher view, which it cannot do (#164).
+    async fn on_view_timeout(&self) -> Result<()> {
+        let current_view = self.view_state.read().view;
+        let timeout_ms = self.view_timer.read().current_timeout().as_millis();
+
+        tracing::warn!(
+            view = current_view,
+            timeout_ms = timeout_ms,
+            "View timeout, broadcasting TimeoutMsg and advancing to next view"
+        );
+
+        // Build & sign a TimeoutMsg for the timing-out view. Best-effort:
+        // if signing fails (e.g. crypto subsystem error) we still advance
+        // locally — silent advance is the existing pre-#164 behaviour, so
+        // the worst case is we degrade to that. We do NOT block the
+        // pacemaker on signing.
+        match self.create_timeout_msg(current_view) {
+            Ok(timeout_msg) => {
+                self.send_out(ConsensusOutMessage::Timeout(timeout_msg));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    view = current_view,
+                    error = %e,
+                    "Failed to create TimeoutMsg; advancing view without broadcast"
+                );
+            }
+        }
+
+        // Apply capped exponential backoff
+        self.view_timer.write().on_timeout();
+
+        // Advance to next view (which will select a new leader via round-robin)
+        self.advance_view().await?;
+
+        Ok(())
+    }
+
+    /// Builds and hybrid-signs a [`TimeoutMsg`] for the given view.
+    ///
+    /// Mirrors the shape of `create_vote` but does **not** consult the
+    /// double-sign vote-state store: a TimeoutMsg does not bind to a block,
+    /// only to a view, so signing two TimeoutMsgs for the same view is
+    /// harmless (both carry identical view bytes; receivers dedupe by
+    /// `(voter, view)`).
+    fn create_timeout_msg(&self, view: u64) -> Result<crate::timeout::TimeoutMsg> {
+        // Carry the highest Prepare-QC view we have observed. Capped at
+        // `view - 1`: a replica timing out on view V cannot honestly claim
+        // it has observed a QC at V or beyond (it would have advanced past
+        // V already). The cap also guarantees `high_qc_view < view` which
+        // `TimeoutMsg::verify` enforces — so we never emit a self-rejected
+        // message.
+        let raw_high_qc = *self.high_qc_view.read();
+        let high_qc_view = if view == 0 {
+            0
+        } else {
+            raw_high_qc.min(view - 1)
+        };
+
+        let placeholder_sig =
+            tenzro_crypto::composite::CompositeSignature::new(Vec::new(), None);
+        let unsigned = crate::timeout::TimeoutMsg::new(
+            view,
+            high_qc_view,
+            self.address,
+            placeholder_sig,
+            self.composite_public_key.clone(),
+        );
+        let payload = unsigned.signing_payload();
+
+        // Reconstruct the hybrid signer (same pattern as create_vote — the
+        // engine's long-lived Arc<MlDsaSigningKey> can't be consumed).
+        let keypair_bytes = self.keypair.to_bytes();
+        let keypair_copy =
+            KeyPair::from_bytes(self.keypair.key_type(), &keypair_bytes)?;
+        let classical = Ed25519SignerImpl::new(keypair_copy)?;
+        let pq_seed = self.pq_signing_key.seed_bytes();
+        let pq_copy = MlDsaSigningKey::from_seed(pq_seed)?;
+        let hybrid = InMemoryHybridSigner::new(Box::new(classical), pq_copy);
+
+        let signature = hybrid.sign(&payload)?;
+
+        Ok(crate::timeout::TimeoutMsg::new(
+            view,
+            high_qc_view,
+            self.address,
+            signature,
+            self.composite_public_key.clone(),
+        ))
+    }
+
+    /// Handles an inbound [`crate::timeout::TimeoutMsg`] from a peer.
+    ///
+    /// Three layered effects:
+    ///
+    /// 1. **Backward view-counter sync** (DiemBFT v4 §3.5). If
+    ///    `msg.view > local_view` (within [`MAX_VIEW_JUMP`]), advance our
+    ///    local view to match. Prevents permanent view divergence under
+    ///    partial synchrony.
+    /// 2. **Bracha boost / `f+1` amplification**. The aggregator emits
+    ///    `BrachaBoost` when the f+1 threshold is crossed for the timing-out
+    ///    view. We respond by firing our local view-timer immediately —
+    ///    even if our timer has not yet expired — so honest replicas
+    ///    converge on the timeout decision in O(network) rather than
+    ///    waiting for the full local timeout.
+    /// 3. **`2f+1` TimeoutCertificate formation**. When the quorum is
+    ///    reached the aggregator emits the formed
+    ///    [`crate::timeout::TimeoutCertificate`]. We store it as
+    ///    `last_round_tc` so the next leader (us, or the next view's leader
+    ///    after view-sync) can attach it to their proposal — which is what
+    ///    receivers' `safe_to_extend` predicate requires before voting on
+    ///    a non-consecutive view.
+    pub async fn on_timeout_msg(&self, msg: &crate::timeout::TimeoutMsg) -> Result<()> {
+        // Verify signature + validator binding before trusting the view
+        // number. Without this, any peer could spoof a TimeoutMsg from a
+        // validator address and drag every replica forward.
+        let validator_set = self.validator_set();
+        msg.verify(&validator_set)?;
+
+        let local_view = self.view_state.read().view;
+
+        // Bound the view jump up-front, before any aggregation work, to
+        // shed work on obvious DoS attempts (a peer claiming view=u64::MAX
+        // would otherwise try to insert into the per-view aggregator and
+        // pin memory).
+        if msg.view > local_view {
+            let jump = msg.view - local_view;
+            if jump > MAX_VIEW_JUMP {
+                tracing::warn!(
+                    msg_view = msg.view,
+                    local_view = local_view,
+                    jump = jump,
+                    max_jump = MAX_VIEW_JUMP,
+                    voter = %msg.voter,
+                    "Refusing to sync to TimeoutMsg view: jump exceeds MAX_VIEW_JUMP"
+                );
+                return Err(ConsensusError::InvalidProposal(format!(
+                    "TimeoutMsg view {} jumps too far from local view {} (max {})",
+                    msg.view, local_view, MAX_VIEW_JUMP
+                )));
+            }
+        }
+
+        // Aggregate into the per-view collector. We aggregate timeouts at
+        // the local view *and* at views ahead of us — TC formation at a
+        // future view is what lets us produce a safe extension once we
+        // catch up.
+        let collect_outcome = {
+            let guard = self.timeout_collector.read();
+            guard.as_ref().map(|collector| collector.add(msg))
+        };
+
+        if let Some(outcome) = collect_outcome {
+            use crate::timeout::CollectOutcome;
+            match outcome {
+                CollectOutcome::Added | CollectOutcome::Duplicate => {}
+                CollectOutcome::BrachaBoost => {
+                    // f+1 honest replicas have timed out on this view —
+                    // amplify by treating this as if our own local timer had
+                    // expired. This is the Bracha-boost / DiemBFT
+                    // `process_remote_timeout` path that drives all honest
+                    // replicas to converge on the timeout decision in
+                    // network-delay time.
+                    tracing::warn!(
+                        view = msg.view,
+                        local_view = local_view,
+                        voter = %msg.voter,
+                        "Bracha boost: f+1 TimeoutMsgs at view {} — amplifying to local timeout",
+                        msg.view
+                    );
+                    if msg.view >= local_view {
+                        // Only amplify if the boosted view is at least our
+                        // current view. A boost at a view we've already
+                        // passed is irrelevant (we're already ahead).
+                        if let Err(e) = self.on_view_timeout().await {
+                            tracing::error!(
+                                error = %e,
+                                "Bracha-boosted local timeout failed"
+                            );
+                        }
+                    }
+                }
+                CollectOutcome::CertificateFormed(tc) => {
+                    tracing::info!(
+                        view = tc.view,
+                        signers = tc.signers.len(),
+                        max_high_qc_view = tc.max_high_qc_view(),
+                        "TimeoutCertificate formed for view {}",
+                        tc.view
+                    );
+                    // Store as last_round_tc, replacing any older TC. The
+                    // next proposer attaches this to their proposal; the
+                    // safe_to_extend predicate at receivers verifies it.
+                    let mut slot = self.last_round_tc.write();
+                    let should_update = match slot.as_ref() {
+                        Some(existing) => tc.view > existing.view,
+                        None => true,
+                    };
+                    if should_update {
+                        *slot = Some(tc);
+                    }
+                }
+            }
+        }
+
+        // Adopt the TimeoutMsg's high_qc_view as a SyncInfo signal — the
+        // signer has seen a Prepare QC at view `msg.high_qc_view`, which
+        // is itself a 2f+1 aggregate. Any local view ≤ `high_qc_view` is
+        // provably behind. The pacemaker target is `max(msg.view,
+        // msg.high_qc_view + 1)` — both are valid evidence of ahead-state.
+        {
+            let mut hqc = self.high_qc_view.write();
+            if msg.high_qc_view > *hqc {
+                *hqc = msg.high_qc_view;
+            }
+        }
+
+        // Backward view-counter sync. Re-check the local view after
+        // aggregation in case the Bracha boost above already advanced us.
+        let post_agg_local_view = self.view_state.read().view;
+
+        // Pacemaker target combines two SyncInfo channels:
+        //   - msg.view: the peer is timing out at this view → engine
+        //     must be at least at msg.view to participate.
+        //   - msg.high_qc_view + 1: 2f+1 cert evidence; next legal
+        //     proposal is at msg.high_qc_view + 1.
+        let target = std::cmp::max(msg.view, msg.high_qc_view.saturating_add(1));
+
+        if target <= post_agg_local_view {
+            // Stale or equal after aggregation. We never *rewind* on a
+            // peer's timeout (that would be a liveness regression and a
+            // downgrade attack).
+            tracing::trace!(
+                msg_view = msg.view,
+                msg_high_qc_view = msg.high_qc_view,
+                local_view = post_agg_local_view,
+                voter = %msg.voter,
+                "TimeoutMsg target view ≤ local view after aggregation — no sync needed"
+            );
+            return Ok(());
+        }
+
+        // Advance our local view to the SyncInfo target. Mirror the
+        // structure of `on_proposal`'s forward-sync block: re-check
+        // under the write lock in case another task already advanced
+        // us, and reset all per-view state so the next proposal
+        // arriving for `target` doesn't see stale prepare/commit QCs
+        // from a previous view.
+        let mut state = self.view_state.write();
+        if target > state.view {
+            tracing::info!(
+                from_view = state.view,
+                to_view = target,
+                msg_view = msg.view,
+                msg_high_qc_view = msg.high_qc_view,
+                height = %state.height,
+                voter = %msg.voter,
+                "View sync: advancing local view to match peer TimeoutMsg SyncInfo"
+            );
+            state.view = target;
+            state.phase = Phase::Prepare;
+            state.proposed_block = None;
+            state.prepare_qc = None;
+            state.commit_qc = None;
+            state.reset_timer();
+        }
+        Ok(())
+    }
+
+    /// Creates a vote for a block.
+    ///
+    /// Wave 3d hybrid path: rebuilds an `InMemoryHybridSigner` from this
+    /// node's classical keypair and ML-DSA-65 signing key, signs the canonical
+    /// vote payload with both legs, and embeds the composite public key into
+    /// the resulting `Vote` so receiving validators can bind it against the
+    /// registered hybrid key.
+    ///
+    /// # Double-sign protection
+    ///
+    /// Before signing, consults `vote_state_store` (mirrors CometBFT
+    /// `FilePVLastSignState`):
+    /// - If `(view, height, step)` is strictly past the last persisted tuple,
+    ///   sign and **persist with fsync before returning** so the broadcast
+    ///   downstream of this function can never reveal a vote that wasn't
+    ///   durably recorded.
+    /// - If `(view, height, step)` matches the last persisted tuple AND the
+    ///   block hash matches, return the previously-persisted signature
+    ///   verbatim (idempotent retry).
+    /// - Otherwise (same tuple, different hash, or earlier tuple) refuse with
+    ///   `ConsensusError::Equivocation` — a self-detected double-sign attempt.
+    fn create_vote(
+        &self,
+        block: &Block,
+        vote_type: VoteType,
+    ) -> Result<Vote> {
+        let (view, height) = {
+            let state = self.view_state.read();
+            (state.view, state.height)
+        };
+        let block_hash = block.hash();
+        let step = VoteStep::from_vote_type(vote_type);
+
+        // SyncInfo piggyback (#171): every vote carries the highest Prepare-QC
+        // view this replica has observed, capped at `view - 1` (a vote at view
+        // V cannot honestly claim a Prepare-QC at view ≥ V — `add_vote`
+        // enforces this on the receiver). Genesis case (view = 0) carries 0.
+        let high_qc_view = {
+            let raw = *self.high_qc_view.read();
+            if view == 0 { 0 } else { raw.min(view - 1) }
+        };
+
+        // Step 1: Consult persistent vote state. If we already signed this
+        // exact (view, height, step, hash), reuse the persisted signature.
+        // If we signed a *different* hash for the same (view, height, step),
+        // refuse — this would be self-equivocation.
+        let decision = self
+            .vote_state_store
+            .check_vrs(view, height.0, step, &block_hash)?;
+
+        match decision {
+            VrsDecision::Reject { reason } => {
+                tracing::error!(
+                    view = view,
+                    height = %height,
+                    step = ?step,
+                    block_hash = %block_hash,
+                    reason = %reason,
+                    "DOUBLE-SIGN PREVENTED: refusing to vote — would equivocate"
+                );
+                return Err(ConsensusError::Equivocation {
+                    validator: self.address.to_string(),
+                    view,
+                });
+            }
+            VrsDecision::Reuse { signature: sig_bytes } => {
+                // Idempotent retry — reconstruct the Vote from persisted
+                // signature bytes. Wire format is `CompositeSignature` JSON.
+                let signature: tenzro_crypto::composite::CompositeSignature =
+                    serde_json::from_slice(&sig_bytes).map_err(|e| {
+                        ConsensusError::Internal(format!(
+                            "vote_state_store: corrupt persisted signature: {}",
+                            e
+                        ))
+                    })?;
+                tracing::info!(
+                    view = view,
+                    height = %height,
+                    step = ?step,
+                    block_hash = %block_hash,
+                    "Idempotent vote retry — reusing persisted signature"
+                );
+                return Ok(Vote::new(
+                    view,
+                    height,
+                    block_hash,
+                    self.address,
+                    signature,
+                    self.composite_public_key.clone(),
+                    vote_type,
+                    high_qc_view,
+                ));
+            }
+            VrsDecision::Sign => {
+                // Fall through to sign + persist + return.
+            }
+        }
+
+        // Step 2: Build the unsigned vote (placeholder signature) so we can
+        // compute the canonical signing payload — this MUST match what
+        // VoteCollector::add_vote feeds to StandardHybridVerifier.
+        let placeholder_sig = tenzro_crypto::composite::CompositeSignature::new(Vec::new(), None);
+        let unsigned_vote = Vote::new(
+            view,
+            height,
+            block_hash,
+            self.address,
+            placeholder_sig,
+            self.composite_public_key.clone(),
+            vote_type,
+            high_qc_view,
+        );
+        let payload = unsigned_vote.signing_payload();
+
+        // Step 3: Reconstruct the hybrid signer for this call. The classical
+        // keypair is rebuilt from bytes (KeyPair is not Clone) and paired
+        // with a fresh signing-key view rebuilt from the persisted seed so
+        // that the engine's long-lived `Arc<MlDsaSigningKey>` is not
+        // consumed.
+        let keypair_bytes = self.keypair.to_bytes();
+        let keypair_copy = KeyPair::from_bytes(self.keypair.key_type(), &keypair_bytes)?;
+        let classical = Ed25519SignerImpl::new(keypair_copy)?;
+        let pq_seed = self.pq_signing_key.seed_bytes();
+        let pq_copy = MlDsaSigningKey::from_seed(pq_seed)?;
+        let hybrid = InMemoryHybridSigner::new(Box::new(classical), pq_copy);
+
+        let signature = hybrid.sign(&payload)?;
+
+        // Step 4: Persist the new sign-state with fsync BEFORE returning the
+        // signed vote. This is the critical ordering: if a crash happens
+        // between sign and persist, on restart we'll re-sign — but since the
+        // old signature never durably escaped, that's safe. If we persisted
+        // *after* broadcast, a crash in that window would let us re-sign a
+        // different block in the same view on restart, which is the textbook
+        // self-equivocation that triggered the cascade.
+        let sig_bytes = serde_json::to_vec(&signature).map_err(|e| {
+            ConsensusError::Internal(format!(
+                "vote_state_store: serialize composite signature: {}",
+                e
+            ))
+        })?;
+        let new_state = LastSignState {
+            version: 1,
+            view,
+            height: height.0,
+            step,
+            block_hash: Some(block_hash),
+            signature: Some(sig_bytes),
+        };
+        self.vote_state_store.record(&new_state)?;
+
+        Ok(Vote::new(
+            view,
+            height,
+            block_hash,
+            self.address,
+            signature,
+            self.composite_public_key.clone(),
+            vote_type,
+            high_qc_view,
+        ))
+    }
+
+    /// Handles the prepare phase
+    async fn handle_prepare_phase(&self, block: &Block) -> Result<Option<QuorumCertificate>> {
+        // Validate the proposal
+        let expected_height = self.view_state.read().height;
+        self.proposer.validate_proposal(block, expected_height)?;
+
+        // EIP-1559 consensus rule: re-derive the expected base fee
+        // from the parent block and reject if the proposer's stamped
+        // value diverges. Mirrors go-ethereum
+        // `consensus/misc/eip1559.VerifyEIP1559Header`. This MUST run
+        // before signing the prepare vote — otherwise a malicious
+        // proposer could pick an arbitrary base fee.
+        let parent_height = block.header.height - 1u64;
+        let parent_block = self
+            .finality_tracker
+            .get_finalized_block(parent_height)
+            .or_else(|| {
+                self.block_provider
+                    .as_ref()
+                    .and_then(|p| p.get_block(parent_height))
+            });
+        match parent_block {
+            Some(parent) => {
+                self.proposer.validate_base_fee(block, &parent)?;
+            }
+            None => {
+                // Parent unavailable — refuse to vote rather than
+                // rubber-stamping an unverifiable proposal.
+                return Err(crate::error::ConsensusError::InvalidProposal(format!(
+                    "Cannot validate base fee for block at height {}: parent at height {} is unavailable",
+                    block.header.height, parent_height
+                )));
+            }
+        }
+
+        // Create and add vote
+        let vote = self.create_vote(block, VoteType::Prepare)?;
+        self.send_out(ConsensusOutMessage::Vote(vote.clone()));
+
+        // Add to vote collector
+        let vote_collector = self.vote_collector.read();
+        if let Some(collector) = vote_collector.as_ref() {
+            let qc = collector.add_vote(vote)?;
+
+            if let Some(qc) = qc.clone() {
+                // We have a prepare QC, advance to commit phase
+                let mut state = self.view_state.write();
+                state.phase = Phase::Commit;
+                state.prepare_qc = Some(qc.clone());
+                // Track the highest prepare QC view we've witnessed — used as the
+                // `high_qc_view` field of any future TimeoutMsg, so the resulting
+                // TC's `max_high_qc_view()` lets the next leader compute a
+                // safe-to-extend predicate per Jolteon §3.5.
+                let qc_view = state.view;
+
+                tracing::info!(
+                    view = state.view,
+                    height = %state.height,
+                    "Prepare phase completed, advancing to commit"
+                );
+                drop(state);
+
+                let mut hqc = self.high_qc_view.write();
+                if qc_view > *hqc {
+                    *hqc = qc_view;
+                }
+            }
+
+            Ok(qc)
+        } else {
+            Err(ConsensusError::Internal("Vote collector not initialized".to_string()))
+        }
+    }
+
+    /// Handles the commit phase
+    async fn handle_commit_phase(&self, block: &Block) -> Result<Option<QuorumCertificate>> {
+        let state = self.view_state.read();
+
+        // Ensure we have a prepare QC
+        if state.prepare_qc.is_none() {
+            return Err(ConsensusError::InvalidProposal(
+                "No prepare QC for commit phase".to_string(),
+            ));
+        }
+
+        drop(state);
+
+        // Create and add commit vote
+        let vote = self.create_vote(block, VoteType::Commit)?;
+        self.send_out(ConsensusOutMessage::Vote(vote.clone()));
+
+        // FIX: Scope the read lock to JUST the add_vote call, then drop it before
+        // the epoch transition which calls vote_collector.write(). Holding the read
+        // lock through the epoch transition caused a parking_lot::RwLock deadlock
+        // every time the chain reached the epoch boundary (block 9,999 → height 10,000).
+        let qc = {
+            let vote_collector = self.vote_collector.read();
+            if let Some(collector) = vote_collector.as_ref() {
+                collector.add_vote(vote)?
+            } else {
+                return Err(ConsensusError::Internal("Vote collector not initialized".to_string()));
+            }
+        }; // vote_collector read lock DROPPED HERE
+
+        if let Some(qc) = qc.clone() {
+            // We have a commit QC, finalize the block
+            let mut state = self.view_state.write();
+            state.phase = Phase::Decide;
+            state.commit_qc = Some(qc.clone());
+
+            tracing::info!(
+                view = state.view,
+                height = %state.height,
+                "Commit phase completed, finalizing block"
+            );
+
+            // Finalize the block.
+            // If finalization fails due to a height mismatch (e.g. after a restart
+            // where the finality tracker is ahead of view state), re-sync state.height
+            // to match what the finality tracker expects and return without propagating
+            // the error — the next proposal will be at the correct height.
+            if let Err(e) = self.finality_tracker.finalize_block(block.clone(), qc.clone()) {
+                let corrected_height = self.finality_tracker.finalized_height() + 1u64;
+                tracing::warn!(
+                    error = %e,
+                    stale_height = %state.height,
+                    corrected_height = %corrected_height,
+                    "Finalization failed — re-syncing height to finality tracker"
+                );
+                state.height = corrected_height;
+                state.phase = Phase::Prepare;
+                state.proposed_block = None;
+                state.prepare_qc = None;
+                state.commit_qc = None;
+                state.reset_timer();
+                drop(state);
+                return Ok(None);
+            }
+
+            // Reset timeout on successful finalization
+            self.view_timer.write().on_success();
+
+            // Advance height for next block
+            state.height = state.height + 1u64;
+            state.view += 1;
+            state.phase = Phase::Prepare;
+            state.proposed_block = None;
+            state.prepare_qc = None;
+            state.commit_qc = None;
+            state.reset_timer();
+
+            // Remove finalized transactions from mempool
+            let tx_hashes: Vec<Hash> = block.transactions.iter()
+                .map(|tx| tx.transaction.hash())
+                .collect();
+            self.mempool.remove_transactions(&tx_hashes);
+
+            // Capture transition height before dropping state write lock
+            let transition_height = state.height;
+            drop(state);
+
+            // Check for epoch transition — SAFE: no vote_collector read lock held here
+            if self.epoch_manager.should_transition(transition_height) {
+                tracing::info!(height = %transition_height, "Epoch transition triggered");
+                let _ = self.epoch_manager.transition_epoch(transition_height)?;
+
+                // Update vote collector with new validator set
+                let new_validator_set = Arc::new(self.validator_set());
+                *self.vote_collector.write() = Some(Arc::new(VoteCollector::new(
+                    new_validator_set.clone(),
+                )));
+                *self.timeout_collector.write() = Some(Arc::new(
+                    crate::timeout::TimeoutCollector::new(new_validator_set),
+                ));
+            }
+        }
+
+        Ok(qc)
+    }
+
+    /// Main consensus loop
+    async fn consensus_loop(&self) -> Result<()> {
+        let mut shutdown_rx = {
+            let shutdown_tx = self.shutdown_tx.read();
+            match shutdown_tx.as_ref() {
+                Some(tx) => tx.subscribe(),
+                None => {
+                    tracing::error!("Consensus loop started without shutdown channel wired");
+                    return Err(ConsensusError::NotStarted);
+                }
+            }
+        };
+
+        // Check interval for view timeout (100ms)
+        let check_interval = Duration::from_millis(100);
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    tracing::info!("Consensus loop shutting down");
+                    break;
+                }
+                _ = sleep(check_interval) => {
+                    // Check for view timeout
+                    if self.check_view_timeout() {
+                        if let Err(e) = self.on_view_timeout().await {
+                            tracing::error!(error = %e, "View timeout handling failed");
+                        }
+                    }
+
+                    // Run consensus step
+                    if let Err(e) = self.run_consensus_step().await {
+                        tracing::error!(error = %e, "Consensus step failed");
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Runs a single consensus step
+    async fn run_consensus_step(&self) -> Result<()> {
+        let is_leader = self.is_leader().await;
+        let state = self.view_state.read().clone();
+
+        match state.phase {
+            Phase::Prepare => {
+                if is_leader {
+                    // Leader proposes a block
+                    if state.proposed_block.is_none() {
+                        drop(state);
+                        let block = self.propose_block_internal().await?;
+                        self.view_state.write().proposed_block = Some(block.clone());
+
+                        // Broadcast proposal to all peers so they can vote on it.
+                        // If we just recovered from a view timeout, attach the
+                        // TC we collected so peers can verify the previous view
+                        // was abandoned (Jolteon safe_to_extend predicate).
+                        let view = self.view_state.read().view;
+                        let timeout_certificate = self.last_round_tc.read().clone();
+                        // SyncInfo (#171): leader piggybacks its current
+                        // high_qc_view, capped at `view - 1` (genesis = 0).
+                        let high_qc_view = {
+                            let raw = *self.high_qc_view.read();
+                            if view == 0 { 0 } else { raw.min(view - 1) }
+                        };
+                        self.send_out(ConsensusOutMessage::Proposal {
+                            block: block.clone(),
+                            proposer: self.address,
+                            round: view,
+                            view,
+                            high_qc_view,
+                            timeout_certificate,
+                        });
+
+                        // Vote on our own proposal
+                        let _ = self.handle_prepare_phase(&block).await?;
+                    }
+                } else {
+                    // Non-leader: wait for proposal or timeout
+                    // In production, this would receive proposals from the network
+                }
+            }
+            Phase::Commit => {
+                if is_leader {
+                    if let Some(block) = state.proposed_block.clone() {
+                        drop(state);
+                        let _ = self.handle_commit_phase(&block).await?;
+                    }
+                }
+            }
+            Phase::Decide => {
+                // Block finalized, advance to next view
+                drop(state);
+                self.advance_view().await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Internal block proposal (called by consensus loop)
+    async fn propose_block_internal(&self) -> Result<Block> {
+        let (height, view) = {
+            let state = self.view_state.read();
+            (state.height, state.view)
+        };
+
+        let prev_hash = self.finality_tracker
+            .get_finalized_hash(height - 1u64)
+            .unwrap_or_default();
+
+        let state_root = self.state_root_provider
+            .as_ref()
+            .map(|p| p.current_state_root())
+            .unwrap_or_default();
+
+        // Fetch parent metadata for EIP-1559 base-fee derivation. Try
+        // the in-memory finality tracker first (fast path), then fall
+        // back to the durable BlockProvider (post-restart path).
+        // For the genesis-child case (height=1, parent height=0) this
+        // resolves to the genesis block; if not found anywhere we fall
+        // back to genesis-edge values which trigger `initial_base_fee`.
+        let parent_height = height - 1u64;
+        let parent_block = self
+            .finality_tracker
+            .get_finalized_block(parent_height)
+            .or_else(|| {
+                self.block_provider
+                    .as_ref()
+                    .and_then(|p| p.get_block(parent_height))
+            });
+        let (parent_base_fee, parent_gas_used, parent_gas_limit) = match parent_block {
+            Some(b) => (
+                b.header.metadata.base_fee_per_gas,
+                b.header.metadata.gas_used,
+                b.header.metadata.gas_limit,
+            ),
+            None => {
+                tracing::warn!(
+                    parent_height = %parent_height,
+                    "Parent block unavailable for base-fee derivation; falling back to initial fee"
+                );
+                (None, 0, 0)
+            }
+        };
+
+        let block = self.proposer.propose_block(
+            height,
+            view,
+            prev_hash,
+            self.address,
+            state_root,
+            parent_base_fee,
+            parent_gas_used,
+            parent_gas_limit,
+        )?;
+
+        // Validate block size before broadcasting
+        self.proposer.validate_block_size(&block)?;
+
+        self.blocks.insert(block.hash(), block.clone());
+
+        tracing::info!(
+            height = %height,
+            hash = %block.hash(),
+            tx_count = block.tx_count(),
+            "Block proposed"
+        );
+
+        Ok(block)
+    }
+
+    /// Finalizes a block on observation of a Commit QC.
+    ///
+    /// Replaces the trailing half of the original `handle_commit_phase` so the
+    /// finalize logic is reachable from `on_vote` (peer-driven) as well as from
+    /// the leader-driven step. Idempotent: if the block has already been
+    /// finalized at a lower local height, the FinalityTracker rejects with
+    /// `InvalidHeight` and we re-sync state without propagating the error.
+    async fn finalize_with_commit_qc(
+        &self,
+        block: &Block,
+        commit_qc: QuorumCertificate,
+    ) -> Result<()> {
+        // Idempotency guard — if we already finalized this height, skip.
+        if self.finality_tracker.finalized_height() >= block.header.height {
+            return Ok(());
+        }
+
+        // A Commit QC at view V implies a Prepare QC at view V was observed —
+        // bump high_qc_view if this is the highest we've seen.
+        {
+            let mut hqc = self.high_qc_view.write();
+            if commit_qc.view > *hqc {
+                *hqc = commit_qc.view;
+            }
+        }
+
+        let transition_height = {
+            let mut state = self.view_state.write();
+            state.phase = Phase::Decide;
+            state.commit_qc = Some(commit_qc.clone());
+
+            tracing::info!(
+                view = state.view,
+                height = %state.height,
+                block_hash = %block.hash(),
+                "Commit QC observed — finalizing block"
+            );
+
+            // Try to finalize. If the tracker disagrees with our height (rare,
+            // happens after a restart where storage tip ≠ view state), re-sync
+            // and bail without propagating.
+            if let Err(e) = self
+                .finality_tracker
+                .finalize_block(block.clone(), commit_qc.clone())
+            {
+                let corrected_height = self.finality_tracker.finalized_height() + 1u64;
+                tracing::warn!(
+                    error = %e,
+                    stale_height = %state.height,
+                    corrected_height = %corrected_height,
+                    "Finalization failed — re-syncing height to finality tracker"
+                );
+                state.height = corrected_height;
+                state.phase = Phase::Prepare;
+                state.proposed_block = None;
+                state.prepare_qc = None;
+                state.commit_qc = None;
+                state.reset_timer();
+                return Ok(());
+            }
+
+            self.view_timer.write().on_success();
+
+            // Advance height + view, reset phase
+            state.height = state.height + 1u64;
+            state.view += 1;
+            state.phase = Phase::Prepare;
+            state.proposed_block = None;
+            state.prepare_qc = None;
+            state.commit_qc = None;
+            state.reset_timer();
+            state.height
+        };
+
+        // Remove finalized transactions from mempool
+        let tx_hashes: Vec<Hash> =
+            block.transactions.iter().map(|tx| tx.transaction.hash()).collect();
+        self.mempool.remove_transactions(&tx_hashes);
+
+        // Epoch transition (vote_collector.write() — must not hold view_state lock here)
+        if self.epoch_manager.should_transition(transition_height) {
+            tracing::info!(height = %transition_height, "Epoch transition triggered");
+            let _ = self.epoch_manager.transition_epoch(transition_height)?;
+
+            let new_validator_set = Arc::new(self.validator_set());
+            *self.vote_collector.write() =
+                Some(Arc::new(VoteCollector::new(new_validator_set.clone())));
+            *self.timeout_collector.write() = Some(Arc::new(
+                crate::timeout::TimeoutCollector::new(new_validator_set),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ConsensusEngine for HotStuff2Engine {
+    async fn start(&mut self) -> Result<()> {
+        let mut is_running = self.is_running.write();
+        if *is_running {
+            return Err(ConsensusError::AlreadyStarted);
+        }
+
+        if !self.is_validator() {
+            return Err(ConsensusError::InvalidValidatorSet(
+                format!("Node {} is not a validator", self.address),
+            ));
+        }
+
+        // Initialize vote collector
+        let validator_set = self.validator_set();
+        let validator_set_arc = Arc::new(validator_set);
+        *self.vote_collector.write() = Some(Arc::new(VoteCollector::new(
+            validator_set_arc.clone(),
+        )));
+        // Initialize timeout collector (Bracha boost + 2f+1 TC formation)
+        *self.timeout_collector.write() = Some(Arc::new(
+            crate::timeout::TimeoutCollector::new(validator_set_arc),
+        ));
+
+        // Create shutdown channel
+        let (shutdown_tx, _) = broadcast::channel(1);
+        *self.shutdown_tx.write() = Some(shutdown_tx);
+
+        *is_running = true;
+
+        tracing::info!(
+            address = %self.address,
+            validators = self.validator_set().len(),
+            "HotStuff-2 consensus engine started"
+        );
+
+        // Spawn consensus loop
+        let engine = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = engine.consensus_loop().await {
+                tracing::error!(error = %e, "Consensus loop error");
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<()> {
+        let mut is_running = self.is_running.write();
+        if !*is_running {
+            return Err(ConsensusError::NotStarted);
+        }
+
+        // Send shutdown signal
+        if let Some(shutdown_tx) = self.shutdown_tx.read().as_ref() {
+            let _ = shutdown_tx.send(());
+        }
+
+        *is_running = false;
+
+        tracing::info!("HotStuff-2 consensus engine stopped");
+
+        Ok(())
+    }
+
+    async fn propose_block(&self, _transactions: Vec<Transaction>) -> Result<Block> {
+        if !self.is_leader().await {
+            let view = self.view_state.read().view;
+            return Err(ConsensusError::NotLeader(view));
+        }
+
+        self.propose_block_internal().await
+    }
+
+    async fn on_proposal(
+        &self,
+        block: &Block,
+        timeout_certificate: Option<crate::timeout::TimeoutCertificate>,
+        proposer_high_qc_view: u64,
+    ) -> Result<Vote> {
+        // SyncInfo (#171, Aptos pattern): the proposer piggybacks its current
+        // `high_qc_view` on every proposal. We adopt it if higher than our
+        // own (subject to `< proposal_view`). This is the steady-state
+        // backward-sync channel — a lagging replica that observes any honest
+        // proposal can fast-forward without waiting for a TC or Prepare-QC of
+        // its own. The bound prevents a Byzantine proposer from inflating the
+        // signal to drag honest replicas into a forged future.
+        let proposal_view_for_hqc = block.header.view;
+        if proposer_high_qc_view < proposal_view_for_hqc {
+            let mut hqc = self.high_qc_view.write();
+            if proposer_high_qc_view > *hqc {
+                tracing::debug!(
+                    local_high_qc_view = *hqc,
+                    proposer_high_qc_view,
+                    proposal_view = proposal_view_for_hqc,
+                    "Adopting proposer's high_qc_view from SyncInfo piggyback"
+                );
+                *hqc = proposer_high_qc_view;
+            }
+        }
+
+        // View sync: advance local view to match the proposal's view before
+        // voting. This is the canonical HotStuff-2 Pacemaker rule (Malkhi &
+        // Nayak 2023, Figure 2 step 3) and mirrors Aptos `round_manager.rs`
+        // `ensure_round_and_sync_up`: when a proposal arrives at a higher view
+        // than our local view, we sync up so our vote is stamped with the
+        // proposer's view and lands in the same vote-collector bucket as the
+        // proposer's self-vote and other peers' votes — otherwise validators
+        // at drifted views never form a quorum at any single view (the bug
+        // that pinned testnet at block_height=0).
+        //
+        // [`MAX_VIEW_JUMP`] is the file-level cap shared with
+        // `on_timeout_msg` so a malicious sender can't drag us up to u64::MAX
+        // in one message.
+        let proposal_view = block.header.view;
+        let proposal_height = block.header.height;
+        let (local_view, local_height) = {
+            let state = self.view_state.read();
+            (state.view, state.height)
+        };
+
+        // Reject proposals for the wrong height outright — `validate_proposal`
+        // will catch this too, but failing fast avoids an unnecessary view jump.
+        if proposal_height != local_height {
+            return Err(ConsensusError::InvalidHeight {
+                expected: local_height,
+                actual: proposal_height,
+            });
+        }
+
+        // Reject stale proposals (proposer was at a strictly lower view than
+        // we are now). Voting on a stale proposal would re-introduce the bug.
+        if proposal_view < local_view {
+            tracing::debug!(
+                proposal_view = proposal_view,
+                local_view = local_view,
+                height = %proposal_height,
+                "Dropping stale proposal: proposer view < local view"
+            );
+            return Err(ConsensusError::InvalidProposal(format!(
+                "stale proposal: view {} < local view {}",
+                proposal_view, local_view
+            )));
+        }
+
+        // safe_to_extend (Jolteon §3.5 / DiemBFT v4 §3.5):
+        // A proposal at round r is safe to vote on iff
+        //   (a) r == high_qc.round + 1                (happy path), OR
+        //   (b) r == tc.round + 1                     (timeout recovery), AND
+        //       high_qc.round ≥ max(tc.high_qc_rounds across signers).
+        //
+        // We don't piggyback `qc` on every proposal yet (#171), so the strongest
+        // tractable check is:
+        //   - If `proposal_view > local_view + 1`, the proposer skipped views.
+        //     They MUST attach a TC for view `proposal_view - 1`. Reject otherwise.
+        //   - If a TC is attached, verify its signatures and that
+        //     `tc.view + 1 == proposal_view`. Then advance our own
+        //     `high_qc_view` if the TC reveals a higher one (Bracha-style sync).
+        if let Some(ref tc) = timeout_certificate {
+            // Verify the TC is well-formed and signed by 2f+1 validators of the
+            // current epoch.
+            let validator_set = self.validator_set();
+            if let Err(e) = tc.verify(&validator_set) {
+                tracing::warn!(
+                    proposal_view = proposal_view,
+                    tc_view = tc.view,
+                    error = %e,
+                    "Rejecting proposal: attached TC failed verification"
+                );
+                return Err(ConsensusError::InvalidProposal(format!(
+                    "invalid timeout certificate: {}",
+                    e
+                )));
+            }
+            // The TC must be for the round immediately preceding the proposal.
+            if tc.view + 1 != proposal_view {
+                tracing::warn!(
+                    proposal_view = proposal_view,
+                    tc_view = tc.view,
+                    "Rejecting proposal: TC view + 1 != proposal view"
+                );
+                return Err(ConsensusError::InvalidProposal(format!(
+                    "TC view {} + 1 != proposal view {}",
+                    tc.view, proposal_view
+                )));
+            }
+            // Adopt the TC's max high_qc view if higher than ours — this is the
+            // backward-sync mechanism that lets a lagging replica catch up to
+            // the chain's true high_qc without waiting for a Prepare QC of
+            // its own.
+            let tc_max_hqc = tc.max_high_qc_view();
+            {
+                let mut hqc = self.high_qc_view.write();
+                if tc_max_hqc > *hqc {
+                    *hqc = tc_max_hqc;
+                }
+            }
+        } else if proposal_view > local_view + 1 {
+            // No TC, but the leader skipped views. This violates safe_to_extend
+            // — refuse to vote rather than risk extending an unsafe branch.
+            tracing::warn!(
+                proposal_view = proposal_view,
+                local_view = local_view,
+                "Rejecting proposal: view jump > 1 with no timeout certificate"
+            );
+            return Err(ConsensusError::InvalidProposal(format!(
+                "proposal view {} jumps from local view {} without timeout certificate",
+                proposal_view, local_view
+            )));
+        }
+
+        // Store the received block keyed by hash so that when the Prepare/Commit
+        // QC forms (driven by peer votes arriving via `on_vote`), we can look
+        // the block back up to drive phase transitions and finalization. Without
+        // this, only the leader (which inserts in `propose_block_internal`) can
+        // advance past Prepare — the bug that wedged height=1 indefinitely.
+        self.blocks.insert(block.hash(), block.clone());
+
+        // Advance local view to match the proposer's view.
+        if proposal_view > local_view {
+            if proposal_view - local_view > MAX_VIEW_JUMP {
+                tracing::warn!(
+                    proposal_view = proposal_view,
+                    local_view = local_view,
+                    max_jump = MAX_VIEW_JUMP,
+                    "Refusing to sync to proposal view: jump exceeds MAX_VIEW_JUMP"
+                );
+                return Err(ConsensusError::InvalidProposal(format!(
+                    "proposal view {} jumps too far from local view {} (max {})",
+                    proposal_view, local_view, MAX_VIEW_JUMP
+                )));
+            }
+            let mut state = self.view_state.write();
+            // Re-check under the write lock — another task may have advanced
+            // us in between.
+            if proposal_view > state.view {
+                tracing::info!(
+                    from_view = state.view,
+                    to_view = proposal_view,
+                    height = %state.height,
+                    "View sync: advancing local view to match proposal"
+                );
+                state.view = proposal_view;
+                state.phase = Phase::Prepare;
+                state.proposed_block = None;
+                state.prepare_qc = None;
+                state.commit_qc = None;
+                state.reset_timer();
+            }
+        }
+
+        let phase = {
+            let state = self.view_state.read();
+            state.phase
+        };
+
+        match phase {
+            Phase::Prepare => {
+                self.handle_prepare_phase(block).await?;
+                self.create_vote(block, VoteType::Prepare)
+            }
+            Phase::Commit => {
+                self.handle_commit_phase(block).await?;
+                self.create_vote(block, VoteType::Commit)
+            }
+            Phase::Decide => {
+                Err(ConsensusError::InvalidProposal(
+                    "Already in decide phase".to_string(),
+                ))
+            }
+        }
+    }
+
+    async fn on_vote(&self, vote: &Vote) -> Result<()> {
+        // SyncInfo (#171, Aptos pattern): every vote piggybacks the voter's
+        // `high_qc_view`. Adopt it if higher than our local view, so a lagging
+        // replica receiving votes for a future view can fast-forward without
+        // a separate sync RPC. The bound `< vote.view` is enforced upstream
+        // by `add_vote()` in the voter — Byzantine voters can't claim a future
+        // high_qc beyond what they're voting for.
+        {
+            let mut hqc = self.high_qc_view.write();
+            if vote.high_qc_view > *hqc {
+                tracing::debug!(
+                    voter = %vote.voter,
+                    voter_high_qc = vote.high_qc_view,
+                    local_high_qc = *hqc,
+                    "Adopting voter's high_qc_view from SyncInfo piggyback"
+                );
+                *hqc = vote.high_qc_view;
+            }
+        }
+
+        // Pacemaker advance via inbound SyncInfo (Jolteon §3.5 / DiemBFT v4):
+        // a vote whose `high_qc_view = Q` is observable evidence of a 2f+1
+        // Prepare QC at view Q — the QC is itself a 2f+1 aggregate, so a
+        // single piece of evidence suffices to advance the pacemaker. The
+        // next legal proposal will be at view Q+1, so any replica still
+        // sitting at view ≤ Q is provably behind and should fast-forward.
+        //
+        // This is the missing rung that wedged validator-2 in the live
+        // testnet at 2026-04-30: the engine booted at view 29988 (derived
+        // from finalized height), persisted vote_state ceiling was 29999,
+        // and the engine advanced via 700ms timeouts. By the time it caught
+        // up via TimeoutCertificate aggregation, the chain had moved on.
+        // Adopting `vote.high_qc_view + 1` here is the canonical
+        // Aptos/DiemBFT recovery channel — see `aptos-core/consensus/src/
+        // round_manager.rs::process_certificates`.
+        //
+        // Bounded by [`MAX_VIEW_JUMP`] so a Byzantine signer (whose
+        // signature has not yet been verified by `add_vote` below) cannot
+        // drag us up to u64::MAX. Vote signatures are authenticated inside
+        // `add_vote`; until then we treat the field as unverified hint.
+        if vote.high_qc_view > 0 {
+            let target = vote.high_qc_view.saturating_add(1);
+            let mut state = self.view_state.write();
+            if target > state.view && target - state.view <= MAX_VIEW_JUMP {
+                tracing::info!(
+                    from_view = state.view,
+                    to_view = target,
+                    height = %state.height,
+                    voter = %vote.voter,
+                    "Pacemaker: advancing local view via vote SyncInfo high_qc_view+1"
+                );
+                state.view = target;
+                state.phase = Phase::Prepare;
+                state.proposed_block = None;
+                state.prepare_qc = None;
+                state.commit_qc = None;
+                state.reset_timer();
+            }
+        }
+
+        // Add the peer vote to the collector. If a QC forms, we must drive
+        // phase progression (Prepare→Commit→Decide) here — the run_consensus_step
+        // loop only progresses the *leader's* phase via handle_prepare/commit;
+        // replicas otherwise sit in Phase::Prepare forever, which is exactly
+        // the bug that wedged height=1 indefinitely on the live testnet
+        // (Prepare QCs at view=135, 136, 137… all formed, all ignored).
+        let qc_opt = {
+            let vote_collector = self.vote_collector.read();
+            let collector = match vote_collector.as_ref() {
+                Some(c) => c,
+                None => return Err(ConsensusError::NotStarted),
+            };
+            match collector.add_vote(vote.clone()) {
+                Ok(qc) => qc,
+                Err(ConsensusError::Equivocation { ref validator, view }) => {
+                    // Equivocation detected — trigger slashing via callback
+                    tracing::error!(
+                        validator = %validator,
+                        view = view,
+                        "EQUIVOCATION: Validator voted for conflicting blocks. \
+                         Triggering slashing."
+                    );
+
+                    // Invoke the slashing callback to slash the validator's stake
+                    if let Some(ref callback) = self.slashing_callback {
+                        if let Some(evidence) = collector.get_evidence_for(&vote.voter, view) {
+                            callback.report_equivocation(&vote.voter, view, &evidence);
+                        }
+                    }
+
+                    return Err(ConsensusError::Equivocation {
+                        validator: validator.clone(),
+                        view,
+                    });
+                }
+                Err(e) => return Err(e),
+            }
+        }; // vote_collector read lock dropped before driving phase progression
+
+        let qc = match qc_opt {
+            Some(qc) => qc,
+            None => return Ok(()), // not a quorum yet, just collected
+        };
+
+        // Look up the block this QC commits to. Available locally because
+        // `on_proposal` (and `propose_block_internal`) insert into self.blocks.
+        let block = match self.blocks.get(&qc.block_hash).map(|r| r.clone()) {
+            Some(b) => b,
+            None => {
+                tracing::warn!(
+                    view = qc.view,
+                    height = qc.height.0,
+                    block_hash = %qc.block_hash,
+                    vote_type = ?qc.vote_type,
+                    "QC formed but block not in local cache — cannot drive phase progression"
+                );
+                return Ok(());
+            }
+        };
+
+        match qc.vote_type {
+            VoteType::Prepare => {
+                // Promote local view to Commit and emit our Commit vote.
+                // Idempotent: if we're already past Prepare for this view+block,
+                // skip to avoid double-broadcasting Commit.
+                let should_emit = {
+                    let mut state = self.view_state.write();
+                    if state.phase == Phase::Prepare && state.view == qc.view {
+                        state.phase = Phase::Commit;
+                        state.prepare_qc = Some(qc.clone());
+                        if state.proposed_block.is_none() {
+                            state.proposed_block = Some(block.clone());
+                        }
+                        tracing::info!(
+                            view = state.view,
+                            height = %state.height,
+                            "Prepare QC observed via on_vote — advancing to Commit phase"
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                // Track high_qc_view independent of phase-advance decision —
+                // even an "already past Prepare" replica should learn the
+                // highest Prepare QC view for future TimeoutMsg construction.
+                {
+                    let mut hqc = self.high_qc_view.write();
+                    if qc.view > *hqc {
+                        *hqc = qc.view;
+                    }
+                }
+
+                if should_emit {
+                    // Emit Commit vote for the same block. create_vote will
+                    // also persist the (view, height, Commit, block_hash) tuple
+                    // to the vote_state_store for double-sign protection.
+                    let commit_vote = self.create_vote(&block, VoteType::Commit)?;
+                    self.send_out(ConsensusOutMessage::Vote(commit_vote.clone()));
+
+                    // Add our own Commit vote to the collector so we count
+                    // toward the Commit quorum without waiting for the gossip
+                    // round-trip.
+                    let collector_qc = {
+                        let vote_collector = self.vote_collector.read();
+                        match vote_collector.as_ref() {
+                            Some(collector) => collector.add_vote(commit_vote)?,
+                            None => return Err(ConsensusError::NotStarted),
+                        }
+                    };
+
+                    // If our self-Commit vote completed the Commit quorum
+                    // (e.g. we were the last vote needed), recurse into
+                    // finalization immediately.
+                    if let Some(commit_qc) = collector_qc {
+                        if commit_qc.vote_type == VoteType::Commit {
+                            self.finalize_with_commit_qc(&block, commit_qc).await?;
+                        }
+                    }
+                }
+            }
+            VoteType::Commit => {
+                self.finalize_with_commit_qc(&block, qc).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn finalized_height(&self) -> BlockHeight {
+        self.finality_tracker.finalized_height()
+    }
+
+    async fn is_leader(&self) -> bool {
+        self.get_leader().map(|l| l == self.address).unwrap_or(false)
+    }
+}
+
+// Manual Clone implementation
+impl Clone for HotStuff2Engine {
+    fn clone(&self) -> Self {
+        Self {
+            keypair: self.keypair.clone(),
+            pq_signing_key: self.pq_signing_key.clone(),
+            composite_public_key: self.composite_public_key.clone(),
+            address: self.address,
+            config: self.config.clone(),
+            epoch_manager: self.epoch_manager.clone(),
+            mempool: self.mempool.clone(),
+            proposer: self.proposer.clone(),
+            vote_collector: self.vote_collector.clone(),
+            finality_tracker: self.finality_tracker.clone(),
+            view_state: self.view_state.clone(),
+            view_timer: self.view_timer.clone(),
+            blocks: self.blocks.clone(),
+            is_running: self.is_running.clone(),
+            shutdown_tx: self.shutdown_tx.clone(),
+            slashing_callback: self.slashing_callback.clone(),
+            state_root_provider: self.state_root_provider.clone(),
+            block_provider: self.block_provider.clone(),
+            consensus_out_tx: self.consensus_out_tx.clone(),
+            vote_state_store: self.vote_state_store.clone(),
+            high_qc_view: self.high_qc_view.clone(),
+            last_round_tc: self.last_round_tc.clone(),
+            timeout_collector: self.timeout_collector.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::validator::ValidatorInfo;
+    use tenzro_crypto::KeyType;
+
+    fn create_test_validators(count: usize) -> Vec<ValidatorInfo> {
+        (0..count)
+            .map(|i| {
+                let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+                // Convert tenzro_crypto::Address (20 bytes) to tenzro_types::Address (32 bytes)
+                let crypto_addr = keypair.address();
+                let mut addr_bytes = [0u8; 32];
+                addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
+                let address = tenzro_types::primitives::Address::new(addr_bytes);
+                let pq = MlDsaSigningKey::generate();
+                ValidatorInfo::new(
+                    address,
+                    keypair.public_key().clone(),
+                    pq.verifying_key_bytes().to_vec(),
+                    1000 * (i as u128 + 1),
+                )
+            })
+            .collect()
+    }
+
+    /// In-memory `BlockProvider` used by tests that drive `on_proposal` /
+    /// `handle_prepare_phase` directly. Real production wiring uses
+    /// `NodeBlockProvider` (RocksDB-backed); the tests need a parent block at
+    /// height 0 in scope so the EIP-1559 base-fee validation path can re-derive
+    /// the child's base fee from the genesis-edge parent (`gas_limit==0`,
+    /// `base_fee_per_gas==Some(initial_base_fee)`).
+    struct TestBlockProvider {
+        blocks: parking_lot::RwLock<
+            std::collections::HashMap<BlockHeight, Block>,
+        >,
+    }
+
+    impl TestBlockProvider {
+        fn new() -> Self {
+            Self {
+                blocks: parking_lot::RwLock::new(std::collections::HashMap::new()),
+            }
+        }
+
+        fn insert(&self, block: Block) {
+            self.blocks.write().insert(block.header.height, block);
+        }
+    }
+
+    impl BlockProvider for TestBlockProvider {
+        fn get_block(&self, height: BlockHeight) -> Option<Block> {
+            self.blocks.read().get(&height).cloned()
+        }
+    }
+
+    /// Stamp the expected genesis-edge EIP-1559 base fee on a child block at
+    /// height 1. Tests that exercise `on_proposal` against `build_test_engine*`
+    /// must use this — the new consensus rule rejects child blocks whose
+    /// `base_fee_per_gas` does not match the value derived from the parent.
+    fn stamp_genesis_edge_base_fee(mut block: Block) -> Block {
+        use tenzro_types::block::FeeMarketParams;
+        block.header.metadata.base_fee_per_gas =
+            Some(FeeMarketParams::default().initial_base_fee);
+        block
+    }
+
+    /// Build a synthetic genesis block (height=0) suitable for satisfying the
+    /// `validate_base_fee` parent lookup in tests. Mirrors the real genesis
+    /// block stamp from `tenzro_node::genesis`: `gas_limit==0` triggers the
+    /// genesis-edge in `calculate_next_base_fee`, so the child at height 1
+    /// adopts `FeeMarketParams::default().initial_base_fee`.
+    fn build_test_genesis() -> Block {
+        use tenzro_types::block::{
+            BlockHeader, BlockMetadata, ConsensusAlgorithm, ConsensusProof,
+            FeeMarketParams,
+        };
+        use tenzro_types::primitives::Address;
+        let mut header = BlockHeader::new_at_view(
+            BlockHeight::from(0),
+            0,
+            Hash::default(),
+            Hash::default(),
+            Hash::default(),
+            Address::new([0u8; 32]),
+            ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
+        );
+        header.metadata = BlockMetadata {
+            gas_used: 0,
+            gas_limit: 0,
+            tx_count: 0,
+            protocol_version: 1,
+            base_fee_per_gas: Some(FeeMarketParams::default().initial_base_fee),
+        };
+        Block::new(header, vec![])
+    }
+
+    /// Regression test for the height=0 testnet wedge surfaced 2026-04-28.
+    ///
+    /// Failure mode: a previous run of the validator votes through views
+    /// 0..62 at height=1 without ever finalizing (because the gossipsub mesh
+    /// was not warm). `PersistentVoteState` correctly records the highest
+    /// vote (view=62, height=1) before the pod restarts. On restart, the new
+    /// run resets `current_view` to 0 — but `vote_state.rs::check_vrs`
+    /// (CometBFT CheckHRS) refuses every vote whose `(view, height, step)`
+    /// is not strictly past the persisted tuple. Since 0..62 are all <= 62
+    /// at the same height, EVERY vote the new run tries to cast is refused
+    /// as "double-sign prevented", and the chain wedges at height=0 forever.
+    ///
+    /// `resume_from_height` must consult `vote_state_store` and jump the
+    /// local view past the persisted last-vote view at the same height.
+    #[tokio::test]
+    async fn test_resume_from_height_jumps_view_past_persisted_vote() {
+        use crate::vote_state::{LastSignState, MemoryVoteStateStore, VoteStateStore, VoteStep};
+        use tenzro_types::primitives::Hash;
+
+        // Pre-load a vote state store with a vote at (view=62, height=1) — the
+        // exact shape observed in the live testnet logs at 2026-04-28T08:20:Z.
+        let store = Arc::new(MemoryVoteStateStore::new());
+        let persisted = LastSignState {
+            version: 1,
+            view: 62,
+            height: 1,
+            step: VoteStep::Prepare,
+            block_hash: Some(Hash::default()),
+            signature: Some(vec![0u8; 64]),
+        };
+        store.record(&persisted).expect("record");
+
+        let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let pq = MlDsaSigningKey::generate();
+        let config = ConsensusConfig::default();
+        let validators = create_test_validators(4);
+        let epoch_manager = EpochManager::new(validators, 100).unwrap();
+        let engine = HotStuff2Engine::new(keypair, pq, config, epoch_manager)
+            .with_vote_state_store(store);
+
+        // Storage tip is height=0 (nothing finalized) — exactly the testnet
+        // boot state. Without the fix, view stays at 0 and every vote at
+        // (view≤62, height=1) is refused. With the fix, view jumps to 63.
+        engine.resume_from_height(BlockHeight(0));
+
+        let state = engine.view_state.read();
+        assert_eq!(state.height, BlockHeight(1), "height must advance to 1 (next-to-propose)");
+        assert!(
+            state.view >= 63,
+            "view must jump past persisted last_vote view=62 to avoid CheckHRS wedge — got view={}",
+            state.view
+        );
+    }
+
+    /// Regression test for the **cross-height** view-restoration wedge
+    /// surfaced 2026-04-30 on testnet (validator-2 logs showed persisted
+    /// `(view=29999, height=29988, Commit)` while `next_height=29989`).
+    ///
+    /// Failure mode: the persisted `(view, height)` tuple is
+    /// `(29999, 29988)` — a vote cast in the previous run at the *just-
+    /// finalized* height. On restart, the storage tip is height 29988,
+    /// so `next_height = 29989`. The previous guard (`persisted.height
+    /// == next_height.0`) was `29988 == 29989` — false — so the view
+    /// jump was skipped. The engine booted at view ~29988, advanced via
+    /// 700 ms timeouts, and got refused by `vote_state.rs::check_vrs`
+    /// for every view ≤ 29999 → wedge.
+    ///
+    /// Fix: adopt the persisted view ceiling **unconditionally**.
+    /// `persisted.view` is a height-independent strict signing floor
+    /// (DiemBFT v4 §3.5: `last_voted_round` is checked against `round`,
+    /// never against `(round, height)`).
+    #[tokio::test]
+    async fn test_resume_from_height_jumps_view_past_persisted_vote_cross_height() {
+        use crate::vote_state::{LastSignState, MemoryVoteStateStore, VoteStateStore, VoteStep};
+        use tenzro_types::primitives::Hash;
+
+        // Pre-load a vote state store with a vote at (view=29999, height=29988, Commit)
+        // — exactly the shape observed in the live testnet logs at 2026-04-30.
+        let store = Arc::new(MemoryVoteStateStore::new());
+        let persisted = LastSignState {
+            version: 1,
+            view: 29999,
+            height: 29988,
+            step: VoteStep::Commit,
+            block_hash: Some(Hash::default()),
+            signature: Some(vec![0u8; 64]),
+        };
+        store.record(&persisted).expect("record");
+
+        let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let pq = MlDsaSigningKey::generate();
+        let config = ConsensusConfig::default();
+        let validators = create_test_validators(4);
+        let epoch_manager = EpochManager::new(validators, 100).unwrap();
+        let engine = HotStuff2Engine::new(keypair, pq, config, epoch_manager)
+            .with_vote_state_store(store);
+
+        // Storage tip is 29988 (just-finalized at the moment of the previous vote).
+        // next_height becomes 29989 — different from persisted.height. Without the
+        // fix, the view-jump guard (`persisted.height == next_height.0`) was false
+        // → engine booted at view ~29988 → wedge.
+        engine.resume_from_height(BlockHeight(29988));
+
+        let state = engine.view_state.read();
+        assert_eq!(
+            state.height,
+            BlockHeight(29989),
+            "height must advance to 29989 (next-to-propose)"
+        );
+        assert!(
+            state.view >= 30000,
+            "view must jump past persisted last_vote view=29999 even when \
+             persisted.height ({}) != next_height ({}) — got view={}",
+            persisted.height,
+            29989,
+            state.view
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hotstuff2_creation() {
+        let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let pq = MlDsaSigningKey::generate();
+        let config = ConsensusConfig::default();
+        let validators = create_test_validators(4);
+        let epoch_manager = EpochManager::new(validators, 100).unwrap();
+
+        let engine = HotStuff2Engine::new(keypair, pq, config, epoch_manager);
+        assert_eq!(engine.finalized_height().await, BlockHeight::from(0));
+    }
+
+    #[tokio::test]
+    async fn test_leader_selection() {
+        let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let pq = MlDsaSigningKey::generate();
+        let crypto_addr = keypair.address();
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
+        let address = tenzro_types::primitives::Address::new(addr_bytes);
+
+        let validators = vec![
+            ValidatorInfo::new(
+                address,
+                keypair.public_key().clone(),
+                pq.verifying_key_bytes().to_vec(),
+                1000,
+            ),
+            create_test_validators(3)[0].clone(),
+        ];
+
+        let config = ConsensusConfig::default();
+        let epoch_manager = EpochManager::new(validators, 100).unwrap();
+
+        let engine = HotStuff2Engine::new(keypair, pq, config, epoch_manager);
+        let leader = engine.get_leader().unwrap();
+
+        // Leader should be one of the validators
+        assert!(engine.validator_set().is_validator(&leader));
+    }
+
+    /// Helper: build an engine where `validators[0]` is this node, plus
+    /// `extra` additional validators. Returns the engine and the address of
+    /// validators[1] (a remote validator we use as a proposer in tests).
+    async fn build_test_engine(extra: usize) -> (HotStuff2Engine, tenzro_types::primitives::Address) {
+        let mut validators = create_test_validators(extra + 1);
+        let local_keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let local_pq = MlDsaSigningKey::generate();
+        let local_crypto_addr = local_keypair.address();
+        let mut local_addr_bytes = [0u8; 32];
+        local_addr_bytes[..20].copy_from_slice(local_crypto_addr.as_bytes());
+        let local_address = tenzro_types::primitives::Address::new(local_addr_bytes);
+        validators[0] = ValidatorInfo::new(
+            local_address,
+            local_keypair.public_key().clone(),
+            local_pq.verifying_key_bytes().to_vec(),
+            1000,
+        );
+        let proposer_addr = validators[1].address;
+
+        let config = ConsensusConfig::default();
+        let epoch_manager = EpochManager::new(validators, 100).unwrap();
+        let mut engine = HotStuff2Engine::new(local_keypair, local_pq, config, epoch_manager);
+
+        // Wire a synthetic genesis block at height 0 so EIP-1559
+        // `validate_base_fee` can re-derive the child's base fee from a
+        // genesis-edge parent. Real production wires `NodeBlockProvider`.
+        let block_provider = Arc::new(TestBlockProvider::new());
+        block_provider.insert(build_test_genesis());
+        engine = engine.with_block_provider(block_provider);
+
+        // Initialize the vote collector — `on_proposal` exercises it via
+        // `handle_prepare_phase`. This is what `start()` does, but we don't
+        // want to spawn the consensus loop in tests.
+        let validator_set = Arc::new(engine.validator_set());
+        *engine.vote_collector.write() = Some(Arc::new(VoteCollector::new(
+            validator_set.clone(),
+        )));
+        *engine.timeout_collector.write() = Some(Arc::new(
+            crate::timeout::TimeoutCollector::new(validator_set),
+        ));
+
+        (engine, proposer_addr)
+    }
+
+    /// Regression test for the height=0 testnet bug: when a proposal arrives at
+    /// a higher view than the local view, `on_proposal` must advance the local
+    /// view to match the proposer's view BEFORE constructing the vote, so the
+    /// vote is bucketed at the proposer's view and a quorum can form.
+    ///
+    /// Mirrors Aptos `ensure_round_and_sync_up` (consensus/src/round_manager.rs)
+    /// and HotStuff-2 paper Figure 1/2 (Malkhi & Nayak, eprint 2023/397).
+    ///
+    /// Without the fix: each validator votes at its own drifted view, votes
+    /// scatter across view-buckets, and no view ever reaches the threshold.
+    #[tokio::test]
+    async fn test_on_proposal_advances_local_view_to_match_proposer() {
+        use tenzro_types::block::{Block, BlockHeader, ConsensusAlgorithm, ConsensusProof};
+        use tenzro_types::primitives::{BlockHeight, Hash};
+
+        let (engine, proposer_addr) = build_test_engine(3).await;
+
+        // Simulate the testnet failure mode: this node's local view is one
+        // behind the proposer's (the canonical happy-path next-view case;
+        // larger view jumps require a TC and are covered in a dedicated
+        // safe_to_extend test).
+        {
+            let mut state = engine.view_state.write();
+            state.view = 16;
+            state.height = BlockHeight::from(1);
+            state.phase = Phase::Prepare;
+        }
+
+        // Build a proposal at height=1, view=17 from `proposer_addr`.
+        let header = BlockHeader::new_at_view(
+            BlockHeight::from(1),
+            17, // proposer's view
+            Hash::default(),
+            Hash::default(),
+            Hash::default(),
+            proposer_addr,
+            ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
+        );
+        let block = stamp_genesis_edge_base_fee(Block::new(header, vec![]));
+
+        // Process the proposal — should advance local view AND produce a vote.
+        let vote = engine.on_proposal(&block, None, 0).await.expect("on_proposal succeeded");
+
+        // The vote MUST be stamped at the proposer's view, not the stale
+        // local view. This is the entire point of the fix.
+        assert_eq!(
+            vote.view, 17,
+            "vote must be stamped at proposer's view (17), got {} — \
+             without view-sync, votes from drifted-view validators never \
+             form a quorum (testnet height=0 bug)",
+            vote.view
+        );
+
+        // Local view state must have been advanced.
+        let final_view = engine.view_state.read().view;
+        assert_eq!(
+            final_view, 17,
+            "local view must advance to proposer's view, got {}",
+            final_view
+        );
+    }
+
+    /// Stale proposals (proposer at a STRICTLY lower view than local) must be
+    /// rejected — voting on them would re-introduce the bucketing bug.
+    #[tokio::test]
+    async fn test_on_proposal_rejects_stale_view() {
+        use tenzro_types::block::{Block, BlockHeader, ConsensusAlgorithm, ConsensusProof};
+        use tenzro_types::primitives::{BlockHeight, Hash};
+
+        let (engine, proposer_addr) = build_test_engine(3).await;
+
+        // Local view is well ahead of an inbound stale proposal.
+        {
+            let mut state = engine.view_state.write();
+            state.view = 20;
+            state.height = BlockHeight::from(1);
+            state.phase = Phase::Prepare;
+        }
+
+        let header = BlockHeader::new_at_view(
+            BlockHeight::from(1),
+            5, // stale view
+            Hash::default(),
+            Hash::default(),
+            Hash::default(),
+            proposer_addr,
+            ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
+        );
+        let block = Block::new(header, vec![]);
+
+        let result = engine.on_proposal(&block, None, 0).await;
+        assert!(
+            matches!(result, Err(ConsensusError::InvalidProposal(_))),
+            "stale proposal must be rejected, got {:?}",
+            result
+        );
+
+        // Local view must be unchanged.
+        assert_eq!(engine.view_state.read().view, 20);
+    }
+
+    /// Proposals that try to fast-forward more than `MAX_VIEW_JUMP` views must
+    /// be rejected (anti-DoS bound on view counter advancement).
+    #[tokio::test]
+    async fn test_on_proposal_rejects_unbounded_view_jump() {
+        use tenzro_types::block::{Block, BlockHeader, ConsensusAlgorithm, ConsensusProof};
+        use tenzro_types::primitives::{BlockHeight, Hash};
+
+        let (engine, proposer_addr) = build_test_engine(3).await;
+
+        {
+            let mut state = engine.view_state.write();
+            state.view = 0;
+            state.height = BlockHeight::from(1);
+            state.phase = Phase::Prepare;
+        }
+
+        // Way beyond MAX_VIEW_JUMP (1024 in the implementation).
+        let header = BlockHeader::new_at_view(
+            BlockHeight::from(1),
+            10_000_000,
+            Hash::default(),
+            Hash::default(),
+            Hash::default(),
+            proposer_addr,
+            ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
+        );
+        let block = Block::new(header, vec![]);
+
+        let result = engine.on_proposal(&block, None, 0).await;
+        assert!(
+            matches!(result, Err(ConsensusError::InvalidProposal(_))),
+            "view jump beyond MAX_VIEW_JUMP must be rejected, got {:?}",
+            result
+        );
+        assert_eq!(engine.view_state.read().view, 0);
+    }
+
+    /// Helper: build an engine plus the keypairs and PQ keys for the OTHER
+    /// validators (so tests can hybrid-sign a TimeoutMsg "from" a peer).
+    /// Returns (engine, peer_keypair, peer_pq_key, peer_address).
+    async fn build_test_engine_with_peer_signer() -> (
+        HotStuff2Engine,
+        KeyPair,
+        MlDsaSigningKey,
+        tenzro_types::primitives::Address,
+    ) {
+        // Inline the body of `create_test_validators` + `build_test_engine`
+        // so the peer's keypair stays in scope for the test to sign with.
+        let local_keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let local_pq = MlDsaSigningKey::generate();
+        let local_crypto_addr = local_keypair.address();
+        let mut local_addr_bytes = [0u8; 32];
+        local_addr_bytes[..20].copy_from_slice(local_crypto_addr.as_bytes());
+        let local_address = tenzro_types::primitives::Address::new(local_addr_bytes);
+        let local_validator = ValidatorInfo::new(
+            local_address,
+            local_keypair.public_key().clone(),
+            local_pq.verifying_key_bytes().to_vec(),
+            1000,
+        );
+
+        let peer_keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let peer_pq = MlDsaSigningKey::generate();
+        let peer_crypto_addr = peer_keypair.address();
+        let mut peer_addr_bytes = [0u8; 32];
+        peer_addr_bytes[..20].copy_from_slice(peer_crypto_addr.as_bytes());
+        let peer_address = tenzro_types::primitives::Address::new(peer_addr_bytes);
+        let peer_validator = ValidatorInfo::new(
+            peer_address,
+            peer_keypair.public_key().clone(),
+            peer_pq.verifying_key_bytes().to_vec(),
+            2000,
+        );
+
+        // Two extra filler validators so the set is realistic (4 total => f=1)
+        let mut validators = vec![local_validator, peer_validator];
+        for i in 0..2 {
+            let kp = KeyPair::generate(KeyType::Ed25519).unwrap();
+            let crypto_addr = kp.address();
+            let mut addr_bytes = [0u8; 32];
+            addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
+            let addr = tenzro_types::primitives::Address::new(addr_bytes);
+            let pq = MlDsaSigningKey::generate();
+            validators.push(ValidatorInfo::new(
+                addr,
+                kp.public_key().clone(),
+                pq.verifying_key_bytes().to_vec(),
+                1000 * (i as u128 + 1),
+            ));
+        }
+
+        let config = ConsensusConfig::default();
+        let epoch_manager = EpochManager::new(validators, 100).unwrap();
+        let mut engine = HotStuff2Engine::new(local_keypair, local_pq, config, epoch_manager);
+
+        // Wire a synthetic genesis block at height 0 so EIP-1559
+        // `validate_base_fee` can re-derive the child's base fee.
+        let block_provider = Arc::new(TestBlockProvider::new());
+        block_provider.insert(build_test_genesis());
+        engine = engine.with_block_provider(block_provider);
+
+        let validator_set = Arc::new(engine.validator_set());
+        *engine.vote_collector.write() = Some(Arc::new(VoteCollector::new(
+            validator_set.clone(),
+        )));
+        *engine.timeout_collector.write() = Some(Arc::new(
+            crate::timeout::TimeoutCollector::new(validator_set),
+        ));
+
+        (engine, peer_keypair, peer_pq, peer_address)
+    }
+
+    /// Hybrid-sign a TimeoutMsg "from" the given peer for the given view.
+    fn peer_sign_timeout(
+        view: u64,
+        peer_address: tenzro_types::primitives::Address,
+        peer_keypair: &KeyPair,
+        peer_pq: &MlDsaSigningKey,
+    ) -> crate::timeout::TimeoutMsg {
+        peer_sign_timeout_with_hqc(view, view.saturating_sub(1), peer_address, peer_keypair, peer_pq)
+    }
+
+    /// Hybrid-sign a TimeoutMsg with an explicit `high_qc_view` (must be `< view`).
+    fn peer_sign_timeout_with_hqc(
+        view: u64,
+        high_qc_view: u64,
+        peer_address: tenzro_types::primitives::Address,
+        peer_keypair: &KeyPair,
+        peer_pq: &MlDsaSigningKey,
+    ) -> crate::timeout::TimeoutMsg {
+        use tenzro_crypto::composite::{
+            CompositePublicKey, CompositeSignature, HybridSigner, InMemoryHybridSigner,
+        };
+        use tenzro_crypto::signatures::Ed25519SignerImpl;
+
+        let composite_pk = CompositePublicKey::new(
+            peer_keypair.public_key().clone(),
+            Some(peer_pq.verifying_key_bytes().to_vec()),
+        );
+        let placeholder = CompositeSignature::new(Vec::new(), None);
+        let unsigned = crate::timeout::TimeoutMsg::new(
+            view,
+            high_qc_view,
+            peer_address,
+            placeholder,
+            composite_pk.clone(),
+        );
+        let payload = unsigned.signing_payload();
+
+        let kp_bytes = peer_keypair.to_bytes();
+        let kp_copy = KeyPair::from_bytes(peer_keypair.key_type(), &kp_bytes).unwrap();
+        let classical = Ed25519SignerImpl::new(kp_copy).unwrap();
+        let pq_copy = MlDsaSigningKey::from_seed(peer_pq.seed_bytes()).unwrap();
+        let signer = InMemoryHybridSigner::new(Box::new(classical), pq_copy);
+
+        let signature = signer.sign(&payload).unwrap();
+        crate::timeout::TimeoutMsg::new(view, high_qc_view, peer_address, signature, composite_pk)
+    }
+
+    /// Receiving a TimeoutMsg at a strictly higher view must advance the
+    /// local view counter — this is the DiemBFT-style backward-sync channel
+    /// (#164).
+    #[tokio::test]
+    async fn test_on_timeout_msg_advances_local_view() {
+        use tenzro_types::primitives::BlockHeight;
+
+        let (engine, peer_kp, peer_pq, peer_addr) =
+            build_test_engine_with_peer_signer().await;
+
+        // Local view stuck at 5; peer is at 17.
+        {
+            let mut state = engine.view_state.write();
+            state.view = 5;
+            state.height = BlockHeight::from(1);
+            state.phase = Phase::Commit; // arbitrary mid-phase state
+            state.proposed_block = None;
+        }
+
+        let msg = peer_sign_timeout(17, peer_addr, &peer_kp, &peer_pq);
+        engine.on_timeout_msg(&msg).await.expect("valid timeout accepted");
+
+        let state = engine.view_state.read();
+        assert_eq!(state.view, 17, "local view advances to peer view");
+        assert!(matches!(state.phase, Phase::Prepare), "phase reset to Prepare");
+        assert!(state.prepare_qc.is_none(), "stale prepare QC cleared");
+        assert!(state.commit_qc.is_none(), "stale commit QC cleared");
+    }
+
+    /// Receiving a TimeoutMsg at a *lower* view must be a no-op — this is
+    /// the downgrade-attack defence: a peer cannot drag us backwards.
+    #[tokio::test]
+    async fn test_on_timeout_msg_ignores_lower_view() {
+        let (engine, peer_kp, peer_pq, peer_addr) =
+            build_test_engine_with_peer_signer().await;
+
+        {
+            let mut state = engine.view_state.write();
+            state.view = 50;
+        }
+
+        let msg = peer_sign_timeout(20, peer_addr, &peer_kp, &peer_pq);
+        engine.on_timeout_msg(&msg).await.expect("verified timeout silently ignored");
+
+        assert_eq!(engine.view_state.read().view, 50, "local view unchanged");
+    }
+
+    /// A TimeoutMsg with a tampered view (signature won't bind) must be
+    /// rejected by the engine — this is the spoofing defence.
+    #[tokio::test]
+    async fn test_on_timeout_msg_rejects_tampered_signature() {
+        let (engine, peer_kp, peer_pq, peer_addr) =
+            build_test_engine_with_peer_signer().await;
+
+        {
+            let mut state = engine.view_state.write();
+            state.view = 5;
+        }
+
+        let mut msg = peer_sign_timeout(20, peer_addr, &peer_kp, &peer_pq);
+        msg.view = 99; // mutate after signing — signature no longer binds
+
+        let err = engine
+            .on_timeout_msg(&msg)
+            .await
+            .expect_err("tampered timeout must be rejected");
+        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+
+        assert_eq!(engine.view_state.read().view, 5, "view unchanged on bad sig");
+    }
+
+    /// A TimeoutMsg jumping more than `MAX_VIEW_JUMP` views beyond the local
+    /// view must be rejected — DoS bound symmetric with `on_proposal`.
+    #[tokio::test]
+    async fn test_on_timeout_msg_rejects_unbounded_view_jump() {
+        let (engine, peer_kp, peer_pq, peer_addr) =
+            build_test_engine_with_peer_signer().await;
+
+        {
+            let mut state = engine.view_state.write();
+            state.view = 0;
+        }
+
+        let msg = peer_sign_timeout(10_000_000, peer_addr, &peer_kp, &peer_pq);
+        let err = engine
+            .on_timeout_msg(&msg)
+            .await
+            .expect_err("massive view jump must be rejected");
+        assert!(matches!(err, ConsensusError::InvalidProposal(_)), "got {err:?}");
+
+        assert_eq!(engine.view_state.read().view, 0, "view unchanged on jump");
+    }
+
+    /// Builds a 4-validator engine and returns the local engine + each peer's
+    /// (keypair, pq_key, address). The local node is index 0; peers are 1..3.
+    /// This enables tests that need to construct multi-signer artifacts (TCs)
+    /// without going through the gossip layer.
+    async fn build_test_engine_with_all_signers() -> (
+        HotStuff2Engine,
+        Vec<(KeyPair, MlDsaSigningKey, tenzro_types::primitives::Address)>,
+    ) {
+        let mut peers = Vec::new();
+        let mut validators = Vec::new();
+
+        // Local validator (index 0).
+        let local_kp = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let local_pq = MlDsaSigningKey::generate();
+        let local_crypto_addr = local_kp.address();
+        let mut local_addr_bytes = [0u8; 32];
+        local_addr_bytes[..20].copy_from_slice(local_crypto_addr.as_bytes());
+        let local_addr = tenzro_types::primitives::Address::new(local_addr_bytes);
+        validators.push(ValidatorInfo::new(
+            local_addr,
+            local_kp.public_key().clone(),
+            local_pq.verifying_key_bytes().to_vec(),
+            1000,
+        ));
+
+        // 3 peers (indices 1..3).
+        for i in 0..3 {
+            let kp = KeyPair::generate(KeyType::Ed25519).unwrap();
+            let pq = MlDsaSigningKey::generate();
+            let crypto_addr = kp.address();
+            let mut addr_bytes = [0u8; 32];
+            addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
+            let addr = tenzro_types::primitives::Address::new(addr_bytes);
+            validators.push(ValidatorInfo::new(
+                addr,
+                kp.public_key().clone(),
+                pq.verifying_key_bytes().to_vec(),
+                1000 * (i as u128 + 2),
+            ));
+            peers.push((kp, pq, addr));
+        }
+
+        let local_kp_for_engine =
+            KeyPair::from_bytes(local_kp.key_type(), &local_kp.to_bytes()).unwrap();
+        let local_pq_for_engine = MlDsaSigningKey::from_seed(local_pq.seed_bytes()).unwrap();
+        let config = ConsensusConfig::default();
+        let epoch_manager = EpochManager::new(validators, 100).unwrap();
+        let mut engine = HotStuff2Engine::new(local_kp_for_engine, local_pq_for_engine, config, epoch_manager);
+
+        // Wire a synthetic genesis block at height 0 so EIP-1559
+        // `validate_base_fee` can re-derive the child's base fee. See
+        // `build_test_genesis` for rationale.
+        let block_provider = Arc::new(TestBlockProvider::new());
+        block_provider.insert(build_test_genesis());
+        engine = engine.with_block_provider(block_provider);
+
+        let validator_set = Arc::new(engine.validator_set());
+        *engine.vote_collector.write() = Some(Arc::new(VoteCollector::new(validator_set.clone())));
+        *engine.timeout_collector.write() = Some(Arc::new(
+            crate::timeout::TimeoutCollector::new(validator_set),
+        ));
+
+        (engine, peers)
+    }
+
+    /// safe_to_extend (Jolteon §3.5): a proposal at view V where V > local_view + 1
+    /// must carry a valid TimeoutCertificate at view V-1 signed by 2f+1 validators.
+    /// Without the TC, the proposal must be rejected — the leader could otherwise
+    /// fork the chain by skipping views unilaterally.
+    #[tokio::test]
+    async fn test_on_proposal_rejects_view_jump_without_tc() {
+        use tenzro_types::block::{Block, BlockHeader, ConsensusAlgorithm, ConsensusProof};
+        use tenzro_types::primitives::{BlockHeight, Hash};
+
+        let (engine, peers) = build_test_engine_with_all_signers().await;
+        let proposer_addr = peers[0].2;
+
+        // Local view 0; proposer jumps to view 5 with no TC.
+        {
+            let mut state = engine.view_state.write();
+            state.view = 0;
+            state.height = BlockHeight::from(1);
+            state.phase = Phase::Prepare;
+        }
+
+        let header = BlockHeader::new_at_view(
+            BlockHeight::from(1),
+            5,
+            Hash::default(),
+            Hash::default(),
+            Hash::default(),
+            proposer_addr,
+            ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
+        );
+        let block = Block::new(header, vec![]);
+
+        let result = engine.on_proposal(&block, None, 0).await;
+        assert!(
+            matches!(result, Err(ConsensusError::InvalidProposal(_))),
+            "view jump > 1 without TC must be rejected, got {:?}",
+            result
+        );
+        assert_eq!(engine.view_state.read().view, 0, "local view unchanged on rejection");
+    }
+
+    /// safe_to_extend happy path: a proposal at view V > local_view + 1 with a
+    /// valid TC for view V-1 must be accepted, and the local view advances.
+    #[tokio::test]
+    async fn test_on_proposal_accepts_view_jump_with_valid_tc() {
+        use tenzro_types::block::{Block, BlockHeader, ConsensusAlgorithm, ConsensusProof};
+        use tenzro_types::primitives::{BlockHeight, Hash};
+
+        let (engine, peers) = build_test_engine_with_all_signers().await;
+        let proposer_addr = peers[0].2;
+
+        // Local view 0; proposer jumps to view 5 with a TC at view 4 signed
+        // by 3 of 4 validators (2f+1 with f=1).
+        {
+            let mut state = engine.view_state.write();
+            state.view = 0;
+            state.height = BlockHeight::from(1);
+            state.phase = Phase::Prepare;
+        }
+
+        // Build 3 TimeoutMsgs at view 4 (with high_qc_view = 0) from the 3
+        // peers, then assemble into a TC.
+        let tc_view = 4u64;
+        let mut signers: Vec<crate::timeout::TcSigner> = Vec::new();
+        for (kp, pq, addr) in peers.iter() {
+            let msg = peer_sign_timeout_with_hqc(tc_view, 0, *addr, kp, pq);
+            signers.push(crate::timeout::TcSigner {
+                voter: msg.voter,
+                high_qc_view: msg.high_qc_view,
+                signature: msg.signature,
+                public_key: msg.public_key,
+            });
+        }
+        let tc = crate::timeout::TimeoutCertificate {
+            format_version: crate::timeout::TIMEOUT_CERTIFICATE_FORMAT_VERSION,
+            view: tc_view,
+            signers,
+        };
+
+        let header = BlockHeader::new_at_view(
+            BlockHeight::from(1),
+            5,
+            Hash::default(),
+            Hash::default(),
+            Hash::default(),
+            proposer_addr,
+            ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
+        );
+        let block = stamp_genesis_edge_base_fee(Block::new(header, vec![]));
+
+        let vote = engine
+            .on_proposal(&block, Some(tc), 0)
+            .await
+            .expect("proposal with valid TC must be accepted");
+        assert_eq!(vote.view, 5, "vote stamped at proposer's view");
+        assert_eq!(engine.view_state.read().view, 5, "local view advanced");
+    }
+
+    /// A proposal carrying a TC for the wrong view (tc.view + 1 != proposal.view)
+    /// must be rejected — even if the TC is otherwise well-formed.
+    #[tokio::test]
+    async fn test_on_proposal_rejects_tc_with_wrong_view() {
+        use tenzro_types::block::{Block, BlockHeader, ConsensusAlgorithm, ConsensusProof};
+        use tenzro_types::primitives::{BlockHeight, Hash};
+
+        let (engine, peers) = build_test_engine_with_all_signers().await;
+        let proposer_addr = peers[0].2;
+
+        {
+            let mut state = engine.view_state.write();
+            state.view = 0;
+            state.height = BlockHeight::from(1);
+            state.phase = Phase::Prepare;
+        }
+
+        // TC is at view 3, but the proposal is at view 5 (gap of 2). Rejected
+        // because tc.view + 1 (= 4) != proposal_view (= 5).
+        let tc_view = 3u64;
+        let mut signers: Vec<crate::timeout::TcSigner> = Vec::new();
+        for (kp, pq, addr) in peers.iter() {
+            let msg = peer_sign_timeout_with_hqc(tc_view, 0, *addr, kp, pq);
+            signers.push(crate::timeout::TcSigner {
+                voter: msg.voter,
+                high_qc_view: msg.high_qc_view,
+                signature: msg.signature,
+                public_key: msg.public_key,
+            });
+        }
+        let tc = crate::timeout::TimeoutCertificate {
+            format_version: crate::timeout::TIMEOUT_CERTIFICATE_FORMAT_VERSION,
+            view: tc_view,
+            signers,
+        };
+
+        let header = BlockHeader::new_at_view(
+            BlockHeight::from(1),
+            5,
+            Hash::default(),
+            Hash::default(),
+            Hash::default(),
+            proposer_addr,
+            ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
+        );
+        let block = Block::new(header, vec![]);
+
+        let result = engine.on_proposal(&block, Some(tc), 0).await;
+        assert!(
+            matches!(result, Err(ConsensusError::InvalidProposal(_))),
+            "TC with wrong view must be rejected, got {:?}",
+            result
+        );
+        assert_eq!(engine.view_state.read().view, 0, "local view unchanged");
+    }
+
+    /// A proposal carrying a TC signed by < 2f+1 validators must be rejected.
+    /// This guards against a leader fabricating a "TC" from f or fewer signers.
+    #[tokio::test]
+    async fn test_on_proposal_rejects_tc_below_quorum() {
+        use tenzro_types::block::{Block, BlockHeader, ConsensusAlgorithm, ConsensusProof};
+        use tenzro_types::primitives::{BlockHeight, Hash};
+
+        let (engine, peers) = build_test_engine_with_all_signers().await;
+        let proposer_addr = peers[0].2;
+
+        {
+            let mut state = engine.view_state.write();
+            state.view = 0;
+            state.height = BlockHeight::from(1);
+            state.phase = Phase::Prepare;
+        }
+
+        // Only 1 signer — far below 2f+1 = 3 for a 4-validator set.
+        let tc_view = 4u64;
+        let (kp, pq, addr) = &peers[0];
+        let msg = peer_sign_timeout_with_hqc(tc_view, 0, *addr, kp, pq);
+        let signers = vec![crate::timeout::TcSigner {
+            voter: msg.voter,
+            high_qc_view: msg.high_qc_view,
+            signature: msg.signature,
+            public_key: msg.public_key,
+        }];
+        let tc = crate::timeout::TimeoutCertificate {
+            format_version: crate::timeout::TIMEOUT_CERTIFICATE_FORMAT_VERSION,
+            view: tc_view,
+            signers,
+        };
+
+        let header = BlockHeader::new_at_view(
+            BlockHeight::from(1),
+            5,
+            Hash::default(),
+            Hash::default(),
+            Hash::default(),
+            proposer_addr,
+            ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
+        );
+        let block = Block::new(header, vec![]);
+
+        let result = engine.on_proposal(&block, Some(tc), 0).await;
+        assert!(
+            matches!(result, Err(ConsensusError::InvalidProposal(_))),
+            "TC below quorum must be rejected, got {:?}",
+            result
+        );
+    }
+}

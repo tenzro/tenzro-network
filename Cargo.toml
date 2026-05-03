@@ -1,0 +1,254 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tenzro-types",
+    "crates/tenzro-crypto",
+    "crates/tenzro-tee",
+    "crates/tenzro-zk",
+    "crates/tenzro-network",
+    "crates/tenzro-storage",
+    "crates/tenzro-wallet",
+    "crates/tenzro-consensus",
+    "crates/tenzro-vm",
+    "crates/tenzro-token",
+    "crates/tenzro-agent",
+    "crates/tenzro-model",
+    "crates/tenzro-settlement",
+    "crates/tenzro-bridge",
+    "crates/tenzro-identity",
+    "crates/tenzro-payments",
+    "crates/tenzro-agent-kit",
+    "crates/tenzro-auth",
+    "crates/tenzro-events",
+    "crates/tenzro-cortex",
+    "crates/tenzro-training",
+    "crates/tenzro-node",
+    "crates/tenzro-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/tenzro/tenzro-network"
+homepage = "https://tenzro.com"
+description = "Tenzro Network — AI-Native, Agentic, Tokenized Settlement Layer"
+authors = ["Tenzro Network Contributors"]
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+large_enum_variant = "allow"
+
+[workspace.dependencies]
+# Workspace crates
+tenzro-types = { path = "crates/tenzro-types" }
+tenzro-crypto = { path = "crates/tenzro-crypto" }
+tenzro-tee = { path = "crates/tenzro-tee" }
+tenzro-zk = { path = "crates/tenzro-zk" }
+tenzro-network = { path = "crates/tenzro-network" }
+tenzro-storage = { path = "crates/tenzro-storage" }
+tenzro-wallet = { path = "crates/tenzro-wallet" }
+tenzro-consensus = { path = "crates/tenzro-consensus" }
+tenzro-vm = { path = "crates/tenzro-vm" }
+tenzro-token = { path = "crates/tenzro-token" }
+tenzro-agent = { path = "crates/tenzro-agent" }
+tenzro-model = { path = "crates/tenzro-model" }
+tenzro-settlement = { path = "crates/tenzro-settlement" }
+tenzro-bridge = { path = "crates/tenzro-bridge" }
+tenzro-events = { path = "crates/tenzro-events" }
+tenzro-cortex = { path = "crates/tenzro-cortex" }
+tenzro-training = { path = "crates/tenzro-training" }
+tenzro-identity = { path = "crates/tenzro-identity" }
+tenzro-payments = { path = "crates/tenzro-payments" }
+tenzro-agent-kit = { path = "crates/tenzro-agent-kit" }
+tenzro-auth = { path = "crates/tenzro-auth" }
+tenzro-node = { path = "crates/tenzro-node" }
+tenzro-cli = { path = "crates/tenzro-cli" }
+tenzro-sdk = { path = "sdk/tenzro-sdk" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+prost = "0.13"
+prost-types = "0.13"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Cryptography
+ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
+sha2 = "0.10"
+sha3 = "0.10"
+aes-gcm = "0.10"
+x25519-dalek = { version = "2", features = ["serde", "static_secrets"] }
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+frost-ed25519 = "2.1"
+frost-secp256k1 = "2.1"
+blst = "0.3"
+argon2 = "0.5"
+subtle = "2.6"
+curve25519-dalek = { version = "4", features = ["alloc"] }
+
+# Post-quantum cryptography (NIST FIPS 203/204/205)
+# ML-KEM-768  — FIPS 203 key encapsulation, hybrid with X25519
+# ML-DSA-65   — FIPS 204 digital signature, hybrid with Ed25519
+# SLH-DSA     — FIPS 205 hash-based fallback signature
+# CVE GHSA-5x2r-hc65-25f9 (ml-dsa verifier soundness) requires >= 0.1.0-rc.8.
+# ml-dsa pulls signature 3.0.0-rc which exposes rand_core 0.10's TryCryptoRng;
+# tenzro-crypto adapts a TryRng→OsRng inside `pq` so callers don't see the new traits.
+ml-kem = { version = "0.3.0-rc.2", features = ["getrandom"] }
+ml-dsa = ">=0.1.0-rc.8"
+slh-dsa = "0.2.0-rc.4"
+rand_core = "0.10"
+getrandom = { version = "0.3", features = ["std"] }
+
+# TLS — pinned at workspace level so we can install aws-lc-rs as the global
+# rustls CryptoProvider. aws-lc-rs supports X25519MLKEM768 hybrid named group.
+rustls = { version = "0.23.39", default-features = false, features = ["std", "aws-lc-rs", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12", "aws-lc-rs", "native-tokio"] }
+aws-lc-rs = { version = "1.16.3", features = ["bindgen"] }
+
+# Networking — 2026 hardened (closes CVE-2026-33040, CVE-2026-34219, CVE-2024-32984, GHSA-jvgw-gccv-q5p8)
+libp2p = { version = "0.56", features = [
+    "gossipsub", "kad", "identify", "tls", "yamux",
+    "tcp", "quic", "dns", "ping", "relay", "rendezvous",
+    "autonat", "dcutr", "request-response",
+    "macros", "tokio", "metrics",
+] }
+libp2p-metrics = "0.17"
+libp2p-connection-limits = "0.6"
+libp2p-allow-block-list = "0.6"
+prometheus-client = "0.24"
+governor = "0.7"
+lru = "0.12"
+
+# Storage
+rocksdb = "0.22"
+
+# Logging & tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# System
+libc = "0.2"
+
+# Compression
+zstd = "0.13"
+
+# Misc
+bytes = "1"
+hex = "0.4"
+bs58 = "0.5"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6"
+parking_lot = "0.12"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+dialoguer = "0.11"
+
+# Web server
+axum = "0.7"
+tower-http = { version = "0.6", features = ["cors", "limit"] }
+tower = { version = "0.5", features = ["limit"] }
+
+# HTTP client — pinned to rustls + aws-lc-rs so it inherits the PQ-hybrid TLS named group.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-manual-roots", "http2", "charset"] }
+base64 = "0.22"
+jsonwebtoken = "9"
+
+# ZK — Plonky3 STARKs (transparent setup, KoalaBear field, Poseidon2 hashes).
+# Pinned to a single git rev across all p3-* crates because Plonky3 has not tagged a stable 1.x
+# and crates.io publishes lag the repo. Rebase as a unit when we move the rev.
+# Pin: Plonky3/Plonky3@main 32079474b1d31d9221656ae774afb322d2597db0 (2026-04).
+p3-air = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+p3-koala-bear = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+p3-poseidon2 = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+p3-poseidon2-air = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+p3-keccak-air = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+p3-fri = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+p3-challenger = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+p3-dft = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "32079474b1d31d9221656ae774afb322d2597db0" }
+
+# arkworks BN254 stack — required by tenzro-vm for the EIP-196/197/198 EVM
+# precompiles (EC_ADD, EC_MUL, EC_PAIRING). Not used for ZK; Tenzro proofs are
+# Plonky3 STARKs over KoalaBear.
+ark-std = "0.4"
+ark-ff = "0.4"
+ark-ec = "0.4"
+ark-serialize = "0.4"
+ark-bn254 = "0.4"
+
+# Configuration
+toml = "0.8"
+
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# MCP (Model Context Protocol)
+rmcp = { version = "1.5", features = ["server", "transport-streamable-http-server"] }
+schemars = "1"
+
+# EVM execution
+revm = { version = "19", default-features = false, features = ["std", "serde-json"] }
+rlp = "0.6"
+ripemd = "0.1"
+solana-sbpf = { version = "0.20", default-features = false }
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+flate2 = "1"
+
+# X.509 certificate parsing & signature verification
+x509-cert = "0.2"
+p256 = { version = "0.13", features = ["ecdsa"] }
+p384 = { version = "0.13", features = ["ecdsa"] }
+rsa = { version = "0.9", features = ["sha2"] }
+der = "0.7"
+spki = "0.7"
+signature = "2"
+ecdsa = "0.16"
+ciborium = "0.2"
+
+# HuggingFace Hub
+hf-hub = { version = "0.4", features = ["tokio"] }
+
+# llama.cpp bindings (replaces candle — proper Metal/CUDA GPU support)
+llama-cpp-2 = "0.1"
+
+# ONNX Runtime — for non-LLM modalities (timeseries forecasting, vision encoders).
+# 2.0 line is the active 2026 standard; auto-downloads the ONNX Runtime binary on
+# build via the `download-binaries` feature. CoreML on macOS, CUDA on Linux.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "download-binaries"] }
+ndarray = "0.16"
+# Image decoding + resize for vision encoder preprocessing.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+opt-level = 0
+debug = true

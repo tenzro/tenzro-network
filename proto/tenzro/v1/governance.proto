@@ -1,0 +1,89 @@
+syntax = "proto3";
+package tenzro.v1;
+
+import "tenzro/v1/types.proto";
+
+message GovernanceProposal {
+  string proposal_id = 1;
+  string title = 2;
+  string description = 3;
+  Address proposer = 4;
+  ProposalType proposal_type = 5;
+  Timestamp voting_start = 6;
+  Timestamp voting_end = 7;
+  ProposalStatus status = 8;
+  uint64 votes_for = 9;
+  uint64 votes_against = 10;
+  uint64 total_voting_power = 11;
+  bytes execution_data = 12;
+}
+
+message ProposalType {
+  oneof type {
+    ParameterChange parameter_change = 1;
+    TreasuryGrant treasury_grant = 2;
+    ProtocolUpgrade protocol_upgrade = 3;
+    CustomProposal custom = 4;
+  }
+}
+
+message ParameterChange {
+  string parameter = 1;
+  string new_value = 2;
+}
+
+message TreasuryGrant {
+  Address recipient = 1;
+  uint64 amount = 2;
+}
+
+message ProtocolUpgrade {
+  string version = 1;
+  bytes code_hash = 2;
+}
+
+message CustomProposal {
+  bytes proposal_data = 1;
+}
+
+enum ProposalStatus {
+  PROPOSAL_STATUS_UNSPECIFIED = 0;
+  PROPOSAL_STATUS_ACTIVE = 1;
+  PROPOSAL_STATUS_PASSED = 2;
+  PROPOSAL_STATUS_FAILED = 3;
+  PROPOSAL_STATUS_CANCELLED = 4;
+  PROPOSAL_STATUS_EXECUTED = 5;
+}
+
+message GovernanceVote {
+  string vote_id = 1;
+  string proposal_id = 2;
+  Address voter = 3;
+  VoteType vote_type = 4;
+  uint64 voting_power = 5;
+  Timestamp voted_at = 6;
+  string justification = 7;
+}
+
+enum VoteType {
+  VOTE_TYPE_UNSPECIFIED = 0;
+  VOTE_TYPE_FOR = 1;
+  VOTE_TYPE_AGAINST = 2;
+  VOTE_TYPE_ABSTAIN = 3;
+}
+
+message VotingDelegation {
+  Address delegator = 1;
+  Address delegate = 2;
+  uint64 voting_power = 3;
+  Timestamp delegated_at = 4;
+  Timestamp expires_at = 5;
+  DelegationStatus status = 6;
+}
+
+enum DelegationStatus {
+  DELEGATION_STATUS_UNSPECIFIED = 0;
+  DELEGATION_STATUS_ACTIVE = 1;
+  DELEGATION_STATUS_REVOKED = 2;
+  DELEGATION_STATUS_EXPIRED = 3;
+}

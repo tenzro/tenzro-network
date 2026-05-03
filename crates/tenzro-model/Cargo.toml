@@ -1,0 +1,65 @@
+[package]
+name = "tenzro-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AI model registry, inference routing, and provider management for Tenzro Network"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-network = { workspace = true }
+tenzro-storage = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+reqwest = { workspace = true }
+bincode = { workspace = true }
+
+# HuggingFace Hub downloads
+hf-hub = { workspace = true }
+
+# llama.cpp bindings — GPU-accelerated GGUF inference
+# Metal auto-links on macOS ARM64 (no feature flag needed)
+# Other backends enabled via feature flags below
+llama-cpp-2 = { workspace = true }
+
+# Unicode decoding for llama.cpp token_to_piece
+encoding_rs = "0.8"
+
+# ONNX Runtime for non-LLM modalities (timeseries, vision). Optional —
+# only pulled in by the `onnx` feature so default builds stay fast.
+ort = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+
+[features]
+default = []
+# ONNX Runtime backend — enables ts_runtime / vision_runtime modules.
+# Adds ~30s to first-build (downloads ONNX Runtime binary).
+onnx = ["dep:ort", "dep:ndarray", "dep:image"]
+# NVIDIA CUDA — datacenter (A100/H100/B200) and consumer (RTX 3090/4090)
+cuda = ["llama-cpp-2/cuda"]
+# NVIDIA CUDA without virtual memory management (older drivers / embedded)
+cuda-no-vmm = ["llama-cpp-2/cuda-no-vmm"]
+# AMD ROCm — datacenter (MI300X) and consumer (RX 7900 XTX)
+rocm = ["llama-cpp-2/rocm"]
+# Vulkan — cross-platform GPU (NVIDIA, AMD, Intel Arc, ARM Mali/Adreno)
+vulkan = ["llama-cpp-2/vulkan"]
+# Apple Metal — explicit opt-in (auto-linked on macOS ARM64 regardless)
+metal = ["llama-cpp-2/metal"]
+
+[dev-dependencies]
+tempfile = "3"

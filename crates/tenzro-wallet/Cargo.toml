@@ -1,0 +1,42 @@
+[package]
+name = "tenzro-wallet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MPC wallet system for Tenzro Network — auto-provisioned threshold wallets"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }
+zeroize = { workspace = true }
+argon2 = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["full", "test-util", "process"] }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+[features]
+default = []
+# Gates the end-to-end integration test (`tests/e2e_real_rpc.rs`) against a
+# real spawned `tenzro-node` binary. Requires the node binary be built first
+# (via `cargo build -p tenzro-node`); enabled with
+# `cargo test -p tenzro-wallet --features e2e`.
+e2e = []

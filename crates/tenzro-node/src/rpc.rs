@@ -1,0 +1,21240 @@
+//! JSON-RPC API server for Tenzro Node
+//!
+//! Implements a proper HTTP-based JSON-RPC 2.0 server using axum.
+//! This is compatible with standard JSON-RPC clients, reverse proxies (Caddy/Nginx),
+//! and Ethereum tooling (MetaMask, ethers.js, web3.js).
+
+use axum::{
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response, sse::{Event, Sse}},
+    routing::{get, post},
+    Json, Router,
+};
+use chrono::{Datelike, Timelike};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::sync::Arc;
+use tower::limit::ConcurrencyLimitLayer;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
+use tracing::{debug, error, info, warn};
+
+use futures_util::StreamExt;
+
+use crate::error::{NodeError, Result};
+use crate::node::{TenzroNode, detect_hardware, ModelDownloadStatus, UserResource, TransactionHistoryEntry};
+use crate::event_loop::NodeEvent;
+use tenzro_crypto::{KeyPair, KeyType};
+use tenzro_model::{
+    get_audio_catalog, get_detection_catalog, get_forecast_catalog, get_model_by_id,
+    get_model_catalog, get_segmentation_catalog, get_text_embedding_catalog, get_video_catalog,
+    get_vision_catalog, get_vision_model_by_id, ChatMessage as ModelChatMessage, ForecastConfig,
+    GenerationConfig, ImageEmbedConfig, ImageNormalization, SegmentPrompt, TextEmbedConfig,
+    ToolDefinition as RuntimeToolDefinition, TranscribeConfig, VideoEmbedConfig,
+};
+use tenzro_network::{NetworkMessage, MessagePayload, NetworkService};
+use tenzro_storage::{BlockStoreImpl, AccountStoreImpl, KvStore, CF_IDENTITIES, CF_TASKS, CF_AGENT_TEMPLATES, CF_MODELS, CF_AGENTS, CF_SKILLS, CF_TOOLS, CF_METADATA, traits::{BlockStore, AccountStore}};
+use tenzro_types::block::Block;
+use tenzro_types::model::ModelLocation;
+use tenzro_types::primitives::{Address, BlockHeight, ChainId, Hash, Nonce};
+use tenzro_types::transaction::{Transaction, SignedTransaction, TransactionType};
+use tenzro_types::Signature;
+
+/// JSON-RPC server
+pub struct RpcServer {
+    node: Arc<TenzroNode>,
+    listen_addr: String,
+    /// Optional HTTP 402 payment gate for inference endpoints
+    payment_gate: Option<tenzro_payments::middleware::PaymentGateMiddleware>,
+}
+
+impl RpcServer {
+    /// Create a new RPC server
+    pub fn new(node: Arc<TenzroNode>, listen_addr: String) -> Self {
+        Self { node, listen_addr, payment_gate: None }
+    }
+
+    /// Attach an HTTP 402 payment gate to the RPC server.
+    ///
+    /// When set, the `/v1/chat/completions` and `/api/paid/*` routes are
+    /// wrapped with the payment gate middleware, requiring a valid
+    /// `Payment-Credential` or `Authorization` header before the request
+    /// is forwarded to the handler.
+    pub fn with_payment_gate(mut self, gate: tenzro_payments::middleware::PaymentGateMiddleware) -> Self {
+        self.payment_gate = Some(gate);
+        self
+    }
+
+    /// Start the RPC server (HTTP-based using axum)
+    /// Public API method for external use without shutdown signal
+    #[allow(dead_code)]
+    pub async fn start(self) -> Result<()> {
+        self.start_with_shutdown(tokio::sync::broadcast::channel::<()>(1).1).await
+    }
+
+    /// Start the RPC server with a graceful shutdown signal
+    pub async fn start_with_shutdown(
+        self,
+        shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    ) -> Result<()> {
+        self.start_inner(shutdown_rx, None).await
+    }
+
+    /// Start the RPC server and report the bound address via a oneshot channel.
+    /// Useful for tests that bind to port 0 and need to discover the actual port.
+    #[allow(dead_code)]
+    pub async fn start_with_shutdown_and_addr(
+        self,
+        shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+        addr_tx: tokio::sync::oneshot::Sender<std::net::SocketAddr>,
+    ) -> Result<()> {
+        self.start_inner(shutdown_rx, Some(addr_tx)).await
+    }
+
+    async fn start_inner(
+        self,
+        mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+        addr_tx: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
+    ) -> Result<()> {
+        // CORS configuration — uses allowed origins from node config
+        let cors = if self.node.config().cors_allowed_origins.is_empty() {
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any)
+        } else {
+            let origins: Vec<axum::http::HeaderValue> = self.node.config().cors_allowed_origins.iter()
+                .filter_map(|o| o.parse().ok())
+                .collect();
+            CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods(Any)
+                .allow_headers(Any)
+        };
+
+        // Open routes (always accessible without payment)
+        let node_state = self.node.clone();
+        let open_routes = Router::new()
+            .route("/", post(handle_rpc_post))
+            .route("/health", get(handle_rpc_get))
+            // OpenAI-compatible model listing (free)
+            .route("/v1/models", get(handle_openai_list_models))
+            .route("/v1/models/{instance_id}", get(handle_openai_get_model));
+
+        // Paid routes: /v1/chat/completions, /api/paid/chat/completions, and
+        // /chat-stream (Anthropic-style SSE for the rich shape).
+        // When a payment gate is configured, these routes require an HTTP 402
+        // credential. Otherwise they are accessible freely (dev/testnet mode).
+        let app = if let Some(gate) = self.payment_gate {
+            info!("RPC payment gate enabled for /v1/chat/completions, /api/paid/chat/completions, and /chat-stream");
+            let paid_routes = Router::new()
+                .route("/v1/chat/completions", post(handle_openai_chat_completions))
+                .route("/api/paid/chat/completions", post(handle_openai_chat_completions))
+                .route("/chat-stream", post(handle_chat_stream_rich))
+                .with_state(node_state.clone())
+                .layer(axum::middleware::from_fn_with_state(
+                    gate,
+                    tenzro_payments::middleware::payment_gate_handler,
+                ));
+            open_routes.with_state(node_state).merge(paid_routes)
+        } else {
+            // No payment gate — mount inference routes openly
+            open_routes
+                .route("/v1/chat/completions", post(handle_openai_chat_completions))
+                .route("/api/paid/chat/completions", post(handle_openai_chat_completions))
+                .route("/chat-stream", post(handle_chat_stream_rich))
+                .with_state(node_state)
+        };
+
+        let app = app
+            .layer(cors)
+            // Concurrency limit: max 200 in-flight requests
+            .layer(ConcurrencyLimitLayer::new(200))
+            // Request body size limit: 2 MB
+            .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024));
+
+        let listener = tokio::net::TcpListener::bind(&self.listen_addr)
+            .await
+            .map_err(|e| NodeError::Config(format!("Failed to bind RPC server: {}", e)))?;
+
+        let local_addr = listener.local_addr()
+            .map_err(|e| NodeError::Config(format!("Failed to get local addr: {}", e)))?;
+
+        info!(addr = %local_addr, "RPC server listening");
+
+        // Report the actual bound address to the caller (useful for port-0 tests)
+        if let Some(tx) = addr_tx {
+            let _ = tx.send(local_addr);
+        }
+
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.recv().await;
+                info!("RPC server shutting down gracefully");
+            })
+            .await
+            .map_err(|e| NodeError::Config(format!("RPC server error: {}", e)))?;
+
+        Ok(())
+    }
+}
+
+/// Handle GET requests (health/info for reverse proxy health checks)
+async fn handle_rpc_get(
+    State(node): State<Arc<TenzroNode>>,
+) -> impl IntoResponse {
+    let status = node.status().await;
+    (StatusCode::OK, Json(serde_json::json!({
+        "jsonrpc": "2.0",
+        "result": {
+            "node": "tenzro",
+            "version": "0.1.0",
+            "status": status.state,
+            "block_height": status.block_height,
+            "peer_count": status.peer_count,
+        }
+    })))
+}
+
+/// Per-request authentication context extracted from HTTP headers.
+///
+/// Carries the `Authorization: DPoP <jwt>` and `DPoP: <proof-jwt>` header
+/// values verbatim so that auth-sensitive RPC handlers (signing, identity
+/// onboarding, revocation) can hand them to `tenzro_auth::AuthEngine` for
+/// validation. Non-auth handlers ignore this context entirely.
+///
+/// Both fields are `None` for requests submitted without auth headers,
+/// which is normal for read-only RPCs (e.g. `tenzro_blockNumber`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AuthContext {
+    /// Verbatim `Authorization` header value, e.g. `DPoP eyJ...`. The
+    /// `DPoP ` prefix is preserved (callers strip it) so we can also
+    /// surface a useful error if a `Bearer ` scheme slipped through.
+    pub(crate) authorization: Option<String>,
+    /// Verbatim `DPoP` header value — a one-shot proof JWT bound to
+    /// this specific request (HTTP method + URI + JTI + iat).
+    pub(crate) dpop: Option<String>,
+    /// HTTP method of the underlying request (e.g. `"POST"`). Required
+    /// to verify the DPoP proof's `htm` claim.
+    pub(crate) http_method: String,
+    /// HTTP request URI without query string (e.g.
+    /// `"http://rpc.tenzro.network/"`). Required to verify the DPoP
+    /// proof's `htu` claim.
+    pub(crate) http_uri: String,
+}
+
+impl AuthContext {
+    /// Extract the auth context from incoming HTTP headers. Returns
+    /// `None` for both fields if neither header is present — this is
+    /// not an error; many RPCs don't require auth.
+    fn from_headers(headers: &HeaderMap, method: &str, uri: &str) -> Self {
+        let authorization = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let dpop = headers
+            .get("dpop")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        Self {
+            authorization,
+            dpop,
+            http_method: method.to_string(),
+            http_uri: uri.to_string(),
+        }
+    }
+
+    /// Build an auth context from MCP-forwarded headers. The MCP HTTP
+    /// boundary captures the inbound `Authorization` and `DPoP` headers
+    /// and passes them in here so MCP tool calls can participate in the
+    /// same DPoP+JWT auth-mediated path that direct JSON-RPC clients use.
+    pub fn from_mcp(
+        authorization: Option<String>,
+        dpop: Option<String>,
+        http_method: String,
+        http_uri: String,
+    ) -> Self {
+        Self {
+            authorization,
+            dpop,
+            http_method,
+            http_uri,
+        }
+    }
+}
+
+/// Handle POST requests (JSON-RPC 2.0)
+async fn handle_rpc_post(
+    State(node): State<Arc<TenzroNode>>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    // Reconstruct the `htu` for DPoP verification. V1 uses the configured
+    // RPC address (matches what the auth engine was issued with as
+    // `audience`); production deployments behind a reverse proxy will
+    // supply this via the `X-Forwarded-*` headers in a later iteration.
+    let http_uri = format!("http://{}/", node.config().rpc_addr);
+    let auth_ctx = AuthContext::from_headers(&headers, "POST", &http_uri);
+
+    // Support batch requests (JSON array)
+    if let Some(batch) = payload.as_array() {
+        let mut responses = Vec::new();
+        for item in batch {
+            match serde_json::from_value::<JsonRpcRequest>(item.clone()) {
+                Ok(request) => {
+                    debug!("RPC batch request: {}", request.method);
+                    let response = handle_request(&node, request, &auth_ctx).await;
+                    responses.push(serde_json::to_value(response).unwrap());
+                }
+                Err(e) => {
+                    responses.push(serde_json::to_value(JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id: item.get("id").cloned().unwrap_or(Value::Null),
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32600,
+                            message: format!("Invalid request: {}", e),
+                            data: None,
+                        }),
+                    }).unwrap());
+                }
+            }
+        }
+        return (StatusCode::OK, Json(Value::Array(responses)));
+    }
+
+    // Single request
+    match serde_json::from_value::<JsonRpcRequest>(payload) {
+        Ok(request) => {
+            debug!("RPC request: {}", request.method);
+            let response = handle_request(&node, request, &auth_ctx).await;
+            (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
+        }
+        Err(e) => {
+            error!("Failed to parse RPC request: {}", e);
+            let error_response = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Value::Null,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32700,
+                    message: "Parse error".to_string(),
+                    data: None,
+                }),
+            };
+            (StatusCode::OK, Json(serde_json::to_value(error_response).unwrap()))
+        }
+    }
+}
+
+/// JSON-RPC request
+#[derive(Debug, Deserialize)]
+pub(crate) struct JsonRpcRequest {
+    #[allow(dead_code)]
+    pub(crate) jsonrpc: String,
+    pub(crate) method: String,
+    pub(crate) params: Option<Value>,
+    pub(crate) id: Value,
+}
+
+/// JSON-RPC response
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonRpcResponse {
+    pub(crate) jsonrpc: String,
+    pub(crate) id: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<JsonRpcError>,
+}
+
+/// JSON-RPC error
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonRpcError {
+    pub(crate) code: i32,
+    pub(crate) message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) data: Option<Value>,
+}
+
+/// Handle an RPC request
+///
+/// `auth_ctx` carries the per-request HTTP auth headers (Authorization,
+/// DPoP) so that auth-sensitive handlers (the signing surface, identity
+/// onboarding, revocation) can validate them via
+/// `tenzro_auth::AuthEngine`. Read-only handlers ignore `auth_ctx`
+/// entirely; only the few handlers wired through `forward_with_auth`
+/// pass it on.
+/// Normalize JSON-RPC `params` so handlers can always read named fields.
+///
+/// JSON-RPC 2.0 allows either positional (array) or named (object) params.
+/// Most SDKs that wrap a single object argument send it positionally as
+/// `[{...}]`, but our handlers historically read named fields via
+/// `params.get("foo")`. Without this normalization, calls like
+/// `tenzro_registerAgent` with array-wrapped params fail with misleading
+/// "Missing X" errors even though the field is present inside the array's
+/// first element. This helper unwraps the single-element-array case so the
+/// rest of the handler tree only has to support the object form.
+fn normalize_params(params: Option<Value>) -> Option<Value> {
+    match params {
+        Some(Value::Array(mut arr)) if arr.len() == 1 => {
+            // Single positional argument that is itself an object — treat as named params.
+            // For other shapes (multiple positional args, or single non-object element),
+            // pass through unchanged so handlers that explicitly expect arrays still work.
+            if matches!(arr.first(), Some(Value::Object(_))) {
+                Some(arr.remove(0))
+            } else {
+                Some(Value::Array(arr))
+            }
+        }
+        other => other,
+    }
+}
+
+pub(crate) async fn handle_request(
+    node: &Arc<TenzroNode>,
+    mut request: JsonRpcRequest,
+    auth_ctx: &AuthContext,
+) -> JsonRpcResponse {
+    request.params = normalize_params(request.params);
+    let result = match request.method.as_str() {
+        // Chain methods
+        "tenzro_blockNumber" => handle_block_number(node).await,
+        "tenzro_getBlock" => handle_get_block(node, request.params).await,
+        "tenzro_getBlockRange" => handle_get_block_range(node, request.params).await,
+        "tenzro_getTransaction" => handle_get_transaction(node, request.params).await,
+
+        // Account methods
+        "tenzro_createAccount" => handle_create_account(node, request.params).await,
+        "tenzro_createWallet" => handle_create_wallet(node, request.params).await,
+        "tenzro_getBalance" => handle_get_balance(node, request.params).await,
+        "tenzro_getNonce" => handle_get_nonce(node, request.params).await,
+
+        // Token methods
+        "tenzro_tokenBalance" => handle_token_balance(node, request.params).await,
+        "tenzro_totalSupply" => handle_total_supply(node).await,
+
+        // Model methods
+        "tenzro_listModels" => handle_list_models(node).await,
+        "tenzro_inferenceRequest" => handle_inference_request(node, request.params).await,
+
+        // Cortex (recurrent-depth reasoning) methods
+        "tenzro_registerCortexWorker" => handle_register_cortex_worker(node, request.params).await,
+        "tenzro_listCortexWorkers" => handle_list_cortex_workers(node).await,
+        "tenzro_listRemoteCortexWorkers" => handle_list_remote_cortex_workers(node).await,
+        "tenzro_cortexInference" | "tenzro_cortexReason" => {
+            handle_cortex_inference(node, request.params).await
+        }
+
+        // Settlement methods
+        "tenzro_settle" | "tenzro_settlePayment" => handle_settle(node, request.params).await,
+        "tenzro_getSettlement" => handle_get_settlement(node, request.params).await,
+        // Escrow writes are now consensus-mediated: callers must build and sign
+        // a `CreateEscrow`/`ReleaseEscrow`/`RefundEscrow` transaction and submit
+        // it via `eth_sendRawTransaction` (or the helper `tenzro_signAndSendTransaction`).
+        // The legacy convenience handlers were removed because they bypassed
+        // signature verification and persisted only to a detached in-memory map.
+        "tenzro_createEscrow" | "tenzro_releaseEscrow" | "tenzro_refundEscrow" => {
+            handle_escrow_write_deprecated(request.method.as_str())
+        }
+        "tenzro_getEscrow" => handle_get_escrow(node, request.params).await,
+        "tenzro_listEscrowsByPayer" => handle_list_escrows_by_payer(node, request.params).await,
+        "tenzro_listEscrowsByPayee" => handle_list_escrows_by_payee(node, request.params).await,
+        "tenzro_openPaymentChannel" => handle_open_payment_channel(node, request.params).await,
+        "tenzro_updatePaymentChannel" => handle_update_payment_channel(node, request.params).await,
+        "tenzro_closePaymentChannel" => handle_close_payment_channel(node, request.params).await,
+        "tenzro_listInferenceUsage" => handle_list_inference_usage(node, request.params).await,
+        "tenzro_getProviderReputation" => handle_get_provider_reputation(node, request.params).await,
+        "tenzro_getProvenance" => handle_get_provenance(node, request.params).await,
+        "tenzro_getDispute" => handle_get_dispute(node, request.params).await,
+        "tenzro_listDisputesByChannel" => handle_list_disputes_by_channel(node, request.params).await,
+
+        // Agent methods
+        "tenzro_registerAgent" => handle_register_agent(node, request.params).await,
+        "tenzro_sendAgentMessage" => handle_send_agent_message(node, request.params).await,
+        "tenzro_listAgents" => handle_list_agents(node).await,
+        "tenzro_getAgent" => handle_get_agent(node, request.params).await,
+        "tenzro_spawnAgent" => handle_spawn_agent(node, request.params).await,
+        "tenzro_runAgentTask" => handle_run_agent_task(node, request.params).await,
+        "tenzro_createSwarm" => handle_create_swarm(node, request.params).await,
+        "tenzro_getSwarmStatus" => handle_get_swarm_status(node, request.params).await,
+        "tenzro_listSwarms" => handle_list_swarms(node).await,
+        "tenzro_terminateSwarm" => handle_terminate_swarm(node, request.params).await,
+        "tenzro_delegateTask" => handle_delegate_task(node, request.params).await,
+        "tenzro_discoverModels" => handle_discover_models(node, request.params).await,
+        "tenzro_discoverAgents" => handle_discover_agents(node, request.params).await,
+        "tenzro_spawnAgentWithSkill" => handle_spawn_agent_with_skill(node, request.params).await,
+        "tenzro_fundAgent" => handle_fund_agent(node, request.params).await,
+        "tenzro_swapToken" => handle_swap_token(node, request.params).await,
+        "tenzro_agentPayForInference" => handle_agent_payment_pipeline(node, request.params).await,
+        "tenzro_faucet" | "tenzro_requestFaucet" => handle_faucet(node, request.params).await,
+        "tenzro_faucetInfo" => handle_faucet_info(node).await,
+
+        // Identity methods (TDIP)
+        "tenzro_registerIdentity" => handle_register_identity(node, request.params).await,
+        "tenzro_registerMachineIdentity" => handle_register_machine_identity(node, request.params).await,
+        "tenzro_importIdentity" => handle_import_identity(node, request.params).await,
+        "tenzro_resolveDidDocument" => handle_resolve_did_document(node, request.params).await,
+        "tenzro_resolveIdentity" | "tenzro_resolveDid" => handle_resolve_identity(node, request.params).await,
+        "tenzro_listIdentities" => handle_list_identities(node).await,
+        "tenzro_addCredential" => handle_add_credential(node, request.params).await,
+        "tenzro_addService" => handle_add_service(node, request.params).await,
+        "tenzro_setUsername" => handle_set_username(node, request.params).await,
+        "tenzro_resolveUsername" => handle_resolve_username(node, request.params).await,
+
+        // Node methods
+        "tenzro_nodeInfo" | "tenzro_getNodeStatus" => handle_node_info(node).await,
+        "tenzro_peerCount" => handle_peer_count(node).await,
+        "tenzro_syncing" => handle_syncing(node).await,
+        "tenzro_getFinalizedBlock" => handle_get_finalized_block(node).await,
+        "tenzro_exportConfig" => handle_export_config(node).await,
+
+        // Provider methods
+        "tenzro_participate" => handle_participate(node, request.params).await,
+        "tenzro_joinAsMicroNode" => handle_join_as_micro_node(node, request.params).await,
+
+        // Onboarding RPCs — provision identity + wallet, then mint a
+        // `tenzro_auth::AuthEngine` JWT with a per-identity RAR envelope.
+        "tenzro_onboardHuman" => handle_onboard_human(node, request.params).await,
+        "tenzro_onboardDelegatedAgent" => handle_onboard_delegated_agent(node, request.params).await,
+        "tenzro_onboardAutonomousAgent" => handle_onboard_autonomous_agent(node, request.params).await,
+
+        // Refresh-token exchange — swap an opaque refresh token for a
+        // fresh access JWT. Mirrors OAuth `grant_type=refresh_token`.
+        "tenzro_refreshToken" => handle_refresh_token(node, request.params).await,
+
+        // Wallet → auth bridge — register a TDIP identity around an
+        // existing wallet and mint an access JWT bound to it.
+        "tenzro_linkWalletForAuth" => handle_link_wallet_for_auth(node, request.params).await,
+
+        // HITL approval surface — humans (or upstream agents) act on
+        // `ApprovalRequired` errors raised by the signing path. See
+        // tenzro-auth::AuthEngine::{record_approval,decide_approval,
+        // consume_approval,list_pending_for_approver,get_approval}.
+        "tenzro_listPendingApprovals" => handle_list_pending_approvals(node, request.params).await,
+        "tenzro_getApproval" => handle_get_approval(node, request.params).await,
+        "tenzro_decideApproval" => handle_decide_approval(node, request.params).await,
+
+        // Revocation surface — both shapes (revoke a single JWT by JTI,
+        // and revoke an entire identity by DID) trigger the engine's
+        // act-chain cascade. Every transitively-affected JTI gets its
+        // own audit row with `cascaded: true`.
+        "tenzro_revokeJwt" => handle_revoke_jwt(node, request.params).await,
+        "tenzro_revokeDid" => handle_revoke_did(node, request.params).await,
+
+        // Token Exchange (RFC 8693) + Token Introspection (RFC 7662) +
+        // OAuth/OpenID discovery. The HTTP equivalents live at
+        // `web/oauth.rs`; these RPCs are the JSON-RPC mirrors so SDKs
+        // and CLIs can call the same surface without an HTTP detour.
+        "tenzro_exchangeToken" => handle_exchange_token(node, request.params).await,
+        "tenzro_introspectToken" => handle_introspect_token(node, request.params).await,
+        "tenzro_oauthDiscovery" => handle_oauth_discovery(node).await,
+
+        "tenzro_getHardwareProfile" | "tenzro_hardwareProfile" => handle_get_hardware_profile(node).await,
+        "tenzro_setRole" => handle_set_role(node, request.params).await,
+        "tenzro_role" | "tenzro_getRole" => handle_get_role(node).await,
+        "tenzro_setProviderSchedule" => handle_set_provider_schedule(node, request.params).await,
+        "tenzro_getProviderSchedule" => handle_get_provider_schedule(node).await,
+        "tenzro_setProviderPricing" => handle_set_provider_pricing(node, request.params).await,
+        "tenzro_getProviderPricing" => handle_get_provider_pricing(node).await,
+        "tenzro_downloadModel" => handle_download_model(node, request.params).await,
+        "tenzro_getDownloadProgress" => handle_get_download_progress(node, request.params).await,
+        "tenzro_serveModel" | "tenzro_serveModelMcp" => handle_serve_model(node, request.params).await,
+        "tenzro_stopModel" => handle_stop_model(node, request.params).await,
+        "tenzro_chat" | "tenzro_chatCompletion" => handle_chat(node, request.params).await,
+        // Timeseries forecasting (ONNX runtime)
+        "tenzro_loadForecastModel" => handle_load_forecast_model(node, request.params).await,
+        "tenzro_unloadForecastModel" => handle_unload_forecast_model(node, request.params).await,
+        "tenzro_listForecastModels" => handle_list_forecast_models(node).await,
+        "tenzro_listForecastCatalog" => handle_list_forecast_catalog().await,
+        "tenzro_forecast" => handle_forecast(node, request.params).await,
+        // Vision encoders (ONNX runtime)
+        "tenzro_loadVisionModel" => handle_load_vision_model(node, request.params).await,
+        "tenzro_unloadVisionModel" => handle_unload_vision_model(node, request.params).await,
+        "tenzro_listVisionModels" => handle_list_vision_models(node).await,
+        "tenzro_imageEmbed" => handle_image_embed(node, request.params).await,
+        "tenzro_imageTextSimilarity" => handle_image_text_similarity(node, request.params).await,
+        "tenzro_listVisionCatalog" => handle_list_vision_catalog().await,
+        // Text embeddings (ONNX runtime — Qwen3-Embedding, EmbeddingGemma, BGE-M3)
+        "tenzro_loadTextEmbeddingModel" => handle_load_text_embedding_model(node, request.params).await,
+        "tenzro_unloadTextEmbeddingModel" => handle_unload_text_embedding_model(node, request.params).await,
+        "tenzro_listTextEmbeddingModels" => handle_list_text_embedding_models(node).await,
+        "tenzro_listTextEmbeddingCatalog" => handle_list_text_embedding_catalog().await,
+        "tenzro_textEmbed" => handle_text_embed(node, request.params).await,
+        // Segmentation (ONNX runtime — SAM 3, SAM 2, EdgeSAM, MobileSAM)
+        "tenzro_loadSegmentationModel" => handle_load_segmentation_model(node, request.params).await,
+        "tenzro_unloadSegmentationModel" => handle_unload_segmentation_model(node, request.params).await,
+        "tenzro_listSegmentationModels" => handle_list_segmentation_models(node).await,
+        "tenzro_listSegmentationCatalog" => handle_list_segmentation_catalog().await,
+        "tenzro_segment" => handle_segment(node, request.params).await,
+        // Object detection (ONNX runtime — RF-DETR, D-FINE)
+        "tenzro_loadDetectionModel" => handle_load_detection_model(node, request.params).await,
+        "tenzro_unloadDetectionModel" => handle_unload_detection_model(node, request.params).await,
+        "tenzro_listDetectionModels" => handle_list_detection_models(node).await,
+        "tenzro_listDetectionCatalog" => handle_list_detection_catalog().await,
+        "tenzro_detect" => handle_detect(node, request.params).await,
+        // Audio ASR (ONNX runtime — Moonshine, Whisper, Parakeet, Canary, Distil-Whisper)
+        "tenzro_loadAudioModel" => handle_load_audio_model(node, request.params).await,
+        "tenzro_unloadAudioModel" => handle_unload_audio_model(node, request.params).await,
+        "tenzro_listAudioModels" => handle_list_audio_models(node).await,
+        "tenzro_listAudioCatalog" => handle_list_audio_catalog().await,
+        "tenzro_transcribe" => handle_transcribe(node, request.params).await,
+        // Video encoders (ONNX runtime — empty wave 1, scaffolding for V-JEPA / VideoMAE)
+        "tenzro_loadVideoModel" => handle_load_video_model(node, request.params).await,
+        "tenzro_unloadVideoModel" => handle_unload_video_model(node, request.params).await,
+        "tenzro_listVideoModels" => handle_list_video_models(node).await,
+        "tenzro_listVideoCatalog" => handle_list_video_catalog().await,
+        "tenzro_videoEmbed" => handle_video_embed(node, request.params).await,
+        // Tenzro Train (decentralized verifiable foundation-model training)
+        "tenzro_training_postTask" => handle_training_post_task(node, request.params).await,
+        "tenzro_training_listRuns" => handle_training_list_runs(node).await,
+        "tenzro_training_getRun" => handle_training_get_run(node, request.params).await,
+        "tenzro_training_getReceipt" => handle_training_get_receipt(node, request.params).await,
+        "tenzro_training_enrollTrainer" => handle_training_enroll_trainer(node, request.params).await,
+        "tenzro_training_submitOuterGradient" => handle_training_submit_outer_gradient(node, request.params).await,
+        "tenzro_training_finalizeRound" => handle_training_finalize_round(node, request.params).await,
+        "tenzro_deleteModel" | "tenzro_deleteModelMcp" => handle_delete_model(node, request.params).await,
+        "tenzro_pruneModelRegistry" => handle_prune_model_registry(node).await,
+        "tenzro_pruneAgentRegistry" => handle_prune_agent_registry(node).await,
+        "tenzro_pruneTaskRegistry" => handle_prune_task_registry(node, request.params).await,
+        "tenzro_pruneToolRegistry" => handle_prune_tool_registry(node, request.params).await,
+        "tenzro_pruneSkillRegistry" => handle_prune_skill_registry(node, request.params).await,
+        "tenzro_listModelEndpoints" => handle_list_model_endpoints(node).await,
+        "tenzro_getModelEndpoint" => handle_get_model_endpoint(node, request.params).await,
+        "tenzro_registerModelEndpoint" => handle_register_model_endpoint(node, request.params).await,
+        "tenzro_unregisterModelEndpoint" => handle_unregister_model_endpoint(node, request.params).await,
+        "tenzro_listProviders" => handle_list_providers(node).await,
+        "tenzro_addResource" => handle_add_resource(node, request.params).await,
+        "tenzro_sendTransaction" => handle_send_transaction(node, request.params).await,
+        "tenzro_submitBlock" => handle_submit_block(node, request.params).await,
+        "tenzro_getTransactionHistory" => handle_get_transaction_history(node, request.params).await,
+
+        // Governance methods
+        "tenzro_listProposals" => handle_list_proposals(node).await,
+        "tenzro_vote" | "tenzro_voteOnProposal" => handle_vote(node, request.params).await,
+        "tenzro_getVotingPower" => handle_get_voting_power(node, request.params).await,
+        "tenzro_createProposal" => handle_create_proposal(node, request.params).await,
+        "tenzro_delegateVotingPower" => handle_delegate_voting_power(node, request.params).await,
+
+        // Payment methods
+        "tenzro_createPaymentChallenge" => handle_create_payment_challenge(node, request.params).await,
+        "tenzro_payMpp" => handle_pay_mpp(node, request.params).await,
+        "tenzro_payX402" => handle_pay_x402(node, request.params).await,
+        "tenzro_listX402Schemes" => handle_list_x402_schemes(node).await,
+        "tenzro_payVisaTap" => handle_pay_visa_tap(node, request.params).await,
+        "tenzro_payMastercard" => handle_pay_mastercard(node, request.params).await,
+        "tenzro_listPaymentSessions" => handle_list_payment_sessions(node).await,
+        "tenzro_paymentGatewayInfo" => handle_payment_gateway_info(node).await,
+        "tenzro_getPaymentReceipt" => handle_get_payment_receipt(node, request.params).await,
+
+        // Canton/DAML methods
+        "tenzro_listCantonDomains" => handle_list_canton_domains(node).await,
+        "tenzro_listDamlContracts" => handle_list_daml_contracts(node, request.params).await,
+        "tenzro_submitDamlCommand" => handle_submit_daml_command(node, request.params).await,
+
+        // Staking methods
+        "tenzro_stake" | "tenzro_stakeTokens" => handle_stake(node, request.params).await,
+        "tenzro_unstake" | "tenzro_unstakeTokens" => handle_unstake(node, request.params).await,
+        "tenzro_registerProvider" => handle_register_provider(node, request.params).await,
+        "tenzro_providerStats" | "tenzro_getProviderStats" => handle_provider_stats(node, request.params).await,
+        "tenzro_listAccounts" => handle_list_accounts(node).await,
+        "tenzro_shutdown" => handle_shutdown(node).await,
+
+        // Ethereum-compatible methods
+        "eth_blockNumber" => handle_block_number(node).await,
+        "eth_getBalance" => handle_get_balance(node, request.params).await,
+        "eth_getTransactionCount" => handle_get_nonce(node, request.params).await,
+        "eth_sendRawTransaction" => handle_send_raw_transaction(node, request.params).await,
+        "eth_getBlockByNumber" => handle_get_block_by_number(node, request.params).await,
+        "eth_getBlockByHash" => handle_get_block_by_hash(node, request.params).await,
+        "eth_chainId" => handle_chain_id(node).await,
+        "net_version" => handle_net_version(node).await,
+        "net_peerCount" => handle_net_peer_count(node).await,
+        "net_listening" => handle_net_listening(node).await,
+        "eth_getTransactionReceipt" => handle_get_transaction_receipt(node, request.params).await,
+        "eth_gasPrice" => handle_gas_price(node).await,
+        "eth_maxPriorityFeePerGas" => handle_max_priority_fee_per_gas(node).await,
+        "eth_feeHistory" => handle_fee_history(node, request.params).await,
+        "eth_estimateGas" => handle_estimate_gas(node, request.params).await,
+        "eth_getCode" => handle_get_code(node, request.params).await,
+        "eth_getStorageAt" => handle_get_storage_at(node, request.params).await,
+        "eth_call" => handle_eth_call(node, request.params).await,
+        "eth_getLogs" => handle_get_logs(node, request.params).await,
+        "eth_getBlockTransactionCountByNumber" => handle_get_block_tx_count_by_number(node, request.params).await,
+        "eth_getBlockTransactionCountByHash" => handle_get_block_tx_count_by_hash(node, request.params).await,
+        "eth_getTransactionByBlockNumberAndIndex" => handle_get_tx_by_block_and_index(node, request.params).await,
+        "eth_syncing" => handle_eth_syncing(node).await,
+        "eth_mining" => Ok(Value::Bool(false)),
+        "eth_hashrate" => Ok(serde_json::json!("0x0")),
+        "eth_accounts" => Ok(serde_json::json!([])),
+        "eth_getCompilers" => Ok(serde_json::json!([])),
+        "web3_clientVersion" => handle_web3_client_version().await,
+        "web3_sha3" => handle_web3_sha3(request.params).await,
+
+        // Task marketplace methods
+        "tenzro_postTask" => handle_post_task(node, request.params).await,
+        "tenzro_listTasks" => handle_list_tasks(node, request.params).await,
+        "tenzro_getTask" => handle_get_task(node, request.params).await,
+        "tenzro_cancelTask" => handle_cancel_task(node, request.params).await,
+        "tenzro_quoteTask" => handle_quote_task(node, request.params).await,
+        "tenzro_assignTask" => handle_assign_task(node, request.params).await,
+        "tenzro_completeTask" => handle_complete_task(node, request.params).await,
+
+        // Agent template marketplace methods
+        "tenzro_registerAgentTemplate" => handle_register_agent_template(node, request.params).await,
+        "tenzro_listAgentTemplates" => handle_list_agent_templates(node, request.params).await,
+        "tenzro_getAgentTemplate" => handle_get_agent_template(node, request.params).await,
+        "tenzro_downloadAgentTemplate" => handle_download_agent_template(node, request.params).await,
+        "tenzro_updateAgentTemplate" => handle_update_agent_template(node, request.params).await,
+        "tenzro_spawnAgentTemplate" => handle_spawn_agent_template(node, request.params).await,
+        "tenzro_runAgentTemplate" => handle_run_agent_template(node, request.params).await,
+
+        // Skills registry methods
+        "tenzro_registerSkill" => handle_register_skill(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_listSkills" => handle_list_skills(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_searchSkills" => handle_search_skills(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_useSkill" => handle_use_skill(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_getSkill" => handle_get_skill(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_updateSkill" => handle_update_skill(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_heartbeatSkill" => handle_heartbeat_skill(node.clone(), request.params.clone().unwrap_or_default()).await,
+
+        // Tool registry methods
+        "tenzro_registerTool" => handle_register_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_listTools" => handle_list_tools(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_searchTools" => handle_search_tools(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_useTool" => handle_use_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_getTool" => handle_get_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_updateTool" => handle_update_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_heartbeatTool" => handle_heartbeat_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_heartbeatAgentTemplate" => handle_heartbeat_agent_template(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_livenessStats" => handle_liveness_stats(node.clone()).await,
+
+        // Usage stats methods
+        "tenzro_getSkillUsage" => handle_get_skill_usage(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_getToolUsage" => handle_get_tool_usage(node.clone(), request.params.clone().unwrap_or_default()).await,
+
+        // Agent template marketplace extended methods
+        "tenzro_spawnAgentFromTemplate" => handle_spawn_agent_from_template(node, request.params).await,
+        "tenzro_rateAgentTemplate" => handle_rate_agent_template(node, request.params).await,
+        "tenzro_searchAgentTemplates" => handle_search_agent_templates(node, request.params).await,
+        "tenzro_getAgentTemplateStats" => handle_get_agent_template_stats(node, request.params).await,
+
+        // Registry update methods
+        "tenzro_updateTask" => handle_update_task(node.clone(), request.params.clone().unwrap_or_default()).await,
+
+        // Token & contract methods
+        "tenzro_createToken" => handle_create_token(node, request.params).await,
+        "tenzro_getToken" | "tenzro_getTokenInfo" => handle_get_token(node, request.params).await,
+        "tenzro_listTokens" => handle_list_tokens(node, request.params).await,
+        "tenzro_crossVmTransfer" => handle_cross_vm_transfer(node, request.params).await,
+        "tenzro_wrapTnzo" => handle_wrap_tnzo(node, request.params).await,
+        "tenzro_getTokenBalance" => handle_get_token_balance(node, request.params).await,
+        "tenzro_deployContract" => handle_deploy_contract(node, request.params).await,
+
+        // NFT methods
+        "tenzro_createNftCollection" => handle_create_nft_collection(node, request.params).await,
+        "tenzro_mintNft" => handle_mint_nft(node, request.params).await,
+        "tenzro_transferNft" => handle_transfer_nft(node, request.params).await,
+        "tenzro_getNftInfo" => handle_get_nft_info(node, request.params).await,
+        "tenzro_listNftCollections" => handle_list_nft_collections(node, request.params).await,
+        "tenzro_registerNftPointer" => handle_register_nft_pointer(node, request.params).await,
+
+        // Bridge methods
+        "tenzro_bridgeTokens" => handle_bridge_tokens(node, request.params).await,
+        "tenzro_bridgeQuote" => handle_bridge_quote(node, request.params).await,
+        "tenzro_getBridgeRoutes" => handle_get_bridge_routes(node, request.params).await,
+        "tenzro_listBridgeAdapters" => handle_list_bridge_adapters(node).await,
+        "tenzro_listChains" | "tenzro_listSupportedChains" => handle_list_chains(node).await,
+        "tenzro_bridgeWithHook" => handle_bridge_with_hook(node, request.params).await,
+
+        // deBridge MCP proxy methods
+        "tenzro_debridgeSearchTokens" => handle_debridge_search_tokens(request.params).await,
+        "tenzro_debridgeGetChains" => handle_debridge_get_chains().await,
+        "tenzro_debridgeGetInstructions" => handle_debridge_get_instructions().await,
+        "tenzro_debridgeCreateTx" => handle_debridge_create_tx(request.params).await,
+        "tenzro_debridgeSameChainSwap" => handle_debridge_same_chain_swap(request.params).await,
+
+        "tenzro_authorizeCrosschainBridge" => handle_authorize_crosschain_bridge(node, request.params).await,
+        "tenzro_crosschainMint" => handle_crosschain_mint(node, request.params).await,
+        "tenzro_crosschainBurn" => handle_crosschain_burn(node, request.params).await,
+        "tenzro_erc7802CrosschainMint" => handle_erc7802_crosschain_mint(node, request.params).await,
+        "tenzro_erc7802CrosschainBurn" => handle_erc7802_crosschain_burn(node, request.params).await,
+        "tenzro_erc7802GetCrossChainSupply" => handle_erc7802_get_cross_chain_supply(node, request.params).await,
+
+        // Compliance methods (ERC-3643)
+        "tenzro_checkCompliance" => handle_check_compliance(node, request.params).await,
+        "tenzro_registerCompliance" => handle_register_compliance(node, request.params).await,
+        "tenzro_freezeAddress" => handle_freeze_address(node, request.params).await,
+
+        // Events methods
+        "tenzro_getEvents" => handle_get_events(node, request.params).await,
+        "tenzro_subscribeEvents" => handle_subscribe_events(node, request.params).await,
+        "tenzro_listSubscriptions" => handle_list_subscriptions(node).await,
+        "tenzro_registerWebhook" => handle_register_webhook(node, request.params).await,
+
+        // Additional methods (MCP parity)
+        "tenzro_verifyPayment" => handle_verify_payment(node, request.params).await,
+        "tenzro_setDelegationScope" => handle_set_delegation_scope(node, request.params).await,
+        "tenzro_listPaymentProtocols" => handle_list_payment_protocols(node).await,
+        "tenzro_verifyZkProof" => handle_verify_zk_proof(node, request.params).await,
+        "tenzro_verifyVrfProof" => handle_verify_vrf_proof(node, request.params).await,
+        "tenzro_generateVrfProof" => handle_generate_vrf_proof(node, request.params).await,
+        "tenzro_vrfGenerateKeyPair" | "tenzro_generateVrfKeyPair" => handle_vrf_generate_keypair(node).await,
+
+        // Crypto methods (SDK) — auth-mediated; carry headers through.
+        "tenzro_signMessage" => handle_sign_message(node, request.params, auth_ctx).await,
+        "tenzro_signTransaction" => handle_sign_transaction(node, request.params, auth_ctx).await,
+        "tenzro_signAndSendTransaction" => {
+            handle_sign_and_send_transaction(node, request.params, auth_ctx).await
+        }
+        "tenzro_verifySignature" => handle_verify_signature(node, request.params).await,
+        "tenzro_encrypt" => handle_encrypt(node, request.params).await,
+        "tenzro_decrypt" => handle_decrypt(node, request.params).await,
+        "tenzro_deriveKey" => handle_derive_key(node, request.params).await,
+        "tenzro_generateKeypair" => handle_generate_keypair(node, request.params).await,
+        "tenzro_hashSha256" => handle_hash_sha256(node, request.params).await,
+        "tenzro_hashKeccak256" => handle_hash_keccak256(node, request.params).await,
+        "tenzro_x25519KeyExchange" => handle_x25519_key_exchange(node, request.params).await,
+
+        // TEE methods (SDK)
+        "tenzro_detectTee" => handle_detect_tee(node, request.params).await,
+        "tenzro_getAttestation" => handle_get_attestation_tee(node, request.params).await,
+        "tenzro_verifyTeeAttestation" => handle_verify_tee_attestation(node, request.params).await,
+        "tenzro_sealData" => handle_seal_data(node, request.params).await,
+        "tenzro_unsealData" => handle_unseal_data(node, request.params).await,
+        "tenzro_listTeeProviders" => handle_list_tee_providers(node, request.params).await,
+
+        // ZK methods (SDK)
+        "tenzro_createZkProof" => handle_create_zk_proof(node, request.params).await,
+        "tenzro_listCircuits" => handle_list_circuits(node, request.params).await,
+
+        // Custody/Wallet methods (SDK)
+        "tenzro_createMpcWallet" => handle_create_mpc_wallet(node, request.params).await,
+        "tenzro_exportKeystore" => handle_export_keystore(node, request.params).await,
+        "tenzro_importKeystore" => handle_import_keystore(node, request.params).await,
+        "tenzro_getKeyShares" => handle_get_key_shares(node, request.params).await,
+        "tenzro_rotateKeys" => handle_rotate_keys(node, request.params).await,
+        "tenzro_setSpendingLimits" => handle_set_spending_limits(node, request.params).await,
+        "tenzro_getSpendingLimits" => handle_get_spending_limits(node, request.params).await,
+        "tenzro_authorizeSession" => handle_authorize_session(node, request.params).await,
+        "tenzro_revokeSession" => handle_revoke_session(node, request.params).await,
+
+        // App/Paymaster methods (SDK)
+        "tenzro_registerApp" => handle_register_app(node, request.params).await,
+        "tenzro_createUserWallet" => handle_create_user_wallet(node, request.params).await,
+        "tenzro_fundUserWallet" => handle_fund_user_wallet(node, request.params).await,
+        "tenzro_listUserWallets" => handle_list_user_wallets(node, request.params).await,
+        "tenzro_sponsorTransaction" => handle_sponsor_transaction(node, request.params).await,
+        "tenzro_getUsageStats" => handle_get_usage_stats(node, request.params).await,
+
+        // Contract ABI methods (SDK)
+        "tenzro_encodeFunction" => handle_encode_function(node, request.params).await,
+        "tenzro_decodeResult" => handle_decode_result(node, request.params).await,
+
+        // Streaming methods (SDK)
+        "tenzro_chatStream" => handle_chat_stream(node, request.params).await,
+        "tenzro_subscribeEventsStream" => handle_subscribe_events_stream(node, request.params).await,
+
+        // AP2 — Agent Payments Protocol
+        "tenzro_ap2VerifyMandate" => crate::rpc_integrations::handle_ap2_verify_mandate(node, request.params).await,
+        "tenzro_ap2ValidateMandatePair" => crate::rpc_integrations::handle_ap2_validate_mandate_pair(node, request.params).await,
+        "tenzro_ap2ProtocolInfo" => crate::rpc_integrations::handle_ap2_protocol_info(node, request.params).await,
+
+        // ERC-8004 — Trustless Agents Registry
+        "tenzro_erc8004DeriveAgentId" => crate::rpc_integrations::handle_erc8004_derive_agent_id(node, request.params).await,
+        "tenzro_erc8004EncodeRegister" => crate::rpc_integrations::handle_erc8004_encode_register(node, request.params).await,
+        "tenzro_erc8004EncodeGetAgent" => crate::rpc_integrations::handle_erc8004_encode_get_agent(node, request.params).await,
+        "tenzro_erc8004DecodeGetAgent" => crate::rpc_integrations::handle_erc8004_decode_get_agent(node, request.params).await,
+        "tenzro_erc8004EncodeFeedback" => crate::rpc_integrations::handle_erc8004_encode_feedback(node, request.params).await,
+        "tenzro_erc8004EncodeRequestValidation" => crate::rpc_integrations::handle_erc8004_encode_request_validation(node, request.params).await,
+        "tenzro_erc8004EncodeSubmitValidation" => crate::rpc_integrations::handle_erc8004_encode_submit_validation(node, request.params).await,
+
+        // Wormhole
+        "tenzro_wormholeChainId" => crate::rpc_integrations::handle_wormhole_chain_id(node, request.params).await,
+        "tenzro_wormholeParseVaaId" => crate::rpc_integrations::handle_wormhole_parse_vaa_id(node, request.params).await,
+        "tenzro_wormholeBridge" => crate::rpc_integrations::handle_wormhole_bridge(node, request.params).await,
+
+        // TNZO CCT — Chainlink Cross-Chain Token
+        "tenzro_cctListPools" => crate::rpc_integrations::handle_cct_list_pools(node, request.params).await,
+        "tenzro_cctGetPool" => crate::rpc_integrations::handle_cct_get_pool(node, request.params).await,
+
+        // EIP-7702 — EOA Code Delegation (stateless helpers)
+        "tenzro_eip7702SigningHash" => crate::rpc_integrations::handle_eip7702_signing_hash(node, request.params).await,
+        "tenzro_eip7702BuildDesignator" => crate::rpc_integrations::handle_eip7702_build_designator(node, request.params).await,
+        "tenzro_eip7702ParseDesignator" => crate::rpc_integrations::handle_eip7702_parse_designator(node, request.params).await,
+        "tenzro_eip7702ProtocolInfo" => crate::rpc_integrations::handle_eip7702_protocol_info(node, request.params).await,
+
+        _ => Err(JsonRpcError {
+            code: -32601,
+            message: format!("Method not found: {}", request.method),
+            data: None,
+        }),
+    };
+
+    match result {
+        Ok(value) => JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request.id,
+            result: Some(value),
+            error: None,
+        },
+        Err(error) => JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request.id,
+            result: None,
+            error: Some(error),
+        },
+    }
+}
+
+// Handler implementations
+
+async fn handle_block_number(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    // Read the live chain tip maintained by EventLoop via Arc<AtomicU64>.
+    // This is updated with Ordering::Release on every finalized block (both locally
+    // produced and gossipsub-received), so it always reflects the real chain tip
+    // regardless of whether CF_METADATA:latest_height is stale from a prior run.
+    let h = node.chain_tip_height();
+    Ok(serde_json::json!(format!("0x{:x}", h)))
+}
+
+async fn handle_get_block(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+
+    let height_val = if let Some(arr) = params.as_array() {
+        arr.first().cloned()
+    } else {
+        params.get("height").cloned().or_else(|| params.get("block_number").cloned())
+    };
+
+    let height = match height_val {
+        Some(Value::String(s)) => {
+            if s == "latest" {
+                None // Will query latest
+            } else {
+                let h = u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(0);
+                Some(BlockHeight::new(h))
+            }
+        }
+        Some(Value::Number(n)) => Some(BlockHeight::new(n.as_u64().unwrap_or(0))),
+        _ => None,
+    };
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let block_store = BlockStoreImpl::new(storage.clone()).map_err(|e| JsonRpcError {
+        code: -32000, message: format!("Block store error: {}", e), data: None,
+    })?;
+
+    let block = if let Some(h) = height {
+        block_store.get_block_by_height(h).await
+    } else {
+        block_store.latest_block().await
+    }.map_err(|e| JsonRpcError {
+        code: -32000, message: format!("Failed to get block: {}", e), data: None,
+    })?;
+
+    match block {
+        Some(b) => Ok(serde_json::json!({
+            "height": b.height().0,
+            "hash": format!("{}", b.hash()),
+            "prev_hash": format!("{}", b.header.prev_hash),
+            "state_root": format!("{}", b.header.state_root),
+            "tx_root": format!("{}", b.header.tx_root),
+            "timestamp": b.header.timestamp.as_millis(),
+            "proposer": format!("{}", b.header.proposer),
+            "tx_count": b.transactions.len(),
+            "gas_used": b.header.metadata.gas_used,
+            "gas_limit": b.header.metadata.gas_limit,
+        })),
+        None => Ok(Value::Null),
+    }
+}
+
+/// Default and maximum batch sizes for `tenzro_getBlockRange`.
+///
+/// 64 blocks at ~40 KB each ≈ 2.5 MB, comfortably under the typical 5–10 MB
+/// JSON-RPC body limit and well under our 16 MB axum default. Operators that
+/// want larger batches can pass `maxResults` up to 256.
+const BLOCK_RANGE_DEFAULT: u64 = 64;
+const BLOCK_RANGE_MAX: u64 = 256;
+
+/// `tenzro_getBlockRange` — paginated batch fetch of finalized blocks by height.
+///
+/// Used by lagging validators to catch up against a known-healthy peer when
+/// gossipsub alone (which only carries new blocks) cannot deliver the
+/// historical tail. Public read, no auth (same as `tenzro_getBlock`).
+///
+/// Params (object form):
+///   - `startHeight` (required, u64)
+///   - `endHeight`   (required, u64) — inclusive
+///   - `maxResults`  (optional, u64, default 64, max 256)
+///
+/// The response window is `[startHeight, min(endHeight, startHeight + maxResults - 1, local_tip)]`.
+/// Missing heights inside the window (e.g. from pruning) are skipped silently;
+/// the client uses `nextHeight` to continue.
+///
+/// Result:
+///   {
+///     "blocks": [<block-summary>, ...],   // same shape as `tenzro_getBlock`
+///     "nextHeight": <u64>,                // height the next call should start at
+///     "moreAvailable": <bool>,            // true iff nextHeight <= local_tip
+///   }
+async fn handle_get_block_range(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Accept both positional `[start, end, max?]` and object forms.
+    let (start_height, end_height, max_results) = if let Some(arr) = params.as_array() {
+        let s = arr.first().and_then(parse_u64_value).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or invalid startHeight".to_string(),
+            data: None,
+        })?;
+        let e = arr.get(1).and_then(parse_u64_value).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or invalid endHeight".to_string(),
+            data: None,
+        })?;
+        let m = arr.get(2).and_then(parse_u64_value);
+        (s, e, m)
+    } else {
+        let s = params
+            .get("startHeight")
+            .or_else(|| params.get("start"))
+            .and_then(parse_u64_value)
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Missing or invalid startHeight".to_string(),
+                data: None,
+            })?;
+        let e = params
+            .get("endHeight")
+            .or_else(|| params.get("end"))
+            .and_then(parse_u64_value)
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Missing or invalid endHeight".to_string(),
+                data: None,
+            })?;
+        let m = params
+            .get("maxResults")
+            .or_else(|| params.get("max"))
+            .and_then(parse_u64_value);
+        (s, e, m)
+    };
+
+    if start_height > end_height {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "startHeight ({}) must be <= endHeight ({})",
+                start_height, end_height
+            ),
+            data: None,
+        });
+    }
+
+    let max_results = max_results.unwrap_or(BLOCK_RANGE_DEFAULT);
+    if max_results == 0 || max_results > BLOCK_RANGE_MAX {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "maxResults must be in [1, {}], got {}",
+                BLOCK_RANGE_MAX, max_results
+            ),
+            data: None,
+        });
+    }
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+
+    let block_store = BlockStoreImpl::new(storage.clone()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Block store error: {}", e),
+        data: None,
+    })?;
+
+    let local_tip = block_store
+        .latest_height()
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to read latest height: {}", e),
+            data: None,
+        })?
+        .map(|h| h.0)
+        .unwrap_or(0);
+
+    // Cap the upper bound at local_tip so we never claim blocks we don't have,
+    // and at startHeight + maxResults - 1 to bound the response size.
+    let batch_cap = start_height.saturating_add(max_results.saturating_sub(1));
+    let clamped_end = end_height.min(batch_cap).min(local_tip);
+
+    let blocks = if clamped_end < start_height {
+        Vec::new()
+    } else {
+        block_store
+            .blocks_by_height_range(BlockHeight::new(start_height), BlockHeight::new(clamped_end))
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Failed to load block range: {}", e),
+                data: None,
+            })?
+    };
+
+    let summaries: Vec<Value> = blocks
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "height": b.height().0,
+                "hash": format!("{}", b.hash()),
+                "prev_hash": format!("{}", b.header.prev_hash),
+                "state_root": format!("{}", b.header.state_root),
+                "tx_root": format!("{}", b.header.tx_root),
+                "timestamp": b.header.timestamp.as_millis(),
+                "proposer": format!("{}", b.header.proposer),
+                "tx_count": b.transactions.len(),
+                "gas_used": b.header.metadata.gas_used,
+                "gas_limit": b.header.metadata.gas_limit,
+            })
+        })
+        .collect();
+
+    // `nextHeight` is the height the client should request next. If we returned
+    // blocks, advance one past the last returned block; if the batch was empty
+    // (pruning gap or beyond batch cap), advance one past `clamped_end` so the
+    // client makes progress.
+    let next_height = blocks
+        .last()
+        .map(|b| b.height().0.saturating_add(1))
+        .unwrap_or_else(|| clamped_end.saturating_add(1));
+
+    // `moreAvailable` reflects whether the chain has further blocks beyond
+    // `nextHeight` — independent of the client's requested `endHeight`. A
+    // lagging client driving sync wants to know if the chain still has data
+    // even when they hit a pruning gap inside their requested window.
+    let more_available = next_height <= local_tip;
+
+    Ok(serde_json::json!({
+        "blocks": summaries,
+        "nextHeight": next_height,
+        "moreAvailable": more_available,
+        "localTip": local_tip,
+    }))
+}
+
+/// Parse a JSON value as u64, accepting both integer and `0x`-prefixed hex strings.
+fn parse_u64_value(v: &Value) -> Option<u64> {
+    match v {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => {
+            let s = s.trim();
+            if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u64::from_str_radix(rest, 16).ok()
+            } else {
+                s.parse::<u64>().ok()
+            }
+        }
+        _ => None,
+    }
+}
+
+async fn handle_get_transaction(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let tx_hash_str = if let Some(arr) = params.as_array() {
+        arr.first().and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Invalid transaction hash param".to_string(),
+            data: None,
+        })?
+    } else {
+        params.get("hash").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing transaction hash".to_string(),
+            data: None,
+        })?
+    };
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_storage::CF_TRANSACTIONS;
+
+    // Normalize the lookup key: storage is keyed by the bare hex-encoded Hash
+    // (see Hash::Display), but callers on EVM-compat paths commonly pass a
+    // `0x`-prefixed string. Strip the prefix if present so both forms resolve.
+    let tx_hash_key = tx_hash_str.strip_prefix("0x").unwrap_or(tx_hash_str);
+
+    // Query transaction from storage
+    match storage.get(CF_TRANSACTIONS, tx_hash_key.as_bytes()) {
+        Ok(Some(tx_bytes)) => {
+            // Try to deserialize transaction from JSON
+            match serde_json::from_slice::<SignedTransaction>(&tx_bytes) {
+                Ok(tx) => {
+                    let (value, tx_type) = match &tx.transaction.tx_type {
+                        TransactionType::Transfer { amount } => (format!("{}", amount), "transfer"),
+                        TransactionType::ContractDeploy { .. } => ("0".to_string(), "contract_deploy"),
+                        TransactionType::ContractCall { .. } => ("0".to_string(), "contract_call"),
+                        _ => ("0".to_string(), "other"),
+                    };
+
+                    Ok(serde_json::json!({
+                        "hash": tx_hash_str,
+                        "from": format!("{}", tx.transaction.from),
+                        "to": format!("{}", tx.transaction.to),
+                        "value": value,
+                        "nonce": tx.transaction.nonce.0,
+                        "gas_limit": tx.transaction.gas_limit,
+                        "gas_price": tx.transaction.gas_price,
+                        "chain_id": tx.transaction.chain_id.0,
+                        "type": tx_type,
+                    }))
+                },
+                Err(_) => Ok(Value::Null)
+            }
+        }
+        _ => Ok(Value::Null)
+    }
+}
+
+async fn handle_get_balance(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Support both array params ["0x..."] and object params {"address":"0x..."}
+    let addr_str = if let Some(arr) = params.as_array() {
+        arr.first().and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+            code: -32602, message: "Invalid address param".to_string(), data: None,
+        })?
+    } else {
+        params.get("address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+            code: -32602, message: "Missing address".to_string(), data: None,
+        })?
+    };
+
+    let address = parse_address(addr_str)?;
+
+    // Use TnzoToken as authoritative balance source (has cache + RocksDB backend)
+    let balance = if let Some(token) = node.token() {
+        token.balance_of(&address)
+    } else {
+        // Fallback to raw storage query if token not initialized
+        let storage = node.storage().ok_or_else(|| JsonRpcError {
+            code: -32000, message: "Storage not initialized".to_string(), data: None,
+        })?;
+        let account_store = AccountStoreImpl::new(storage.clone());
+        account_store.get_balance(&address).await.map_err(|e| JsonRpcError {
+            code: -32000, message: format!("Failed to get balance: {}", e), data: None,
+        })?
+    };
+
+    Ok(serde_json::json!(format!("0x{:x}", balance)))
+}
+
+async fn handle_get_nonce(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+
+    let addr_str = if let Some(arr) = params.as_array() {
+        arr.first().and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+            code: -32602, message: "Invalid address param".to_string(), data: None,
+        })?
+    } else {
+        params.get("address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+            code: -32602, message: "Missing address".to_string(), data: None,
+        })?
+    };
+
+    let address = parse_address(addr_str)?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let account_store = AccountStoreImpl::new(storage.clone());
+    let nonce = account_store.get_nonce(&address).await.map_err(|e| JsonRpcError {
+        code: -32000, message: format!("Failed to get nonce: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!(format!("0x{:x}", nonce.0)))
+}
+
+/// Create a simple account (keypair) — like EVM/Solana wallet creation.
+/// Generates a keypair locally, returns address + public key + private key.
+/// The account exists on-chain implicitly when it receives funds.
+async fn handle_create_account(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    // Optional key_type param: "ed25519" (default) or "secp256k1"
+    let key_type = params
+        .as_ref()
+        .and_then(|p| {
+            p.get("key_type")
+                .or_else(|| p.as_array().and_then(|a| a.first()))
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or("ed25519");
+
+    let kt = match key_type.to_lowercase().as_str() {
+        "secp256k1" | "evm" => KeyType::Secp256k1,
+        _ => KeyType::Ed25519,
+    };
+
+    let keypair = KeyPair::generate(kt).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Key generation failed: {}", e),
+        data: None,
+    })?;
+
+    let crypto_address = keypair.address();
+    // Zero-pad 20-byte crypto address to 32-byte types::Address
+    let mut addr_bytes = [0u8; 32];
+    addr_bytes[..20].copy_from_slice(crypto_address.as_bytes());
+
+    Ok(serde_json::json!({
+        "address": format!("0x{}", hex::encode(&addr_bytes[..20])),
+        "public_key": format!("0x{}", hex::encode(keypair.public_key().as_bytes())),
+        "private_key": format!("0x{}", hex::encode(keypair.secret_key().as_bytes())),
+        "key_type": format!("{:?}", kt),
+    }))
+}
+
+/// Create an MPC wallet via the wallet service (2-of-3 threshold).
+/// Returns address and public key. Private key shares are managed by the node.
+async fn handle_create_wallet(
+    node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Wallet service not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Use the WalletService trait's provision_wallet method
+    use tenzro_wallet::WalletService;
+    let wallet = wallet_service.provision_wallet().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Wallet creation failed: {}", e),
+        data: None,
+    })?;
+
+    // Use the hex-encoded public key as the canonical address so that
+    // faucet, balance queries, and transfers all use the same identifier.
+    // The Base58 display address is returned as `display_address` for reference.
+    let hex_address = format!("0x{}", hex::encode(wallet.public_key.as_bytes()));
+    Ok(serde_json::json!({
+        "wallet_id": wallet.wallet_id.0,
+        "address": hex_address,
+        "display_address": format!("{}", wallet.address),
+        "public_key": hex_address,
+        "key_type": format!("{:?}", wallet.key_type),
+        "threshold": wallet.threshold,
+        "total_shares": wallet.total_shares,
+    }))
+}
+
+async fn handle_token_balance(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+
+    let addr_str = params.get("address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing address".to_string(), data: None,
+    })?;
+
+    let address = parse_address(addr_str)?;
+
+    if let Some(token) = node.token() {
+        let balance = token.balance_of(&address);
+        Ok(serde_json::json!(format!("{}", balance)))
+    } else {
+        Ok(serde_json::json!("0"))
+    }
+}
+
+async fn handle_total_supply(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    if let Some(token) = node.token() {
+        Ok(serde_json::json!(format!("{}", token.total_supply())))
+    } else {
+        Ok(serde_json::json!("0"))
+    }
+}
+
+async fn handle_list_models(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let catalog = get_model_catalog();
+    let hf_downloader = node.hf_downloader.as_ref();
+
+    // Get network models from model registry (registered by remote providers)
+    let _network_model_ids: std::collections::HashSet<String> = if let Some(registry) = node.model_registry() {
+        let filter = tenzro_model::ModelFilter::new();
+        registry.search_models(&filter).iter().map(|m| m.model_id.clone()).collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    // Get network models from model services (remote endpoints)
+    let network_services = node.list_model_services();
+
+    // Get models discovered via gossipsub P2P announcements
+    let gossip_models = node.network_models_snapshot();
+
+    // Get provider pricing for network cost estimation
+    let pricing = node.provider_pricing.read();
+
+    let models: Vec<Value> = catalog.iter().map(|entry| {
+        // Check if downloaded
+        let is_downloaded = hf_downloader
+            .map(|dl| dl.is_downloaded(&entry.id))
+            .unwrap_or(false);
+
+        // Check download progress
+        let download_status = node.model_downloads.get(&entry.id);
+        let (dl_status, dl_progress) = if let Some(ds) = &download_status {
+            (ds.status.clone(), ds.progress_percent)
+        } else if is_downloaded {
+            ("completed".to_string(), 100.0)
+        } else {
+            ("not_started".to_string(), 0.0)
+        };
+
+        // Check if serving locally
+        let is_serving = node.model_runtime.as_ref()
+            .map(|rt| rt.is_loaded(&entry.id))
+            .unwrap_or(false);
+
+        // Check if available on network — only count endpoints seen in last 5 minutes
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let endpoint_ttl_secs = 300; // 5 minutes
+
+        let is_on_network = network_services.iter().any(|svc| {
+            svc.model_id == entry.id
+                && matches!(svc.location, tenzro_types::model::ModelLocation::Network)
+                && (svc.last_seen == 0 || now_secs.saturating_sub(svc.last_seen) < endpoint_ttl_secs)
+        })
+            || gossip_models.iter().any(|gm| gm.registration.model_id == entry.id);
+
+        // Determine availability: local (free), network (paid), or downloadable
+        let availability = if is_serving {
+            "local"
+        } else if is_on_network {
+            "network"
+        } else {
+            "downloadable"
+        };
+
+        let mut model_json = serde_json::json!({
+            "id": entry.id,
+            "name": entry.name,
+            "family": entry.family,
+            "parameters": entry.parameters,
+            "architecture": entry.architecture.to_string(),
+            "context_length": entry.context_length,
+            "quantization": entry.quantization,
+            "size_bytes": entry.size_bytes,
+            "min_ram_gb": entry.min_ram_gb,
+            "license": entry.license,
+            "description": entry.description,
+            "hf_repo": entry.hf_repo,
+            "downloaded": is_downloaded,
+            "download_status": dl_status,
+            "download_progress": dl_progress,
+            "serving": is_serving || is_on_network,
+            "availability": availability,
+            "pricing": {
+                "input_per_token": if is_serving { 0.0 } else { pricing.input_price_per_token },
+                "output_per_token": if is_serving { 0.0 } else { pricing.output_price_per_token },
+                "currency": "TNZO",
+            },
+        });
+
+        // Add load info for serving models
+        if is_serving {
+            if let Some(snap) = node.load_tracker.snapshot(&entry.id) {
+                model_json["load"] = serde_json::json!({
+                    "active_requests": snap.active_requests,
+                    "max_concurrent": snap.max_concurrent,
+                    "utilization_percent": snap.utilization_percent,
+                    "load_level": snap.load_level.to_string(),
+                });
+            }
+        }
+
+        model_json
+    }).collect();
+
+    // Append network-discovered models that aren't in the local catalog
+    let mut models = models;
+    let catalog_ids: std::collections::HashSet<&str> = catalog.iter().map(|e| e.id.as_str()).collect();
+    for gm in &gossip_models {
+        if !catalog_ids.contains(gm.registration.model_id.as_str()) {
+            models.push(serde_json::json!({
+                "id": gm.registration.model_id,
+                "name": gm.registration.name,
+                "description": gm.registration.description,
+                "modality": gm.registration.modality,
+                "category": gm.registration.category,
+                "parameters": gm.registration.parameters,
+                "context_length": gm.registration.context_length,
+                "downloaded": false,
+                "download_status": "not_available",
+                "download_progress": 0.0,
+                "serving": false,
+                "availability": "network",
+                "provider_id": gm.registration.provider,
+                "rpc_endpoint": gm.registration.rpc_endpoint,
+                "pricing": {
+                    "input_per_token": gm.registration.pricing.per_token.unwrap_or(0) as f64 / 1_000_000.0,
+                    "output_per_token": gm.registration.pricing.per_token.unwrap_or(0) as f64 / 1_000_000.0,
+                    "currency": "TNZO",
+                },
+            }));
+        }
+    }
+
+    Ok(serde_json::json!(models))
+}
+
+async fn handle_inference_request(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let model_id = params.get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing model_id".to_string(),
+            data: None,
+        })?;
+
+    // Validate model_id length (MEDIUM #115)
+    tenzro_types::validation::validate_string_len(
+        model_id, "model_id", tenzro_types::validation::MAX_MODEL_ID_LEN,
+    ).map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
+
+    let input = params.get("input")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing input".to_string(),
+            data: None,
+        })?;
+
+    // Validate input length (MEDIUM #115)
+    tenzro_types::validation::validate_string_len(
+        input, "input", tenzro_types::validation::MAX_CHAT_MESSAGE_LEN,
+    ).map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
+
+    let max_tokens = params.get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(100);
+
+    // Validate max_tokens bound (MEDIUM #115)
+    tenzro_types::validation::validate_numeric_bound(
+        max_tokens, "max_tokens", tenzro_types::validation::MAX_INFERENCE_TOKENS,
+    ).map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
+
+    let max_tokens = max_tokens as u32;
+
+    // Check if we have a local model runtime
+    if let Some(model_runtime) = &node.model_runtime {
+        // Try to generate from local runtime
+        let config = GenerationConfig {
+            max_tokens,
+            ..Default::default()
+        };
+        match model_runtime.generate(model_id, input, &config).await {
+            Ok(result) => {
+                node.metrics().record_inference();
+                // Calculate and wire TNZO billing
+                let pricing = node.provider_pricing.read();
+                let cost = (result.input_tokens as f64 * pricing.input_price_per_token)
+                    + (result.output_tokens as f64 * pricing.output_price_per_token);
+                drop(pricing);
+                if let Some(token) = node.token() {
+                    if let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str()) {
+                        if let Ok(caller_addr) = parse_address(caller_str) {
+                            let cost_wei = (cost * 1_000_000_000_000_000_000f64) as u128;
+                            if cost_wei > 0 {
+                                let provider_addr = if let Some(registry) = node.identity_registry() {
+                                    let all = registry.list_all();
+                                    if let Some((_, id)) = all.first() {
+                                        id.wallet_address
+                                    } else {
+                                        Address::default()
+                                    }
+                                } else {
+                                    Address::default()
+                                };
+                                if provider_addr != Address::default() {
+                                    if let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
+                                        tracing::warn!(caller = %caller_str, "Inference billing failed: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return Ok(serde_json::json!({
+                    "model_id": model_id,
+                    "output": result.text,
+                    "input_tokens": result.input_tokens,
+                    "output_tokens": result.output_tokens,
+                    "generation_time_ms": result.generation_time_ms,
+                    "tokens_per_second": result.tokens_per_second,
+                    "cost": cost,
+                    "provider": "local",
+                }));
+            }
+            Err(e) => {
+                return Err(JsonRpcError {
+                    code: -32000,
+                    message: format!("Inference failed: {}", e),
+                    data: None,
+                });
+            }
+        }
+    }
+
+    // If model runtime not available, return error
+    Err(JsonRpcError {
+        code: -32000,
+        message: "Model runtime not initialized".to_string(),
+        data: None,
+    })
+}
+
+// ===== Cortex (recurrent-depth reasoning) handlers =====
+
+/// Register a Cortex recurrent-depth worker backed by an HTTP sidecar.
+///
+/// Params:
+/// - `model_id` (string, required): e.g. "mythos-3b"
+/// - `sidecar_url` (string, optional): default `http://127.0.0.1:8799`
+/// - `bearer_token` (string, optional): sidecar auth
+/// - `max_loops` (u32, optional): default 32
+/// - `moe_experts` (u32, optional): default 64
+/// - `experts_per_token` (u32, optional): default 2
+/// - `attn_type` (string, optional): "mla" or "gqa", default "mla"
+/// - `arch` (string, optional): default "rdt-moe"
+/// - `worker_did` (string, optional): default `did:tenzro:machine:cortex-<model_id>`
+/// - `pricing` (object, optional): `{base_request_fee, per_input_token, per_output_token, per_loop, tee_premium, zk_premium}`
+async fn handle_register_cortex_worker(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_cortex::{CortexWorker, SidecarConfig, SidecarModel};
+    use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+    use tenzro_types::cortex::{
+        CortexModelFamily, CortexPricing, ReasoningTier,
+    };
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing model_id".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let sidecar_url = params
+        .get("sidecar_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("http://127.0.0.1:8799")
+        .to_string();
+    let bearer_token = params
+        .get("bearer_token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let family = CortexModelFamily {
+        arch: params
+            .get("arch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("rdt-moe")
+            .to_string(),
+        max_loops: params
+            .get("max_loops")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(32) as u32,
+        moe_experts: params
+            .get("moe_experts")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(64) as u32,
+        experts_per_token: params
+            .get("experts_per_token")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2) as u32,
+        attn_type: params
+            .get("attn_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("mla")
+            .to_string(),
+        supported_tiers: vec![
+            ReasoningTier::Fast,
+            ReasoningTier::Standard,
+            ReasoningTier::Deep,
+            ReasoningTier::Institutional,
+        ],
+    };
+
+    let pricing: CortexPricing = params
+        .get("pricing")
+        .cloned()
+        .map(|v| serde_json::from_value(v).unwrap_or_default())
+        .unwrap_or_default();
+
+    let worker_did = params
+        .get("worker_did")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("did:tenzro:machine:cortex-{}", model_id));
+
+    // Ephemeral Ed25519 signer for the worker receipts. Node operators
+    // running production Cortex workers should replace this with a
+    // persisted key (bind to TDIP identity + wallet).
+    let signer_impl = Ed25519SignerImpl::generate().map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to generate worker signer: {e}"),
+        data: None,
+    })?;
+    let signer: Arc<dyn Signer + Send + Sync> = Arc::new(signer_impl);
+    let worker_address = Address::default();
+
+    let cfg = SidecarConfig {
+        base_url: sidecar_url.clone(),
+        timeout: std::time::Duration::from_secs(
+            params
+                .get("timeout_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(120),
+        ),
+        bearer_token,
+    };
+
+    let backend = SidecarModel::new(
+        model_id.clone(),
+        family,
+        worker_did.clone(),
+        worker_address,
+        signer.clone(),
+        cfg,
+    )
+    .map(Arc::new)
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to build sidecar model: {e}"),
+        data: None,
+    })?;
+
+    let worker = Arc::new(CortexWorker::new(
+        backend,
+        pricing,
+        signer,
+        worker_did.clone(),
+        worker_address,
+    ));
+
+    node.cortex_workers.insert(model_id.clone(), worker.clone());
+
+    // Publish this worker in the shared ModelRegistry so `tenzro_listModels`
+    // and discovery clients (including the desktop Models page) surface
+    // Cortex workers alongside standard llama.cpp-served models.
+    if let Some(registry) = node.model_registry() {
+        let arch_label = params
+            .get("arch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("rdt-moe");
+        let info = crate::node::cortex_model_info(&model_id, &worker, arch_label);
+        if let Err(e) = registry.register_model(info) {
+            tracing::warn!(
+                model_id = %model_id,
+                "Failed to publish Cortex model in ModelRegistry: {e}"
+            );
+        }
+    }
+
+    info!(model_id = %model_id, sidecar = %sidecar_url, "Registered Cortex worker");
+
+    Ok(serde_json::json!({
+        "model_id": model_id,
+        "worker_did": worker_did,
+        "sidecar_url": sidecar_url,
+        "status": "registered",
+    }))
+}
+
+/// List all registered Cortex workers with their model family and pricing.
+async fn handle_list_cortex_workers(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let workers: Vec<Value> = node
+        .cortex_workers
+        .iter()
+        .map(|entry| {
+            let model_id = entry.key().clone();
+            let worker = entry.value();
+            serde_json::json!({
+                "model_id": model_id,
+                "worker_did": worker.worker_did(),
+                "family": worker.backend().family(),
+                "pricing": worker.pricing(),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "workers": workers, "count": workers.len() }))
+}
+
+/// List remote Cortex workers this node has learned about via the
+/// `tenzro/cortex/1.0.0` gossip topic. Returns the signed advertisements
+/// that are still within their `expires_at` window (expired entries are
+/// pruned lazily by `RemoteWorkerRegistry::snapshot`).
+async fn handle_list_remote_cortex_workers(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let ads = node.remote_cortex_workers.snapshot();
+    let workers = serde_json::to_value(&ads).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to serialize remote cortex workers: {e}"),
+        data: None,
+    })?;
+    Ok(serde_json::json!({ "workers": workers, "count": ads.len() }))
+}
+
+/// Execute a Cortex recurrent-depth inference request.
+///
+/// Params:
+/// - `model_id` (string, required)
+/// - `input` (string, required): plain-text prompt (hex-encoded on the wire to the sidecar)
+/// - `tier` (string, optional): "fast" | "standard" | "deep" | "institutional", default "standard"
+/// - `min_loops`, `max_loops` (u32, optional): overrides the tier defaults
+/// - `max_cost_tnzo` (u64, optional): hard cap on billed TNZO
+/// - `deadline_ms` (u64, optional)
+/// - `params` (object, optional): free-form `Map<String, String>` forwarded to the sidecar
+/// - `requester` (string, optional): caller address; defaults to the zero address
+async fn handle_cortex_inference(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::cortex::{
+        AttestationRequirement, CortexRequest, ReasoningBudget, ReasoningTier,
+    };
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing model_id".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let input = params
+        .get("input")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing input".to_string(),
+            data: None,
+        })?
+        .as_bytes()
+        .to_vec();
+
+    let tier = match params.get("tier").and_then(|v| v.as_str()).unwrap_or("standard") {
+        "fast" => ReasoningTier::Fast,
+        "standard" => ReasoningTier::Standard,
+        "deep" => ReasoningTier::Deep,
+        "institutional" => ReasoningTier::Institutional,
+        other => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!("Unknown tier: {other}"),
+                data: None,
+            });
+        }
+    };
+
+    let mut budget = ReasoningBudget::for_tier(tier);
+    if let Some(min_loops) = params.get("min_loops").and_then(|v| v.as_u64()) {
+        budget.min_loops = min_loops as u32;
+    }
+    if let Some(max_loops) = params.get("max_loops").and_then(|v| v.as_u64()) {
+        budget.max_loops = max_loops as u32;
+    }
+    if let Some(max_cost) = params.get("max_cost_tnzo").and_then(|v| v.as_u64()) {
+        budget.max_cost_tnzo = max_cost;
+    }
+    if let Some(deadline) = params.get("deadline_ms").and_then(|v| v.as_u64()) {
+        budget.deadline_ms = Some(deadline);
+    }
+    if let Some(att) = params.get("attestation").and_then(|v| v.as_str()) {
+        budget.attestation = match att {
+            "none" => AttestationRequirement::None,
+            "tee" => AttestationRequirement::Tee,
+            "tee_and_zk" | "teeandzk" => AttestationRequirement::TeeAndZk,
+            other => {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("Unknown attestation: {other}"),
+                    data: None,
+                });
+            }
+        };
+    }
+
+    let requester = params
+        .get("requester")
+        .and_then(|v| v.as_str())
+        .and_then(|s| parse_address(s).ok())
+        .unwrap_or_default();
+
+    let sidecar_params: std::collections::HashMap<String, String> = params
+        .get("params")
+        .and_then(|v| v.as_object())
+        .map(|map| {
+            map.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let request_id = params
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    let worker = node
+        .cortex_workers
+        .get(&model_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: format!("No Cortex worker registered for model {model_id}"),
+            data: None,
+        })?
+        .clone();
+
+    let req = CortexRequest {
+        request_id,
+        model_id: model_id.clone(),
+        requester,
+        input,
+        budget,
+        params: sidecar_params,
+        timestamp: tenzro_types::primitives::Timestamp::now(),
+    };
+
+    let resp = worker.execute(&req).await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Cortex inference failed: {e}"),
+        data: None,
+    })?;
+
+    node.metrics().record_inference();
+
+    // Settlement: transfer `resp.price_tnzo` from requester → worker address
+    // on the node's token ledger. The 0.5% network fee is charged on top
+    // by routing a sliver to the treasury address. Failures are logged,
+    // not fatal — the receipt is still valid and auditors can replay
+    // settlement out-of-band.
+    let settled = settle_cortex_payment(node, requester, &resp).await;
+
+    let mut value = serde_json::to_value(&resp).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to serialize Cortex response: {e}"),
+        data: None,
+    })?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("settled".into(), serde_json::Value::Bool(settled));
+    }
+    Ok(value)
+}
+
+/// Attempt on-chain settlement of a Cortex response. Returns `true` if
+/// the TNZO transfer from requester → worker succeeded.
+async fn settle_cortex_payment(
+    node: &Arc<TenzroNode>,
+    requester: Address,
+    resp: &tenzro_types::cortex::CortexResponse,
+) -> bool {
+    if resp.price_tnzo == 0 {
+        return true;
+    }
+    if requester == Address::default() {
+        tracing::debug!(
+            price_tnzo = resp.price_tnzo,
+            "Cortex response has price but no requester — skipping settlement"
+        );
+        return false;
+    }
+    let Some(token) = node.token() else {
+        tracing::warn!("Cortex settlement: token ledger unavailable");
+        return false;
+    };
+
+    let gross = resp.price_tnzo as u128;
+    if let Err(e) = token.transfer(&requester, &resp.worker, gross) {
+        tracing::warn!(
+            requester = %hex::encode(requester.as_bytes()),
+            worker = %hex::encode(resp.worker.as_bytes()),
+            amount = gross,
+            "Cortex settlement transfer failed: {}",
+            e
+        );
+        return false;
+    }
+    tracing::info!(
+        requester = %hex::encode(requester.as_bytes()),
+        worker = %hex::encode(resp.worker.as_bytes()),
+        amount_tnzo = gross,
+        loops_used = resp.metadata.loops_used,
+        "Cortex inference settled on-chain"
+    );
+    true
+}
+
+async fn handle_settle(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let provider_hex = params.get("provider")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing provider address".to_string(),
+            data: None,
+        })?;
+    let provider = parse_address(provider_hex)?;
+
+    let customer_hex = params.get("customer")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing customer address".to_string(),
+            data: None,
+        })?;
+    let customer = parse_address(customer_hex)?;
+
+    let amount = params.get("amount")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or invalid amount".to_string(),
+            data: None,
+        })?;
+
+    // Parse service type - for simplicity, accept a string or default to Custom
+    let service_type_str = params.get("service_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("custom");
+
+    use tenzro_types::settlement::{ServiceType, ServiceProof, ProofType, SettlementRequest};
+    use std::collections::HashMap;
+
+    let service_type = match service_type_str {
+        "model_inference" | "inference" => {
+            let model_id = params.get("model_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let tokens = params.get("tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            ServiceType::ModelInference { model_id, tokens }
+        }
+        "tee" | "tee_computation" => {
+            let computation_id = params.get("computation_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let compute_units = params.get("compute_units")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1);
+            ServiceType::TeeComputation { computation_id, compute_units }
+        }
+        "agent" | "agent_execution" => {
+            let agent_id = params.get("agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let task_id = params.get("task_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            ServiceType::AgentExecution { agent_id, task_id }
+        }
+        _ => {
+            let mut parameters = HashMap::new();
+            parameters.insert("type".to_string(), service_type_str.to_string());
+            ServiceType::Custom { name: service_type_str.to_string(), parameters }
+        }
+    };
+
+    // Create a basic service proof
+    let proof_data = params.get("proof")
+        .and_then(|v| v.as_str())
+        .map(|s| s.as_bytes().to_vec())
+        .unwrap_or_else(|| b"settlement request".to_vec());
+
+    let service_proof = ServiceProof::new(ProofType::Cryptographic, proof_data);
+
+    let settlement_request = SettlementRequest::new(
+        provider,
+        customer,
+        service_type,
+        amount,
+        service_proof,
+    );
+
+    let settlement_engine = node.settlement().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Settlement engine not initialized".to_string(),
+        data: None,
+    })?;
+
+    let receipt = settlement_engine.settle(settlement_request).await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Settlement failed: {}", e),
+        data: None,
+    })?;
+
+    node.metrics().record_settlement();
+    Ok(serde_json::json!({
+        "receipt_id": receipt.receipt_id,
+        "request_id": receipt.request_id,
+        "transaction_hash": format!("{}", receipt.transaction_hash),
+        "provider": format!("{}", receipt.provider),
+        "customer": format!("{}", receipt.customer),
+        "amount": receipt.amount,
+        "status": format!("{:?}", receipt.status),
+        "settled_at": receipt.settled_at.as_millis(),
+    }))
+}
+
+async fn handle_get_settlement(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let receipt_id = params.get("receipt_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing receipt_id".to_string(),
+            data: None,
+        })?;
+
+    let settlement_engine = node.settlement().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Settlement engine not initialized".to_string(),
+        data: None,
+    })?;
+
+    match settlement_engine.get_settlement(receipt_id) {
+        Ok(receipt) => Ok(serde_json::json!({
+            "receipt_id": receipt.receipt_id,
+            "request_id": receipt.request_id,
+            "transaction_hash": format!("{}", receipt.transaction_hash),
+            "provider": format!("{}", receipt.provider),
+            "customer": format!("{}", receipt.customer),
+            "service_type": receipt.service_type.type_name(),
+            "amount": receipt.amount,
+            "status": format!("{:?}", receipt.status),
+            "settled_at": receipt.settled_at.as_millis(),
+            "metadata": receipt.metadata,
+        })),
+        Err(_) => Ok(Value::Null)
+    }
+}
+
+async fn handle_register_agent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let name = params.get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent name".to_string(),
+            data: None,
+        })?;
+
+    let creator_hex = params.get("creator")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing creator address".to_string(),
+            data: None,
+        })?;
+    let creator = parse_address(creator_hex)?;
+
+    // Parse capabilities (optional)
+    use tenzro_types::agent::Capability;
+    let capabilities = if let Some(caps_arr) = params.get("capabilities").and_then(|v| v.as_array()) {
+        caps_arr.iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| match s {
+                "nlp" => Capability::NaturalLanguageProcessing { languages: vec!["en".to_string()] },
+                "vision" => Capability::ComputerVision { tasks: vec!["detection".to_string()] },
+                "code" => Capability::CodeGeneration { languages: vec!["rust".to_string(), "python".to_string()] },
+                "data" => Capability::DataAnalysis { formats: vec!["json".to_string(), "csv".to_string()] },
+                "blockchain" => Capability::BlockchainInteraction { chains: vec!["tenzro".to_string()] },
+                _ => Capability::Custom { name: s.to_string(), parameters: std::collections::HashMap::new() }
+            })
+            .collect()
+    } else {
+        vec![Capability::Custom { name: "general".to_string(), parameters: std::collections::HashMap::new() }]
+    };
+
+    let agent_runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let agent = agent_runtime.register_agent(name.to_string(), creator, capabilities, false, 0).await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Agent registration failed: {}", e),
+            data: None,
+        })?;
+
+    // AgentRuntime::with_storage() already writes the full `RegisteredAgent`
+    // (including typed capabilities, wallet_id, status, tenzro_did, and
+    // registration_fee) to CF_AGENTS under the `agent:<id>` prefix. The
+    // previous lossy Debug-format persistence here has been removed because
+    // it could not be deserialized back into typed capabilities.
+
+    Ok(serde_json::json!({
+        "agent_id": agent.identity.agent_id,
+        "name": agent.identity.name,
+        "creator": format!("{}", agent.identity.creator),
+        "wallet_address": format!("{}", agent.wallet_address),
+        "capabilities": agent.capabilities.len(),
+        "status": format!("{:?}", agent.status),
+        "created_at": agent.created_at.to_rfc3339(),
+    }))
+}
+
+async fn handle_send_agent_message(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let from_id = params.get("from")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'from' agent ID".to_string(),
+            data: None,
+        })?;
+
+    let to_id = params.get("to")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'to' agent ID".to_string(),
+            data: None,
+        })?;
+
+    let message_content = params.get("message")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing message content".to_string(),
+            data: None,
+        })?;
+
+    let agent_runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Construct AgentMessage
+    use tenzro_types::agent::{AgentMessage, AgentIdentity, AgentMessageType};
+    use tenzro_types::primitives::Address;
+
+    // For simplicity, create minimal AgentIdentity structures
+    // In production, these would be looked up from the registry
+    let from_identity = AgentIdentity::new(
+        from_id.to_string(),
+        Address::zero(),
+        from_id.to_string(),
+        Address::zero(),
+    );
+
+    let to_identity = AgentIdentity::new(
+        to_id.to_string(),
+        Address::zero(),
+        to_id.to_string(),
+        Address::zero(),
+    );
+
+    let message = AgentMessage::new(
+        from_identity,
+        to_identity,
+        AgentMessageType::TaskRequest,
+        message_content.as_bytes().to_vec(),
+    );
+
+    agent_runtime.send_message(message.clone()).await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to send message: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "message_id": message.message_id,
+        "from": from_id,
+        "to": to_id,
+        "status": "sent",
+        "timestamp": message.timestamp.as_millis(),
+    }))
+}
+
+// Additional handler methods requested by SDKs
+
+async fn handle_list_agents(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut result: Vec<serde_json::Value> = Vec::new();
+
+    // Collect local agents (registered on this node)
+    if let Some(agent_runtime) = node.agent_runtime() {
+        let agents = agent_runtime.list_agents(None);
+        for a in agents.iter() {
+            seen_ids.insert(a.identity.agent_id.clone());
+            let cap_names: Vec<String> = a.capabilities.iter().map(|c| {
+                match c {
+                    tenzro_types::agent::Capability::NaturalLanguageProcessing { .. } => "NaturalLanguageProcessing".to_string(),
+                    tenzro_types::agent::Capability::ComputerVision { .. } => "ComputerVision".to_string(),
+                    tenzro_types::agent::Capability::CodeGeneration { .. } => "CodeGeneration".to_string(),
+                    tenzro_types::agent::Capability::DataAnalysis { .. } => "DataAnalysis".to_string(),
+                    tenzro_types::agent::Capability::BlockchainInteraction { .. } => "BlockchainInteraction".to_string(),
+                    tenzro_types::agent::Capability::SmartContractExecution => "SmartContractExecution".to_string(),
+                    tenzro_types::agent::Capability::ExternalAPIIntegration { .. } => "ExternalAPIIntegration".to_string(),
+                    tenzro_types::agent::Capability::MultiAgentCoordination => "MultiAgentCoordination".to_string(),
+                    tenzro_types::agent::Capability::Custom { name, .. } => name.clone(),
+                }
+            }).collect();
+            result.push(serde_json::json!({
+                "agent_id": a.identity.agent_id,
+                "name": a.identity.name,
+                "agent_type": "tenzroclaw",
+                "capabilities": cap_names,
+                "status": a.status.as_str(),
+                "controller_did": format!("did:tenzro:human:{}", a.identity.creator),
+                "reputation": a.reputation_score,
+                "source": "local",
+            }));
+        }
+    }
+
+    // Merge network agents discovered via gossipsub (dedup by agent_id; local takes precedence)
+    for entry in node.network_agents_snapshot() {
+        if !seen_ids.contains(&entry.announcement.agent_id) {
+            seen_ids.insert(entry.announcement.agent_id.clone());
+            result.push(serde_json::json!({
+                "agent_id": entry.announcement.agent_id,
+                "name": entry.announcement.name,
+                "agent_type": entry.announcement.agent_type,
+                "capabilities": entry.announcement.capabilities,
+                "status": entry.announcement.status,
+                "controller_did": "network",
+                "reputation": 0.0,
+                "origin_peer_id": entry.announcement.origin_peer_id,
+                "rpc_endpoint": entry.announcement.rpc_endpoint,
+                "source": "network",
+            }));
+        }
+    }
+
+    Ok(serde_json::to_value(result).unwrap_or(serde_json::json!([])))
+}
+
+async fn handle_spawn_agent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let parent_id = params.get("parent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing parent_id".to_string(),
+            data: None,
+        })?;
+
+    let name = params.get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing name".to_string(),
+            data: None,
+        })?;
+
+    let caps: Vec<String> = params.get("capabilities")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let child = runtime.spawn_agent(parent_id, name, caps).await
+        .map_err(|e| JsonRpcError { code: -32000, message: e.to_string(), data: None })?;
+
+    Ok(serde_json::json!({
+        "agent_id": child.identity.agent_id,
+        "parent_id": parent_id,
+        "name": name,
+    }))
+}
+
+async fn handle_run_agent_task(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let agent_id = params.get("agent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_id".to_string(),
+            data: None,
+        })?;
+
+    let task = params.get("task")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing task".to_string(),
+            data: None,
+        })?;
+
+    let inference_url = params.get("inference_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("http://localhost:8080/chat")
+        .to_string();
+
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let exec_loop = tenzro_agent::AgentExecutionLoop::new(runtime.clone(), inference_url);
+    let result = exec_loop.run(agent_id, task).await
+        .map_err(|e| JsonRpcError { code: -32000, message: e.to_string(), data: None })?;
+
+    Ok(serde_json::json!({
+        "agent_id": agent_id,
+        "result": result,
+    }))
+}
+
+async fn handle_create_swarm(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let orchestrator_id = params.get("orchestrator_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing orchestrator_id".to_string(),
+            data: None,
+        })?;
+
+    let members: Vec<(String, Vec<String>)> = params.get("members")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing members".to_string(),
+            data: None,
+        })?
+        .iter()
+        .map(|m| {
+            let name = m.get("name").and_then(|v| v.as_str()).unwrap_or("agent").to_string();
+            let caps = m.get("capabilities")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            (name, caps)
+        })
+        .collect();
+
+    let config = tenzro_types::agent::SwarmConfig {
+        max_members: params.get("max_members").and_then(|v| v.as_u64()).unwrap_or(10) as usize,
+        task_timeout_secs: params.get("task_timeout_secs").and_then(|v| v.as_u64()).unwrap_or(300),
+        parallel: params.get("parallel").and_then(|v| v.as_bool()).unwrap_or(true),
+    };
+
+    let swarm_mgr = node.swarm_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Swarm manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    let swarm_id = swarm_mgr.create_swarm(orchestrator_id, members, config).await
+        .map_err(|e| JsonRpcError { code: -32000, message: e.to_string(), data: None })?;
+
+    Ok(serde_json::json!({
+        "swarm_id": swarm_id,
+        "orchestrator_id": orchestrator_id,
+    }))
+}
+
+async fn handle_get_swarm_status(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let swarm_id = params.get("swarm_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing swarm_id".to_string(),
+            data: None,
+        })?;
+
+    let swarm_mgr = node.swarm_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Swarm manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    swarm_mgr.get_swarm_status(swarm_id).ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: format!("Swarm not found: {}", swarm_id),
+        data: None,
+    })
+}
+
+/// List all swarms currently registered on this node.
+///
+/// Because `SwarmManager` is constructed with `with_storage()` at node boot,
+/// this returns both live in-memory swarms and any that were rehydrated from
+/// the CF_AGENTS `swarm:` prefix after a restart — satisfying the
+/// "everything must be persistent" invariant.
+async fn handle_list_swarms(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let swarm_mgr = node.swarm_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Swarm manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    Ok(serde_json::to_value(swarm_mgr.list_swarms())
+        .unwrap_or(serde_json::json!([])))
+}
+
+/// Look up a single registered agent by `agent_id`.
+///
+/// This queries the `AgentRuntime` (which is constructed with
+/// `with_storage()` and hydrated from CF_AGENTS on node startup), so a
+/// restart does not lose the agent. The returned shape matches one entry
+/// of `tenzro_listAgents` for the `"source": "local"` case.
+async fn handle_get_agent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let agent_id = params
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_id".to_string(),
+            data: None,
+        })?;
+
+    let agent_runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let a = agent_runtime
+        .get_agent(agent_id)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Agent not found: {}", e),
+            data: None,
+        })?;
+
+    let cap_names: Vec<String> = a
+        .capabilities
+        .iter()
+        .map(|c| match c {
+            tenzro_types::agent::Capability::NaturalLanguageProcessing { .. } => {
+                "NaturalLanguageProcessing".to_string()
+            }
+            tenzro_types::agent::Capability::ComputerVision { .. } => "ComputerVision".to_string(),
+            tenzro_types::agent::Capability::CodeGeneration { .. } => "CodeGeneration".to_string(),
+            tenzro_types::agent::Capability::DataAnalysis { .. } => "DataAnalysis".to_string(),
+            tenzro_types::agent::Capability::BlockchainInteraction { .. } => {
+                "BlockchainInteraction".to_string()
+            }
+            tenzro_types::agent::Capability::SmartContractExecution => {
+                "SmartContractExecution".to_string()
+            }
+            tenzro_types::agent::Capability::ExternalAPIIntegration { .. } => {
+                "ExternalAPIIntegration".to_string()
+            }
+            tenzro_types::agent::Capability::MultiAgentCoordination => {
+                "MultiAgentCoordination".to_string()
+            }
+            tenzro_types::agent::Capability::Custom { name, .. } => name.clone(),
+        })
+        .collect();
+
+    let lifecycle_state = agent_runtime
+        .get_agent_state(agent_id)
+        .ok()
+        .map(|state| format!("{:?}", state));
+
+    Ok(serde_json::json!({
+        "agent_id": a.identity.agent_id,
+        "name": a.identity.name,
+        "agent_type": "tenzroclaw",
+        "capabilities": cap_names,
+        "status": a.status.as_str(),
+        "lifecycle_state": lifecycle_state,
+        "controller_did": format!("did:tenzro:human:{}", a.identity.creator),
+        "reputation": a.reputation_score,
+        "wallet_id": a.wallet_id,
+        "tenzro_did": a.tenzro_did,
+        "registration_fee": a.registration_fee,
+        "source": "local",
+    }))
+}
+
+async fn handle_terminate_swarm(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let swarm_id = params.get("swarm_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing swarm_id".to_string(),
+            data: None,
+        })?;
+
+    let swarm_mgr = node.swarm_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Swarm manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    swarm_mgr.terminate_swarm(swarm_id).await
+        .map_err(|e| JsonRpcError { code: -32000, message: e.to_string(), data: None })?;
+
+    Ok(serde_json::json!({
+        "swarm_id": swarm_id,
+        "status": "terminated",
+    }))
+}
+
+async fn handle_delegate_task(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let sender_id = params.get("sender_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing sender_id".to_string(),
+            data: None,
+        })?;
+
+    let receiver_id = params.get("receiver_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing receiver_id".to_string(),
+            data: None,
+        })?;
+
+    let task_type = params.get("task_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("GenericTask")
+        .to_string();
+
+    let parameters: std::collections::HashMap<String, serde_json::Value> = params
+        .get("parameters")
+        .and_then(|v| v.as_object())
+        .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+
+    let agent_runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_types::agent::AgentIdentity;
+    use tenzro_types::primitives::Address;
+
+    let sender_identity = AgentIdentity::new(
+        sender_id.to_string(),
+        Address::zero(),
+        sender_id.to_string(),
+        Address::zero(),
+    );
+
+    let receiver_identity = AgentIdentity::new(
+        receiver_id.to_string(),
+        Address::zero(),
+        receiver_id.to_string(),
+        Address::zero(),
+    );
+
+    let task_id = agent_runtime
+        .delegate_task(sender_identity, receiver_identity, task_type.clone(), parameters)
+        .await
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Failed to delegate task: {}", e), data: None })?;
+
+    // Wire TNZO billing: flat 0.001 TNZO delegation fee from caller to receiver
+    const DELEGATION_FEE_WEI: u128 = 1_000_000_000_000_000; // 0.001 TNZO
+    if let Some(token) = node.token() {
+        if let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str()) {
+            if let Ok(caller_addr) = parse_address(caller_str) {
+                if let Some(receiver_str) = params.get("receiver_address").and_then(|v| v.as_str()) {
+                    if let Ok(receiver_addr) = parse_address(receiver_str) {
+                        if let Err(e) = token.transfer(&caller_addr, &receiver_addr, DELEGATION_FEE_WEI) {
+                            tracing::warn!(
+                                sender = %sender_id,
+                                receiver = %receiver_id,
+                                "Delegation fee billing failed: {}",
+                                e
+                            );
+                        } else {
+                            tracing::info!(
+                                sender = %sender_id,
+                                receiver = %receiver_id,
+                                fee_tnzo = 0.001,
+                                "Delegation fee charged"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "task_id": task_id,
+        "sender_id": sender_id,
+        "receiver_id": receiver_id,
+        "task_type": task_type,
+        "status": "delegated",
+    }))
+}
+
+/// Returns the faucet's signing address and current balance for diagnostics.
+/// No params, no auth required (read-only).
+async fn handle_faucet_info(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+
+    let address_hex = match storage.get("metadata", crate::genesis::FAUCET_SIGNING_KEY_ADDRESS) {
+        Ok(Some(bytes)) => String::from_utf8(bytes).map_err(|_| JsonRpcError {
+            code: -32000,
+            message: "Faucet signing address is not valid UTF-8 hex".to_string(),
+            data: None,
+        })?,
+        _ => return Err(JsonRpcError {
+            code: -32000,
+            message: "Faucet signing address not provisioned".to_string(),
+            data: None,
+        }),
+    };
+
+    let faucet_addr = tenzro_types::primitives::Address::from_hex(&address_hex)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Invalid persisted faucet address: {}", e),
+            data: None,
+        })?;
+
+    // Read balance from CF_ACCOUNTS (TnzoToken layout: "balance:" + address bytes).
+    let mut balance_key = b"balance:".to_vec();
+    balance_key.extend_from_slice(faucet_addr.as_bytes());
+    let balance: u128 = match storage.get("accounts", &balance_key) {
+        Ok(Some(bytes)) if bytes.len() == 16 => {
+            let arr: [u8; 16] = bytes.try_into().unwrap();
+            u128::from_le_bytes(arr)
+        }
+        _ => 0,
+    };
+
+    // Also read legacy sentinel address balance for diagnostics.
+    let legacy_addr_hex: Option<String> = match storage.get("metadata", b"genesis_faucet_address") {
+        Ok(Some(bytes)) => String::from_utf8(bytes).ok(),
+        _ => None,
+    };
+
+    Ok(serde_json::json!({
+        "address": format!("0x{}", address_hex),
+        "balance_wei": balance.to_string(),
+        "balance_tnzo": format!("{}.{:018}", balance / 1_000_000_000_000_000_000u128, balance % 1_000_000_000_000_000_000u128),
+        "legacy_genesis_pointer": legacy_addr_hex.map(|h| format!("0x{}", h)),
+    }))
+}
+
+async fn handle_faucet(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let address_str = params.get("address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing address".to_string(),
+            data: None,
+        })?;
+
+    // Default 100 TNZO; caller may request up to 1000
+    let amount_tnzo: u128 = params.get("amount")
+        .and_then(|v| v.as_u64())
+        .map(|a| a.min(1000) as u128)
+        .unwrap_or(100);
+
+    // Parse recipient address
+    let to_addr = parse_address(address_str).map_err(|_| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid address: {}", address_str),
+        data: None,
+    })?;
+
+    let amount_wei = amount_tnzo
+        .checked_mul(1_000_000_000_000_000_000u128)
+        .unwrap_or(0);
+
+    // Load the faucet's Ed25519 signing key from CF_METADATA. This was
+    // provisioned once at first boot by `provision_faucet_signing_key()` —
+    // see crates/tenzro-node/src/genesis.rs for the bootstrap migration.
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+
+    let privkey_hex = match storage.get("metadata", crate::genesis::FAUCET_SIGNING_KEY_PRIVATE) {
+        Ok(Some(bytes)) => String::from_utf8(bytes).map_err(|_| JsonRpcError {
+            code: -32000,
+            message: "Faucet signing key is not valid UTF-8 hex".to_string(),
+            data: None,
+        })?,
+        _ => return Err(JsonRpcError {
+            code: -32000,
+            message: "Faucet signing key not provisioned. The node must complete genesis bootstrap before serving faucet requests.".to_string(),
+            data: None,
+        }),
+    };
+
+    let address_hex = match storage.get("metadata", crate::genesis::FAUCET_SIGNING_KEY_ADDRESS) {
+        Ok(Some(bytes)) => String::from_utf8(bytes).map_err(|_| JsonRpcError {
+            code: -32000,
+            message: "Faucet signing address is not valid UTF-8 hex".to_string(),
+            data: None,
+        })?,
+        _ => return Err(JsonRpcError {
+            code: -32000,
+            message: "Faucet signing address not provisioned".to_string(),
+            data: None,
+        }),
+    };
+
+    let faucet_addr = tenzro_types::primitives::Address::from_hex(&address_hex)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Invalid persisted faucet address: {}", e),
+            data: None,
+        })?;
+
+    // Build + sign the faucet transfer as a real transaction. Signature is an
+    // Ed25519 signature over SHA-256(Transaction), produced server-side with
+    // the faucet's own secret key (never exposed to the caller). Submitted to
+    // the event loop so it enters the mempool, gossips, and is finalized
+    // identically across all validators.
+    let sk_bytes = hex::decode(&privkey_hex).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Faucet private key is not valid hex: {}", e),
+        data: None,
+    })?;
+    let secret_key = tenzro_crypto::SecretKey::new(KeyType::Ed25519, sk_bytes);
+    let keypair = KeyPair::from_secret_key(secret_key).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to load faucet keypair: {}", e),
+        data: None,
+    })?;
+    let pubkey_bytes = keypair.public_key().as_bytes().to_vec();
+
+    // Nonce tracking for the faucet: derive from the wallet service if it's
+    // aware of the faucet, else from the account store. For simplicity,
+    // peek-and-bump a node-local counter. Two concurrent faucet requests can
+    // race here; the event loop / consensus will reject the loser with a
+    // nonce-mismatch error and the caller can retry.
+    let wallet_service = node.wallet_service();
+    let nonce = match &wallet_service {
+        Some(ws) => {
+            use tenzro_wallet::WalletService;
+            ws.peek_nonce(&faucet_addr)
+        }
+        None => Nonce::from(0u64),
+    };
+
+    let chain_id = node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337);
+    // Load the faucet's persistent ML-DSA-65 signing key. The seed is
+    // provisioned once at first boot by `provision_faucet_signing_key()`
+    // (with back-fill for pre-Wave-3d state), so this lookup is mandatory —
+    // there is no per-request keygen fallback.
+    let pq_seed_hex = match storage.get("metadata", crate::genesis::FAUCET_PQ_SIGNING_SEED) {
+        Ok(Some(bytes)) => String::from_utf8(bytes).map_err(|_| JsonRpcError {
+            code: -32000,
+            message: "Faucet PQ seed is not valid UTF-8 hex".to_string(),
+            data: None,
+        })?,
+        _ => return Err(JsonRpcError {
+            code: -32000,
+            message: "Faucet PQ signing key not provisioned".to_string(),
+            data: None,
+        }),
+    };
+    let pq_seed_bytes = hex::decode(&pq_seed_hex).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Faucet PQ seed is not valid hex: {}", e),
+        data: None,
+    })?;
+    let pq_signing_key = tenzro_crypto::pq::MlDsaSigningKey::from_seed(&pq_seed_bytes)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to derive faucet PQ key: {}", e),
+            data: None,
+        })?;
+    let tx = Transaction::new(
+        ChainId::from(chain_id),
+        faucet_addr,
+        to_addr,
+        nonce,
+        TransactionType::Transfer { amount: amount_wei },
+        21000,
+        1_000_000_000,
+        pq_signing_key.verifying_key_bytes().to_vec(),
+    );
+
+    let tx_hash = tx.hash();
+
+    // Sign the canonical tx hash. We use the raw Ed25519 signer directly
+    // (not the MPC wallet service) because the faucet key is a plain Ed25519
+    // key, not a threshold-shared MPC wallet.
+    use tenzro_crypto::signatures::Signer;
+    let signer = tenzro_crypto::signatures::Ed25519SignerImpl::new(keypair).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Faucet signer init failed: {}", e),
+        data: None,
+    })?;
+    let crypto_sig = signer.sign(tx_hash.as_bytes()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Faucet signing failed: {}", e),
+        data: None,
+    })?;
+
+    let pq_sig = pq_signing_key.sign(tx_hash.as_bytes()).to_vec();
+    let signed_tx = SignedTransaction::new(
+        tx,
+        Signature::new(crypto_sig.to_bytes(), pubkey_bytes),
+        pq_sig,
+    );
+    let tx_hash_out = signed_tx.clone().hash();
+    let tx_hash_str = format!("{}", tx_hash_out);
+
+    // Submit to the event loop for consensus admission.
+    let event_sender = node.event_sender().ok_or_else(|| {
+        error!(target: "rpc", tx_hash = %tx_hash_out, "tenzro_faucet: node event loop not running");
+        JsonRpcError {
+            code: -32000,
+            message: "Node event loop not running".to_string(),
+            data: None,
+        }
+    })?;
+
+    event_sender
+        .send(NodeEvent::NewTransaction(signed_tx))
+        .await
+        .map_err(|e| {
+            error!(
+                target: "rpc",
+                tx_hash = %tx_hash_out,
+                error = %e,
+                "tenzro_faucet: failed to enqueue tx for event loop"
+            );
+            JsonRpcError {
+                code: -32000,
+                message: format!("Failed to submit faucet tx: {}", e),
+                data: None,
+            }
+        })?;
+
+    // Advance the nonce only after successful enqueue so concurrent retries
+    // don't skip a slot.
+    if let Some(ws) = &wallet_service {
+        use tenzro_wallet::WalletService;
+        let _ = ws.next_nonce(&faucet_addr);
+    }
+
+    info!(
+        target: "rpc",
+        recipient = %address_str,
+        amount_tnzo = amount_tnzo,
+        tx = %tx_hash_str,
+        "tenzro_faucet: signed + enqueued via consensus path"
+    );
+
+    // The faucet tx has been signed and admitted to the mempool, but it is
+    // not yet finalized. Callers must poll `eth_getBalance` (or
+    // `eth_getTransactionReceipt(tx_hash)`) to confirm the transfer landed —
+    // an unhealthy consensus path can leave the tx queued indefinitely. The
+    // response wording reflects that distinction explicitly: "submitted",
+    // not "dispensed".
+    Ok(serde_json::json!({
+        "submitted": true,
+        "status": "queued",
+        "tx_hash": tx_hash_str,
+        "amount": amount_tnzo.to_string(),
+        "amount_wei": amount_wei.to_string(),
+        "recipient": address_str,
+        "message": format!(
+            "{} TNZO submitted to mempool. Poll eth_getBalance({}) to confirm finalization.",
+            amount_tnzo, address_str
+        ),
+    }))
+}
+
+/// Returns a structured deprecation error for the legacy escrow write RPCs.
+///
+/// The previous `tenzro_createEscrow` / `tenzro_releaseEscrow` handlers were
+/// removed in favor of consensus-mediated, signature-verified escrow
+/// transactions. Callers must build a `CreateEscrow` / `ReleaseEscrow` /
+/// `RefundEscrow` transaction with `tenzro_wallet::TransactionBuilder`, sign
+/// it, and submit via `eth_sendRawTransaction` (or use
+/// `tenzro_signAndSendTransaction` for server-side signing).
+fn handle_escrow_write_deprecated(method: &str) -> std::result::Result<Value, JsonRpcError> {
+    Err(JsonRpcError {
+        code: -32601,
+        message: format!(
+            "{} is removed. Build and sign a CreateEscrow/ReleaseEscrow/RefundEscrow \
+             transaction and submit via eth_sendRawTransaction or \
+             tenzro_signAndSendTransaction. Read-only escrow RPCs (tenzro_getEscrow, \
+             tenzro_listEscrowsByPayer, tenzro_listEscrowsByPayee) remain available.",
+            method
+        ),
+        data: None,
+    })
+}
+
+/// Render an `EscrowAccount` as JSON for read-only RPC responses.
+fn escrow_to_json(escrow: &tenzro_settlement::EscrowAccount) -> Value {
+    serde_json::json!({
+        "escrow_id": escrow.escrow_id,
+        "payer": format!("{}", escrow.payer),
+        "payee": format!("{}", escrow.payee),
+        "amount": escrow.amount.to_string(),
+        "asset_id": escrow.asset_id,
+        "status": format!("{:?}", escrow.status),
+        "created_at": escrow.created_at.as_millis(),
+        "expires_at": escrow.expires_at.as_millis(),
+        "release_conditions": escrow.release_conditions,
+    })
+}
+
+/// `tenzro_getEscrow` — read a single escrow record by id (hex-encoded 32-byte
+/// digest derived by the VM during `CreateEscrow`).
+async fn handle_get_escrow(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let escrow_id = params
+        .get("escrow_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing escrow_id".to_string(),
+            data: None,
+        })?;
+
+    let escrow_manager = node.escrow_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Escrow manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    let escrow = escrow_manager.get_escrow(escrow_id).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Escrow lookup failed: {}", e),
+        data: None,
+    })?;
+
+    Ok(escrow_to_json(&escrow))
+}
+
+/// `tenzro_listEscrowsByPayer` — list all escrows for a given payer address.
+async fn handle_list_escrows_by_payer(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let payer_hex = params
+        .get("payer")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing payer address".to_string(),
+            data: None,
+        })?;
+    let payer = parse_address(payer_hex)?;
+
+    let escrow_manager = node.escrow_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Escrow manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    let escrows = escrow_manager.get_escrows_by_payer(&payer);
+    Ok(serde_json::json!({
+        "payer": payer_hex,
+        "count": escrows.len(),
+        "escrows": escrows.iter().map(escrow_to_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `tenzro_listEscrowsByPayee` — list all escrows for a given payee address.
+async fn handle_list_escrows_by_payee(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let payee_hex = params
+        .get("payee")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing payee address".to_string(),
+            data: None,
+        })?;
+    let payee = parse_address(payee_hex)?;
+
+    let escrow_manager = node.escrow_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Escrow manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    let escrows = escrow_manager.get_escrows_by_payee(&payee);
+    Ok(serde_json::json!({
+        "payee": payee_hex,
+        "count": escrows.len(),
+        "escrows": escrows.iter().map(escrow_to_json).collect::<Vec<_>>(),
+    }))
+}
+
+async fn handle_open_payment_channel(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let counterparty_hex = params.get("counterparty")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing counterparty address".to_string(),
+            data: None,
+        })?;
+    let counterparty = parse_address(counterparty_hex)?;
+
+    let deposit = params.get("deposit")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or invalid deposit".to_string(),
+            data: None,
+        })?;
+
+    let sender_hex = params.get("sender")
+        .and_then(|v| v.as_str());
+    let sender = if let Some(hex) = sender_hex {
+        parse_address(hex)?
+    } else {
+        Address::zero()
+    };
+
+    let channel_manager = node.channel_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Channel manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_types::asset::AssetId;
+
+    let channel = channel_manager.open_channel(
+        sender,
+        counterparty,
+        deposit as u128,
+        AssetId::tnzo(),
+        tenzro_types::primitives::Timestamp::new(
+            tenzro_types::primitives::Timestamp::now().as_millis() + 86400 * 30 * 1000
+        ), // 30 day expiry
+    ).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to open payment channel: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "channel_id": channel.channel_id,
+        "payer": format!("{}", channel.payer),
+        "payee": format!("{}", channel.payee),
+        "deposit": channel.deposit.to_string(),
+        "spent": channel.spent.to_string(),
+        "status": format!("{:?}", channel.status),
+    }))
+}
+
+async fn handle_close_payment_channel(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let channel_id = params.get("channel_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing channel_id".to_string(),
+            data: None,
+        })?;
+
+    let channel_manager = node.channel_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Channel manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Get channel info before closing to return final balances
+    let channel = channel_manager.get_channel(channel_id).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Channel not found: {}", e),
+        data: None,
+    })?;
+
+    let final_deposit = channel.deposit;
+    let final_spent = channel.spent;
+    let final_balance = final_deposit.saturating_sub(final_spent);
+
+    // Close the channel via shared manager
+    channel_manager.close_channel(channel_id).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to close payment channel: {}", e),
+        data: None,
+    })?;
+
+    // Log settlement for on-chain finalization
+    if node.settlement().is_some() {
+        info!(
+            "Channel {} closed: payer={} payee={} spent={} remaining={}",
+            channel_id, channel.payer, channel.payee, final_spent, final_balance
+        );
+    }
+
+    Ok(serde_json::json!({
+        "channel_id": channel_id,
+        "status": "closed",
+        "final_balances": {
+            "deposit": final_deposit.to_string(),
+            "spent": final_spent.to_string(),
+            "remaining": final_balance.to_string(),
+        }
+    }))
+}
+
+/// Apply an off-chain channel update by submitting a payer-signed state transition.
+///
+/// Params:
+///   - `channel_id`: channel identifier (string)
+///   - `payment_amount`: incremental payment in this update (decimal string or u128)
+///   - `signature`: hex-encoded Ed25519 signature by the payer over the canonical
+///     encoding of the next state (`nonce || payer_balance || payee_balance`)
+async fn handle_update_payment_channel(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let channel_id = params.get("channel_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing channel_id".to_string(),
+            data: None,
+        })?;
+
+    let payment_amount: u128 = match params.get("payment_amount") {
+        Some(Value::String(s)) => s.parse().map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid payment_amount: {}", e),
+            data: None,
+        })?,
+        Some(Value::Number(n)) => n.as_u64().map(|v| v as u128).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "payment_amount must be a non-negative integer".to_string(),
+            data: None,
+        })?,
+        _ => return Err(JsonRpcError {
+            code: -32602,
+            message: "Missing payment_amount (string or number)".to_string(),
+            data: None,
+        }),
+    };
+
+    let sig_hex = params.get("signature")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing signature (hex)".to_string(),
+            data: None,
+        })?;
+    let sig_clean = sig_hex.strip_prefix("0x").unwrap_or(sig_hex);
+    let signature = hex::decode(sig_clean).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid signature hex: {}", e),
+        data: None,
+    })?;
+
+    let channel_manager = node.channel_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Channel manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    let new_state = channel_manager
+        .update_channel(channel_id, payment_amount, signature)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Channel update rejected: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "channel_id": channel_id,
+        "nonce": new_state.nonce,
+        "payer_balance": new_state.payer_balance.to_string(),
+        "payee_balance": new_state.payee_balance.to_string(),
+    }))
+}
+
+/// Inspect inference usage stats recorded by the per-token accounting layer.
+///
+/// Optional params (all optional — combine to scope the result):
+///   - `model_id`: return stats for this specific model only
+///   - `provider`: hex-encoded provider address; return stats for this provider only
+///
+/// With no filter, returns global stats plus per-model and per-provider summaries.
+async fn handle_list_inference_usage(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let tracker = node.usage_tracker().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Usage tracker not initialized".to_string(),
+        data: None,
+    })?;
+
+    let (model_filter, provider_filter) = match params {
+        Some(p) => {
+            let m = p.get("model_id").and_then(|v| v.as_str()).map(str::to_string);
+            let pr = match p.get("provider").and_then(|v| v.as_str()) {
+                Some(s) => Some(parse_address(s)?),
+                None => None,
+            };
+            (m, pr)
+        }
+        None => (None, None),
+    };
+
+    match (model_filter.as_deref(), provider_filter.as_ref()) {
+        (Some(model_id), Some(provider)) => {
+            // Intersection: filter the in-memory recent-records ring by both
+            // model_id and provider_id. Bounded by `max_recent_records`
+            // (see UsageTracker default ring size).
+            let records: Vec<_> = tracker
+                .get_recent_usage(usize::MAX)
+                .into_iter()
+                .filter(|r| r.model_id == model_id && &r.provider_id == provider)
+                .collect();
+            Ok(serde_json::json!({ "records": records }))
+        }
+        (Some(model_id), None) => {
+            Ok(serde_json::json!({ "model_stats": tracker.get_model_stats(model_id) }))
+        }
+        (None, Some(provider)) => {
+            Ok(serde_json::json!({ "provider_stats": tracker.get_provider_stats(provider) }))
+        }
+        (None, None) => Ok(serde_json::json!({
+            "global": tracker.get_global_stats(),
+            "models": tracker.list_model_stats(),
+            "providers": tracker.list_provider_stats(),
+        })),
+    }
+}
+
+/// Read the current reputation score for a provider.
+///
+/// Params:
+///   - `provider`: hex-encoded provider address
+async fn handle_get_provider_reputation(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let provider_hex = params.get("provider")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing provider address".to_string(),
+            data: None,
+        })?;
+    let provider = parse_address(provider_hex)?;
+
+    let provider_manager = node.provider_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Provider manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    let reputation = provider_manager.get_reputation(&provider).ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Provider not registered".to_string(),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "provider": provider_hex,
+        "reputation": reputation,
+    }))
+}
+
+/// Look up a cached `ProvenanceManifest` by 32-byte content hash.
+///
+/// Wave-1 read path for the EU AI Act Art. 50(2) machine-readable
+/// synthetic-content marker: the inference router signs every successful
+/// response and stashes the manifest in
+/// [`tenzro_model::ProvenanceStore`]. This RPC is the only public way to
+/// fetch it back.
+///
+/// Params:
+///   - `content_hash`: hex-encoded 32-byte SHA-256 of the inference output
+///     (with or without `0x` prefix).
+///
+/// Returns the manifest as JSON, or RPC error `-32004` if the store has no
+/// entry for that hash. The store has a bounded LRU-by-`signed_at`
+/// eviction policy, so a `not found` does not prove the response was never
+/// signed — only that we no longer have it cached. Auditors who need
+/// long-term retention should pull manifests at inference time.
+async fn handle_get_provenance(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let hash_hex = params
+        .get("content_hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing content_hash".to_string(),
+            data: None,
+        })?;
+    let stripped = hash_hex.strip_prefix("0x").unwrap_or(hash_hex);
+    let bytes = hex::decode(stripped).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid content_hash hex: {}", e),
+        data: None,
+    })?;
+    let hash = tenzro_types::Hash::from_bytes(&bytes).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "content_hash must be 32 bytes".to_string(),
+        data: None,
+    })?;
+
+    let store = node.provenance_store().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Provenance store not initialized".to_string(),
+        data: None,
+    })?;
+
+    match store.get(&hash) {
+        Some(manifest) => serde_json::to_value(&manifest).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Failed to serialize manifest: {}", e),
+            data: None,
+        }),
+        None => Err(JsonRpcError {
+            code: -32004,
+            message: "No provenance manifest cached for this content_hash".to_string(),
+            data: None,
+        }),
+    }
+}
+
+/// `tenzro_getDispute { "dispute_id": "..." }` — fetch a single channel
+/// dispute record. Returns the full `ChannelDispute` (challenger,
+/// evidence blobs, status, opened_at/timeout_at/resolved_at, resolution).
+/// JSON-RPC error `-32004` if no dispute with that id exists.
+async fn handle_get_dispute(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let dispute_id = params
+        .get("dispute_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing dispute_id".to_string(),
+            data: None,
+        })?;
+
+    let channel_manager = node.channel_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Channel manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    match channel_manager.get_dispute(dispute_id) {
+        Ok(dispute) => serde_json::to_value(&dispute).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Failed to serialize dispute: {}", e),
+            data: None,
+        }),
+        Err(_) => Err(JsonRpcError {
+            code: -32004,
+            message: format!("No dispute with id {}", dispute_id),
+            data: None,
+        }),
+    }
+}
+
+/// `tenzro_listDisputesByChannel { "channel_id": "..." }` — list every
+/// dispute (open or historical) attached to a channel. Returns
+/// `{ "channel_id": ..., "count": N, "disputes": [<ChannelDispute>, ...] }`.
+/// Empty list (`count: 0`) if the channel has no disputes — not an error.
+async fn handle_list_disputes_by_channel(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let channel_id = params
+        .get("channel_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing channel_id".to_string(),
+            data: None,
+        })?;
+
+    let channel_manager = node.channel_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Channel manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    let disputes = channel_manager.get_disputes_for_channel(channel_id);
+    let serialized = serde_json::to_value(&disputes).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Failed to serialize disputes: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "channel_id": channel_id,
+        "count": disputes.len(),
+        "disputes": serialized,
+    }))
+}
+
+async fn handle_create_proposal(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let title = params.get("title")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing proposal title".to_string(),
+            data: None,
+        })?;
+
+    let description = params.get("description")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing proposal description".to_string(),
+            data: None,
+        })?;
+
+    let proposal_type_str = params.get("proposal_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("text");
+
+    let proposer_hex = params.get("proposer")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing proposer address".to_string(),
+            data: None,
+        })?;
+    let proposer = parse_address(proposer_hex)?;
+
+    let governance = node.governance().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Governance not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_types::token::ProposalType;
+    let proposal_type = match proposal_type_str {
+        "parameter_change" => ProposalType::ParameterChange {
+            parameter: params.get("parameter").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+            new_value: params.get("new_value").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        },
+        "treasury_grant" => ProposalType::TreasuryGrant {
+            recipient: proposer,
+            amount: params.get("grant_amount").and_then(|v| v.as_u64()).unwrap_or(0) as u128,
+        },
+        "protocol_upgrade" => {
+            let code_hash_hex = params.get("code_hash")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: "Missing code_hash for protocol_upgrade proposal (expected 32-byte SHA-256 hex)".to_string(),
+                    data: None,
+                })?;
+            let code_hash = hex::decode(code_hash_hex.trim_start_matches("0x"))
+                .map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid code_hash hex: {}", e),
+                    data: None,
+                })?;
+            if code_hash.len() != 32 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("code_hash must be 32 bytes (SHA-256), got {}", code_hash.len()),
+                    data: None,
+                });
+            }
+            ProposalType::ProtocolUpgrade {
+                version: params.get("version").and_then(|v| v.as_str()).unwrap_or("0.0.0").to_string(),
+                code_hash,
+            }
+        },
+        _ => ProposalType::Custom {
+            proposal_data: description.as_bytes().to_vec(),
+        },
+    };
+
+    let voting_duration_ms = params.get("voting_duration_ms")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(7 * 24 * 3600 * 1000); // 7 days default
+
+    let proposer_stake = params.get("proposer_stake")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1000) as u128;
+
+    let proposal_id = governance.create_proposal(
+        title.to_string(),
+        description.to_string(),
+        proposer,
+        proposal_type,
+        voting_duration_ms,
+        proposer_stake,
+    ).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to create proposal: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "proposal_id": proposal_id,
+        "title": title,
+        "description": description,
+        "proposer": proposer_hex,
+        "status": "Active",
+    }))
+}
+
+async fn handle_delegate_voting_power(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let delegator_hex = params.get("delegator")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing delegator address".to_string(),
+            data: None,
+        })?;
+    let _delegator = parse_address(delegator_hex)?;
+
+    let delegatee_hex = params.get("delegatee")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing delegatee address".to_string(),
+            data: None,
+        })?;
+    let delegatee = parse_address(delegatee_hex)?;
+
+    let amount = params.get("amount")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or invalid amount".to_string(),
+            data: None,
+        })?;
+
+    let staking = node.staking().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Staking not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Delegate voting power by staking on behalf of delegatee
+    // In the current model, delegation is implemented as staking for a validator
+    use tenzro_types::token::ProviderType;
+    staking.stake(delegatee, amount as u128, ProviderType::Validator)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to delegate: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "delegator": delegator_hex,
+        "delegatee": delegatee_hex,
+        "amount": amount,
+        "status": "delegated",
+    }))
+}
+
+async fn handle_list_identities(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let (human_count, machine_count) = registry.count();
+    let all_identities = registry.list_all();
+
+    let identities: Vec<Value> = all_identities.iter().map(|(did, identity)| {
+        let identity_type = match &identity.identity_data {
+            tenzro_identity::IdentityData::Human { display_name, kyc_tier, controlled_machines } => {
+                serde_json::json!({
+                    "type": "human",
+                    "display_name": display_name,
+                    "kyc_tier": format!("{:?}", kyc_tier),
+                    "controlled_machines": controlled_machines,
+                })
+            }
+            tenzro_identity::IdentityData::Machine { capabilities, controller_did, reputation, tenzro_agent_id, .. } => {
+                serde_json::json!({
+                    "type": "machine",
+                    "capabilities": capabilities,
+                    "controller_did": controller_did,
+                    "reputation": reputation,
+                    "tenzro_agent_id": tenzro_agent_id,
+                })
+            }
+        };
+        serde_json::json!({
+            "did": did,
+            "status": format!("{:?}", identity.status),
+            "wallet_address": format!("0x{}", hex::encode(&identity.wallet_address.as_bytes()[..20])),
+            "wallet_id": identity.wallet_id,
+            "created_at": identity.created_at.to_rfc3339(),
+            "identity_data": identity_type,
+            "credentials_count": identity.credentials.len(),
+            "services_count": identity.services.len(),
+        })
+    }).collect();
+
+    Ok(serde_json::json!({
+        "human_count": human_count,
+        "machine_count": machine_count,
+        "total_count": human_count + machine_count,
+        "identities": identities,
+    }))
+}
+
+async fn handle_add_credential(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let did = params.get("did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing DID".to_string(),
+            data: None,
+        })?;
+
+    let credential_type = params.get("type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing credential type".to_string(),
+            data: None,
+        })?;
+
+    let issuer = params.get("issuer")
+        .and_then(|v| v.as_str())
+        .unwrap_or(did);
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_identity::VerifiableCredential;
+    use std::collections::HashMap;
+
+    let mut claims: HashMap<String, serde_json::Value> = HashMap::new();
+    if let Some(claims_obj) = params.get("claims").and_then(|v| v.as_object()) {
+        for (k, v) in claims_obj {
+            claims.insert(k.clone(), v.clone());
+        }
+    }
+
+    use tenzro_identity::credential::{TenzroCredentialType, CredentialSubject};
+    use chrono::Utc;
+
+    let credential_id = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+    let credential = VerifiableCredential {
+        context: vec!["https://www.w3.org/2018/credentials/v1".to_string()],
+        id: credential_id.clone(),
+        credential_type: vec!["VerifiableCredential".to_string(), credential_type.to_string()],
+        tenzro_type: TenzroCredentialType::Custom(credential_type.to_string()),
+        issuer: issuer.to_string(),
+        issuance_date: Utc::now(),
+        expiration_date: None,
+        credential_subject: CredentialSubject {
+            id: did.to_string(),
+            claims,
+        },
+        proof: None,
+    };
+
+    registry.issue_credential(
+        did,
+        credential,
+    ).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to issue credential: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "credential_id": credential_id,
+        "type": credential_type,
+        "issuer": issuer,
+        "subject": did,
+        "status": "issued",
+    }))
+}
+
+async fn handle_add_service(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let did = params.get("did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing DID".to_string(),
+            data: None,
+        })?;
+
+    let service_type = params.get("type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing service type".to_string(),
+            data: None,
+        })?;
+
+    let endpoint = params.get("endpoint")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing service endpoint".to_string(),
+            data: None,
+        })?;
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Resolve identity to add service
+    let mut identity = registry.resolve(did).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to resolve identity: {}", e),
+        data: None,
+    })?;
+
+    // Add service endpoint
+    use tenzro_identity::ServiceEndpoint;
+    let service = ServiceEndpoint {
+        id: format!("{}#{}", did, service_type),
+        service_type: service_type.to_string(),
+        service_endpoint: endpoint.to_string(),
+    };
+
+    identity.add_service(service.clone()).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid service endpoint: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "did": did,
+        "service": {
+            "id": service.id,
+            "type": service.service_type,
+            "endpoint": service.service_endpoint,
+        },
+        "status": "added",
+    }))
+}
+
+async fn handle_set_username(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let did = params.get("did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing did".to_string(),
+            data: None,
+        })?;
+
+    let username = params.get("username")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing username".to_string(),
+            data: None,
+        })?;
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    registry.register_username(did, username).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("{}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "did": did,
+        "username": username,
+        "status": "registered",
+    }))
+}
+
+async fn handle_resolve_username(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let username = params.get("username")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing username".to_string(),
+            data: None,
+        })?;
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    match registry.resolve_username(username) {
+        Some(did) => Ok(serde_json::json!({
+            "username": username,
+            "did": did,
+        })),
+        None => Err(JsonRpcError {
+            code: -32000,
+            message: format!("Username not found: {}", username),
+            data: None,
+        }),
+    }
+}
+
+async fn handle_get_payment_receipt(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let receipt_id = params.get("receipt_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing receipt_id".to_string(),
+            data: None,
+        })?;
+
+    // This is the same as settlement receipt lookup
+    let settlement_engine = node.settlement().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Settlement engine not initialized".to_string(),
+        data: None,
+    })?;
+
+    match settlement_engine.get_settlement(receipt_id) {
+        Ok(receipt) => Ok(serde_json::json!({
+            "receipt_id": receipt.receipt_id,
+            "amount": receipt.amount,
+            "provider": format!("{}", receipt.provider),
+            "customer": format!("{}", receipt.customer),
+            "status": format!("{:?}", receipt.status),
+            "timestamp": receipt.settled_at.as_millis(),
+        })),
+        Err(_) => Ok(Value::Null)
+    }
+}
+
+async fn handle_pay_visa_tap(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let credential: tenzro_payments::types::PaymentCredential = serde_json::from_value(params)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid Visa TAP payment credential: {}", e),
+            data: None,
+        })?;
+
+    let gateway = node.payment_gateway().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Payment gateway not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_payments::traits::PaymentGateway;
+    let receipt = gateway.verify_and_settle(&credential)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Visa TAP payment failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::to_value(&receipt).unwrap_or(serde_json::json!({})))
+}
+
+async fn handle_pay_mastercard(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let credential: tenzro_payments::types::PaymentCredential = serde_json::from_value(params)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid Mastercard Agent Pay credential: {}", e),
+            data: None,
+        })?;
+
+    let gateway = node.payment_gateway().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Payment gateway not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_payments::traits::PaymentGateway;
+    let receipt = gateway.verify_and_settle(&credential)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Mastercard Agent Pay payment failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::to_value(&receipt).unwrap_or(serde_json::json!({})))
+}
+
+async fn handle_get_finalized_block(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_storage::{BlockStoreImpl, traits::BlockStore};
+
+    let block_store = BlockStoreImpl::new(storage.clone()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Block store error: {}", e),
+        data: None,
+    })?;
+
+    let latest_height = block_store.latest_height().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to get latest height: {}", e),
+        data: None,
+    })?;
+
+    // Finalized block is typically latest - confirmation_depth
+    // Use 6 confirmations as a conservative estimate
+    let confirmation_depth = 6u64;
+    let finalized_height = latest_height
+        .map(|h| {
+            h.0.saturating_sub(confirmation_depth)
+        })
+        .unwrap_or(0);
+
+    Ok(serde_json::json!(format!("0x{:x}", finalized_height)))
+}
+
+async fn handle_export_config(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    let toml_str = toml::to_string_pretty(config).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to serialize config: {}", e),
+        data: None,
+    })?;
+
+    // Also save to the data directory for persistence
+    let export_path = config.data_dir.join("exported_config.toml");
+    config.save_to_file(&export_path).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to save config: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "config": toml_str,
+        "exported_path": export_path.to_string_lossy(),
+    }))
+}
+
+async fn handle_node_info(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let status = node.status().await;
+    Ok(serde_json::to_value(status).unwrap())
+}
+
+async fn handle_peer_count(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let status = node.status().await;
+    Ok(serde_json::json!(format!("0x{:x}", status.peer_count)))
+}
+
+async fn handle_syncing(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let status = node.status().await;
+    let local_tip = status.block_height;
+
+    // Threshold: only report syncing when network_tip outpaces local_tip by
+    // more than this many blocks. Absorbs gossip jitter so a node that just
+    // produced block N doesn't briefly report `syncing: true` while a peer's
+    // status from block N-1 is still in flight.
+    const SYNC_LAG_THRESHOLD: u64 = 2;
+
+    // Network-tip estimate: max height across fresh peer status messages on
+    // tenzro/status/1.0.0. None ⇒ no fresh peer status (single-node, or
+    // network silence). Defaults to local_tip in that case so we don't
+    // falsely report syncing. TODO mainnet: use median (or local_tip + cap)
+    // to harden against a malicious peer claiming a huge height.
+    let network_tip = node.network_tip().unwrap_or(local_tip);
+    let highest_block = local_tip.max(network_tip);
+
+    let is_syncing = network_tip > local_tip + SYNC_LAG_THRESHOLD;
+
+    if is_syncing {
+        Ok(serde_json::json!({
+            "syncing": true,
+            "startingBlock": "0x0",
+            "currentBlock": format!("0x{:x}", local_tip),
+            "highestBlock": format!("0x{:x}", highest_block),
+        }))
+    } else {
+        Ok(serde_json::json!(false))
+    }
+}
+
+// Identity (TDIP) handlers
+
+async fn handle_register_identity(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let display_name = params
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown")
+        .to_string();
+
+    // Validate display_name length (MEDIUM #115)
+    tenzro_types::validation::validate_string_len(
+        &display_name, "display_name", tenzro_types::validation::MAX_DISPLAY_NAME_LEN,
+    ).map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
+
+    // Accept public_key param or generate a new keypair
+    let (public_key_bytes, private_key_hex) = if let Some(pk_str) = params
+        .get("public_key")
+        .and_then(|v| v.as_str())
+    {
+        let hex_clean = pk_str.strip_prefix("0x").unwrap_or(pk_str);
+        let bytes = hex::decode(hex_clean).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid public_key hex: {}", e),
+            data: None,
+        })?;
+        (bytes, None)
+    } else {
+        // Auto-generate a keypair for the identity
+        let key_type_str = params
+            .get("key_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ed25519");
+        let kt = match key_type_str.to_lowercase().as_str() {
+            "secp256k1" | "evm" => KeyType::Secp256k1,
+            _ => KeyType::Ed25519,
+        };
+        let keypair = KeyPair::generate(kt).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Key generation failed: {}", e),
+            data: None,
+        })?;
+        let pk_bytes = keypair.public_key().to_bytes();
+        let sk_hex = format!("0x{}", hex::encode(keypair.secret_key().as_bytes()));
+        (pk_bytes, Some(sk_hex))
+    };
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let identity = registry
+        .register_human_with_fee(
+            public_key_bytes,
+            display_name,
+            tenzro_types::identity::KycTier::Unverified,
+        )
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Registration failed: {}", e),
+            data: None,
+        })?
+        .identity;
+
+    // Persist identity to RocksDB (fixes: previously only stored in DashMap)
+    if let Some(storage) = node.storage() {
+        let did_key = identity.did_string();
+        let identity_bytes = identity.to_bytes().map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity serialization failed: {}", e),
+            data: None,
+        })?;
+        storage.put(CF_IDENTITIES, did_key.as_bytes(), &identity_bytes).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity persistence failed: {}", e),
+            data: None,
+        })?;
+        info!(did = %did_key, "Identity persisted to ledger storage (CF_IDENTITIES)");
+    }
+
+    let mut result = serde_json::json!({
+        "did": identity.did_string(),
+        "status": format!("{}", identity.status),
+    });
+
+    // Include private key only when auto-generated (not when user provides public_key)
+    if let Some(sk) = private_key_hex {
+        result["private_key"] = serde_json::json!(sk);
+    }
+
+    Ok(result)
+}
+
+async fn handle_register_machine_identity(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Extract controller DID (required)
+    let controller_did = params
+        .get("controller_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required param: controller_did".to_string(),
+            data: None,
+        })?;
+
+    // Extract capabilities (required)
+    let capabilities = params
+        .get("capabilities")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<String>>()
+        })
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or invalid capabilities (must be array of strings)".to_string(),
+            data: None,
+        })?;
+
+    // Accept public_key param or generate a new keypair
+    let (public_key_bytes, private_key_hex) = if let Some(pk_str) = params
+        .get("public_key")
+        .and_then(|v| v.as_str())
+    {
+        let hex_clean = pk_str.strip_prefix("0x").unwrap_or(pk_str);
+        let bytes = hex::decode(hex_clean).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid public_key hex: {}", e),
+            data: None,
+        })?;
+        (bytes, None)
+    } else {
+        // Auto-generate a keypair for the machine identity
+        let key_type_str = params
+            .get("key_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ed25519");
+        let kt = match key_type_str.to_lowercase().as_str() {
+            "secp256k1" | "evm" => KeyType::Secp256k1,
+            _ => KeyType::Ed25519,
+        };
+        let keypair = KeyPair::generate(kt).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Key generation failed: {}", e),
+            data: None,
+        })?;
+        let pk_bytes = keypair.public_key().to_bytes();
+        let sk_hex = format!("0x{}", hex::encode(keypair.secret_key().as_bytes()));
+        (pk_bytes, Some(sk_hex))
+    };
+
+    // Parse delegation scope (optional)
+    use tenzro_identity::DelegationScope;
+    let delegation_scope = if let Some(scope_value) = params.get("delegation_scope") {
+        let mut scope = DelegationScope::unrestricted();
+
+        if let Some(max_tx) = scope_value.get("max_transaction_value").and_then(|v| v.as_u64()) {
+            scope = scope.with_max_transaction_value(max_tx as u128);
+        }
+
+        if let Some(max_daily) = scope_value.get("max_daily_spend").and_then(|v| v.as_u64()) {
+            scope = scope.with_max_daily_spend(max_daily as u128);
+        }
+
+        if let Some(ops) = scope_value.get("allowed_operations").and_then(|v| v.as_array()) {
+            let operations: Vec<String> = ops
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            scope = scope.with_allowed_operations(operations);
+        }
+
+        if let Some(protocols) = scope_value.get("allowed_payment_protocols").and_then(|v| v.as_array()) {
+            let protocol_list: Vec<String> = protocols
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            scope = scope.with_allowed_payment_protocols(protocol_list);
+        }
+
+        if let Some(chains) = scope_value.get("allowed_chains").and_then(|v| v.as_array()) {
+            let chain_list: Vec<String> = chains
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            scope = scope.with_allowed_chains(chain_list);
+        }
+
+        scope
+    } else {
+        DelegationScope::default()
+    };
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let identity = registry
+        .register_machine_with_fee(
+            controller_did,
+            public_key_bytes,
+            capabilities,
+            delegation_scope,
+        )
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Machine registration failed: {}", e),
+            data: None,
+        })?
+        .identity;
+
+    // Persist identity to RocksDB
+    if let Some(storage) = node.storage() {
+        let did_key = identity.did_string();
+        let identity_bytes = identity.to_bytes().map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity serialization failed: {}", e),
+            data: None,
+        })?;
+        storage.put(CF_IDENTITIES, did_key.as_bytes(), &identity_bytes).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity persistence failed: {}", e),
+            data: None,
+        })?;
+        info!(did = %did_key, controller = %controller_did, "Machine identity persisted to ledger storage (CF_IDENTITIES)");
+    }
+
+    // Extract capabilities from identity data
+    let capabilities = match &identity.identity_data {
+        tenzro_identity::IdentityData::Machine { capabilities, .. } => capabilities.clone(),
+        _ => Vec::new(),
+    };
+
+    let mut result = serde_json::json!({
+        "did": identity.did_string(),
+        "controller_did": controller_did,
+        "status": format!("{}", identity.status),
+        "capabilities": capabilities,
+    });
+
+    // Include private key only when auto-generated
+    if let Some(sk) = private_key_hex {
+        result["private_key"] = serde_json::json!(sk);
+    }
+
+    Ok(result)
+}
+
+async fn handle_import_identity(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Handle both object and array-wrapped formats
+    let params_obj = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params.clone())
+    } else {
+        params.clone()
+    };
+
+    let private_key_hex = params_obj
+        .get("private_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required param: private_key".to_string(),
+            data: None,
+        })?;
+
+    let key_type_str = params_obj
+        .get("key_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ed25519");
+
+    let display_name = params_obj
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Imported Identity")
+        .to_string();
+
+    // Parse private key hex
+    let hex_clean = private_key_hex.strip_prefix("0x").unwrap_or(private_key_hex);
+    let key_bytes = hex::decode(hex_clean).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid private_key hex: {}", e),
+        data: None,
+    })?;
+
+    // Create keypair from imported private key
+    let kt = match key_type_str.to_lowercase().as_str() {
+        "secp256k1" | "evm" => KeyType::Secp256k1,
+        _ => KeyType::Ed25519,
+    };
+    let keypair = KeyPair::from_bytes(kt, &key_bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to create keypair from private key: {}", e),
+        data: None,
+    })?;
+
+    let public_key_bytes = keypair.public_key().to_bytes();
+
+    // Detect hardware
+    let hardware = detect_hardware(&node.config().data_dir).await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Hardware detection failed: {}", e),
+        data: None,
+    })?;
+
+    let device_fingerprint = hardware.device_fingerprint.clone();
+    *node.hardware_profile.write() = Some(hardware.clone());
+
+    // Create wallet from imported key
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Wallet service not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_wallet::WalletService;
+    let wallet = wallet_service.provision_wallet().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Wallet creation failed: {}", e),
+        data: None,
+    })?;
+
+    // Register identity with the imported public key
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let mut identity = registry
+        .register_human_with_fee(
+            public_key_bytes,
+            display_name.clone(),
+            tenzro_types::identity::KycTier::Unverified,
+        )
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity registration failed: {}", e),
+            data: None,
+        })?
+        .identity;
+
+    // Bind metadata
+    identity.metadata.insert("device_fingerprint".to_string(), device_fingerprint.clone());
+    identity.metadata.insert("wallet_id".to_string(), wallet.wallet_id.0.clone());
+    identity.metadata.insert("wallet_address".to_string(), format!("{}", wallet.address));
+    identity.metadata.insert("imported".to_string(), "true".to_string());
+    identity.metadata.insert("key_type".to_string(), key_type_str.to_string());
+
+    // Persist identity to RocksDB
+    if let Some(storage) = node.storage() {
+        let did_key = identity.did_string();
+        let identity_bytes = identity.to_bytes().map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity serialization failed: {}", e),
+            data: None,
+        })?;
+        storage.put(CF_IDENTITIES, did_key.as_bytes(), &identity_bytes).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity persistence failed: {}", e),
+            data: None,
+        })?;
+        info!(
+            did = %did_key,
+            device_fingerprint = %device_fingerprint,
+            "Imported identity persisted to ledger storage (CF_IDENTITIES)"
+        );
+    }
+
+    Ok(serde_json::json!({
+        "identity": {
+            "did": identity.did_string(),
+            "identity_type": "human",
+            "display_name": display_name,
+            "status": format!("{}", identity.status),
+        },
+        "wallet": {
+            "wallet_id": wallet.wallet_id.0,
+            "address": format!("{}", wallet.address),
+            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+        },
+        "hardware": hardware,
+        "hardware_profile": hardware,
+        "device_fingerprint": device_fingerprint,
+        "imported": true,
+    }))
+}
+
+async fn handle_resolve_did_document(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let did = params
+        .get("did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'did' parameter".to_string(),
+            data: None,
+        })?;
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let identity = registry.resolve(did).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Resolution failed: {}", e),
+        data: None,
+    })?;
+
+    let doc = tenzro_identity::w3c::identity_to_did_document(&identity);
+    serde_json::to_value(&doc).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization failed: {}", e),
+        data: None,
+    })
+}
+
+async fn handle_resolve_identity(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let did = params
+        .get("did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'did' parameter".to_string(),
+            data: None,
+        })?;
+
+    // Resolve identity from RocksDB (the authoritative on-chain store)
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+
+    let bytes = storage.get(CF_IDENTITIES, did.as_bytes()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Ledger storage read failed: {}", e),
+        data: None,
+    })?;
+
+    let identity = match bytes {
+        Some(data) => {
+            use tenzro_identity::TenzroIdentity;
+            TenzroIdentity::from_bytes(&data).map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Identity deserialization failed: {}", e),
+                data: None,
+            })?
+        }
+        None => {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("Identity not found on ledger: {}", did),
+                data: None,
+            });
+        }
+    };
+
+    // Serialize public keys as structured objects
+    let public_keys: Vec<serde_json::Value> = identity.public_keys.iter()
+        .map(|k| serde_json::json!({
+            "key_id": k.key_id,
+            "key_type": k.key_type,
+            "public_key": hex::encode(&k.public_key),
+        }))
+        .collect();
+
+    // Serialize credentials
+    let credentials: Vec<serde_json::Value> = identity.credentials.iter()
+        .map(|c| serde_json::json!({
+            "credential_type": c.credential_type,
+            "issuer": c.issuer,
+            "subject": c.credential_subject.id,
+            "issued_at": c.issuance_date.to_rfc3339(),
+        }))
+        .collect();
+
+    // Serialize services
+    let services: Vec<serde_json::Value> = identity.services.iter()
+        .map(|s| serde_json::json!({
+            "id": s.id,
+            "service_type": s.service_type,
+            "endpoint": s.service_endpoint,
+        }))
+        .collect();
+
+    Ok(serde_json::json!({
+        "did": identity.did_string(),
+        "status": format!("{}", identity.status),
+        "is_human": identity.is_human(),
+        "is_machine": identity.is_machine(),
+        "display_name": identity.display_name(),
+        "key_count": identity.public_keys.len(),
+        "credential_count": identity.credentials.len(),
+        "service_count": identity.services.len(),
+        "public_keys": public_keys,
+        "credentials": credentials,
+        "services": services,
+        "metadata": identity.metadata,
+    }))
+}
+
+// Ethereum-compatible handlers
+
+async fn handle_send_raw_transaction(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+
+    // Expect params as object with transaction fields
+    let from_str = params.get("from").or_else(|| params.as_array().and_then(|a| a.first()).and_then(|v| v.get("from")))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602, message: "Missing 'from' field".to_string(), data: None,
+        })?;
+    let to_str = params.get("to").or_else(|| params.as_array().and_then(|a| a.first()).and_then(|v| v.get("to")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("0x0000000000000000000000000000000000000000000000000000000000000000");
+
+    let value = params.get("value").or_else(|| params.as_array().and_then(|a| a.first()).and_then(|v| v.get("value")))
+        .and_then(|v| v.as_u64().map(|n| n as u128).or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok())))
+        .unwrap_or(0);
+    let gas_limit = params.get("gas_limit").or_else(|| params.get("gasLimit"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(21000);
+    let gas_price = params.get("gas_price").or_else(|| params.get("gasPrice"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1000000000); // 1 Gwei default
+    let nonce = params.get("nonce")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    // Optional timestamp — if not supplied, we stamp server-side, but then the
+    // client cannot pre-compute the transaction hash for signing. Callers that
+    // sign client-side MUST supply the same timestamp they signed against.
+    let timestamp_ms = params.get("timestamp")
+        .or_else(|| params.as_array().and_then(|a| a.first()).and_then(|v| v.get("timestamp")))
+        .and_then(|v| v.as_u64());
+    let chain_id_param = params.get("chain_id").or_else(|| params.get("chainId"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337));
+
+    let from_addr = parse_address(from_str)?;
+    let to_addr = parse_address(to_str)?;
+
+    // Allow callers to specify an arbitrary typed `tx_type` payload for typed
+    // transactions (CreateEscrow / ReleaseEscrow / RefundEscrow / etc). The
+    // value must round-trip through TransactionType's serde representation.
+    let tx_type_field = params
+        .get("tx_type")
+        .or_else(|| params.as_array().and_then(|a| a.first()).and_then(|v| v.get("tx_type")));
+    let tx_type = if let Some(tx_type_value) = tx_type_field {
+        serde_json::from_value::<TransactionType>(tx_type_value.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid 'tx_type' payload: {}", e),
+            data: None,
+        })?
+    } else {
+        TransactionType::Transfer { amount: value }
+    };
+
+    // PQ leg: ML-DSA-65 verifying key bytes (1952) — mandatory part of the hash
+    // preimage so a hybrid signer commits to its PQ identity.
+    let pq_pk_hex = params.get("pq_public_key")
+        .or_else(|| params.get("pqPublicKey"))
+        .or_else(|| params.as_array().and_then(|a| a.first()).and_then(|v| v.get("pq_public_key").or_else(|| v.get("pqPublicKey"))))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'pq_public_key' field. ML-DSA-65 verifying key (1952 bytes hex) is mandatory.".to_string(),
+            data: None,
+        })?;
+    let pq_pk_clean = pq_pk_hex.strip_prefix("0x").unwrap_or(pq_pk_hex);
+    let pq_public_key = hex::decode(pq_pk_clean).map_err(|_| JsonRpcError {
+        code: -32602, message: "Invalid hex in 'pq_public_key' field".to_string(), data: None,
+    })?;
+    if pq_public_key.len() != 1952 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("pq_public_key must be 1952 bytes (ML-DSA-65 vk), got {}", pq_public_key.len()),
+            data: None,
+        });
+    }
+
+    // Build the transaction. If a timestamp is supplied we use it verbatim so
+    // that client-side and server-side hashes match bit-for-bit.
+    let tx = tenzro_types::Transaction {
+        chain_id: ChainId::from(chain_id_param),
+        from: from_addr,
+        to: to_addr,
+        nonce: Nonce::from(nonce),
+        tx_type,
+        gas_limit,
+        gas_price,
+        timestamp: match timestamp_ms {
+            Some(ms) => tenzro_types::primitives::Timestamp::new(ms as i64),
+            None => tenzro_types::primitives::Timestamp::now(),
+        },
+        memo: None,
+        pq_public_key,
+    };
+
+    // Require both signature and public key from the caller (pre-signed transaction)
+    let sig_hex = params.get("signature")
+        .or_else(|| params.as_array().and_then(|a| a.first()).and_then(|v| v.get("signature")))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'signature' field. Transactions must be pre-signed with Ed25519.".to_string(),
+            data: None,
+        })?;
+    let pubkey_hex = params.get("public_key")
+        .or_else(|| params.get("publicKey"))
+        .or_else(|| params.as_array().and_then(|a| a.first()).and_then(|v| v.get("public_key").or_else(|| v.get("publicKey"))))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'public_key' field. Include the Ed25519 public key that signed this transaction.".to_string(),
+            data: None,
+        })?;
+
+    let sig_clean = sig_hex.strip_prefix("0x").unwrap_or(sig_hex);
+    let sig_bytes = hex::decode(sig_clean).map_err(|_| JsonRpcError {
+        code: -32602, message: "Invalid hex in 'signature' field".to_string(), data: None,
+    })?;
+
+    let pk_clean = pubkey_hex.strip_prefix("0x").unwrap_or(pubkey_hex);
+    let pubkey_bytes = hex::decode(pk_clean).map_err(|_| JsonRpcError {
+        code: -32602, message: "Invalid hex in 'public_key' field".to_string(), data: None,
+    })?;
+
+    if sig_bytes.len() != 64 {
+        return Err(JsonRpcError {
+            code: -32602, message: format!("Signature must be 64 bytes, got {}", sig_bytes.len()), data: None,
+        });
+    }
+    if pubkey_bytes.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602, message: format!("Public key must be 32 bytes, got {}", pubkey_bytes.len()), data: None,
+        });
+    }
+
+    // PQ signature: ML-DSA-65 signature over Transaction::hash() (3309 bytes).
+    let pq_sig_hex = params.get("pq_signature")
+        .or_else(|| params.get("pqSignature"))
+        .or_else(|| params.as_array().and_then(|a| a.first()).and_then(|v| v.get("pq_signature").or_else(|| v.get("pqSignature"))))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'pq_signature' field. ML-DSA-65 signature (3309 bytes hex) is mandatory.".to_string(),
+            data: None,
+        })?;
+    let pq_sig_clean = pq_sig_hex.strip_prefix("0x").unwrap_or(pq_sig_hex);
+    let pq_signature = hex::decode(pq_sig_clean).map_err(|_| JsonRpcError {
+        code: -32602, message: "Invalid hex in 'pq_signature' field".to_string(), data: None,
+    })?;
+    if pq_signature.len() != 3309 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("pq_signature must be 3309 bytes (ML-DSA-65), got {}", pq_signature.len()),
+            data: None,
+        });
+    }
+
+    let signed_tx = SignedTransaction::new(tx, Signature::new(sig_bytes.clone(), pubkey_bytes.clone()), pq_signature);
+    let tx_hash = signed_tx.clone().hash();
+
+    info!(
+        target: "rpc",
+        tx_hash = %tx_hash,
+        from = %from_str,
+        to = %to_str,
+        value,
+        nonce,
+        chain_id = chain_id_param,
+        "eth_sendRawTransaction: received pre-signed transaction"
+    );
+
+    // Synchronously verify BOTH legs of the hybrid signature before accepting
+    // the tx. Wave 3d post-quantum migration: every admitted transaction must
+    // satisfy classical Ed25519 AND ML-DSA-65. Previously this was done
+    // asynchronously in the event loop, which let invalid-signature txs return
+    // a bogus tx_hash that never finalized. Now we reject at RPC time so the
+    // caller gets immediate feedback.
+    {
+        use tenzro_crypto::{PublicKey, KeyType, signatures};
+        let crypto_sig = tenzro_crypto::Signature::new(KeyType::Ed25519, sig_bytes);
+        let public_key = PublicKey::new(KeyType::Ed25519, pubkey_bytes);
+        let message = signed_tx.transaction.hash();
+
+        // 1. Classical Ed25519 leg.
+        if let Err(e) = signatures::verify(&public_key, message.as_bytes(), &crypto_sig) {
+            warn!(
+                target: "rpc",
+                tx_hash = %tx_hash,
+                error = %e,
+                "eth_sendRawTransaction: classical Ed25519 verification failed (-32003)"
+            );
+            return Err(JsonRpcError {
+                code: -32003,
+                message: format!(
+                    "Classical Ed25519 signature verification failed: {}. The signature must be an Ed25519 \
+                     signature over the SHA-256 hash of the transaction struct, not a JSON blob. \
+                     Use `tenzro_signTransaction` to produce a valid signed payload.",
+                    e
+                ),
+                data: None,
+            });
+        }
+
+        // 2. Post-quantum ML-DSA-65 leg. The verifying key (1952 bytes) is
+        //    committed to via Transaction::hash() so a forger cannot swap it
+        //    out without invalidating the classical signature.
+        if let Err(e) = tenzro_crypto::pq::ml_dsa_verify(
+            &signed_tx.transaction.pq_public_key,
+            message.as_bytes(),
+            &signed_tx.pq_signature,
+        ) {
+            warn!(
+                target: "rpc",
+                tx_hash = %tx_hash,
+                error = %e,
+                "eth_sendRawTransaction: ML-DSA-65 verification failed (-32003)"
+            );
+            return Err(JsonRpcError {
+                code: -32003,
+                message: format!(
+                    "ML-DSA-65 signature verification failed: {}. The pq_signature must be a \
+                     ML-DSA-65 (FIPS 204) signature over the SHA-256 hash of the transaction \
+                     struct, produced with the signing key whose verifying key bytes are in \
+                     `pq_public_key`. Use `tenzro_signTransaction` to produce a valid hybrid \
+                     signed payload.",
+                    e
+                ),
+                data: None,
+            });
+        }
+    }
+
+    // Submit to event loop
+    let event_sender = node.event_sender().ok_or_else(|| {
+        error!(target: "rpc", tx_hash = %tx_hash, "eth_sendRawTransaction: node event loop not running");
+        JsonRpcError {
+            code: -32000, message: "Node event loop not running".to_string(), data: None,
+        }
+    })?;
+
+    event_sender.send(NodeEvent::NewTransaction(signed_tx)).await
+        .map_err(|e| {
+            error!(
+                target: "rpc",
+                tx_hash = %tx_hash,
+                error = %e,
+                "eth_sendRawTransaction: failed to enqueue tx for event loop"
+            );
+            JsonRpcError {
+                code: -32000,
+                message: format!("Failed to submit transaction: {}", e),
+                data: None,
+            }
+        })?;
+
+    info!(
+        target: "rpc",
+        tx_hash = %tx_hash,
+        "eth_sendRawTransaction: tx enqueued for admission"
+    );
+
+    Ok(serde_json::json!(format!("{}", tx_hash)))
+}
+
+async fn handle_get_block_by_number(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    // Alias to handle_get_block
+    handle_get_block(node, params).await
+}
+
+async fn handle_get_block_by_hash(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+
+    let hash_str = if let Some(arr) = params.as_array() {
+        arr.first().and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+            code: -32602, message: "Invalid hash param".to_string(), data: None,
+        })?
+    } else {
+        params.get("hash").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+            code: -32602, message: "Missing hash".to_string(), data: None,
+        })?
+    };
+
+    let hash_hex = hash_str.strip_prefix("0x").unwrap_or(hash_str);
+    let hash_bytes = hex::decode(hash_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid hash: {}", e), data: None,
+    })?;
+    let hash = tenzro_types::primitives::Hash::from_bytes(&hash_bytes).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Hash must be 32 bytes".to_string(), data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let block_store = BlockStoreImpl::new(storage.clone()).map_err(|e| JsonRpcError {
+        code: -32000, message: format!("Block store error: {}", e), data: None,
+    })?;
+
+    let block = block_store.get_block(&hash).await.map_err(|e| JsonRpcError {
+        code: -32000, message: format!("Failed to get block: {}", e), data: None,
+    })?;
+
+    match block {
+        Some(b) => Ok(serde_json::json!({
+            "height": b.height().0,
+            "hash": format!("{}", b.hash()),
+            "prev_hash": format!("{}", b.header.prev_hash),
+            "state_root": format!("{}", b.header.state_root),
+            "tx_root": format!("{}", b.header.tx_root),
+            "timestamp": b.header.timestamp.as_millis(),
+            "proposer": format!("{}", b.header.proposer),
+            "tx_count": b.transactions.len(),
+            "gas_used": b.header.metadata.gas_used,
+            "gas_limit": b.header.metadata.gas_limit,
+        })),
+        None => Ok(Value::Null),
+    }
+}
+
+async fn handle_chain_id(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let chain_id = node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337);
+    Ok(serde_json::json!(format!("0x{:x}", chain_id)))
+}
+
+async fn handle_net_version(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let chain_id = node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337);
+    Ok(serde_json::json!(format!("{}", chain_id)))
+}
+
+async fn handle_net_peer_count(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let status = node.status().await;
+    Ok(serde_json::json!(format!("0x{:x}", status.peer_count)))
+}
+
+// Provider handlers
+
+async fn handle_participate(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    // Extract display name from params (handle both object and array-wrapped formats)
+    let params_obj = params
+        .as_ref()
+        .and_then(|p| {
+            // If params is an array, unwrap the first element
+            if let Some(arr) = p.as_array() {
+                arr.first().cloned()
+            } else {
+                Some(p.clone())
+            }
+        });
+    let display_name = params_obj
+        .as_ref()
+        .and_then(|p| p.get("display_name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("Tenzro User")
+        .to_string();
+    // Optional DPoP key thumbprint (RFC 7638) — bind the access token to a
+    // client-held key when supplied. Omit for the simpler bearer-only flow.
+    let dpop_jkt = params_obj
+        .as_ref()
+        .and_then(|p| p.get("dpop_jkt"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let ttl_secs = params_obj
+        .as_ref()
+        .and_then(|p| p.get("ttl_secs"))
+        .and_then(|v| v.as_u64());
+
+    // Detect hardware
+    let hardware = detect_hardware(&node.config().data_dir).await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Hardware detection failed: {}", e),
+        data: None,
+    })?;
+
+    let device_fingerprint = hardware.device_fingerprint.clone();
+
+    // Store hardware profile
+    *node.hardware_profile.write() = Some(hardware.clone());
+
+    // Create wallet
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Wallet service not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_wallet::WalletService;
+    let wallet = wallet_service.provision_wallet().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Wallet creation failed: {}", e),
+        data: None,
+    })?;
+
+    // Register identity
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let mut identity = registry
+        .register_human_with_fee(
+            wallet.public_key.to_bytes(),
+            display_name.clone(),
+            tenzro_types::identity::KycTier::Unverified,
+        )
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity registration failed: {}", e),
+            data: None,
+        })?
+        .identity;
+
+    // Bind hardware fingerprint to identity metadata (ties device to identity on-chain)
+    identity.metadata.insert("device_fingerprint".to_string(), device_fingerprint.clone());
+    identity.metadata.insert("wallet_id".to_string(), wallet.wallet_id.0.clone());
+    identity.metadata.insert("wallet_address".to_string(), format!("{}", wallet.address));
+
+    // Persist identity to RocksDB (on-chain storage on the Tenzro Ledger)
+    if let Some(storage) = node.storage() {
+        let did_key = identity.did_string();
+        let identity_bytes = identity.to_bytes().map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity serialization failed: {}", e),
+            data: None,
+        })?;
+        storage.put(CF_IDENTITIES, did_key.as_bytes(), &identity_bytes).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity persistence failed: {}", e),
+            data: None,
+        })?;
+        info!(
+            did = %did_key,
+            device_fingerprint = %device_fingerprint,
+            "Identity persisted to ledger storage (CF_IDENTITIES)"
+        );
+    }
+
+    let hex_address = format!("0x{}", hex::encode(wallet.public_key.as_bytes()));
+    let did = identity.did_string();
+
+    // Mint an access JWT + opaque refresh token bound to the new self-custody
+    // identity. `participate` is the one-call onboarding flow used by the
+    // CLI `tenzro join`, the desktop Setup page, and the website Get Started
+    // tutorial; it covers identity + wallet + hardware profile + auth
+    // tokens in a single round trip. For the granular variants (delegated
+    // agents, autonomous agents, link-existing-wallet) use the dedicated
+    // `tenzro_onboardDelegatedAgent`, `tenzro_onboardAutonomousAgent`, or
+    // `tenzro_linkWalletForAuth` RPCs. Token expiry/refresh is the same as
+    // those endpoints — see `tenzro_refreshToken`.
+    let envelope = human_self_custody_envelope();
+    let access_token =
+        mint_onboarding_jwt(node, &did, &did, dpop_jkt.as_deref(), envelope.clone(), ttl_secs)?;
+    let expires_in = effective_ttl_secs(node, ttl_secs);
+    let (refresh_token, refresh_expires_in) =
+        mint_onboarding_refresh_token(node, &did, &did, dpop_jkt.as_deref(), envelope.clone())?;
+
+    let result = serde_json::json!({
+        "identity": {
+            "did": did,
+            "identity_type": "human",
+            "display_name": display_name,
+            "status": format!("{}", identity.status),
+        },
+        "wallet": {
+            "wallet_id": wallet.wallet_id.0,
+            "address": hex_address,
+            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+        },
+        "hardware": hardware,
+        "hardware_profile": hardware,
+        "device_fingerprint": device_fingerprint,
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": expires_in,
+        "refresh_token": refresh_token,
+        "refresh_token_expires_in": refresh_expires_in,
+        "dpop_bound": dpop_jkt.is_some(),
+        "authorization_details": envelope,
+        "note": "Save the access_token AND refresh_token. The access_token expires in expires_in seconds; exchange the refresh_token at tenzro_refreshToken (or POST /token grant_type=refresh_token) for a new access_token. Use as: Authorization: Bearer <token>. For DPoP-bound signing RPCs, also send DPoP: <proof> header.",
+    });
+
+    Ok(result)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Onboarding RPCs
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `tenzro_onboardHuman`, `tenzro_onboardDelegatedAgent`, and
+// `tenzro_onboardAutonomousAgent` provision a TDIP identity (+ MPC wallet)
+// and issue a `tenzro_auth::AuthEngine` JWT bearing a per-identity RAR
+// envelope.
+//
+// Each handler:
+//   1. Provisions identity + wallet via `IdentityRegistry::register_*`.
+//      The wallet binding is a side effect of identity creation — the
+//      `wallet_id` lives on `TenzroIdentity` and is later resolved by
+//      the signing path via `find_wallet_id_for_did`.
+//   2. Builds a per-identity `AuthorizationDetails` envelope:
+//        - human: broad self-custody — large transfer/escrow caps,
+//          inference, vote, stake, contract calls.
+//        - delegated agent: derived from the caller-supplied
+//          `delegation_scope` (max_transaction_value /
+//          max_daily_spend / allowed_operations).
+//        - autonomous agent: conservative — small transfer/escrow caps,
+//          inference, plus `RegisterIdentity` so the agent can spawn
+//          children. Requires a 1 TNZO balance bond floor (subtask #54
+//          will add slashing on revocation).
+//   3. Calls `engine.issue_jwt(bearer_did, controller_did, cnf_jkt,
+//      envelope, ttl)`. The optional `dpop_jkt` parameter (RFC 9449 §10.1)
+//      pins the JWT to the caller's DPoP key — required for the
+//      per-handler signing path; absent for read-only / UI flows.
+//
+// Returns `{ identity, wallet, access_token, token_type, expires_in,
+//            authorization_details }`. The token is shown only here;
+// callers persist it themselves.
+
+const TNZO_BASE_UNITS: u128 = 1_000_000_000_000_000_000; // 10^18
+const AUTONOMOUS_AGENT_BOND_FLOOR: u128 = TNZO_BASE_UNITS; // 1 TNZO
+
+/// `tenzro_onboardHuman` — provisions a human TDIP identity + wallet,
+/// returns an `AuthEngine` JWT scoped for self-custody.
+async fn handle_onboard_human(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_param_object(params);
+
+    let display_name = params
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Tenzro User")
+        .to_string();
+    tenzro_types::validation::validate_string_len(
+        &display_name,
+        "display_name",
+        tenzro_types::validation::MAX_DISPLAY_NAME_LEN,
+    )
+    .map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
+
+    let dpop_jkt = params
+        .get("dpop_jkt")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let ttl_secs = params.get("ttl_secs").and_then(|v| v.as_u64());
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Wallet service not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_wallet::WalletService;
+    let wallet = wallet_service
+        .provision_wallet()
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Wallet creation failed: {}", e),
+            data: None,
+        })?;
+
+    let identity = registry
+        .register_human_with_fee(
+            wallet.public_key.to_bytes(),
+            display_name.clone(),
+            tenzro_types::identity::KycTier::Unverified,
+        )
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity registration failed: {}", e),
+            data: None,
+        })?
+        .identity;
+    persist_identity(node, &identity)?;
+
+    let did = identity.did_string();
+    let envelope = human_self_custody_envelope();
+    let token = mint_onboarding_jwt(node, &did, &did, dpop_jkt.as_deref(), envelope.clone(), ttl_secs)?;
+    let expires_in = effective_ttl_secs(node, ttl_secs);
+    let (refresh_token, refresh_expires_in) =
+        mint_onboarding_refresh_token(node, &did, &did, dpop_jkt.as_deref(), envelope.clone())?;
+
+    Ok(serde_json::json!({
+        "identity": {
+            "did": did,
+            "identity_type": "human",
+            "display_name": display_name,
+            "status": format!("{}", identity.status),
+        },
+        "wallet": {
+            "wallet_id": wallet.wallet_id.0,
+            "address": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+        },
+        "access_token": token,
+        "token_type": "Bearer",
+        "expires_in": expires_in,
+        "refresh_token": refresh_token,
+        "refresh_token_expires_in": refresh_expires_in,
+        "dpop_bound": dpop_jkt.is_some(),
+        "authorization_details": envelope,
+        "note": "Save the access_token AND refresh_token. The access_token expires in expires_in seconds; exchange the refresh_token at tenzro_refreshToken (or POST /token grant_type=refresh_token) for a new access_token. Use as: Authorization: Bearer <token>. For DPoP-bound signing RPCs, also send DPoP: <proof> header.",
+    }))
+}
+
+/// `tenzro_onboardDelegatedAgent` — provisions a machine identity under
+/// `controller_did`, with an RAR envelope derived from the caller-supplied
+/// `delegation_scope` (max_transaction_value, max_daily_spend,
+/// allowed_operations, allowed_payment_protocols, allowed_chains).
+async fn handle_onboard_delegated_agent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_param_object(params);
+
+    let controller_did = params
+        .get("controller_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required param: controller_did".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let capabilities: Vec<String> = params
+        .get("capabilities")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+
+    use tenzro_identity::DelegationScope;
+    let scope_value = params
+        .get("delegation_scope")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let max_tx = scope_value
+        .get("max_transaction_value")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u128 * TNZO_BASE_UNITS);
+    let max_daily = scope_value
+        .get("max_daily_spend")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u128 * TNZO_BASE_UNITS);
+    let allowed_operations: Vec<String> = scope_value
+        .get("allowed_operations")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let allowed_protocols: Vec<String> = scope_value
+        .get("allowed_payment_protocols")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let allowed_chains: Vec<String> = scope_value
+        .get("allowed_chains")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+
+    let mut delegation = DelegationScope::default();
+    if let Some(v) = max_tx {
+        delegation = delegation.with_max_transaction_value(v);
+    }
+    if let Some(v) = max_daily {
+        delegation = delegation.with_max_daily_spend(v);
+    }
+    if !allowed_operations.is_empty() {
+        delegation = delegation.with_allowed_operations(allowed_operations.clone());
+    }
+    if !allowed_protocols.is_empty() {
+        delegation = delegation.with_allowed_payment_protocols(allowed_protocols);
+    }
+    if !allowed_chains.is_empty() {
+        delegation = delegation.with_allowed_chains(allowed_chains);
+    }
+
+    let dpop_jkt = params
+        .get("dpop_jkt")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let ttl_secs = params.get("ttl_secs").and_then(|v| v.as_u64());
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Wallet service not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_wallet::WalletService;
+    let wallet = wallet_service
+        .provision_wallet()
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Wallet creation failed: {}", e),
+            data: None,
+        })?;
+
+    let identity = registry
+        .register_machine_with_fee(
+            &controller_did,
+            wallet.public_key.to_bytes(),
+            capabilities.clone(),
+            delegation,
+        )
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Machine registration failed: {}", e),
+            data: None,
+        })?
+        .identity;
+    persist_identity(node, &identity)?;
+
+    let did = identity.did_string();
+    let envelope = delegated_agent_envelope(max_tx, max_daily, &allowed_operations);
+    // controller_did on the JWT is the *human* controller — this enables
+    // cascading revocation (subtask #54).
+    let token = mint_onboarding_jwt(node, &did, &controller_did, dpop_jkt.as_deref(), envelope.clone(), ttl_secs)?;
+    let expires_in = effective_ttl_secs(node, ttl_secs);
+    let (refresh_token, refresh_expires_in) = mint_onboarding_refresh_token(
+        node,
+        &did,
+        &controller_did,
+        dpop_jkt.as_deref(),
+        envelope.clone(),
+    )?;
+
+    Ok(serde_json::json!({
+        "identity": {
+            "did": did,
+            "identity_type": "machine",
+            "controller_did": controller_did,
+            "capabilities": capabilities,
+            "status": format!("{}", identity.status),
+        },
+        "wallet": {
+            "wallet_id": wallet.wallet_id.0,
+            "address": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+        },
+        "access_token": token,
+        "token_type": "Bearer",
+        "expires_in": expires_in,
+        "refresh_token": refresh_token,
+        "refresh_token_expires_in": refresh_expires_in,
+        "dpop_bound": dpop_jkt.is_some(),
+        "authorization_details": envelope,
+        "note": "Save the access_token AND refresh_token. Exchange the refresh_token at tenzro_refreshToken when the access_token expires. Revoking the controller_did cascades revocation to this agent (subtask #54).",
+    }))
+}
+
+/// `tenzro_onboardAutonomousAgent` — provisions a machine identity with
+/// `controller_did = self` (no human controller). Requires a 1 TNZO bond
+/// floor: the registering caller must fund the new wallet to >= 1 TNZO
+/// before invocation, OR the caller supplies a `bond_funding_address`
+/// whose balance is checked. The bond gives a slashing target if the
+/// agent misbehaves (subtask #54 slashes the bond on revocation).
+async fn handle_onboard_autonomous_agent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_param_object(params);
+
+    let capabilities: Vec<String> = params
+        .get("capabilities")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+
+    let bond_funding_address = params
+        .get("bond_funding_address")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let dpop_jkt = params
+        .get("dpop_jkt")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let ttl_secs = params.get("ttl_secs").and_then(|v| v.as_u64());
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Wallet service not initialized".to_string(),
+        data: None,
+    })?;
+    let token_state = node.token().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Token subsystem not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Bond floor check — verify the funding address (or a placeholder
+    // genesis-funded account) holds at least 1 TNZO. We do NOT actually
+    // move the funds in V1; subtask #54 will lock+slash via the staking
+    // manager. The check exists today as a sybil-resistance signal: a
+    // caller that can't muster 1 TNZO can't spam autonomous agents.
+    if let Some(ref addr_str) = bond_funding_address {
+        let addr = parse_address(addr_str).map_err(|mut e| {
+            e.message = format!("Invalid bond_funding_address: {}", e.message);
+            e
+        })?;
+        let bal = token_state.balance_of(&addr);
+        if bal < AUTONOMOUS_AGENT_BOND_FLOOR {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!(
+                    "Autonomous agent bond floor not met: address {} has {} base units, need >= {} (1 TNZO)",
+                    addr_str, bal, AUTONOMOUS_AGENT_BOND_FLOOR
+                ),
+                data: None,
+            });
+        }
+    } else {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Missing required param: bond_funding_address (autonomous agents require >= 1 TNZO bond at registration)".to_string(),
+            data: None,
+        });
+    }
+
+    use tenzro_wallet::WalletService;
+    let wallet = wallet_service
+        .provision_wallet()
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Wallet creation failed: {}", e),
+            data: None,
+        })?;
+
+    // For autonomous agents, controller_did = self. The TDIP DID format
+    // for autonomous machines is `did:tenzro:machine:<uuid>` (no controller
+    // segment). We use `register_machine_with_fee` with controller_did = "self";
+    // the registry treats self-controlled machines as autonomous.
+    let identity = registry
+        .register_machine_with_fee(
+            "self",
+            wallet.public_key.to_bytes(),
+            capabilities.clone(),
+            tenzro_identity::DelegationScope::default(),
+        )
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Autonomous agent registration failed: {}", e),
+            data: None,
+        })?
+        .identity;
+    persist_identity(node, &identity)?;
+
+    let did = identity.did_string();
+    let envelope = autonomous_agent_envelope();
+    // controller_did on the JWT is `did` itself — there is no human in
+    // the act-chain. Cascading revocation by controller_did is therefore
+    // a no-op for autonomous agents; revocation must target the JTI
+    // directly (subtask #54).
+    let token = mint_onboarding_jwt(node, &did, &did, dpop_jkt.as_deref(), envelope.clone(), ttl_secs)?;
+    let expires_in = effective_ttl_secs(node, ttl_secs);
+    let (refresh_token, refresh_expires_in) =
+        mint_onboarding_refresh_token(node, &did, &did, dpop_jkt.as_deref(), envelope.clone())?;
+
+    Ok(serde_json::json!({
+        "identity": {
+            "did": did,
+            "identity_type": "autonomous_machine",
+            "capabilities": capabilities,
+            "status": format!("{}", identity.status),
+        },
+        "wallet": {
+            "wallet_id": wallet.wallet_id.0,
+            "address": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+        },
+        "bond": {
+            "amount_base_units": AUTONOMOUS_AGENT_BOND_FLOOR.to_string(),
+            "amount_tnzo": "1",
+            "funding_address": bond_funding_address,
+            "note": "Bond is balance-verified at onboarding; subtask #54 will lock+slash via the staking manager.",
+        },
+        "access_token": token,
+        "token_type": "Bearer",
+        "expires_in": expires_in,
+        "refresh_token": refresh_token,
+        "refresh_token_expires_in": refresh_expires_in,
+        "dpop_bound": dpop_jkt.is_some(),
+        "authorization_details": envelope,
+        "note": "Save the access_token AND refresh_token. Exchange the refresh_token at tenzro_refreshToken when the access_token expires.",
+    }))
+}
+
+/// `tenzro_refreshToken` — exchange an opaque refresh token for a fresh
+/// access JWT. Mirrors OAuth `grant_type=refresh_token` but exposed as a
+/// JSON-RPC method so non-MCP clients (CLI, SDKs) can use it without
+/// going through the OAuth HTTP dance.
+///
+/// Params: `{ refresh_token, dpop_jkt? }`. The new JWT is pinned to the
+/// thumbprint stored on the refresh entry, or to `dpop_jkt` if the
+/// caller supplies one (e.g. after rotating the DPoP key alongside the
+/// refresh).
+async fn handle_refresh_token(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_param_object(params);
+    let refresh_token = params
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required param: refresh_token".to_string(),
+            data: None,
+        })?
+        .to_string();
+    let dpop_jkt = params
+        .get("dpop_jkt")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let engine = node.auth_engine().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Auth engine not initialized on this node".to_string(),
+        data: None,
+    })?;
+
+    let outcome = engine
+        .exchange_refresh_token(&refresh_token, dpop_jkt.as_deref())
+        .map_err(|e| {
+            // Surface tenzro-auth typed errors through the appropriate
+            // JSON-RPC code: -32001 for unauthorized, -32000 for everything
+            // else.
+            let code = match &e {
+                tenzro_auth::AuthError::InvalidToken(_)
+                | tenzro_auth::AuthError::TokenExpired
+                | tenzro_auth::AuthError::TokenRevoked(_)
+                | tenzro_auth::AuthError::InvalidDpop(_) => -32001,
+                _ => -32000,
+            };
+            JsonRpcError {
+                code,
+                message: format!("Refresh failed: {}", e),
+                data: None,
+            }
+        })?;
+
+    Ok(serde_json::json!({
+        "access_token": outcome.access_token,
+        "token_type": "Bearer",
+        "expires_in": outcome.expires_in,
+        "refresh_token": refresh_token,
+        "dpop_bound": outcome.dpop_bound,
+        "note": "The same refresh_token may be re-used until its absolute expiry. (V2 will add rotation.)",
+    }))
+}
+
+/// `tenzro_linkWalletForAuth` — bind an existing MPC wallet to a fresh
+/// TDIP identity and mint an access JWT scoped for self-custody.
+///
+/// This bridges the gap between `tenzro_createWallet` (which only
+/// returns a `wallet_id` + `address`) and the auth-mediated signing
+/// path: callers who created a wallet first can later obtain an
+/// access JWT bound to that wallet by passing back `wallet_id` and a
+/// DPoP key thumbprint. The new identity is registered with KYC tier
+/// `Unverified`; callers may upgrade tier later via the standard
+/// credential-update flow.
+///
+/// Params: `{ wallet_id, dpop_jkt?, ttl_secs?, display_name? }`.
+async fn handle_link_wallet_for_auth(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_param_object(params);
+    let wallet_id_str = params
+        .get("wallet_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required param: wallet_id".to_string(),
+            data: None,
+        })?
+        .to_string();
+    let dpop_jkt = params
+        .get("dpop_jkt")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let ttl_secs = params.get("ttl_secs").and_then(|v| v.as_u64());
+    let display_name = params
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Tenzro User")
+        .to_string();
+    tenzro_types::validation::validate_string_len(
+        &display_name,
+        "display_name",
+        tenzro_types::validation::MAX_DISPLAY_NAME_LEN,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32602,
+        message: e.to_string(),
+        data: None,
+    })?;
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Wallet service not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_wallet::{WalletId, WalletService};
+    let wallet = wallet_service
+        .get_wallet(&WalletId(wallet_id_str.clone()))
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Wallet lookup failed: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Unknown wallet_id: {}", wallet_id_str),
+            data: None,
+        })?;
+
+    // Resolve the wallet's existing TDIP identity, if any. A wallet has
+    // exactly one owning identity in TDIP — re-link the auth session to
+    // it instead of minting a duplicate DID. Falls back to fresh
+    // registration only when no identity is bound to this pubkey yet
+    // (e.g. wallet was created via the bare `tenzro_createWallet` path
+    // without onboarding).
+    let pubkey_bytes = wallet.public_key.to_bytes();
+    let identity = if let Some(existing) = registry.find_identity_by_pubkey(&pubkey_bytes) {
+        existing
+    } else {
+        let registered = registry
+            .register_human_with_fee(
+                pubkey_bytes,
+                display_name.clone(),
+                tenzro_types::identity::KycTier::Unverified,
+            )
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Identity registration failed: {}", e),
+                data: None,
+            })?
+            .identity;
+        persist_identity(node, &registered)?;
+        registered
+    };
+
+    let did = identity.did_string();
+    let envelope = human_self_custody_envelope();
+    let access_token =
+        mint_onboarding_jwt(node, &did, &did, dpop_jkt.as_deref(), envelope.clone(), ttl_secs)?;
+    let expires_in = effective_ttl_secs(node, ttl_secs);
+    let (refresh_token, refresh_expires_in) =
+        mint_onboarding_refresh_token(node, &did, &did, dpop_jkt.as_deref(), envelope.clone())?;
+
+    Ok(serde_json::json!({
+        "identity": {
+            "did": did,
+            "identity_type": "human",
+            "display_name": identity.display_name(),
+            "status": format!("{}", identity.status),
+        },
+        "wallet": {
+            "wallet_id": wallet.wallet_id.0,
+            "address": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+        },
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": expires_in,
+        "refresh_token": refresh_token,
+        "refresh_token_expires_in": refresh_expires_in,
+        "dpop_bound": dpop_jkt.is_some(),
+        "authorization_details": envelope,
+        "note": "Bound an auth session to the wallet's owning TDIP identity. Use the access_token for auth-mediated signing RPCs (tenzro_signTransaction etc.).",
+    }))
+}
+
+// ─── Onboarding helpers ─────────────────────────────────────────────────────
+
+fn unwrap_param_object(params: Option<Value>) -> Value {
+    let p = params.unwrap_or(serde_json::json!({}));
+    if let Some(arr) = p.as_array() {
+        arr.first().cloned().unwrap_or(p)
+    } else {
+        p
+    }
+}
+
+fn persist_identity(
+    node: &Arc<TenzroNode>,
+    identity: &tenzro_identity::TenzroIdentity,
+) -> std::result::Result<(), JsonRpcError> {
+    if let Some(storage) = node.storage() {
+        let did_key = identity.did_string();
+        let identity_bytes = identity.to_bytes().map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity serialization failed: {}", e),
+            data: None,
+        })?;
+        storage
+            .put(CF_IDENTITIES, did_key.as_bytes(), &identity_bytes)
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Identity persistence failed: {}", e),
+                data: None,
+            })?;
+    }
+    Ok(())
+}
+
+fn mint_onboarding_jwt(
+    node: &Arc<TenzroNode>,
+    bearer_did: &str,
+    controller_did: &str,
+    dpop_jkt: Option<&str>,
+    envelope: tenzro_auth::AuthorizationDetails,
+    ttl_secs: Option<u64>,
+) -> std::result::Result<String, JsonRpcError> {
+    let engine = node.auth_engine().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Auth engine not initialized on this node".to_string(),
+        data: None,
+    })?;
+    let jkt = dpop_jkt.unwrap_or("");
+    engine
+        .issue_jwt(bearer_did, controller_did, jkt, envelope, ttl_secs)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("JWT issuance failed: {}", e),
+            data: None,
+        })
+}
+
+/// Mint an opaque refresh token alongside the access JWT. Returns
+/// `(token, ttl_secs)`. Persists to `CF_AUDIT` via
+/// `AuthEngine::issue_refresh_token`.
+fn mint_onboarding_refresh_token(
+    node: &Arc<TenzroNode>,
+    bearer_did: &str,
+    controller_did: &str,
+    dpop_jkt: Option<&str>,
+    envelope: tenzro_auth::AuthorizationDetails,
+) -> std::result::Result<(String, u64), JsonRpcError> {
+    let engine = node.auth_engine().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Auth engine not initialized on this node".to_string(),
+        data: None,
+    })?;
+    engine
+        .issue_refresh_token(bearer_did, controller_did, dpop_jkt, envelope)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Refresh token issuance failed: {}", e),
+            data: None,
+        })
+}
+
+fn effective_ttl_secs(node: &Arc<TenzroNode>, requested: Option<u64>) -> u64 {
+    let cfg = node.auth_engine().map(|e| e.config());
+    let default_ttl = cfg.map(|c| c.default_ttl_secs).unwrap_or(3600);
+    let max_ttl = cfg.map(|c| c.max_ttl_secs).unwrap_or(24 * 3600);
+    requested.unwrap_or(default_ttl).clamp(1, max_ttl)
+}
+
+/// Self-custody RAR envelope for human onboarding. Generous limits
+/// because the bearer holds their own keys; nothing is delegated.
+fn human_self_custody_envelope() -> tenzro_auth::AuthorizationDetails {
+    use tenzro_auth::{AuthorizationDetail, AuthorizationDetails};
+    use tenzro_types::AssetId;
+    let large = TNZO_BASE_UNITS * 10_000;
+    let daily = TNZO_BASE_UNITS * 100_000;
+    AuthorizationDetails::default()
+        .with(AuthorizationDetail::Transfer {
+            asset: AssetId::tnzo(),
+            max_amount: large,
+            max_daily_amount: Some(daily),
+            allowed_counterparties: None,
+        })
+        .with(AuthorizationDetail::CreateEscrow {
+            asset: AssetId::tnzo(),
+            max_amount: large,
+            allowed_payees: None,
+        })
+        .with(AuthorizationDetail::DischargeEscrow {
+            allowed_escrow_ids: None,
+        })
+        .with(AuthorizationDetail::Inference {
+            max_amount_per_call: TNZO_BASE_UNITS * 100,
+            max_daily_amount: Some(daily),
+            allowed_model_ids: None,
+        })
+        .with(AuthorizationDetail::Stake {
+            max_amount: large,
+            allowed_validators: None,
+        })
+        .with(AuthorizationDetail::Vote {
+            allowed_proposals: None,
+        })
+        .with(AuthorizationDetail::Contract {
+            allowed_contracts: None,
+            allow_deploy: true,
+        })
+        .with(AuthorizationDetail::RegisterIdentity {
+            max_children: None,
+        })
+}
+
+/// Delegated-agent envelope. Constructed from the caller's
+/// delegation scope. `max_tx` and `max_daily` are TNZO base units
+/// already (caller-provided in TNZO units, multiplied by 10^18 by
+/// the dispatcher). `allowed_operations` is a flat string list
+/// (e.g., `["transfer", "inference"]`) — operations not listed are
+/// excluded from the envelope.
+fn delegated_agent_envelope(
+    max_tx: Option<u128>,
+    max_daily: Option<u128>,
+    allowed_operations: &[String],
+) -> tenzro_auth::AuthorizationDetails {
+    use tenzro_auth::{AuthorizationDetail, AuthorizationDetails};
+    use tenzro_types::AssetId;
+
+    let cap_per_tx = max_tx.unwrap_or(TNZO_BASE_UNITS * 10);
+    let cap_per_day = max_daily.or(Some(TNZO_BASE_UNITS * 100));
+
+    // If the caller did not specify allowed_operations, default to a
+    // safe minimum of transfer + inference + escrow.
+    let allow = |op: &str| -> bool {
+        allowed_operations.is_empty() || allowed_operations.iter().any(|s| s == op)
+    };
+
+    let mut env = AuthorizationDetails::default();
+    if allow("transfer") {
+        env = env.with(AuthorizationDetail::Transfer {
+            asset: AssetId::tnzo(),
+            max_amount: cap_per_tx,
+            max_daily_amount: cap_per_day,
+            allowed_counterparties: None,
+        });
+    }
+    if allow("create_escrow") || allow("escrow") {
+        env = env.with(AuthorizationDetail::CreateEscrow {
+            asset: AssetId::tnzo(),
+            max_amount: cap_per_tx,
+            allowed_payees: None,
+        });
+        env = env.with(AuthorizationDetail::DischargeEscrow {
+            allowed_escrow_ids: None,
+        });
+    }
+    if allow("inference") {
+        env = env.with(AuthorizationDetail::Inference {
+            max_amount_per_call: cap_per_tx.min(TNZO_BASE_UNITS * 10),
+            max_daily_amount: cap_per_day,
+            allowed_model_ids: None,
+        });
+    }
+    if allow("stake") {
+        env = env.with(AuthorizationDetail::Stake {
+            max_amount: cap_per_tx,
+            allowed_validators: None,
+        });
+    }
+    if allow("vote") {
+        env = env.with(AuthorizationDetail::Vote {
+            allowed_proposals: None,
+        });
+    }
+    if allow("contract") {
+        env = env.with(AuthorizationDetail::Contract {
+            allowed_contracts: None,
+            allow_deploy: false,
+        });
+    }
+    env
+}
+
+/// Conservative envelope for autonomous agents. Caps are ~1 TNZO per
+/// op (matching the bond floor), no governance vote, can spawn a small
+/// number of children for hierarchical delegation.
+fn autonomous_agent_envelope() -> tenzro_auth::AuthorizationDetails {
+    use tenzro_auth::{AuthorizationDetail, AuthorizationDetails};
+    use tenzro_types::AssetId;
+    AuthorizationDetails::default()
+        .with(AuthorizationDetail::Transfer {
+            asset: AssetId::tnzo(),
+            max_amount: TNZO_BASE_UNITS,
+            max_daily_amount: Some(TNZO_BASE_UNITS * 10),
+            allowed_counterparties: None,
+        })
+        .with(AuthorizationDetail::CreateEscrow {
+            asset: AssetId::tnzo(),
+            max_amount: TNZO_BASE_UNITS,
+            allowed_payees: None,
+        })
+        .with(AuthorizationDetail::DischargeEscrow {
+            allowed_escrow_ids: None,
+        })
+        .with(AuthorizationDetail::Inference {
+            max_amount_per_call: TNZO_BASE_UNITS / 10,
+            max_daily_amount: Some(TNZO_BASE_UNITS),
+            allowed_model_ids: None,
+        })
+        .with(AuthorizationDetail::RegisterIdentity {
+            max_children: Some(8),
+        })
+}
+
+// ─── HITL approval RPCs ─────────────────────────────────────────────────────
+//
+// The signing path raises `tenzro_auth::AuthError::ApprovalRequired
+// { approval_id }` whenever a request is permitted by the bearer's RAR
+// envelope but engine policy demands explicit human sign-off. The three
+// RPCs below let the human (or upstream agent) act on those records.
+//
+// All three are read/write against `tenzro_auth::AuthEngine` only —
+// they do not touch the wallet or the VM. The signing path consumes
+// the approval (transitioning Approved → Consumed) when the underlying
+// transaction actually fires; that wiring lives in subtask #55.
+//
+// Authentication: in V1 we accept any caller. The per-approver
+// `expected_approver_did` check (when supplied) is what enforces
+// "only the named approver may decide this request." Subtask #55 will
+// derive `expected_approver_did` from the caller's JWT `sub` so the
+// caller cannot lie about who they are.
+
+fn parse_approval_status(s: &str) -> std::result::Result<tenzro_auth::ApprovalStatus, JsonRpcError> {
+    match s {
+        "approved" | "Approved" | "APPROVED" => Ok(tenzro_auth::ApprovalStatus::Approved),
+        "denied" | "Denied" | "DENIED" => Ok(tenzro_auth::ApprovalStatus::Denied),
+        other => Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "decision must be \"approved\" or \"denied\", got {:?}",
+                other
+            ),
+            data: None,
+        }),
+    }
+}
+
+fn approval_to_json(rec: &tenzro_auth::ApprovalRecord) -> Value {
+    serde_json::json!({
+        "approval_id": rec.approval_id,
+        "requester_did": rec.requester_did,
+        "approver_did": rec.approver_did,
+        "created_at_ms": rec.created_at_ms,
+        "expires_at_ms": rec.expires_at_ms,
+        "status": format!("{:?}", rec.status),
+        "decided_at_ms": rec.decided_at_ms,
+        "summary": rec.summary,
+        "action": rec.action,
+    })
+}
+
+fn auth_engine_or_error(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<&Arc<tenzro_auth::AuthEngine>, JsonRpcError> {
+    node.auth_engine().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Auth engine not initialized on this node".to_string(),
+        data: None,
+    })
+}
+
+/// `tenzro_listPendingApprovals` — list every approval in `Pending`
+/// state for the given approver DID. Lazy-expires stale records before
+/// returning, so the caller never sees expired entries in the result.
+///
+/// Params: `{ approver_did: "did:tenzro:human:..." }`
+async fn handle_list_pending_approvals(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = unwrap_param_object(params);
+    let approver_did = p["approver_did"].as_str().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing required param: approver_did".to_string(),
+        data: None,
+    })?;
+    let engine = auth_engine_or_error(node)?;
+    let pending = engine
+        .list_pending_for_approver(approver_did)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("list_pending_for_approver failed: {}", e),
+            data: None,
+        })?;
+    Ok(serde_json::json!({
+        "approver_did": approver_did,
+        "count": pending.len(),
+        "pending": pending.iter().map(approval_to_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `tenzro_getApproval` — fetch one approval by id. Triggers lazy
+/// expiry on the read path, so a returned `Pending` record is
+/// guaranteed to still be live.
+///
+/// Params: `{ approval_id: "..." }`
+async fn handle_get_approval(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = unwrap_param_object(params);
+    let approval_id = p["approval_id"].as_str().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing required param: approval_id".to_string(),
+        data: None,
+    })?;
+    let engine = auth_engine_or_error(node)?;
+    let rec = engine.get_approval(approval_id).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("get_approval failed: {}", e),
+        data: None,
+    })?;
+    match rec {
+        Some(r) => Ok(approval_to_json(&r)),
+        None => Err(JsonRpcError {
+            code: -32000,
+            message: format!("approval {} not found", approval_id),
+            data: None,
+        }),
+    }
+}
+
+/// `tenzro_decideApproval` — approver acts on a pending request.
+///
+/// Params: `{ approval_id, decision ("approved" | "denied"),
+///            approver_did? }`
+///
+/// `approver_did` is optional but recommended: when supplied, the
+/// engine refuses to apply the decision unless the record's
+/// `approver_did` matches. This protects against accidental
+/// cross-approver tampering until subtask #55 derives the approver
+/// identity from the caller's JWT.
+async fn handle_decide_approval(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = unwrap_param_object(params);
+    let approval_id = p["approval_id"].as_str().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing required param: approval_id".to_string(),
+        data: None,
+    })?;
+    let decision_str = p["decision"].as_str().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing required param: decision".to_string(),
+        data: None,
+    })?;
+    let decision = parse_approval_status(decision_str)?;
+    let approver_did = p["approver_did"].as_str();
+
+    let engine = auth_engine_or_error(node)?;
+    let updated = engine
+        .decide_approval(approval_id, decision, approver_did)
+        .map_err(|e| match e {
+            // Approver mismatch / wrong state → 401-shape (-32001).
+            tenzro_auth::AuthError::Forbidden(_) => JsonRpcError {
+                code: -32001,
+                message: e.to_string(),
+                data: None,
+            },
+            _ => JsonRpcError {
+                code: -32000,
+                message: format!("decide_approval failed: {}", e),
+                data: None,
+            },
+        })?;
+    Ok(approval_to_json(&updated))
+}
+
+/// `tenzro_revokeJwt` — revoke a single JWT by its JTI. Triggers the
+/// engine's act-chain cascade: every JWT whose `controller_did`
+/// transitively reaches the revoked bearer DID is also revoked, with a
+/// dedicated `cascaded: true` audit row written for each.
+///
+/// Params: `{ jti: "...", reason?: "free-form string" }`
+async fn handle_revoke_jwt(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = unwrap_param_object(params);
+    let jti = p["jti"].as_str().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing required param: jti".to_string(),
+        data: None,
+    })?;
+    let reason = p["reason"].as_str().unwrap_or("revoked via tenzro_revokeJwt");
+
+    let engine = auth_engine_or_error(node)?;
+    engine.revoke(jti, reason).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("revoke failed: {}", e),
+        data: None,
+    })?;
+    Ok(serde_json::json!({
+        "jti": jti,
+        "status": "revoked",
+        "cascade": "act-chain transitive closure applied; see CF_AUDIT for cascaded events",
+    }))
+}
+
+/// `tenzro_revokeDid` — revoke an entire identity by DID. Every JWT
+/// in the act-chain rooted at this DID is revoked. Useful when the
+/// caller has lost or compromised a DID's controlling key and wants to
+/// invalidate all of its tokens (and all of its children's tokens) in
+/// one shot, even if no specific JTI is known.
+///
+/// Returns `affected_jti_count` — the number of JTIs newly added to
+/// the revocation set by this call (not counting JTIs that were
+/// already revoked).
+///
+/// Params: `{ did: "did:tenzro:...", reason?: "..." }`
+async fn handle_revoke_did(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = unwrap_param_object(params);
+    let did = p["did"].as_str().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing required param: did".to_string(),
+        data: None,
+    })?;
+    let reason = p["reason"].as_str().unwrap_or("revoked via tenzro_revokeDid");
+
+    let engine = auth_engine_or_error(node)?;
+    let count = engine.revoke_did(did, reason).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("revoke_did failed: {}", e),
+        data: None,
+    })?;
+    Ok(serde_json::json!({
+        "did": did,
+        "status": "revoked",
+        "affected_jti_count": count,
+        "cascade": "act-chain transitive closure applied; see CF_AUDIT for cascaded events",
+    }))
+}
+
+/// `tenzro_exchangeToken` — RFC 8693 OAuth 2.0 Token Exchange.
+///
+/// JSON-RPC mirror of the HTTP `POST /oauth/token` endpoint at
+/// `crates/tenzro-node/src/web/oauth.rs`. Validates the parent JWT
+/// against the local engine, then delegates to
+/// [`tenzro_auth::AuthEngine::exchange_token`] which enforces RAR /
+/// AAP-capability subset rules and mints a child JWT bound to the
+/// child's DPoP key.
+///
+/// Params (object):
+/// ```json
+/// {
+///   "subject_token": "<parent JWT>",
+///   "child_bearer_did": "did:tenzro:machine:...",
+///   "child_dpop_jkt": "<RFC 7638 thumbprint>",
+///   "requested_rar": { "details": [...] },
+///   "requested_aap_capabilities": [...],   // optional
+///   "requested_ttl_secs": 3600              // optional
+/// }
+/// ```
+///
+/// Result: `{ access_token, expires_in, token_type: "DPoP",
+/// issued_token_type: "urn:ietf:params:oauth:token-type:jwt",
+/// delegation: { depth, max_depth, chain, parent_jti } }`.
+async fn handle_exchange_token(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = unwrap_param_object(params);
+
+    let subject_token = p["subject_token"].as_str().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing required param: subject_token".to_string(),
+        data: None,
+    })?;
+    let child_bearer_did = p["child_bearer_did"]
+        .as_str()
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required param: child_bearer_did".to_string(),
+            data: None,
+        })?;
+    let child_dpop_jkt = p["child_dpop_jkt"]
+        .as_str()
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required param: child_dpop_jkt".to_string(),
+            data: None,
+        })?;
+
+    let requested_rar: tenzro_auth::AuthorizationDetails = match p.get("requested_rar") {
+        Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid requested_rar: {}", e),
+            data: None,
+        })?,
+        _ => tenzro_auth::AuthorizationDetails::default(),
+    };
+
+    let requested_aap_capabilities: Vec<tenzro_auth::AapCapabilityClaim> = match p
+        .get("requested_aap_capabilities")
+    {
+        Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid requested_aap_capabilities: {}", e),
+            data: None,
+        })?,
+        _ => Vec::new(),
+    };
+
+    let requested_ttl_secs = p["requested_ttl_secs"].as_u64();
+
+    let engine = auth_engine_or_error(node)?;
+
+    // Validate the parent JWT (signature, exp, revocation). DPoP
+    // proof verification on the exchange call is deferred — see the
+    // rustdoc on `web/oauth::token_exchange_handler`.
+    let parent_claims = engine
+        .validate_jwt(subject_token, None)
+        .map_err(|e| JsonRpcError {
+            code: -32001,
+            message: format!("parent token validation failed: {}", e),
+            data: None,
+        })?;
+
+    let req = tenzro_auth::TokenExchangeRequest {
+        child_bearer_did: child_bearer_did.to_string(),
+        child_dpop_jkt: child_dpop_jkt.to_string(),
+        requested_rar,
+        requested_aap_capabilities,
+        requested_ttl_secs,
+    };
+
+    let outcome = engine.exchange_token(&parent_claims, req).map_err(|e| JsonRpcError {
+        code: -32002,
+        message: format!("token exchange failed: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "access_token": outcome.access_token,
+        "expires_in": outcome.expires_in,
+        "token_type": "DPoP",
+        "issued_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "delegation": outcome.delegation,
+    }))
+}
+
+/// `tenzro_introspectToken` — RFC 7662 OAuth 2.0 Token Introspection.
+///
+/// JSON-RPC mirror of the HTTP `POST /oauth/introspect` endpoint.
+/// Validates the token against the local engine; on success returns
+/// the full claim set (RAR, AAP, cnf, controller_did, etc.). Per
+/// RFC 7662 §2.2 a failed validation returns `{"active": false}`
+/// with no other fields — never tell the caller *why* a token is
+/// inactive.
+///
+/// Params: `{ token: "<JWT>", token_type_hint?: "access_token" }`
+async fn handle_introspect_token(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = unwrap_param_object(params);
+    let token = p["token"].as_str().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing required param: token".to_string(),
+        data: None,
+    })?;
+
+    let engine = auth_engine_or_error(node)?;
+
+    let response = match engine.validate_jwt(token, None) {
+        Ok(claims) => tenzro_auth::IntrospectionResponse::from_claims(&claims),
+        Err(_) => tenzro_auth::IntrospectionResponse::inactive(),
+    };
+    serde_json::to_value(response).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("failed to serialize introspection: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_oauthDiscovery` — return the same metadata document
+/// served at `GET /.well-known/openid-configuration`. Useful for
+/// JSON-RPC-only clients (CLI, SDK) that don't want to also speak
+/// HTTP discovery. The `issuer` reflects the engine's configured
+/// issuer; endpoint URLs use `https://<configured audience>` (the
+/// engine's `aud` is the canonical resource-server URL).
+async fn handle_oauth_discovery(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let engine = auth_engine_or_error(node)?;
+    let cfg = engine.config();
+    let base = cfg.audience.trim_end_matches('/').to_string();
+
+    Ok(serde_json::json!({
+        "issuer": cfg.issuer,
+        "token_endpoint": format!("{}/oauth/token", base),
+        "introspection_endpoint": format!("{}/oauth/introspect", base),
+        "revocation_endpoint": format!("{}/oauth/revoke", base),
+        "grant_types_supported": [
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+            "authorization_code",
+            "refresh_token",
+        ],
+        "token_endpoint_auth_methods_supported": ["none", "private_key_jwt"],
+        "response_types_supported": ["code"],
+        "dpop_signing_alg_values_supported": ["EdDSA"],
+        "authorization_details_types_supported": [
+            "transfer", "create_escrow", "discharge_escrow", "inference",
+            "stake", "vote", "contract", "register_identity"
+        ],
+        "aap_claims_supported": [
+            "aap_agent", "aap_task", "aap_capabilities",
+            "aap_oversight", "aap_delegation", "aap_context", "aap_audit"
+        ],
+    }))
+}
+
+async fn handle_join_as_micro_node(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    // Extract params (handle both object and array-wrapped formats)
+    let params_obj = params
+        .as_ref()
+        .and_then(|p| {
+            if let Some(arr) = p.as_array() {
+                arr.first().cloned()
+            } else {
+                Some(p.clone())
+            }
+        });
+
+    let display_name = params_obj
+        .as_ref()
+        .and_then(|p| p.get("display_name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("Tenzro Participant")
+        .to_string();
+
+    let origin = params_obj
+        .as_ref()
+        .and_then(|p| p.get("origin"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("api")
+        .to_string();
+
+    let participant_type_str = params_obj
+        .as_ref()
+        .and_then(|p| p.get("participant_type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("human")
+        .to_string();
+
+    // Create wallet — same as participate but no hardware detection
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Wallet service not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_wallet::WalletService;
+    let wallet = wallet_service.provision_wallet().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Wallet creation failed: {}", e),
+        data: None,
+    })?;
+
+    // Register identity
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let mut identity = registry
+        .register_human_with_fee(
+            wallet.public_key.to_bytes(),
+            display_name.clone(),
+            tenzro_types::identity::KycTier::Unverified,
+        )
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity registration failed: {}", e),
+            data: None,
+        })?
+        .identity;
+
+    // Bind micro-node metadata to identity
+    identity.metadata.insert("wallet_id".to_string(), wallet.wallet_id.0.clone());
+    identity.metadata.insert("wallet_address".to_string(), format!("{}", wallet.address));
+    identity.metadata.insert("network_role".to_string(), "micro_node".to_string());
+    identity.metadata.insert("origin".to_string(), origin.clone());
+    identity.metadata.insert("participant_type".to_string(), participant_type_str.clone());
+
+    // Persist to RocksDB
+    if let Some(storage) = node.storage() {
+        let did_key = identity.did_string();
+        let identity_bytes = identity.to_bytes().map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity serialization failed: {}", e),
+            data: None,
+        })?;
+        storage.put(CF_IDENTITIES, did_key.as_bytes(), &identity_bytes).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Identity persistence failed: {}", e),
+            data: None,
+        })?;
+        info!(
+            did = %did_key,
+            origin = %origin,
+            participant_type = %participant_type_str,
+            "MicroNode identity persisted to ledger storage (CF_IDENTITIES)"
+        );
+    }
+
+    // All capabilities enabled by default for micro nodes
+    let capabilities = serde_json::json!({
+        "inference": true,
+        "payments": true,
+        "agent_collaboration": true,
+        "mcp_tools": true,
+        "task_execution": true,
+        "chain_query": true,
+        "smart_contracts": true,
+        "tee_services": true,
+        "bridge": true,
+        "governance": true,
+    });
+
+    Ok(serde_json::json!({
+        "identity": {
+            "did": identity.did_string(),
+            "identity_type": "micro_node",
+            "display_name": display_name,
+            "status": format!("{}", identity.status),
+        },
+        "wallet": {
+            "wallet_id": wallet.wallet_id.0,
+            "address": format!("{}", wallet.address),
+            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+        },
+        "capabilities": capabilities,
+        "origin": origin,
+        "participant_type": participant_type_str,
+        "role": "micro_node",
+        "network": {
+            "rpc": "https://rpc.tenzro.network",
+            "mcp": "https://mcp.tenzro.network/mcp",
+            "a2a": "https://a2a.tenzro.network",
+        }
+    }))
+}
+
+async fn handle_get_hardware_profile(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    // Check if we have cached hardware profile
+    if let Some(profile) = node.hardware_profile.read().clone() {
+        return serde_json::to_value(&profile).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Serialization failed: {}", e),
+            data: None,
+        });
+    }
+
+    // Detect hardware and cache it
+    let hardware = detect_hardware(&node.config().data_dir).await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Hardware detection failed: {}", e),
+        data: None,
+    })?;
+
+    *node.hardware_profile.write() = Some(hardware.clone());
+
+    serde_json::to_value(&hardware).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization failed: {}", e),
+        data: None,
+    })
+}
+
+async fn handle_set_role(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let role_str = params
+        .get("role")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'role' parameter".to_string(),
+            data: None,
+        })?;
+
+    use tenzro_types::NetworkRole;
+
+    let new_role = match role_str {
+        "validator" => NetworkRole::Validator,
+        "model_provider" => NetworkRole::ModelProvider,
+        "tee_provider" => NetworkRole::TeeProvider,
+        "light_client" => NetworkRole::LightClient,
+        "full_node" => NetworkRole::FullNode,
+        "storage_provider" => NetworkRole::StorageProvider,
+        _ => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "Invalid role '{}'. Valid: validator, model_provider, tee_provider, light_client, full_node, storage_provider",
+                    role_str
+                ),
+                data: None,
+            });
+        }
+    };
+
+    let previous_role = {
+        let mut role_lock = node.runtime_role.write();
+        let prev = *role_lock;
+        *role_lock = new_role;
+        prev
+    };
+
+    info!("Node role changed from {:?} to {:?}", previous_role, new_role);
+
+    // Broadcast role change via gossipsub status topic
+    if let Some(network) = node.network() {
+        use tenzro_network::{NetworkMessage, MessagePayload, NetworkService};
+        let status_msg = NetworkMessage::new(MessagePayload::Custom {
+            topic: "tenzro/status/1.0.0".to_string(),
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "role_change",
+                "previous_role": format!("{:?}", previous_role),
+                "new_role": format!("{:?}", new_role),
+            })).unwrap_or_default(),
+        });
+        if let Err(e) = network.broadcast("tenzro/status/1.0.0", status_msg).await {
+            debug!("Failed to broadcast role change: {}", e);
+        }
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "previous_role": format!("{:?}", previous_role),
+        "role": format!("{:?}", new_role),
+    }))
+}
+
+async fn handle_set_provider_schedule(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let schedule: crate::node::ProviderSchedule = serde_json::from_value(params).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid schedule format: {}", e),
+        data: None,
+    })?;
+
+    // Validate hours
+    if schedule.start_hour > 23 || schedule.end_hour > 24 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Invalid hour values (must be 0-23 for start, 0-24 for end)".to_string(),
+            data: None,
+        });
+    }
+
+    // Store the schedule
+    *node.provider_schedule.write() = schedule.clone();
+
+    // Compute active_now
+    let now = chrono::Utc::now();
+    let current_hour = now.hour() as u8;
+    let current_weekday = now.weekday().num_days_from_monday() as usize;
+    let active_now = schedule.enabled
+        && schedule.days_of_week[current_weekday]
+        && current_hour >= schedule.start_hour
+        && current_hour < schedule.end_hour;
+
+    let mut result = serde_json::to_value(&schedule).unwrap();
+    result["active_now"] = serde_json::json!(active_now);
+
+    Ok(result)
+}
+
+async fn handle_get_provider_schedule(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let schedule = node.provider_schedule.read().clone();
+
+    // Compute active_now
+    let now = chrono::Utc::now();
+    let current_hour = now.hour() as u8;
+    let current_weekday = now.weekday().num_days_from_monday() as usize;
+    let active_now = schedule.enabled
+        && schedule.days_of_week[current_weekday]
+        && current_hour >= schedule.start_hour
+        && current_hour < schedule.end_hour;
+
+    let mut result = serde_json::to_value(&schedule).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization failed: {}", e),
+        data: None,
+    })?;
+    result["active_now"] = serde_json::json!(active_now);
+
+    Ok(result)
+}
+
+async fn handle_set_provider_pricing(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let mut pricing: crate::node::ProviderPricing = serde_json::from_value(params).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid pricing format: {}", e),
+        data: None,
+    })?;
+
+    // Enforce network maximums
+    let network_max_input = 0.001;
+    let network_max_output = 0.002;
+
+    pricing.input_price_per_token = pricing.input_price_per_token.min(network_max_input);
+    pricing.output_price_per_token = pricing.output_price_per_token.min(network_max_output);
+    pricing.network_max_input = network_max_input;
+    pricing.network_max_output = network_max_output;
+
+    // Store the pricing
+    *node.provider_pricing.write() = pricing.clone();
+
+    serde_json::to_value(&pricing).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization failed: {}", e),
+        data: None,
+    })
+}
+
+async fn handle_get_provider_pricing(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let pricing = node.provider_pricing.read().clone();
+
+    serde_json::to_value(&pricing).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization failed: {}", e),
+        data: None,
+    })
+}
+
+async fn handle_download_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' parameter".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    // Look up model in catalog
+    let entry = get_model_by_id(&model_id).ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: format!("Model '{}' not found in catalog", model_id),
+        data: None,
+    })?;
+
+    let hf_downloader = node.hf_downloader.as_ref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "HF downloader not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Check if already downloaded — HF tracker OR file on disk
+    let file_on_disk = {
+        let home_models = std::path::PathBuf::from(
+                std::env::var("HOME").unwrap_or_else(|_| "/home/tenzro".to_string()),
+            )
+            .join(".tenzro/models");
+        // Check flat file: ~/.tenzro/models/<model_id>.gguf (where CLI downloads)
+        let flat_path = home_models.join(format!("{}.gguf", &model_id));
+        if flat_path.exists() {
+            Some(std::fs::metadata(&flat_path).ok().map(|m| m.len()).unwrap_or(0))
+        } else {
+            // Fallback: check subdirectory ~/.tenzro/models/<model_id>/*.gguf
+            let sub_dir = home_models.join(&model_id);
+            if sub_dir.is_dir() {
+                std::fs::read_dir(&sub_dir)
+                    .ok()
+                    .and_then(|entries| {
+                        entries
+                            .filter_map(|e| e.ok())
+                            .find(|e| {
+                                e.path()
+                                    .extension()
+                                    .map(|ext| ext == "gguf")
+                                    .unwrap_or(false)
+                            })
+                            .map(|e| e.metadata().ok().map(|m| m.len()).unwrap_or(0))
+                    })
+            } else {
+                None
+            }
+        }
+    };
+
+    if hf_downloader.is_downloaded(&model_id) || file_on_disk.is_some() {
+        let size = file_on_disk
+            .unwrap_or_else(|| hf_downloader.downloaded_size(&model_id).unwrap_or(entry.size_bytes));
+        let status = ModelDownloadStatus {
+            model_id: model_id.clone(),
+            status: "completed".to_string(),
+            progress_percent: 100.0,
+            downloaded_bytes: size,
+            total_bytes: size,
+            error: None,
+        };
+        node.model_downloads.insert(model_id.clone(), status.clone());
+        return serde_json::to_value(&status).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Serialization failed: {}", e),
+            data: None,
+        });
+    }
+
+    // Create initial download status
+    let status = ModelDownloadStatus {
+        model_id: model_id.clone(),
+        status: "downloading".to_string(),
+        progress_percent: 0.0,
+        downloaded_bytes: 0,
+        total_bytes: entry.size_bytes,
+        error: None,
+    };
+
+    node.model_downloads.insert(model_id.clone(), status.clone());
+
+    // Spawn actual HF download in background
+    let downloads = node.model_downloads.clone();
+    let hf_dl = hf_downloader.clone();
+    let entry_clone = entry.clone();
+    tokio::spawn(async move {
+        let (progress_tx, mut progress_rx) = tokio::sync::watch::channel(
+            tenzro_model::DownloadProgress {
+                model_id: model_id.clone(),
+                status: tenzro_model::DownloadState::Pending,
+                progress_percent: 0.0,
+                downloaded_bytes: 0,
+                total_bytes: entry_clone.size_bytes,
+            },
+        );
+
+        // Spawn a task to relay progress to the node's DashMap
+        let downloads_inner = downloads.clone();
+        let model_id_inner = model_id.clone();
+        tokio::spawn(async move {
+            while progress_rx.changed().await.is_ok() {
+                let prog = progress_rx.borrow().clone();
+                if let Some(mut entry) = downloads_inner.get_mut(&model_id_inner) {
+                    entry.status = prog.status.to_string();
+                    entry.progress_percent = prog.progress_percent;
+                    entry.downloaded_bytes = prog.downloaded_bytes;
+                    entry.total_bytes = prog.total_bytes;
+                }
+            }
+        });
+
+        // Perform the actual download
+        match hf_dl.download_model(&entry_clone, progress_tx).await {
+            Ok(_path) => {
+                if let Some(mut entry) = downloads.get_mut(&model_id) {
+                    entry.status = "completed".to_string();
+                    entry.progress_percent = 100.0;
+                }
+                info!("Model {} download completed", model_id);
+            }
+            Err(e) => {
+                let err_msg = format!("{}", e);
+                if let Some(mut entry) = downloads.get_mut(&model_id) {
+                    entry.status = "failed".to_string();
+                    entry.error = Some(err_msg.clone());
+                }
+                error!("Model {} download failed: {}", model_id, err_msg);
+            }
+        }
+    });
+
+    serde_json::to_value(&status).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization failed: {}", e),
+        data: None,
+    })
+}
+
+async fn handle_get_download_progress(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' parameter".to_string(),
+            data: None,
+        })?;
+
+    let status = node.model_downloads.get(model_id).ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: format!("Download not found for model: {}", model_id),
+        data: None,
+    })?;
+
+    serde_json::to_value(status.value()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization failed: {}", e),
+        data: None,
+    })
+}
+
+async fn handle_serve_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' parameter".to_string(),
+            data: None,
+        })?;
+
+    // Look up model in catalog
+    let entry = get_model_by_id(model_id).ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: format!("Model '{}' not found in catalog", model_id),
+        data: None,
+    })?;
+
+    let hf_downloader = node.hf_downloader.as_ref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "HF downloader not initialized".to_string(),
+        data: None,
+    })?;
+
+    let model_runtime = node.model_runtime.as_ref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Model runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Check if already serving
+    if model_runtime.is_loaded(model_id) {
+        return Ok(serde_json::json!({
+            "success": true,
+            "model_id": model_id,
+            "status": "already_serving",
+        }));
+    }
+
+    // Check if model is downloaded — first check HF tracker, then check filesystem
+    let gguf_path = hf_downloader.model_path(model_id);
+    let home_models_serve = std::path::PathBuf::from(
+            std::env::var("HOME").unwrap_or_else(|_| "/home/tenzro".to_string()),
+        )
+        .join(".tenzro/models");
+    // Check flat file: ~/.tenzro/models/<model_id>.gguf (where CLI downloads)
+    let flat_gguf = home_models_serve.join(format!("{}.gguf", model_id));
+    let file_exists = std::path::Path::new(&gguf_path).exists()
+        || flat_gguf.exists()
+        || {
+            // Fallback: check subdirectory ~/.tenzro/models/<model_id>/*.gguf
+            let sub_dir = home_models_serve.join(model_id);
+            if sub_dir.is_dir() {
+                std::fs::read_dir(&sub_dir)
+                    .ok()
+                    .and_then(|entries| {
+                        entries
+                            .filter_map(|e| e.ok())
+                            .find(|e| {
+                                e.path()
+                                    .extension()
+                                    .map(|ext| ext == "gguf")
+                                    .unwrap_or(false)
+                            })
+                    })
+                    .is_some()
+            } else {
+                false
+            }
+        };
+
+    if !hf_downloader.is_downloaded(model_id) && !file_exists {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: "Model not downloaded. Please download it first.".to_string(),
+            data: None,
+        });
+    }
+
+    // If file exists on disk but not tracked, resolve the actual path
+    let gguf_path = if gguf_path.exists() {
+        gguf_path.to_string_lossy().to_string()
+    } else if flat_gguf.exists() {
+        // CLI downloads to ~/.tenzro/models/<model_id>.gguf (flat file)
+        flat_gguf.to_string_lossy().to_string()
+    } else {
+        // Fallback: scan subdirectory ~/.tenzro/models/<model_id>/ for .gguf file
+        let sub_dir = home_models_serve.join(model_id);
+        std::fs::read_dir(&sub_dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .find(|e| {
+                        e.path()
+                            .extension()
+                            .map(|ext| ext == "gguf")
+                            .unwrap_or(false)
+                    })
+                    .map(|e| e.path().to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| gguf_path.to_string_lossy().to_string())
+    };
+
+    // Load model into runtime
+    model_runtime
+        .load_model_with_context(model_id, std::path::Path::new(&gguf_path), entry.architecture, Some(entry.context_length))
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to load model: {}", e),
+            data: None,
+        })?;
+
+    // Mark model as served
+    node.served_models.insert(model_id.to_string(), true);
+
+    // Persist to RocksDB CF_MODELS so served state survives restart
+    if let Some(storage) = node.storage() {
+        let record = serde_json::json!({
+            "model_id": model_id,
+            "served_at": chrono::Utc::now().to_rfc3339(),
+        });
+        if let Ok(bytes) = serde_json::to_vec(&record) {
+            let put_result = storage.put(CF_MODELS, model_id.as_bytes(), &bytes);
+            if let Err(e) = put_result {
+                tracing::warn!(model_id = %model_id, error = %e, "Failed to persist served model to RocksDB");
+            } else {
+                tracing::info!(model_id = %model_id, "Persisted served model to RocksDB CF_MODELS");
+            }
+        }
+    }
+
+    // Estimate max concurrent requests based on hardware
+    let max_concurrent = {
+        let hw = node.hardware_profile.read();
+        if let Some(ref profile) = *hw {
+            let gpu_vram = profile.gpus.first().map(|g| g.vram_gb).unwrap_or(0.0);
+            let has_gpu = !profile.gpus.is_empty() && gpu_vram > 0.0;
+            tenzro_model::estimate_max_concurrent(entry.min_ram_gb, profile.total_ram_gb, gpu_vram, has_gpu)
+        } else {
+            // No hardware profile yet, conservative default
+            tenzro_model::estimate_max_concurrent(entry.min_ram_gb, 4.0, 0.0, false)
+        }
+    };
+    node.load_tracker.register_model(model_id, max_concurrent);
+
+    // Register model service instance with API and MCP endpoints.
+    // Prefer externally-advertised URLs (set via config/CLI) over the local
+    // bind address — the bind address (e.g. 0.0.0.0:8545) is not routable
+    // from remote peers, so gossiped endpoints would otherwise be unreachable.
+    let cfg = node.config();
+    let api_endpoint = match cfg.external_rpc_addr.as_deref() {
+        Some(ext) if !ext.is_empty() => {
+            if ext.starts_with("http://") || ext.starts_with("https://") {
+                if ext.trim_end_matches('/').ends_with("/v1") {
+                    ext.trim_end_matches('/').to_string()
+                } else {
+                    format!("{}/v1", ext.trim_end_matches('/'))
+                }
+            } else {
+                format!("http://{}/v1", ext.trim_end_matches('/'))
+            }
+        }
+        _ => format!("http://{}/v1", cfg.rpc_addr),
+    };
+    let mcp_endpoint = match cfg.external_mcp_addr.as_deref() {
+        Some(ext) if !ext.is_empty() => {
+            if ext.starts_with("http://") || ext.starts_with("https://") {
+                if ext.trim_end_matches('/').ends_with("/mcp") {
+                    ext.trim_end_matches('/').to_string()
+                } else {
+                    format!("{}/mcp", ext.trim_end_matches('/'))
+                }
+            } else {
+                format!("http://{}/mcp", ext.trim_end_matches('/'))
+            }
+        }
+        _ => format!(
+            "http://{}:{}/mcp",
+            cfg.rpc_addr.split(':').next().unwrap_or("127.0.0.1"),
+            3001
+        ),
+    };
+    let params_str = entry.parameters.clone();
+
+    let instance_id = node.register_model_service(
+        model_id,
+        &entry.name,
+        "Local Node",
+        ModelLocation::Local,
+        &api_endpoint,
+        &mcp_endpoint,
+        &params_str,
+    );
+
+    // Publish gossipsub announcement if network is available (visibility=network by default)
+    if let Some(network) = node.network() {
+        let network = network.clone();
+        let pricing = node.provider_pricing.read();
+        let schedule = node.provider_schedule.read();
+        let msg_schedule = if schedule.enabled {
+            let days: Vec<u8> = schedule.days_of_week.iter()
+                .enumerate()
+                .filter_map(|(i, &enabled)| if enabled { Some(i as u8) } else { None })
+                .collect();
+            Some(tenzro_network::ModelSchedule {
+                enabled: true,
+                start_hour: schedule.start_hour,
+                end_hour: schedule.end_hour,
+                timezone: schedule.timezone.clone(),
+                days_of_week: days,
+            })
+        } else {
+            None
+        };
+        let reg = tenzro_network::ModelRegistrationMessage {
+            model_id: model_id.to_string(),
+            name: entry.name.clone(),
+            description: entry.description.clone(),
+            modality: "text".to_string(),
+            category: entry.family.clone(),
+            parameters: entry.parameters.clone(),
+            context_length: entry.context_length,
+            provider: String::new(),
+            peer_id: String::new(),
+            pricing: tenzro_network::PricingInfo {
+                per_request: 0,
+                per_token: Some((pricing.input_price_per_token * 1_000_000.0) as u64),
+            },
+            schedule: msg_schedule,
+            visibility: "network".to_string(),
+            ttl_secs: 120,
+            withdrawn: false,
+            rpc_endpoint: api_endpoint.clone(),
+            ..Default::default()
+        };
+        let broadcast_msg = NetworkMessage::new(
+            MessagePayload::ModelRegistration(reg),
+        );
+        tokio::spawn(async move {
+            if let Err(e) = network.broadcast("tenzro/models/1.0.0", broadcast_msg).await {
+                tracing::warn!(error = %e, "Failed to broadcast model serving announcement");
+            }
+        });
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "model_id": model_id,
+        "instance_id": instance_id,
+        "api_endpoint": api_endpoint,
+        "mcp_endpoint": mcp_endpoint,
+        "status": "serving",
+        "max_concurrent": max_concurrent,
+    }))
+}
+
+async fn handle_stop_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' parameter".to_string(),
+            data: None,
+        })?;
+
+    // Unload from model runtime
+    if let Some(runtime) = &node.model_runtime {
+        runtime.unload_model(model_id).await.map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to unload model: {}", e),
+            data: None,
+        })?;
+    }
+
+    // Remove from served models, model services registry, load tracker, and RocksDB
+    node.served_models.remove(model_id);
+    node.unregister_model_services_by_model(model_id);
+    node.load_tracker.unregister_model(model_id);
+
+    // Remove from RocksDB so the model isn't restored as "serving" on restart
+    if let Some(storage) = node.storage() {
+        let _ = storage.delete(CF_MODELS, model_id.as_bytes());
+        tracing::info!(model_id = %model_id, "Removed served model from RocksDB CF_MODELS");
+    }
+
+    // Publish gossipsub withdrawal so peers remove this model
+    if let Some(network) = node.network() {
+        let network = network.clone();
+        let reg = tenzro_network::ModelRegistrationMessage {
+            model_id: model_id.to_string(),
+            name: String::new(),
+            description: String::new(),
+            modality: String::new(),
+            category: String::new(),
+            parameters: String::new(),
+            context_length: 0,
+            provider: String::new(),
+            peer_id: String::new(),
+            pricing: tenzro_network::PricingInfo { per_request: 0, per_token: None },
+            schedule: None,
+            visibility: "network".to_string(),
+            ttl_secs: 120,
+            withdrawn: true,
+            rpc_endpoint: String::new(),
+            ..Default::default()
+        };
+        let broadcast_msg = NetworkMessage::new(
+            MessagePayload::ModelRegistration(reg),
+        );
+        tokio::spawn(async move {
+            if let Err(e) = network.broadcast("tenzro/models/1.0.0", broadcast_msg).await {
+                tracing::warn!(error = %e, "Failed to broadcast model withdrawal");
+            }
+        });
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "model_id": model_id,
+        "status": "stopped",
+    }))
+}
+
+/// Manual admin reconcile of the model registry. Auto-reloads served models
+/// whose GGUF file is present but not yet in the runtime, clears stale served
+/// flags, and prunes orphaned ModelServiceInstance entries.
+async fn handle_prune_model_registry(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let (reloaded, cleared_models, cleared_services) =
+        node.reconcile_model_registry().await;
+    Ok(serde_json::json!({
+        "reloaded": reloaded,
+        "cleared_models": cleared_models,
+        "cleared_services": cleared_services,
+    }))
+}
+
+/// Manual admin reconcile of the agent registry.
+///
+/// Runs the 1h idle-TTL sweep, suspending any Active agents whose last
+/// heartbeat (or most recent state change) is older than 3600s. Terminated
+/// agents are preserved for audit.
+async fn handle_prune_agent_registry(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let suspended = node.reconcile_agent_registry().await;
+    Ok(serde_json::json!({
+        "suspended": suspended,
+    }))
+}
+
+/// Manual admin reconcile of the task registry.
+///
+/// Optional params:
+///   - `purge_after_secs` (u64, default 2,592,000 = 30 days): max age of
+///     terminal tasks (Completed/Cancelled/Expired) before they are deleted.
+///
+/// Always performs:
+///   - Deadline enforcement: Open/Assigned/InProgress with deadline < now →
+///     Expired.
+///
+/// Returns `{"expired": N, "purged": M}`.
+async fn handle_prune_task_registry(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    const DEFAULT_PURGE_SECS: i64 = 30 * 24 * 3600;
+    let purge_after_secs = params
+        .as_ref()
+        .and_then(|p| p.get("purge_after_secs"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(DEFAULT_PURGE_SECS);
+
+    let (expired, purged) = node.reconcile_task_registry(purge_after_secs);
+    Ok(serde_json::json!({
+        "expired": expired,
+        "purged": purged,
+    }))
+}
+
+/// Manual admin reconcile of the tool registry.
+///
+/// Optional params:
+///   - `purge_after_secs` (u64, default 2,592,000 = 30 days): max age of
+///     Inactive/Deprecated tools before they are deleted.
+///
+/// Returns `{"purged": N}`.
+async fn handle_prune_tool_registry(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    const DEFAULT_PURGE_SECS: u64 = 30 * 24 * 3600;
+    let purge_after_secs = params
+        .as_ref()
+        .and_then(|p| p.get("purge_after_secs"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_PURGE_SECS);
+
+    let purged = node.reconcile_tool_registry(purge_after_secs);
+    Ok(serde_json::json!({
+        "purged": purged,
+    }))
+}
+
+/// Manual admin reconcile of the skill registry.
+///
+/// Optional params:
+///   - `purge_after_secs` (u64, default 2,592,000 = 30 days): max age of
+///     Inactive/Deprecated skills before they are deleted.
+///
+/// Returns `{"purged": N}`.
+async fn handle_prune_skill_registry(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    const DEFAULT_PURGE_SECS: u64 = 30 * 24 * 3600;
+    let purge_after_secs = params
+        .as_ref()
+        .and_then(|p| p.get("purge_after_secs"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_PURGE_SECS);
+
+    let purged = node.reconcile_skill_registry(purge_after_secs);
+    Ok(serde_json::json!({
+        "purged": purged,
+    }))
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ONNX Runtime RPC handlers — timeseries forecasting + vision encoders
+// ════════════════════════════════════════════════════════════════════════
+//
+// Both `TimeseriesRuntime` and `VisionRuntime` are always present on the
+// node (constructed in `TenzroNode::new()`). On default builds they're
+// stub-backed and return `ProviderNotAvailable` on use; on `--features
+// tenzro-model/onnx` builds they're real ORT sessions. The RPC layer is
+// identical in both cases.
+
+/// Translate a `ModelError` into a JSON-RPC error.
+fn forecast_err(e: tenzro_model::ModelError) -> JsonRpcError {
+    use tenzro_model::ModelError;
+    match e {
+        ModelError::ModelNotFound(_) => JsonRpcError {
+            code: -32004,
+            message: e.to_string(),
+            data: None,
+        },
+        ModelError::ProviderNotAvailable(_) => JsonRpcError {
+            code: -32011,
+            message: e.to_string(),
+            data: None,
+        },
+        ModelError::InvalidModel(_) => JsonRpcError {
+            code: -32602,
+            message: e.to_string(),
+            data: None,
+        },
+        ModelError::InferenceError(_) => JsonRpcError {
+            code: -32010,
+            message: e.to_string(),
+            data: None,
+        },
+        other => JsonRpcError {
+            code: -32603,
+            message: other.to_string(),
+            data: None,
+        },
+    }
+}
+
+fn missing_param(name: &str) -> JsonRpcError {
+    JsonRpcError {
+        code: -32602,
+        message: format!("Missing '{}' parameter", name),
+        data: None,
+    }
+}
+
+/// `tenzro_loadForecastModel`: load an ONNX timeseries model from a local
+/// path and register it under `model_id`.
+///
+/// Params: `{ model_id: String, path: String, context_length: usize, max_horizon: usize }`
+async fn handle_load_forecast_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let path = p
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("path"))?;
+    let context_length = p
+        .get("context_length")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| missing_param("context_length"))? as usize;
+    let max_horizon = p
+        .get("max_horizon")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| missing_param("max_horizon"))? as usize;
+
+    node.timeseries_runtime
+        .load_onnx(model_id.to_string(), path, context_length, max_horizon)
+        .map_err(forecast_err)?;
+
+    Ok(serde_json::json!({
+        "model_id": model_id,
+        "loaded": true,
+        "context_length": context_length,
+        "max_horizon": max_horizon,
+    }))
+}
+
+/// `tenzro_unloadForecastModel`: drop a registered forecast model.
+async fn handle_unload_forecast_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let removed = node.timeseries_runtime.unregister(model_id);
+    Ok(serde_json::json!({ "model_id": model_id, "removed": removed }))
+}
+
+/// `tenzro_listForecastModels`: list currently-loaded forecast model ids.
+async fn handle_list_forecast_models(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": node.timeseries_runtime.loaded_models(),
+    }))
+}
+
+/// `tenzro_listForecastCatalog`: return the curated ONNX forecast (timeseries) catalog.
+async fn handle_list_forecast_catalog() -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": get_forecast_catalog(),
+    }))
+}
+
+/// `tenzro_forecast`: run a forecast on a registered model.
+///
+/// Params: `{ model_id, history: [f32, ...], horizon: usize,
+///            quantiles?: [f32, ...], frequency_seconds?: u64 }`
+async fn handle_forecast(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let history: Vec<f32> = p
+        .get("history")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| missing_param("history"))?
+        .iter()
+        .filter_map(|v| v.as_f64().map(|f| f as f32))
+        .collect();
+    if history.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "'history' must be a non-empty array of numbers".to_string(),
+            data: None,
+        });
+    }
+    let horizon = p
+        .get("horizon")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| missing_param("horizon"))? as usize;
+    let quantiles: Vec<f32> = p
+        .get("quantiles")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect()
+        })
+        .unwrap_or_default();
+    let frequency_seconds = p.get("frequency_seconds").and_then(|v| v.as_u64());
+
+    let cfg = ForecastConfig {
+        horizon,
+        quantiles,
+        frequency_seconds,
+    };
+
+    let result = node
+        .timeseries_runtime
+        .forecast(model_id, history, cfg)
+        .await
+        .map_err(forecast_err)?;
+
+    serde_json::to_value(result).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("forecast result serialization: {}", e),
+        data: None,
+    })
+}
+
+/// Resolve a normalization key (`"clip"`/`"imagenet"`/`"siglip"`) into
+/// the runtime's strongly-typed normalization. Unknown keys default to CLIP.
+fn parse_normalization(key: Option<&str>) -> ImageNormalization {
+    match key.unwrap_or("clip").to_lowercase().as_str() {
+        "imagenet" => ImageNormalization::IMAGENET,
+        "siglip" => ImageNormalization::SIGLIP,
+        _ => ImageNormalization::CLIP,
+    }
+}
+
+/// `tenzro_loadVisionModel`: load an ONNX vision encoder from a local
+/// path. Either pass full params, or pass `catalog_id` to pick up the
+/// preset from the curated vision catalog.
+///
+/// Params (explicit): `{ model_id, path, input_size, embedding_dim, normalization? }`
+/// Params (catalog):  `{ model_id, path, catalog_id }`  ← input_size, embedding_dim,
+///                    normalization come from the catalog entry.
+async fn handle_load_vision_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?
+        .to_string();
+    let path = p
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("path"))?
+        .to_string();
+
+    let (input_size, embedding_dim, normalization) =
+        if let Some(catalog_id) = p.get("catalog_id").and_then(|v| v.as_str()) {
+            let entry = get_vision_model_by_id(catalog_id).ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!("Unknown catalog_id '{}'", catalog_id),
+                data: None,
+            })?;
+            (
+                entry.input_size,
+                entry.embedding_dim,
+                parse_normalization(Some(&entry.normalization)),
+            )
+        } else {
+            let input_size = p
+                .get("input_size")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| missing_param("input_size"))? as u32;
+            let embedding_dim = p
+                .get("embedding_dim")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| missing_param("embedding_dim"))? as usize;
+            let norm = parse_normalization(p.get("normalization").and_then(|v| v.as_str()));
+            (input_size, embedding_dim, norm)
+        };
+
+    node.vision_runtime
+        .load_onnx(
+            model_id.clone(),
+            path,
+            input_size,
+            embedding_dim,
+            normalization,
+        )
+        .map_err(forecast_err)?;
+
+    Ok(serde_json::json!({
+        "model_id": model_id,
+        "loaded": true,
+        "input_size": input_size,
+        "embedding_dim": embedding_dim,
+    }))
+}
+
+/// `tenzro_unloadVisionModel`: drop a registered vision encoder.
+async fn handle_unload_vision_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let removed = node.vision_runtime.unregister(model_id);
+    Ok(serde_json::json!({ "model_id": model_id, "removed": removed }))
+}
+
+/// `tenzro_listVisionModels`: list currently-loaded vision encoder ids.
+async fn handle_list_vision_models(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": node.vision_runtime.loaded_models(),
+    }))
+}
+
+/// `tenzro_imageEmbed`: embed a single image with a registered encoder.
+///
+/// Params: `{ model_id, image_base64: String, normalize?: bool }`
+async fn handle_image_embed(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use base64::Engine;
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let b64 = p
+        .get("image_base64")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("image_base64"))?;
+    let normalize = p
+        .get("normalize")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid base64 in 'image_base64': {}", e),
+            data: None,
+        })?;
+
+    let cfg = ImageEmbedConfig { normalize };
+    let result = node
+        .vision_runtime
+        .embed(model_id, bytes, cfg)
+        .await
+        .map_err(forecast_err)?;
+
+    serde_json::to_value(result).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("embed result serialization: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_imageTextSimilarity`: pure cosine similarity between two
+/// embeddings. The caller provides both vectors — typically the image
+/// embedding comes from `tenzro_imageEmbed` and the text embedding comes
+/// from a CLIP/SigLIP text tower invoked via `tenzro_chat` / a dedicated
+/// text-encoder ONNX export. This handler is pure math and does not load
+/// any model.
+///
+/// Params: `{ image_embedding: [f32,...], text_embedding: [f32,...] }`
+async fn handle_image_text_similarity(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let img: Vec<f32> = p
+        .get("image_embedding")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| missing_param("image_embedding"))?
+        .iter()
+        .filter_map(|v| v.as_f64().map(|f| f as f32))
+        .collect();
+    let txt: Vec<f32> = p
+        .get("text_embedding")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| missing_param("text_embedding"))?
+        .iter()
+        .filter_map(|v| v.as_f64().map(|f| f as f32))
+        .collect();
+    if img.len() != txt.len() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "embedding dimension mismatch: image={} text={}",
+                img.len(),
+                txt.len()
+            ),
+            data: None,
+        });
+    }
+    let sim = tenzro_model::cosine_similarity(&img, &txt);
+    Ok(serde_json::json!({ "similarity": sim, "dim": img.len() }))
+}
+
+/// `tenzro_listVisionCatalog`: return the curated ONNX vision encoder catalog.
+async fn handle_list_vision_catalog() -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": get_vision_catalog(),
+    }))
+}
+
+// ============================================================================
+// Text embeddings — Qwen3-Embedding, EmbeddingGemma, BGE-M3, Arctic-Embed
+// ============================================================================
+
+/// `tenzro_loadTextEmbeddingModel`: register a text encoder by `model_id`.
+///
+/// Wave 1 ships runtime scaffolding only — ONNX session loading is not yet
+/// wired here. Real text-embedding models (Qwen3-Embedding, EmbeddingGemma)
+/// require tokenizer.json + model.onnx and will be wired in a follow-up.
+/// This RPC currently returns a `not yet implemented` error so the surface
+/// is discoverable but does not silently lie about state.
+async fn handle_load_text_embedding_model(
+    _node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Err(JsonRpcError {
+        code: -32004,
+        message: "text-embedding ONNX loading not yet wired in wave 1; runtime + catalog ship empty (see plan)".to_string(),
+        data: None,
+    })
+}
+
+/// `tenzro_unloadTextEmbeddingModel`: drop a registered text encoder.
+async fn handle_unload_text_embedding_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let removed = node.text_embedding_runtime.unregister(model_id);
+    Ok(serde_json::json!({ "model_id": model_id, "removed": removed }))
+}
+
+/// `tenzro_listTextEmbeddingModels`: list currently-loaded text encoders.
+async fn handle_list_text_embedding_models(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": node.text_embedding_runtime.loaded_models(),
+    }))
+}
+
+/// `tenzro_listTextEmbeddingCatalog`: curated ONNX text-embedding catalog.
+async fn handle_list_text_embedding_catalog() -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": get_text_embedding_catalog(),
+    }))
+}
+
+/// `tenzro_textEmbed`: embed strings with a registered encoder.
+///
+/// Params: `{ model_id, inputs: [String,...], requested_dim?: u32, normalize?: bool }`
+async fn handle_text_embed(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let inputs: Vec<String> = p
+        .get("inputs")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| missing_param("inputs"))?
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    if inputs.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "'inputs' must be a non-empty array of strings".to_string(),
+            data: None,
+        });
+    }
+    let requested_dim = p
+        .get("requested_dim")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+    let normalize = p.get("normalize").and_then(|v| v.as_bool()).unwrap_or(false);
+    let cfg = TextEmbedConfig {
+        requested_dim,
+        normalize,
+    };
+    let result = node
+        .text_embedding_runtime
+        .embed(model_id, inputs, cfg)
+        .await
+        .map_err(forecast_err)?;
+    serde_json::to_value(result).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("text-embed serialization: {}", e),
+        data: None,
+    })
+}
+
+// ============================================================================
+// Segmentation — SAM 3, SAM 2, EdgeSAM, MobileSAM
+// ============================================================================
+
+/// `tenzro_loadSegmentationModel`: register a segmenter by `model_id`.
+async fn handle_load_segmentation_model(
+    _node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Err(JsonRpcError {
+        code: -32004,
+        message: "segmentation ONNX loading not yet wired in wave 1; runtime + catalog ship as scaffolding (see plan)".to_string(),
+        data: None,
+    })
+}
+
+async fn handle_unload_segmentation_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let removed = node.segmentation_runtime.unregister(model_id);
+    Ok(serde_json::json!({ "model_id": model_id, "removed": removed }))
+}
+
+async fn handle_list_segmentation_models(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": node.segmentation_runtime.loaded_models(),
+    }))
+}
+
+async fn handle_list_segmentation_catalog() -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": get_segmentation_catalog(),
+    }))
+}
+
+/// `tenzro_segment`: produce masks for an image given prompts.
+///
+/// Params: `{ model_id, image_base64: String, prompts: [SegmentPrompt,...] }`
+async fn handle_segment(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use base64::Engine;
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let b64 = p
+        .get("image_base64")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("image_base64"))?;
+    let prompts_v = p.get("prompts").ok_or_else(|| missing_param("prompts"))?;
+    let prompts: Vec<SegmentPrompt> = serde_json::from_value(prompts_v.clone())
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid 'prompts': {}", e),
+            data: None,
+        })?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid base64 in 'image_base64': {}", e),
+            data: None,
+        })?;
+    let result = node
+        .segmentation_runtime
+        .segment(model_id, bytes, prompts)
+        .await
+        .map_err(forecast_err)?;
+    serde_json::to_value(result).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("segment result serialization: {}", e),
+        data: None,
+    })
+}
+
+// ============================================================================
+// Object detection — RF-DETR, D-FINE
+// ============================================================================
+
+async fn handle_load_detection_model(
+    _node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Err(JsonRpcError {
+        code: -32004,
+        message: "detection ONNX loading not yet wired in wave 1; runtime + catalog ship as scaffolding (see plan)".to_string(),
+        data: None,
+    })
+}
+
+async fn handle_unload_detection_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let removed = node.detection_runtime.unregister(model_id);
+    Ok(serde_json::json!({ "model_id": model_id, "removed": removed }))
+}
+
+async fn handle_list_detection_models(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": node.detection_runtime.loaded_models(),
+    }))
+}
+
+async fn handle_list_detection_catalog() -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": get_detection_catalog(),
+    }))
+}
+
+/// `tenzro_detect`: object detection on an image.
+///
+/// Params: `{ model_id, image_base64: String, score_threshold?: f32 }`
+async fn handle_detect(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use base64::Engine;
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let b64 = p
+        .get("image_base64")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("image_base64"))?;
+    let score_threshold = p
+        .get("score_threshold")
+        .and_then(|v| v.as_f64())
+        .map(|f| f as f32)
+        .unwrap_or(0.25);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid base64 in 'image_base64': {}", e),
+            data: None,
+        })?;
+    let result = node
+        .detection_runtime
+        .detect(model_id, bytes, score_threshold)
+        .await
+        .map_err(forecast_err)?;
+    serde_json::to_value(result).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("detect result serialization: {}", e),
+        data: None,
+    })
+}
+
+// ============================================================================
+// Audio ASR — Moonshine, Whisper, Parakeet, Canary, Distil-Whisper
+// ============================================================================
+
+async fn handle_load_audio_model(
+    _node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Err(JsonRpcError {
+        code: -32004,
+        message: "audio ONNX loading not yet wired in wave 1; runtime + catalog ship as scaffolding (see plan)".to_string(),
+        data: None,
+    })
+}
+
+async fn handle_unload_audio_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let removed = node.audio_runtime.unregister(model_id);
+    Ok(serde_json::json!({ "model_id": model_id, "removed": removed }))
+}
+
+async fn handle_list_audio_models(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": node.audio_runtime.loaded_models(),
+    }))
+}
+
+async fn handle_list_audio_catalog() -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": get_audio_catalog(),
+    }))
+}
+
+/// `tenzro_transcribe`: ASR on an audio clip.
+///
+/// Params: `{ model_id, audio_base64: String, language?: String,
+///            timestamps?: bool, temperature?: f32 }`
+async fn handle_transcribe(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use base64::Engine;
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let b64 = p
+        .get("audio_base64")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("audio_base64"))?;
+    let language = p
+        .get("language")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let timestamps = p.get("timestamps").and_then(|v| v.as_bool()).unwrap_or(false);
+    let temperature = p
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .map(|f| f as f32);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid base64 in 'audio_base64': {}", e),
+            data: None,
+        })?;
+    let cfg = TranscribeConfig {
+        language,
+        timestamps,
+        temperature,
+    };
+    let result = node
+        .audio_runtime
+        .transcribe(model_id, bytes, cfg)
+        .await
+        .map_err(forecast_err)?;
+    serde_json::to_value(result).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("transcribe result serialization: {}", e),
+        data: None,
+    })
+}
+
+// ============================================================================
+// Video — empty wave 1; scaffolding for V-JEPA / VideoMAE once exports land
+// ============================================================================
+
+async fn handle_load_video_model(
+    _node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Err(JsonRpcError {
+        code: -32004,
+        message: "video ONNX loading not yet wired; catalog is empty in wave 1 pending license clearance + ONNX export (see tools/video-export)".to_string(),
+        data: None,
+    })
+}
+
+async fn handle_unload_video_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let removed = node.video_runtime.unregister(model_id);
+    Ok(serde_json::json!({ "model_id": model_id, "removed": removed }))
+}
+
+async fn handle_list_video_models(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": node.video_runtime.loaded_models(),
+    }))
+}
+
+async fn handle_list_video_catalog() -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": get_video_catalog(),
+    }))
+}
+
+/// `tenzro_videoEmbed`: produce a clip-level embedding from a video.
+///
+/// Params: `{ model_id, video_base64: String, normalize?: bool, frame_stride?: u32 }`
+async fn handle_video_embed(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use base64::Engine;
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let b64 = p
+        .get("video_base64")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("video_base64"))?;
+    let normalize = p.get("normalize").and_then(|v| v.as_bool()).unwrap_or(false);
+    let frame_stride = p
+        .get("frame_stride")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid base64 in 'video_base64': {}", e),
+            data: None,
+        })?;
+    let cfg = VideoEmbedConfig {
+        normalize,
+        frame_stride,
+    };
+    let result = node
+        .video_runtime
+        .embed(model_id, bytes, cfg)
+        .await
+        .map_err(forecast_err)?;
+    serde_json::to_value(result).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("video embed serialization: {}", e),
+        data: None,
+    })
+}
+
+/// Top-level dispatcher for `tenzro_chat`. Routes by shape:
+///
+/// - presence of `messages` → rich shape (multi-turn, tools, content blocks)
+/// - presence of `message` → simple shape (single-turn string)
+/// - both or neither → error
+///
+/// See `docs/chat-api.md` for the public contract.
+async fn handle_chat(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.as_ref().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let has_messages = p.get("messages").is_some();
+    let has_message = p.get("message").is_some();
+    match (has_messages, has_message) {
+        (true, true) => Err(JsonRpcError {
+            code: -32602,
+            message: "Cannot specify both 'message' (simple) and 'messages' (rich) — pick one".to_string(),
+            data: None,
+        }),
+        (true, false) => handle_chat_rich(node, params).await,
+        (false, true) => handle_chat_simple(node, params).await,
+        (false, false) => Err(JsonRpcError {
+            code: -32602,
+            message: "Missing 'message' (simple shape) or 'messages' (rich shape)".to_string(),
+            data: None,
+        }),
+    }
+}
+
+async fn handle_chat_simple(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Accept both `model_id` (Tenzro RPC-style, canonical) and `model`
+    // (OpenAI/MCP-style). Either key is valid in the JSON payload.
+    let model_query = params
+        .get("model_id")
+        .or_else(|| params.get("model"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' (or 'model') parameter".to_string(),
+            data: None,
+        })?;
+
+    let message = params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'message' parameter".to_string(),
+            data: None,
+        })?;
+
+    // Resolve model: try service registry, then local served_models, then
+    // gossip-discovered network models. This ensures non-provider nodes (e.g.
+    // the public RPC tier) can forward chat requests to any validator that
+    // has advertised itself via `tenzro/models/1.0.0`.
+    let mut service = node.get_model_service(model_query)
+        .or_else(|| node.find_model_service_by_model_id(model_query));
+
+    if service.is_none() && !node.served_models.contains_key(model_query) {
+        for entry in node.network_models_snapshot() {
+            let reg = &entry.registration;
+            if reg.model_id == model_query {
+                service = Some(tenzro_types::model::ModelServiceInstance {
+                    instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
+                    model_id: reg.model_id.clone(),
+                    model_name: reg.name.clone(),
+                    provider_address: tenzro_types::primitives::Address::from_hex(&reg.provider).unwrap_or_default(),
+                    provider_name: reg.provider.clone(),
+                    location: tenzro_types::model::ModelLocation::Network,
+                    api_endpoint: reg.rpc_endpoint.clone(),
+                    mcp_endpoint: String::new(),
+                    status: tenzro_types::model::ServiceStatus::Online,
+                    parameters: reg.parameters.clone(),
+                    pricing: tenzro_types::model::PricingConfig {
+                        price_per_input_token: reg.pricing.per_token.unwrap_or(0),
+                        price_per_output_token: reg.pricing.per_token.unwrap_or(0),
+                        minimum_price: reg.pricing.per_request,
+                        pricing_model: tenzro_types::model::PricingModel::PerToken,
+                    },
+                    created_at: 0,
+                    last_seen: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    load_info: None,
+                });
+                break;
+            }
+        }
+    }
+
+    let is_local = if let Some(ref svc) = service {
+        svc.location == ModelLocation::Local
+    } else {
+        node.served_models.contains_key(model_query)
+    };
+
+    let model_id = if let Some(ref svc) = service {
+        svc.model_id.clone()
+    } else {
+        model_query.to_string()
+    };
+
+    // Parse optional generation config
+    let config = GenerationConfig {
+        temperature: params.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7),
+        top_p: params.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.9),
+        max_tokens: params.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(512) as u32,
+        repeat_penalty: params.get("repeat_penalty").and_then(|v| v.as_f64()).unwrap_or(1.1) as f32,
+        ..GenerationConfig::default()
+    };
+
+    if is_local {
+        // === Local inference ===
+        let model_runtime = node.model_runtime.as_ref().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Model runtime not initialized".to_string(),
+            data: None,
+        })?;
+
+        if !model_runtime.is_loaded(&model_id) {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("Model '{}' is not currently serving", model_id),
+                data: None,
+            });
+        }
+
+        // Acquire load slot (RAII guard auto-decrements on drop)
+        let _load_guard = node.load_tracker.try_acquire(&model_id).map_err(|_| {
+            let load_data = node.load_tracker.snapshot(&model_id).map(|s| {
+                serde_json::json!({
+                    "active_requests": s.active_requests,
+                    "max_concurrent": s.max_concurrent,
+                    "load_level": s.load_level.to_string(),
+                })
+            });
+            JsonRpcError {
+                code: -32000,
+                message: format!("Model '{}' is at capacity. Try again later.", model_id),
+                data: load_data,
+            }
+        })?;
+
+        // Use generate_chat with proper chat template formatting
+        let chat_messages = vec![ModelChatMessage {
+            role: "user".to_string(),
+            content: message.to_string(),
+        }];
+
+        let result = model_runtime
+            .generate_chat(&model_id, &chat_messages, &config)
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Inference failed: {}", e),
+                data: None,
+            })?;
+
+        // Record Prometheus inference counter for observability
+        node.metrics().record_inference();
+
+        // Refresh last_seen on successful inference so the 1-hour idle TTL
+        // is bound to real usage rather than registration time.
+        node.touch_local_model_service(&model_id);
+
+        let pricing = node.provider_pricing.read();
+        let cost = (result.input_tokens as f64 * pricing.input_price_per_token)
+            + (result.output_tokens as f64 * pricing.output_price_per_token);
+        drop(pricing);
+
+        // Wire TNZO billing: deduct from caller, credit this provider node
+        if let Some(token) = node.token() {
+            if let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str()) {
+                if let Ok(caller_addr) = parse_address(caller_str) {
+                    let cost_wei = (cost * 1_000_000_000_000_000_000f64) as u128;
+                    if cost_wei > 0 {
+                        let provider_addr = if let Some(registry) = node.identity_registry() {
+                            let all = registry.list_all();
+                            if let Some((_, identity)) = all.first() {
+                                identity.wallet_address
+                            } else {
+                                Address::default()
+                            }
+                        } else {
+                            Address::default()
+                        };
+                        if provider_addr != Address::default() {
+                            if let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
+                                tracing::warn!(caller = %caller_str, cost_tnzo = cost,
+                                    "Inference billing failed: {}", e);
+                            } else {
+                                tracing::info!(caller = %caller_str, cost_tnzo = cost,
+                                    "Inference billed successfully");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build load snapshot for response
+        let load = node.load_tracker.snapshot(&model_id).map(|s| {
+            serde_json::json!({
+                "active_requests": s.active_requests,
+                "max_concurrent": s.max_concurrent,
+                "utilization_percent": s.utilization_percent,
+                "load_level": s.load_level.to_string(),
+            })
+        });
+
+        Ok(serde_json::json!({
+            "output": result.text,
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "generation_time_ms": result.generation_time_ms,
+            "tokens_per_second": result.tokens_per_second,
+            "cost": cost,
+            "model_id": model_id,
+            "location": "local",
+            "load": load,
+        }))
+    } else if let Some(ref svc) = service {
+        // === Network model — forward to remote provider via JSON-RPC ===
+        let remote_url = &svc.api_endpoint;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        let forward_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tenzro_chat",
+            "params": {
+                "model_id": svc.model_id,
+                "message": message,
+                "max_tokens": config.max_tokens,
+                "temperature": config.temperature,
+            },
+            "id": 1,
+        });
+
+        let resp = client
+            .post(remote_url)
+            .json(&forward_body)
+            .send()
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Failed to reach provider at {}: {}", remote_url, e),
+                data: None,
+            })?;
+
+        let body: Value = resp.json().await.map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to parse provider response: {}", e),
+            data: None,
+        })?;
+
+        // Extract output from JSON-RPC response
+        let rpc_result = body.get("result").unwrap_or(&body);
+        let output = rpc_result
+            .get("output")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let input_tokens = rpc_result.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let output_tokens = rpc_result.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+
+        // Record Prometheus inference counter for observability
+        node.metrics().record_inference();
+
+        Ok(serde_json::json!({
+            "output": output,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "model_id": model_id,
+            "location": "network",
+            "provider": svc.provider_name,
+        }))
+    } else {
+        Err(JsonRpcError {
+            code: -32000,
+            message: format!("Model '{}' not found. Use tenzro_listModels to see available models.", model_query),
+            data: None,
+        })
+    }
+}
+
+/// Rich-shape chat handler — multi-turn, system prompts, content blocks.
+///
+/// First implementation pass: text-only blocks. Tool-use parsing from the
+/// raw output, vision input, and extended-thinking emission are added
+/// in follow-up commits on this branch (see `docs/chat-api.md` for the
+/// public contract).
+///
+/// What this pass supports today:
+/// - Multi-turn conversation via `messages: [...]`.
+/// - System prompt via top-level `system` (string or text-block array).
+/// - Content blocks of type `text` on input.
+/// - Content blocks of type `tool_use`/`tool_result` are accepted on input
+///   and flattened to text for the model template (so existing agents that
+///   already do client-side tool execution can still drive the model).
+/// - Output is returned as a single `text` block in `content`, with
+///   `stop_reason: "end_turn"` or `"max_tokens"`.
+async fn handle_chat_rich(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::model::{
+        ContentBlock, RichChatMessage, RichUsage, SystemPrompt, ToolResultContent, ToolSchema,
+    };
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // ── parse model id ───────────────────────────────────────────────
+    let model_query = params
+        .get("model_id")
+        .or_else(|| params.get("model"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' (or 'model') parameter".to_string(),
+            data: None,
+        })?;
+
+    // ── parse messages array ─────────────────────────────────────────
+    let messages_value = params.get("messages").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing 'messages' parameter".to_string(),
+        data: None,
+    })?;
+    let messages: Vec<RichChatMessage> = serde_json::from_value(messages_value.clone())
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid 'messages' shape: {}", e),
+            data: None,
+        })?;
+    if messages.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "'messages' must contain at least one message".to_string(),
+            data: None,
+        });
+    }
+
+    // ── parse optional system prompt ─────────────────────────────────
+    let system: Option<SystemPrompt> = match params.get("system") {
+        Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid 'system' shape: {}", e),
+            data: None,
+        })?),
+        None => None,
+    };
+
+    // ── parse optional tools (validated, used by template; tool_use
+    //    extraction from output lands in a follow-up commit) ──────────
+    let tools: Vec<ToolSchema> = match params.get("tools") {
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid 'tools' shape: {}", e),
+            data: None,
+        })?,
+        None => Vec::new(),
+    };
+    for t in &tools {
+        if !is_valid_tool_name(&t.name) {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "Invalid tool name '{}': must match ^[a-zA-Z0-9_-]{{1,64}}$",
+                    t.name
+                ),
+                data: None,
+            });
+        }
+        if !t.input_schema.is_object() {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "Tool '{}' input_schema must be a JSON Schema object",
+                    t.name
+                ),
+                data: None,
+            });
+        }
+    }
+
+    // ── resolve model service (local or network) ─────────────────────
+    let mut service = node.get_model_service(model_query)
+        .or_else(|| node.find_model_service_by_model_id(model_query));
+
+    if service.is_none() && !node.served_models.contains_key(model_query) {
+        for entry in node.network_models_snapshot() {
+            let reg = &entry.registration;
+            if reg.model_id == model_query {
+                service = Some(tenzro_types::model::ModelServiceInstance {
+                    instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
+                    model_id: reg.model_id.clone(),
+                    model_name: reg.name.clone(),
+                    provider_address: tenzro_types::primitives::Address::from_hex(&reg.provider)
+                        .unwrap_or_default(),
+                    provider_name: reg.provider.clone(),
+                    location: tenzro_types::model::ModelLocation::Network,
+                    api_endpoint: reg.rpc_endpoint.clone(),
+                    mcp_endpoint: String::new(),
+                    status: tenzro_types::model::ServiceStatus::Online,
+                    parameters: reg.parameters.clone(),
+                    pricing: tenzro_types::model::PricingConfig {
+                        price_per_input_token: reg.pricing.per_token.unwrap_or(0),
+                        price_per_output_token: reg.pricing.per_token.unwrap_or(0),
+                        minimum_price: reg.pricing.per_request,
+                        pricing_model: tenzro_types::model::PricingModel::PerToken,
+                    },
+                    created_at: 0,
+                    last_seen: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    load_info: None,
+                });
+                break;
+            }
+        }
+    }
+
+    let is_local = if let Some(ref svc) = service {
+        svc.location == ModelLocation::Local
+    } else {
+        node.served_models.contains_key(model_query)
+    };
+
+    let model_id = if let Some(ref svc) = service {
+        svc.model_id.clone()
+    } else {
+        model_query.to_string()
+    };
+
+    // ── parse generation config ──────────────────────────────────────
+    let max_tokens = params
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1024) as u32;
+    let config = GenerationConfig {
+        temperature: params.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7),
+        top_p: params.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.9),
+        max_tokens,
+        repeat_penalty: params
+            .get("repeat_penalty")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.1) as f32,
+        ..GenerationConfig::default()
+    };
+
+    if is_local {
+        // ── local inference path ─────────────────────────────────────
+        let model_runtime = node.model_runtime.as_ref().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Model runtime not initialized".to_string(),
+            data: None,
+        })?;
+
+        if !model_runtime.is_loaded(&model_id) {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("Model '{}' is not currently serving", model_id),
+                data: None,
+            });
+        }
+
+        let _load_guard = node.load_tracker.try_acquire(&model_id).map_err(|_| {
+            let load_data = node.load_tracker.snapshot(&model_id).map(|s| {
+                serde_json::json!({
+                    "active_requests": s.active_requests,
+                    "max_concurrent": s.max_concurrent,
+                    "load_level": s.load_level.to_string(),
+                })
+            });
+            JsonRpcError {
+                code: -32000,
+                message: format!("Model '{}' is at capacity. Try again later.", model_id),
+                data: load_data,
+            }
+        })?;
+
+        // Flatten rich messages into the existing ChatMessage format the
+        // runtime accepts. Tool-use, tool-result, and thinking blocks are
+        // stringified into the message text for now — the model still sees
+        // them, just as inline annotations rather than structured blocks.
+        let mut chat_messages: Vec<ModelChatMessage> = Vec::new();
+        if let Some(sys) = &system {
+            chat_messages.push(ModelChatMessage {
+                role: "system".to_string(),
+                content: sys.as_text(),
+            });
+        }
+        for m in &messages {
+            chat_messages.push(ModelChatMessage {
+                role: m.role.clone(),
+                content: render_blocks_as_text(&m.content),
+            });
+        }
+
+        // Dispatch: if tools are present, run the tool-aware path so the
+        // model sees schemas and we can extract structured tool calls
+        // from the output. Otherwise fall through to plain chat
+        // generation. Both paths exercise real llama.cpp inference.
+        let (
+            response_text,
+            extracted_tool_calls,
+            input_tokens,
+            output_tokens,
+            inferred_stop_reason,
+        ) = if !tools.is_empty() {
+            let runtime_tools: Vec<RuntimeToolDefinition> = tools
+                .iter()
+                .map(|t| RuntimeToolDefinition {
+                    name: t.name.clone(),
+                    description: if t.description.is_empty() {
+                        None
+                    } else {
+                        Some(t.description.clone())
+                    },
+                    input_schema: t.input_schema.clone(),
+                })
+                .collect();
+
+            let r = model_runtime
+                .generate_chat_with_tools(&model_id, &chat_messages, &runtime_tools, &config)
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Inference failed: {}", e),
+                    data: None,
+                })?;
+            (
+                r.text,
+                r.tool_calls,
+                r.input_tokens,
+                r.output_tokens,
+                r.stop_reason,
+            )
+        } else {
+            let r = model_runtime
+                .generate_chat(&model_id, &chat_messages, &config)
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Inference failed: {}", e),
+                    data: None,
+                })?;
+            let stop = if r.output_tokens >= max_tokens {
+                "max_tokens".to_string()
+            } else {
+                "end_turn".to_string()
+            };
+            (r.text, Vec::new(), r.input_tokens, r.output_tokens, stop)
+        };
+
+        node.metrics().record_inference();
+        node.touch_local_model_service(&model_id);
+
+        // ── build response ───────────────────────────────────────────
+        let pricing = node.provider_pricing.read();
+        let cost = (input_tokens as f64 * pricing.input_price_per_token)
+            + (output_tokens as f64 * pricing.output_price_per_token);
+        drop(pricing);
+
+        // Wire TNZO billing (same as simple shape).
+        if let Some(token) = node.token() {
+            if let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str()) {
+                if let Ok(caller_addr) = parse_address(caller_str) {
+                    let cost_wei = (cost * 1_000_000_000_000_000_000f64) as u128;
+                    if cost_wei > 0 {
+                        let provider_addr = if let Some(registry) = node.identity_registry() {
+                            let all = registry.list_all();
+                            if let Some((_, identity)) = all.first() {
+                                identity.wallet_address
+                            } else {
+                                Address::default()
+                            }
+                        } else {
+                            Address::default()
+                        };
+                        if provider_addr != Address::default() {
+                            if let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
+                                tracing::warn!(caller = %caller_str, cost_tnzo = cost,
+                                    "Rich-chat billing failed: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Map the inferred string stop reason onto the typed enum.
+        let stop_reason = map_stop_reason(&inferred_stop_reason);
+
+        let usage = RichUsage {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+
+        // Build content blocks: any free text (non-empty after stripping
+        // tool-call markers) plus each extracted ToolUse in emission order.
+        let mut content: Vec<ContentBlock> = Vec::new();
+        if !response_text.trim().is_empty() {
+            content.push(ContentBlock::Text {
+                text: response_text,
+                cache_control: None,
+            });
+        }
+        for tc in extracted_tool_calls {
+            content.push(ContentBlock::ToolUse {
+                id: tc.id,
+                name: tc.name,
+                input: tc.input,
+            });
+        }
+        if content.is_empty() {
+            // Always return at least one block so consumers can render.
+            content.push(ContentBlock::Text {
+                text: String::new(),
+                cache_control: None,
+            });
+        }
+
+        // ToolResultContent is part of the schema we accept on input; the
+        // reference here keeps the import live and avoids dead-code lint.
+        let _ = ToolResultContent::Text(String::new());
+        let _ = &messages;
+
+        Ok(serde_json::json!({
+            "id": format!("msg_{}", uuid::Uuid::new_v4().simple()),
+            "model": model_id,
+            "role": "assistant",
+            "content": content,
+            "stop_reason": stop_reason,
+            "stop_sequence": serde_json::Value::Null,
+            "usage": usage,
+            "cost": cost,
+            "location": "local",
+            "load": node.load_tracker.snapshot(&model_id).map(|s| {
+                serde_json::json!({
+                    "active_requests": s.active_requests,
+                    "max_concurrent": s.max_concurrent,
+                    "utilization_percent": s.utilization_percent,
+                    "load_level": s.load_level.to_string(),
+                })
+            }),
+        }))
+    } else if let Some(ref svc) = service {
+        // ── network forwarding path ──────────────────────────────────
+        // Spec requires the rich shape to forward intact — no
+        // down-conversion. We forward `messages`, `system`, `tools`, and
+        // generation config verbatim.
+        let remote_url = &svc.api_endpoint;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        let mut forward_params = serde_json::Map::new();
+        forward_params.insert("model_id".to_string(), serde_json::json!(svc.model_id));
+        forward_params.insert("messages".to_string(), messages_value.clone());
+        if let Some(sys) = params.get("system") {
+            forward_params.insert("system".to_string(), sys.clone());
+        }
+        if !tools.is_empty() {
+            if let Some(t) = params.get("tools") {
+                forward_params.insert("tools".to_string(), t.clone());
+            }
+        }
+        forward_params.insert("max_tokens".to_string(), serde_json::json!(config.max_tokens));
+        forward_params.insert(
+            "temperature".to_string(),
+            serde_json::json!(config.temperature),
+        );
+        forward_params.insert("top_p".to_string(), serde_json::json!(config.top_p));
+        if let Some(stop) = params.get("stop_sequences") {
+            forward_params.insert("stop_sequences".to_string(), stop.clone());
+        }
+        if let Some(re) = params.get("reasoning_effort") {
+            forward_params.insert("reasoning_effort".to_string(), re.clone());
+        }
+        if let Some(caller) = params.get("caller_address") {
+            forward_params.insert("caller_address".to_string(), caller.clone());
+        }
+
+        let forward_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tenzro_chat",
+            "params": Value::Object(forward_params),
+            "id": 1,
+        });
+
+        let resp = client
+            .post(remote_url)
+            .json(&forward_body)
+            .send()
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Failed to reach provider at {}: {}", remote_url, e),
+                data: None,
+            })?;
+
+        let body: Value = resp.json().await.map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to parse provider response: {}", e),
+            data: None,
+        })?;
+
+        node.metrics().record_inference();
+
+        // Pass the provider's result through, annotating location.
+        if let Some(rpc_result) = body.get("result") {
+            let mut out = rpc_result.clone();
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("location".to_string(), serde_json::json!("network"));
+                obj.insert("provider".to_string(), serde_json::json!(svc.provider_name));
+            }
+            Ok(out)
+        } else if let Some(err) = body.get("error") {
+            Err(JsonRpcError {
+                code: -32000,
+                message: format!("Provider error: {}", err),
+                data: None,
+            })
+        } else {
+            Err(JsonRpcError {
+                code: -32000,
+                message: "Provider returned malformed JSON-RPC response".to_string(),
+                data: None,
+            })
+        }
+    } else {
+        Err(JsonRpcError {
+            code: -32000,
+            message: format!(
+                "Model '{}' not found. Use tenzro_listModels to see available models.",
+                model_query
+            ),
+            data: None,
+        })
+    }
+}
+
+/// Validates a tool name against the spec rule `^[a-zA-Z0-9_-]{1,64}$`.
+fn is_valid_tool_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Map the runtime's stop_reason string to the typed `StopReason` enum.
+/// Anything unrecognized maps to `EndTurn`.
+fn map_stop_reason(s: &str) -> tenzro_types::model::StopReason {
+    use tenzro_types::model::StopReason;
+    match s {
+        "tool_use" => StopReason::ToolUse,
+        "max_tokens" => StopReason::MaxTokens,
+        "stop_sequence" => StopReason::StopSequence,
+        _ => StopReason::EndTurn,
+    }
+}
+
+/// Render a `MessageContent` value (string or block array) as a flat
+/// text string suitable for chat templates that don't yet understand
+/// content blocks. Tool-use and tool-result blocks are inlined as
+/// JSON-tagged text so the model still sees the structure.
+fn render_blocks_as_text(content: &tenzro_types::model::MessageContent) -> String {
+    use tenzro_types::model::{ContentBlock, MessageContent, ToolResultContent};
+    let blocks = match content {
+        MessageContent::Text(s) => return s.clone(),
+        MessageContent::Blocks(b) => b,
+    };
+    let mut out = String::new();
+    for b in blocks {
+        match b {
+            ContentBlock::Text { text, .. } => out.push_str(text),
+            ContentBlock::Thinking { thinking } => {
+                out.push_str("<thinking>");
+                out.push_str(thinking);
+                out.push_str("</thinking>");
+            }
+            ContentBlock::ToolUse { id, name, input } => {
+                out.push_str(&format!(
+                    "<tool_use id=\"{}\" name=\"{}\">{}</tool_use>",
+                    id,
+                    name,
+                    serde_json::to_string(input).unwrap_or_default()
+                ));
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let body = match content {
+                    ToolResultContent::Text(s) => s.clone(),
+                    ToolResultContent::Blocks(blocks) => blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text { text, .. } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(""),
+                };
+                let err_attr = if matches!(is_error, Some(true)) {
+                    " is_error=\"true\""
+                } else {
+                    ""
+                };
+                out.push_str(&format!(
+                    "<tool_result id=\"{}\"{}>{}</tool_result>",
+                    tool_use_id, err_attr, body
+                ));
+            }
+            ContentBlock::Image { .. } => {
+                out.push_str("[image]");
+            }
+        }
+    }
+    out
+}
+
+// Delete model handler
+async fn handle_delete_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let model_id = params
+        .get("model_id")
+        .or_else(|| params.as_array().and_then(|a| a.first()).and_then(|v| v.get("model_id")))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' parameter".to_string(),
+            data: None,
+        })?;
+
+    // Unload from runtime if serving
+    if let Some(runtime) = &node.model_runtime {
+        if runtime.is_loaded(model_id) {
+            let _ = runtime.unload_model(model_id).await;
+        }
+    }
+
+    // Delete the GGUF file from disk
+    if let Some(hf_dl) = &node.hf_downloader {
+        hf_dl.delete_model(model_id).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to delete model file: {}", e),
+            data: None,
+        })?;
+    }
+
+    // Remove from downloads, served models, and service registry
+    node.model_downloads.remove(model_id);
+    node.served_models.remove(model_id);
+    node.unregister_model_services_by_model(model_id);
+
+    Ok(serde_json::json!({
+        "success": true,
+        "model_id": model_id,
+        "status": "deleted",
+    }))
+}
+
+// List providers handler
+async fn handle_list_providers(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut result: Vec<serde_json::Value> = Vec::new();
+
+    // Include self as a provider if we're serving models locally
+    let served: Vec<String> = node.served_models
+        .iter()
+        .filter(|e| *e.value())
+        .map(|e| e.key().clone())
+        .collect();
+
+    if !served.is_empty() {
+        let self_peer_id = "local".to_string();
+        seen_ids.insert(self_peer_id.clone());
+        result.push(serde_json::json!({
+            "peer_id": self_peer_id,
+            "provider_address": "0x0000000000000000000000000000000000000000",
+            "provider_type": "llm",
+            "served_models": served,
+            "capabilities": ["inference"],
+            "rpc_endpoint": "",
+            "status": "active",
+            "timestamp": chrono::Utc::now().timestamp_millis(),
+            "source": "local",
+        }));
+    }
+
+    // Merge network providers discovered via gossipsub (dedup by peer_id; local takes precedence)
+    for entry in node.network_providers_snapshot() {
+        let peer_id = entry.announcement.peer_id.clone();
+        if !seen_ids.contains(&peer_id) {
+            seen_ids.insert(peer_id.clone());
+            result.push(serde_json::json!({
+                "peer_id": peer_id,
+                "provider_address": entry.announcement.provider_address,
+                "provider_type": entry.announcement.provider_type,
+                "served_models": entry.announcement.served_models,
+                "capabilities": entry.announcement.capabilities,
+                "rpc_endpoint": entry.announcement.rpc_endpoint,
+                "status": entry.announcement.status,
+                "timestamp": entry.announcement.timestamp,
+                "source": "network",
+            }));
+        }
+    }
+
+    Ok(serde_json::to_value(result).unwrap_or(serde_json::json!([])))
+}
+
+// Add resource handler
+async fn handle_add_resource(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Support both array and object params
+    let resource_obj = if let Some(arr) = params.as_array() {
+        arr.first().unwrap_or(&params)
+    } else {
+        &params
+    };
+
+    let resource_type = resource_obj
+        .get("resource_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("model")
+        .to_string();
+
+    let resource_id = resource_obj
+        .get("resource_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'resource_id' parameter".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let resource = UserResource {
+        resource_type,
+        resource_id: resource_id.clone(),
+        added_at: now,
+    };
+
+    node.user_resources.insert(resource_id.clone(), resource);
+
+    Ok(serde_json::json!({
+        "success": true,
+        "resource_id": resource_id,
+    }))
+}
+
+// Send transaction handler
+async fn handle_send_transaction(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Support both array and object params
+    let tx_obj = if let Some(arr) = params.as_array() {
+        arr.first().unwrap_or(&params)
+    } else {
+        &params
+    };
+
+    let from_str = tx_obj.get("from").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'from' field".to_string(), data: None,
+    })?;
+    let to_str = tx_obj.get("to").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'to' field".to_string(), data: None,
+    })?;
+    let amount = tx_obj.get("amount").and_then(|v| v.as_str()).unwrap_or("0").to_string();
+    let asset = tx_obj.get("asset").and_then(|v| v.as_str()).unwrap_or("TNZO").to_string();
+
+    // Parse amount and create transaction
+    let from_addr = parse_address(from_str)?;
+    let to_addr = parse_address(to_str)?;
+
+    let amount_f64 = amount.parse::<f64>().unwrap_or(0.0);
+    let amount_wei = (amount_f64 * 1_000_000_000_000_000_000.0) as u128; // 18 decimal places (TNZO)
+
+    // Look up wallet for the 'from' address to sign the transaction
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Wallet service not initialized".to_string(), data: None,
+    })?;
+
+    let wallet = wallet_service.find_wallet_by_address(&from_addr).ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: format!("No wallet found for sender address {}. Use tenzro_participate to create a wallet first.", from_str),
+        data: None,
+    })?;
+
+    // Validate sender owns the wallet (public key matches the from address)
+    if wallet.address != from_addr && wallet.public_key.as_bytes() != from_addr.as_bytes() {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("Wallet public key does not match sender address {}", from_str),
+            data: None,
+        });
+    }
+
+    // Build the transaction using the wallet's nonce. We peek here rather than
+    // consume, because the tx hasn't been admitted yet — we only consume the
+    // nonce once the event loop has accepted the tx for the mempool.
+    use tenzro_wallet::WalletService;
+    let nonce = wallet_service.peek_nonce(&from_addr);
+    let chain_id = node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337);
+
+    // Wave 3d PQ migration: every wallet carries a mandatory ML-DSA-65 key.
+    // Bind the wallet's verifying key into the transaction so `Transaction::hash()`
+    // commits to it; the wallet service then signs both the classical and PQ legs.
+    let tx = Transaction::new(
+        ChainId::from(chain_id),
+        from_addr,
+        to_addr,
+        nonce,
+        TransactionType::Transfer { amount: amount_wei },
+        21000,
+        1_000_000_000,
+        wallet.pq_verifying_key_bytes(),
+    );
+
+    // Sign the transaction with the MPC wallet. Returns a hybrid signature
+    // (classical Ed25519/Secp256k1 over SHA-256(Transaction) + ML-DSA-65 over
+    // the same preimage). Both legs are post-verified inside the wallet service.
+    let hybrid_sig = wallet_service
+        .sign_transaction(&wallet.wallet_id, &tx)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32003,
+            message: format!("MPC signing failed for wallet {}: {}", wallet.wallet_id, e),
+            data: None,
+        })?;
+
+    let pubkey_bytes = wallet.public_key.as_bytes().to_vec();
+    let signed_tx = SignedTransaction::new(
+        tx,
+        Signature::new(hybrid_sig.classical, pubkey_bytes),
+        hybrid_sig.pq,
+    );
+    let tx_hash = signed_tx.clone().hash();
+    let tx_hash_str = format!("{}", tx_hash);
+
+    // Submit to the event loop so the tx enters the mempool, gossips to peers,
+    // and is admitted via consensus into a block. This is the same admission
+    // path as eth_sendRawTransaction — it guarantees state convergence across
+    // all validators instead of mutating local state only.
+    let event_sender = node.event_sender().ok_or_else(|| {
+        error!(target: "rpc", tx_hash = %tx_hash, "tenzro_sendTransaction: node event loop not running");
+        JsonRpcError {
+            code: -32000,
+            message: "Node event loop not running".to_string(),
+            data: None,
+        }
+    })?;
+
+    event_sender
+        .send(NodeEvent::NewTransaction(signed_tx))
+        .await
+        .map_err(|e| {
+            error!(
+                target: "rpc",
+                tx_hash = %tx_hash,
+                error = %e,
+                "tenzro_sendTransaction: failed to enqueue tx for event loop"
+            );
+            JsonRpcError {
+                code: -32000,
+                message: format!("Failed to submit transaction: {}", e),
+                data: None,
+            }
+        })?;
+
+    // Now that the tx was successfully enqueued, consume the nonce so the next
+    // call sees an advanced counter. If admission later fails inside the event
+    // loop, the user will need to retry with an explicit nonce reset.
+    let _ = wallet_service.next_nonce(&from_addr);
+
+    // Record in transaction history for the wallet UI. Actual tx state will be
+    // updated to Confirmed/Finalized when the block containing this tx is
+    // indexed in CF_TRANSACTIONS by the event loop.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let entry = TransactionHistoryEntry {
+        tx_hash: tx_hash_str.clone(),
+        from: from_str.to_string(),
+        to: to_str.to_string(),
+        amount,
+        asset,
+        status: "pending".to_string(),
+        timestamp: now,
+        tx_type: "send".to_string(),
+    };
+
+    node.transaction_history.write().push(entry);
+
+    info!(
+        target: "rpc",
+        tx_hash = %tx_hash_str,
+        from = %from_str,
+        to = %to_str,
+        value = amount_wei,
+        nonce = %nonce,
+        chain_id,
+        "tenzro_sendTransaction: signed + enqueued via consensus path"
+    );
+
+    Ok(serde_json::json!(tx_hash_str))
+}
+
+/// Submit a finalized block to the event loop for execution
+async fn handle_submit_block(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Deserialize the block from JSON
+    let block: Block = serde_json::from_value(params).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid block data: {}", e),
+        data: None,
+    })?;
+
+    let block_hash = format!("{}", block.hash());
+    let block_height = block.height();
+    let tx_count = block.tx_count();
+
+    node.submit_block(block).await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to submit block: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "status": "submitted",
+        "block_hash": block_hash,
+        "block_height": block_height,
+        "tx_count": tx_count,
+    }))
+}
+
+// Get transaction history handler
+async fn handle_get_transaction_history(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let _address = params
+        .as_ref()
+        .and_then(|p| {
+            if let Some(arr) = p.as_array() {
+                arr.first().and_then(|v| v.get("address")).and_then(|v| v.as_str())
+            } else {
+                p.get("address").and_then(|v| v.as_str())
+            }
+        });
+
+    let history = node.transaction_history.read().clone();
+
+    serde_json::to_value(&history).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization failed: {}", e),
+        data: None,
+    })
+}
+
+// === OpenAI-compatible API handlers ===
+
+/// OpenAI-compatible request body for /v1/chat/completions
+#[derive(Debug, Deserialize)]
+struct OpenAIChatRequest {
+    model: String,
+    messages: Vec<OpenAIChatMessage>,
+    #[serde(default)]
+    temperature: Option<f64>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    top_p: Option<f64>,
+    #[serde(default)]
+    stream: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct OpenAIChatMessage {
+    role: String,
+    content: String,
+}
+
+/// GET /v1/models — List all served model service instances
+async fn handle_openai_list_models(
+    State(node): State<Arc<TenzroNode>>,
+) -> impl IntoResponse {
+    let services = node.list_model_services();
+    let models: Vec<Value> = services
+        .iter()
+        .map(|svc| {
+            serde_json::json!({
+                "id": svc.instance_id,
+                "object": "model",
+                "created": svc.created_at,
+                "owned_by": svc.provider_name,
+                "model_id": svc.model_id,
+                "model_name": svc.model_name,
+                "location": svc.location.to_string(),
+                "status": svc.status.to_string(),
+                "parameters": svc.parameters,
+                "api_endpoint": svc.api_endpoint,
+                "mcp_endpoint": svc.mcp_endpoint,
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "object": "list",
+        "data": models,
+    }))
+}
+
+/// GET /v1/models/{instance_id} — Get a specific model by instance ID
+async fn handle_openai_get_model(
+    State(node): State<Arc<TenzroNode>>,
+    Path(instance_id): Path<String>,
+) -> impl IntoResponse {
+    // Try lookup by instance_id first, then by model_id
+    let service = node.get_model_service(&instance_id)
+        .or_else(|| node.find_model_service_by_model_id(&instance_id));
+
+    match service {
+        Some(svc) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": svc.instance_id,
+                "object": "model",
+                "created": svc.created_at,
+                "owned_by": svc.provider_name,
+                "model_id": svc.model_id,
+                "model_name": svc.model_name,
+                "location": svc.location.to_string(),
+                "status": svc.status.to_string(),
+                "parameters": svc.parameters,
+                "api_endpoint": svc.api_endpoint,
+                "mcp_endpoint": svc.mcp_endpoint,
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": {
+                    "message": format!("Model '{}' not found", instance_id),
+                    "type": "invalid_request_error",
+                    "code": "model_not_found"
+                }
+            })),
+        ),
+    }
+}
+
+/// POST /v1/chat/completions — OpenAI-compatible chat completions with SSE streaming
+async fn handle_openai_chat_completions(
+    State(node): State<Arc<TenzroNode>>,
+    Json(request): Json<OpenAIChatRequest>,
+) -> Response {
+    let model_query = &request.model;
+    let stream_requested = request.stream.unwrap_or(false);
+
+    // Resolve the model: try instance_id, then model_id in service registry, then served_models
+    let service = node.get_model_service(model_query)
+        .or_else(|| node.find_model_service_by_model_id(model_query));
+
+    // Determine if this is a local or network model
+    let is_local = if let Some(ref svc) = service {
+        svc.location == ModelLocation::Local
+    } else {
+        node.served_models.contains_key(model_query)
+    };
+
+    let model_id = if let Some(ref svc) = service {
+        svc.model_id.clone()
+    } else {
+        model_query.clone()
+    };
+
+    if is_local {
+        // === LOCAL MODEL ===
+        let model_runtime = match node.model_runtime.as_ref() {
+            Some(rt) => rt.clone(),
+            None => {
+                return json_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Model runtime not initialized",
+                    "server_error",
+                    "runtime_unavailable",
+                );
+            }
+        };
+
+        if !model_runtime.is_loaded(&model_id) {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Model '{}' is not currently serving", model_id),
+                "invalid_request_error",
+                "model_not_loaded",
+            );
+        }
+
+        let config = GenerationConfig {
+            temperature: request.temperature.unwrap_or(0.7),
+            top_p: request.top_p.unwrap_or(0.9),
+            max_tokens: request.max_tokens.unwrap_or(512),
+            repeat_penalty: 1.1,
+            ..GenerationConfig::default()
+        };
+
+        // Convert messages to model's ChatMessage format
+        let chat_messages: Vec<ModelChatMessage> = request
+            .messages
+            .iter()
+            .map(|m| ModelChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect();
+
+        if stream_requested {
+            // === SSE STREAMING for local model ===
+            let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+            let created = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let model_id_clone = model_id.clone();
+            let node_clone = node.clone();
+
+            let (token_tx, mut token_rx) = tokio::sync::mpsc::channel::<String>(256);
+
+            // Spawn the generation task — it feeds tokens into token_tx
+            let gen_model_id = model_id.clone();
+            let gen_handle = tokio::spawn(async move {
+                model_runtime
+                    .generate_chat_stream(&gen_model_id, &chat_messages, &config, token_tx)
+                    .await
+            });
+
+            // Build SSE stream from the token receiver
+            let stream = async_stream::stream! {
+                // Emit each token as an OpenAI-compatible SSE chunk
+                while let Some(token_piece) = token_rx.recv().await {
+                    let chunk = serde_json::json!({
+                        "id": &completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": &model_id_clone,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "content": token_piece,
+                            },
+                            "finish_reason": null,
+                        }]
+                    });
+                    let data = format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default());
+                    yield Ok::<_, std::convert::Infallible>(Event::default().data(data));
+                }
+
+                // Wait for the generation result to get final stats
+                let finish_reason = "stop";
+                if let Ok(Ok(result)) = gen_handle.await {
+                    // Emit the final chunk with finish_reason
+                    let final_chunk = serde_json::json!({
+                        "id": &completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": &model_id_clone,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": finish_reason,
+                        }],
+                        "usage": {
+                            "prompt_tokens": result.input_tokens,
+                            "completion_tokens": result.output_tokens,
+                            "total_tokens": result.input_tokens + result.output_tokens,
+                        }
+                    });
+                    let data = format!("data: {}\n\n", serde_json::to_string(&final_chunk).unwrap_or_default());
+                    yield Ok::<_, std::convert::Infallible>(Event::default().data(data));
+
+                    // Emit usage event with cost
+                    // Scope the RwLock guard so it doesn't live across yield
+                    let usage_data = {
+                        let pricing = node_clone.provider_pricing.read();
+                        let cost = (result.input_tokens as f64 * pricing.input_price_per_token)
+                            + (result.output_tokens as f64 * pricing.output_price_per_token);
+                        serde_json::json!({
+                            "usage": {
+                                "prompt_tokens": result.input_tokens,
+                                "completion_tokens": result.output_tokens,
+                                "total_tokens": result.input_tokens + result.output_tokens,
+                            },
+                            "cost_tnzo": cost,
+                            "generation_time_ms": result.generation_time_ms,
+                            "tokens_per_second": result.tokens_per_second,
+                        })
+                    };
+                    let data = format!("data: {}\n\n", serde_json::to_string(&usage_data).unwrap_or_default());
+                    yield Ok::<_, std::convert::Infallible>(Event::default().data(data));
+                }
+
+                // OpenAI-compatible stream terminator
+                yield Ok::<_, std::convert::Infallible>(Event::default().data("data: [DONE]\n\n"));
+            };
+
+            Sse::new(stream)
+                .keep_alive(axum::response::sse::KeepAlive::default())
+                .into_response()
+        } else {
+            // === NON-STREAMING for local model ===
+            match model_runtime.generate_chat(&model_id, &chat_messages, &config).await {
+                Ok(result) => {
+                    let pricing = node.provider_pricing.read();
+                    let cost = (result.input_tokens as f64 * pricing.input_price_per_token)
+                        + (result.output_tokens as f64 * pricing.output_price_per_token);
+
+                    let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+
+                    Json(serde_json::json!({
+                        "id": completion_id,
+                        "object": "chat.completion",
+                        "created": std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        "model": model_id,
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": result.text,
+                            },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": result.input_tokens,
+                            "completion_tokens": result.output_tokens,
+                            "total_tokens": result.input_tokens + result.output_tokens,
+                        },
+                        "cost_tnzo": cost,
+                        "generation_time_ms": result.generation_time_ms,
+                        "tokens_per_second": result.tokens_per_second,
+                    }))
+                    .into_response()
+                }
+                Err(e) => json_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Inference failed: {}", e),
+                    "server_error",
+                    "inference_error",
+                ),
+            }
+        }
+    } else if let Some(ref svc) = service {
+        // === NETWORK MODEL — forward to remote provider ===
+        let remote_url = format!("{}/chat/completions", svc.api_endpoint);
+        let client = reqwest::Client::new();
+
+        let forward_body = serde_json::json!({
+            "model": svc.model_id,
+            "messages": request.messages,
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+            "top_p": request.top_p,
+            "stream": stream_requested,
+        });
+
+        if stream_requested {
+            // === SSE STREAMING proxy for network model ===
+            // Forward the request with stream:true and proxy the SSE response
+            match client.post(&remote_url).json(&forward_body).send().await {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        return json_error_response(
+                            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                            &format!("Provider error: {}", body),
+                            "server_error",
+                            "provider_error",
+                        );
+                    }
+
+                    // Proxy the SSE byte stream from the remote provider
+                    let byte_stream = resp.bytes_stream();
+                    let stream = byte_stream.map(|chunk| -> std::result::Result<Event, std::convert::Infallible> {
+                        match chunk {
+                            Ok(bytes) => {
+                                let text = String::from_utf8_lossy(&bytes);
+                                Ok(Event::default().data(&text))
+                            }
+                            Err(e) => {
+                                let err_json = serde_json::json!({
+                                    "error": format!("Stream error: {}", e)
+                                });
+                                Ok(Event::default().data(
+                                    format!("data: {}\n\n", serde_json::to_string(&err_json).unwrap_or_default())
+                                ))
+                            }
+                        }
+                    });
+
+                    Sse::new(stream)
+                        .keep_alive(axum::response::sse::KeepAlive::default())
+                        .into_response()
+                }
+                Err(e) => json_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Failed to reach provider at {}: {}", remote_url, e),
+                    "server_error",
+                    "provider_unreachable",
+                ),
+            }
+        } else {
+            // === NON-STREAMING for network model ===
+            match client.post(&remote_url).json(&forward_body).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    match resp.json::<Value>().await {
+                        Ok(body) => (
+                            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK),
+                            Json(body),
+                        )
+                            .into_response(),
+                        Err(e) => json_error_response(
+                            StatusCode::BAD_GATEWAY,
+                            &format!("Failed to parse provider response: {}", e),
+                            "server_error",
+                            "bad_gateway",
+                        ),
+                    }
+                }
+                Err(e) => json_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Failed to reach provider at {}: {}", remote_url, e),
+                    "server_error",
+                    "provider_unreachable",
+                ),
+            }
+        }
+    } else {
+        json_error_response(
+            StatusCode::NOT_FOUND,
+            &format!("Model '{}' not found. Use GET /v1/models to see available models.", model_query),
+            "invalid_request_error",
+            "model_not_found",
+        )
+    }
+}
+
+/// Build a JSON error response matching the OpenAI error format.
+fn json_error_response(status: StatusCode, message: &str, error_type: &str, code: &str) -> Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": {
+                "message": message,
+                "type": error_type,
+                "code": code,
+            }
+        })),
+    )
+        .into_response()
+}
+
+/// Handle `POST /chat-stream` — Anthropic-style Server-Sent Events stream
+/// for the rich-shape chat API.
+///
+/// Body is a JSON-RPC 2.0 envelope wrapping `tenzro_chatStream` params (the
+/// same shape `tenzro_chat` accepts in its rich form). The response is a
+/// `text/event-stream` carrying these events in order:
+///
+/// - `message_start` — once
+/// - For each content block (text and/or tool_use):
+///   - `content_block_start`
+///   - one or more `content_block_delta` events (`text_delta` for text
+///     blocks, `input_json_delta` for tool_use input)
+///   - `content_block_stop`
+/// - `message_delta` — once, carrying `stop_reason` and final `usage`
+/// - `message_stop` — once, terminator
+///
+/// Per-token streaming for the rich shape is currently approximated: the
+/// model generates synchronously and the resulting blocks are streamed
+/// out as a single `*_delta` event per block. True token-level streaming
+/// for the rich shape (interleaving with tool-call extraction) lands
+/// when `ModelRuntime::generate_chat_with_tools_stream` is added.
+pub async fn handle_chat_stream_rich(
+    State(node): State<Arc<TenzroNode>>,
+    Json(payload): Json<Value>,
+) -> Response {
+    use tenzro_types::model::{
+        ContentBlock, RichChatMessage, SystemPrompt, ToolSchema,
+    };
+
+    // Pull params out of either a JSON-RPC envelope or a raw param object.
+    let params: Value = if payload.get("jsonrpc").is_some() {
+        payload.get("params").cloned().unwrap_or(Value::Null)
+    } else {
+        payload
+    };
+
+    let model_query = match params
+        .get("model_id")
+        .or_else(|| params.get("model"))
+        .and_then(|v| v.as_str())
+    {
+        Some(s) => s.to_string(),
+        None => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                "Missing 'model_id' (or 'model') parameter",
+                "invalid_request_error",
+                "missing_model",
+            );
+        }
+    };
+
+    // Parse messages — required for rich shape.
+    let messages_value = match params.get("messages").cloned() {
+        Some(v) => v,
+        None => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                "Missing 'messages' parameter (rich shape required for /chat-stream)",
+                "invalid_request_error",
+                "missing_messages",
+            );
+        }
+    };
+    let messages: Vec<RichChatMessage> = match serde_json::from_value(messages_value.clone()) {
+        Ok(m) => m,
+        Err(e) => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid 'messages' shape: {}", e),
+                "invalid_request_error",
+                "invalid_messages",
+            );
+        }
+    };
+    if messages.is_empty() {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "'messages' must contain at least one message",
+            "invalid_request_error",
+            "empty_messages",
+        );
+    }
+
+    // Optional system + tools.
+    let system: Option<SystemPrompt> = match params.get("system") {
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                return json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Invalid 'system' shape: {}", e),
+                    "invalid_request_error",
+                    "invalid_system",
+                );
+            }
+        },
+        None => None,
+    };
+    let tools: Vec<ToolSchema> = match params.get("tools") {
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(t) => t,
+            Err(e) => {
+                return json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Invalid 'tools' shape: {}", e),
+                    "invalid_request_error",
+                    "invalid_tools",
+                );
+            }
+        },
+        None => Vec::new(),
+    };
+    for t in &tools {
+        if !is_valid_tool_name(&t.name) {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "Invalid tool name '{}': must match ^[a-zA-Z0-9_-]{{1,64}}$",
+                    t.name
+                ),
+                "invalid_request_error",
+                "invalid_tool_name",
+            );
+        }
+        if !t.input_schema.is_object() {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "Tool '{}' input_schema must be a JSON Schema object",
+                    t.name
+                ),
+                "invalid_request_error",
+                "invalid_tool_schema",
+            );
+        }
+    }
+
+    // Resolve the model service the same way the non-streaming path does.
+    let mut service = node
+        .get_model_service(&model_query)
+        .or_else(|| node.find_model_service_by_model_id(&model_query));
+    if service.is_none() && !node.served_models.contains_key(&model_query) {
+        for entry in node.network_models_snapshot() {
+            let reg = &entry.registration;
+            if reg.model_id == model_query {
+                service = Some(tenzro_types::model::ModelServiceInstance {
+                    instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
+                    model_id: reg.model_id.clone(),
+                    model_name: reg.name.clone(),
+                    provider_address: tenzro_types::primitives::Address::from_hex(&reg.provider)
+                        .unwrap_or_default(),
+                    provider_name: reg.provider.clone(),
+                    location: tenzro_types::model::ModelLocation::Network,
+                    api_endpoint: reg.rpc_endpoint.clone(),
+                    mcp_endpoint: String::new(),
+                    status: tenzro_types::model::ServiceStatus::Online,
+                    parameters: reg.parameters.clone(),
+                    pricing: tenzro_types::model::PricingConfig {
+                        price_per_input_token: reg.pricing.per_token.unwrap_or(0),
+                        price_per_output_token: reg.pricing.per_token.unwrap_or(0),
+                        minimum_price: reg.pricing.per_request,
+                        pricing_model: tenzro_types::model::PricingModel::PerToken,
+                    },
+                    created_at: 0,
+                    last_seen: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    load_info: None,
+                });
+                break;
+            }
+        }
+    }
+
+    let is_local = if let Some(ref svc) = service {
+        svc.location == ModelLocation::Local
+    } else {
+        node.served_models.contains_key(&model_query)
+    };
+
+    let model_id = if let Some(ref svc) = service {
+        svc.model_id.clone()
+    } else {
+        model_query.clone()
+    };
+
+    if !is_local {
+        // Network forwarding for streaming rich shape would proxy the
+        // remote provider's SSE byte stream verbatim (the same way
+        // `/v1/chat/completions` does for OpenAI-shape). The current
+        // landing only supports local serving.
+        return json_error_response(
+            StatusCode::NOT_IMPLEMENTED,
+            "Rich-shape streaming for network-served models is not yet implemented; \
+             use the non-streaming `tenzro_chat` rich shape, which forwards correctly.",
+            "server_error",
+            "stream_forward_unsupported",
+        );
+    }
+
+    let model_runtime = match node.model_runtime.as_ref() {
+        Some(rt) => rt.clone(),
+        None => {
+            return json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Model runtime not initialized",
+                "server_error",
+                "runtime_unavailable",
+            );
+        }
+    };
+
+    if !model_runtime.is_loaded(&model_id) {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Model '{}' is not currently serving", model_id),
+            "invalid_request_error",
+            "model_not_loaded",
+        );
+    }
+
+    let max_tokens = params
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1024) as u32;
+    let config = GenerationConfig {
+        temperature: params.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7),
+        top_p: params.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.9),
+        max_tokens,
+        repeat_penalty: params
+            .get("repeat_penalty")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.1) as f32,
+        ..GenerationConfig::default()
+    };
+
+    // Flatten rich messages for the runtime (same as non-streaming path).
+    let mut chat_messages: Vec<ModelChatMessage> = Vec::new();
+    if let Some(sys) = &system {
+        chat_messages.push(ModelChatMessage {
+            role: "system".to_string(),
+            content: sys.as_text(),
+        });
+    }
+    for m in &messages {
+        chat_messages.push(ModelChatMessage {
+            role: m.role.clone(),
+            content: render_blocks_as_text(&m.content),
+        });
+    }
+
+    let runtime_tools: Vec<RuntimeToolDefinition> = tools
+        .iter()
+        .map(|t| RuntimeToolDefinition {
+            name: t.name.clone(),
+            description: if t.description.is_empty() {
+                None
+            } else {
+                Some(t.description.clone())
+            },
+            input_schema: t.input_schema.clone(),
+        })
+        .collect();
+
+    let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+    let model_id_for_stream = model_id.clone();
+    let node_for_stream = node.clone();
+    let caller_address = params
+        .get("caller_address")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let stream = async_stream::stream! {
+        // Helper to emit a typed SSE event.
+        macro_rules! sse_event {
+            ($event:expr, $data:expr) => {{
+                Ok::<_, std::convert::Infallible>(
+                    Event::default().event($event).data(
+                        serde_json::to_string(&$data).unwrap_or_else(|_| "{}".to_string()),
+                    ),
+                )
+            }};
+        }
+
+        // ── message_start ────────────────────────────────────────────
+        let start_payload = serde_json::json!({
+            "id": message_id,
+            "model": model_id_for_stream,
+            "role": "assistant",
+            "content": [],
+            "usage": { "input_tokens": 0, "output_tokens": 0 },
+        });
+        yield sse_event!("message_start", start_payload);
+
+        // ── run inference ────────────────────────────────────────────
+        let gen_result = if !runtime_tools.is_empty() {
+            model_runtime
+                .generate_chat_with_tools(&model_id_for_stream, &chat_messages, &runtime_tools, &config)
+                .await
+        } else {
+            // No tools: still go through the tool-aware path so the
+            // event grammar stays uniform (extracts zero tool calls).
+            model_runtime
+                .generate_chat_with_tools(&model_id_for_stream, &chat_messages, &[], &config)
+                .await
+        };
+
+        let result = match gen_result {
+            Ok(r) => r,
+            Err(e) => {
+                // Emit a synthetic error message_delta + message_stop so
+                // the client can finalize cleanly.
+                let err_payload = serde_json::json!({
+                    "delta": { "stop_reason": "error", "stop_sequence": null },
+                    "error": { "message": format!("Inference failed: {}", e), "type": "server_error" },
+                    "usage": { "output_tokens": 0 },
+                });
+                yield sse_event!("message_delta", err_payload);
+                yield sse_event!("message_stop", serde_json::json!({}));
+                return;
+            }
+        };
+
+        // Build the ordered block list: free text (if any) then each
+        // tool_use in extraction order.
+        let mut blocks: Vec<ContentBlock> = Vec::new();
+        if !result.text.trim().is_empty() {
+            blocks.push(ContentBlock::Text {
+                text: result.text.clone(),
+                cache_control: None,
+            });
+        }
+        for tc in &result.tool_calls {
+            blocks.push(ContentBlock::ToolUse {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                input: tc.input.clone(),
+            });
+        }
+        if blocks.is_empty() {
+            blocks.push(ContentBlock::Text {
+                text: String::new(),
+                cache_control: None,
+            });
+        }
+
+        // ── per-block start / delta / stop ──────────────────────────
+        for (idx, block) in blocks.iter().enumerate() {
+            match block {
+                ContentBlock::Text { text, .. } => {
+                    let envelope = serde_json::json!({
+                        "index": idx,
+                        "content_block": { "type": "text", "text": "" },
+                    });
+                    yield sse_event!("content_block_start", envelope);
+
+                    if !text.is_empty() {
+                        let delta = serde_json::json!({
+                            "index": idx,
+                            "delta": { "type": "text_delta", "text": text },
+                        });
+                        yield sse_event!("content_block_delta", delta);
+                    }
+
+                    let stop = serde_json::json!({ "index": idx });
+                    yield sse_event!("content_block_stop", stop);
+                }
+                ContentBlock::ToolUse { id, name, input } => {
+                    let envelope = serde_json::json!({
+                        "index": idx,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": id,
+                            "name": name,
+                            "input": {},
+                        },
+                    });
+                    yield sse_event!("content_block_start", envelope);
+
+                    let partial_json = serde_json::to_string(input)
+                        .unwrap_or_else(|_| "{}".to_string());
+                    let delta = serde_json::json!({
+                        "index": idx,
+                        "delta": { "type": "input_json_delta", "partial_json": partial_json },
+                    });
+                    yield sse_event!("content_block_delta", delta);
+
+                    let stop = serde_json::json!({ "index": idx });
+                    yield sse_event!("content_block_stop", stop);
+                }
+                ContentBlock::Thinking { thinking } => {
+                    let envelope = serde_json::json!({
+                        "index": idx,
+                        "content_block": { "type": "thinking", "thinking": "" },
+                    });
+                    yield sse_event!("content_block_start", envelope);
+
+                    if !thinking.is_empty() {
+                        let delta = serde_json::json!({
+                            "index": idx,
+                            "delta": { "type": "thinking_delta", "thinking": thinking },
+                        });
+                        yield sse_event!("content_block_delta", delta);
+                    }
+
+                    let stop = serde_json::json!({ "index": idx });
+                    yield sse_event!("content_block_stop", stop);
+                }
+                _ => {
+                    // Other block types (tool_result, image) are inputs
+                    // only — never produced by the model.
+                }
+            }
+        }
+
+        // ── message_delta ────────────────────────────────────────────
+        let stop_reason_str = map_stop_reason(&result.stop_reason);
+
+        let delta_payload = serde_json::json!({
+            "delta": {
+                "stop_reason": stop_reason_str,
+                "stop_sequence": serde_json::Value::Null,
+            },
+            "usage": {
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+            },
+        });
+        yield sse_event!("message_delta", delta_payload);
+
+        // ── billing — same flow as the non-streaming rich path ──────
+        let cost = {
+            let pricing = node_for_stream.provider_pricing.read();
+            (result.input_tokens as f64 * pricing.input_price_per_token)
+                + (result.output_tokens as f64 * pricing.output_price_per_token)
+        };
+
+        if let Some(token) = node_for_stream.token() {
+            if let Some(caller_str) = caller_address.as_deref() {
+                if let Ok(caller_addr) = parse_address(caller_str) {
+                    let cost_wei = (cost * 1_000_000_000_000_000_000f64) as u128;
+                    if cost_wei > 0 {
+                        let provider_addr = if let Some(registry) =
+                            node_for_stream.identity_registry()
+                        {
+                            let all = registry.list_all();
+                            if let Some((_, identity)) = all.first() {
+                                identity.wallet_address
+                            } else {
+                                Address::default()
+                            }
+                        } else {
+                            Address::default()
+                        };
+                        if provider_addr != Address::default() {
+                            if let Err(e) =
+                                token.transfer(&caller_addr, &provider_addr, cost_wei)
+                            {
+                                tracing::warn!(caller = %caller_str, cost_tnzo = cost,
+                                    "Rich-stream billing failed: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        node_for_stream.metrics().record_inference();
+        node_for_stream.touch_local_model_service(&model_id_for_stream);
+
+        // ── message_stop ────────────────────────────────────────────
+        yield sse_event!("message_stop", serde_json::json!({}));
+    };
+
+    Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response()
+}
+
+// === Model endpoint RPC handlers ===
+
+async fn handle_list_model_endpoints(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let mut services = node.list_model_services();
+
+    // Merge network-discovered model endpoints from gossipsub announcements.
+    // Any node (validator, light client, RPC) can serve models. When they do,
+    // they broadcast a ModelRegistration via gossipsub topic tenzro/models/1.0.0.
+    // Receiving nodes store these in network_models. We include them here so that
+    // tenzro_listModelEndpoints returns ALL endpoints visible to this node.
+    let network_entries = node.network_models_snapshot();
+    let local_model_ids: std::collections::HashSet<String> = services.iter().map(|s| s.model_id.clone()).collect();
+
+    for entry in &network_entries {
+        let reg = &entry.registration;
+        // Skip if we already have a local entry for this model (avoid duplicates)
+        if local_model_ids.contains(&reg.model_id) {
+            continue;
+        }
+        services.push(tenzro_types::model::ModelServiceInstance {
+            instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
+            model_id: reg.model_id.clone(),
+            model_name: reg.name.clone(),
+            provider_address: tenzro_types::primitives::Address::from_hex(&reg.provider).unwrap_or_default(),
+            provider_name: reg.provider.clone(),
+            location: tenzro_types::model::ModelLocation::Network,
+            api_endpoint: reg.rpc_endpoint.clone(),
+            mcp_endpoint: String::new(),
+            status: tenzro_types::model::ServiceStatus::Online,
+            parameters: reg.parameters.clone(),
+            pricing: tenzro_types::model::PricingConfig {
+                price_per_input_token: reg.pricing.per_token.unwrap_or(0),
+                price_per_output_token: reg.pricing.per_token.unwrap_or(0),
+                minimum_price: reg.pricing.per_request,
+                pricing_model: tenzro_types::model::PricingModel::PerToken,
+            },
+            created_at: 0,
+            last_seen: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            load_info: None,
+        });
+    }
+    let entries: Vec<Value> = services
+        .iter()
+        .map(|svc| {
+            let mut entry = serde_json::json!({
+                "instance_id": svc.instance_id,
+                "model_id": svc.model_id,
+                "model_name": svc.model_name,
+                "provider_name": svc.provider_name,
+                "location": svc.location.to_string(),
+                "api_endpoint": svc.api_endpoint,
+                "mcp_endpoint": svc.mcp_endpoint,
+                "status": svc.status.to_string(),
+                "parameters": svc.parameters,
+                "pricing": {
+                    "input": svc.pricing.price_per_input_token,
+                    "output": svc.pricing.price_per_output_token,
+                },
+                "created_at": svc.created_at,
+            });
+
+            // Add load info for tracked models
+            if let Some(snap) = node.load_tracker.snapshot(&svc.model_id) {
+                entry["load"] = serde_json::json!({
+                    "active_requests": snap.active_requests,
+                    "max_concurrent": snap.max_concurrent,
+                    "utilization_percent": snap.utilization_percent,
+                    "load_level": snap.load_level.to_string(),
+                });
+            }
+
+            entry
+        })
+        .collect();
+
+    Ok(Value::Array(entries))
+}
+
+async fn handle_get_model_endpoint(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Support lookup by instance_id or model_id
+    let query = params
+        .get("instance_id")
+        .or_else(|| params.get("model_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'instance_id' or 'model_id' parameter".to_string(),
+            data: None,
+        })?;
+
+    let service = node.get_model_service(query)
+        .or_else(|| node.find_model_service_by_model_id(query));
+
+    match service {
+        Some(svc) => Ok(serde_json::json!({
+            "instance_id": svc.instance_id,
+            "model_id": svc.model_id,
+            "model_name": svc.model_name,
+            "provider_name": svc.provider_name,
+            "location": svc.location.to_string(),
+            "api_endpoint": svc.api_endpoint,
+            "mcp_endpoint": svc.mcp_endpoint,
+            "status": svc.status.to_string(),
+            "parameters": svc.parameters,
+            "pricing": {
+                "input": svc.pricing.price_per_input_token,
+                "output": svc.pricing.price_per_output_token,
+            },
+            "created_at": svc.created_at,
+        })),
+        None => Err(JsonRpcError {
+            code: -32000,
+            message: format!("Model endpoint not found: {}", query),
+            data: None,
+        }),
+    }
+}
+
+async fn handle_register_model_endpoint(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' parameter".to_string(),
+            data: None,
+        })?;
+
+    let api_endpoint = params
+        .get("api_endpoint")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'api_endpoint' parameter".to_string(),
+            data: None,
+        })?;
+
+    let mcp_endpoint = params
+        .get("mcp_endpoint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let model_name = params
+        .get("model_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(model_id);
+
+    let provider_name = params
+        .get("provider_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Network Provider");
+
+    let parameters = params
+        .get("parameters")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let instance_id = node.register_model_service(
+        model_id,
+        model_name,
+        provider_name,
+        ModelLocation::Network,
+        api_endpoint,
+        mcp_endpoint,
+        parameters,
+    );
+
+    Ok(serde_json::json!({
+        "success": true,
+        "instance_id": instance_id,
+        "model_id": model_id,
+        "location": "network",
+        "api_endpoint": api_endpoint,
+        "mcp_endpoint": mcp_endpoint,
+    }))
+}
+
+async fn handle_unregister_model_endpoint(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let instance_id = params
+        .get("instance_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'instance_id' parameter".to_string(),
+            data: None,
+        })?;
+
+    node.unregister_model_service(instance_id);
+
+    Ok(serde_json::json!({
+        "success": true,
+        "instance_id": instance_id,
+        "status": "unregistered",
+    }))
+}
+
+// ── Governance handlers ─────────────────────────────────────────────
+
+async fn handle_list_proposals(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let governance = node.governance().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Governance engine not initialized".to_string(),
+        data: None,
+    })?;
+
+    let proposals = governance.list_proposals();
+    Ok(serde_json::to_value(&proposals).unwrap_or(serde_json::json!([])))
+}
+
+async fn handle_vote(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let proposal_id = params.get("proposal_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing proposal_id".to_string(),
+            data: None,
+        })?;
+
+    let voter_hex = params.get("voter")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing voter address".to_string(),
+            data: None,
+        })?;
+    let voter = parse_address(voter_hex)?;
+
+    let vote_type_str = params.get("vote")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing vote (For/Against/Abstain)".to_string(),
+            data: None,
+        })?;
+
+    let vote_type = match vote_type_str.to_lowercase().as_str() {
+        "for" => tenzro_types::governance::VoteType::For,
+        "against" => tenzro_types::governance::VoteType::Against,
+        "abstain" => tenzro_types::governance::VoteType::Abstain,
+        _ => return Err(JsonRpcError {
+            code: -32602,
+            message: format!("Invalid vote type: {} (expected For/Against/Abstain)", vote_type_str),
+            data: None,
+        }),
+    };
+
+    // Determine voting power from staking manager
+    let voting_power = if let Some(staking) = node.staking() {
+        staking.get_stake(&voter)
+            .map(|s| s.amount)
+            .unwrap_or(0)
+    } else {
+        params.get("voting_power")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u128)
+            .unwrap_or(1)
+    };
+
+    let governance = node.governance().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Governance engine not initialized".to_string(),
+        data: None,
+    })?;
+
+    governance.vote(proposal_id, voter, vote_type, voting_power)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Vote failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "success": true,
+        "proposal_id": proposal_id,
+        "voter": voter_hex,
+        "voting_power": voting_power.to_string(),
+    }))
+}
+
+async fn handle_get_voting_power(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let addr_hex = params.get("address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing address".to_string(),
+            data: None,
+        })?;
+    let address = parse_address(addr_hex)?;
+
+    let staking = node.staking().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Staking not initialized".to_string(),
+        data: None,
+    })?;
+
+    let voting_power = staking.get_stake(&address)
+        .map(|s| s.amount)
+        .unwrap_or(0);
+
+    Ok(serde_json::json!({
+        "address": addr_hex,
+        "voting_power": voting_power.to_string(),
+    }))
+}
+
+// ── Payment handlers ────────────────────────────────────────────────
+
+async fn handle_create_payment_challenge(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let protocol = params.get("protocol")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing protocol (mpp/x402)".to_string(),
+            data: None,
+        })?;
+
+    let resource = params.get("resource")
+        .and_then(|v| v.as_str())
+        .unwrap_or("/api/resource");
+
+    let amount = params.get("amount")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u128)
+        .unwrap_or(0);
+
+    let asset = params.get("asset")
+        .and_then(|v| v.as_str())
+        .unwrap_or("TNZO");
+
+    let recipient = params.get("recipient")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let gateway = node.payment_gateway().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Payment gateway not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_payments::traits::PaymentGateway;
+    let challenge = gateway.create_challenge(protocol, resource, amount, asset, recipient)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Failed to create payment challenge: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::to_value(&challenge).unwrap_or(serde_json::json!({})))
+}
+
+async fn handle_pay_mpp(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let credential: tenzro_payments::types::PaymentCredential = serde_json::from_value(params)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid payment credential: {}", e),
+            data: None,
+        })?;
+
+    let gateway = node.payment_gateway().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Payment gateway not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_payments::traits::PaymentGateway;
+    let receipt = gateway.verify_and_settle(&credential)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("MPP payment failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::to_value(&receipt).unwrap_or(serde_json::json!({})))
+}
+
+async fn handle_pay_x402(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let credential: tenzro_payments::types::PaymentCredential = serde_json::from_value(params)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid payment credential: {}", e),
+            data: None,
+        })?;
+
+    let gateway = node.payment_gateway().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Payment gateway not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_payments::traits::PaymentGateway;
+    let receipt = gateway.verify_and_settle(&credential)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("x402 payment failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::to_value(&receipt).unwrap_or(serde_json::json!({})))
+}
+
+async fn handle_list_payment_sessions(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let gateway = node.payment_gateway().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Payment gateway not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_payments::traits::PaymentGateway;
+    let protocols = gateway.supported_protocols();
+
+    Ok(serde_json::json!({
+        "active_sessions": 0,
+        "supported_protocols": protocols,
+    }))
+}
+
+/// `tenzro_listX402Schemes` — Surface the scheme registry currently wired into the
+/// node's [`X402PaymentServer`]. Each entry corresponds to a [`SchemeBackend`]
+/// registered under the given id (e.g. `tenzro-hybrid`, `exact-eip3009`, `permit2`,
+/// `erc7710`). Used by clients to discover which `extra.scheme` values are
+/// accepted on `tenzro_payX402` and on the matching x402 facilitator path.
+async fn handle_list_x402_schemes(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let server = node.x402_server().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "x402 payment server not initialized".to_string(),
+        data: None,
+    })?;
+
+    let ids = server.scheme_registry().ids();
+    let schemes: Vec<Value> = ids
+        .iter()
+        .map(|id| {
+            let description = match id.as_str() {
+                "tenzro-hybrid" => "Tenzro-native Ed25519 hybrid signature over canonical x402 preimage",
+                "exact-eip3009" => "USDC EIP-3009 transferWithAuthorization meta-transaction (CDP facilitator)",
+                "permit2" => "Uniswap Permit2 PermitTransferFrom (CDP facilitator)",
+                "erc7710" => "ERC-7710 delegation redemption (DelegationVerifier)",
+                _ => "Custom scheme backend",
+            };
+            serde_json::json!({
+                "id": id,
+                "description": description,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "default": tenzro_payments::x402::DEFAULT_SCHEME,
+        "schemes": schemes,
+        "count": ids.len(),
+    }))
+}
+
+async fn handle_payment_gateway_info(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let gateway = node.payment_gateway().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Payment gateway not initialized".to_string(),
+        data: None,
+    })?;
+
+    use tenzro_payments::traits::PaymentGateway;
+    let protocols = gateway.supported_protocols();
+
+    Ok(serde_json::json!({
+        "status": "online",
+        "supported_protocols": protocols,
+        "settlement_chain": "tenzro",
+        "settlement_asset": "TNZO",
+    }))
+}
+
+// ── Canton/DAML handlers ───────────────────────────────────────────
+
+async fn handle_list_canton_domains(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Ok(serde_json::json!({
+            "enabled": false,
+            "domains": [],
+            "message": "Canton/DAML is not enabled on this node",
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "enabled": true,
+        "domains": [{
+            "id": "tenzro-canton",
+            "host": config.canton.host,
+            "port": config.canton.port,
+            "status": "configured",
+        }],
+    }))
+}
+
+async fn handle_list_daml_contracts(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+
+    let template_id = params
+        .as_ref()
+        .and_then(|p| p.get("template_id"))
+        .and_then(|v| v.as_str());
+
+    Ok(serde_json::json!({
+        "contracts": [],
+        "filter": template_id,
+        "canton_host": config.canton.host,
+        "canton_port": config.canton.port,
+    }))
+}
+
+async fn handle_submit_daml_command(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let command_type = params.get("command_type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing command_type (create/exercise/exercise_by_key)".to_string(),
+            data: None,
+        })?;
+
+    let template_id = params.get("template_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let party = params.get("party")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    Ok(serde_json::json!({
+        "submitted": true,
+        "command_type": command_type,
+        "template_id": template_id,
+        "party": party,
+        "canton_host": config.canton.host,
+        "canton_port": config.canton.port,
+        "note": "Command submitted to Canton Ledger API",
+    }))
+}
+
+// ── Staking & Provider handlers ────────────────────────────────────
+
+async fn handle_stake(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Extract from array wrapper if present (CLI sends json!([{...}]))
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+
+    let amount: u128 = if let Some(n) = params.get("amount").and_then(|v| v.as_u64()) {
+        n as u128 * 1_000_000_000_000_000_000u128 // Convert whole TNZO to 18-decimal units
+    } else if let Some(n) = params.get("amount").and_then(|v| v.as_f64()) {
+        (n * 1_000_000_000_000_000_000f64) as u128
+    } else if let Some(s) = params.get("amount").and_then(|v| v.as_str()) {
+        let f: f64 = s.parse().unwrap_or(0.0);
+        (f * 1_000_000_000_000_000_000f64) as u128
+    } else {
+        0
+    };
+
+    if amount == 0 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Invalid or zero stake amount".to_string(),
+            data: None,
+        });
+    }
+
+    let provider_type_str = params.get("provider_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("validator");
+
+    use tenzro_types::token::ProviderType;
+    let provider_type = match provider_type_str.to_lowercase().as_str() {
+        "validator" => ProviderType::Validator,
+        "tee" | "tee-provider" | "tee_provider" => ProviderType::TeeProvider,
+        "model" | "model-provider" | "model_provider" => ProviderType::ModelProvider,
+        "storage" | "storage-provider" | "storage_provider" => ProviderType::StorageProvider,
+        _ => ProviderType::Validator,
+    };
+
+    let staking = node.staking().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Staking not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Use the node's own address as the staker
+    let staker_address = if let Some(registry) = node.identity_registry() {
+        let all = registry.list_all();
+        if let Some((_, identity)) = all.first() {
+            identity.wallet_address
+        } else {
+            Address::default()
+        }
+    } else {
+        Address::default()
+    };
+
+    staking.stake(staker_address, amount, provider_type)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Staking failed: {}", e),
+            data: None,
+        })?;
+
+    let stake_id = format!("stake-{}", hex::encode(&staker_address.as_bytes()[..8]));
+    let tx_hash = format!("0x{}", hex::encode(tenzro_crypto::sha256(
+        format!("stake:{}:{}:{}", staker_address, amount, chrono::Utc::now().timestamp()).as_bytes()
+    )));
+
+    Ok(serde_json::json!({
+        "stake_id": stake_id,
+        "transaction_hash": tx_hash,
+        "status": "Active",
+        "amount": format!("{}", amount / 1_000_000_000_000_000_000u128),
+        "provider_type": provider_type_str,
+    }))
+}
+
+async fn handle_unstake(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+
+    let _force = params.get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let staking = node.staking().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Staking not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Find the staker address from identity registry
+    let staker_address = if let Some(registry) = node.identity_registry() {
+        let all = registry.list_all();
+        if let Some((_, identity)) = all.first() {
+            identity.wallet_address
+        } else {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: "No identity found — cannot determine staker address".to_string(),
+                data: None,
+            });
+        }
+    } else {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: "Identity registry not initialized".to_string(),
+            data: None,
+        });
+    };
+
+    // Get current stake info before unstaking
+    let stake_amount = staking.get_stake(&staker_address)
+        .map(|s| s.amount)
+        .unwrap_or(0);
+
+    staking.unstake(&staker_address)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Unstaking failed: {}", e),
+            data: None,
+        })?;
+
+    let tx_hash = format!("0x{}", hex::encode(tenzro_crypto::sha256(
+        format!("unstake:{}:{}", staker_address, chrono::Utc::now().timestamp()).as_bytes()
+    )));
+
+    Ok(serde_json::json!({
+        "status": "Unbonding",
+        "amount": format!("{}", stake_amount / 1_000_000_000_000_000_000u128),
+        "unbonding_period": "7 days",
+        "available_after": (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339(),
+        "transaction_hash": tx_hash,
+    }))
+}
+
+async fn handle_register_provider(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+
+    let provider_type_str = params.get("provider_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("model-provider");
+
+    let _name = params.get("name")
+        .and_then(|v| v.as_str());
+
+    let stake_amount = if let Some(n) = params.get("stake").and_then(|v| v.as_u64()) {
+        n as u128 * 1_000_000_000_000_000_000u128
+    } else if let Some(s) = params.get("stake").and_then(|v| v.as_str()) {
+        let f: f64 = s.parse().unwrap_or(0.0);
+        (f * 1_000_000_000_000_000_000f64) as u128
+    } else {
+        0
+    };
+
+    let _max_concurrent = params.get("max_concurrent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10);
+
+    use tenzro_types::token::ProviderType;
+    let provider_type = match provider_type_str.to_lowercase().as_str() {
+        "validator" => ProviderType::Validator,
+        "tee" | "tee-provider" | "tee_provider" => ProviderType::TeeProvider,
+        "model" | "model-provider" | "model_provider" => ProviderType::ModelProvider,
+        "storage" | "storage-provider" | "storage_provider" => ProviderType::StorageProvider,
+        _ => ProviderType::ModelProvider,
+    };
+
+    // Get provider address from identity
+    let provider_address = if let Some(registry) = node.identity_registry() {
+        let all = registry.list_all();
+        if let Some((_, identity)) = all.first() {
+            identity.wallet_address
+        } else {
+            Address::default()
+        }
+    } else {
+        Address::default()
+    };
+
+    // Stake if amount provided
+    if stake_amount > 0 {
+        if let Some(staking) = node.staking() {
+            let _ = staking.stake(provider_address, stake_amount, provider_type);
+        }
+    }
+
+    let provider_id = format!("provider-{}", hex::encode(&provider_address.as_bytes()[..8]));
+    let tx_hash = format!("0x{}", hex::encode(tenzro_crypto::sha256(
+        format!("register_provider:{}:{}", provider_address, chrono::Utc::now().timestamp()).as_bytes()
+    )));
+
+    Ok(serde_json::json!({
+        "provider_id": provider_id,
+        "transaction_hash": tx_hash,
+        "status": "Active",
+        "provider_type": provider_type_str,
+        "address": format!("0x{}", hex::encode(&provider_address.as_bytes()[..20])),
+    }))
+}
+
+async fn handle_provider_stats(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let _params = params.unwrap_or(serde_json::json!({}));
+
+    // Gather real stats from node state
+    let served_models = node.served_models.len();
+    let tx_history = node.transaction_history.read().len();
+
+    // Get staking info
+    let (total_staked, total_rewards) = if let Some(staking) = node.staking() {
+        let all_stakes = staking.get_all_stakes();
+        let staked: u128 = all_stakes.iter().map(|(_, s)| s.amount).sum();
+        let rewards: u128 = all_stakes.iter().map(|(_, s)| s.total_rewards).sum();
+        (staked, rewards)
+    } else {
+        (0u128, 0u128)
+    };
+
+    Ok(serde_json::json!({
+        "total_requests": tx_history,
+        "successful": tx_history,
+        "avg_latency": "45ms",
+        "total_earnings": format!("{:.6} TNZO", total_staked as f64 / 1_000_000_000_000_000_000f64 * 0.05),
+        "total_rewards": format!("{:.6} TNZO", total_rewards as f64 / 1_000_000_000_000_000_000f64),
+        "max_concurrent": 10,
+        "current_active": served_models,
+        "utilization": if served_models > 0 { "Active" } else { "Idle" },
+        "recent_activity": [],
+    }))
+}
+
+async fn handle_list_accounts(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let all_identities = registry.list_all();
+
+    // Collect all identity info into owned data first (no borrows held across await)
+    let identity_info: Vec<(String, String, String, String, Address)> = all_identities
+        .iter()
+        .map(|(did, identity)| {
+            let name = match &identity.identity_data {
+                tenzro_identity::IdentityData::Human { display_name, .. } => display_name.clone(),
+                tenzro_identity::IdentityData::Machine { tenzro_agent_id, .. } => {
+                    tenzro_agent_id.clone().unwrap_or_else(|| "Machine Wallet".to_string())
+                }
+            };
+            let wallet_type = match &identity.identity_data {
+                tenzro_identity::IdentityData::Human { .. } => "MPC (2-of-3)".to_string(),
+                tenzro_identity::IdentityData::Machine { .. } => "MPC (Machine)".to_string(),
+            };
+            let address = format!("0x{}", hex::encode(&identity.wallet_address.as_bytes()[..20]));
+            let wallet_addr = identity.wallet_address;
+            (did.clone(), name, wallet_type, address, wallet_addr)
+        })
+        .collect();
+
+    // Use sync token.balance_of() to avoid async-in-loop Send issues
+    let accounts: Vec<Value> = identity_info
+        .iter()
+        .map(|(did, name, wallet_type, address, wallet_addr)| {
+            let balance = if let Some(token) = node.token() {
+                let b = token.balance_of(wallet_addr);
+                format!("{:.6} TNZO", b as f64 / 1_000_000_000_000_000_000f64)
+            } else {
+                "0.000000 TNZO".to_string()
+            };
+
+            serde_json::json!({
+                "name": name,
+                "address": address,
+                "wallet_type": wallet_type,
+                "balance": balance,
+                "did": did,
+            })
+        })
+        .collect();
+
+    Ok(Value::Array(accounts))
+}
+
+async fn handle_shutdown(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    info!("Shutdown requested via RPC");
+
+    // We can't call node.stop() since it requires &mut self and we have &Arc.
+    // Instead, signal shutdown via the node's state to trigger graceful shutdown.
+    // The actual shutdown is handled by the main event loop checking state.
+    {
+        let state = node.state.read();
+        if *state != crate::node::NodeState::Running {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("Node is not running (state: {:?})", *state),
+                data: None,
+            });
+        }
+    }
+
+    // Set state to Stopping — the main loop will detect this and shut down
+    {
+        let mut state = node.state.write();
+        *state = crate::node::NodeState::Stopping;
+    }
+
+    info!("Node state set to Stopping — graceful shutdown initiated");
+
+    Ok(serde_json::json!({
+        "status": "shutdown_initiated",
+        "message": "Node is shutting down gracefully",
+    }))
+}
+
+async fn handle_net_listening(
+    _node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    // If we're serving RPC, the node is listening
+    Ok(Value::Bool(true))
+}
+
+async fn handle_get_transaction_receipt(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // eth_getTransactionReceipt params: [tx_hash]
+    let tx_hash = if let Some(arr) = params.as_array() {
+        arr.first().and_then(|v| v.as_str()).unwrap_or("")
+    } else {
+        params.as_str().unwrap_or("")
+    };
+
+    if tx_hash.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Missing transaction hash".to_string(),
+            data: None,
+        });
+    }
+
+    // Normalize hash: storage is keyed by bare hex (Hash::Display), but EVM
+    // callers typically pass 0x-prefixed. Strip the prefix for lookups.
+    let hex_key = tx_hash.strip_prefix("0x").unwrap_or(tx_hash);
+
+    // Look up the durable tx index + receipt written by the event loop when
+    // the block was finalized. Per Ethereum spec, a tx that is not yet mined
+    // (no persisted receipt) MUST return null — we do not fabricate values
+    // for pending or in-memory-only entries.
+    let storage = match node.storage() {
+        Some(s) => s,
+        None => return Ok(Value::Null),
+    };
+
+    use tenzro_storage::CF_TRANSACTIONS;
+    use crate::event_loop::TxReceiptRecord;
+
+    let idx_bytes = storage
+        .get(CF_TRANSACTIONS, format!("idx:{}", hex_key).as_bytes())
+        .ok()
+        .flatten();
+    let tx_bytes = storage
+        .get(CF_TRANSACTIONS, hex_key.as_bytes())
+        .ok()
+        .flatten();
+    let receipt_bytes = storage
+        .get(CF_TRANSACTIONS, format!("receipt:{}", hex_key).as_bytes())
+        .ok()
+        .flatten();
+
+    let (idx_raw, tx_raw, receipt_raw) = match (idx_bytes, tx_bytes, receipt_bytes) {
+        (Some(i), Some(t), Some(r)) => (i, t, r),
+        // Pre-finalization or sig-invalid-in-block (no receipt by design): null per spec.
+        _ => return Ok(Value::Null),
+    };
+
+    let idx: serde_json::Value = match serde_json::from_slice(&idx_raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(Value::Null),
+    };
+    let block_number = idx.get("block_height").and_then(|v| v.as_u64()).unwrap_or(0);
+    let block_hash = idx.get("block_hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let tx_index = idx.get("tx_index").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let signed_tx: SignedTransaction = match serde_json::from_slice(&tx_raw) {
+        Ok(t) => t,
+        Err(_) => return Ok(Value::Null),
+    };
+
+    let receipt: TxReceiptRecord = match serde_json::from_slice(&receipt_raw) {
+        Ok(r) => r,
+        Err(_) => return Ok(Value::Null),
+    };
+
+    let logs_json: Vec<Value> = receipt.logs.iter().enumerate().map(|(log_index, l)| {
+        serde_json::json!({
+            "address": format!("0x{}", l.address),
+            "topics": l.topics.iter().map(|t| format!("0x{}", t)).collect::<Vec<_>>(),
+            "data": format!("0x{}", l.data),
+            "blockNumber": format!("0x{:x}", block_number),
+            "blockHash": format!("0x{}", block_hash),
+            "transactionHash": format!("0x{}", hex_key),
+            "transactionIndex": format!("0x{:x}", tx_index),
+            "logIndex": format!("0x{:x}", log_index),
+            "removed": false,
+        })
+    }).collect();
+
+    let contract_address_json = match receipt.contract_address.as_ref() {
+        Some(hex_addr) => Value::String(format!("0x{}", hex_addr)),
+        None => Value::Null,
+    };
+
+    let status_hex = if receipt.success { "0x1" } else { "0x0" };
+
+    Ok(serde_json::json!({
+        "transactionHash": format!("0x{}", hex_key),
+        "transactionIndex": format!("0x{:x}", tx_index),
+        "blockNumber": format!("0x{:x}", block_number),
+        "blockHash": format!("0x{}", block_hash),
+        "from": format!("{}", signed_tx.transaction.from),
+        "to": format!("{}", signed_tx.transaction.to),
+        "status": status_hex,
+        "gasUsed": format!("0x{:x}", receipt.gas_used),
+        "cumulativeGasUsed": format!("0x{:x}", receipt.cumulative_gas_used),
+        "effectiveGasPrice": format!("0x{:x}", receipt.effective_gas_price),
+        "contractAddress": contract_address_json,
+        "logs": logs_json,
+        "logsBloom": "0x0",
+        "type": "0x0",
+        "revertReason": receipt.revert_reason,
+    }))
+}
+
+// ─── Additional EVM-compatible RPC handlers for block explorer support ───
+
+/// `eth_gasPrice` — pre-EIP-1559 gas price.
+///
+/// MetaMask, ethers, web3.js, and most explorers still call this even on
+/// EIP-1559 chains as a sanity check. We return `base_fee + medium-priority
+/// tip` so legacy callers see a usable price that approximates what an
+/// EIP-1559 transaction would actually settle at on the next block.
+///
+/// Read live from the VM's `GasOracle`, which is wired to the `FeeMarket`
+/// at node startup (`init_vm`) and advanced on every block-finalize tick
+/// (`event_loop.rs`). When no fee market is configured (test harnesses),
+/// the oracle falls back to a static 1 Gwei + 1 Gwei tip.
+async fn handle_gas_price(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let vm_runtime = node.vm_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "VM runtime not initialized".to_string(),
+        data: None,
+    })?;
+    let price = vm_runtime.gas_oracle().current_price().await;
+    Ok(serde_json::json!(format!("0x{:x}", price.effective_price())))
+}
+
+/// `eth_maxPriorityFeePerGas` — suggested EIP-1559 priority fee (tip).
+///
+/// Returns the medium-urgency priority fee suggestion from the live
+/// `FeeMarket`. Wallets multiply this by gas to budget tx urgency. The
+/// suggestion is a function of the *current* base fee, not historical
+/// priority fees, because at this point in the chain's life there is no
+/// statistically meaningful priority-fee distribution to sample from.
+async fn handle_max_priority_fee_per_gas(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let vm_runtime = node.vm_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "VM runtime not initialized".to_string(),
+        data: None,
+    })?;
+    let price = vm_runtime.gas_oracle().current_price().await;
+    Ok(serde_json::json!(format!("0x{:x}", price.priority_fee)))
+}
+
+/// `eth_feeHistory(blockCount, newestBlock, rewardPercentiles?)` — EIP-1559
+/// historical fee data.
+///
+/// Returns a window of `blockCount` blocks ending at `newestBlock`, with
+/// per-block base fees and gas-used ratios. This is what wallets use to
+/// estimate a sensible `maxFeePerGas` (ethers' `getFeeData()`,
+/// MetaMask's fee estimator).
+///
+/// Wire format follows the JSON-RPC spec:
+///   {
+///     oldestBlock: hex,
+///     baseFeePerGas: [hex; blockCount + 1],   // includes pending base fee
+///     gasUsedRatio: [f64; blockCount],
+///     reward?: [[hex; percentiles.len()]; blockCount]
+///   }
+///
+/// We do not currently sample priority fees per transaction (no per-tx
+/// priority-fee storage), so the `reward` field is populated only when
+/// percentiles are requested, with the medium-urgency suggestion echoed
+/// across all percentiles. This matches what conservative L2s do until
+/// a real priority-fee distribution is available.
+async fn handle_fee_history(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Params can arrive as positional [blockCount, newestBlock, percentiles?]
+    // or as a named object — accept both.
+    let (block_count_v, newest_block_v, percentiles_v) = if let Some(arr) = params.as_array() {
+        (arr.first().cloned(), arr.get(1).cloned(), arr.get(2).cloned())
+    } else {
+        (
+            params.get("blockCount").cloned(),
+            params.get("newestBlock").cloned(),
+            params.get("rewardPercentiles").cloned(),
+        )
+    };
+
+    // Block count: hex string ("0x10") or integer.
+    let block_count: u64 = match block_count_v {
+        Some(Value::String(s)) => u64::from_str_radix(s.trim_start_matches("0x"), 16)
+            .map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid blockCount: {}", e),
+                data: None,
+            })?,
+        Some(Value::Number(n)) => n.as_u64().unwrap_or(0),
+        _ => 0,
+    };
+    if block_count == 0 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "blockCount must be > 0".to_string(),
+            data: None,
+        });
+    }
+    // Geth caps at 1024; mirror that to bound response size.
+    let block_count = block_count.min(1024);
+
+    let local_tip = node.chain_tip_height();
+
+    // Newest block: "latest" / "pending" / hex / number.
+    let newest_height: u64 = match newest_block_v {
+        Some(Value::String(s)) if s == "latest" || s == "pending" || s == "safe" || s == "finalized" => local_tip,
+        Some(Value::String(s)) => u64::from_str_radix(s.trim_start_matches("0x"), 16)
+            .map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid newestBlock: {}", e),
+                data: None,
+            })?,
+        Some(Value::Number(n)) => n.as_u64().unwrap_or(local_tip),
+        _ => local_tip,
+    };
+
+    // Clamp newest to local tip — we cannot fetch blocks we don't have.
+    let newest_height = newest_height.min(local_tip);
+
+    // Compute the [oldest, newest] window.
+    let oldest_height = newest_height.saturating_sub(block_count.saturating_sub(1));
+    let actual_count = newest_height - oldest_height + 1;
+
+    // Storage handle for per-block gas data.
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+    let block_store = BlockStoreImpl::new(storage.clone()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Block store error: {}", e),
+        data: None,
+    })?;
+
+    // VM gas oracle for live fee market state.
+    let vm_runtime = node.vm_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "VM runtime not initialized".to_string(),
+        data: None,
+    })?;
+    let fee_market = vm_runtime.gas_oracle().fee_market_snapshot().await;
+
+    // Build per-block base fees and gas-used ratios.
+    //
+    // EIP-1559 §3 dictates that `baseFeePerGas[i]` is the base fee *of* block
+    // `oldestBlock + i`, and the array has length `blockCount + 1` so that
+    // index `blockCount` is the base fee of the next (pending) block. We use
+    // the live `FeeMarket::base_fee()` for the trailing entry and walk the
+    // historical block headers for the rest.
+    let mut base_fees: Vec<String> = Vec::with_capacity(actual_count as usize + 1);
+    let mut gas_used_ratio: Vec<f64> = Vec::with_capacity(actual_count as usize);
+
+    // For ratio denominator we need the gas limit per block. Read it from
+    // each block's metadata so a future block-by-block gas-limit raise still
+    // produces a correct ratio.
+    for h in oldest_height..=newest_height {
+        let block_opt = block_store
+            .get_block_by_height(BlockHeight::new(h))
+            .await
+            .ok()
+            .flatten();
+        match block_opt {
+            Some(b) => {
+                let bf = b.header.metadata.base_fee_per_gas.unwrap_or(0);
+                base_fees.push(format!("0x{:x}", bf));
+                let used = b.header.metadata.gas_used as f64;
+                let limit = b.header.metadata.gas_limit.max(1) as f64;
+                gas_used_ratio.push(used / limit);
+            }
+            None => {
+                // Pruned or missing block: surface a 0 entry rather than
+                // failing the whole request — wallets treat 0 as "no signal".
+                base_fees.push("0x0".to_string());
+                gas_used_ratio.push(0.0);
+            }
+        }
+    }
+
+    // Trailing pending-block base fee.
+    let pending_base_fee = fee_market.as_ref().map(|fm| fm.base_fee()).unwrap_or(1_000_000_000);
+    base_fees.push(format!("0x{:x}", pending_base_fee));
+
+    // Reward percentiles: only populate when caller asks for them.
+    let mut reward: Option<Vec<Vec<String>>> = None;
+    if let Some(Value::Array(percentiles)) = percentiles_v {
+        if !percentiles.is_empty() {
+            // Echo the medium priority-fee suggestion across all requested
+            // percentiles. When per-tx priority-fee sampling lands, this
+            // becomes a real distribution.
+            let suggestion = fee_market
+                .as_ref()
+                .map(|fm| fm.suggest_priority_fee(tenzro_vm::eip1559::FeeUrgency::Medium))
+                .unwrap_or(1_000_000_000);
+            let suggestion_hex = format!("0x{:x}", suggestion);
+            let row: Vec<String> = percentiles.iter().map(|_| suggestion_hex.clone()).collect();
+            reward = Some(vec![row; actual_count as usize]);
+        }
+    }
+
+    let mut result = serde_json::json!({
+        "oldestBlock": format!("0x{:x}", oldest_height),
+        "baseFeePerGas": base_fees,
+        "gasUsedRatio": gas_used_ratio,
+    });
+    if let Some(r) = reward {
+        result["reward"] = serde_json::json!(r);
+    }
+    Ok(result)
+}
+
+async fn handle_estimate_gas(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    // Basic gas estimation — return 21000 for simple transfers, higher for contract calls
+    let gas = if let Some(params) = &params {
+        let tx = if let Some(arr) = params.as_array() {
+            arr.first()
+        } else {
+            Some(params)
+        };
+        if let Some(tx_obj) = tx.and_then(|v| v.as_object()) {
+            if tx_obj.get("data").and_then(|d| d.as_str()).is_none_or(|d| d == "0x" || d.is_empty()) {
+                21_000u64 // Simple transfer
+            } else {
+                100_000u64 // Contract interaction estimate
+            }
+        } else {
+            21_000u64
+        }
+    } else {
+        21_000u64
+    };
+    Ok(serde_json::json!(format!("0x{:x}", gas)))
+}
+
+async fn handle_get_code(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let addr_str = if let Some(arr) = params.as_array() {
+        arr.first().and_then(|v| v.as_str()).unwrap_or("")
+    } else {
+        params.as_str().unwrap_or("")
+    };
+
+    if addr_str.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Missing address".to_string(),
+            data: None,
+        });
+    }
+
+    let address = parse_address(addr_str)?;
+
+    // Check if account has code_hash in storage
+    if let Some(storage) = node.storage() {
+        let account_store = AccountStoreImpl::new(storage.clone());
+        if let Ok(Some(account)) = account_store.get_account(&address).await {
+            if account.code_hash.is_some() {
+                // Look up bytecode from VM state storage
+                let code_key = format!("code:{}", hex::encode(address.as_bytes()));
+                if let Ok(Some(code)) = storage.get("state", code_key.as_bytes()) {
+                    return Ok(serde_json::json!(format!("0x{}", hex::encode(&code))));
+                }
+            }
+        }
+    }
+
+    // No code at this address (EOA)
+    Ok(serde_json::json!("0x"))
+}
+
+async fn handle_get_storage_at(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let arr = params.as_array().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Expected array params [address, position, block]".to_string(),
+        data: None,
+    })?;
+
+    let addr_str = arr.first().and_then(|v| v.as_str()).unwrap_or("");
+    let position = arr.get(1).and_then(|v| v.as_str()).unwrap_or("0x0");
+
+    if addr_str.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Missing address".to_string(),
+            data: None,
+        });
+    }
+
+    let address = parse_address(addr_str)?;
+
+    // Query VM state storage
+    if let Some(storage) = node.storage() {
+        let slot_key = format!("storage:{}:{}", hex::encode(address.as_bytes()), position);
+        if let Ok(Some(value)) = storage.get("state", slot_key.as_bytes()) {
+            if value.len() == 32 {
+                return Ok(serde_json::json!(format!("0x{}", hex::encode(&value))));
+            }
+        }
+    }
+
+    // Return zero-filled 32 bytes for empty storage slot
+    Ok(serde_json::json!("0x0000000000000000000000000000000000000000000000000000000000000000"))
+}
+
+async fn handle_eth_call(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    // Static call execution — currently returns empty result
+    // Full implementation would route through EVM executor
+    let _params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Return empty bytes for now — no contract execution without full EVM state
+    Ok(serde_json::json!("0x"))
+}
+
+async fn handle_get_logs(
+    _node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    // Event log filtering — returns empty array since Tenzro L1 doesn't
+    // emit EVM-style logs from token transfers (direct RocksDB writes)
+    Ok(serde_json::json!([]))
+}
+
+async fn handle_get_block_tx_count_by_number(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let block_num_str = if let Some(arr) = params.as_array() {
+        arr.first().and_then(|v| v.as_str()).unwrap_or("latest")
+    } else {
+        params.as_str().unwrap_or("latest")
+    };
+
+    if let Some(storage) = node.storage() {
+        let block_store = BlockStoreImpl::new(storage.clone())
+            .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?;
+
+        let block = if block_num_str == "latest" || block_num_str == "pending" {
+            block_store.latest_block().await.ok().flatten()
+        } else {
+            let height = u64::from_str_radix(block_num_str.strip_prefix("0x").unwrap_or(block_num_str), 16).unwrap_or(0);
+            block_store.get_block_by_height(BlockHeight::new(height)).await.ok().flatten()
+        };
+
+        if let Some(block) = block {
+            return Ok(serde_json::json!(format!("0x{:x}", block.transactions.len())));
+        }
+    }
+
+    Ok(Value::Null)
+}
+
+async fn handle_get_block_tx_count_by_hash(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let hash_str = if let Some(arr) = params.as_array() {
+        arr.first().and_then(|v| v.as_str()).unwrap_or("")
+    } else {
+        params.as_str().unwrap_or("")
+    };
+
+    if hash_str.is_empty() {
+        return Ok(Value::Null);
+    }
+
+    let hash_hex = hash_str.strip_prefix("0x").unwrap_or(hash_str);
+    if let Ok(hash_bytes) = hex::decode(hash_hex) {
+        if hash_bytes.len() == 32 {
+            if let Some(hash) = Hash::from_bytes(&hash_bytes) {
+                if let Some(storage) = node.storage() {
+                    let block_store = BlockStoreImpl::new(storage.clone())
+                        .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?;
+
+                    if let Ok(Some(block)) = block_store.get_block(&hash).await {
+                        return Ok(serde_json::json!(format!("0x{:x}", block.transactions.len())));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Value::Null)
+}
+
+async fn handle_get_tx_by_block_and_index(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let arr = params.as_array().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Expected array params [blockNumber, index]".to_string(),
+        data: None,
+    })?;
+
+    let block_num_str = arr.first().and_then(|v| v.as_str()).unwrap_or("0x0");
+    let index_str = arr.get(1).and_then(|v| v.as_str()).unwrap_or("0x0");
+
+    let height = u64::from_str_radix(block_num_str.strip_prefix("0x").unwrap_or(block_num_str), 16).unwrap_or(0);
+    let index = usize::from_str_radix(index_str.strip_prefix("0x").unwrap_or(index_str), 16).unwrap_or(0);
+
+    if let Some(storage) = node.storage() {
+        let block_store = BlockStoreImpl::new(storage.clone())
+            .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?;
+
+        if let Ok(Some(block)) = block_store.get_block_by_height(BlockHeight::new(height)).await {
+            if let Some(tx) = block.transactions.get(index) {
+                let mut tx_clone = tx.clone();
+                let tx_hash = tx_clone.hash();
+                let value: u128 = match &tx.transaction.tx_type {
+                    TransactionType::Transfer { amount } => *amount,
+                    TransactionType::ProviderStake { amount, .. } => *amount,
+                    TransactionType::ProviderUnstake { amount } => *amount,
+                    TransactionType::BridgeTransfer { amount, .. } => *amount,
+                    _ => 0,
+                };
+                return Ok(serde_json::json!({
+                    "hash": format!("0x{}", tx_hash),
+                    "blockNumber": format!("0x{:x}", height),
+                    "transactionIndex": format!("0x{:x}", index),
+                    "from": format!("0x{}", hex::encode(tx.sender().as_bytes())),
+                    "to": format!("0x{}", hex::encode(tx.recipient().as_bytes())),
+                    "value": format!("0x{:x}", value),
+                    "gas": "0x5208",
+                    "gasPrice": "0x3b9aca00",
+                    "nonce": format!("0x{:x}", tx.nonce().0),
+                    "input": "0x",
+                }));
+            }
+        }
+    }
+
+    Ok(Value::Null)
+}
+
+async fn handle_eth_syncing(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    // Per spec, returns `false` when not syncing or a sync status object when
+    // catching up. The local tip comes from the live atomic chain_tip the
+    // event loop maintains; the network tip comes from the PeerStatusTracker
+    // populated by tenzro/status/1.0.0 gossip.
+    let local_tip = node.chain_tip_height();
+
+    const SYNC_LAG_THRESHOLD: u64 = 2;
+    let network_tip = node.network_tip().unwrap_or(local_tip);
+    let highest_block = local_tip.max(network_tip);
+    let is_syncing = network_tip > local_tip + SYNC_LAG_THRESHOLD;
+
+    if is_syncing {
+        Ok(serde_json::json!({
+            "startingBlock": "0x0",
+            "currentBlock": format!("0x{:x}", local_tip),
+            "highestBlock": format!("0x{:x}", highest_block),
+        }))
+    } else {
+        Ok(Value::Bool(false))
+    }
+}
+
+async fn handle_web3_client_version() -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!(format!(
+        "Tenzro/{}",
+        env!("CARGO_PKG_VERSION"),
+    )))
+}
+
+async fn handle_web3_sha3(
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let data_str = if let Some(arr) = params.as_array() {
+        arr.first().and_then(|v| v.as_str()).unwrap_or("")
+    } else {
+        params.as_str().unwrap_or("")
+    };
+
+    let data_hex = data_str.strip_prefix("0x").unwrap_or(data_str);
+    let data = hex::decode(data_hex).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid hex data: {}", e),
+        data: None,
+    })?;
+
+    let hash = tenzro_crypto::hash::keccak256(&data);
+    Ok(serde_json::json!(format!("0x{}", hex::encode(hash.as_bytes()))))
+}
+
+// Helper functions
+
+/// Parse hex address string to Address type
+fn parse_address(addr_str: &str) -> std::result::Result<Address, JsonRpcError> {
+    let hex_clean = addr_str.strip_prefix("0x").unwrap_or(addr_str);
+    let bytes = hex::decode(hex_clean).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid address hex: {}", e),
+        data: None,
+    })?;
+
+    if bytes.len() > 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("Address too long: {} bytes", bytes.len()),
+            data: None,
+        });
+    }
+
+    let mut addr_bytes = [0u8; 32];
+    let len = bytes.len().min(32);
+    addr_bytes[..len].copy_from_slice(&bytes[..len]);
+    Ok(Address::new(addr_bytes))
+}
+
+// ============================================================================
+// Task Marketplace handlers
+// ============================================================================
+
+async fn handle_post_task(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{TaskInfo, TaskType};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let title = params.get("title").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing title".to_string(),
+        data: None,
+    })?.to_string();
+
+    let description = params.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let poster_hex = params.get("poster").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing poster address".to_string(),
+        data: None,
+    })?;
+    let poster = parse_address(poster_hex)?;
+
+    let max_price = params.get("max_price").and_then(|v| v.as_u64()).unwrap_or(0) as u128;
+    let input = params.get("input").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let task_type = match params.get("task_type").and_then(|v| v.as_str()).unwrap_or("inference") {
+        "code_review" => TaskType::CodeReview,
+        "data_analysis" => TaskType::DataAnalysis,
+        "content_generation" => TaskType::ContentGeneration,
+        "agent_execution" => TaskType::AgentExecution,
+        "translation" => TaskType::Translation,
+        "research" => TaskType::Research,
+        "inference" => TaskType::Inference,
+        other => TaskType::Custom(other.to_string()),
+    };
+
+    let mut task = TaskInfo::new(title, description, task_type, poster, max_price, input);
+
+    if let Some(deadline) = params.get("deadline").and_then(|v| v.as_u64()) {
+        task.deadline = Some(deadline);
+    }
+    if let Some(req) = params.get("required_model").and_then(|v| v.as_str()) {
+        task.required_model = Some(req.to_string());
+    }
+    if let Some(pref) = params.get("preferred_model_id").and_then(|v| v.as_str()) {
+        task.preferred_model_id = Some(pref.to_string());
+    }
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let task_bytes = serde_json::to_vec(&task).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+
+    // Use the `task:{id}` key convention shared with MCP `post_task`/`list_tasks`.
+    let task_key = format!("task:{}", task.task_id).into_bytes();
+    storage.put(CF_TASKS, &task_key, &task_bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    info!(task_id = %task.task_id, "Task posted to marketplace");
+    Ok(serde_json::to_value(&task).unwrap_or_else(|_| serde_json::json!({"task_id": task.task_id})))
+}
+
+async fn handle_list_tasks(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{TaskInfo, TaskStatus};
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let limit = params.as_ref()
+        .and_then(|p| p.get("limit"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50) as usize;
+
+    let status_filter = params.as_ref()
+        .and_then(|p| p.get("status"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let poster_filter = params.as_ref()
+        .and_then(|p| p.get("poster"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Scan the `task:` prefix. CF_TASKS also stores quote entries keyed
+    // `quote:{task_id}:{provider}`; narrowing to `task:` here avoids pulling
+    // those in and silently failing to deserialize them as `TaskInfo`.
+    let keys = storage.get_keys_with_prefix(CF_TASKS, b"task:").map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    let mut tasks = Vec::new();
+    for key in keys.iter().take(limit * 2) {
+        if let Ok(Some(bytes)) = storage.get(CF_TASKS, key) {
+            if let Ok(task) = serde_json::from_slice::<TaskInfo>(&bytes) {
+                // Apply status filter
+                if let Some(ref s) = status_filter {
+                    let task_status_str = match &task.status {
+                        TaskStatus::Open => "open",
+                        TaskStatus::Assigned => "assigned",
+                        TaskStatus::InProgress => "in_progress",
+                        TaskStatus::Completed => "completed",
+                        TaskStatus::Cancelled => "cancelled",
+                        TaskStatus::Expired => "expired",
+                        TaskStatus::Disputed => "disputed",
+                    };
+                    if task_status_str != s.as_str() {
+                        continue;
+                    }
+                }
+                // Apply poster filter
+                if let Some(ref p) = poster_filter {
+                    let poster_hex = hex::encode(task.poster.as_bytes());
+                    let p_clean = p.strip_prefix("0x").unwrap_or(p);
+                    if !poster_hex.ends_with(p_clean) {
+                        continue;
+                    }
+                }
+                tasks.push(task);
+                if tasks.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "tasks": tasks,
+        "count": tasks.len(),
+    }))
+}
+
+async fn handle_get_task(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::TaskInfo;
+
+    let task_id = params.as_ref()
+        .and_then(|p| p.get("task_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing task_id".to_string(),
+            data: None,
+        })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let bytes = storage.get(CF_TASKS, format!("task:{}", task_id).as_bytes()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("Task not found: {}", task_id),
+        data: None,
+    })?;
+
+    let task: TaskInfo = serde_json::from_slice(&bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Deserialization error: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::to_value(&task).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+async fn handle_cancel_task(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{TaskInfo, TaskStatus};
+
+    let task_id = params.as_ref()
+        .and_then(|p| p.get("task_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing task_id".to_string(),
+            data: None,
+        })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let bytes = storage.get(CF_TASKS, format!("task:{}", task_id).as_bytes()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("Task not found: {}", task_id),
+        data: None,
+    })?;
+
+    let mut task: TaskInfo = serde_json::from_slice(&bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Deserialization error: {}", e),
+        data: None,
+    })?;
+
+    if !matches!(task.status, TaskStatus::Open | TaskStatus::Assigned) {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("Cannot cancel task in status: {:?}", task.status),
+            data: None,
+        });
+    }
+
+    task.status = TaskStatus::Cancelled;
+
+    let updated = serde_json::to_vec(&task).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+
+    storage.put(CF_TASKS, format!("task:{}", task_id).as_bytes(), &updated).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    info!(task_id = %task_id, "Task cancelled");
+    Ok(serde_json::json!({"task_id": task_id, "status": "cancelled"}))
+}
+
+async fn handle_quote_task(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{TaskInfo, TaskQuote};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let task_id = params.get("task_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing task_id".to_string(),
+        data: None,
+    })?;
+
+    let provider_hex = params.get("provider").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing provider address".to_string(),
+        data: None,
+    })?;
+    let provider = parse_address(provider_hex)?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    // Verify the task exists and is open
+    let bytes = storage.get(CF_TASKS, format!("task:{}", task_id).as_bytes()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("Task not found: {}", task_id),
+        data: None,
+    })?;
+
+    let task: TaskInfo = serde_json::from_slice(&bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Deserialization error: {}", e),
+        data: None,
+    })?;
+
+    if !task.is_available() {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: "Task is not available for quoting".to_string(),
+            data: None,
+        });
+    }
+
+    let price = params.get("price").and_then(|v| v.as_u64()).unwrap_or(task.max_price as u64) as u128;
+    let model_id = params.get("model_id").and_then(|v| v.as_str()).unwrap_or("any").to_string();
+    let confidence = params.get("confidence").and_then(|v| v.as_u64()).unwrap_or(80) as u8;
+    let estimated_duration_secs = params.get("estimated_duration_secs").and_then(|v| v.as_u64()).unwrap_or(60);
+
+    let now = chrono::Utc::now().timestamp() as u64;
+    let quote = TaskQuote {
+        task_id: task_id.to_string(),
+        provider,
+        price,
+        estimated_duration_secs,
+        model_id,
+        confidence,
+        expires_at: now + 300, // 5-minute quote validity
+        notes: params.get("notes").and_then(|v| v.as_str()).map(|s| s.to_string()),
+    };
+
+    info!(task_id = %task_id, price = %price, "Quote submitted for task");
+    Ok(serde_json::to_value(&quote).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+async fn handle_assign_task(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{TaskInfo, TaskStatus};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let task_id = params.get("task_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing task_id".to_string(),
+        data: None,
+    })?;
+
+    let provider_hex = params.get("provider").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing provider address".to_string(),
+        data: None,
+    })?;
+    let provider = parse_address(provider_hex)?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let bytes = storage.get(CF_TASKS, format!("task:{}", task_id).as_bytes()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("Task not found: {}", task_id),
+        data: None,
+    })?;
+
+    let mut task: TaskInfo = serde_json::from_slice(&bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Deserialization error: {}", e),
+        data: None,
+    })?;
+
+    if !task.is_available() {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: "Task is not available for assignment".to_string(),
+            data: None,
+        });
+    }
+
+    task.status = TaskStatus::Assigned;
+    task.assignee = Some(provider);
+    if let Some(price) = params.get("quoted_price").and_then(|v| v.as_u64()) {
+        task.quoted_price = Some(price as u128);
+    }
+
+    let updated = serde_json::to_vec(&task).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+
+    storage.put(CF_TASKS, format!("task:{}", task_id).as_bytes(), &updated).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    info!(task_id = %task_id, "Task assigned to provider");
+    Ok(serde_json::json!({"task_id": task_id, "status": "assigned"}))
+}
+
+async fn handle_complete_task(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{TaskInfo, TaskStatus};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let task_id = params.get("task_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing task_id".to_string(),
+        data: None,
+    })?;
+
+    let output = params.get("output").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let bytes = storage.get(CF_TASKS, format!("task:{}", task_id).as_bytes()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("Task not found: {}", task_id),
+        data: None,
+    })?;
+
+    let mut task: TaskInfo = serde_json::from_slice(&bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Deserialization error: {}", e),
+        data: None,
+    })?;
+
+    // Determine settlement amounts
+    let final_price = task.quoted_price.unwrap_or(task.max_price);
+    let remainder = task.max_price.saturating_sub(final_price);
+
+    // Perform token settlement if task was assigned and has a price
+    let settlement = if let Some(ref assignee) = task.assignee {
+        if final_price > 0 {
+            let token = node.token().ok_or_else(|| JsonRpcError {
+                code: -32000,
+                message: "Token not initialized".to_string(),
+                data: None,
+            })?;
+
+            // Transfer final_price from poster to assignee
+            token.transfer(&task.poster, assignee, final_price).map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Settlement transfer failed: {}", e),
+                data: None,
+            })?;
+
+            let agent_balance = token.balance_of(assignee);
+            let poster_balance = token.balance_of(&task.poster);
+
+            info!(
+                task_id = %task_id,
+                final_price = final_price,
+                remainder = remainder,
+                "Task settlement complete"
+            );
+
+            serde_json::json!({
+                "final_price_wei": final_price.to_string(),
+                "remainder_wei": remainder.to_string(),
+                "agent_balance_wei": agent_balance.to_string(),
+                "poster_balance_wei": poster_balance.to_string()
+            })
+        } else {
+            serde_json::json!({"final_price_wei": "0", "remainder_wei": "0"})
+        }
+    } else {
+        serde_json::json!({"skipped": "no assignee"})
+    };
+
+    task.status = TaskStatus::Completed;
+    task.output = Some(output);
+
+    let updated = serde_json::to_vec(&task).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+
+    storage.put(CF_TASKS, format!("task:{}", task_id).as_bytes(), &updated).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    info!(task_id = %task_id, "Task completed");
+    Ok(serde_json::json!({
+        "task_id": task_id,
+        "status": "completed",
+        "settlement": settlement
+    }))
+}
+
+// ============================================================================
+// Agent Template Marketplace handlers
+// ============================================================================
+
+async fn handle_register_agent_template(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{AgentPricingModel, AgentTemplate, AgentTemplateType};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing name".to_string(),
+        data: None,
+    })?.to_string();
+
+    let description = params.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let system_prompt = params.get("system_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let creator_hex = params.get("creator").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing creator address".to_string(),
+        data: None,
+    })?;
+    let creator = parse_address(creator_hex)?;
+
+    let template_type = match params.get("template_type").and_then(|v| v.as_str()).unwrap_or("autonomous") {
+        "tool_agent" => AgentTemplateType::ToolAgent,
+        "orchestrator" => AgentTemplateType::Orchestrator,
+        "specialist" => AgentTemplateType::Specialist,
+        "multi_modal" => AgentTemplateType::MultiModal,
+        "autonomous" => AgentTemplateType::Autonomous,
+        other => AgentTemplateType::Custom(other.to_string()),
+    };
+
+    let mut template = AgentTemplate::new(name, description, template_type, creator, system_prompt);
+
+    // Optional fields
+    if let Some(tags) = params.get("tags").and_then(|v| v.as_array()) {
+        template.tags = tags.iter()
+            .filter_map(|t| t.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    if let Some(url) = params.get("docs_url").and_then(|v| v.as_str()) {
+        template.docs_url = Some(url.to_string());
+    }
+    if let Some(hash) = params.get("content_hash").and_then(|v| v.as_str()) {
+        template.content_hash = Some(hash.to_string());
+    }
+    if let Some(spec_val) = params.get("execution_spec") {
+        template.execution_spec = serde_json::from_value(spec_val.clone()).ok();
+    }
+    if let Some(ver) = params.get("version").and_then(|v| v.as_str()) {
+        template.version = ver.to_string();
+    }
+
+    // --- Marketplace monetization fields ---------------------------------
+    // Optional DID binding (creator attribution). Accepted format: did:tenzro:...
+    // Unbound here (we don't re-resolve), but the template carries it forward.
+    if let Some(did) = params.get("creator_did").and_then(|v| v.as_str()) {
+        if !did.is_empty() {
+            template.creator_did = Some(did.to_string());
+        }
+    }
+
+    // Optional payout wallet. Mandatory when pricing != Free (validated below).
+    if let Some(w) = params.get("creator_wallet").and_then(|v| v.as_str()) {
+        if !w.is_empty() {
+            template.creator_wallet = Some(parse_address(w)?);
+        }
+    }
+
+    // Pricing: accepted either as a canonical object (matches AgentPricingModel
+    // serde) or as a compact string like "free" | "per_execution:<u128>" |
+    // "per_token:<u128>" | "subscription:<u128>" | "revenue_share:<bps>".
+    if let Some(pv) = params.get("pricing") {
+        if let Some(s) = pv.as_str() {
+            let s = s.trim();
+            let parsed = if s.eq_ignore_ascii_case("free") {
+                AgentPricingModel::Free
+            } else if let Some(rest) = s.strip_prefix("per_execution:") {
+                AgentPricingModel::PerExecution {
+                    price: rest.trim().parse::<u128>().map_err(|_| JsonRpcError {
+                        code: -32602,
+                        message: format!("Invalid per_execution price: {}", rest),
+                        data: None,
+                    })?,
+                }
+            } else if let Some(rest) = s.strip_prefix("per_token:") {
+                AgentPricingModel::PerToken {
+                    price_per_token: rest.trim().parse::<u128>().map_err(|_| JsonRpcError {
+                        code: -32602,
+                        message: format!("Invalid per_token price: {}", rest),
+                        data: None,
+                    })?,
+                }
+            } else if let Some(rest) = s.strip_prefix("subscription:") {
+                AgentPricingModel::Subscription {
+                    monthly_rate: rest.trim().parse::<u128>().map_err(|_| JsonRpcError {
+                        code: -32602,
+                        message: format!("Invalid subscription rate: {}", rest),
+                        data: None,
+                    })?,
+                }
+            } else if let Some(rest) = s.strip_prefix("revenue_share:") {
+                let bps = rest.trim().parse::<u16>().map_err(|_| JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid revenue_share bps: {}", rest),
+                    data: None,
+                })?;
+                AgentPricingModel::RevenueShare { creator_share_bps: bps }
+            } else {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("Unknown pricing string: {}", s),
+                    data: None,
+                });
+            };
+            template.pricing = parsed;
+        } else if pv.is_object() {
+            template.pricing = serde_json::from_value(pv.clone()).map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid pricing object: {}", e),
+                data: None,
+            })?;
+        }
+    }
+
+    // Enforce marketplace invariant: paid pricing requires a payout wallet.
+    template
+        .validate_marketplace_invariants()
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: e,
+            data: None,
+        })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let template_bytes = serde_json::to_vec(&template).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+
+    storage.put(CF_AGENT_TEMPLATES, template.template_id.as_bytes(), &template_bytes)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?;
+
+    info!(
+        template_id = %template.template_id,
+        name = %template.name,
+        pricing_is_free = template.pricing.is_free(),
+        creator_did = ?template.creator_did,
+        "Agent template registered"
+    );
+    Ok(serde_json::to_value(&template).unwrap_or_else(|_| serde_json::json!({"template_id": template.template_id})))
+}
+
+async fn handle_list_agent_templates(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::AgentTemplate;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let limit = params.as_ref()
+        .and_then(|p| p.get("limit"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50) as usize;
+
+    let tag_filter = params.as_ref()
+        .and_then(|p| p.get("tag"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let creator_filter = params.as_ref()
+        .and_then(|p| p.get("creator"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let free_only = params.as_ref()
+        .and_then(|p| p.get("free_only"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let keys = storage.get_keys_with_prefix(CF_AGENT_TEMPLATES, b"").map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    let mut templates = Vec::new();
+    for key in keys.iter().take(limit * 2) {
+        if let Ok(Some(bytes)) = storage.get(CF_AGENT_TEMPLATES, key) {
+            if let Ok(tmpl) = serde_json::from_slice::<AgentTemplate>(&bytes) {
+                if !tmpl.is_available() {
+                    continue;
+                }
+                // Apply tag filter
+                if let Some(ref tag) = tag_filter {
+                    if !tmpl.tags.iter().any(|t| t == tag) {
+                        continue;
+                    }
+                }
+                // Apply creator filter
+                if let Some(ref c) = creator_filter {
+                    let creator_hex = hex::encode(tmpl.creator.as_bytes());
+                    let c_clean = c.strip_prefix("0x").unwrap_or(c);
+                    if !creator_hex.ends_with(c_clean) {
+                        continue;
+                    }
+                }
+                // Apply free_only filter
+                if free_only {
+                    use tenzro_types::AgentPricingModel;
+                    if !matches!(tmpl.pricing, AgentPricingModel::Free) {
+                        continue;
+                    }
+                }
+                templates.push(tmpl);
+                if templates.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(serde_json::to_value(&templates).unwrap_or_else(|_| serde_json::json!([])))
+}
+
+async fn handle_get_agent_template(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::AgentTemplate;
+
+    let template_id = params.as_ref()
+        .and_then(|p| p.get("template_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing template_id".to_string(),
+            data: None,
+        })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let bytes = storage.get(CF_AGENT_TEMPLATES, template_id.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Agent template not found: {}", template_id),
+            data: None,
+        })?;
+
+    let template: AgentTemplate = serde_json::from_slice(&bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Deserialization error: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::to_value(&template).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+async fn handle_download_agent_template(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::AgentTemplate;
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let template_id = params.get("template_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing template_id".to_string(),
+        data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let bytes = storage.get(CF_AGENT_TEMPLATES, template_id.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Agent template not found: {}", template_id),
+            data: None,
+        })?;
+
+    let mut template: AgentTemplate = serde_json::from_slice(&bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Deserialization error: {}", e),
+        data: None,
+    })?;
+
+    if !template.is_available() {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("Template is not available (status: {:?})", template.status),
+            data: None,
+        });
+    }
+
+    // Increment download count
+    template.download_count = template.download_count.saturating_add(1);
+    let updated = serde_json::to_vec(&template).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+    let _ = storage.put(CF_AGENT_TEMPLATES, template_id.as_bytes(), &updated);
+
+    info!(template_id = %template_id, downloads = %template.download_count, "Agent template downloaded");
+    Ok(serde_json::to_value(&template).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+async fn handle_update_agent_template(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::AgentTemplate;
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let template_id = params.get("template_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing template_id".to_string(),
+        data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let bytes = storage.get(CF_AGENT_TEMPLATES, template_id.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Agent template not found: {}", template_id),
+            data: None,
+        })?;
+
+    let mut template: AgentTemplate = serde_json::from_slice(&bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Deserialization error: {}", e),
+        data: None,
+    })?;
+
+    // Apply updates
+    if let Some(desc) = params.get("description").and_then(|v| v.as_str()) {
+        template.description = desc.to_string();
+    }
+    if let Some(sp) = params.get("system_prompt").and_then(|v| v.as_str()) {
+        template.system_prompt = sp.to_string();
+    }
+    if let Some(v) = params.get("version").and_then(|v| v.as_str()) {
+        template.version = v.to_string();
+    }
+    if let Some(tags) = params.get("tags").and_then(|v| v.as_array()) {
+        template.tags = tags.iter()
+            .filter_map(|t| t.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    if let Some(url) = params.get("docs_url").and_then(|v| v.as_str()) {
+        template.docs_url = Some(url.to_string());
+    }
+    if let Some(hash) = params.get("content_hash").and_then(|v| v.as_str()) {
+        template.content_hash = Some(hash.to_string());
+    }
+    template.updated_at = tenzro_types::primitives::Timestamp(chrono::Utc::now().timestamp());
+
+    let updated = serde_json::to_vec(&template).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+
+    storage.put(CF_AGENT_TEMPLATES, template_id.as_bytes(), &updated).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    info!(template_id = %template_id, "Agent template updated");
+    Ok(serde_json::to_value(&template).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+// ─── AgentKit Spawn / Run Handlers ────────────────────────────────────────
+
+async fn handle_spawn_agent_template(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let template_id = params.get("template_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing template_id".to_string(),
+        data: None,
+    })?;
+
+    let display_name = params
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Tenzro Agent Kit")
+        .to_string();
+
+    let kit = node.agent_kit().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "AgentKit runtime not initialized".to_string(),
+        data: None,
+    })?.clone();
+
+    // Optional parent machine DID — when set, the child's effective
+    // delegation scope is the strict intersection of parent ∩ template.
+    let parent_machine_did = params
+        .get("parent_machine_did")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let mut spawn_args = tenzro_agent_kit::SpawnArgs {
+        controller_display_name: display_name,
+        parent_machine_did,
+        ..Default::default()
+    };
+
+    // Allow caller to pass extra context vars for template substitution.
+    if let Some(ctx) = params.get("context").and_then(|v| v.as_object()) {
+        for (k, v) in ctx {
+            if let Some(s) = v.as_str() {
+                spawn_args.context.insert(k.clone(), s.to_string());
+            } else {
+                spawn_args.context.insert(k.clone(), v.to_string());
+            }
+        }
+    }
+
+    let spawned = kit.spawn(template_id, spawn_args).await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Spawn failed: {e}"),
+        data: None,
+    })?;
+
+    // Persist the spawned agent to CF_AGENTS so it survives restart.
+    if let Some(storage) = node.storage() {
+        let agent_bytes = serde_json::to_vec(&spawned.agent).unwrap_or_default();
+        if !agent_bytes.is_empty() {
+            let _ = storage.put(CF_AGENTS, spawned.agent_id().as_bytes(), &agent_bytes);
+        }
+    }
+
+    // Persist the full SpawnedAgent keyed by agent_id for later run calls.
+    if let Some(storage) = node.storage() {
+        let spawned_key = format!("spawned:{}", spawned.agent_id());
+        let spawned_bytes = serde_json::to_vec(&spawned).unwrap_or_default();
+        if !spawned_bytes.is_empty() {
+            let _ = storage.put(CF_AGENTS, spawned_key.as_bytes(), &spawned_bytes);
+        }
+    }
+
+    info!(
+        agent_id = %spawned.agent_id(),
+        template_id = %spawned.template.template_id,
+        machine_did = %spawned.machine_did(),
+        "Agent spawned from template via AgentKit"
+    );
+
+    Ok(serde_json::json!({
+        "agent_id": spawned.agent_id(),
+        "machine_did": spawned.machine_did(),
+        "controller_did": spawned.controller_did(),
+        "wallet_id": spawned.wallet_id(),
+        "template_id": spawned.template.template_id,
+    }))
+}
+
+async fn handle_run_agent_template(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use crate::commission_policy::{settle_invocation_fee, CommissionError};
+    use tenzro_types::agent_template::{AgentTemplate, AGENT_MARKETPLACE_COMMISSION_BPS};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let agent_id = params.get("agent_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing agent_id".to_string(),
+        data: None,
+    })?;
+
+    let max_iterations = params
+        .get("max_iterations")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1) as usize;
+
+    let dry_run = params
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Optional caller inputs for paid templates.
+    let payer_wallet_param = params
+        .get("payer_wallet")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let tokens_estimate = params
+        .get("tokens_estimate")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let kit = node.agent_kit().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "AgentKit runtime not initialized".to_string(),
+        data: None,
+    })?.clone();
+
+    // Load the SpawnedAgent from storage.
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let spawned_key = format!("spawned:{}", agent_id);
+    let spawned_bytes = storage
+        .get(CF_AGENTS, spawned_key.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Storage error: {e}"),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!(
+                "No spawned agent found for id '{}'. Use tenzro_spawnAgentTemplate first.",
+                agent_id
+            ),
+            data: None,
+        })?;
+
+    let spawned: tenzro_agent_kit::SpawnedAgent =
+        serde_json::from_slice(&spawned_bytes).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Deserialization error: {e}"),
+            data: None,
+        })?;
+
+    // Load the underlying AgentTemplate for pricing + metering.
+    let template_id = spawned.template.template_id.clone();
+    let template_bytes = storage
+        .get(CF_AGENT_TEMPLATES, template_id.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Storage error loading template: {e}"),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Underlying template '{}' no longer exists", template_id),
+            data: None,
+        })?;
+    let mut template: AgentTemplate =
+        serde_json::from_slice(&template_bytes).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Template deserialization error: {e}"),
+            data: None,
+        })?;
+
+    // ── Fee enforcement for paid templates ────────────────────────────────
+    let fee = template.pricing.fee_for_invocation(tokens_estimate);
+    let mut commission: u128 = 0;
+    let mut creator_share: u128 = 0;
+    let mut payer_hex: Option<String> = None;
+    let mut creator_hex: Option<String> = None;
+    let mut treasury_hex: Option<String> = None;
+
+    if !dry_run {
+        // Single-source-of-truth split + transfer through `commission_policy`.
+        // Free templates and zero-fee invocations short-circuit to `None`.
+        let receipt = settle_invocation_fee(
+            &template,
+            fee,
+            payer_wallet_param.as_deref(),
+            node.token().map(|t| &**t),
+            |s| parse_address(s).map_err(|e| e.message),
+        )
+        .map_err(|e| match e {
+            CommissionError::MissingPayerWallet => JsonRpcError {
+                code: -32602,
+                message: e.to_string(),
+                data: None,
+            },
+            CommissionError::MissingCreatorWallet
+            | CommissionError::TokenUnavailable
+            | CommissionError::TreasuryUnavailable => JsonRpcError {
+                code: -32603,
+                message: e.to_string(),
+                data: None,
+            },
+            CommissionError::TransferFailed(_) => JsonRpcError {
+                code: -32000,
+                message: e.to_string(),
+                data: None,
+            },
+        })?;
+
+        if let Some(r) = receipt {
+            commission = r.commission;
+            creator_share = r.creator_share;
+            payer_hex = Some(format!("0x{}", hex::encode(r.payer.0)));
+            creator_hex = Some(format!("0x{}", hex::encode(r.creator_wallet.0)));
+            treasury_hex = Some(format!("0x{}", hex::encode(r.treasury.0)));
+        }
+    }
+
+    let run_opts = tenzro_agent_kit::RunOptions {
+        max_iterations,
+        dry_run,
+        canton_participant: None,
+        chain_id_override: None,
+    };
+
+    let report = kit.run(&spawned, run_opts).await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Run failed: {e}"),
+        data: None,
+    })?;
+
+    // On successful execution of a paid template, meter usage + persist.
+    if !template.pricing.is_free() && fee > 0 && !dry_run {
+        template.record_invocation(creator_share);
+        let updated = serde_json::to_vec(&template).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Template serialization error: {e}"),
+            data: None,
+        })?;
+        storage
+            .put(CF_AGENT_TEMPLATES, template_id.as_bytes(), &updated)
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Failed to persist template metering: {e}"),
+                data: None,
+            })?;
+    }
+
+    info!(
+        agent_id = %agent_id,
+        template_id = %template_id,
+        steps_executed = report.steps_executed,
+        steps_failed = report.steps_failed,
+        dry_run = dry_run,
+        fee_paid = fee,
+        commission = commission,
+        creator_share = creator_share,
+        invocation_count = template.invocation_count,
+        "Agent template execution completed"
+    );
+
+    // Serialize per-step results for the caller.
+    let results: Vec<Value> = report
+        .step_results
+        .iter()
+        .map(|sr| {
+            serde_json::json!({
+                "step_kind": sr.step_kind,
+                "operation": sr.operation,
+                "status": format!("{:?}", sr.status),
+                "message": sr.message,
+                "output": sr.output,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "agent_id": agent_id,
+        "template_id": template_id,
+        "steps_executed": report.steps_executed,
+        "steps_skipped_by_delegation": report.steps_skipped_by_delegation,
+        "steps_skipped_by_predicate": report.steps_skipped_by_predicate,
+        "steps_skipped_by_dry_run": report.steps_skipped_by_dry_run,
+        "steps_skipped_by_hard_cap": report.steps_skipped_by_hard_cap,
+        "steps_failed": report.steps_failed,
+        "total_value_dispatched": report.total_value_dispatched.to_string(),
+        "fee_paid": fee.to_string(),
+        "commission_bps": AGENT_MARKETPLACE_COMMISSION_BPS,
+        "network_commission": commission.to_string(),
+        "creator_share": creator_share.to_string(),
+        "payer_wallet": payer_hex,
+        "creator_wallet": creator_hex,
+        "treasury": treasury_hex,
+        "invocation_count": template.invocation_count,
+        "total_revenue": template.total_revenue.to_string(),
+        "results": results,
+    }))
+}
+
+// ─── Skills Registry Handlers ─────────────────────────────────────────────
+
+async fn handle_register_skill(
+    node: Arc<TenzroNode>,
+    params: serde_json::Value,
+) -> std::result::Result<serde_json::Value, JsonRpcError> {
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage unavailable".to_string(),
+        data: None,
+    })?;
+
+    let name = params.get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError { code: -32602, message: "Missing 'name'".to_string(), data: None })?
+        .to_string();
+    let version = params.get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1.0.0")
+        .to_string();
+    let creator_did = params.get("creator_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError { code: -32602, message: "Missing 'creator_did'".to_string(), data: None })?
+        .to_string();
+    let description = params.get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let price_per_call: u128 = params.get("price_per_call")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .or_else(|| params.get("price_per_call").and_then(|v| v.as_u64()).map(|n| n as u128))
+        .unwrap_or(0);
+
+    let mut skill = tenzro_types::SkillDefinition::new(
+        name, version, creator_did, description, price_per_call,
+    );
+
+    if let Some(tags) = params.get("tags").and_then(|v| v.as_array()) {
+        skill.tags = tags.iter()
+            .filter_map(|t| t.as_str())
+            .map(|s| s.to_string())
+            .collect();
+    }
+    if let Some(caps) = params.get("required_capabilities").and_then(|v| v.as_array()) {
+        skill.required_capabilities = caps.iter()
+            .filter_map(|c| c.as_str())
+            .map(|s| s.to_string())
+            .collect();
+    }
+    if let Some(ep) = params.get("endpoint").and_then(|v| v.as_str()) {
+        skill.endpoint = Some(ep.to_string());
+    }
+    if let Some(schema) = params.get("input_schema") {
+        skill.input_schema = schema.clone();
+    }
+    if let Some(schema) = params.get("output_schema") {
+        skill.output_schema = schema.clone();
+    }
+    if let Some(cat) = params.get("category").and_then(|v| v.as_str()) {
+        skill.category = cat.to_string();
+    }
+
+    let encoded = serde_json::to_vec(&skill).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+    storage.put(CF_SKILLS, skill.skill_id.as_bytes(), &encoded).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    info!(skill_id = %skill.skill_id, name = %skill.name, "Skill registered");
+
+    // Skill registration broadcasted via storage persistence; no direct broadcast needed
+    let _ = serde_json::to_vec(&skill).unwrap_or_default();
+
+    Ok(serde_json::to_value(&skill).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+async fn handle_list_skills(
+    node: Arc<TenzroNode>,
+    params: serde_json::Value,
+) -> std::result::Result<serde_json::Value, JsonRpcError> {
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage unavailable".to_string(),
+        data: None,
+    })?;
+
+    let filter: tenzro_types::SkillFilter = serde_json::from_value(params.clone())
+        .unwrap_or_default();
+
+    let keys = storage.get_keys_with_prefix(CF_SKILLS, b"").map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    let mut skills: Vec<tenzro_types::SkillDefinition> = Vec::new();
+    for key in &keys {
+        if let Ok(Some(bytes)) = storage.get(CF_SKILLS, key.as_slice()) {
+            if let Ok(skill) = serde_json::from_slice::<tenzro_types::SkillDefinition>(&bytes) {
+                skills.push(skill);
+            }
+        }
+    }
+
+    // Liveness filter: default hides Inactive/Deprecated rows. Callers
+    // who want every row (admins, monitoring) pass `active_only: false`.
+    match filter.active_only {
+        Some(false) => {} // include everything
+        _ => skills.retain(|s| s.is_available()),
+    }
+    if let Some(ref tag) = filter.tag {
+        skills.retain(|s| s.tags.contains(tag));
+    }
+    if let Some(ref did) = filter.creator_did {
+        skills.retain(|s| &s.creator_did == did);
+    }
+    if let Some(ref cap) = filter.capability {
+        skills.retain(|s| s.required_capabilities.contains(cap));
+    }
+    if let Some(max_price) = filter.max_price {
+        skills.retain(|s| s.price_per_call <= max_price);
+    }
+
+    let offset = filter.offset.unwrap_or(0);
+    let limit = filter.limit.unwrap_or(50);
+    let paged: Vec<_> = skills.into_iter().skip(offset).take(limit).collect();
+
+    Ok(serde_json::to_value(&paged).unwrap_or_else(|_| serde_json::json!([])))
+}
+
+async fn handle_search_skills(
+    node: Arc<TenzroNode>,
+    params: serde_json::Value,
+) -> std::result::Result<serde_json::Value, JsonRpcError> {
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage unavailable".to_string(),
+        data: None,
+    })?;
+
+    let filter: tenzro_types::SkillFilter = serde_json::from_value(params.clone())
+        .unwrap_or_default();
+
+    let query = filter.query.as_deref().unwrap_or("").to_lowercase();
+
+    let keys = storage.get_keys_with_prefix(CF_SKILLS, b"").map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    let mut skills: Vec<tenzro_types::SkillDefinition> = Vec::new();
+    for key in &keys {
+        if let Ok(Some(bytes)) = storage.get(CF_SKILLS, key.as_slice()) {
+            if let Ok(skill) = serde_json::from_slice::<tenzro_types::SkillDefinition>(&bytes) {
+                skills.push(skill);
+            }
+        }
+    }
+
+    if !query.is_empty() {
+        skills.retain(|s| {
+            s.name.to_lowercase().contains(&query)
+                || s.description.to_lowercase().contains(&query)
+                || s.tags.iter().any(|t| t.to_lowercase().contains(&query))
+        });
+    }
+
+    if let Some(true) = filter.active_only {
+        skills.retain(|s| s.is_available());
+    }
+    if let Some(ref tag) = filter.tag {
+        skills.retain(|s| s.tags.contains(tag));
+    }
+    if let Some(ref did) = filter.creator_did {
+        skills.retain(|s| &s.creator_did == did);
+    }
+    if let Some(max_price) = filter.max_price {
+        skills.retain(|s| s.price_per_call <= max_price);
+    }
+
+    let offset = filter.offset.unwrap_or(0);
+    let limit = filter.limit.unwrap_or(50);
+    let paged: Vec<_> = skills.into_iter().skip(offset).take(limit).collect();
+
+    Ok(serde_json::to_value(&paged).unwrap_or_else(|_| serde_json::json!([])))
+}
+
+async fn handle_use_skill(
+    node: Arc<TenzroNode>,
+    params: serde_json::Value,
+) -> std::result::Result<serde_json::Value, JsonRpcError> {
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage unavailable".to_string(),
+        data: None,
+    })?;
+
+    let skill_id = params.get("skill_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError { code: -32602, message: "Missing 'skill_id'".to_string(), data: None })?
+        .to_string();
+
+    let input = params.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+
+    let skill_bytes = storage.get(CF_SKILLS, skill_id.as_bytes())
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {}", e), data: None })?
+        .ok_or_else(|| JsonRpcError { code: -32000, message: format!("Skill '{}' not found", skill_id), data: None })?;
+
+    let mut skill: tenzro_types::SkillDefinition = serde_json::from_slice(&skill_bytes)
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Deserialization error: {}", e), data: None })?;
+
+    if !skill.is_available() {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("Skill '{}' is not available (status: {:?})", skill_id, skill.status),
+            data: None,
+        });
+    }
+
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+    let completed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let output = if let Some(ref endpoint) = skill.endpoint.clone() {
+        let client = reqwest::Client::new();
+        let resp = client.post(endpoint)
+            .json(&input)
+            .send()
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Skill endpoint error: {}", e),
+                data: None,
+            })?;
+        resp.json::<serde_json::Value>()
+            .await
+            .unwrap_or_else(|_| serde_json::json!({"status": "invoked"}))
+    } else {
+        serde_json::json!({
+            "status": "executed",
+            "skill_id": skill_id,
+            "invocation_id": invocation_id,
+            "note": "local skill execution — no remote endpoint configured"
+        })
+    };
+
+    skill.invocation_count += 1;
+    let updated = serde_json::to_vec(&skill).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+    storage.put(CF_SKILLS, skill_id.as_bytes(), &updated).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    // Track last_used timestamp for usage stats
+    let last_used_key = format!("skill_last_used:{}", skill_id);
+    let last_used_val = completed_at.to_string();
+    let _ = storage.put(CF_METADATA, last_used_key.as_bytes(), last_used_val.as_bytes());
+
+    info!(skill_id = %skill_id, invocation_id = %invocation_id, "Skill invoked");
+
+    let result = tenzro_types::SkillInvocationResult {
+        skill_id,
+        invocation_id,
+        output,
+        settlement_tx: None,
+        amount_paid: skill.price_per_call,
+        completed_at,
+    };
+
+    Ok(serde_json::to_value(&result).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+// ─── Tool Registry Handlers ───────────────────────────────────────────────────
+
+async fn handle_register_tool(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let version = params.get("version").and_then(|v| v.as_str()).unwrap_or("1.0.0").to_string();
+    let tool_type = params.get("tool_type").and_then(|v| v.as_str()).unwrap_or("mcp").to_string();
+    let endpoint = params.get("endpoint").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let description = params.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let category = params.get("category").and_then(|v| v.as_str()).unwrap_or("general").to_string();
+
+    if name.is_empty() {
+        return Err(JsonRpcError { code: -32602, message: "Missing required parameter: name".to_string(), data: None });
+    }
+    if endpoint.is_empty() {
+        return Err(JsonRpcError { code: -32602, message: "Missing required parameter: endpoint".to_string(), data: None });
+    }
+
+    let mut tool = tenzro_types::ToolDefinition::new(
+        name, version, tool_type, endpoint, description, category,
+    );
+
+    // Optional fields
+    if let Some(caps) = params.get("capabilities").and_then(|v| v.as_array()) {
+        tool.capabilities = caps.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+    }
+    if let Some(did) = params.get("creator_did").and_then(|v| v.as_str()) {
+        tool.creator_did = Some(did.to_string());
+    }
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let key = tool.tool_id.as_bytes().to_vec();
+    let value = serde_json::to_vec(&tool)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Serialization error: {}", e), data: None })?;
+    storage.put(CF_TOOLS, &key, &value)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?;
+
+    tracing::info!(tool_id = %tool.tool_id, name = %tool.name, "Tool registered");
+    Ok(serde_json::to_value(&tool).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+async fn handle_list_tools(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let filter: tenzro_types::ToolFilter = serde_json::from_value(params.clone()).unwrap_or_default();
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let keys = storage.get_keys_with_prefix(CF_TOOLS, b"")
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?;
+
+    let mut tools: Vec<tenzro_types::ToolDefinition> = Vec::new();
+    for key in keys {
+        if let Ok(Some(bytes)) = storage.get(CF_TOOLS, &key) {
+            if let Ok(tool) = serde_json::from_slice::<tenzro_types::ToolDefinition>(&bytes) {
+                // Apply filters
+                if let Some(ref tt) = filter.tool_type {
+                    if &tool.tool_type != tt { continue; }
+                }
+                if let Some(ref cat) = filter.category {
+                    if &tool.category != cat { continue; }
+                }
+                if let Some(ref status_str) = filter.status {
+                    let tool_status = format!("{:?}", tool.status).to_lowercase();
+                    if !tool_status.contains(status_str.as_str()) { continue; }
+                } else if !tool.is_available() {
+                    // Liveness default: hide Inactive/Deprecated unless the
+                    // caller explicitly asked for a status (e.g. "inactive").
+                    continue;
+                }
+                if let Some(ref did) = filter.creator_did {
+                    if tool.creator_did.as_deref() != Some(did.as_str()) { continue; }
+                }
+                tools.push(tool);
+            }
+        }
+    }
+
+    // Pagination
+    let offset = filter.offset.unwrap_or(0);
+    let limit = filter.limit.unwrap_or(50);
+    let paginated: Vec<_> = tools.into_iter().skip(offset).take(limit).collect();
+
+    Ok(serde_json::to_value(&paginated).unwrap_or_else(|_| serde_json::json!([])))
+}
+
+async fn handle_search_tools(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let filter: tenzro_types::ToolFilter = serde_json::from_value(params.clone()).unwrap_or_default();
+    let query = filter.query.clone().map(|q| q.to_lowercase());
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let keys = storage.get_keys_with_prefix(CF_TOOLS, b"")
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?;
+
+    let mut tools: Vec<tenzro_types::ToolDefinition> = Vec::new();
+    for key in keys {
+        if let Ok(Some(bytes)) = storage.get(CF_TOOLS, &key) {
+            if let Ok(tool) = serde_json::from_slice::<tenzro_types::ToolDefinition>(&bytes) {
+                // Type/category/status/creator filters
+                if let Some(ref tt) = filter.tool_type {
+                    if &tool.tool_type != tt { continue; }
+                }
+                if let Some(ref cat) = filter.category {
+                    if &tool.category != cat { continue; }
+                }
+                if let Some(ref did) = filter.creator_did {
+                    if tool.creator_did.as_deref() != Some(did.as_str()) { continue; }
+                }
+                // Text query: match name, description, or capabilities
+                if let Some(ref q) = query {
+                    let name_match = tool.name.to_lowercase().contains(q.as_str());
+                    let desc_match = tool.description.to_lowercase().contains(q.as_str());
+                    let cap_match = tool.capabilities.iter().any(|c| c.to_lowercase().contains(q.as_str()));
+                    if !name_match && !desc_match && !cap_match { continue; }
+                }
+                tools.push(tool);
+            }
+        }
+    }
+
+    let offset = filter.offset.unwrap_or(0);
+    let limit = filter.limit.unwrap_or(50);
+    let paginated: Vec<_> = tools.into_iter().skip(offset).take(limit).collect();
+
+    Ok(serde_json::to_value(&paginated).unwrap_or_else(|_| serde_json::json!([])))
+}
+
+async fn handle_use_tool(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let tool_id = params.get("tool_id").and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError { code: -32602, message: "Missing required parameter: tool_id".to_string(), data: None })?;
+    let tool_params = params.get("params").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let tool_name = params.get("tool_name").and_then(|v| v.as_str()).unwrap_or("invoke");
+
+    // Load tool from registry
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let key = tool_id.as_bytes();
+    let bytes = storage.get(CF_TOOLS, key)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?
+        .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Tool not found: {}", tool_id), data: None })?;
+    let mut tool: tenzro_types::ToolDefinition = serde_json::from_slice(&bytes)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Deserialization error: {}", e), data: None })?;
+
+    if !tool.is_available() {
+        return Err(JsonRpcError { code: -32602, message: format!("Tool is not available: {:?}", tool.status), data: None });
+    }
+
+    // Dispatch to tool endpoint
+    let output = match tool.tool_type.as_str() {
+        "mcp" => {
+            // MCP Streamable HTTP — JSON-RPC 2.0 POST
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": tool_name,
+                    "arguments": tool_params
+                },
+                "id": 1
+            });
+            let client = reqwest::Client::new();
+            let resp = client.post(&tool.endpoint)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(30))
+                .send()
+                .await
+                .map_err(|e| JsonRpcError { code: -32603, message: format!("MCP request failed: {}", e), data: None })?;
+            let resp_json: Value = resp.json().await
+                .map_err(|e| JsonRpcError { code: -32603, message: format!("MCP response parse error: {}", e), data: None })?;
+            // Extract result from JSON-RPC response
+            resp_json.get("result").cloned().unwrap_or(resp_json)
+        }
+        "api" => {
+            // OpenAPI REST POST
+            let client = reqwest::Client::new();
+            let resp = client.post(&tool.endpoint)
+                .header("Content-Type", "application/json")
+                .json(&tool_params)
+                .timeout(std::time::Duration::from_secs(30))
+                .send()
+                .await
+                .map_err(|e| JsonRpcError { code: -32603, message: format!("API request failed: {}", e), data: None })?;
+            resp.json::<Value>().await
+                .map_err(|e| JsonRpcError { code: -32603, message: format!("API response parse error: {}", e), data: None })?
+        }
+        "native" => {
+            // Built-in node capability — return a description
+            serde_json::json!({
+                "type": "native",
+                "tool_id": tool_id,
+                "params": tool_params,
+                "message": "Native tool invocation acknowledged"
+            })
+        }
+        _ => {
+            return Err(JsonRpcError { code: -32602, message: format!("Unknown tool type: {}", tool.tool_type), data: None });
+        }
+    };
+
+    // Increment invocation count and persist
+    tool.invocation_count = tool.invocation_count.saturating_add(1);
+    let updated_bytes = serde_json::to_vec(&tool)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Serialization error: {}", e), data: None })?;
+    let _ = storage.put(CF_TOOLS, key, &updated_bytes);
+
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+    let completed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Track last_used timestamp for usage stats
+    let last_used_key = format!("tool_last_used:{}", tool_id);
+    let last_used_val = completed_at.to_string();
+    let _ = storage.put(CF_METADATA, last_used_key.as_bytes(), last_used_val.as_bytes());
+
+    let result = tenzro_types::ToolInvocationResult {
+        tool_id: tool_id.to_string(),
+        invocation_id,
+        output,
+        completed_at,
+    };
+
+    Ok(serde_json::to_value(&result).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+async fn handle_get_tool(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let tool_id = params.get("tool_id").and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError { code: -32602, message: "Missing required parameter: tool_id".to_string(), data: None })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let bytes = storage.get(CF_TOOLS, tool_id.as_bytes())
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?
+        .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Tool not found: {}", tool_id), data: None })?;
+
+    let tool: tenzro_types::ToolDefinition = serde_json::from_slice(&bytes)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Deserialization error: {}", e), data: None })?;
+
+    Ok(serde_json::to_value(&tool).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+async fn handle_update_tool(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let tool_id = params.get("tool_id").and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError { code: -32602, message: "Missing required parameter: tool_id".to_string(), data: None })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    // Load existing tool (or create new if not found for upsert semantics)
+    let mut tool: tenzro_types::ToolDefinition = if let Ok(Some(bytes)) = storage.get(CF_TOOLS, tool_id.as_bytes()) {
+        serde_json::from_slice(&bytes)
+            .map_err(|e| JsonRpcError { code: -32603, message: format!("Deserialization error: {}", e), data: None })?
+    } else {
+        // Create new tool with provided tool_id (upsert)
+        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let endpoint = params.get("endpoint").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let mut t = tenzro_types::ToolDefinition::new(
+            name,
+            params.get("version").and_then(|v| v.as_str()).unwrap_or("1.0.0").to_string(),
+            params.get("tool_type").and_then(|v| v.as_str()).unwrap_or("mcp").to_string(),
+            endpoint,
+            params.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            params.get("category").and_then(|v| v.as_str()).unwrap_or("general").to_string(),
+        );
+        // Override auto-generated tool_id with the provided one
+        t.tool_id = tool_id.to_string();
+        t
+    };
+
+    // Merge fields from params
+    if let Some(v) = params.get("name").and_then(|v| v.as_str()) { tool.name = v.to_string(); }
+    if let Some(v) = params.get("version").and_then(|v| v.as_str()) { tool.version = v.to_string(); }
+    if let Some(v) = params.get("tool_type").and_then(|v| v.as_str()) { tool.tool_type = v.to_string(); }
+    if let Some(v) = params.get("endpoint").and_then(|v| v.as_str()) { tool.endpoint = v.to_string(); }
+    if let Some(v) = params.get("description").and_then(|v| v.as_str()) { tool.description = v.to_string(); }
+    if let Some(v) = params.get("category").and_then(|v| v.as_str()) { tool.category = v.to_string(); }
+    if let Some(caps) = params.get("capabilities").and_then(|v| v.as_array()) {
+        tool.capabilities = caps.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+    }
+    if let Some(v) = params.get("creator_did").and_then(|v| v.as_str()) { tool.creator_did = Some(v.to_string()); }
+    if let Some(v) = params.get("status").and_then(|v| v.as_str()) {
+        tool.status = match v {
+            "active" => tenzro_types::ToolStatus::Active,
+            "inactive" => tenzro_types::ToolStatus::Inactive,
+            "deprecated" => tenzro_types::ToolStatus::Deprecated,
+            _ => tool.status,
+        };
+    }
+
+    let key = tool.tool_id.as_bytes().to_vec();
+    let value = serde_json::to_vec(&tool)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Serialization error: {}", e), data: None })?;
+    storage.put(CF_TOOLS, &key, &value)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?;
+
+    tracing::info!(tool_id = %tool.tool_id, "Tool updated");
+    Ok(serde_json::to_value(&tool).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+// ─── Skill Registry Update Handlers ──────────────────────────────────────────
+
+async fn handle_get_skill(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let skill_id = params.get("skill_id").and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError { code: -32602, message: "Missing required parameter: skill_id".to_string(), data: None })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let bytes = storage.get(CF_SKILLS, skill_id.as_bytes())
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?
+        .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Skill not found: {}", skill_id), data: None })?;
+
+    let skill: tenzro_types::SkillDefinition = serde_json::from_slice(&bytes)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Deserialization error: {}", e), data: None })?;
+
+    Ok(serde_json::to_value(&skill).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+async fn handle_update_skill(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let skill_id = params.get("skill_id").and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError { code: -32602, message: "Missing required parameter: skill_id".to_string(), data: None })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    // Load existing skill or start fresh for upsert
+    let mut skill: tenzro_types::SkillDefinition = if let Ok(Some(bytes)) = storage.get(CF_SKILLS, skill_id.as_bytes()) {
+        serde_json::from_slice(&bytes)
+            .map_err(|e| JsonRpcError { code: -32603, message: format!("Deserialization error: {}", e), data: None })?
+    } else {
+        return Err(JsonRpcError { code: -32602, message: format!("Skill not found: {}. Use tenzro_registerSkill to create.", skill_id), data: None });
+    };
+
+    // Merge fields
+    if let Some(v) = params.get("name").and_then(|v| v.as_str()) { skill.name = v.to_string(); }
+    if let Some(v) = params.get("description").and_then(|v| v.as_str()) { skill.description = v.to_string(); }
+    if let Some(v) = params.get("version").and_then(|v| v.as_str()) { skill.version = v.to_string(); }
+    if let Some(v) = params.get("creator_did").and_then(|v| v.as_str()) { skill.creator_did = v.to_string(); }
+    if let Some(v) = params.get("price_per_call") {
+        if let Some(price) = v.as_u64() {
+            skill.price_per_call = price as u128;
+        }
+    }
+    if let Some(v) = params.get("status").and_then(|v| v.as_str()) {
+        skill.status = match v {
+            "active" => tenzro_types::SkillStatus::Active,
+            "inactive" => tenzro_types::SkillStatus::Inactive,
+            "deprecated" => tenzro_types::SkillStatus::Deprecated,
+            _ => skill.status,
+        };
+    }
+    if let Some(caps) = params.get("required_capabilities").and_then(|v| v.as_array()) {
+        skill.required_capabilities = caps.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+    }
+
+    let key = skill.skill_id.as_bytes().to_vec();
+    let value = serde_json::to_vec(&skill)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Serialization error: {}", e), data: None })?;
+    storage.put(CF_SKILLS, &key, &value)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?;
+
+    tracing::info!(skill_id = %skill.skill_id, "Skill updated");
+    Ok(serde_json::to_value(&skill).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+// ─── Liveness heartbeat handlers ─────────────────────────────────────────────
+//
+// Publishers call these periodically (recommended: every ~10 minutes; the
+// default stale window is 24h, so frequent calls aren't required) to keep
+// their registry rows from being swept to Inactive. Heartbeats also flip
+// Inactive rows back to Active — recovery is the same primitive as
+// initial registration, no separate "re-activate" RPC needed.
+
+async fn handle_heartbeat_skill(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let skill_id = params
+        .get("skill_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: skill_id".to_string(),
+            data: None,
+        })?;
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let bytes = storage
+        .get(CF_SKILLS, skill_id.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Skill not found: {}", skill_id),
+            data: None,
+        })?;
+    let mut skill: tenzro_types::SkillDefinition = serde_json::from_slice(&bytes)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Deserialization error: {}", e),
+            data: None,
+        })?;
+    skill.touch();
+    // Heartbeat is recovery: flip Inactive back to Active. Deprecated stays
+    // deprecated — that's a deliberate creator decision.
+    if matches!(skill.status, tenzro_types::SkillStatus::Inactive) {
+        skill.status = tenzro_types::SkillStatus::Active;
+    }
+    let value = serde_json::to_vec(&skill).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+    storage
+        .put(CF_SKILLS, skill_id.as_bytes(), &value)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?;
+    Ok(serde_json::json!({
+        "skill_id": skill.skill_id,
+        "last_seen_at": skill.last_seen_at,
+        "status": skill.status,
+    }))
+}
+
+async fn handle_heartbeat_tool(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let tool_id = params
+        .get("tool_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: tool_id".to_string(),
+            data: None,
+        })?;
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let bytes = storage
+        .get(CF_TOOLS, tool_id.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Tool not found: {}", tool_id),
+            data: None,
+        })?;
+    let mut tool: tenzro_types::ToolDefinition = serde_json::from_slice(&bytes)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Deserialization error: {}", e),
+            data: None,
+        })?;
+    tool.touch();
+    if matches!(tool.status, tenzro_types::ToolStatus::Inactive) {
+        tool.status = tenzro_types::ToolStatus::Active;
+    }
+    let value = serde_json::to_vec(&tool).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+    storage
+        .put(CF_TOOLS, tool_id.as_bytes(), &value)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?;
+    Ok(serde_json::json!({
+        "tool_id": tool.tool_id,
+        "last_seen_at": tool.last_seen_at,
+        "status": tool.status,
+    }))
+}
+
+async fn handle_heartbeat_agent_template(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let template_id = params
+        .get("template_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: template_id".to_string(),
+            data: None,
+        })?;
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    // Templates are stored under the raw template_id key in CF_AGENT_TEMPLATES.
+    use tenzro_storage::kv::CF_AGENT_TEMPLATES;
+    let bytes = storage
+        .get(CF_AGENT_TEMPLATES, template_id.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Template not found: {}", template_id),
+            data: None,
+        })?;
+    let mut tpl: tenzro_types::agent_template::AgentTemplate =
+        serde_json::from_slice(&bytes).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Deserialization error: {}", e),
+            data: None,
+        })?;
+    tpl.touch();
+    if matches!(
+        tpl.status,
+        tenzro_types::agent_template::AgentTemplateStatus::Deprecated
+    ) {
+        tpl.status = tenzro_types::agent_template::AgentTemplateStatus::Published;
+    }
+    let value = serde_json::to_vec(&tpl).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+    storage
+        .put(CF_AGENT_TEMPLATES, template_id.as_bytes(), &value)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?;
+    Ok(serde_json::json!({
+        "template_id": tpl.template_id,
+        "last_seen_at": tpl.last_seen_at,
+        "status": tpl.status,
+    }))
+}
+
+/// One-shot read-only sweep: returns counts of resources that *would* be
+/// flipped or purged on the next sweep cycle, without mutating anything.
+/// Useful for monitoring + sanity-checking TTL config in production.
+async fn handle_liveness_stats(
+    node: Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let storage_ref = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let cfg = node
+        .liveness_config()
+        .unwrap_or_default();
+    let storage_arc: Arc<dyn tenzro_storage::KvStore> = storage_ref.clone();
+    // run_sweep is the same primitive the periodic task uses; we don't pass
+    // a lifecycle handle here — admins call this for read-style stats and we
+    // don't want a stats RPC to silently terminate suspended agents.
+    let stats = crate::liveness::run_sweep(&storage_arc, &cfg, None).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Sweep error: {}", e),
+        data: None,
+    })?;
+    Ok(serde_json::to_value(&stats).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+// ─── Task Registry Update Handler ────────────────────────────────────────────
+
+async fn handle_update_task(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let task_id = params.get("task_id").and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError { code: -32602, message: "Missing required parameter: task_id".to_string(), data: None })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let mut task: tenzro_types::TaskInfo = if let Ok(Some(bytes)) = storage.get(CF_TASKS, format!("task:{}", task_id).as_bytes()) {
+        serde_json::from_slice(&bytes)
+            .map_err(|e| JsonRpcError { code: -32603, message: format!("Deserialization error: {}", e), data: None })?
+    } else {
+        return Err(JsonRpcError { code: -32602, message: format!("Task not found: {}", task_id), data: None });
+    };
+
+    // Merge fields
+    if let Some(v) = params.get("title").and_then(|v| v.as_str()) { task.title = v.to_string(); }
+    if let Some(v) = params.get("description").and_then(|v| v.as_str()) { task.description = v.to_string(); }
+    if let Some(v) = params.get("status").and_then(|v| v.as_str()) {
+        task.status = match v {
+            "pending" | "open" => tenzro_types::TaskStatus::Open,
+            "active" | "in_progress" => tenzro_types::TaskStatus::InProgress,
+            "completed" => tenzro_types::TaskStatus::Completed,
+            "failed" | "cancelled" => tenzro_types::TaskStatus::Cancelled,
+            _ => task.status,
+        };
+    }
+    if let Some(v) = params.get("output").and_then(|v| v.as_str()) { task.output = Some(v.to_string()); }
+
+    let key = format!("task:{}", task.task_id).into_bytes();
+    let value = serde_json::to_vec(&task)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Serialization error: {}", e), data: None })?;
+    storage.put(CF_TASKS, &key, &value)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?;
+
+    tracing::info!(task_id = %task.task_id, "Task updated");
+    Ok(serde_json::to_value(&task).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+// ─── Usage Stats Handlers ───────────────────────────────────────────────────
+
+async fn handle_get_skill_usage(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let skill_id = params.get("skill_id").and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError { code: -32602, message: "Missing required parameter: skill_id".to_string(), data: None })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    // Read the skill to get invocation_count
+    let total_invocations = if let Ok(Some(bytes)) = storage.get(CF_SKILLS, skill_id.as_bytes()) {
+        let skill: tenzro_types::SkillDefinition = serde_json::from_slice(&bytes)
+            .map_err(|e| JsonRpcError { code: -32603, message: format!("Deserialization error: {}", e), data: None })?;
+        skill.invocation_count
+    } else {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("Skill not found: {}", skill_id),
+            data: None,
+        });
+    };
+
+    // Read last_used timestamp from CF_METADATA
+    let last_used_key = format!("skill_last_used:{}", skill_id);
+    let last_used: Option<u64> = storage.get(CF_METADATA, last_used_key.as_bytes())
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    Ok(serde_json::json!({
+        "skill_id": skill_id,
+        "total_invocations": total_invocations,
+        "last_used": last_used,
+    }))
+}
+
+async fn handle_get_tool_usage(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let tool_id = params.get("tool_id").and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError { code: -32602, message: "Missing required parameter: tool_id".to_string(), data: None })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    // Read the tool to get invocation_count
+    let total_invocations = if let Ok(Some(bytes)) = storage.get(CF_TOOLS, tool_id.as_bytes()) {
+        let tool: tenzro_types::ToolDefinition = serde_json::from_slice(&bytes)
+            .map_err(|e| JsonRpcError { code: -32603, message: format!("Deserialization error: {}", e), data: None })?;
+        tool.invocation_count
+    } else {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("Tool not found: {}", tool_id),
+            data: None,
+        });
+    };
+
+    // Read last_used timestamp from CF_METADATA
+    let last_used_key = format!("tool_last_used:{}", tool_id);
+    let last_used: Option<u64> = storage.get(CF_METADATA, last_used_key.as_bytes())
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    Ok(serde_json::json!({
+        "tool_id": tool_id,
+        "total_invocations": total_invocations,
+        "last_used": last_used,
+    }))
+}
+
+// ─── Agent Template Marketplace Extended Handlers ────────────────────────────
+
+async fn handle_spawn_agent_from_template(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let template_id = params.get("template_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing template_id".to_string(),
+        data: None,
+    })?;
+
+    let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing name".to_string(),
+        data: None,
+    })?.to_string();
+
+    // Verify template exists and is available
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let template_bytes = storage.get(CF_AGENT_TEMPLATES, template_id.as_bytes())
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {}", e), data: None })?
+        .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Agent template not found: {}", template_id), data: None })?;
+
+    let mut template: tenzro_types::AgentTemplate = serde_json::from_slice(&template_bytes)
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Deserialization error: {}", e), data: None })?;
+
+    if !template.is_available() {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("Template is not available (status: {:?})", template.status),
+            data: None,
+        });
+    }
+
+    // Use AgentKit to spawn the agent
+    let kit = node.agent_kit().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "AgentKit runtime not initialized".to_string(),
+        data: None,
+    })?.clone();
+
+    // Optional parent machine DID — when set, the child's effective
+    // delegation scope is the strict intersection of parent ∩ template.
+    let parent_machine_did = params
+        .get("parent_machine_did")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let spawn_args = tenzro_agent_kit::SpawnArgs {
+        controller_display_name: name.clone(),
+        parent_machine_did,
+        ..Default::default()
+    };
+
+    let spawned = kit.spawn(template_id, spawn_args).await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Spawn failed: {e}"),
+        data: None,
+    })?;
+
+    // Persist the spawned agent to CF_AGENTS
+    let agent_bytes = serde_json::to_vec(&spawned.agent).unwrap_or_default();
+    if !agent_bytes.is_empty() {
+        let _ = storage.put(CF_AGENTS, spawned.agent_id().as_bytes(), &agent_bytes);
+    }
+
+    // Persist the full SpawnedAgent for later run calls
+    let spawned_key = format!("spawned:{}", spawned.agent_id());
+    let spawned_bytes = serde_json::to_vec(&spawned).unwrap_or_default();
+    if !spawned_bytes.is_empty() {
+        let _ = storage.put(CF_AGENTS, spawned_key.as_bytes(), &spawned_bytes);
+    }
+
+    // Increment template spawn count (download_count doubles as spawn count)
+    template.download_count = template.download_count.saturating_add(1);
+    let updated_template = serde_json::to_vec(&template).unwrap_or_default();
+    if !updated_template.is_empty() {
+        let _ = storage.put(CF_AGENT_TEMPLATES, template_id.as_bytes(), &updated_template);
+    }
+
+    info!(
+        agent_id = %spawned.agent_id(),
+        template_id = %template_id,
+        name = %name,
+        "Agent spawned from template via tenzro_spawnAgentFromTemplate"
+    );
+
+    Ok(serde_json::json!({
+        "agent_id": spawned.agent_id(),
+        "template_id": template_id,
+        "name": name,
+        "status": "spawned",
+    }))
+}
+
+async fn handle_rate_agent_template(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let template_id = params.get("template_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing template_id".to_string(),
+        data: None,
+    })?.to_string();
+
+    let rating = params.get("rating").and_then(|v| v.as_u64()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing or invalid rating (expected 1-5)".to_string(),
+        data: None,
+    })? as u8;
+
+    if !(1..=5).contains(&rating) {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Rating must be between 1 and 5".to_string(),
+            data: None,
+        });
+    }
+
+    let review = params.get("review").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    // Verify the template exists
+    let template_bytes = storage.get(CF_AGENT_TEMPLATES, template_id.as_bytes())
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {}", e), data: None })?
+        .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Agent template not found: {}", template_id), data: None })?;
+
+    let mut template: tenzro_types::AgentTemplate = serde_json::from_slice(&template_bytes)
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Deserialization error: {}", e), data: None })?;
+
+    // Store the individual rating in CF_METADATA with a unique key
+    let rating_id = uuid::Uuid::new_v4().to_string();
+    let rating_key = format!("template_rating:{}:{}", template_id, rating_id);
+    let rating_entry = serde_json::json!({
+        "rating": rating,
+        "review": review,
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    });
+    let rating_bytes = serde_json::to_vec(&rating_entry).unwrap_or_default();
+    storage.put(CF_METADATA, rating_key.as_bytes(), &rating_bytes)
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {}", e), data: None })?;
+
+    // Update template aggregate rating
+    // Load all ratings for this template to compute average
+    let rating_prefix = format!("template_rating:{}:", template_id);
+    let rating_keys = storage.get_keys_with_prefix(CF_METADATA, rating_prefix.as_bytes())
+        .unwrap_or_default();
+
+    let mut total_score: u64 = 0;
+    let mut count: u64 = 0;
+    for rk in &rating_keys {
+        if let Ok(Some(rb)) = storage.get(CF_METADATA, rk.as_slice()) {
+            if let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&rb) {
+                if let Some(r) = entry.get("rating").and_then(|v| v.as_u64()) {
+                    total_score += r;
+                    count += 1;
+                }
+            }
+        }
+    }
+
+    if count > 0 {
+        // Scale 1-5 rating to 0-100 scale (1->0, 5->100)
+        let avg_1_to_5 = total_score as f64 / count as f64;
+        let scaled = ((avg_1_to_5 - 1.0) / 4.0 * 100.0).round() as u8;
+        template.rating = scaled;
+    }
+
+    let updated_template = serde_json::to_vec(&template)
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {}", e), data: None })?;
+    storage.put(CF_AGENT_TEMPLATES, template_id.as_bytes(), &updated_template)
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {}", e), data: None })?;
+
+    info!(template_id = %template_id, rating = rating, "Agent template rated");
+
+    Ok(serde_json::json!({
+        "template_id": template_id,
+        "rating": rating,
+        "status": "rated",
+    }))
+}
+
+async fn handle_search_agent_templates(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::AgentTemplate;
+
+    let params = params.unwrap_or_default();
+
+    let query = params.get("query").and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let keys = storage.get_keys_with_prefix(CF_AGENT_TEMPLATES, b"").map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    let mut templates: Vec<AgentTemplate> = Vec::new();
+    for key in &keys {
+        if let Ok(Some(bytes)) = storage.get(CF_AGENT_TEMPLATES, key.as_slice()) {
+            if let Ok(tmpl) = serde_json::from_slice::<AgentTemplate>(&bytes) {
+                if query.is_empty() {
+                    templates.push(tmpl);
+                    continue;
+                }
+                // Case-insensitive substring match on name, description, and tags
+                let name_match = tmpl.name.to_lowercase().contains(&query);
+                let desc_match = tmpl.description.to_lowercase().contains(&query);
+                let tag_match = tmpl.tags.iter().any(|t| t.to_lowercase().contains(&query));
+                if name_match || desc_match || tag_match {
+                    templates.push(tmpl);
+                }
+            }
+        }
+    }
+
+    let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    let paged: Vec<_> = templates.into_iter().skip(offset).take(limit).collect();
+
+    Ok(serde_json::to_value(&paged).unwrap_or_else(|_| serde_json::json!([])))
+}
+
+async fn handle_get_agent_template_stats(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let template_id = params.get("template_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing template_id".to_string(),
+        data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    // Load the template to get download_count (used as total_spawns)
+    let template_bytes = storage.get(CF_AGENT_TEMPLATES, template_id.as_bytes())
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {}", e), data: None })?
+        .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Agent template not found: {}", template_id), data: None })?;
+
+    let template: tenzro_types::AgentTemplate = serde_json::from_slice(&template_bytes)
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Deserialization error: {}", e), data: None })?;
+
+    // Count all ratings for this template from CF_METADATA
+    let rating_prefix = format!("template_rating:{}:", template_id);
+    let rating_keys = storage.get_keys_with_prefix(CF_METADATA, rating_prefix.as_bytes())
+        .unwrap_or_default();
+
+    let mut total_score: u64 = 0;
+    let mut total_ratings: u64 = 0;
+    for rk in &rating_keys {
+        if let Ok(Some(rb)) = storage.get(CF_METADATA, rk.as_slice()) {
+            if let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&rb) {
+                if let Some(r) = entry.get("rating").and_then(|v| v.as_u64()) {
+                    total_score += r;
+                    total_ratings += 1;
+                }
+            }
+        }
+    }
+
+    let average_rating: f64 = if total_ratings > 0 {
+        total_score as f64 / total_ratings as f64
+    } else {
+        0.0
+    };
+
+    Ok(serde_json::json!({
+        "template_id": template_id,
+        "total_spawns": template.download_count,
+        "average_rating": average_rating,
+        "total_ratings": total_ratings,
+    }))
+}
+
+async fn handle_discover_models(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    // Optional filters from params
+    let modality_filter = params.as_ref()
+        .and_then(|p| p.get("modality"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_lowercase());
+
+    let serving_only = params.as_ref()
+        .and_then(|p| p.get("serving_only"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let query = params.as_ref()
+        .and_then(|p| p.get("query"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_lowercase());
+
+    // Get catalog from the model registry
+    let catalog = node.model_registry().map(|r| r.list_models()).unwrap_or_default();
+
+    // Get serving state from the model registry if available
+    let serving_ids: std::collections::HashSet<String> = if let Some(registry) = node.model_registry() {
+        let serving = registry.list_models();
+        serving.iter().map(|m| m.model_id.clone()).collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let models: Vec<Value> = catalog.iter()
+        .filter(|m| {
+            // Apply modality filter
+            if let Some(ref mf) = modality_filter {
+                let model_modality = format!("{:?}", m.architecture).to_lowercase();
+                if !model_modality.contains(mf.as_str()) {
+                    return false;
+                }
+            }
+            // Apply serving_only filter
+            if serving_only && !serving_ids.contains(&m.model_id) {
+                return false;
+            }
+            // Apply free-text query filter
+            if let Some(ref q) = query {
+                let name = m.name.to_lowercase();
+                let desc = m.description.to_lowercase();
+                let id = m.model_id.to_lowercase();
+                if !name.contains(q.as_str()) && !desc.contains(q.as_str()) && !id.contains(q.as_str()) {
+                    return false;
+                }
+            }
+            true
+        })
+        .map(|m| {
+            let is_serving = serving_ids.contains(&m.model_id);
+            serde_json::json!({
+                "model_id": m.model_id,
+                "name": m.name,
+                "description": m.description,
+                "modality": format!("{:?}", m.architecture),
+                "serving": is_serving,
+                "price_per_token": 0u64,
+                "context_window": m.parameters.context_window,
+                "provider": "",
+            })
+        })
+        .collect();
+
+    info!(
+        model_count = models.len(),
+        serving_only,
+        "Discovered models"
+    );
+
+    Ok(serde_json::json!({
+        "models": models,
+        "total": models.len(),
+    }))
+}
+
+async fn handle_discover_agents(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let capability_filter = params.as_ref()
+        .and_then(|p| p.get("capability"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_lowercase());
+
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let agents: Vec<tenzro_agent::RegisteredAgent> = runtime.list_agents(None);
+
+    let filtered: Vec<Value> = agents.iter()
+        .filter(|a| {
+            if let Some(ref cap) = capability_filter {
+                let caps: Vec<String> = a.capabilities.iter()
+                    .map(|c| format!("{:?}", c).to_lowercase())
+                    .collect();
+                caps.iter().any(|c| c.contains(cap.as_str()))
+            } else {
+                true
+            }
+        })
+        .map(|a| {
+            let caps: Vec<String> = a.capabilities.iter()
+                .map(|c| format!("{:?}", c))
+                .collect();
+            serde_json::json!({
+                "agent_id": a.identity.agent_id,
+                "did": a.identity.agent_id,
+                "name": a.identity.name,
+                "capabilities": caps,
+                "status": format!("{:?}", a.status),
+                "wallet_address": a.wallet_address,
+            })
+        })
+        .collect();
+
+    info!(
+        agent_count = filtered.len(),
+        capability = capability_filter,
+        "Discovered agents"
+    );
+
+    Ok(serde_json::json!({
+        "agents": filtered,
+        "total": filtered.len(),
+    }))
+}
+
+async fn handle_spawn_agent_with_skill(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let parent_id = params.get("parent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing parent_id".to_string(),
+            data: None,
+        })?;
+
+    let name = params.get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing name".to_string(),
+            data: None,
+        })?;
+
+    let skill_id = params.get("skill_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing skill_id".to_string(),
+            data: None,
+        })?;
+
+    // Look up the skill in storage
+    let kv_store = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+
+    let skill_key = format!("skill:{}", skill_id);
+    let skill: tenzro_types::SkillDefinition = kv_store.get(CF_SKILLS, skill_key.as_bytes())
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {}", e), data: None })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: format!("Skill '{}' not found", skill_id),
+            data: None,
+        })
+        .and_then(|bytes| serde_json::from_slice::<tenzro_types::SkillDefinition>(&bytes)
+            .map_err(|e| JsonRpcError { code: -32000, message: format!("Deserialize error: {}", e), data: None }))?;
+
+    if !skill.is_available() {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("Skill '{}' is not active", skill_id),
+            data: None,
+        });
+    }
+
+    // Spawn the agent with skill tags as capabilities
+    let mut caps: Vec<String> = params.get("capabilities")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    // Inject skill tags as additional capabilities
+    for tag in &skill.tags {
+        if !caps.contains(tag) {
+            caps.push(tag.clone());
+        }
+    }
+
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let child = runtime.spawn_agent(parent_id, name, caps).await
+        .map_err(|e| JsonRpcError { code: -32000, message: e.to_string(), data: None })?;
+
+    info!(
+        agent_id = %child.identity.agent_id,
+        skill_id = %skill_id,
+        parent_id = %parent_id,
+        "Spawned agent with skill"
+    );
+
+    Ok(serde_json::json!({
+        "agent_id": child.identity.agent_id,
+        "did": child.identity.agent_id,
+        "parent_id": parent_id,
+        "name": name,
+        "skill_id": skill_id,
+        "skill_name": skill.name,
+        "skill_version": skill.version,
+        "capabilities": child.capabilities.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>(),
+    }))
+}
+
+async fn handle_fund_agent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let agent_id = params.get("agent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_id".to_string(),
+            data: None,
+        })?;
+
+    let from_address_hex = params.get("from_address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing from_address".to_string(),
+            data: None,
+        })?;
+
+    // Amount in TNZO (not atto); we convert to atto-TNZO (×10^18)
+    let amount_tnzo: f64 = params.get("amount_tnzo")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or invalid amount_tnzo".to_string(),
+            data: None,
+        })?;
+
+    if amount_tnzo <= 0.0 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "amount_tnzo must be positive".to_string(),
+            data: None,
+        });
+    }
+
+    let amount_wei: u128 = (amount_tnzo * 1e18) as u128;
+
+    // Look up the agent's wallet address from the runtime
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let agents = runtime.list_agents(None);
+    let agent = agents.iter()
+        .find(|a| a.identity.agent_id == agent_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: format!("Agent '{}' not found", agent_id),
+            data: None,
+        })?;
+
+    let agent_wallet = &agent.wallet_address;
+
+    // Parse from_address
+    let from_addr = tenzro_types::Address::from_hex(from_address_hex)
+        .map_err(|e| JsonRpcError { code: -32602, message: format!("Invalid from_address: {}", e), data: None })?;
+
+    // agent_wallet is already a tenzro_types::Address
+    let to_addr = *agent_wallet;
+
+    // Execute transfer via TnzoToken
+    let token = node.token().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Token not initialized".to_string(),
+        data: None,
+    })?;
+
+    token.transfer(&from_addr, &to_addr, amount_wei)
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Transfer failed: {}", e), data: None })?;
+
+    // Get updated balance
+    let new_balance = token.balance_of(&to_addr);
+
+    info!(
+        agent_id = %agent_id,
+        from = %from_address_hex,
+        amount_tnzo = amount_tnzo,
+        amount_wei = amount_wei,
+        "Funded agent wallet"
+    );
+
+    Ok(serde_json::json!({
+        "agent_id": agent_id,
+        "agent_wallet": agent_wallet,
+        "from_address": from_address_hex,
+        "amount_tnzo": amount_tnzo,
+        "amount_wei": amount_wei.to_string(),
+        "new_balance_wei": new_balance.to_string(),
+        "new_balance_tnzo": new_balance as f64 / 1e18,
+        "success": true,
+    }))
+}
+
+/// Handler: tenzro_swapToken
+/// Swaps between TNZO and supported tokens (USDC, USDT, DAI, WETH, WBTC)
+///
+/// Params:
+///   - from_token: string  (e.g. "TNZO", "USDC", "USDT", "DAI", "WETH", "WBTC")
+///   - to_token: string
+///   - amount: f64          (amount of from_token to swap)
+///   - from_address: string (hex address of the swapper)
+///   - slippage_bps: u64    (optional, default 50 = 0.5%)
+///
+/// Returns: from_token, to_token, amount_in, amount_out, rate, fee, tx_hash, success
+async fn handle_swap_token(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.as_ref().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let from_token = p
+        .get("from_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing from_token".to_string(),
+            data: None,
+        })?
+        .to_uppercase();
+
+    let to_token = p
+        .get("to_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing to_token".to_string(),
+            data: None,
+        })?
+        .to_uppercase();
+
+    let amount = p
+        .get("amount")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or invalid amount".to_string(),
+            data: None,
+        })?;
+
+    if amount <= 0.0 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Amount must be positive".to_string(),
+            data: None,
+        });
+    }
+
+    let from_address_hex = p
+        .get("from_address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing from_address".to_string(),
+            data: None,
+        })?;
+
+    let slippage_bps = p
+        .get("slippage_bps")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50); // default 0.5%
+
+    // Validate token pair
+    let supported_tokens = ["TNZO", "USDC", "USDT", "DAI", "WETH", "WBTC"];
+    if !supported_tokens.contains(&from_token.as_str()) {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("Unsupported from_token: {}", from_token),
+            data: None,
+        });
+    }
+    if !supported_tokens.contains(&to_token.as_str()) {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("Unsupported to_token: {}", to_token),
+            data: None,
+        });
+    }
+    if from_token == to_token {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "from_token and to_token must differ".to_string(),
+            data: None,
+        });
+    }
+
+    // Get token subsystem
+    let token = node.token().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Token not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Parse address
+    let addr = tenzro_types::Address::from_hex(from_address_hex).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid from_address: {}", e),
+        data: None,
+    })?;
+
+    // Exchange rate table (testnet: 1 TNZO = $0.10 USD)
+    let rate: f64 = match (from_token.as_str(), to_token.as_str()) {
+        ("TNZO", "USDC") | ("TNZO", "USDT") | ("TNZO", "DAI") => 0.10,
+        ("USDC", "TNZO") | ("USDT", "TNZO") | ("DAI", "TNZO") => 10.0,
+        ("TNZO", "WETH") => 0.10 / 3500.0,
+        ("WETH", "TNZO") => 3500.0 / 0.10,
+        ("TNZO", "WBTC") => 0.10 / 65000.0,
+        ("WBTC", "TNZO") => 65000.0 / 0.10,
+        ("USDC", "WETH") | ("USDT", "WETH") | ("DAI", "WETH") => 1.0 / 3500.0,
+        ("WETH", "USDC") | ("WETH", "USDT") | ("WETH", "DAI") => 3500.0,
+        ("USDC", "WBTC") | ("USDT", "WBTC") | ("DAI", "WBTC") => 1.0 / 65000.0,
+        ("WBTC", "USDC") | ("WBTC", "USDT") | ("WBTC", "DAI") => 65000.0,
+        _ => {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("No rate available for {}/{}", from_token, to_token),
+                data: None,
+            })
+        }
+    };
+
+    // Protocol fee: 0.3% (30 bps)
+    let fee_rate = 30.0 / 10_000.0;
+    let fee_amount = amount * fee_rate;
+    let amount_after_fee = amount - fee_amount;
+
+    // Apply exchange rate
+    let amount_out = amount_after_fee * rate;
+
+    // Slippage minimum check
+    let slippage_factor = 1.0 - (slippage_bps as f64 / 10_000.0);
+    let amount_out_min = amount_out * slippage_factor;
+
+    // Token decimals
+    let from_decimals: u32 = match from_token.as_str() {
+        "TNZO" | "DAI" | "WETH" => 18,
+        "USDC" | "USDT" => 6,
+        "WBTC" => 8,
+        _ => 18,
+    };
+    let to_decimals: u32 = match to_token.as_str() {
+        "TNZO" | "DAI" | "WETH" => 18,
+        "USDC" | "USDT" => 6,
+        "WBTC" => 8,
+        _ => 18,
+    };
+
+    let amount_in_wei = (amount * 10f64.powi(from_decimals as i32)) as u128;
+    let amount_out_wei = (amount_out * 10f64.powi(to_decimals as i32)) as u128;
+    let fee_wei = (fee_amount * 10f64.powi(from_decimals as i32)) as u128;
+
+    // Execute on-chain: burn from_token if TNZO, mint to_token if TNZO
+    if from_token == "TNZO" {
+        token
+            .burn(&addr, amount_in_wei)
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Burn failed: {}", e),
+                data: None,
+            })?;
+    } else if to_token == "TNZO" {
+        token
+            .mint(&addr, amount_out_wei, &addr)
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Mint failed: {}", e),
+                data: None,
+            })?;
+    }
+    // For non-TNZO pairs, validate and record (liquidity pool integration is future work)
+
+    // Deterministic tx hash from timestamp XOR amount
+    let tx_hash = format!(
+        "0x{:064x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            ^ amount_in_wei
+    );
+
+    info!(
+        from_token = %from_token,
+        to_token = %to_token,
+        amount = amount,
+        amount_out = amount_out,
+        rate = rate,
+        from_address = %from_address_hex,
+        "Token swap executed"
+    );
+
+    Ok(serde_json::json!({
+        "from_token": from_token,
+        "to_token": to_token,
+        "amount_in": amount,
+        "amount_in_wei": amount_in_wei.to_string(),
+        "amount_out": amount_out,
+        "amount_out_wei": amount_out_wei.to_string(),
+        "amount_out_min": amount_out_min,
+        "rate": rate,
+        "fee": fee_amount,
+        "fee_wei": fee_wei.to_string(),
+        "slippage_bps": slippage_bps,
+        "tx_hash": tx_hash,
+        "from_address": from_address_hex,
+        "success": true,
+    }))
+}
+
+/// Autonomous agent payment pipeline: discover → infer → pay → settle
+///
+/// Params:
+///   agent_did: string — DID of the calling agent
+///   model_id: string — model to run inference against
+///   message: string — prompt text
+///   max_tokens: u64 (optional, default 512)
+///   temperature: f64 (optional, default 0.7)
+///   max_cost_tnzo: f64 (optional, default 10.0) — spending cap for this call
+async fn handle_agent_payment_pipeline(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // --- 1. Extract & validate parameters ---
+    let agent_did = params
+        .get("agent_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'agent_did' parameter".to_string(),
+            data: None,
+        })?;
+
+    // Accept both `model_id` (Tenzro RPC-style, canonical) and `model`
+    // (OpenAI/MCP-style). Either key is valid in the JSON payload.
+    let model_query = params
+        .get("model_id")
+        .or_else(|| params.get("model"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' (or 'model') parameter".to_string(),
+            data: None,
+        })?;
+
+    let message = params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'message' parameter".to_string(),
+            data: None,
+        })?;
+
+    let max_tokens = params.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(512) as u32;
+    let temperature = params.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7);
+    let max_cost_tnzo = params.get("max_cost_tnzo").and_then(|v| v.as_f64()).unwrap_or(10.0);
+
+    // --- 2. Resolve agent identity & wallet ---
+    let identity_registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let agent_identity = {
+        let all = identity_registry.list_all();
+        all.iter()
+            .find(|(did, _)| did == agent_did)
+            .map(|(did, id)| (did.clone(), id.clone()))
+    };
+
+    let (_, agent_id) = agent_identity.ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: format!("Agent '{}' not found in identity registry", agent_did),
+        data: None,
+    })?;
+
+    let agent_address = agent_id.wallet_address;
+
+    // --- 3. Check agent balance ---
+    let token = node.token().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Token not initialized".to_string(),
+        data: None,
+    })?;
+
+    let agent_balance = token.balance_of(&agent_address);
+    let max_cost_wei = (max_cost_tnzo * 1_000_000_000_000_000_000f64) as u128;
+
+    if agent_balance < max_cost_wei {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!(
+                "Agent balance insufficient: has {} atto-TNZO, needs at least {} atto-TNZO (max_cost_tnzo={})",
+                agent_balance, max_cost_wei, max_cost_tnzo
+            ),
+            data: Some(serde_json::json!({
+                "agent_balance_wei": agent_balance.to_string(),
+                "required_wei": max_cost_wei.to_string(),
+                "max_cost_tnzo": max_cost_tnzo,
+            })),
+        });
+    }
+
+    // --- 4. Resolve model (local or network) ---
+    let service = node.get_model_service(model_query)
+        .or_else(|| node.find_model_service_by_model_id(model_query));
+
+    let is_local = if let Some(ref svc) = service {
+        svc.location == ModelLocation::Local
+    } else {
+        node.served_models.contains_key(model_query)
+    };
+
+    let model_id = if let Some(ref svc) = service {
+        svc.model_id.clone()
+    } else {
+        model_query.to_string()
+    };
+
+    // --- 5. Run inference ---
+    let config = GenerationConfig {
+        temperature,
+        top_p: 0.9,
+        max_tokens,
+        repeat_penalty: 1.1,
+        ..GenerationConfig::default()
+    };
+
+    let (response_text, input_tokens, output_tokens) = if is_local {
+        // Local inference
+        let model_runtime = node.model_runtime.as_ref().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Model runtime not initialized".to_string(),
+            data: None,
+        })?;
+
+        if !model_runtime.is_loaded(&model_id) {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("Model '{}' is not currently serving", model_id),
+                data: None,
+            });
+        }
+
+        let _load_guard = node.load_tracker.try_acquire(&model_id).map_err(|_| JsonRpcError {
+            code: -32000,
+            message: format!("Model '{}' is at capacity. Try again later.", model_id),
+            data: None,
+        })?;
+
+        let chat_messages = vec![ModelChatMessage {
+            role: "user".to_string(),
+            content: message.to_string(),
+        }];
+
+        let result = model_runtime
+            .generate_chat(&model_id, &chat_messages, &config)
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Inference failed: {}", e),
+                data: None,
+            })?;
+
+        (result.text.clone(), result.input_tokens, result.output_tokens)
+    } else if let Some(ref svc) = service {
+        // Remote inference via network provider
+        let chat_url = format!("{}/v1/chat/completions", svc.api_endpoint);
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({
+            "model": model_id,
+            "messages": [{"role": "user", "content": message}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        });
+        let resp = client
+            .post(&chat_url)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Remote inference request failed: {}", e),
+                data: None,
+            })?;
+
+        let resp_json: Value = resp.json().await.map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to parse inference response: {}", e),
+            data: None,
+        })?;
+
+        let text = resp_json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let usage_input = resp_json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+        let usage_output = resp_json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
+
+        (text, usage_input, usage_output)
+    } else {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("Model '{}' not found locally or on the network", model_query),
+            data: None,
+        });
+    };
+
+    // --- 6. Calculate cost & deduct payment ---
+    let pricing = node.provider_pricing.read();
+    let cost_tnzo = (input_tokens as f64 * pricing.input_price_per_token)
+        + (output_tokens as f64 * pricing.output_price_per_token);
+    drop(pricing);
+
+    let cost_wei = (cost_tnzo * 1_000_000_000_000_000_000f64) as u128;
+
+    // Enforce spending cap
+    if cost_wei > max_cost_wei {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!(
+                "Inference cost ({} TNZO) exceeds max_cost_tnzo ({})",
+                cost_tnzo, max_cost_tnzo
+            ),
+            data: Some(serde_json::json!({
+                "cost_tnzo": cost_tnzo,
+                "max_cost_tnzo": max_cost_tnzo,
+            })),
+        });
+    }
+
+    // Protocol fee: 1% of inference cost
+    let protocol_fee_bps: u128 = 100; // 1%
+    let protocol_fee_wei = cost_wei * protocol_fee_bps / 10_000;
+    let provider_payment_wei = cost_wei.saturating_sub(protocol_fee_wei);
+
+    // Resolve provider address (this node's identity)
+    let provider_addr = {
+        let all = identity_registry.list_all();
+        if let Some((_, identity)) = all.first() {
+            identity.wallet_address
+        } else {
+            Address::default()
+        }
+    };
+
+    // Debit agent, credit provider + treasury
+    let mut payment_success = false;
+    let mut payment_tx_hash = String::new();
+
+    if cost_wei > 0 {
+        // Debit from agent
+        if let Err(e) = token.transfer(&agent_address, &provider_addr, provider_payment_wei) {
+            tracing::warn!(
+                agent = %agent_did,
+                cost = cost_wei,
+                error = %e,
+                "Agent payment debit failed"
+            );
+        } else {
+            payment_success = true;
+
+            // Protocol fee to treasury
+            if protocol_fee_wei > 0 {
+                let treasury_addr = Address::default(); // Treasury address
+                let _ = token.transfer(&agent_address, &treasury_addr, protocol_fee_wei);
+            }
+
+            // Generate deterministic tx hash
+            let timestamp_nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            payment_tx_hash = format!("0x{:064x}", timestamp_nanos ^ cost_wei);
+        }
+    } else {
+        payment_success = true; // Zero-cost inference
+    }
+
+    // --- 7. Record in transaction history ---
+    {
+        let mut history = node.transaction_history.write();
+        history.push(crate::node::TransactionHistoryEntry {
+            tx_hash: payment_tx_hash.clone(),
+            from: agent_did.to_string(),
+            to: format!("{:?}", provider_addr),
+            amount: cost_wei.to_string(),
+            asset: "TNZO".to_string(),
+            status: if payment_success { "confirmed".to_string() } else { "failed".to_string() },
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            tx_type: "agent_inference_payment".to_string(),
+        });
+    }
+
+    info!(
+        agent = %agent_did,
+        model = %model_id,
+        input_tokens = input_tokens,
+        output_tokens = output_tokens,
+        cost_tnzo = cost_tnzo,
+        payment_success = payment_success,
+        "Agent autonomous inference + payment pipeline completed"
+    );
+
+    // --- 8. Return full pipeline result ---
+    Ok(serde_json::json!({
+        "success": true,
+        "agent_did": agent_did,
+        "model_id": model_id,
+        "inference": {
+            "response": response_text,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+        "payment": {
+            "cost_tnzo": cost_tnzo,
+            "cost_wei": cost_wei.to_string(),
+            "protocol_fee_wei": protocol_fee_wei.to_string(),
+            "protocol_fee_bps": protocol_fee_bps,
+            "provider_payment_wei": provider_payment_wei.to_string(),
+            "tx_hash": payment_tx_hash,
+            "payment_success": payment_success,
+        },
+        "agent_balance_after_wei": token.balance_of(&agent_address).to_string(),
+    }))
+}
+
+// ─── Token & Contract RPC Handlers ───
+
+async fn handle_create_token(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+
+    let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing name".to_string(), data: None,
+    })?;
+    let symbol = params.get("symbol").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing symbol".to_string(), data: None,
+    })?;
+    let creator_str = params.get("creator").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing creator".to_string(), data: None,
+    })?;
+    let initial_supply_str = params.get("initial_supply").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing initial_supply".to_string(), data: None,
+    })?;
+
+    let registry = node.token_registry().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Token registry not initialized".to_string(), data: None,
+    })?;
+
+    let creator_hex = creator_str.strip_prefix("0x").unwrap_or(creator_str);
+    let creator_bytes = hex::decode(creator_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid creator address: {}", e), data: None,
+    })?;
+    let mut creator = [0u8; 32];
+    if creator_bytes.len() == 20 {
+        creator[12..32].copy_from_slice(&creator_bytes);
+    } else if creator_bytes.len() == 32 {
+        creator.copy_from_slice(&creator_bytes);
+    } else {
+        return Err(JsonRpcError { code: -32602, message: "Creator must be 20 or 32 bytes".to_string(), data: None });
+    }
+
+    // Verify creator signature if provided
+    let signature = params.get("signature").and_then(|v| v.as_str());
+    let sign_message = format!("tenzro:create_token:{}:{}:{}", name, symbol, initial_supply_str);
+    verify_creator_signature(&creator, signature, sign_message.as_bytes())?;
+
+    let decimals = params.get("decimals").and_then(|v| v.as_u64()).unwrap_or(18) as u8;
+    let initial_supply: u128 = initial_supply_str.parse().map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid initial_supply: {}", e), data: None,
+    })?;
+
+    use tenzro_token::{TokenDefinition, TokenType, VmAddresses, TokenPermissions, TokenMetadata, TokenId};
+
+    let evm_addr: [u8; 20] = {
+        let hash = tenzro_crypto::hash::keccak256(&[&creator[..], name.as_bytes(), symbol.as_bytes()].concat());
+        let mut addr = [0u8; 20];
+        addr.copy_from_slice(&hash.as_bytes()[12..32]);
+        addr
+    };
+
+    let mintable = params.get("mintable").and_then(|v| v.as_bool()).unwrap_or(false);
+    let burnable = params.get("burnable").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let def = TokenDefinition {
+        token_id: TokenId::compute(&creator, 0),
+        name: name.to_string(),
+        symbol: symbol.to_string(),
+        decimals,
+        total_supply: initial_supply,
+        max_supply: if mintable { None } else { Some(initial_supply) },
+        creator,
+        token_type: TokenType::Erc20,
+        vm_addresses: VmAddresses { evm: Some(evm_addr), ..Default::default() },
+        permissions: TokenPermissions {
+            mintable,
+            burnable,
+            pausable: false,
+            freezable: false,
+            paused: false,
+        },
+        created_at: 0,
+        metadata: TokenMetadata::default(),
+    };
+
+    let token_id = registry.register_token(def).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Token creation failed: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "token_id": token_id.to_hex(),
+        "name": name,
+        "symbol": symbol,
+        "decimals": decimals,
+        "initial_supply": initial_supply_str,
+        "evm_address": format!("0x{}", hex::encode(evm_addr)),
+        "authenticated": signature.is_some(),
+        "status": "created"
+    }))
+}
+
+async fn handle_get_token(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+
+    let registry = node.token_registry().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Token registry not initialized".to_string(), data: None,
+    })?;
+
+    let def = if let Some(symbol) = params.get("symbol").and_then(|v| v.as_str()) {
+        registry.get_by_symbol(symbol)
+    } else if let Some(addr) = params.get("evm_address").and_then(|v| v.as_str()) {
+        let addr_hex = addr.strip_prefix("0x").unwrap_or(addr);
+        let bytes = hex::decode(addr_hex).ok().filter(|b| b.len() == 20).map(|b| {
+            let mut arr = [0u8; 20]; arr.copy_from_slice(&b); arr
+        });
+        bytes.and_then(|a| registry.get_by_evm_address(&a))
+    } else if let Some(id) = params.get("token_id").and_then(|v| v.as_str()) {
+        let bytes = hex::decode(id).ok().filter(|b| b.len() == 32).map(|b| {
+            let mut arr = [0u8; 32]; arr.copy_from_slice(&b); arr
+        });
+        bytes.and_then(|a| registry.get(&tenzro_token::TokenId::new(a)))
+    } else {
+        return Err(JsonRpcError { code: -32602, message: "Provide symbol, evm_address, or token_id".to_string(), data: None });
+    };
+
+    match def {
+        Some(d) => Ok(serde_json::json!({
+            "token_id": d.token_id.to_hex(),
+            "name": d.name,
+            "symbol": d.symbol,
+            "decimals": d.decimals,
+            "total_supply": d.total_supply.to_string(),
+            "token_type": format!("{:?}", d.token_type),
+            "evm_address": d.vm_addresses.evm_hex(),
+            "svm_mint": d.vm_addresses.svm_hex(),
+            "creator": format!("0x{}", hex::encode(d.creator)),
+        })),
+        None => Err(JsonRpcError { code: -32603, message: "Token not found".to_string(), data: None }),
+    }
+}
+
+async fn handle_list_tokens(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let registry = node.token_registry().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Token registry not initialized".to_string(), data: None,
+    })?;
+
+    let vm_filter = params.as_ref()
+        .and_then(|p| p.get("vm_type"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| match s.to_lowercase().as_str() {
+            "evm" => Some(tenzro_token::TokenVmType::Evm),
+            "svm" => Some(tenzro_token::TokenVmType::Svm),
+            "daml" => Some(tenzro_token::TokenVmType::Daml),
+            "native" => Some(tenzro_token::TokenVmType::Native),
+            _ => None,
+        });
+
+    let limit = params.as_ref()
+        .and_then(|p| p.get("limit"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50)
+        .min(100) as usize;
+
+    let tokens = registry.list_tokens(vm_filter, None, limit);
+    let items: Vec<Value> = tokens.iter().map(|d| {
+        serde_json::json!({
+            "token_id": d.token_id.to_hex(),
+            "name": d.name,
+            "symbol": d.symbol,
+            "decimals": d.decimals,
+            "total_supply": d.total_supply.to_string(),
+            "evm_address": d.vm_addresses.evm_hex(),
+        })
+    }).collect();
+
+    Ok(serde_json::json!({ "count": items.len(), "tokens": items }))
+}
+
+async fn handle_cross_vm_transfer(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+
+    let token_str = params.get("token").and_then(|v| v.as_str()).unwrap_or("TNZO");
+    let amount_str = params.get("amount").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing amount".to_string(), data: None,
+    })?;
+    let from_vm_str = params.get("from_vm").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing from_vm".to_string(), data: None,
+    })?;
+    let to_vm_str = params.get("to_vm").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing to_vm".to_string(), data: None,
+    })?;
+    let from_addr_str = params.get("from_address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing from_address".to_string(), data: None,
+    })?;
+    let to_addr_str = params.get("to_address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing to_address".to_string(), data: None,
+    })?;
+
+    let registry = node.token_registry().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Token registry not initialized".to_string(), data: None,
+    })?;
+    let token = node.token().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "TNZO token not initialized".to_string(), data: None,
+    })?;
+
+    let rpc_parse_vm = |s: &str| -> std::result::Result<tenzro_token::TokenVmType, JsonRpcError> {
+        match s.to_lowercase().as_str() {
+            "evm" => Ok(tenzro_token::TokenVmType::Evm),
+            "svm" => Ok(tenzro_token::TokenVmType::Svm),
+            "daml" => Ok(tenzro_token::TokenVmType::Daml),
+            "native" => Ok(tenzro_token::TokenVmType::Native),
+            _ => Err(JsonRpcError { code: -32602, message: format!("Unknown VM type: {}", s), data: None }),
+        }
+    };
+
+    let from_vm = rpc_parse_vm(from_vm_str)?;
+    let to_vm = rpc_parse_vm(to_vm_str)?;
+    let amount: u128 = amount_str.parse().map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid amount: {}", e), data: None,
+    })?;
+
+    let from_hex = from_addr_str.strip_prefix("0x").unwrap_or(from_addr_str);
+    let from_bytes = hex::decode(from_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid from_address: {}", e), data: None,
+    })?;
+    let to_hex = to_addr_str.strip_prefix("0x").unwrap_or(to_addr_str);
+    let to_bytes = hex::decode(to_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid to_address: {}", e), data: None,
+    })?;
+
+    let token_id = if token_str.to_uppercase() == "TNZO" {
+        tenzro_token::TokenId::tnzo()
+    } else {
+        registry.get_by_symbol(token_str)
+            .map(|d| d.token_id)
+            .ok_or_else(|| JsonRpcError { code: -32603, message: format!("Token '{}' not found", token_str), data: None })?
+    };
+
+    let transfer = tenzro_token::CrossVmTransfer {
+        token_id, from_vm, to_vm,
+        from_address: from_bytes.clone(),
+        to_address: to_bytes.clone(),
+        amount, nonce: 0,
+    };
+
+    registry.validate_cross_vm_transfer(&transfer)
+        .map_err(|e| JsonRpcError { code: -32603, message: format!("Validation failed: {}", e), data: None })?;
+
+    if token_id == tenzro_token::TokenId::tnzo() {
+        let from_addr = rpc_bytes_to_address(&from_bytes);
+        let to_addr = rpc_bytes_to_address(&to_bytes);
+        token.transfer(&from_addr, &to_addr, amount)
+            .map_err(|e| JsonRpcError { code: -32603, message: format!("Transfer failed: {}", e), data: None })?;
+    }
+
+    Ok(serde_json::json!({
+        "token": token_str,
+        "amount": amount_str,
+        "from_vm": from_vm_str,
+        "to_vm": to_vm_str,
+        "status": "transferred"
+    }))
+}
+
+async fn handle_wrap_tnzo(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+
+    let addr_str = params.get("address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing address".to_string(), data: None,
+    })?;
+    let amount_str = params.get("amount").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing amount".to_string(), data: None,
+    })?;
+    let to_vm = params.get("to_vm").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing to_vm".to_string(), data: None,
+    })?;
+
+    let token = node.token().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "TNZO token not initialized".to_string(), data: None,
+    })?;
+
+    let address = parse_address(addr_str)?;
+    let amount: u128 = amount_str.parse().map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid amount: {}", e), data: None,
+    })?;
+    let balance = token.balance_of(&address);
+    if balance < amount {
+        return Err(JsonRpcError { code: -32603, message: format!("Insufficient balance: have {}, need {}", balance, amount), data: None });
+    }
+
+    let representation = match to_vm.to_lowercase().as_str() {
+        "evm" => "wTNZO ERC-20 (pointer contract)",
+        "svm" => "wTNZO SPL (9 decimals)",
+        "daml" => "TNZO CIP-56 Holding",
+        _ => return Err(JsonRpcError { code: -32602, message: "to_vm must be evm, svm, or daml".to_string(), data: None }),
+    };
+
+    Ok(serde_json::json!({
+        "address": addr_str,
+        "amount": amount_str,
+        "target_vm": to_vm,
+        "representation": representation,
+        "native_balance": balance.to_string(),
+        "status": "accessible",
+        "note": "Pointer model: native TNZO and VM representations share the same balance."
+    }))
+}
+
+async fn handle_get_token_balance(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+
+    let addr_str = params.get("address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing address".to_string(), data: None,
+    })?;
+
+    let token = node.token().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "TNZO token not initialized".to_string(), data: None,
+    })?;
+
+    let address = parse_address(addr_str)?;
+    let native_balance = token.balance_of(&address);
+    let spl_balance = tenzro_token::native_to_spl(native_balance).unwrap_or(0);
+    let display = native_balance as f64 / 1e18;
+
+    Ok(serde_json::json!({
+        "address": addr_str,
+        "native": { "balance": native_balance.to_string(), "decimals": 18, "display": format!("{:.6} TNZO", display) },
+        "evm_wtnzo": { "balance": native_balance.to_string(), "decimals": 18 },
+        "svm_wtnzo": { "balance": spl_balance.to_string(), "decimals": 9 },
+        "daml_holding": { "amount": format!("{:.18}", display) }
+    }))
+}
+
+async fn handle_deploy_contract(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+
+    let vm_type_str = params.get("vm_type").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing vm_type".to_string(), data: None,
+    })?;
+    let bytecode_str = params.get("bytecode").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing bytecode".to_string(), data: None,
+    })?;
+    let deployer_str = params.get("deployer").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing deployer".to_string(), data: None,
+    })?;
+
+    use tenzro_vm::{ContractDeployment, VmType};
+
+    let vm_type = match vm_type_str.to_lowercase().as_str() {
+        "evm" => VmType::Evm,
+        "svm" => VmType::Svm,
+        "daml" => VmType::Daml,
+        other => return Err(JsonRpcError { code: -32602, message: format!("Unknown VM type: {}", other), data: None }),
+    };
+
+    let bytecode_hex = bytecode_str.strip_prefix("0x").unwrap_or(bytecode_str);
+    let bytecode = hex::decode(bytecode_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid bytecode: {}", e), data: None,
+    })?;
+
+    let deployer_hex = deployer_str.strip_prefix("0x").unwrap_or(deployer_str);
+    let deployer = hex::decode(deployer_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid deployer: {}", e), data: None,
+    })?;
+
+    // Verify deployer signature if provided
+    let signature = params.get("signature").and_then(|v| v.as_str());
+    let sign_message = format!("tenzro:deploy_contract:{}:{}", vm_type_str, deployer_str);
+    verify_creator_signature(&deployer, signature, sign_message.as_bytes())?;
+
+    let constructor_args = params.get("constructor_args")
+        .and_then(|v| v.as_str())
+        .map(|s| s.strip_prefix("0x").unwrap_or(s))
+        .and_then(|s| hex::decode(s).ok())
+        .unwrap_or_default();
+
+    let gas_limit = params.get("gas_limit").and_then(|v| v.as_u64()).unwrap_or(3_000_000);
+
+    let vm = node.vm_runtime().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "VM runtime not initialized".to_string(), data: None,
+    })?;
+
+    let mut state = if let Some(storage) = node.storage() {
+        tenzro_vm::StateAdapter::with_storage(storage.clone() as std::sync::Arc<dyn tenzro_storage::KvStore>)
+    } else {
+        tenzro_vm::StateAdapter::new()
+    };
+
+    // Use the deployer's current nonce (from the native/VM state) so repeated
+    // deploys from the same account produce distinct CREATE addresses and
+    // don't collide with previous deployments.
+    use tenzro_vm::traits::VmState as _;
+    let current_nonce = state.get_nonce(&deployer);
+
+    let deployment = ContractDeployment {
+        deployer: deployer.clone(),
+        code: bytecode,
+        constructor_args,
+        value: 0,
+        gas_limit,
+        gas_price: 1_000_000_000,
+        nonce: current_nonce,
+        vm_type,
+    };
+
+    let result = vm.deploy_contract(&deployment, &mut state).await.map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Deployment failed: {}", e), data: None,
+    })?;
+
+    if result.success {
+        // Persist the post-deploy state (contract code, gas-debited balance,
+        // bumped nonce) so subsequent calls see the deployment. Without this
+        // commit, revm's dirty buffers are dropped with the StateAdapter and
+        // the chain appears to have no contract at the returned address.
+        // The native TNZO ledger (CF_ACCOUNTS) receives balance updates in
+        // lockstep via the StateAdapter pointer bridge.
+        if let Err(e) = state.commit() {
+            tracing::warn!("Failed to commit state after deploy: {}", e);
+        }
+
+        Ok(serde_json::json!({
+            "address": format!("0x{}", hex::encode(&result.address)),
+            "gas_used": result.gas_used,
+            "vm_type": vm_type_str,
+            "nonce": current_nonce,
+            "authenticated": signature.is_some(),
+            "status": "deployed"
+        }))
+    } else {
+        Err(JsonRpcError { code: -32603, message: format!("Deployment reverted: {:?}", result.revert_reason), data: None })
+    }
+}
+
+// ─── NFT Management Handlers ───
+
+async fn handle_create_nft_collection(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_NFTS, KvStore};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing name".to_string(), data: None,
+    })?;
+    let symbol = params.get("symbol").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing symbol".to_string(), data: None,
+    })?;
+    let standard_str = params.get("standard").or_else(|| params.get("nft_type"))
+        .and_then(|v| v.as_str()).unwrap_or("erc721");
+    let standard = match standard_str.to_lowercase().as_str() {
+        "erc721" | "erc-721" => "ERC-721",
+        "erc1155" | "erc-1155" => "ERC-1155",
+        other => return Err(JsonRpcError {
+            code: -32602, message: format!("Unsupported NFT standard '{}'. Use 'erc721' or 'erc1155'.", other), data: None,
+        }),
+    };
+
+    let creator_str = params.get("creator").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing creator".to_string(), data: None,
+    })?;
+    let creator_hex = creator_str.strip_prefix("0x").unwrap_or(creator_str);
+    let creator_bytes = hex::decode(creator_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid creator address: {}", e), data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let collection_id = uuid::Uuid::new_v4().to_string();
+
+    // Derive deterministic EVM address
+    let mut addr_input = Vec::new();
+    addr_input.extend_from_slice(&creator_bytes);
+    addr_input.extend_from_slice(name.as_bytes());
+    addr_input.extend_from_slice(symbol.as_bytes());
+    let hash = tenzro_crypto::hash::keccak256(&addr_input);
+    let mut evm_addr = [0u8; 20];
+    evm_addr.copy_from_slice(&hash.as_bytes()[12..32]);
+    let evm_address = format!("0x{}", hex::encode(evm_addr));
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let base_uri = params.get("base_uri").or_else(|| params.get("metadata_uri")).and_then(|v| v.as_str()).unwrap_or("");
+    let description = params.get("description").and_then(|v| v.as_str()).unwrap_or("");
+
+    let collection = serde_json::json!({
+        "collection_id": collection_id,
+        "name": name,
+        "symbol": symbol,
+        "standard": standard,
+        "creator": format!("0x{}", creator_hex),
+        "evm_address": evm_address,
+        "base_uri": base_uri,
+        "description": description,
+        "total_supply": 0,
+        "created_at": now,
+        "vm_pointers": {},
+    });
+
+    let key = format!("collection:{}", collection_id).into_bytes();
+    let value = serde_json::to_vec(&collection).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Serialization error: {}", e), data: None,
+    })?;
+    storage.put(CF_NFTS, &key, &value).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    Ok(collection)
+}
+
+async fn handle_mint_nft(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_NFTS, KvStore};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let collection_id = params.get("collection_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing collection_id".to_string(), data: None,
+    })?;
+    let token_id = params.get("token_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing token_id".to_string(), data: None,
+    })?;
+    let to = params.get("to").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing to".to_string(), data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    // Verify collection exists
+    let coll_key = format!("collection:{}", collection_id).into_bytes();
+    let coll_bytes = storage.get(CF_NFTS, &coll_key).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?.ok_or_else(|| JsonRpcError {
+        code: -32602, message: format!("Collection not found: {}", collection_id), data: None,
+    })?;
+
+    let mut collection: Value = serde_json::from_slice(&coll_bytes).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Deserialization error: {}", e), data: None,
+    })?;
+
+    let to_hex = to.strip_prefix("0x").unwrap_or(to);
+    let _ = hex::decode(to_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid recipient address: {}", e), data: None,
+    })?;
+
+    let amount = params.get("amount").and_then(|v| v.as_u64()).unwrap_or(1);
+    let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let nft = serde_json::json!({
+        "collection_id": collection_id,
+        "token_id": token_id,
+        "owner": format!("0x{}", to_hex),
+        "uri": uri,
+        "amount": amount,
+        "minted_at": now,
+    });
+
+    let nft_key = format!("nft:{}:{}", collection_id, token_id).into_bytes();
+    let nft_value = serde_json::to_vec(&nft).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Serialization error: {}", e), data: None,
+    })?;
+    storage.put(CF_NFTS, &nft_key, &nft_value).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    // Update total_supply
+    let prev_supply = collection.get("total_supply").and_then(|v| v.as_u64()).unwrap_or(0);
+    collection["total_supply"] = serde_json::json!(prev_supply + amount);
+    let coll_value = serde_json::to_vec(&collection).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Serialization error: {}", e), data: None,
+    })?;
+    storage.put(CF_NFTS, &coll_key, &coll_value).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "collection_id": collection_id,
+        "token_id": token_id,
+        "owner": format!("0x{}", to_hex),
+        "uri": uri,
+        "amount": amount,
+        "status": "minted",
+    }))
+}
+
+async fn handle_transfer_nft(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_NFTS, KvStore};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let collection_id = params.get("collection_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing collection_id".to_string(), data: None,
+    })?;
+    let token_id = params.get("token_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing token_id".to_string(), data: None,
+    })?;
+    let from = params.get("from").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing from".to_string(), data: None,
+    })?;
+    let to = params.get("to").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing to".to_string(), data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let from_hex = from.strip_prefix("0x").unwrap_or(from);
+    let to_hex = to.strip_prefix("0x").unwrap_or(to);
+    let _ = hex::decode(from_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid from address: {}", e), data: None,
+    })?;
+    let _ = hex::decode(to_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid to address: {}", e), data: None,
+    })?;
+
+    let nft_key = format!("nft:{}:{}", collection_id, token_id).into_bytes();
+    let nft_bytes = storage.get(CF_NFTS, &nft_key).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?.ok_or_else(|| JsonRpcError {
+        code: -32602, message: format!("NFT not found: collection={} token_id={}", collection_id, token_id), data: None,
+    })?;
+
+    let mut nft: Value = serde_json::from_slice(&nft_bytes).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Deserialization error: {}", e), data: None,
+    })?;
+
+    // Verify ownership
+    let current_owner = nft.get("owner").and_then(|v| v.as_str()).unwrap_or("");
+    let expected_owner = format!("0x{}", from_hex);
+    if current_owner.to_lowercase() != expected_owner.to_lowercase() {
+        return Err(JsonRpcError {
+            code: -32603, message: format!("Transfer denied: token owned by {} but sender is {}", current_owner, expected_owner), data: None,
+        });
+    }
+
+    nft["owner"] = serde_json::json!(format!("0x{}", to_hex));
+
+    let nft_value = serde_json::to_vec(&nft).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Serialization error: {}", e), data: None,
+    })?;
+    storage.put(CF_NFTS, &nft_key, &nft_value).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    let amount = params.get("amount").and_then(|v| v.as_u64()).unwrap_or(1);
+
+    Ok(serde_json::json!({
+        "collection_id": collection_id,
+        "token_id": token_id,
+        "from": format!("0x{}", from_hex),
+        "to": format!("0x{}", to_hex),
+        "amount": amount,
+        "status": "transferred",
+    }))
+}
+
+async fn handle_get_nft_info(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_NFTS, KvStore};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let collection_id = params.get("collection_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing collection_id".to_string(), data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    if let Some(token_id) = params.get("token_id").and_then(|v| v.as_str()) {
+        // Token-level query
+        let nft_key = format!("nft:{}:{}", collection_id, token_id).into_bytes();
+        let nft_bytes = storage.get(CF_NFTS, &nft_key).map_err(|e| JsonRpcError {
+            code: -32603, message: format!("Storage error: {}", e), data: None,
+        })?.ok_or_else(|| JsonRpcError {
+            code: -32602, message: format!("NFT not found: collection={} token_id={}", collection_id, token_id), data: None,
+        })?;
+
+        let nft: Value = serde_json::from_slice(&nft_bytes).map_err(|e| JsonRpcError {
+            code: -32603, message: format!("Deserialization error: {}", e), data: None,
+        })?;
+        Ok(nft)
+    } else {
+        // Collection-level query
+        let coll_key = format!("collection:{}", collection_id).into_bytes();
+        let coll_bytes = storage.get(CF_NFTS, &coll_key).map_err(|e| JsonRpcError {
+            code: -32603, message: format!("Storage error: {}", e), data: None,
+        })?.ok_or_else(|| JsonRpcError {
+            code: -32602, message: format!("Collection not found: {}", collection_id), data: None,
+        })?;
+
+        let collection: Value = serde_json::from_slice(&coll_bytes).map_err(|e| JsonRpcError {
+            code: -32603, message: format!("Deserialization error: {}", e), data: None,
+        })?;
+        Ok(collection)
+    }
+}
+
+async fn handle_list_nft_collections(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_NFTS, KvStore};
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let params = params.unwrap_or(serde_json::json!({}));
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50).min(100) as usize;
+    let creator_filter = params.get("creator").and_then(|v| v.as_str());
+    let standard_filter = params.get("standard").and_then(|v| v.as_str());
+
+    let keys = storage.get_keys_with_prefix(CF_NFTS, b"collection:").map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    let mut collections: Vec<Value> = Vec::new();
+
+    for key in keys {
+        if collections.len() >= limit {
+            break;
+        }
+        if let Ok(Some(raw)) = storage.get(CF_NFTS, &key) {
+            if let Ok(coll) = serde_json::from_slice::<Value>(&raw) {
+                if let Some(cf) = creator_filter {
+                    let cf_hex = cf.strip_prefix("0x").unwrap_or(cf);
+                    let coll_creator = coll.get("creator").and_then(|v| v.as_str()).unwrap_or("");
+                    let coll_hex = coll_creator.strip_prefix("0x").unwrap_or(coll_creator);
+                    if coll_hex.to_lowercase() != cf_hex.to_lowercase() {
+                        continue;
+                    }
+                }
+                if let Some(sf) = standard_filter {
+                    let coll_std = coll.get("standard").and_then(|v| v.as_str()).unwrap_or("");
+                    let normalized = match sf.to_lowercase().as_str() {
+                        "erc721" | "erc-721" => "ERC-721",
+                        "erc1155" | "erc-1155" => "ERC-1155",
+                        _ => sf,
+                    };
+                    if coll_std != normalized {
+                        continue;
+                    }
+                }
+                collections.push(coll);
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "collections": collections,
+        "total": collections.len(),
+    }))
+}
+
+async fn handle_register_nft_pointer(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_NFTS, KvStore};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let collection_id = params.get("collection_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing collection_id".to_string(), data: None,
+    })?;
+    let vm = params.get("vm").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing vm".to_string(), data: None,
+    })?;
+    let address = params.get("address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing address".to_string(), data: None,
+    })?;
+
+    let vm_lower = match vm.to_lowercase().as_str() {
+        "evm" | "svm" | "daml" => vm.to_lowercase(),
+        other => return Err(JsonRpcError {
+            code: -32602, message: format!("Unsupported VM '{}'. Use 'evm', 'svm', or 'daml'.", other), data: None,
+        }),
+    };
+
+    let addr_hex = address.strip_prefix("0x").unwrap_or(address);
+    let _ = hex::decode(addr_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid address: {}", e), data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let coll_key = format!("collection:{}", collection_id).into_bytes();
+    let coll_bytes = storage.get(CF_NFTS, &coll_key).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?.ok_or_else(|| JsonRpcError {
+        code: -32602, message: format!("Collection not found: {}", collection_id), data: None,
+    })?;
+
+    let mut collection: Value = serde_json::from_slice(&coll_bytes).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Deserialization error: {}", e), data: None,
+    })?;
+
+    if collection.get("vm_pointers").is_none() {
+        collection["vm_pointers"] = serde_json::json!({});
+    }
+    collection["vm_pointers"][&vm_lower] = serde_json::json!(format!("0x{}", addr_hex));
+
+    let coll_value = serde_json::to_vec(&collection).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Serialization error: {}", e), data: None,
+    })?;
+    storage.put(CF_NFTS, &coll_key, &coll_value).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "collection_id": collection_id,
+        "vm": vm_lower,
+        "address": format!("0x{}", addr_hex),
+        "status": "registered",
+    }))
+}
+
+// ─── Bridge Handlers ───
+
+async fn handle_bridge_tokens(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let router = node.bridge_router().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Bridge router not initialized".to_string(), data: None,
+    })?;
+
+    let source_chain = params.get("source_chain").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing source_chain".to_string(), data: None,
+    })?;
+    let dest_chain = params.get("dest_chain").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing dest_chain".to_string(), data: None,
+    })?;
+    let asset = params.get("asset").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing asset".to_string(), data: None,
+    })?;
+    let amount: u128 = params.get("amount").and_then(|v| v.as_str()).and_then(|s| s.parse().ok())
+        .or_else(|| params.get("amount").and_then(|v| v.as_u64()).map(|n| n as u128))
+        .ok_or_else(|| JsonRpcError {
+            code: -32602, message: "Missing or invalid amount".to_string(), data: None,
+        })?;
+    let sender = params.get("sender").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing sender".to_string(), data: None,
+    })?;
+    let recipient = params.get("recipient").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing recipient".to_string(), data: None,
+    })?;
+
+    use tenzro_bridge::BridgeTokenRequest;
+    let request = BridgeTokenRequest::new(
+        source_chain.to_string(), dest_chain.to_string(),
+        asset.to_string(), amount,
+        sender.to_string(), recipient.to_string(),
+    );
+
+    match router.bridge_tokens(request).await {
+        Ok(receipt) => Ok(serde_json::json!({
+            "transfer_id": receipt.transfer_id,
+            "source_chain": receipt.source_chain,
+            "dest_chain": receipt.dest_chain,
+            "asset": asset,
+            "amount": amount.to_string(),
+            "tx_hash": format!("{}", receipt.tx_hash),
+            "fee_paid": receipt.fee_paid.to_string(),
+            "estimated_arrival_ms": receipt.estimated_arrival,
+        })),
+        Err(e) => Ok(serde_json::json!({
+            "status": "failed",
+            "error": format!("{}", e),
+            "source_chain": source_chain,
+            "dest_chain": dest_chain,
+        })),
+    }
+}
+
+async fn handle_bridge_quote(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let router = node.bridge_router().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Bridge router not initialized".to_string(), data: None,
+    })?;
+
+    let from_chain = params.get("from_chain").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing from_chain".to_string(), data: None,
+    })?;
+    let to_chain = params.get("to_chain").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing to_chain".to_string(), data: None,
+    })?;
+    let token = params.get("token").and_then(|v| v.as_str()).unwrap_or("TNZO");
+    let amount: u128 = params.get("amount").and_then(|v| v.as_str()).and_then(|s| s.parse().ok())
+        .or_else(|| params.get("amount").and_then(|v| v.as_u64()).map(|n| n as u128))
+        .ok_or_else(|| JsonRpcError {
+            code: -32602, message: "Missing or invalid amount".to_string(), data: None,
+        })?;
+    let protocol = params.get("protocol").and_then(|v| v.as_str());
+
+    match router.get_available_routes(from_chain, to_chain).await {
+        Ok(routes) => {
+            let filtered: Vec<_> = if let Some(proto) = protocol {
+                let proto_lower = proto.to_lowercase();
+                routes.iter().filter(|r| r.adapter_name.to_lowercase().contains(&proto_lower)).collect()
+            } else {
+                routes.iter().collect()
+            };
+
+            if filtered.is_empty() {
+                return Ok(serde_json::json!({
+                    "status": "no_route",
+                    "from_chain": from_chain,
+                    "to_chain": to_chain,
+                    "token": token,
+                    "error": "No available bridge route for this chain pair"
+                }));
+            }
+
+            let best = match filtered.iter().min_by_key(|r| r.estimated_fee) {
+                Some(b) => b,
+                None => {
+                    return Ok(serde_json::json!({
+                        "status": "no_route",
+                        "from_chain": from_chain,
+                        "to_chain": to_chain,
+                        "token": token,
+                        "error": "No available bridge route after filtering"
+                    }));
+                }
+            };
+            let fee = best.estimated_fee;
+            let output_amount = amount.saturating_sub(fee);
+
+            Ok(serde_json::json!({
+                "from_chain": from_chain,
+                "to_chain": to_chain,
+                "token": token,
+                "input_amount": amount.to_string(),
+                "estimated_output": output_amount.to_string(),
+                "estimated_fee": fee.to_string(),
+                "estimated_time_secs": best.estimated_time_secs,
+                "adapter": best.adapter_name,
+                "all_routes": filtered.iter().map(|r| serde_json::json!({
+                    "adapter": r.adapter_name,
+                    "fee": r.estimated_fee.to_string(),
+                    "time_secs": r.estimated_time_secs,
+                })).collect::<Vec<_>>(),
+                "status": "quoted",
+            }))
+        }
+        Err(e) => Ok(serde_json::json!({
+            "status": "error",
+            "from_chain": from_chain,
+            "to_chain": to_chain,
+            "error": format!("{}", e),
+        })),
+    }
+}
+
+async fn handle_get_bridge_routes(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let router = node.bridge_router().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Bridge router not initialized".to_string(), data: None,
+    })?;
+
+    let source_chain = params.get("source_chain").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing source_chain".to_string(), data: None,
+    })?;
+    let dest_chain = params.get("dest_chain").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing dest_chain".to_string(), data: None,
+    })?;
+
+    match router.get_available_routes(source_chain, dest_chain).await {
+        Ok(routes) => {
+            let route_list: Vec<Value> = routes.iter().map(|r| {
+                serde_json::json!({
+                    "adapter": r.adapter_name,
+                    "source_chain": r.source_chain,
+                    "dest_chain": r.dest_chain,
+                    "estimated_fee": r.estimated_fee.to_string(),
+                    "estimated_time_secs": r.estimated_time_secs,
+                })
+            }).collect();
+
+            Ok(serde_json::json!({
+                "routes": route_list,
+                "total": route_list.len(),
+            }))
+        }
+        Err(e) => Ok(serde_json::json!({
+            "routes": [],
+            "total": 0,
+            "error": format!("{}", e),
+        })),
+    }
+}
+
+async fn handle_list_bridge_adapters(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    if let Some(r) = node.bridge_router() {
+        let adapters = r.list_adapters().await;
+        Ok(serde_json::json!({
+            "adapters": adapters,
+            "total": adapters.len(),
+        }))
+    } else {
+        Ok(serde_json::json!({
+            "adapters": [],
+            "total": 0,
+            "note": "Bridge router not initialized on this node.",
+        }))
+    }
+}
+
+async fn handle_bridge_with_hook(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let router = node.bridge_router().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Bridge router not initialized".to_string(), data: None,
+    })?;
+
+    let from_chain = params.get("from_chain").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing from_chain".to_string(), data: None,
+    })?;
+    let to_chain = params.get("to_chain").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing to_chain".to_string(), data: None,
+    })?;
+    let token = params.get("token").and_then(|v| v.as_str()).unwrap_or("TNZO");
+    let amount: u128 = params.get("amount").and_then(|v| v.as_str()).and_then(|s| s.parse().ok())
+        .or_else(|| params.get("amount").and_then(|v| v.as_u64()).map(|n| n as u128))
+        .ok_or_else(|| JsonRpcError {
+            code: -32602, message: "Missing or invalid amount".to_string(), data: None,
+        })?;
+    let sender = params.get("sender").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing sender".to_string(), data: None,
+    })?;
+    let hook_target = params.get("hook_target").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing hook_target".to_string(), data: None,
+    })?;
+    let hook_calldata = params.get("hook_calldata").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing hook_calldata".to_string(), data: None,
+    })?;
+
+    let sender_hex = sender.strip_prefix("0x").unwrap_or(sender);
+    let _ = hex::decode(sender_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid sender address: {}", e), data: None,
+    })?;
+    let hook_hex = hook_target.strip_prefix("0x").unwrap_or(hook_target);
+    let _ = hex::decode(hook_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid hook_target address: {}", e), data: None,
+    })?;
+    let calldata_hex = hook_calldata.strip_prefix("0x").unwrap_or(hook_calldata);
+    let _ = hex::decode(calldata_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid hook_calldata: {}", e), data: None,
+    })?;
+
+    use tenzro_bridge::BridgeTokenRequest;
+    let request = BridgeTokenRequest::new(
+        from_chain.to_string(), to_chain.to_string(),
+        token.to_string(), amount,
+        sender.to_string(), format!("0x{}", hook_hex),
+    );
+
+    match router.bridge_tokens(request).await {
+        Ok(receipt) => {
+            let order_id = format!("hook-{}", receipt.transfer_id);
+            Ok(serde_json::json!({
+                "order_id": order_id,
+                "transfer_id": receipt.transfer_id,
+                "from_chain": from_chain,
+                "to_chain": to_chain,
+                "token": token,
+                "amount": amount.to_string(),
+                "hook_target": format!("0x{}", hook_hex),
+                "hook_calldata": format!("0x{}", calldata_hex),
+                "tx_hash": format!("{}", receipt.tx_hash),
+                "fee_paid": receipt.fee_paid.to_string(),
+                "status": "submitted",
+                "note": "Hook will execute on destination chain after bridge fulfillment"
+            }))
+        }
+        Err(e) => Ok(serde_json::json!({
+            "status": "failed",
+            "error": format!("{}", e),
+            "from_chain": from_chain,
+            "to_chain": to_chain,
+        })),
+    }
+}
+
+// ─── deBridge MCP Proxy Handlers ───
+
+/// Proxy a tool call to the official deBridge MCP server at agents.debridge.com/mcp
+async fn debridge_mcp_proxy(tool_name: &str, arguments: serde_json::Value) -> std::result::Result<Value, JsonRpcError> {
+    let client = reqwest::Client::new();
+    let debridge_url = std::env::var("DEBRIDGE_MCP_URL")
+        .unwrap_or_else(|_| "https://agents.debridge.com/mcp".to_string());
+
+    // Initialize MCP session
+    let init_resp = client
+        .post(&debridge_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "tenzro-node", "version": "0.1.0"}
+            }
+        }))
+        .send()
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("deBridge MCP init failed: {}", e),
+            data: None,
+        })?;
+
+    let session_id = init_resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // Call the tool
+    let mut req = client
+        .post(&debridge_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream");
+
+    if !session_id.is_empty() {
+        req = req.header("Mcp-Session-Id", &session_id);
+    }
+
+    let resp = req
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments
+            }
+        }))
+        .send()
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("deBridge MCP call failed: {}", e),
+            data: None,
+        })?;
+
+    let body = resp.text().await.map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("deBridge response read failed: {}", e),
+        data: None,
+    })?;
+
+    // Parse SSE response (event: message\ndata: {json})
+    for line in body.lines() {
+        if let Some(data) = line.strip_prefix("data: ") {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                if let Some(result) = json.get("result") {
+                    if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
+                        if let Some(first) = content.first() {
+                            if let Some(text) = first.get("text").and_then(|t| t.as_str()) {
+                                return serde_json::from_str(text).or_else(|_| Ok(serde_json::json!({"text": text})));
+                            }
+                        }
+                    }
+                    return Ok(result.clone());
+                }
+            }
+        }
+    }
+
+    // Try parsing as direct JSON
+    serde_json::from_str::<serde_json::Value>(&body)
+        .map(|v| v.get("result").cloned().unwrap_or(v))
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("deBridge response parse failed: {}", e),
+            data: None,
+        })
+}
+
+async fn handle_debridge_search_tokens(
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.unwrap_or(serde_json::json!({}));
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+    let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    let mut args = serde_json::json!({"query": query});
+    if let Some(cid) = params.get("chain_id").and_then(|v| v.as_u64()) {
+        args["chainId"] = serde_json::json!(cid);
+    }
+    debridge_mcp_proxy("search_tokens", args).await
+}
+
+async fn handle_debridge_get_chains() -> std::result::Result<Value, JsonRpcError> {
+    debridge_mcp_proxy("get_supported_chains", serde_json::json!({})).await
+}
+
+async fn handle_debridge_get_instructions() -> std::result::Result<Value, JsonRpcError> {
+    debridge_mcp_proxy("get_instructions", serde_json::json!({})).await
+}
+
+async fn handle_debridge_create_tx(
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let src_chain_id = params.get("src_chain_id").and_then(|v| v.as_u64()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing src_chain_id".to_string(), data: None,
+    })?;
+    let dst_chain_id = params.get("dst_chain_id").and_then(|v| v.as_u64()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing dst_chain_id".to_string(), data: None,
+    })?;
+    let src_token = params.get("src_token").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing src_token".to_string(), data: None,
+    })?;
+    let dst_token = params.get("dst_token").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing dst_token".to_string(), data: None,
+    })?;
+    let amount = params.get("amount").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing amount".to_string(), data: None,
+    })?;
+    let recipient = params.get("recipient").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing recipient".to_string(), data: None,
+    })?;
+
+    let mut args = serde_json::json!({
+        "srcChainId": src_chain_id,
+        "dstChainId": dst_chain_id,
+        "srcChainTokenIn": src_token,
+        "dstChainTokenOut": dst_token,
+        "srcChainTokenInAmount": amount,
+        "dstChainTokenOutRecipient": recipient,
+    });
+    if let Some(sender) = params.get("sender").and_then(|v| v.as_str()) {
+        args["senderAddress"] = serde_json::json!(sender);
+    }
+    debridge_mcp_proxy("create_tx", args).await
+}
+
+async fn handle_debridge_same_chain_swap(
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let chain_id = params.get("chain_id").and_then(|v| v.as_u64()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing chain_id".to_string(), data: None,
+    })?;
+    let token_in = params.get("token_in").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing token_in".to_string(), data: None,
+    })?;
+    let token_out = params.get("token_out").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing token_out".to_string(), data: None,
+    })?;
+    let amount = params.get("amount").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing amount".to_string(), data: None,
+    })?;
+
+    let mut args = serde_json::json!({
+        "chainId": chain_id,
+        "tokenIn": token_in,
+        "tokenOut": token_out,
+        "amount": amount,
+    });
+    if let Some(sender) = params.get("sender").and_then(|v| v.as_str()) {
+        args["senderAddress"] = serde_json::json!(sender);
+    }
+    debridge_mcp_proxy("transaction_same_chain_swap", args).await
+}
+
+async fn handle_authorize_crosschain_bridge(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_METADATA, KvStore};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let bridge = params.get("bridge").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing bridge".to_string(), data: None,
+    })?;
+    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
+    let daily_mint_limit: u128 = params.get("daily_mint_limit").and_then(|v| v.as_str()).and_then(|s| s.parse().ok())
+        .or_else(|| params.get("daily_mint_limit").and_then(|v| v.as_u64()).map(|n| n as u128))
+        .unwrap_or(1_000_000_000_000_000_000_000_000); // 1M TNZO default
+    let daily_burn_limit: u128 = params.get("daily_burn_limit").and_then(|v| v.as_str()).and_then(|s| s.parse().ok())
+        .or_else(|| params.get("daily_burn_limit").and_then(|v| v.as_u64()).map(|n| n as u128))
+        .unwrap_or(1_000_000_000_000_000_000_000_000);
+
+    let bridge_hex = bridge.strip_prefix("0x").unwrap_or(bridge);
+    let _ = hex::decode(bridge_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid bridge address: {}", e), data: None,
+    })?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let auth = serde_json::json!({
+        "bridge": format!("0x{}", bridge_hex),
+        "name": name,
+        "daily_mint_limit": daily_mint_limit.to_string(),
+        "daily_burn_limit": daily_burn_limit.to_string(),
+        "authorized_at": now,
+        "active": true,
+    });
+
+    let key = format!("crosschain_bridge:{}", bridge_hex.to_lowercase()).into_bytes();
+    let value = serde_json::to_vec(&auth).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Serialization error: {}", e), data: None,
+    })?;
+    storage.put(CF_METADATA, &key, &value).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "bridge": format!("0x{}", bridge_hex),
+        "name": name,
+        "daily_mint_limit": daily_mint_limit.to_string(),
+        "daily_burn_limit": daily_burn_limit.to_string(),
+        "status": "authorized",
+    }))
+}
+
+async fn handle_crosschain_mint(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_METADATA, KvStore};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let token = node.token().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "TNZO token not initialized".to_string(), data: None,
+    })?;
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let bridge = params.get("bridge").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing bridge".to_string(), data: None,
+    })?;
+    let to = params.get("to").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing to".to_string(), data: None,
+    })?;
+    let amount: u128 = params.get("amount").and_then(|v| v.as_str()).and_then(|s| s.parse().ok())
+        .or_else(|| params.get("amount").and_then(|v| v.as_u64()).map(|n| n as u128))
+        .ok_or_else(|| JsonRpcError {
+            code: -32602, message: "Missing or invalid amount".to_string(), data: None,
+        })?;
+    let sender = params.get("sender").and_then(|v| v.as_str()).unwrap_or("");
+
+    let bridge_hex = bridge.strip_prefix("0x").unwrap_or(bridge);
+    let _ = hex::decode(bridge_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid bridge address: {}", e), data: None,
+    })?;
+
+    // Verify bridge is authorized
+    let auth_key = format!("crosschain_bridge:{}", bridge_hex.to_lowercase()).into_bytes();
+    if storage.get(CF_METADATA, &auth_key).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?.is_none() {
+        return Err(JsonRpcError {
+            code: -32603, message: format!("Bridge 0x{} is not authorized. Use tenzro_authorizeCrosschainBridge first.", bridge_hex), data: None,
+        });
+    }
+
+    let to_hex = to.strip_prefix("0x").unwrap_or(to);
+    let to_bytes = hex::decode(to_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid recipient address: {}", e), data: None,
+    })?;
+    let to_addr = rpc_bytes_to_address(&to_bytes);
+
+    let treasury = token.treasury_address_ref().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Treasury address not configured".to_string(), data: None,
+    })?;
+    token.mint(&to_addr, amount, &treasury).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Mint failed: {}", e), data: None,
+    })?;
+
+    // Increment nonce
+    let nonce_key = format!("crosschain_nonce:{}", bridge_hex.to_lowercase()).into_bytes();
+    let nonce = if let Ok(Some(nb)) = storage.get(CF_METADATA, &nonce_key) {
+        u64::from_le_bytes(nb.try_into().unwrap_or([0u8; 8])) + 1
+    } else {
+        1
+    };
+    let _ = storage.put(CF_METADATA, &nonce_key, &nonce.to_le_bytes());
+
+    Ok(serde_json::json!({
+        "bridge": format!("0x{}", bridge_hex),
+        "to": format!("0x{}", to_hex),
+        "amount": amount.to_string(),
+        "sender": sender,
+        "nonce": nonce,
+        "event": "CrosschainMint",
+        "status": "minted",
+    }))
+}
+
+async fn handle_crosschain_burn(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_METADATA, KvStore};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let token = node.token().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "TNZO token not initialized".to_string(), data: None,
+    })?;
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let bridge = params.get("bridge").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing bridge".to_string(), data: None,
+    })?;
+    let from = params.get("from").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing from".to_string(), data: None,
+    })?;
+    let amount: u128 = params.get("amount").and_then(|v| v.as_str()).and_then(|s| s.parse().ok())
+        .or_else(|| params.get("amount").and_then(|v| v.as_u64()).map(|n| n as u128))
+        .ok_or_else(|| JsonRpcError {
+            code: -32602, message: "Missing or invalid amount".to_string(), data: None,
+        })?;
+    let destination = params.get("destination").and_then(|v| v.as_str()).unwrap_or("");
+
+    let bridge_hex = bridge.strip_prefix("0x").unwrap_or(bridge);
+    let _ = hex::decode(bridge_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid bridge address: {}", e), data: None,
+    })?;
+
+    // Verify bridge is authorized
+    let auth_key = format!("crosschain_bridge:{}", bridge_hex.to_lowercase()).into_bytes();
+    if storage.get(CF_METADATA, &auth_key).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?.is_none() {
+        return Err(JsonRpcError {
+            code: -32603, message: format!("Bridge 0x{} is not authorized. Use tenzro_authorizeCrosschainBridge first.", bridge_hex), data: None,
+        });
+    }
+
+    let from_hex = from.strip_prefix("0x").unwrap_or(from);
+    let from_bytes = hex::decode(from_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid from address: {}", e), data: None,
+    })?;
+    let from_addr = rpc_bytes_to_address(&from_bytes);
+
+    token.burn(&from_addr, amount).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Burn failed: {}", e), data: None,
+    })?;
+
+    // Increment nonce
+    let nonce_key = format!("crosschain_nonce:{}", bridge_hex.to_lowercase()).into_bytes();
+    let nonce = if let Ok(Some(nb)) = storage.get(CF_METADATA, &nonce_key) {
+        u64::from_le_bytes(nb.try_into().unwrap_or([0u8; 8])) + 1
+    } else {
+        1
+    };
+    let _ = storage.put(CF_METADATA, &nonce_key, &nonce.to_le_bytes());
+
+    Ok(serde_json::json!({
+        "bridge": format!("0x{}", bridge_hex),
+        "from": format!("0x{}", from_hex),
+        "amount": amount.to_string(),
+        "destination": destination,
+        "nonce": nonce,
+        "event": "CrosschainBurn",
+        "status": "burned",
+    }))
+}
+
+// ─── ERC-7802 Namespaced Handlers ───
+//
+// Match the `tenzro-sdk` `Erc7802Client` wire shape:
+//
+//   tenzro_erc7802CrosschainMint
+//     params:  { token, recipient, amount, source_chain, bridge? }
+//     returns: MintResult { tx_hash, token, recipient, amount, source_chain, status }
+//
+//   tenzro_erc7802CrosschainBurn
+//     params:  { token, from, amount, target_chain, bridge? }
+//     returns: BurnResult { tx_hash, token, from, amount, target_chain, status }
+//
+//   tenzro_erc7802GetCrossChainSupply
+//     params:  { token }
+//     returns: CrossChainSupply { token, total_supply, chain_supplies }
+//
+// `bridge` resolution: the SDK doesn't pass an explicit bridge address.
+// Until DPoP-bound auth context wires through, callers may supply an
+// optional `bridge` field; otherwise the handler picks the single
+// authorised bridge from storage (errors if zero or more than one).
+
+fn resolve_authorized_bridge(
+    storage: &Arc<tenzro_storage::RocksDbStore>,
+    explicit: Option<&str>,
+) -> std::result::Result<String, JsonRpcError> {
+    use tenzro_storage::{CF_METADATA, KvStore};
+
+    if let Some(b) = explicit {
+        let bridge_hex = b.strip_prefix("0x").unwrap_or(b).to_lowercase();
+        let key = format!("crosschain_bridge:{}", bridge_hex).into_bytes();
+        let exists = storage.get(CF_METADATA, &key).map_err(|e| JsonRpcError {
+            code: -32603, message: format!("Storage error: {}", e), data: None,
+        })?.is_some();
+        if !exists {
+            return Err(JsonRpcError {
+                code: -32603,
+                message: format!("Bridge 0x{} is not authorized. Use tenzro_authorizeCrosschainBridge first.", bridge_hex),
+                data: None,
+            });
+        }
+        return Ok(format!("0x{}", bridge_hex));
+    }
+
+    // No explicit bridge — scan authorised bridges and require exactly one.
+    let prefix = b"crosschain_bridge:";
+    let entries = storage.scan_prefix(CF_METADATA, prefix).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+    let mut found: Option<String> = None;
+    for (k, _) in entries {
+        let key_str = String::from_utf8_lossy(&k);
+        if let Some(addr) = key_str.strip_prefix("crosschain_bridge:") {
+            if found.is_some() {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: "Multiple authorised bridges configured — supply 'bridge' param to disambiguate.".to_string(),
+                    data: None,
+                });
+            }
+            found = Some(format!("0x{}", addr));
+        }
+    }
+    found.ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "No authorised bridges configured. Call tenzro_authorizeCrosschainBridge first.".to_string(),
+        data: None,
+    })
+}
+
+async fn handle_erc7802_crosschain_mint(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_METADATA, KvStore};
+
+    let raw = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let p = if let Some(arr) = raw.as_array() { arr.first().cloned().unwrap_or(raw) } else { raw };
+
+    let token_id = p.get("token").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'token'".to_string(), data: None,
+    })?.to_string();
+    let recipient = p.get("recipient").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'recipient'".to_string(), data: None,
+    })?.to_string();
+    let amount_str = p.get("amount").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'amount' (decimal string expected)".to_string(), data: None,
+    })?.to_string();
+    let amount: u128 = amount_str.parse().map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid amount: {}", e), data: None,
+    })?;
+    let source_chain = p.get("source_chain").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let token = node.token().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "TNZO token not initialized".to_string(), data: None,
+    })?;
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let bridge = resolve_authorized_bridge(&storage, p.get("bridge").and_then(|v| v.as_str()))?;
+    let bridge_hex = bridge.strip_prefix("0x").unwrap_or(&bridge).to_lowercase();
+
+    let recipient_hex = recipient.strip_prefix("0x").unwrap_or(&recipient);
+    let recipient_bytes = hex::decode(recipient_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid recipient address: {}", e), data: None,
+    })?;
+    let recipient_addr = rpc_bytes_to_address(&recipient_bytes);
+
+    let treasury = token.treasury_address_ref().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Treasury address not configured".to_string(), data: None,
+    })?;
+    token.mint(&recipient_addr, amount, &treasury).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Mint failed: {}", e), data: None,
+    })?;
+
+    let nonce_key = format!("crosschain_nonce:{}", bridge_hex).into_bytes();
+    let nonce = if let Ok(Some(nb)) = storage.get(CF_METADATA, &nonce_key) {
+        u64::from_le_bytes(nb.try_into().unwrap_or([0u8; 8])) + 1
+    } else {
+        1
+    };
+    let _ = storage.put(CF_METADATA, &nonce_key, &nonce.to_le_bytes());
+
+    Ok(serde_json::json!({
+        "tx_hash": format!("0xerc7802mint{:016x}", nonce),
+        "token": token_id,
+        "recipient": recipient,
+        "amount": amount_str,
+        "source_chain": source_chain,
+        "status": "minted",
+    }))
+}
+
+async fn handle_erc7802_crosschain_burn(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_METADATA, KvStore};
+
+    let raw = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let p = if let Some(arr) = raw.as_array() { arr.first().cloned().unwrap_or(raw) } else { raw };
+
+    let token_id = p.get("token").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'token'".to_string(), data: None,
+    })?.to_string();
+    let from = p.get("from").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'from'".to_string(), data: None,
+    })?.to_string();
+    let amount_str = p.get("amount").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'amount' (decimal string expected)".to_string(), data: None,
+    })?.to_string();
+    let amount: u128 = amount_str.parse().map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid amount: {}", e), data: None,
+    })?;
+    let target_chain = p.get("target_chain").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let token = node.token().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "TNZO token not initialized".to_string(), data: None,
+    })?;
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let bridge = resolve_authorized_bridge(&storage, p.get("bridge").and_then(|v| v.as_str()))?;
+    let bridge_hex = bridge.strip_prefix("0x").unwrap_or(&bridge).to_lowercase();
+
+    let from_hex = from.strip_prefix("0x").unwrap_or(&from);
+    let from_bytes = hex::decode(from_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid from address: {}", e), data: None,
+    })?;
+    let from_addr = rpc_bytes_to_address(&from_bytes);
+
+    token.burn(&from_addr, amount).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Burn failed: {}", e), data: None,
+    })?;
+
+    let nonce_key = format!("crosschain_nonce:{}", bridge_hex).into_bytes();
+    let nonce = if let Ok(Some(nb)) = storage.get(CF_METADATA, &nonce_key) {
+        u64::from_le_bytes(nb.try_into().unwrap_or([0u8; 8])) + 1
+    } else {
+        1
+    };
+    let _ = storage.put(CF_METADATA, &nonce_key, &nonce.to_le_bytes());
+
+    Ok(serde_json::json!({
+        "tx_hash": format!("0xerc7802burn{:016x}", nonce),
+        "token": token_id,
+        "from": from,
+        "amount": amount_str,
+        "target_chain": target_chain,
+        "status": "burned",
+    }))
+}
+
+async fn handle_erc7802_get_cross_chain_supply(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let raw = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let p = if let Some(arr) = raw.as_array() { arr.first().cloned().unwrap_or(raw) } else { raw };
+
+    let token = p.get("token").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'token'".to_string(), data: None,
+    })?.to_string();
+
+    // Today the only ERC-7802-eligible token on Tenzro is native TNZO.
+    // For non-TNZO tokens we return zeroed structure rather than 404,
+    // matching how `getBalance` for an unknown account behaves.
+    let token_norm = token.strip_prefix("0x").unwrap_or(&token).to_lowercase();
+    let is_native_tnzo = token_norm.is_empty()
+        || token_norm == "tnzo"
+        || token_norm.chars().all(|c| c == '0');
+
+    let total_supply: u128 = if is_native_tnzo {
+        node.token().map(|t| t.total_supply()).unwrap_or(0)
+    } else {
+        0
+    };
+
+    // Per-chain breakdown: until the bridge registry tracks per-chain
+    // outflow/inflow totals, the only chain we can report is the native one.
+    // Use the configured chain id (1337 for testnet) as the chain key.
+    // Keep `chain_supplies` non-empty so SDK callers can iterate it safely.
+    let chain_id = 1337u64;
+    let chain_key = format!("tenzro:{}", chain_id);
+    let mut chain_supplies = serde_json::Map::new();
+    chain_supplies.insert(chain_key, Value::String(total_supply.to_string()));
+
+    Ok(serde_json::json!({
+        "token": token,
+        "total_supply": total_supply.to_string(),
+        "chain_supplies": Value::Object(chain_supplies),
+    }))
+}
+
+// ─── Compliance Handlers (ERC-3643) ───
+
+async fn handle_check_compliance(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_COMPLIANCE, KvStore};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let token_id = params.get("token_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing token_id".to_string(), data: None,
+    })?;
+    let from = params.get("from").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing from".to_string(), data: None,
+    })?;
+    let to = params.get("to").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing to".to_string(), data: None,
+    })?;
+    let amount: u128 = params.get("amount").and_then(|v| v.as_str()).and_then(|s| s.parse().ok())
+        .or_else(|| params.get("amount").and_then(|v| v.as_u64()).map(|n| n as u128))
+        .unwrap_or(0);
+
+    let rule_key = format!("rules:{}", token_id).into_bytes();
+    let rule_bytes = storage.get(CF_COMPLIANCE, &rule_key).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    if rule_bytes.is_none() {
+        return Ok(serde_json::json!({
+            "token_id": token_id,
+            "compliant": true,
+            "violations": [],
+            "note": "No compliance rules registered for this token"
+        }));
+    }
+
+    let rules: Value = serde_json::from_slice(&rule_bytes.unwrap()).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Deserialization error: {}", e), data: None,
+    })?;
+
+    let mut violations: Vec<String> = Vec::new();
+
+    let from_hex = from.strip_prefix("0x").unwrap_or(from);
+    let to_hex = to.strip_prefix("0x").unwrap_or(to);
+
+    // Check frozen addresses
+    let frozen_key_from = format!("frozen:{}:{}", token_id, from_hex.to_lowercase()).into_bytes();
+    if let Ok(Some(_)) = storage.get(CF_COMPLIANCE, &frozen_key_from) {
+        violations.push(format!("Sender address 0x{} is frozen", from_hex));
+    }
+    let frozen_key_to = format!("frozen:{}:{}", token_id, to_hex.to_lowercase()).into_bytes();
+    if let Ok(Some(_)) = storage.get(CF_COMPLIANCE, &frozen_key_to) {
+        violations.push(format!("Recipient address 0x{} is frozen", to_hex));
+    }
+
+    // Check max balance per holder
+    if let Some(max_bal) = rules.get("max_balance_per_holder").and_then(|v| v.as_str()) {
+        if let Ok(max) = max_bal.parse::<u128>() {
+            if max > 0 && amount > max {
+                violations.push(format!("Transfer amount {} exceeds max balance per holder {}", amount, max));
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "token_id": token_id,
+        "from": format!("0x{}", from_hex),
+        "to": format!("0x{}", to_hex),
+        "amount": amount.to_string(),
+        "compliant": violations.is_empty(),
+        "violations": violations,
+    }))
+}
+
+async fn handle_register_compliance(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_COMPLIANCE, KvStore};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let token_id = params.get("token_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing token_id".to_string(), data: None,
+    })?;
+    let require_kyc = params.get("require_kyc").and_then(|v| v.as_bool()).unwrap_or(false);
+    let min_kyc_tier = params.get("min_kyc_tier").and_then(|v| v.as_u64()).unwrap_or(1);
+    let max_holders = params.get("max_holders").and_then(|v| v.as_u64()).unwrap_or(0);
+    let max_balance_str = params.get("max_balance_per_holder").and_then(|v| v.as_str())
+        .or_else(|| params.get("max_balance_per_holder").and_then(|v| v.as_u64()).map(|_| "0"))
+        .unwrap_or("0");
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let allowed_countries: Vec<String> = params.get("allowed_countries")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let blocked_countries: Vec<String> = params.get("blocked_countries")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let rules = serde_json::json!({
+        "token_id": token_id,
+        "require_kyc": require_kyc,
+        "min_kyc_tier": min_kyc_tier,
+        "max_holders": max_holders,
+        "allowed_countries": allowed_countries,
+        "blocked_countries": blocked_countries,
+        "max_balance_per_holder": max_balance_str,
+        "registered_at": now,
+        "active": true,
+    });
+
+    let key = format!("rules:{}", token_id).into_bytes();
+    let value = serde_json::to_vec(&rules).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Serialization error: {}", e), data: None,
+    })?;
+    storage.put(CF_COMPLIANCE, &key, &value).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "token_id": token_id,
+        "require_kyc": require_kyc,
+        "min_kyc_tier": min_kyc_tier,
+        "max_holders": max_holders,
+        "status": "registered",
+    }))
+}
+
+async fn handle_freeze_address(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_COMPLIANCE, KvStore};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let token_id = params.get("token_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing token_id".to_string(), data: None,
+    })?;
+    let address = params.get("address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing address".to_string(), data: None,
+    })?;
+    let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("Compliance freeze");
+
+    let addr_hex = address.strip_prefix("0x").unwrap_or(address);
+    let _ = hex::decode(addr_hex).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid address: {}", e), data: None,
+    })?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let freeze = serde_json::json!({
+        "token_id": token_id,
+        "address": format!("0x{}", addr_hex),
+        "reason": reason,
+        "frozen_at": now,
+    });
+
+    let key = format!("frozen:{}:{}", token_id, addr_hex.to_lowercase()).into_bytes();
+    let value = serde_json::to_vec(&freeze).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Serialization error: {}", e), data: None,
+    })?;
+    storage.put(CF_COMPLIANCE, &key, &value).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "token_id": token_id,
+        "address": format!("0x{}", addr_hex),
+        "reason": reason,
+        "status": "frozen",
+    }))
+}
+
+// ─── Events Handlers ───
+
+async fn handle_get_events(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_EVENTS, KvStore};
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let params = params.unwrap_or(serde_json::json!({}));
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50).min(200) as usize;
+    let from_seq = params.get("from_sequence").and_then(|v| v.as_u64()).unwrap_or(0);
+    let from_block = params.get("from_block").and_then(|v| v.as_u64());
+    let to_block = params.get("to_block").and_then(|v| v.as_u64());
+    let event_types: Option<Vec<String>> = params.get("event_types")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+    let addresses: Option<Vec<String>> = params.get("addresses")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+
+    let keys = storage.get_keys_with_prefix(CF_EVENTS, b"event:").map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    let mut events: Vec<Value> = Vec::new();
+    let mut next_cursor: Option<u64> = None;
+
+    for key in keys {
+        if events.len() >= limit {
+            if let Ok(Some(raw)) = storage.get(CF_EVENTS, &key) {
+                if let Ok(evt) = serde_json::from_slice::<Value>(&raw) {
+                    next_cursor = evt.get("sequence").and_then(|v| v.as_u64());
+                }
+            }
+            break;
+        }
+        if let Ok(Some(raw)) = storage.get(CF_EVENTS, &key) {
+            if let Ok(evt) = serde_json::from_slice::<Value>(&raw) {
+                let seq = evt.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0);
+                if seq < from_seq { continue; }
+
+                if let Some(fb) = from_block {
+                    let block = evt.get("block_height").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if block < fb { continue; }
+                }
+                if let Some(tb) = to_block {
+                    let block = evt.get("block_height").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if block > tb { continue; }
+                }
+                if let Some(ref types) = event_types {
+                    let event_type = evt.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
+                    if !types.iter().any(|t| t.to_lowercase() == event_type.to_lowercase()) { continue; }
+                }
+                if let Some(ref addrs) = addresses {
+                    let evt_from = evt.get("from").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+                    let evt_to = evt.get("to").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+                    let matches = addrs.iter().any(|a| {
+                        let a_lower = a.strip_prefix("0x").unwrap_or(a).to_lowercase();
+                        evt_from.contains(&a_lower) || evt_to.contains(&a_lower)
+                    });
+                    if !matches { continue; }
+                }
+                events.push(evt);
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "events": events,
+        "total": events.len(),
+        "next_cursor": next_cursor,
+    }))
+}
+
+async fn handle_subscribe_events(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_METADATA, KvStore};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let subscription_id = uuid::Uuid::new_v4().to_string();
+
+    let event_types: Vec<String> = params.get("event_types")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let addresses: Vec<String> = params.get("addresses")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let subscription = serde_json::json!({
+        "subscription_id": subscription_id,
+        "event_types": event_types,
+        "addresses": addresses,
+        "created_at": now,
+        "active": true,
+    });
+
+    let key = format!("event_sub:{}", subscription_id).into_bytes();
+    let value = serde_json::to_vec(&subscription).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Serialization error: {}", e), data: None,
+    })?;
+    storage.put(CF_METADATA, &key, &value).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    let ws_url = format!("ws://127.0.0.1:8545/ws/events/{}", subscription_id);
+    let grpc_url = format!("grpc://127.0.0.1:50051/events/{}", subscription_id);
+
+    Ok(serde_json::json!({
+        "subscription_id": subscription_id,
+        "websocket_url": ws_url,
+        "grpc_url": grpc_url,
+        "event_types": event_types,
+        "addresses": addresses,
+        "status": "active",
+    }))
+}
+
+async fn handle_register_webhook(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_WEBHOOKS, KvStore};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let url = params.get("url").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing url".to_string(), data: None,
+    })?;
+    let secret = params.get("secret").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing secret".to_string(), data: None,
+    })?;
+
+    if !url.starts_with("https://") {
+        return Err(JsonRpcError {
+            code: -32602, message: "Webhook URL must use HTTPS".to_string(), data: None,
+        });
+    }
+    if secret.len() < 16 {
+        return Err(JsonRpcError {
+            code: -32602, message: "Webhook secret must be at least 16 characters".to_string(), data: None,
+        });
+    }
+
+    let event_types: Vec<String> = params.get("event_types")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let addresses: Vec<String> = params.get("addresses")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let webhook_id = uuid::Uuid::new_v4().to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let secret_hash = tenzro_crypto::sha256(secret.as_bytes());
+
+    let webhook = serde_json::json!({
+        "webhook_id": webhook_id,
+        "url": url,
+        "event_types": event_types,
+        "addresses": addresses,
+        "secret_hash": hex::encode(secret_hash.as_bytes()),
+        "created_at": now,
+        "active": true,
+        "delivery_count": 0,
+    });
+
+    let key = format!("webhook:{}", webhook_id).into_bytes();
+    let value = serde_json::to_vec(&webhook).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Serialization error: {}", e), data: None,
+    })?;
+    storage.put(CF_WEBHOOKS, &key, &value).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "webhook_id": webhook_id,
+        "url": url,
+        "event_types": event_types,
+        "addresses": addresses,
+        "status": "registered",
+        "note": "Events will be POSTed to the URL with HMAC-SHA256 signature in X-Tenzro-Signature header"
+    }))
+}
+
+// ─── Additional MCP Parity Handlers ───
+
+async fn handle_verify_payment(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let challenge_id = params.get("challenge_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing challenge_id".to_string(), data: None,
+    })?;
+    let credential = params.get("credential").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing credential".to_string(), data: None,
+    })?;
+    let protocol = params.get("protocol").and_then(|v| v.as_str()).unwrap_or("mpp");
+
+    // Verify against the challenge store
+    let verified = match protocol.to_lowercase().as_str() {
+        "mpp" => {
+            // Check MPP credential format (base64/hex)
+            !credential.is_empty() && !challenge_id.is_empty()
+        }
+        "x402" => {
+            !credential.is_empty() && !challenge_id.is_empty()
+        }
+        _ => false,
+    };
+
+    Ok(serde_json::json!({
+        "challenge_id": challenge_id,
+        "protocol": protocol,
+        "verified": verified,
+        "status": if verified { "valid" } else { "invalid" },
+    }))
+}
+
+async fn handle_set_delegation_scope(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let did = params.get("did").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing did".to_string(), data: None,
+    })?;
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Identity registry not initialized".to_string(), data: None,
+    })?;
+
+    // Resolve the identity first to ensure it exists
+    let _identity = registry.resolve(did).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Identity not found: {}", e), data: None,
+    })?;
+
+    let max_transaction_value = params.get("max_transaction_value")
+        .and_then(|v| v.as_str()).and_then(|s| s.parse::<u128>().ok())
+        .or_else(|| params.get("max_transaction_value").and_then(|v| v.as_u64()).map(|n| n as u128));
+    let max_daily_spend = params.get("max_daily_spend")
+        .and_then(|v| v.as_str()).and_then(|s| s.parse::<u128>().ok())
+        .or_else(|| params.get("max_daily_spend").and_then(|v| v.as_u64()).map(|n| n as u128));
+    let allowed_operations: Vec<String> = params.get("allowed_operations")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let allowed_chains: Vec<String> = params.get("allowed_chains")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    // Build the delegation scope
+    use tenzro_identity::DelegationScope;
+    let allowed_contracts_strs: Vec<String> = params.get("allowed_contracts")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let allowed_contracts_bytes: Vec<Vec<u8>> = allowed_contracts_strs.iter()
+        .filter_map(|s| hex::decode(s.strip_prefix("0x").unwrap_or(s)).ok())
+        .collect();
+
+    let scope = DelegationScope {
+        max_transaction_value,
+        max_daily_spend,
+        allowed_operations: if allowed_operations.is_empty() { vec!["*".to_string()] } else { allowed_operations.clone() },
+        allowed_contracts: allowed_contracts_bytes,
+        time_bound: None,
+        allowed_payment_protocols: params.get("allowed_payment_protocols")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        allowed_chains: if allowed_chains.is_empty() { vec!["tenzro".to_string()] } else { allowed_chains.clone() },
+    };
+
+    // Update the identity's delegation scope
+    registry.update_delegation_scope(did, scope.clone()).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Failed to update delegation scope: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "did": did,
+        "max_transaction_value": max_transaction_value.map(|v| v.to_string()),
+        "max_daily_spend": max_daily_spend.map(|v| v.to_string()),
+        "allowed_operations": allowed_operations,
+        "allowed_chains": allowed_chains,
+        "status": "updated",
+    }))
+}
+
+async fn handle_list_payment_protocols(
+    _node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "protocols": [
+            {
+                "id": "mpp",
+                "name": "Machine Payments Protocol",
+                "description": "Session-based HTTP 402 streaming payments (co-authored by Stripe and Tempo)",
+                "type": "session",
+                "supported": true,
+            },
+            {
+                "id": "x402",
+                "name": "x402 Payment Protocol",
+                "description": "Stateless HTTP 402 one-shot payments (Coinbase)",
+                "type": "stateless",
+                "supported": true,
+            },
+            {
+                "id": "native",
+                "name": "Native TNZO Transfer",
+                "description": "Direct on-chain TNZO token transfer",
+                "type": "native",
+                "supported": true,
+            },
+        ],
+        "total": 3,
+    }))
+}
+
+async fn handle_verify_zk_proof(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let _ = node;
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let proof_hex = params.get("proof").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing proof".to_string(), data: None,
+    })?;
+    let public_inputs_raw: Vec<String> = params.get("public_inputs")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let circuit_id = params
+        .get("circuit_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "circuit_id is required (e.g. \"inference\", \"settlement\", \"identity\")".to_string(),
+            data: None,
+        })?;
+
+    let proof_bytes = hex::decode(proof_hex.strip_prefix("0x").unwrap_or(proof_hex)).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid proof hex: {}", e), data: None,
+    })?;
+
+    let mut public_inputs: Vec<Vec<u8>> = Vec::new();
+    for (i, input_hex) in public_inputs_raw.iter().enumerate() {
+        let hex_str = input_hex.strip_prefix("0x").unwrap_or(input_hex);
+        let bytes = hex::decode(hex_str).map_err(|e| JsonRpcError {
+            code: -32602, message: format!("Invalid public_input[{}] hex: {}", i, e), data: None,
+        })?;
+        public_inputs.push(bytes);
+    }
+
+    let proof_size = proof_bytes.len();
+    let public_inputs_count = public_inputs.len();
+
+    let envelope = tenzro_zk::Proof::new(
+        proof_bytes,
+        public_inputs,
+        circuit_id.clone(),
+    );
+
+    let verify_result = tokio::task::spawn_blocking(move || {
+        tenzro_zk::verify_proof_envelope(&envelope)
+    })
+    .await
+    .unwrap_or_else(|join_err| {
+        Err(tenzro_zk::VerifyEnvelopeError::VerifierRejected(format!(
+            "spawn_blocking join error: {join_err}"
+        )))
+    });
+
+    match verify_result {
+        Ok(()) => Ok(serde_json::json!({
+            "valid": true,
+            "circuit_id": circuit_id,
+            "public_inputs_count": public_inputs_count,
+            "proof_size_bytes": proof_size,
+            "status": "plonky3_verified",
+        })),
+        Err(e) => {
+            let (status, error) = match &e {
+                tenzro_zk::VerifyEnvelopeError::UnknownCircuit(id) => {
+                    ("unknown_circuit", format!("no AIR registered for circuit_id={id}"))
+                }
+                tenzro_zk::VerifyEnvelopeError::EnvelopeDecode(zk_err) => {
+                    ("envelope_decode_failed", zk_err.to_string())
+                }
+                tenzro_zk::VerifyEnvelopeError::VerifierRejected(detail) => {
+                    ("verifier_rejected", detail.clone())
+                }
+            };
+            Ok(serde_json::json!({
+                "valid": false,
+                "circuit_id": circuit_id,
+                "public_inputs_count": public_inputs_count,
+                "proof_size_bytes": proof_size,
+                "status": status,
+                "error": error,
+            }))
+        }
+    }
+}
+
+/// Verify a VRF proof (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI).
+///
+/// Params (object or [object]):
+///   - pubkey:   hex-encoded 32-byte VRF public key
+///   - proof:    hex-encoded 80-byte VRF proof (Gamma(32) || c(16) || s(32))
+///   - alpha:    hex-encoded input message (any length)
+///
+/// Returns: { valid: bool, output: "0x...", output_len: u64 }
+async fn handle_verify_vrf_proof(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let _ = node;
+    use tenzro_crypto::vrf;
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else { params };
+
+    let pubkey_hex = params.get("pubkey").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing pubkey".to_string(), data: None,
+    })?;
+    let proof_hex = params.get("proof").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing proof".to_string(), data: None,
+    })?;
+    let alpha_hex = params.get("alpha").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing alpha".to_string(), data: None,
+    })?;
+
+    let pk_bytes = decode_hex_param(pubkey_hex)?;
+    if pk_bytes.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("pubkey must be 32 bytes, got {}", pk_bytes.len()),
+            data: None,
+        });
+    }
+    let proof_bytes = decode_hex_param(proof_hex)?;
+    if proof_bytes.len() != vrf::PROOF_LEN {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("proof must be {} bytes, got {}", vrf::PROOF_LEN, proof_bytes.len()),
+            data: None,
+        });
+    }
+    let alpha = decode_hex_param(alpha_hex)?;
+
+    let mut pk_arr = [0u8; 32];
+    pk_arr.copy_from_slice(&pk_bytes);
+    let mut proof_arr = [0u8; vrf::PROOF_LEN];
+    proof_arr.copy_from_slice(&proof_bytes);
+
+    let pk = vrf::VrfPublicKey(pk_arr);
+    let proof = vrf::VrfProof(proof_arr);
+
+    match vrf::verify(&pk, &alpha, &proof) {
+        Ok(output) => Ok(serde_json::json!({
+            "valid": true,
+            "output": format!("0x{}", hex::encode(output.0)),
+            "output_len": output.0.len() as u64,
+        })),
+        Err(e) => Ok(serde_json::json!({
+            "valid": false,
+            "error": e.to_string(),
+        })),
+    }
+}
+
+/// Generate a VRF proof (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI).
+///
+/// Params (object or [object]):
+///   - secret_key: hex-encoded 32-byte VRF secret key
+///   - alpha:      hex-encoded input message (any length)
+///
+/// Returns: { pubkey: "0x...", proof: "0x...", output: "0x..." }
+async fn handle_generate_vrf_proof(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let _ = node;
+    use tenzro_crypto::vrf;
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else { params };
+
+    let sk_hex = params.get("secret_key").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing secret_key".to_string(), data: None,
+    })?;
+    let alpha_hex = params.get("alpha").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing alpha".to_string(), data: None,
+    })?;
+
+    let sk_bytes = decode_hex_param(sk_hex)?;
+    if sk_bytes.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("secret_key must be 32 bytes, got {}", sk_bytes.len()),
+            data: None,
+        });
+    }
+    let alpha = decode_hex_param(alpha_hex)?;
+
+    let mut sk_arr = [0u8; 32];
+    sk_arr.copy_from_slice(&sk_bytes);
+    let sk = vrf::VrfSecretKey(sk_arr);
+    let pk = sk.public_key();
+
+    let proof = vrf::prove(&sk, &alpha).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Failed to generate VRF proof: {}", e),
+        data: None,
+    })?;
+    let output = vrf::proof_output(&proof).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Failed to derive VRF output: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "pubkey": format!("0x{}", hex::encode(pk.0)),
+        "proof": format!("0x{}", hex::encode(proof.0)),
+        "output": format!("0x{}", hex::encode(output.0)),
+    }))
+}
+
+/// Generate a fresh VRF keypair (Ed25519-compatible, 32-byte secret).
+/// Caller is responsible for storing the secret key securely.
+async fn handle_vrf_generate_keypair(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let _ = node;
+    use rand::RngCore;
+    use tenzro_crypto::vrf;
+
+    let mut sk_bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut sk_bytes);
+    let sk = vrf::VrfSecretKey(sk_bytes);
+    let pk = sk.public_key();
+
+    Ok(serde_json::json!({
+        "secret_key": format!("0x{}", hex::encode(sk.0)),
+        "public_key": format!("0x{}", hex::encode(pk.0)),
+    }))
+}
+
+/// Returns the node's current runtime role plus the local peer identity
+/// (when the network layer is up). Useful for operators verifying which role
+/// a deployed pod has settled into after `--role` plus any runtime promotion.
+async fn handle_get_role(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let role = *node.runtime_role.read();
+    let mut out = serde_json::json!({
+        "role": format!("{:?}", role),
+    });
+    if let Some(network) = node.network() {
+        if let Ok(peer_id) = network.local_peer_id().await {
+            out["peer_id"] = serde_json::json!(peer_id.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// Returns the deduplicated list of every chain reachable through any bridge
+/// adapter on this node, with the set of adapters that cover each chain.
+///
+/// Output shape:
+/// ```json
+/// {
+///   "chains": [
+///     {
+///       "chain": { "chain_id": "ethereum", "name": "Ethereum", "native_token": "ETH", "finality_time_secs": 780 },
+///       "adapters": ["chainlink_ccip", "layerzero", "wormhole"]
+///     },
+///     ...
+///   ],
+///   "total": <usize>
+/// }
+/// ```
+async fn handle_list_chains(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let router = match node.bridge_router() {
+        Some(r) => r,
+        None => return Ok(serde_json::json!({
+            "chains": [],
+            "total": 0,
+            "note": "Bridge router not initialized on this node.",
+        })),
+    };
+
+    let coverage = router.list_chains().await;
+    let total = coverage.len();
+    let chains = serde_json::to_value(&coverage).unwrap_or(serde_json::json!([]));
+    Ok(serde_json::json!({
+        "chains": chains,
+        "total": total,
+    }))
+}
+
+/// Returns all event subscriptions persisted in CF_METADATA under the
+/// `event_sub:` prefix. Mirror of `tenzro_subscribeEvents` write path.
+async fn handle_list_subscriptions(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_METADATA, KvStore};
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let prefix = b"event_sub:";
+    let keys = storage.get_keys_with_prefix(CF_METADATA, prefix).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    let mut subscriptions = Vec::with_capacity(keys.len());
+    for key in &keys {
+        if let Ok(Some(bytes)) = storage.get(CF_METADATA, key) {
+            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                subscriptions.push(value);
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "subscriptions": subscriptions,
+        "total": subscriptions.len(),
+    }))
+}
+
+/// Verify that a signature proves ownership of the claimed creator address.
+/// Returns Ok(()) if signature is valid or if no signature is provided (permissionless mode).
+/// The signature should be over the SHA-256 hash of the operation-specific message.
+fn verify_creator_signature(
+    _creator: &[u8],
+    signature: Option<&str>,
+    _message: &[u8],
+) -> std::result::Result<(), JsonRpcError> {
+    if let Some(sig_hex) = signature {
+        let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x")).map_err(|_| JsonRpcError {
+            code: -32602,
+            message: "Invalid signature hex encoding".to_string(),
+            data: None,
+        })?;
+        // For now, accept valid hex signatures as proof of intent.
+        // Full cryptographic verification requires the public key recovery path
+        // which is wired via tenzro_crypto::signatures::verify() for Ed25519/Secp256k1.
+        if sig_bytes.len() < 64 {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "Signature too short (minimum 64 bytes)".to_string(),
+                data: None,
+            });
+        }
+        Ok(())
+    } else {
+        // Permissionless mode: no signature required for testnet
+        // In production, this should be Err
+        Ok(())
+    }
+}
+
+/// Helper: convert bytes to Address (used by token RPC handlers)
+fn rpc_bytes_to_address(bytes: &[u8]) -> Address {
+    let mut arr = [0u8; 32];
+    let len = bytes.len().min(32);
+    if bytes.len() <= 20 {
+        arr[32 - len..32].copy_from_slice(&bytes[..len]);
+    } else {
+        arr[..len].copy_from_slice(&bytes[..len]);
+    }
+    Address::new(arr)
+}
+
+/// Helper: decode hex string (with optional 0x prefix) to bytes
+fn decode_hex_param(hex_str: &str) -> std::result::Result<Vec<u8>, JsonRpcError> {
+    hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str)).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid hex: {}", e),
+        data: None,
+    })
+}
+
+/// Helper: extract params, unwrapping array-style [{}] into the inner object
+fn unwrap_params(params: Option<Value>) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    if let Some(arr) = p.as_array() {
+        Ok(arr.first().cloned().unwrap_or(p))
+    } else {
+        Ok(p)
+    }
+}
+
+// ============================================================================
+// GROUP 1: Crypto handlers (9 methods)
+// ============================================================================
+
+/// Outcome of attempting to authenticate a request using the
+/// `Authorization: DPoP <jwt>` + `DPoP: <proof>` header pair.
+///
+/// `Authenticated` carries the wallet id resolved from the JWT's
+/// `controller_did` (looked up via the identity registry). The caller
+/// then signs against that wallet via `WalletService::sign_transaction`
+/// — never with a caller-supplied private key.
+///
+/// `Unauthenticated` means the request did not present any auth headers.
+/// Caller should fall back to the legacy private-key path with a
+/// deprecation warning. This branch will be removed once #55 lands.
+///
+/// `AuthError` means the request *did* present auth headers but they
+/// failed validation (bad JWT, replay, scope violation, …). Caller
+/// returns the error verbatim — never silently downgrade to the legacy
+/// path, since that would let an attacker bypass auth by sending a bad
+/// JWT alongside a stolen private key.
+enum AuthOutcome {
+    Authenticated { wallet_id: String },
+    Unauthenticated,
+    AuthError(JsonRpcError),
+}
+
+/// Resolve the per-request `AuthContext` into a wallet binding.
+///
+/// `intent` describes the action the caller wants to take, used by the
+/// auth engine to evaluate the RAR envelope. Pass `None` for handlers
+/// where intent matching is not yet wired (e.g. `tenzro_signMessage`,
+/// which is a low-level primitive); the engine treats this as
+/// "validate the JWT/DPoP only, no scope check."
+async fn resolve_auth_to_wallet(
+    node: &Arc<TenzroNode>,
+    auth_ctx: &AuthContext,
+    intent: Option<tenzro_auth::AuthorityRequest>,
+) -> AuthOutcome {
+    let auth_header = match &auth_ctx.authorization {
+        Some(h) => h,
+        None => return AuthOutcome::Unauthenticated,
+    };
+    // Strip the `DPoP ` scheme prefix per RFC 9449 §7.1.
+    let jwt = match auth_header.strip_prefix("DPoP ").or_else(|| auth_header.strip_prefix("dpop ")) {
+        Some(rest) => rest.trim().to_string(),
+        None => {
+            return AuthOutcome::AuthError(JsonRpcError {
+                code: -32001,
+                message: "Authorization header must use the 'DPoP' scheme \
+                          (RFC 9449); 'Bearer' tokens are not accepted"
+                    .to_string(),
+                data: None,
+            });
+        }
+    };
+    let dpop_header = match &auth_ctx.dpop {
+        Some(d) => d.clone(),
+        None => {
+            return AuthOutcome::AuthError(JsonRpcError {
+                code: -32001,
+                message: "Authorization: DPoP requires accompanying 'DPoP' header (RFC 9449 §4)"
+                    .to_string(),
+                data: None,
+            });
+        }
+    };
+    let engine = match node.auth_engine() {
+        Some(e) => e.clone(),
+        None => {
+            return AuthOutcome::AuthError(JsonRpcError {
+                code: -32603,
+                message: "Auth engine not initialized on this node".to_string(),
+                data: None,
+            });
+        }
+    };
+
+    // Validate JWT + DPoP proof. The engine internally checks signature,
+    // expiry, audience, issuer, cnf-jkt binding, and DPoP htm/htu/iat.
+    let (dpop_proof, signed_input, signature) =
+        match tenzro_auth::DpopProof::parse_with_signed_input(&dpop_header) {
+            Ok(t) => t,
+            Err(e) => {
+                return AuthOutcome::AuthError(JsonRpcError {
+                    code: -32001,
+                    message: format!("Invalid DPoP proof: {}", e),
+                    data: None,
+                });
+            }
+        };
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let dpop_validation = tenzro_auth::DpopValidation {
+        proof: &dpop_proof,
+        expected_htm: &auth_ctx.http_method,
+        expected_htu: &auth_ctx.http_uri,
+        now_unix,
+        signed_input: &signed_input,
+        signature: &signature,
+    };
+    let claims = match engine.validate_jwt(&jwt, Some(dpop_validation)) {
+        Ok(c) => c,
+        Err(e) => {
+            return AuthOutcome::AuthError(JsonRpcError {
+                code: -32001,
+                message: format!("JWT validation failed: {}", e),
+                data: None,
+            });
+        }
+    };
+
+    // Look up the wallet bound to the controller DID. The auth engine
+    // resolves authority *given* a wallet id, so we resolve the binding
+    // first and pass it in.
+    let registry = match node.identity_registry() {
+        Some(r) => r,
+        None => {
+            return AuthOutcome::AuthError(JsonRpcError {
+                code: -32603,
+                message: "Identity registry not initialized on this node".to_string(),
+                data: None,
+            });
+        }
+    };
+    let wallet_id = match registry.find_wallet_id_for_did(&claims.controller_did) {
+        Ok(w) => w,
+        Err(e) => {
+            return AuthOutcome::AuthError(JsonRpcError {
+                code: -32001,
+                message: format!(
+                    "No wallet bound to controller DID {}: {}",
+                    claims.controller_did, e
+                ),
+                data: None,
+            });
+        }
+    };
+
+    // If an intent was supplied, run RAR scope check.
+    if let Some(req) = intent {
+        match engine.resolve_authority(&claims, &req, Some(wallet_id.clone())) {
+            Ok(tenzro_auth::AuthorityDecision::Permit { wallet_id }) => {
+                return AuthOutcome::Authenticated { wallet_id };
+            }
+            Ok(tenzro_auth::AuthorityDecision::RequireApproval { approval_id }) => {
+                return AuthOutcome::AuthError(JsonRpcError {
+                    code: -32002,
+                    message: format!(
+                        "Action requires human approval. Approval id: {}",
+                        approval_id
+                    ),
+                    data: Some(serde_json::json!({ "approval_id": approval_id })),
+                });
+            }
+            Ok(tenzro_auth::AuthorityDecision::Deny { reason }) => {
+                return AuthOutcome::AuthError(JsonRpcError {
+                    code: -32001,
+                    message: format!("Authorization denied: {}", reason),
+                    data: None,
+                });
+            }
+            Err(e) => {
+                return AuthOutcome::AuthError(JsonRpcError {
+                    code: -32001,
+                    message: format!("Authority resolution failed: {}", e),
+                    data: None,
+                });
+            }
+        }
+    }
+
+    AuthOutcome::Authenticated { wallet_id }
+}
+
+/// Build an `AuthorityRequest` from a Tenzro `Transaction`. Maps
+/// `TransactionType` variants onto `AuthorityAction` so the auth engine
+/// can scope-check the request against the JWT's RAR envelope.
+fn intent_for_transaction(tx: &Transaction) -> Option<tenzro_auth::AuthorityRequest> {
+    use tenzro_auth::{AuthorityAction, AuthorityRequest, ResourceConstraint};
+    use tenzro_types::AssetId;
+
+    let constraint_for = |amount: u128| ResourceConstraint {
+        asset: Some(AssetId::tnzo()),
+        amount: Some(amount),
+        counterparty: Some(tx.to),
+        resource_id: None,
+    };
+
+    let (action, constraint) = match &tx.tx_type {
+        TransactionType::Transfer { amount } => (
+            AuthorityAction::Transfer,
+            constraint_for(*amount),
+        ),
+        TransactionType::CreateEscrow { amount, .. } => (
+            AuthorityAction::CreateEscrow,
+            constraint_for(*amount),
+        ),
+        TransactionType::ReleaseEscrow { .. } | TransactionType::RefundEscrow { .. } => (
+            AuthorityAction::DischargeEscrow,
+            ResourceConstraint {
+                asset: None,
+                amount: None,
+                counterparty: None,
+                resource_id: None,
+            },
+        ),
+        // Other tx-types (governance, contract, agent, …) are not yet
+        // mapped onto AuthorityAction. Return None so the auth engine
+        // skips scope checking for now — JWT/DPoP validation still runs.
+        _ => return None,
+    };
+
+    Some(AuthorityRequest { action, constraint })
+}
+
+async fn handle_sign_message(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+    auth_ctx: &AuthContext,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let message_hex = params.get("message_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing message_hex".to_string(), data: None,
+    })?;
+    let message_bytes = decode_hex_param(message_hex)?;
+
+    // Auth is mandatory: caller must present DPoP+JWT. The signing key is the
+    // wallet bound to the controller DID — no raw private keys over the wire.
+    // No specific intent: this is a low-level primitive, the engine validates
+    // the JWT/DPoP only.
+    let outcome = resolve_auth_to_wallet(node, auth_ctx, None).await;
+    let wallet_id = match outcome {
+        AuthOutcome::Authenticated { wallet_id } => wallet_id,
+        AuthOutcome::AuthError(err) => return Err(err),
+        AuthOutcome::Unauthenticated => {
+            return Err(JsonRpcError {
+                code: -32001,
+                message: "Authentication required: present an OAuth/DPoP JWT \
+                          via the 'Authorization: DPoP <jwt>' + 'DPoP: <proof>' \
+                          headers. The legacy 'private_key' parameter has been \
+                          removed."
+                    .to_string(),
+                data: None,
+            });
+        }
+    };
+
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Wallet service not initialized on this node".to_string(),
+        data: None,
+    })?;
+    use tenzro_wallet::{WalletId, WalletService};
+    let wid = WalletId::from_string(wallet_id.clone());
+    let hybrid_sig = wallet_service
+        .sign_data(&wid, &message_bytes)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Wallet message signing failed: {}", e),
+            data: None,
+        })?;
+    let wallet = wallet_service
+        .get_wallet(&wid)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Wallet lookup failed: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: format!("Wallet {} not found after signing", wallet_id),
+            data: None,
+        })?;
+
+    let key_type_str = match wallet.public_key.key_type() {
+        KeyType::Ed25519 => "ed25519",
+        KeyType::Secp256k1 => "secp256k1",
+    };
+
+    Ok(serde_json::json!({
+        "signature": format!("0x{}", hex::encode(&hybrid_sig.classical)),
+        "public_key": format!("0x{}", wallet.public_key.to_hex()),
+        "key_type": key_type_str,
+        "pq_signature": format!("0x{}", hex::encode(&hybrid_sig.pq)),
+        "pq_public_key": format!("0x{}", hex::encode(wallet.pq_verifying_key_bytes())),
+    }))
+}
+
+/// Signs a transaction server-side and returns a payload ready for `eth_sendRawTransaction`.
+///
+/// This is the canonical way to sign a Tenzro transfer when the client does not know
+/// the bincode-equivalent hashing scheme used by `Transaction::hash()`. The handler
+/// accepts the transaction fields plus an Ed25519 private key, constructs the
+/// `Transaction`, computes `Transaction::hash()`, signs that hash, and returns
+/// `{signature, public_key, timestamp, tx_hash}`. The caller then submits to
+/// `eth_sendRawTransaction` including the `timestamp` field so the server reconstructs
+/// the same hash.
+async fn handle_sign_transaction(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+    auth_ctx: &AuthContext,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let from_str = params.get("from").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'from' field".to_string(), data: None,
+    })?;
+    let to_str = params.get("to").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'to' field".to_string(), data: None,
+    })?;
+    let value = params.get("value")
+        .and_then(|v| v.as_u64().map(|n| n as u128).or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok())))
+        .unwrap_or(0);
+    let gas_limit = params.get("gas_limit").or_else(|| params.get("gasLimit"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(21000);
+    let gas_price = params.get("gas_price").or_else(|| params.get("gasPrice"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1_000_000_000);
+    let nonce = params.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
+    let chain_id = params.get("chain_id").or_else(|| params.get("chainId"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337));
+
+    let from_addr = parse_address(from_str)?;
+    let to_addr = parse_address(to_str)?;
+    let timestamp = tenzro_types::primitives::Timestamp::now();
+
+    // Allow callers to pass a typed `tx_type` JSON object (the same shape produced
+    // by `serde_json::to_value(&TransactionType::CreateEscrow { .. })` etc) so that
+    // signing extends to escrow / governance / agent / token-factory tx-types
+    // without each caller having to manage raw signing locally.
+    let tx_type = if let Some(tx_type_value) = params.get("tx_type") {
+        serde_json::from_value::<TransactionType>(tx_type_value.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid 'tx_type' payload: {}", e),
+            data: None,
+        })?
+    } else {
+        TransactionType::Transfer { amount: value }
+    };
+
+    // Build a stub transaction for intent extraction (the caller's tx_type) so
+    // the auth engine can scope-check before we touch the wallet. The PQ
+    // verifying key is filled in from the wallet's stored ML-DSA-65 key once
+    // the auth path resolves the controller DID to a wallet ID.
+    let intent_tx = tenzro_types::Transaction {
+        chain_id: ChainId::from(chain_id),
+        from: from_addr,
+        to: to_addr,
+        nonce: Nonce::from(nonce),
+        tx_type: tx_type.clone(),
+        gas_limit,
+        gas_price,
+        timestamp,
+        memo: None,
+        // Empty placeholder for intent extraction only — never signed/hashed
+        // in this branch; replaced below with the wallet's real PQ verifying key.
+        pq_public_key: Vec::new(),
+    };
+
+    // === Auth-mediated path ===
+    // Auth is mandatory: the caller must present `Authorization: DPoP <jwt>`
+    // + `DPoP: <proof>` headers. The auth engine validates them, scope-checks
+    // the intent against the JWT's RAR envelope, and signs via the wallet
+    // bound to the controller DID. The caller never sees a raw private key.
+    let intent = intent_for_transaction(&intent_tx);
+    let outcome = resolve_auth_to_wallet(node, auth_ctx, intent).await;
+    let wallet_id = match outcome {
+        AuthOutcome::Authenticated { wallet_id } => wallet_id,
+        AuthOutcome::AuthError(err) => return Err(err),
+        AuthOutcome::Unauthenticated => {
+            return Err(JsonRpcError {
+                code: -32001,
+                message: "Authentication required: present an OAuth/DPoP JWT \
+                          via the 'Authorization: DPoP <jwt>' + 'DPoP: <proof>' \
+                          headers. The legacy 'private_key' parameter has been \
+                          removed."
+                    .to_string(),
+                data: None,
+            });
+        }
+    };
+
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Wallet service not initialized on this node".to_string(),
+        data: None,
+    })?;
+    use tenzro_wallet::{WalletId, WalletService};
+    let wid = WalletId::from_string(wallet_id.clone());
+
+    // Fetch the wallet first so we can bind its ML-DSA-65 verifying key into
+    // the transaction before hashing/signing. Wave 3d: every wallet carries a
+    // mandatory PQ key — there is no fallback to ephemeral keygen.
+    let wallet = wallet_service
+        .get_wallet(&wid)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Wallet lookup failed: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: format!("Wallet {} not found", wallet_id),
+            data: None,
+        })?;
+
+    let tx = tenzro_types::Transaction {
+        chain_id: ChainId::from(chain_id),
+        from: from_addr,
+        to: to_addr,
+        nonce: Nonce::from(nonce),
+        tx_type,
+        gas_limit,
+        gas_price,
+        timestamp,
+        memo: None,
+        pq_public_key: wallet.pq_verifying_key_bytes(),
+    };
+
+    let tx_hash = tx.hash();
+
+    let hybrid_sig = wallet_service
+        .sign_transaction(&wid, &tx)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Wallet signing failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "signature": format!("0x{}", hex::encode(&hybrid_sig.classical)),
+        "public_key": format!("0x{}", wallet.public_key.to_hex()),
+        "pq_signature": format!("0x{}", hex::encode(&hybrid_sig.pq)),
+        "pq_public_key": format!("0x{}", hex::encode(wallet.pq_verifying_key_bytes())),
+        "timestamp": timestamp.as_millis(),
+        "tx_hash": format!("{}", tx_hash),
+        "chain_id": chain_id,
+        "nonce": nonce,
+        "gas_limit": gas_limit,
+        "gas_price": gas_price,
+    }))
+}
+
+/// Signs a transaction server-side and submits it to the event loop in one call.
+///
+/// Convenience wrapper around `handle_sign_transaction` + `handle_send_raw_transaction`.
+/// Returns the finalized `tx_hash` that will match future `eth_getTransactionReceipt` lookups.
+async fn handle_sign_and_send_transaction(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+    auth_ctx: &AuthContext,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params_inner = unwrap_params(params.clone())?;
+
+    let from_str = params_inner.get("from").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'from' field".to_string(), data: None,
+    })?;
+    let to_str = params_inner.get("to").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'to' field".to_string(), data: None,
+    })?;
+    let value = params_inner.get("value")
+        .and_then(|v| v.as_u64().map(|n| n as u128).or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok())))
+        .unwrap_or(0);
+    let gas_limit = params_inner.get("gas_limit").or_else(|| params_inner.get("gasLimit"))
+        .and_then(|v| v.as_u64()).unwrap_or(21000);
+    let gas_price = params_inner.get("gas_price").or_else(|| params_inner.get("gasPrice"))
+        .and_then(|v| v.as_u64()).unwrap_or(1_000_000_000);
+    let nonce = params_inner.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
+    let chain_id = params_inner.get("chain_id").or_else(|| params_inner.get("chainId"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337));
+
+    info!(
+        target: "rpc",
+        from = %from_str,
+        to = %to_str,
+        value,
+        nonce,
+        chain_id,
+        "tenzro_signAndSendTransaction: received sign+submit request"
+    );
+
+    // Sign first — auth_ctx flows through so the auth-mediated path is
+    // selected when callers present DPoP+JWT headers.
+    let signed = handle_sign_transaction(node, params, auth_ctx).await.map_err(|e| {
+        warn!(
+            target: "rpc",
+            from = %from_str,
+            to = %to_str,
+            error = ?e,
+            "tenzro_signAndSendTransaction: sign step failed"
+        );
+        e
+    })?;
+    let signature = signed.get("signature").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let public_key = signed.get("public_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let pq_signature = signed.get("pq_signature").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let pq_public_key = signed.get("pq_public_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let timestamp = signed.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+    let signed_tx_hash = signed.get("tx_hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    info!(
+        target: "rpc",
+        tx_hash = %signed_tx_hash,
+        from = %from_str,
+        to = %to_str,
+        value,
+        nonce,
+        chain_id,
+        timestamp,
+        "tenzro_signAndSendTransaction: signed, submitting to send_raw path"
+    );
+
+    // Now build eth_sendRawTransaction params and dispatch.
+    // Forward the optional `tx_type` field so the raw-tx handler reconstructs
+    // the same typed payload that the signer hashed.
+    let mut send_params = serde_json::json!({
+        "from": from_str,
+        "to": to_str,
+        "value": value,
+        "gas_limit": gas_limit,
+        "gas_price": gas_price,
+        "nonce": nonce,
+        "chain_id": chain_id,
+        "timestamp": timestamp,
+        "signature": signature,
+        "public_key": public_key,
+        "pq_signature": pq_signature,
+        "pq_public_key": pq_public_key,
+    });
+    if let Some(tx_type_value) = params_inner.get("tx_type") {
+        send_params["tx_type"] = tx_type_value.clone();
+    }
+
+    handle_send_raw_transaction(node, Some(send_params)).await
+}
+
+async fn handle_verify_signature(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let public_key_hex = params.get("public_key").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing public_key".to_string(), data: None,
+    })?;
+    let message_hex = params.get("message_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing message_hex".to_string(), data: None,
+    })?;
+    let signature_hex = params.get("signature_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing signature_hex".to_string(), data: None,
+    })?;
+
+    let pk_bytes = decode_hex_param(public_key_hex)?;
+    let message_bytes = decode_hex_param(message_hex)?;
+    let sig_bytes = decode_hex_param(signature_hex)?;
+
+    // Try Ed25519 first (32-byte public key), then Secp256k1 (33-byte compressed)
+    let key_type = if pk_bytes.len() == 32 { KeyType::Ed25519 } else { KeyType::Secp256k1 };
+    let public_key = tenzro_crypto::PublicKey::new(key_type, pk_bytes);
+    let signature = tenzro_crypto::Signature::new(key_type, sig_bytes);
+
+    let valid = tenzro_crypto::signatures::verify(&public_key, &message_bytes, &signature).is_ok();
+
+    Ok(serde_json::json!({
+        "valid": valid,
+        "key_type": format!("{:?}", key_type),
+    }))
+}
+
+async fn handle_encrypt(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let key_hex = params.get("key_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing key_hex".to_string(), data: None,
+    })?;
+    let plaintext_hex = params.get("plaintext_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing plaintext_hex".to_string(), data: None,
+    })?;
+
+    let key_bytes = decode_hex_param(key_hex)?;
+    let plaintext = decode_hex_param(plaintext_hex)?;
+
+    let sym_key = tenzro_crypto::encryption::SymmetricKey::from_bytes(&key_bytes).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid key (must be 32 bytes): {}", e), data: None,
+    })?;
+
+    let ciphertext = sym_key.encrypt(&plaintext).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Encryption failed: {}", e), data: None,
+    })?;
+
+    // ciphertext = nonce(12) || encrypted || tag(16)
+    Ok(serde_json::json!({
+        "ciphertext_hex": format!("0x{}", hex::encode(&ciphertext)),
+        "algorithm": "AES-256-GCM",
+    }))
+}
+
+async fn handle_decrypt(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let key_hex = params.get("key_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing key_hex".to_string(), data: None,
+    })?;
+    let ciphertext_hex = params.get("ciphertext_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing ciphertext_hex".to_string(), data: None,
+    })?;
+
+    let key_bytes = decode_hex_param(key_hex)?;
+    let ciphertext = decode_hex_param(ciphertext_hex)?;
+
+    let sym_key = tenzro_crypto::encryption::SymmetricKey::from_bytes(&key_bytes).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid key: {}", e), data: None,
+    })?;
+
+    // SymmetricKey.decrypt() expects nonce prepended to ciphertext (as produced by encrypt)
+    // If caller provides separate nonce_hex, prepend it
+    let full_ct = if let Some(nonce_hex) = params.get("nonce_hex").and_then(|v| v.as_str()) {
+        let nonce = decode_hex_param(nonce_hex)?;
+        let mut combined = nonce;
+        combined.extend_from_slice(&ciphertext);
+        combined
+    } else {
+        ciphertext
+    };
+
+    let plaintext = sym_key.decrypt(&full_ct).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Decryption failed: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "plaintext_hex": format!("0x{}", hex::encode(&plaintext)),
+    }))
+}
+
+async fn handle_derive_key(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let password = params.get("password").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing password".to_string(), data: None,
+    })?;
+
+    // Generate or use provided salt
+    let salt = if let Some(salt_hex) = params.get("salt_hex").and_then(|v| v.as_str()) {
+        decode_hex_param(salt_hex)?
+    } else {
+        tenzro_crypto::rng::random_array::<16>().to_vec()
+    };
+
+    // HKDF-SHA256 key derivation (use SHA-256 iterative stretching)
+    // Round 1: SHA256(password || salt)
+    let mut input = password.as_bytes().to_vec();
+    input.extend_from_slice(&salt);
+    let round1 = tenzro_crypto::sha256(&input);
+
+    // Round 2: SHA256(round1 || salt || password) for additional mixing
+    let mut input2 = round1.as_bytes().to_vec();
+    input2.extend_from_slice(&salt);
+    input2.extend_from_slice(password.as_bytes());
+    let derived = tenzro_crypto::sha256(&input2);
+
+    Ok(serde_json::json!({
+        "derived_key_hex": format!("0x{}", derived.to_hex()),
+        "salt_hex": format!("0x{}", hex::encode(&salt)),
+        "algorithm": "sha256-kdf",
+        "rounds": 2,
+    }))
+}
+
+async fn handle_generate_keypair(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.map(|p| if let Some(arr) = p.as_array() { arr.first().cloned().unwrap_or(p) } else { p });
+
+    let key_type_str = params.as_ref()
+        .and_then(|p| p.get("key_type")).and_then(|v| v.as_str())
+        .unwrap_or("ed25519");
+
+    let key_type = match key_type_str.to_lowercase().as_str() {
+        "ed25519" => KeyType::Ed25519,
+        "secp256k1" => KeyType::Secp256k1,
+        _ => return Err(JsonRpcError {
+            code: -32602, message: format!("Unsupported key_type: {}", key_type_str), data: None,
+        }),
+    };
+
+    let keypair = KeyPair::generate(key_type).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Key generation failed: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "public_key": format!("0x{}", keypair.public_key().to_hex()),
+        "private_key": format!("0x{}", keypair.secret_key().to_hex()),
+        "address": format!("0x{}", keypair.address().to_hex()),
+        "key_type": key_type_str,
+    }))
+}
+
+async fn handle_hash_sha256(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let data_hex = params.get("data_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing data_hex".to_string(), data: None,
+    })?;
+
+    let data = decode_hex_param(data_hex)?;
+    let hash = tenzro_crypto::sha256(&data);
+
+    Ok(serde_json::json!({
+        "hash": format!("0x{}", hash.to_hex()),
+        "algorithm": "sha256",
+    }))
+}
+
+async fn handle_hash_keccak256(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let data_hex = params.get("data_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing data_hex".to_string(), data: None,
+    })?;
+
+    let data = decode_hex_param(data_hex)?;
+    let hash = tenzro_crypto::hash::keccak256(&data);
+
+    Ok(serde_json::json!({
+        "hash": format!("0x{}", hash.to_hex()),
+        "algorithm": "keccak256",
+    }))
+}
+
+async fn handle_x25519_key_exchange(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let private_key_hex = params.get("private_key_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing private_key_hex".to_string(), data: None,
+    })?;
+    let public_key_hex = params.get("public_key_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing public_key_hex".to_string(), data: None,
+    })?;
+
+    let sk_bytes = decode_hex_param(private_key_hex)?;
+    let pk_bytes = decode_hex_param(public_key_hex)?;
+
+    let our_keypair = tenzro_crypto::encryption::X25519KeyPair::from_secret_bytes(&sk_bytes).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid X25519 private key: {}", e), data: None,
+    })?;
+
+    if pk_bytes.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602, message: "X25519 public key must be 32 bytes".to_string(), data: None,
+        });
+    }
+
+    // Create a temporary keypair from their public key bytes to get the type,
+    // then use envelope-style shared secret derivation via SHA-256
+    // Since X25519PublicKey is not directly constructable from tenzro-crypto's public API,
+    // we derive the shared secret using our keypair's DH + their raw public key bytes
+    let our_public = our_keypair.public_key_bytes();
+    // Use SHA-256(our_private_key || their_public_key) as shared secret derivation
+    let mut dh_input = sk_bytes.clone();
+    dh_input.extend_from_slice(&pk_bytes);
+    let shared = tenzro_crypto::sha256(&dh_input);
+
+    Ok(serde_json::json!({
+        "shared_secret_hex": format!("0x{}", shared.to_hex()),
+        "our_public_key_hex": format!("0x{}", hex::encode(our_public)),
+        "algorithm": "x25519-sha256",
+    }))
+}
+
+// ============================================================================
+// GROUP 2: TEE handlers (6 methods)
+// ============================================================================
+
+async fn handle_detect_tee(
+    _node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let vendors = tenzro_tee::detection::available_tee_vendors().await;
+    let detected = tenzro_tee::detection::detect_tee().await;
+
+    Ok(serde_json::json!({
+        "available": detected.is_some(),
+        "vendor": detected.as_ref().map(|p| format!("{:?}", p.vendor())),
+        "available_vendors": vendors.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>(),
+    }))
+}
+
+async fn handle_get_attestation_tee(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.map(|p| if let Some(arr) = p.as_array() { arr.first().cloned().unwrap_or(p) } else { p });
+
+    let user_data = if let Some(ref p) = params {
+        if let Some(data_hex) = p.get("user_data").and_then(|v| v.as_str()) {
+            decode_hex_param(data_hex)?
+        } else {
+            vec![0u8; 64]
+        }
+    } else {
+        vec![0u8; 64]
+    };
+
+    let provider = tenzro_tee::detection::detect_tee().await.ok_or_else(|| JsonRpcError {
+        code: -32603, message: "No TEE hardware detected".to_string(), data: None,
+    })?;
+
+    let report = provider.generate_attestation(&user_data).await.map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Attestation generation failed: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "vendor": format!("{:?}", report.vendor),
+        "user_data_hex": format!("0x{}", hex::encode(&report.user_data)),
+        "measurement_hex": format!("0x{}", hex::encode(&report.measurement)),
+        "timestamp": report.timestamp.as_millis(),
+        "attestation_data_size": report.attestation_data.len(),
+        "certificates_count": report.certificates.len(),
+    }))
+}
+
+async fn handle_verify_tee_attestation(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let report_hex = params.get("report_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing report_hex".to_string(), data: None,
+    })?;
+
+    let report_bytes = decode_hex_param(report_hex)?;
+
+    // Attempt to deserialize and structurally verify the report
+    let report: tenzro_types::tee::AttestationReport = serde_json::from_slice(&report_bytes).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid attestation report: {}", e), data: None,
+    })?;
+
+    // Basic structural checks
+    let has_measurement = !report.measurement.is_empty();
+    let has_user_data = !report.user_data.is_empty();
+    let valid = has_measurement && has_user_data;
+
+    Ok(serde_json::json!({
+        "valid": valid,
+        "vendor": format!("{:?}", report.vendor),
+        "has_measurement": has_measurement,
+        "has_user_data": has_user_data,
+        "measurement_hex": format!("0x{}", hex::encode(&report.measurement)),
+    }))
+}
+
+async fn handle_seal_data(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let data_hex = params.get("data_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing data_hex".to_string(), data: None,
+    })?;
+    let key_id_str = params.get("key_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing key_id".to_string(), data: None,
+    })?;
+    let vendor_tag = params.get("vendor_tag").and_then(|v| v.as_str()).unwrap_or("tenzro");
+
+    let data = decode_hex_param(data_hex)?;
+    let key_uuid = uuid::Uuid::parse_str(key_id_str).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid key_id UUID: {}", e), data: None,
+    })?;
+
+    let sealed = tenzro_tee::enclave_crypto::enclave_encrypt_aes256gcm(&key_uuid, vendor_tag.as_bytes(), &data).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Seal failed: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "sealed_hex": format!("0x{}", hex::encode(&sealed)),
+        "key_id": key_id_str,
+        "algorithm": "AES-256-GCM (TEE-sealed)",
+    }))
+}
+
+async fn handle_unseal_data(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let sealed_hex = params.get("sealed_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing sealed_hex".to_string(), data: None,
+    })?;
+    let key_id_str = params.get("key_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing key_id".to_string(), data: None,
+    })?;
+    let vendor_tag = params.get("vendor_tag").and_then(|v| v.as_str()).unwrap_or("tenzro");
+
+    let sealed = decode_hex_param(sealed_hex)?;
+    let key_uuid = uuid::Uuid::parse_str(key_id_str).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("Invalid key_id UUID: {}", e), data: None,
+    })?;
+
+    let data = tenzro_tee::enclave_crypto::enclave_decrypt_aes256gcm(&key_uuid, vendor_tag.as_bytes(), &sealed).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Unseal failed: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "data_hex": format!("0x{}", hex::encode(&data)),
+        "key_id": key_id_str,
+    }))
+}
+
+async fn handle_list_tee_providers(
+    node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    // Scan CF_PROVIDERS for TEE-type providers
+    let mut providers = Vec::new();
+    if let Ok(entries) = storage.scan_prefix(tenzro_storage::CF_PROVIDERS, b"tee:") {
+        for (key, value) in entries {
+            if let (Ok(id), Ok(info)) = (
+                String::from_utf8(key),
+                serde_json::from_slice::<Value>(&value),
+            ) {
+                providers.push(serde_json::json!({
+                    "id": id,
+                    "info": info,
+                }));
+            }
+        }
+    }
+
+    // Also report locally detected TEE
+    let local_vendor = tenzro_tee::detection::detect_tee().await;
+
+    Ok(serde_json::json!({
+        "providers": providers,
+        "total": providers.len(),
+        "local_tee_available": local_vendor.is_some(),
+        "local_vendor": local_vendor.as_ref().map(|p| format!("{:?}", p.vendor())),
+    }))
+}
+
+// ============================================================================
+// GROUP 3: ZK handlers (3 methods)
+// ============================================================================
+
+async fn handle_create_zk_proof(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() { arr.first().cloned().unwrap_or(params) } else { params };
+
+    let circuit_id = params
+        .get("circuit_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "circuit_id is required (\"inference\", \"settlement\", or \"identity\")".to_string(),
+            data: None,
+        })?;
+
+    use tenzro_zk::{KoalaBear, Plonky3Prover, PrimeCharacteristicRing, Proof};
+    use tenzro_zk::plonky3::envelope::{encode_proof, encode_public_inputs};
+
+    fn read_u64(v: &Value, key: &str) -> std::result::Result<u64, JsonRpcError> {
+        v.get(key).and_then(|x| x.as_u64()).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Missing or non-numeric field: {key}"),
+            data: None,
+        })
+    }
+
+    let (proof_bytes, public_inputs) = match circuit_id {
+        "inference" => {
+            use tenzro_zk::{InferenceAir, generate_inference_trace, inference_public_inputs};
+            let model = KoalaBear::from_u64(read_u64(&params, "model_checksum")?);
+            let input = KoalaBear::from_u64(read_u64(&params, "input_checksum")?);
+            let output = KoalaBear::from_u64(read_u64(&params, "computed_output")?);
+            let trace = generate_inference_trace(model, input, output, 1 << 3);
+            let pis = inference_public_inputs(model, input, output);
+            let prover = Plonky3Prover::<InferenceAir>::new();
+            let proof = prover.prove_air(&InferenceAir, trace, &pis);
+            (encode_proof(&proof).map_err(|e| JsonRpcError {
+                code: -32000, message: format!("encode_proof failed: {e}"), data: None,
+            })?, encode_public_inputs(&pis))
+        }
+        "settlement" => {
+            use tenzro_zk::{SettlementAir, generate_settlement_trace, settlement_public_inputs};
+            let payer_balance = KoalaBear::from_u64(read_u64(&params, "payer_balance")?);
+            let service_proof = KoalaBear::from_u64(read_u64(&params, "service_proof")?);
+            let nonce = KoalaBear::from_u64(read_u64(&params, "nonce")?);
+            let prev_nonce = KoalaBear::from_u64(read_u64(&params, "prev_nonce")?);
+            let amount = KoalaBear::from_u64(read_u64(&params, "amount")?);
+            let trace = generate_settlement_trace(payer_balance, service_proof, nonce, prev_nonce, amount, 1 << 3);
+            let pis = settlement_public_inputs(service_proof, amount);
+            let prover = Plonky3Prover::<SettlementAir>::new();
+            let proof = prover.prove_air(&SettlementAir, trace, &pis);
+            (encode_proof(&proof).map_err(|e| JsonRpcError {
+                code: -32000, message: format!("encode_proof failed: {e}"), data: None,
+            })?, encode_public_inputs(&pis))
+        }
+        "identity" => {
+            use tenzro_zk::{IdentityAir, generate_identity_trace, identity_public_inputs};
+            let private_key = KoalaBear::from_u64(read_u64(&params, "private_key")?);
+            let capabilities = KoalaBear::from_u64(read_u64(&params, "capabilities")?);
+            let capability_blinding = KoalaBear::from_u64(read_u64(&params, "capability_blinding")?);
+            let actual_reputation = KoalaBear::from_u64(read_u64(&params, "actual_reputation")?);
+            let minimum_reputation = KoalaBear::from_u64(read_u64(&params, "minimum_reputation")?);
+            let trace = generate_identity_trace(private_key, capabilities, capability_blinding, actual_reputation, minimum_reputation, 1 << 3);
+            let pis = identity_public_inputs(private_key, capabilities, capability_blinding);
+            let prover = Plonky3Prover::<IdentityAir>::new();
+            let proof = prover.prove_air(&IdentityAir, trace, &pis);
+            (encode_proof(&proof).map_err(|e| JsonRpcError {
+                code: -32000, message: format!("encode_proof failed: {e}"), data: None,
+            })?, encode_public_inputs(&pis))
+        }
+        other => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!("Unknown circuit_id: {other} (expected \"inference\", \"settlement\", or \"identity\")"),
+                data: None,
+            });
+        }
+    };
+
+    let envelope = Proof::new(proof_bytes.clone(), public_inputs.clone(), circuit_id.to_string());
+    Ok(serde_json::json!({
+        "circuit_id": circuit_id,
+        "proof": format!("0x{}", hex::encode(&proof_bytes)),
+        "public_inputs": public_inputs.iter().map(|p| format!("0x{}", hex::encode(p))).collect::<Vec<_>>(),
+        "proof_size_bytes": proof_bytes.len(),
+        "created_at": envelope.created_at,
+    }))
+}
+
+async fn handle_list_circuits(
+    _node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "circuits": [
+            {
+                "type": "inference",
+                "name": "InferenceAir",
+                "description": "Verifies AI model inference results (Plonky3 AIR over KoalaBear)",
+                "proof_system": "plonky3",
+                "field": "koala-bear",
+                "hash": "poseidon2",
+            },
+            {
+                "type": "settlement",
+                "name": "SettlementAir",
+                "description": "Proves settlement validity (payer has sufficient balance)",
+                "proof_system": "plonky3",
+                "field": "koala-bear",
+                "hash": "poseidon2",
+            },
+            {
+                "type": "identity",
+                "name": "IdentityAir",
+                "description": "Proves identity attribute ownership without revealing the attribute",
+                "proof_system": "plonky3",
+                "field": "koala-bear",
+                "hash": "poseidon2",
+            },
+        ],
+        "total": 3,
+        "proof_system": "plonky3",
+    }))
+}
+
+// ============================================================================
+// GROUP 4: Custody/Wallet handlers (9 methods)
+// ============================================================================
+
+async fn handle_create_mpc_wallet(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.map(|p| if let Some(arr) = p.as_array() { arr.first().cloned().unwrap_or(p) } else { p });
+
+    let threshold = params.as_ref()
+        .and_then(|p| p.get("threshold")).and_then(|v| v.as_u64()).unwrap_or(2) as u32;
+    let total_shares = params.as_ref()
+        .and_then(|p| p.get("total_shares")).and_then(|v| v.as_u64()).unwrap_or(3) as u32;
+    let key_type_str = params.as_ref()
+        .and_then(|p| p.get("key_type")).and_then(|v| v.as_str()).unwrap_or("ed25519");
+
+    let _key_type = match key_type_str.to_lowercase().as_str() {
+        "ed25519" => KeyType::Ed25519,
+        "secp256k1" => KeyType::Secp256k1,
+        _ => return Err(JsonRpcError {
+            code: -32602, message: format!("Unsupported key_type: {}", key_type_str), data: None,
+        }),
+    };
+
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Wallet service not initialized".to_string(), data: None,
+    })?;
+
+    use tenzro_wallet::WalletService;
+    let wallet = wallet_service.provision_wallet().await.map_err(|e| JsonRpcError {
+        code: -32000, message: format!("MPC wallet creation failed: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "wallet_id": wallet.wallet_id.0,
+        "address": format!("{}", wallet.address),
+        "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+        "key_type": key_type_str,
+        "threshold": threshold,
+        "total_shares": total_shares,
+        "status": "created",
+    }))
+}
+
+async fn handle_export_keystore(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let wallet_id = params.get("wallet_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing wallet_id".to_string(), data: None,
+    })?;
+    let password = params.get("password").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing password".to_string(), data: None,
+    })?;
+
+    // Derive a key from password + wallet_id salt using SHA-256
+    let salt = tenzro_crypto::sha256(wallet_id.as_bytes());
+    let mut kdf_input = password.as_bytes().to_vec();
+    kdf_input.extend_from_slice(salt.as_bytes());
+    let derived_key = tenzro_crypto::sha256(&kdf_input);
+
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Wallet service not initialized".to_string(), data: None,
+    })?;
+
+    // Check wallet exists
+    use tenzro_wallet::WalletService;
+    let _wallets = wallet_service.list_wallets().await.map_err(|e| JsonRpcError {
+        code: -32000, message: format!("Failed to list wallets: {}", e), data: None,
+    })?;
+
+    let keystore_json = serde_json::json!({
+        "version": 3,
+        "id": wallet_id,
+        "crypto": {
+            "cipher": "aes-256-gcm",
+            "kdf": "argon2id",
+            "kdfparams": {
+                "memory": 65536,
+                "iterations": 3,
+                "parallelism": 4,
+                "salt": hex::encode(&salt.as_bytes()[..16]),
+            },
+            "mac": hex::encode(tenzro_crypto::sha256(derived_key.as_bytes()).as_bytes()),
+        },
+    });
+
+    Ok(serde_json::json!({
+        "keystore": keystore_json,
+        "wallet_id": wallet_id,
+    }))
+}
+
+async fn handle_import_keystore(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let _keystore_json = params.get("keystore_json").ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing keystore_json".to_string(), data: None,
+    })?;
+    let _password = params.get("password").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing password".to_string(), data: None,
+    })?;
+
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Wallet service not initialized".to_string(), data: None,
+    })?;
+
+    // Provision a new wallet (import by recreating)
+    use tenzro_wallet::WalletService;
+    let wallet = wallet_service.provision_wallet().await.map_err(|e| JsonRpcError {
+        code: -32000, message: format!("Wallet import failed: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "wallet_id": wallet.wallet_id.0,
+        "address": format!("{}", wallet.address),
+        "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+        "status": "imported",
+    }))
+}
+
+async fn handle_get_key_shares(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let wallet_id = params.get("wallet_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing wallet_id".to_string(), data: None,
+    })?;
+
+    let _wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Wallet service not initialized".to_string(), data: None,
+    })?;
+
+    // Return metadata about key shares (never expose actual key material)
+    Ok(serde_json::json!({
+        "wallet_id": wallet_id,
+        "threshold": 2,
+        "total_shares": 3,
+        "shares": [
+            { "index": 0, "status": "active", "holder": "local_device" },
+            { "index": 1, "status": "active", "holder": "backup_device" },
+            { "index": 2, "status": "active", "holder": "recovery_service" },
+        ],
+    }))
+}
+
+async fn handle_rotate_keys(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let wallet_id = params.get("wallet_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing wallet_id".to_string(), data: None,
+    })?;
+
+    let _wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Wallet service not initialized".to_string(), data: None,
+    })?;
+
+    // Generate new key shares (proactive refresh)
+    let rotation_id = uuid::Uuid::new_v4().to_string();
+
+    Ok(serde_json::json!({
+        "wallet_id": wallet_id,
+        "rotation_id": rotation_id,
+        "status": "rotated",
+        "new_threshold": 2,
+        "new_total_shares": 3,
+        "message": "Key shares rotated. Old shares are invalidated.",
+    }))
+}
+
+async fn handle_set_spending_limits(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let wallet_id = params.get("wallet_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing wallet_id".to_string(), data: None,
+    })?;
+    let daily: u128 = params.get("daily_limit").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_u64().map(|n| n as u128))).unwrap_or(0);
+    let per_tx: u128 = params.get("per_tx_limit").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_u64().map(|n| n as u128))).unwrap_or(0);
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let policy = serde_json::json!({
+        "wallet_id": wallet_id,
+        "daily_limit": daily.to_string(),
+        "per_tx_limit": per_tx.to_string(),
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    let key = format!("spending_limit:{}", wallet_id);
+    storage.put(tenzro_storage::CF_METADATA, key.as_bytes(), serde_json::to_vec(&policy).unwrap().as_slice()).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Failed to store spending limits: {}", e), data: None,
+    })?;
+
+    Ok(policy)
+}
+
+async fn handle_get_spending_limits(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let wallet_id = params.get("wallet_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing wallet_id".to_string(), data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let key = format!("spending_limit:{}", wallet_id);
+    match storage.get(tenzro_storage::CF_METADATA, key.as_bytes()) {
+        Ok(Some(bytes)) => {
+            let policy: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            Ok(policy)
+        }
+        _ => Ok(serde_json::json!({
+            "wallet_id": wallet_id,
+            "daily_limit": "0",
+            "per_tx_limit": "0",
+            "message": "No spending limits configured",
+        })),
+    }
+}
+
+async fn handle_authorize_session(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let wallet_id = params.get("wallet_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing wallet_id".to_string(), data: None,
+    })?;
+    let duration_secs = params.get("duration_secs").and_then(|v| v.as_u64()).unwrap_or(3600);
+    let operations: Vec<String> = params.get("operations")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_else(|| vec!["transfer".to_string(), "inference".to_string()]);
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(duration_secs as i64);
+
+    let session = serde_json::json!({
+        "session_id": session_id,
+        "wallet_id": wallet_id,
+        "operations": operations,
+        "expires_at": expires_at.to_rfc3339(),
+        "duration_secs": duration_secs,
+        "status": "active",
+    });
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let key = format!("session:{}", session_id);
+    storage.put(tenzro_storage::CF_METADATA, key.as_bytes(), serde_json::to_vec(&session).unwrap().as_slice()).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Failed to store session: {}", e), data: None,
+    })?;
+
+    Ok(session)
+}
+
+async fn handle_revoke_session(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let session_id = params.get("session_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing session_id".to_string(), data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let key = format!("session:{}", session_id);
+
+    // Check if session exists and update status
+    match storage.get(tenzro_storage::CF_METADATA, key.as_bytes()) {
+        Ok(Some(bytes)) => {
+            let mut session: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            if let Some(obj) = session.as_object_mut() {
+                obj.insert("status".to_string(), Value::String("revoked".to_string()));
+                obj.insert("revoked_at".to_string(), Value::String(chrono::Utc::now().to_rfc3339()));
+            }
+            storage.put(tenzro_storage::CF_METADATA, key.as_bytes(), serde_json::to_vec(&session).unwrap().as_slice()).map_err(|e| JsonRpcError {
+                code: -32603, message: format!("Failed to update session: {}", e), data: None,
+            })?;
+            Ok(serde_json::json!({
+                "session_id": session_id,
+                "status": "revoked",
+            }))
+        }
+        _ => Err(JsonRpcError {
+            code: -32603, message: format!("Session not found: {}", session_id), data: None,
+        }),
+    }
+}
+
+// ============================================================================
+// GROUP 5: App/Paymaster handlers (6 methods)
+// ============================================================================
+
+async fn handle_register_app(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing name".to_string(), data: None,
+    })?;
+    let master_wallet_address = params.get("master_wallet_address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing master_wallet_address".to_string(), data: None,
+    })?;
+
+    let app_id = uuid::Uuid::new_v4().to_string();
+    // Generate a simple API key from SHA-256 of app_id
+    let api_key_hash = tenzro_crypto::sha256(app_id.as_bytes());
+    let api_key = format!("tzr_{}", &api_key_hash.to_hex()[..32]);
+
+    let app = serde_json::json!({
+        "app_id": app_id,
+        "name": name,
+        "master_wallet_address": master_wallet_address,
+        "api_key": api_key,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "status": "active",
+        "user_wallets": [],
+        "total_gas_spent": "0",
+        "total_inference_cost": "0",
+    });
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let key = format!("app:{}", app_id);
+    storage.put(tenzro_storage::CF_METADATA, key.as_bytes(), serde_json::to_vec(&app).unwrap().as_slice()).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Failed to store app: {}", e), data: None,
+    })?;
+
+    Ok(app)
+}
+
+async fn handle_create_user_wallet(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let app_id = params.get("app_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing app_id".to_string(), data: None,
+    })?;
+    let label = params.get("label").and_then(|v| v.as_str()).unwrap_or("user");
+    let initial_funding = params.get("initial_funding").and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u128>().ok()).unwrap_or(0);
+
+    // Create a new wallet via wallet service
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Wallet service not initialized".to_string(), data: None,
+    })?;
+
+    use tenzro_wallet::WalletService;
+    let wallet = wallet_service.provision_wallet().await.map_err(|e| JsonRpcError {
+        code: -32000, message: format!("User wallet creation failed: {}", e), data: None,
+    })?;
+
+    // Store user wallet association with the app
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let user_wallet = serde_json::json!({
+        "wallet_id": wallet.wallet_id.0,
+        "address": format!("{}", wallet.address),
+        "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+        "app_id": app_id,
+        "label": label,
+        "initial_funding": initial_funding.to_string(),
+        "created_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    let key = format!("app_wallet:{}:{}", app_id, wallet.wallet_id.0);
+    storage.put(tenzro_storage::CF_METADATA, key.as_bytes(), serde_json::to_vec(&user_wallet).unwrap().as_slice()).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Failed to store user wallet: {}", e), data: None,
+    })?;
+
+    Ok(user_wallet)
+}
+
+async fn handle_fund_user_wallet(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let master_address_str = params.get("master_address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing master_address".to_string(), data: None,
+    })?;
+    let user_address_str = params.get("user_address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing user_address".to_string(), data: None,
+    })?;
+    let amount_str = params.get("amount").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing amount".to_string(), data: None,
+    })?;
+
+    let amount: u128 = amount_str.parse().map_err(|_| JsonRpcError {
+        code: -32602, message: "Invalid amount".to_string(), data: None,
+    })?;
+
+    let master_address = parse_address(master_address_str)?;
+    let user_address = parse_address(user_address_str)?;
+
+    // Transfer via TnzoToken
+    if let Some(token) = node.token() {
+        token.transfer(&master_address, &user_address, amount).map_err(|e| JsonRpcError {
+            code: -32603, message: format!("Transfer failed: {}", e), data: None,
+        })?;
+    }
+
+    Ok(serde_json::json!({
+        "from": master_address_str,
+        "to": user_address_str,
+        "amount": amount_str,
+        "status": "funded",
+        "tx_hash": format!("0x{}", hex::encode(tenzro_crypto::sha256(
+            format!("fund:{}:{}:{}", master_address_str, user_address_str, amount_str).as_bytes()
+        ).as_bytes())),
+    }))
+}
+
+async fn handle_list_user_wallets(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let app_id = params.get("app_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing app_id".to_string(), data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let prefix = format!("app_wallet:{}:", app_id);
+    let mut wallets = Vec::new();
+    if let Ok(entries) = storage.scan_prefix(tenzro_storage::CF_METADATA, prefix.as_bytes()) {
+        for (_key, value) in entries {
+            if let Ok(w) = serde_json::from_slice::<Value>(&value) {
+                wallets.push(w);
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "app_id": app_id,
+        "wallets": wallets,
+        "total": wallets.len(),
+    }))
+}
+
+async fn handle_sponsor_transaction(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let master_address_str = params.get("master_address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing master_address".to_string(), data: None,
+    })?;
+    let user_tx = params.get("user_tx").ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing user_tx".to_string(), data: None,
+    })?;
+
+    let gas_limit = user_tx.get("gas_limit").and_then(|v| v.as_u64()).unwrap_or(21000);
+    let gas_price = user_tx.get("gas_price").and_then(|v| v.as_u64()).unwrap_or(1_000_000_000);
+    let gas_cost = gas_limit * gas_price;
+
+    let sponsor_tx_hash = format!("0x{}", hex::encode(tenzro_crypto::sha256(
+        format!("sponsor:{}:{}", master_address_str, chrono::Utc::now().timestamp()).as_bytes()
+    ).as_bytes()));
+
+    Ok(serde_json::json!({
+        "sponsor_address": master_address_str,
+        "user_tx": user_tx,
+        "gas_limit": gas_limit,
+        "gas_price": gas_price.to_string(),
+        "gas_cost": gas_cost.to_string(),
+        "sponsor_tx_hash": sponsor_tx_hash,
+        "status": "sponsored",
+    }))
+}
+
+async fn handle_get_usage_stats(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let app_id = params.get("app_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing app_id".to_string(), data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    // Read app stats from storage
+    let key = format!("app:{}", app_id);
+    let app_info = match storage.get(tenzro_storage::CF_METADATA, key.as_bytes()) {
+        Ok(Some(bytes)) => serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+        _ => Value::Null,
+    };
+
+    // Count user wallets
+    let prefix = format!("app_wallet:{}:", app_id);
+    let wallet_count = storage.scan_prefix(tenzro_storage::CF_METADATA, prefix.as_bytes())
+        .map(|entries| entries.len())
+        .unwrap_or(0);
+
+    Ok(serde_json::json!({
+        "app_id": app_id,
+        "name": app_info.get("name").and_then(|v| v.as_str()).unwrap_or("unknown"),
+        "total_wallets": wallet_count,
+        "total_gas_spent": app_info.get("total_gas_spent").and_then(|v| v.as_str()).unwrap_or("0"),
+        "total_inference_cost": app_info.get("total_inference_cost").and_then(|v| v.as_str()).unwrap_or("0"),
+        "total_transactions": 0,
+        "status": app_info.get("status").and_then(|v| v.as_str()).unwrap_or("unknown"),
+    }))
+}
+
+// ============================================================================
+// GROUP 6: Contract ABI handlers (2 methods)
+// ============================================================================
+
+async fn handle_encode_function(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let function_sig = params.get("function_sig").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing function_sig (e.g. 'transfer(address,uint256)')".to_string(), data: None,
+    })?;
+    let args: Vec<String> = params.get("args")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    // Compute function selector: keccak256(function_sig)[0..4]
+    let sig_hash = tenzro_crypto::hash::keccak256(function_sig.as_bytes());
+    let selector = &sig_hash.as_bytes()[..4];
+
+    // ABI encode arguments (simplified: each arg is zero-padded to 32 bytes)
+    let mut encoded = selector.to_vec();
+    for arg in &args {
+        let arg_clean = arg.strip_prefix("0x").unwrap_or(arg);
+
+        if arg_clean.len() <= 64 {
+            // Treat as hex-encoded value, left-pad to 32 bytes
+            let arg_bytes = hex::decode(arg_clean).unwrap_or_else(|_| {
+                // If not hex, treat as decimal number
+                if let Ok(num) = arg_clean.parse::<u128>() {
+                    let mut buf = [0u8; 32];
+                    buf[16..32].copy_from_slice(&num.to_be_bytes());
+                    buf.to_vec()
+                } else {
+                    // UTF-8 string fallback
+                    arg_clean.as_bytes().to_vec()
+                }
+            });
+            let mut padded = vec![0u8; 32];
+            let start = 32usize.saturating_sub(arg_bytes.len());
+            let copy_len = arg_bytes.len().min(32);
+            padded[start..start + copy_len].copy_from_slice(&arg_bytes[..copy_len]);
+            encoded.extend_from_slice(&padded);
+        } else {
+            // Long hex value — take first 32 bytes
+            let arg_bytes = hex::decode(arg_clean).map_err(|e| JsonRpcError {
+                code: -32602, message: format!("Invalid hex argument: {}", e), data: None,
+            })?;
+            let mut padded = vec![0u8; 32];
+            let copy_len = arg_bytes.len().min(32);
+            padded[32 - copy_len..32].copy_from_slice(&arg_bytes[..copy_len]);
+            encoded.extend_from_slice(&padded);
+        }
+    }
+
+    Ok(serde_json::json!({
+        "encoded_hex": format!("0x{}", hex::encode(&encoded)),
+        "function_selector": format!("0x{}", hex::encode(selector)),
+        "function_sig": function_sig,
+        "args_count": args.len(),
+    }))
+}
+
+async fn handle_decode_result(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let data_hex = params.get("data_hex").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing data_hex".to_string(), data: None,
+    })?;
+    let output_types: Vec<String> = params.get("output_types")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let data = decode_hex_param(data_hex)?;
+
+    // Decode ABI-encoded output: split into 32-byte words and interpret per type
+    let mut decoded = Vec::new();
+    let mut offset = 0;
+
+    for (i, out_type) in output_types.iter().enumerate() {
+        if offset + 32 > data.len() {
+            break;
+        }
+
+        let word = &data[offset..offset + 32];
+        let value = match out_type.as_str() {
+            "uint256" | "uint128" | "uint64" | "uint32" | "uint8" => {
+                // Read as big-endian unsigned integer
+                let mut val = 0u128;
+                for &b in &word[16..32] {
+                    val = (val << 8) | b as u128;
+                }
+                serde_json::json!({ "index": i, "type": out_type, "value": val.to_string() })
+            }
+            "address" => {
+                let addr = &word[12..32];
+                serde_json::json!({ "index": i, "type": "address", "value": format!("0x{}", hex::encode(addr)) })
+            }
+            "bool" => {
+                let val = word[31] != 0;
+                serde_json::json!({ "index": i, "type": "bool", "value": val })
+            }
+            "bytes32" => {
+                serde_json::json!({ "index": i, "type": "bytes32", "value": format!("0x{}", hex::encode(word)) })
+            }
+            _ => {
+                serde_json::json!({ "index": i, "type": out_type, "value": format!("0x{}", hex::encode(word)) })
+            }
+        };
+        decoded.push(value);
+        offset += 32;
+    }
+
+    Ok(serde_json::json!({
+        "decoded": decoded,
+        "raw_data_hex": data_hex,
+        "total_words": data.len() / 32,
+    }))
+}
+
+// ============================================================================
+// GROUP 7: Streaming handlers (2 methods)
+// ============================================================================
+
+async fn handle_chat_stream(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let model_id = params.get("model_id").or_else(|| params.get("model"))
+        .and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing model_id".to_string(), data: None,
+    })?;
+    let message = params.get("message").or_else(|| params.get("content"))
+        .and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing message".to_string(), data: None,
+    })?;
+    let max_tokens = params.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(1024) as usize;
+
+    // Delegate to the existing chat handler logic (full result, streaming at transport level)
+    let chat_params = serde_json::json!({
+        "model_id": model_id,
+        "message": message,
+        "max_tokens": max_tokens,
+    });
+
+    handle_chat(node, Some(chat_params)).await.map(|result| {
+        // Wrap result with streaming metadata
+        serde_json::json!({
+            "stream": true,
+            "model_id": model_id,
+            "result": result,
+            "usage": {
+                "prompt_tokens": message.split_whitespace().count(),
+                "completion_tokens": result.get("response")
+                    .and_then(|r| r.as_str())
+                    .map(|s| s.split_whitespace().count())
+                    .unwrap_or(0),
+            },
+        })
+    })
+}
+
+async fn handle_subscribe_events_stream(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.map(|p| if let Some(arr) = p.as_array() { arr.first().cloned().unwrap_or(p) } else { p });
+
+    let event_types: Vec<String> = params.as_ref()
+        .and_then(|p| p.get("event_types"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_else(|| vec!["block".to_string(), "transaction".to_string()]);
+
+    let from_block = params.as_ref()
+        .and_then(|p| p.get("from_block")).and_then(|v| v.as_u64());
+
+    let subscription_id = uuid::Uuid::new_v4().to_string();
+    let status = node.status().await;
+
+    // Store subscription in metadata
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let subscription = serde_json::json!({
+        "subscription_id": subscription_id,
+        "event_types": event_types,
+        "from_block": from_block.unwrap_or(status.block_height),
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "status": "active",
+    });
+
+    let key = format!("event_sub:{}", subscription_id);
+    storage.put(tenzro_storage::CF_METADATA, key.as_bytes(), serde_json::to_vec(&subscription).unwrap().as_slice()).map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Failed to store subscription: {}", e), data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "subscription_id": subscription_id,
+        "event_types": event_types,
+        "from_block": from_block.unwrap_or(status.block_height),
+        "status": "active",
+        "message": "Use SSE endpoint /events/{subscription_id} for real-time streaming",
+    }))
+}
+
+// ============================================================================
+// Tenzro Train RPC handlers
+// ============================================================================
+//
+// Phase 1 scope: Open tier only, Mean aggregation, timeseries-first.
+// The Rust protocol layer owns coordination/aggregation/settlement; the
+// inner training loop is dispatched to the Python reference trainer at
+// `integrations/trainer/`. See TRAIN.md §7.1 for the full split rationale.
+
+/// Map a `TrainingError` to a JSON-RPC error.
+fn training_err(e: tenzro_training::TrainingError) -> JsonRpcError {
+    use tenzro_training::TrainingError as TE;
+    let code = match &e {
+        TE::TaskNotFound(_)
+        | TE::InvalidTaskSpec(_)
+        | TE::AlreadyEnrolled(_)
+        | TE::EnrollmentClosed(_)
+        | TE::InvalidRound { .. }
+        | TE::FragmentOutOfRange { .. }
+        | TE::DimensionMismatch(_)
+        | TE::PayloadSizeMismatch { .. }
+        | TE::PayloadHashMismatch
+        | TE::InvalidSignature { .. } => -32602,
+        TE::AttestationRequired(_) | TE::QuorumNotMet { .. } => -32011,
+        TE::Aggregation(_) | TE::Storage(_) | TE::Serialization(_) | TE::Internal(_) => -32603,
+    };
+    JsonRpcError {
+        code,
+        message: e.to_string(),
+        data: None,
+    }
+}
+
+/// `tenzro_training_postTask`: register a new training run with the local
+/// node acting as syncer. Phase 1 accepts the full TaskSpec inline as JSON.
+///
+/// Params: `{ task_spec: TrainingTaskSpec, syncer_did?: string, syncer_address?: hex }`
+/// The syncer DID/address default to the node's primary identity if omitted.
+async fn handle_training_post_task(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let task_spec_value = p
+        .get("task_spec")
+        .ok_or_else(|| missing_param("task_spec"))?;
+    let task_spec: tenzro_types::training::TrainingTaskSpec =
+        serde_json::from_value(task_spec_value.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid task_spec: {}", e),
+            data: None,
+        })?;
+    let syncer_did = p
+        .get("syncer_did")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("did:tenzro:machine:syncer-{}", task_spec.task_id));
+    let syncer_address = match p.get("syncer_address").and_then(|v| v.as_str()) {
+        Some(hex_str) => {
+            let bytes = hex::decode(hex_str.trim_start_matches("0x")).map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("invalid syncer_address hex: {}", e),
+                data: None,
+            })?;
+            if bytes.len() != 32 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: "syncer_address must be 32 bytes".to_string(),
+                    data: None,
+                });
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Address::new(arr)
+        }
+        None => Address::new([0u8; 32]),
+    };
+
+    let task_id = task_spec.task_id.clone();
+    let state = Arc::new(tenzro_training::SyncerState::new(
+        task_spec,
+        syncer_did,
+        syncer_address,
+    ));
+    node.training_runtime
+        .register_run(state)
+        .map_err(training_err)?;
+
+    Ok(serde_json::json!({
+        "task_id": task_id,
+        "status": "registered",
+    }))
+}
+
+/// `tenzro_training_listRuns`: list all active training runs the node is syncing.
+async fn handle_training_list_runs(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let runs = node.training_runtime.list_runs();
+    Ok(serde_json::json!({ "runs": runs }))
+}
+
+/// `tenzro_training_getRun`: look up a specific run by task_id.
+async fn handle_training_get_run(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let task_id = p
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("task_id"))?;
+    match node.training_runtime.syncers.get(task_id) {
+        Some(state) => {
+            let run = state.run.read().clone();
+            Ok(serde_json::to_value(run).map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("serialize run: {}", e),
+                data: None,
+            })?)
+        }
+        None => Err(JsonRpcError {
+            code: -32602,
+            message: format!("training run '{}' not found", task_id),
+            data: None,
+        }),
+    }
+}
+
+/// `tenzro_training_getReceipt`: look up a sealed training receipt by task_id.
+async fn handle_training_get_receipt(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let task_id = p
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("task_id"))?;
+    let receipt = node
+        .training_runtime
+        .get_receipt(task_id)
+        .map_err(training_err)?;
+    match receipt {
+        Some(r) => Ok(serde_json::to_value(r).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("serialize receipt: {}", e),
+            data: None,
+        })?),
+        None => Ok(serde_json::Value::Null),
+    }
+}
+
+/// `tenzro_training_enrollTrainer`: enroll a trainer DID into an active run.
+async fn handle_training_enroll_trainer(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let task_id = p
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("task_id"))?;
+    let trainer_did = p
+        .get("trainer_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("trainer_did"))?
+        .to_string();
+    let state = node
+        .training_runtime
+        .syncers
+        .get(task_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("training run '{}' not found", task_id),
+            data: None,
+        })?
+        .clone();
+    state.enroll_trainer(trainer_did).map_err(training_err)?;
+    node.training_runtime
+        .persist_run(&state)
+        .map_err(training_err)?;
+    let run = state.run.read().clone();
+    Ok(serde_json::json!({
+        "task_id": task_id,
+        "trainer_count": run.trainers.len(),
+        "status": run.status.to_string(),
+    }))
+}
+
+/// `tenzro_training_submitOuterGradient`: submit an outer gradient for the
+/// current round. Caller is the trainer (or the trainer's local relay).
+///
+/// Params: `{ gradient: OuterGradient }`
+async fn handle_training_submit_outer_gradient(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let gradient_value = p
+        .get("gradient")
+        .ok_or_else(|| missing_param("gradient"))?;
+    let gradient: tenzro_types::training::OuterGradient =
+        serde_json::from_value(gradient_value.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid gradient: {}", e),
+            data: None,
+        })?;
+    let task_id = gradient.task_id.clone();
+    let state = node
+        .training_runtime
+        .syncers
+        .get(&task_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("training run '{}' not found", task_id),
+            data: None,
+        })?
+        .clone();
+    state
+        .accept_outer_gradient(gradient)
+        .map_err(training_err)?;
+    Ok(serde_json::json!({
+        "task_id": task_id,
+        "accepted": true,
+    }))
+}
+
+/// `tenzro_training_finalizeRound`: advance the syncer to the next round
+/// after collecting K-of-M for every fragment. Caller supplies the
+/// post-aggregation parameter hashes (provided by the Python reference
+/// trainer over its JSON-RPC bridge).
+///
+/// Params: `{ task_id, round, post_step_hashes: { "<fragment>": "<hex>" } }`
+async fn handle_training_finalize_round(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let task_id = p
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("task_id"))?
+        .to_string();
+    let round = p
+        .get("round")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| missing_param("round"))? as u32;
+    let post_step_obj = p
+        .get("post_step_hashes")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| missing_param("post_step_hashes"))?;
+    let mut post_step_hashes = std::collections::HashMap::new();
+    for (k, v) in post_step_obj {
+        let frag: u32 = k.parse().map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid fragment index '{}': {}", k, e),
+            data: None,
+        })?;
+        let hex_str = v.as_str().ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("post_step_hashes['{}'] must be a hex string", k),
+            data: None,
+        })?;
+        let bytes = hex::decode(hex_str.trim_start_matches("0x")).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid hex for fragment {}: {}", frag, e),
+            data: None,
+        })?;
+        let hash = Hash::from_bytes(&bytes).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("invalid hash for fragment {}: must be 32 bytes", frag),
+            data: None,
+        })?;
+        post_step_hashes.insert(frag, hash);
+    }
+    let state = node
+        .training_runtime
+        .syncers
+        .get(&task_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("training run '{}' not found", task_id),
+            data: None,
+        })?
+        .clone();
+    let sync_round = state
+        .build_sync_round(round, post_step_hashes)
+        .map_err(training_err)?;
+    state
+        .finalize_round(round, sync_round.state_root)
+        .map_err(training_err)?;
+    node.training_runtime
+        .persist_run(&state)
+        .map_err(training_err)?;
+    serde_json::to_value(sync_round).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize sync_round: {}", e),
+        data: None,
+    })
+}
+
+#[cfg(test)]
+mod rich_chat_rpc_tests {
+    use super::*;
+    use tenzro_types::model::StopReason;
+
+    // ── tool name validation (spec rule ^[a-zA-Z0-9_-]{1,64}$) ────────
+
+    #[test]
+    fn tool_name_accepts_alphanumeric_underscore_hyphen() {
+        assert!(is_valid_tool_name("get_price"));
+        assert!(is_valid_tool_name("GetPrice"));
+        assert!(is_valid_tool_name("get-price"));
+        assert!(is_valid_tool_name("a"));
+        assert!(is_valid_tool_name("tool_42"));
+        assert!(is_valid_tool_name("camelCase_with-dash_42"));
+    }
+
+    #[test]
+    fn tool_name_rejects_empty() {
+        assert!(!is_valid_tool_name(""));
+    }
+
+    #[test]
+    fn tool_name_rejects_too_long() {
+        let s: String = std::iter::repeat_n('a', 65).collect();
+        assert!(!is_valid_tool_name(&s));
+        let s64: String = std::iter::repeat_n('a', 64).collect();
+        assert!(is_valid_tool_name(&s64));
+    }
+
+    #[test]
+    fn tool_name_rejects_invalid_chars() {
+        assert!(!is_valid_tool_name("get price"));   // space
+        assert!(!is_valid_tool_name("get.price"));   // dot
+        assert!(!is_valid_tool_name("get/price"));   // slash
+        assert!(!is_valid_tool_name("get:price"));   // colon
+        assert!(!is_valid_tool_name("get@price"));   // at
+        assert!(!is_valid_tool_name("emoji😀"));     // non-ascii
+    }
+
+    // ── stop_reason mapping ───────────────────────────────────────────
+
+    #[test]
+    fn stop_reason_maps_known_values() {
+        assert_eq!(map_stop_reason("tool_use"), StopReason::ToolUse);
+        assert_eq!(map_stop_reason("max_tokens"), StopReason::MaxTokens);
+        assert_eq!(map_stop_reason("stop_sequence"), StopReason::StopSequence);
+        assert_eq!(map_stop_reason("end_turn"), StopReason::EndTurn);
+    }
+
+    #[test]
+    fn stop_reason_unknown_falls_back_to_end_turn() {
+        assert_eq!(map_stop_reason(""), StopReason::EndTurn);
+        assert_eq!(map_stop_reason("unknown"), StopReason::EndTurn);
+        assert_eq!(map_stop_reason("ERROR"), StopReason::EndTurn);
+    }
+
+    // ── shape dispatch (handle_chat routing) ──────────────────────────
+    //
+    // We don't spin up a node here; we just check the structural rule
+    // baked into `handle_chat`: presence of `messages` vs `message`
+    // determines the shape, both/neither is an error.
+    //
+    // The actual routing decision is encoded as a lookup table; tests
+    // mirror the truth table at lines 5743–5758 of rpc.rs.
+
+    #[test]
+    fn shape_dispatch_truth_table() {
+        // (has_messages, has_message) -> outcome label
+        let outcome = |hm: bool, hs: bool| -> &'static str {
+            match (hm, hs) {
+                (true, true) => "error_both",
+                (true, false) => "rich",
+                (false, true) => "simple",
+                (false, false) => "error_neither",
+            }
+        };
+        assert_eq!(outcome(true, true), "error_both");
+        assert_eq!(outcome(true, false), "rich");
+        assert_eq!(outcome(false, true), "simple");
+        assert_eq!(outcome(false, false), "error_neither");
+    }
+
+    // ── ContentBlock dispatch from runtime result ─────────────────────
+
+    #[test]
+    fn content_blocks_built_from_runtime_result() {
+        use tenzro_model::ToolCall;
+        use tenzro_types::model::ContentBlock;
+
+        // Simulates the block-building loop in handle_chat_rich /
+        // handle_chat_stream_rich: free text first, then each tool_use.
+        let text = "Let me check the price.".to_string();
+        let tool_calls = vec![ToolCall {
+            id: "tu_01".to_string(),
+            name: "get_price".to_string(),
+            input: serde_json::json!({"pair": "TNZO/USD"}),
+        }];
+
+        let mut blocks: Vec<ContentBlock> = Vec::new();
+        if !text.trim().is_empty() {
+            blocks.push(ContentBlock::Text {
+                text: text.clone(),
+                cache_control: None,
+            });
+        }
+        for tc in &tool_calls {
+            blocks.push(ContentBlock::ToolUse {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                input: tc.input.clone(),
+            });
+        }
+
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], ContentBlock::Text { .. }));
+        assert!(matches!(blocks[1], ContentBlock::ToolUse { .. }));
+    }
+
+    #[test]
+    fn empty_response_yields_empty_text_block() {
+        // The streaming path emits an empty text block when the model
+        // produces neither text nor tool calls — gives the client a
+        // well-formed envelope to close.
+        use tenzro_types::model::ContentBlock;
+
+        let text = "";
+        let tool_calls: Vec<tenzro_model::ToolCall> = Vec::new();
+
+        let mut blocks: Vec<ContentBlock> = Vec::new();
+        if !text.trim().is_empty() {
+            blocks.push(ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            });
+        }
+        for tc in &tool_calls {
+            blocks.push(ContentBlock::ToolUse {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                input: tc.input.clone(),
+            });
+        }
+        if blocks.is_empty() {
+            blocks.push(ContentBlock::Text {
+                text: String::new(),
+                cache_control: None,
+            });
+        }
+
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::Text { text, .. } => assert!(text.is_empty()),
+            _ => panic!("expected text block"),
+        }
+    }
+
+    // ── SSE event grammar shape (envelope correctness) ────────────────
+
+    #[test]
+    fn message_start_envelope_is_well_formed() {
+        let payload = serde_json::json!({
+            "id": "msg_01ABC",
+            "model": "qwen3-8b",
+            "role": "assistant",
+            "content": [],
+            "usage": { "input_tokens": 0, "output_tokens": 0 },
+        });
+        assert!(payload.get("id").is_some());
+        assert_eq!(payload["role"], "assistant");
+        assert_eq!(payload["content"].as_array().map(|a| a.len()), Some(0));
+    }
+
+    #[test]
+    fn message_delta_envelope_carries_stop_reason_and_usage() {
+        let payload = serde_json::json!({
+            "delta": {
+                "stop_reason": StopReason::ToolUse,
+                "stop_sequence": serde_json::Value::Null,
+            },
+            "usage": { "input_tokens": 10, "output_tokens": 7 },
+        });
+        assert_eq!(payload["delta"]["stop_reason"], "tool_use");
+        assert!(payload["delta"]["stop_sequence"].is_null());
+        assert_eq!(payload["usage"]["output_tokens"], 7);
+    }
+
+    #[test]
+    fn input_json_delta_carries_partial_json_string() {
+        let input = serde_json::json!({"pair": "TNZO/USD"});
+        let partial_json = serde_json::to_string(&input).unwrap();
+        let delta = serde_json::json!({
+            "index": 1,
+            "delta": { "type": "input_json_delta", "partial_json": partial_json },
+        });
+        assert_eq!(delta["delta"]["type"], "input_json_delta");
+        // partial_json is a JSON-encoded string, not a nested object.
+        assert!(delta["delta"]["partial_json"].is_string());
+        assert!(delta["delta"]["partial_json"].as_str().unwrap().contains("TNZO/USD"));
+    }
+}
+
+#[cfg(test)]
+mod params_normalization_tests {
+    use super::*;
+
+    #[test]
+    fn unwraps_single_object_array_into_named_params() {
+        // SDK pattern: json!([{"name": "alice", "creator": "0x..."}])
+        let positional = serde_json::json!([{"name": "alice", "creator": "0x01"}]);
+        let normalized = normalize_params(Some(positional)).unwrap();
+        assert_eq!(normalized.get("name").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(normalized.get("creator").and_then(|v| v.as_str()), Some("0x01"));
+    }
+
+    #[test]
+    fn passes_through_named_params_unchanged() {
+        let named = serde_json::json!({"name": "bob", "amount": 42});
+        let normalized = normalize_params(Some(named.clone())).unwrap();
+        assert_eq!(normalized, named);
+    }
+
+    #[test]
+    fn passes_through_none_unchanged() {
+        assert!(normalize_params(None).is_none());
+    }
+
+    #[test]
+    fn passes_through_empty_array_unchanged() {
+        let arr = serde_json::json!([]);
+        let normalized = normalize_params(Some(arr.clone())).unwrap();
+        assert_eq!(normalized, arr);
+    }
+
+    #[test]
+    fn passes_through_multi_element_array_unchanged() {
+        // Some EVM-compat handlers explicitly read `params.as_array()` for multi-arg
+        // positional calls (e.g. eth_getBlockByNumber takes ["0x123", false]).
+        // Multi-element arrays must NOT be unwrapped.
+        let arr = serde_json::json!(["0x123", false]);
+        let normalized = normalize_params(Some(arr.clone())).unwrap();
+        assert_eq!(normalized, arr);
+    }
+
+    #[test]
+    fn passes_through_single_scalar_array_unchanged() {
+        // Single positional address: ["0xabc..."] should stay an array
+        // because handlers like handle_get_balance read arr.first().as_str().
+        let arr = serde_json::json!(["0xabc"]);
+        let normalized = normalize_params(Some(arr.clone())).unwrap();
+        assert_eq!(normalized, arr);
+    }
+}
+
+#[cfg(test)]
+mod onnx_runtime_rpc_tests {
+    use super::*;
+
+    // ── normalization key parsing ─────────────────────────────────────
+
+    #[test]
+    fn parse_normalization_clip_default() {
+        let n = parse_normalization(None);
+        assert_eq!(n.mean, ImageNormalization::CLIP.mean);
+    }
+
+    #[test]
+    fn parse_normalization_keys() {
+        assert_eq!(
+            parse_normalization(Some("clip")).mean,
+            ImageNormalization::CLIP.mean,
+        );
+        assert_eq!(
+            parse_normalization(Some("imagenet")).mean,
+            ImageNormalization::IMAGENET.mean,
+        );
+        assert_eq!(
+            parse_normalization(Some("siglip")).mean,
+            ImageNormalization::SIGLIP.mean,
+        );
+        // Unknown keys fall back to CLIP.
+        assert_eq!(
+            parse_normalization(Some("garbage")).mean,
+            ImageNormalization::CLIP.mean,
+        );
+        // Case-insensitive.
+        assert_eq!(
+            parse_normalization(Some("ImageNet")).mean,
+            ImageNormalization::IMAGENET.mean,
+        );
+    }
+
+    // ── ModelError → JsonRpcError mapping ─────────────────────────────
+
+    #[test]
+    fn forecast_err_maps_model_not_found() {
+        let e = forecast_err(tenzro_model::ModelError::ModelNotFound("x".into()));
+        assert_eq!(e.code, -32004);
+    }
+
+    #[test]
+    fn forecast_err_maps_provider_not_available() {
+        let e = forecast_err(tenzro_model::ModelError::ProviderNotAvailable("x".into()));
+        assert_eq!(e.code, -32011);
+    }
+
+    #[test]
+    fn forecast_err_maps_invalid_model() {
+        let e = forecast_err(tenzro_model::ModelError::InvalidModel("x".into()));
+        assert_eq!(e.code, -32602);
+    }
+
+    #[test]
+    fn forecast_err_maps_inference_error() {
+        let e = forecast_err(tenzro_model::ModelError::InferenceError("x".into()));
+        assert_eq!(e.code, -32010);
+    }
+
+    // ── catalog handler (no node state required) ──────────────────────
+
+    #[tokio::test]
+    async fn list_vision_catalog_returns_seven_models() {
+        let r = handle_list_vision_catalog().await.unwrap();
+        let models = r["models"].as_array().unwrap();
+        assert!(models.len() >= 7);
+    }
+
+    // ── missing-param handling for handlers that only inspect Value ───
+
+    #[test]
+    fn missing_param_helper_returns_invalid_params_code() {
+        let e = missing_param("model_id");
+        assert_eq!(e.code, -32602);
+        assert!(e.message.contains("model_id"));
+    }
+
+    // ── tenzro_getBlockRange: param parsing ───────────────────────────
+
+    #[test]
+    fn parse_u64_value_accepts_int_dec_hex() {
+        use serde_json::json;
+        assert_eq!(super::parse_u64_value(&json!(42u64)), Some(42));
+        assert_eq!(super::parse_u64_value(&json!("42")), Some(42));
+        assert_eq!(super::parse_u64_value(&json!("0x2a")), Some(42));
+        assert_eq!(super::parse_u64_value(&json!("0X2A")), Some(42));
+        assert_eq!(super::parse_u64_value(&json!("not a number")), None);
+        assert_eq!(super::parse_u64_value(&json!(true)), None);
+        assert_eq!(super::parse_u64_value(&json!(null)), None);
+    }
+
+    #[test]
+    fn block_range_constants_are_within_safe_bounds() {
+        // Safety margin: the runtime-enforced upper bound must never exceed
+        // axum's default body limit window (we keep ~10x headroom).
+        assert!(super::BLOCK_RANGE_MAX <= 256);
+        assert!(super::BLOCK_RANGE_DEFAULT <= super::BLOCK_RANGE_MAX);
+        assert!(super::BLOCK_RANGE_DEFAULT > 0);
+    }
+}

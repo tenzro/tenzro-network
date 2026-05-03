@@ -1,0 +1,62 @@
+# Registry of timeseries ONNX export targets.
+#
+# Each [[target]] block describes one model the harness knows how to
+# export. The `id` field is the local name used by `export.py`. The
+# `context_length` and `max_horizon` fields will be consumed by the
+# Tenzro `TimeseriesRuntime` when the resulting artifact is registered
+# (`tenzro_loadForecastModel` RPC).
+
+[[target]]
+id = "chronos-bolt-small"
+hf_repo = "amazon/chronos-bolt-small"
+arch = "chronos-bolt"          # T5-derived encoder + linear quantile head
+license = "Apache-2.0"
+params = "48M"
+context_length = 2048
+max_horizon = 64
+n_quantiles = 9
+notes = "Tier A — easiest export target. Single-file output, FP32."
+
+[[target]]
+id = "chronos-bolt-base"
+hf_repo = "amazon/chronos-bolt-base"
+arch = "chronos-bolt"
+license = "Apache-2.0"
+params = "205M"
+context_length = 2048
+max_horizon = 64
+n_quantiles = 9
+notes = "Tier A — same architecture as small, larger params."
+
+[[target]]
+id = "granite-ttm-r2-512"
+hf_repo = "ibm-granite/granite-timeseries-ttm-r2"
+arch = "ttm"                    # Tiny TimeMixer (custom, patch-based)
+license = "Apache-2.0"
+params = "1M"
+context_length = 512
+max_horizon = 96
+n_quantiles = 0
+notes = "Tier B — patch-based, requires custom torch.onnx.export shim."
+
+[[target]]
+id = "timesfm-2.5-200m"
+hf_repo = "google/timesfm-2.5-200m-pytorch"
+arch = "timesfm"                # Decoder-only transformer with patch tokenizer
+license = "Apache-2.0"
+params = "200M"
+context_length = 2048
+max_horizon = 128
+n_quantiles = 10
+notes = "Tier B — proprietary patch tokenizer, needs hand-rolled tracer."
+
+[[target]]
+id = "chronos-2"
+hf_repo = "amazon/chronos-2"
+arch = "chronos-2"              # T5-derived encoder + multivariate quantile head with covariate channel
+license = "Apache-2.0"
+params = "120M"
+context_length = 4096
+max_horizon = 128
+n_quantiles = 9
+notes = "Tier B — Chronos-2 (Oct 2025). Multivariate forecasting with covariates. Successor to Chronos-Bolt with a wider context window and a covariate input branch; export shim needs to feed the covariate tensor as a second input."
