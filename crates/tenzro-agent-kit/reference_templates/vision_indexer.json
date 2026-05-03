@@ -1,0 +1,88 @@
+{
+  "template_id": "ref-vision-indexer-v1",
+  "name": "Vision Indexer",
+  "description": "Autonomous agent that ingests images, computes high-quality embeddings (DINOv3, SigLIP2, CLIP) on Tenzro-served vision encoders, and stores them in a content-addressed index for semantic retrieval. Supports zero-shot classification via cosine similarity against label prompts.",
+  "template_type": "autonomous",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1745798400,
+  "updated_at": 1745798400,
+  "capabilities": [
+    {
+      "id": "embed_image",
+      "name": "Image Embedding",
+      "description": "Encodes a single image into a unit-norm dense vector using the selected vision encoder",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"model_id\":{\"type\":\"string\"},\"image_b64\":{\"type\":\"string\"},\"normalize\":{\"type\":\"boolean\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"embedding\":{\"type\":\"array\"},\"dim\":{\"type\":\"integer\"},\"model_used\":{\"type\":\"string\"}}}"
+    },
+    {
+      "id": "zero_shot_classify",
+      "name": "Zero-Shot Classification",
+      "description": "Classifies an image against a list of natural-language labels via cosine similarity over a text-image aligned encoder (SigLIP2, CLIP)",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"model_id\":{\"type\":\"string\"},\"image_b64\":{\"type\":\"string\"},\"labels\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"top_label\":{\"type\":\"string\"},\"scores\":{\"type\":\"object\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 1024,
+    "min_storage_mb": 256,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are a vision indexing agent. When asked to index an image: (1) pick the best vision encoder for the task — DINOv3 for self-supervised dense features, SigLIP2 for text-image alignment / zero-shot, CLIP as a baseline; (2) call tenzro_visionEmbed; (3) store the resulting vector under a content-addressed key derived from the image SHA-256. For zero-shot classification, call tenzro_visionSimilarity per label and rank by cosine score. Always honor the requested normalize flag.",
+  "examples": [
+    {
+      "description": "Index a product photo",
+      "user_input": "Embed the attached product photo with DINOv3-base",
+      "expected_output": "Used dinov3-vitb16. Computed 768-dim embedding in 95ms. Stored under content key 0xab12..."
+    },
+    {
+      "description": "Zero-shot classification of a wildlife photo",
+      "user_input": "Classify against [cat, dog, lion, tiger]",
+      "expected_output": "Used siglip2-base. Top label: tiger (score 0.87). Full scores: tiger 0.87, lion 0.05, cat 0.04, dog 0.04."
+    }
+  ],
+  "tags": ["vision", "embedding", "dinov3", "siglip2", "clip", "indexing", "ai"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/vision-indexer",
+  "metadata": {},
+  "execution_spec": {
+    "backend": "MultiVm",
+    "delegation": {
+      "max_transaction_value": 10000000000000000000,
+      "max_daily_spend": 100000000000000000000,
+      "allowed_operations": ["inference"],
+      "allowed_chains": ["ethereum", "base"],
+      "time_bound_days": 30,
+      "kyc_tier": "Basic"
+    },
+    "required_tool_tags": ["ai"],
+    "required_skill_tags": ["openclaw-tenzro"],
+    "steps": [
+      {
+        "ToolInvoke": {
+          "tool_tag": "ai",
+          "method": "tenzro_listVisionModels",
+          "params_template": "{}"
+        }
+      },
+      {
+        "ToolInvoke": {
+          "tool_tag": "ai",
+          "method": "tenzro_visionEmbed",
+          "params_template": "{\"model_id\":\"{{model_id}}\",\"image_b64\":\"{{image_b64}}\",\"normalize\":true}"
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 10000000000000000000,
+      "per_day_value": 100000000000000000000
+    }
+  }
+}

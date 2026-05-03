@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tenzro-trainer"
+version = "0.1.0"
+description = "Tenzro Train reference trainer (Python). Inner training loops for Decoupled DiLoCo over PyTorch FSDP2 + Hivemind + safetensors. Coordinates with the Rust syncer in tenzro-training over JSON-RPC."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Tenzro" }]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3 :: Only",
+]
+dependencies = [
+    "torch>=2.4",
+    "safetensors>=0.4.3",
+    "numpy>=1.26",
+    "requests>=2.31",
+    "PyNaCl>=1.5",
+]
+
+[project.optional-dependencies]
+hivemind = ["hivemind>=1.1.10"]
+language = ["transformers>=4.45", "datasets>=2.20", "tokenizers>=0.19"]
+vision = ["torchvision>=0.19", "Pillow>=10.0"]
+timeseries = ["pandas>=2.2"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
+all = ["tenzro-trainer[hivemind,language,vision,timeseries]"]
+
+[project.scripts]
+tenzro-trainer = "tenzro_trainer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["tenzro_trainer*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

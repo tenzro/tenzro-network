@@ -1,0 +1,100 @@
+name: Video ONNX Export
+
+# Manual / on-demand. Each run exports one or more target models from
+# tools/video-export/targets.toml and uploads the resulting .onnx files
+# as workflow artifacts. A maintainer downloads the artifact and
+# uploads it to `tenzro/video-onnx` on HuggingFace — we don't
+# auto-publish. License clearance for video encoders (V-JEPA license
+# unclear; VideoMAE is CC-BY-NC) is the bottleneck, not export
+# mechanics, so a human stays in the loop.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target ID (from targets.toml) — e.g. "videomae-base", or "all"'
+        required: true
+        default: 'videomae-base'
+      opset:
+        description: 'ONNX opset version'
+        required: false
+        default: '17'
+
+  pull_request:
+    paths:
+      # Run unit tests only — never the heavy export job — when the
+      # harness itself changes.
+      - 'tools/video-export/**'
+      - '.github/workflows/video-export.yml'
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  unit-tests:
+    name: Harness unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Run pure-Python tests (no torch)
+        working-directory: tools/video-export
+        run: python -m unittest test_targets.py -v
+
+  export:
+    name: Export ${{ inputs.target }}
+    # Only on workflow_dispatch — heavy step, downloads multi-hundred-MB
+    # weights and spends serious CPU on tracing.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: 'tools/video-export/pyproject.toml'
+
+      - name: Install harness
+        working-directory: tools/video-export
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Export target(s)
+        working-directory: tools/video-export
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+
+          if [[ "${{ inputs.target }}" == "all" ]]; then
+            # Read target ids from the registry without depending on yq/toml-cli.
+            TARGETS=$(python -c '
+          import export
+          for t in export.load_targets():
+              print(t)
+          ')
+          else
+            TARGETS="${{ inputs.target }}"
+          fi
+
+          for t in $TARGETS; do
+            echo "::group::Exporting $t"
+            python export.py "$t" --out ./out --opset ${{ inputs.opset }}
+            python verify.py "./out/${t}.onnx"
+            echo "::endgroup::"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tenzro-video-onnx-${{ github.run_id }}
+          path: tools/video-export/out/*.onnx
+          retention-days: 14

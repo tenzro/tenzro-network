@@ -1,0 +1,97 @@
+{
+  "template_id": "ref-premium-alpha-advisor-v1",
+  "name": "Premium Alpha Advisor",
+  "description": "Paid specialist agent that analyzes on-chain positions, DEX liquidity depth, funding rates, and correlation across ETH/SOL/BTC markets to produce concise alpha recommendations. Demonstrates the Tenzro paid-agent marketplace end-to-end: creator DID binding, creator payout wallet, per-execution pricing, and the 5% AGENT_MARKETPLACE_COMMISSION_BPS network commission routed to the treasury.",
+  "template_type": "specialist",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2],
+  "creator_did": "did:tenzro:human:ref-premium-alpha-advisor",
+  "creator_wallet": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3],
+  "invocation_count": 0,
+  "total_revenue": 0,
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1712534400,
+  "updated_at": 1712534400,
+  "capabilities": [
+    {
+      "id": "position_analysis",
+      "name": "Position Analysis",
+      "description": "Reads a wallet's open positions and assesses exposure, liquidation risk, and unrealised PnL across EVM + Solana venues.",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"wallet\":{\"type\":\"string\"},\"chains\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"exposure_usd\":{\"type\":\"number\"},\"liquidation_buffer_bps\":{\"type\":\"integer\"},\"unrealised_pnl_usd\":{\"type\":\"number\"}}}"
+    },
+    {
+      "id": "alpha_signal",
+      "name": "Alpha Signal Generation",
+      "description": "Produces a time-bounded, auditable alpha recommendation with entry, target, invalidation, size, and confidence.",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"market\":{\"type\":\"string\"},\"horizon_hours\":{\"type\":\"integer\"},\"risk_budget_bps\":{\"type\":\"integer\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"long\",\"short\",\"neutral\"]},\"entry\":{\"type\":\"number\"},\"target\":{\"type\":\"number\"},\"invalidation\":{\"type\":\"number\"},\"size_pct\":{\"type\":\"number\"},\"confidence\":{\"type\":\"number\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 512,
+    "min_storage_mb": 64,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": {
+    "per_execution": { "price": 5000000000000000000 }
+  },
+  "system_prompt": "You are Premium Alpha Advisor, a paid specialist on the Tenzro Network. For every request: (1) fetch the caller's positions and market context, (2) compute exposure, liquidation buffer, and correlation-adjusted risk budget, (3) emit a single concise, auditable alpha recommendation with explicit entry / target / invalidation / size / confidence, (4) cite the on-chain and oracle sources you consulted. Never place trades yourself — output recommendations only. If the user's risk budget is zero or liquidation buffer is inadequate, return `action=neutral` and explain why. Every invocation is metered at 5 TNZO per-execution: 5% flows to the Tenzro treasury as AGENT_MARKETPLACE_COMMISSION_BPS, the remaining 4.75 TNZO is paid to the creator wallet.",
+  "examples": [
+    {
+      "description": "Request alpha on ETH with a 24h horizon and tight risk",
+      "user_input": "Analyse wallet 0xabc... and recommend an ETH trade, 24h horizon, 50 bps risk budget.",
+      "expected_output": "exposure=$42,180; liquidation_buffer=860 bps. Action=long ETH, entry 3,412, target 3,520, invalidation 3,378, size 4.2% of equity, confidence 0.61. Sources: Chainlink ETH/USD feed, Uniswap V4 ETH/USDC depth, Binance funding rate."
+    },
+    {
+      "description": "Neutral call when buffer is thin",
+      "user_input": "Analyse wallet 0xdef... BTC long, 4h horizon, 200 bps budget.",
+      "expected_output": "exposure=$8,900; liquidation_buffer=190 bps (below risk budget). Action=neutral. Reason: insufficient liquidation buffer vs realised 4h vol. Recommend reducing leverage before re-entering."
+    }
+  ],
+  "tags": ["paid", "alpha", "defi", "specialist", "trading-advice"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/premium-alpha-advisor",
+  "metadata": {
+    "paid_marketplace_reference": "true",
+    "commission_bps": "500"
+  },
+  "execution_spec": {
+    "backend": "MultiVm",
+    "delegation": {
+      "max_transaction_value": 0,
+      "max_daily_spend": 0,
+      "allowed_operations": ["read_only"],
+      "allowed_chains": ["ethereum", "base", "solana"],
+      "time_bound_days": 7,
+      "kyc_tier": "Basic"
+    },
+    "required_tool_tags": ["defi", "oracle"],
+    "required_skill_tags": ["ethereum-defi", "chainlink-oracle"],
+    "steps": [
+      {
+        "SkillInvoke": {
+          "skill_tag": "ethereum-defi",
+          "method": "get_positions",
+          "params_template": "{\"wallet\":\"{{wallet}}\",\"chains\":{{chains}}}"
+        }
+      },
+      {
+        "SkillInvoke": {
+          "skill_tag": "chainlink-oracle",
+          "method": "read_price_feed",
+          "params_template": "{\"market\":\"{{market}}\"}"
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 0,
+      "per_day_value": 0
+    }
+  }
+}

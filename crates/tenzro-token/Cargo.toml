@@ -1,0 +1,24 @@
+[package]
+name = "tenzro-token"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TNZO token, treasury management, staking, and governance for Tenzro Network"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-storage = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }
+sha2 = { workspace = true }

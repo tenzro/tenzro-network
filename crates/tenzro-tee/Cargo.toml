@@ -1,0 +1,46 @@
+[package]
+name = "tenzro-tee"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TEE abstraction layer for Tenzro Network — Intel TDX, AMD SEV-SNP, AWS Nitro"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+hex = { workspace = true }
+bytes = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+sha2 = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
+x509-cert = { workspace = true }
+p256 = { workspace = true }
+p384 = { workspace = true }
+rsa = { workspace = true }
+der = { workspace = true }
+spki = { workspace = true }
+signature = { workspace = true }
+ecdsa = { workspace = true }
+ciborium = { workspace = true }
+base64 = { workspace = true }
+reqwest = { workspace = true, optional = true }
+libc = { workspace = true }
+
+[features]
+default = ["all-tees"]
+intel-tdx = ["reqwest"]
+amd-sev-snp = ["reqwest"]
+aws-nitro = []
+nvidia-gpu = ["reqwest"]
+all-tees = ["intel-tdx", "amd-sev-snp", "aws-nitro", "nvidia-gpu"]

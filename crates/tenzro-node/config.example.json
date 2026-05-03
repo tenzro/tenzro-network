@@ -1,0 +1,25 @@
+{
+  "role": "Validator",
+  "data_dir": "./data/validator",
+  "network": {
+    "listen_addresses": [
+      "/ip4/0.0.0.0/tcp/30333",
+      "/ip4/0.0.0.0/udp/30333/quic-v1"
+    ],
+    "boot_nodes": [],
+    "max_peers": 50,
+    "chain": "Testnet"
+  },
+  "consensus": {
+    "block_time_ms": 400,
+    "view_timeout_ms": 2000,
+    "tee_priority": true,
+    "max_block_size": 5242880
+  },
+  "tee_enabled": false,
+  "models_dir": null,
+  "log_level": "info",
+  "rpc_addr": "127.0.0.1:8545",
+  "metrics_enabled": true,
+  "health_enabled": true
+}

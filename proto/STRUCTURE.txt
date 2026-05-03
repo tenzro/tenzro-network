@@ -1,0 +1,289 @@
+Tenzro Network Protocol Buffers - Directory Structure
+======================================================
+
+/Users/hilarl/AI/tenzronetwork/proto/
+│
+├── Configuration Files
+│   ├── buf.yaml                    # Buf linting and breaking change detection config
+│   ├── buf.gen.yaml                # Code generation configuration for Rust, Go, TypeScript
+│   └── Makefile                    # Build automation (generate, lint, format, clean)
+│
+├── Documentation
+│   ├── README.md                   # Comprehensive documentation with examples
+│   ├── OVERVIEW.md                 # High-level overview and architecture
+│   ├── QUICK_REFERENCE.md          # Quick reference guide for common patterns
+│   └── STRUCTURE.txt               # This file - directory structure
+│
+└── Proto Definitions (tenzro/v1/)
+    │
+    ├── Core Protocol
+    │   ├── types.proto             # Foundation types (Hash, Address, Signature, etc.)
+    │   │                           # - 7 core message types
+    │   │                           # - Used by all other proto files
+    │   │
+    │   ├── transaction.proto       # Transaction structures
+    │   │                           # - Transaction message with 11 fields
+    │   │                           # - TransactionReceipt with logs
+    │   │                           # - 7 TransactionType enum values
+    │   │                           # - TransactionStatus enum
+    │   │
+    │   └── block.proto             # Blockchain blocks
+    │                               # - Block with header and transactions
+    │                               # - BlockHeader with Merkle roots
+    │                               # - ConsensusProof with BLS signatures
+    │                               # - CompactBlock for efficient propagation
+    │
+    ├── Consensus Layer
+    │   └── consensus.proto         # HotStuff-2 BFT consensus
+    │                               # - Proposal, Vote, QuorumCertificate
+    │                               # - ViewChange and NewView messages
+    │                               # - TimeoutCertificate for liveness
+    │                               # - ValidatorSet management
+    │                               # - 3 VotePhase values (Prepare/Commit/Decide)
+    │
+    ├── Network Layer
+    │   └── network.proto           # P2P networking
+    │                               # - NetworkMessage envelope
+    │                               # - 12 MessageType enum values
+    │                               # - PeerInfo and PeerExchange
+    │                               # - BlockAnnounce for propagation
+    │                               # - DataRequest/Response for sync
+    │                               # - Ping/Pong for connectivity
+    │
+    ├── Security & TEE
+    │   └── tee.proto              # Trusted Execution Environments
+    │                               # - TeeAttestation (Intel TDX, AMD SEV-SNP, AWS Nitro)
+    │                               # - AttestationResult with SecurityLevel
+    │                               # - TeeIdentity and TeeCapabilities
+    │                               # - TeeRequest/Response for secure compute
+    │                               # - 5 TeeVendor enum values
+    │
+    ├── AI Infrastructure
+    │   ├── model.proto            # AI models and inference
+    │   │                           # - ModelInfo with metadata
+    │   │                           # - 9 ModelModality enum values
+    │   │                           # - InferenceRequest/Response
+    │   │                           # - InferenceParameters (temperature, top_p, etc.)
+    │   │                           # - InferenceMetadata (tokens, latency)
+    │   │                           # - ModelStatistics for tracking
+    │   │
+    │   └── agent.proto            # AI agent framework
+    │                               # - AgentIdentity and AgentConfig
+    │                               # - AgentMessage with 10 message types
+    │                               # - AgentTask for execution
+    │                               # - AgentCoordination for multi-agent
+    │                               # - AgentReputation scoring
+    │
+    ├── Economic Layer
+    │   └── settlement.proto       # Payment settlements
+    │                               # - SettlementRequest/Receipt
+    │                               # - 9 ServiceType enum values
+    │                               # - ServiceProof for delivery verification
+    │                               # - BatchSettlement for efficiency
+    │                               # - SettlementDispute resolution
+    │                               # - PaymentChannel for instant payments
+    │
+    ├── Governance
+    │   └── governance.proto       # On-chain governance
+    │                               # - GovernanceProposal with metadata
+    │                               # - 10 ProposalType enum values
+    │                               # - GovernanceVote (For/Against/Abstain/Veto)
+    │                               # - ParameterChange for network updates
+    │                               # - TreasurySpend with milestones
+    │                               # - ValidatorSetChange management
+    │                               # - Delegation for voting power
+    │
+    ├── Interoperability
+    │   └── bridge.proto           # Cross-chain bridges
+    │                               # - BridgeMessage and BridgeTransfer
+    │                               # - 6 BridgeProtocol enum values
+    │                               # - TransferProof with multiple proof types
+    │                               # - BridgeConfig for bridge setup
+    │                               # - BridgeChallenge for disputes
+    │                               # - LiquidityPool management
+    │                               # - RelayerInfo for bridge operators
+    │
+    └── RPC Interface
+        └── rpc.proto              # gRPC service definitions
+                                    # - TenzroNode service with 40+ methods
+                                    # - Chain methods (6 RPCs)
+                                    # - Account methods (3 RPCs)
+                                    # - Model/Inference methods (5 RPCs)
+                                    # - Settlement methods (3 RPCs)
+                                    # - Agent methods (6 RPCs)
+                                    # - Governance methods (5 RPCs)
+                                    # - Bridge methods (3 RPCs)
+                                    # - Node methods (7 RPCs)
+                                    # - Streaming subscriptions (3 RPCs)
+                                    # - 30+ request/response message types
+
+===================================
+SUMMARY STATISTICS
+===================================
+
+Proto Files:           12
+Total Messages:        150+
+Total Enums:           25+
+RPC Methods:           40+
+Services:              1 (TenzroNode)
+
+Core Types:            7
+Transaction Types:     7
+Model Modalities:      9
+Service Types:         9
+TEE Vendors:           5
+Bridge Protocols:      6
+Proposal Types:        10
+
+Lines of Proto:        ~2,500
+Documentation Lines:   ~1,000
+
+===================================
+FILE SIZES (Approximate)
+===================================
+
+types.proto:           1 KB   (foundation)
+transaction.proto:     3 KB   (transactions & receipts)
+block.proto:           2 KB   (blocks & headers)
+consensus.proto:       4 KB   (BFT consensus)
+network.proto:         4 KB   (P2P networking)
+tee.proto:            4 KB   (trusted execution)
+model.proto:           6 KB   (AI models & inference)
+settlement.proto:      5 KB   (payment settlements)
+agent.proto:           6 KB   (AI agents)
+governance.proto:      7 KB   (governance & voting)
+bridge.proto:          7 KB   (cross-chain bridges)
+rpc.proto:            11 KB   (gRPC service definitions)
+
+Total Proto Size:     ~60 KB
+
+===================================
+CODE GENERATION TARGETS
+===================================
+
+Rust:
+  - Output: ../crates/tenzro-types/src/proto/
+  - Generator: prost + tonic
+  - Features: Serde support, file descriptors
+
+Go:
+  - Output: ../gen/go/
+  - Generator: protoc-gen-go + protoc-gen-go-grpc
+  - Features: Source-relative paths
+
+TypeScript:
+  - Output: ../sdk/tenzro-ts-sdk/src/proto/
+  - Generator: protoc-gen-js + protoc-gen-grpc-node
+  - Features: Node.js gRPC support
+
+===================================
+DEPENDENCY GRAPH
+===================================
+
+types.proto (no deps)
+  ↓
+  ├─→ transaction.proto → types
+  ├─→ tee.proto → types
+  ├─→ network.proto → types
+  ├─→ settlement.proto → types
+  ├─→ agent.proto → types
+  ├─→ governance.proto → types
+  ├─→ bridge.proto → types
+  │
+  ├─→ block.proto → types, transaction, tee
+  ├─→ consensus.proto → types, block
+  ├─→ model.proto → types, tee
+  │
+  └─→ rpc.proto → ALL (main service definition)
+
+===================================
+USAGE PATTERNS
+===================================
+
+1. Blockchain Operations:
+   types → transaction → block → consensus
+
+2. AI Operations:
+   types → tee → model → settlement
+
+3. Agent Operations:
+   types → agent → model → settlement
+
+4. Cross-chain:
+   types → bridge → network
+
+5. Governance:
+   types → governance → transaction
+
+6. Client Communication:
+   rpc → (imports all) → client SDKs
+
+===================================
+COMPILATION COMMANDS
+===================================
+
+Generate all:          make generate
+Generate Rust:         make protoc-rust
+Generate Go:           make protoc-go
+Lint:                  make lint
+Format:                make format
+Validate:              make validate
+Clean:                 make clean
+Install buf:           make install-buf
+Help:                  make help
+
+Using buf directly:
+  buf generate         # Generate from buf.gen.yaml
+  buf lint             # Lint all proto files
+  buf format -w        # Format in place
+  buf build            # Validate compilation
+
+===================================
+INTEGRATION POINTS
+===================================
+
+Rust Crates:
+  ✓ tenzro-types      → Message definitions
+  ✓ tenzro-network    → P2P implementation
+  ✓ tenzro-consensus  → Consensus engine
+  ✓ tenzro-tee        → TEE attestation
+  ✓ tenzro-model      → Model registry
+  ✓ tenzro-settlement → Payment logic
+  ✓ tenzro-agent      → Agent runtime
+  ✓ tenzro-node       → RPC server
+
+SDKs:
+  ✓ tenzro-sdk        → Rust client SDK
+  ✓ tenzro-ts-sdk     → TypeScript SDK
+
+Tools:
+  ✓ tenzro-cli        → Command-line client
+  ✓ tenzro-desktop    → Desktop application
+
+===================================
+NEXT STEPS
+===================================
+
+1. Generate code:
+   cd /Users/hilarl/AI/tenzronetwork/proto
+   make generate
+
+2. Integrate with Rust crates:
+   - Update tenzro-types/build.rs
+   - Add prost build dependencies
+   - Re-export generated types
+
+3. Implement RPC server:
+   - Use tonic for gRPC server
+   - Implement TenzroNode trait
+   - Add method handlers
+
+4. Test proto definitions:
+   - Write integration tests
+   - Validate serialization
+   - Test RPC endpoints
+
+5. Generate SDK code:
+   - Rust SDK in tenzro-sdk
+   - TypeScript SDK in tenzro-ts-sdk
+   - Add convenience wrappers

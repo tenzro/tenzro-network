@@ -1,0 +1,35 @@
+version: v1
+managed:
+  enabled: true
+  go_package_prefix:
+    default: github.com/tenzronetwork/tenzro/gen/go
+    except:
+      - buf.build/googleapis/googleapis
+plugins:
+  # Rust
+  - plugin: buf.build/community/neoeinstein-prost:v0.4.0
+    out: ../crates/tenzro-types/src/proto
+    opt:
+      - bytes=.
+      - file_descriptor_set
+  - plugin: buf.build/community/neoeinstein-tonic:v0.4.0
+    out: ../crates/tenzro-types/src/proto
+    opt:
+      - compile_well_known_types
+      - file_descriptor_set
+
+  # Go
+  - plugin: go
+    out: ../gen/go
+    opt:
+      - paths=source_relative
+  - plugin: go-grpc
+    out: ../gen/go
+    opt:
+      - paths=source_relative
+
+  # TypeScript
+  - plugin: buf.build/protocolbuffers/js:v3.21.2
+    out: ../sdk/tenzro-ts-sdk/src/proto
+  - plugin: buf.build/grpc/node:v1.3.9
+    out: ../sdk/tenzro-ts-sdk/src/proto

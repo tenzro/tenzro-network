@@ -1,0 +1,29 @@
+[package]
+name = "tenzro-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AI agent infrastructure for Tenzro Network — identity, lifecycle, A2A/MCP protocol"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-wallet = { workspace = true }
+tenzro-identity = { workspace = true }
+tenzro-storage = { workspace = true }
+async-trait = { workspace = true }
+bincode = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }

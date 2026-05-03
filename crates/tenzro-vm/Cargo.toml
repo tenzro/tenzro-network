@@ -1,0 +1,60 @@
+[package]
+name = "tenzro-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Multi-VM runtime for Tenzro Network — EVM and SVM execution engines"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-storage = { workspace = true }
+tenzro-tee = { workspace = true }
+tenzro-zk = { workspace = true }
+tenzro-model = { workspace = true }
+tenzro-settlement = { workspace = true }
+tenzro-token = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
+dashmap = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+k256 = { workspace = true }
+p256 = { workspace = true }
+parking_lot = { workspace = true }
+tonic = "0.12"
+prost = { workspace = true }
+prost-types = { workspace = true }
+http-body-util = "0.1"
+tower = "0.5"
+chrono = "0.4"
+revm = { workspace = true }
+rlp = { workspace = true }
+ripemd = { workspace = true }
+solana-sbpf = { workspace = true }
+curve25519-dalek = { workspace = true }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+num-integer = { workspace = true }
+ark-bn254 = { workspace = true }
+ark-ec = { workspace = true }
+ark-ff = { workspace = true }
+ark-serialize = { workspace = true }
+blst = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tokio = { workspace = true }
+rand = { workspace = true }
+
+[[bench]]
+name = "vm_benchmarks"
+harness = false

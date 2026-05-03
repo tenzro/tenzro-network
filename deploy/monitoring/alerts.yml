@@ -1,0 +1,47 @@
+groups:
+  - name: tenzro-testnet
+    rules:
+      - alert: ValidatorDown
+        expr: up{job="tenzro-validators"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Validator {{ $labels.instance }} is down"
+          description: "Validator has been unreachable for more than 2 minutes"
+
+      - alert: BlockHeightStalled
+        expr: increase(tenzro_block_height[5m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Block production stalled"
+          description: "No new blocks produced in the last 5 minutes"
+
+      - alert: HighMemoryUsage
+        expr: container_memory_working_set_bytes{namespace="tenzro-testnet"} > 6e9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.pod }}"
+          description: "Memory usage exceeds 6GB"
+
+      - alert: LowPeerCount
+        expr: tenzro_peer_count < 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low peer count on {{ $labels.instance }}"
+          description: "Node has fewer than 3 peers"
+
+      - alert: HighConsensusLatency
+        expr: histogram_quantile(0.99, tenzro_consensus_round_duration_seconds_bucket) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High consensus latency"
+          description: "P99 consensus round time exceeds 5 seconds"

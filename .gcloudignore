@@ -1,0 +1,58 @@
+.gcloudignore
+.git
+.gitignore
+
+# Rust build artifacts (can be GBs)
+target/
+apps/tenzro-desktop/src-tauri/target/
+
+# Entire website directory (Next.js app — not needed for Docker build)
+website/
+
+# Entire desktop app (Tauri — not needed for Docker build)
+apps/
+
+# SDK node_modules and build outputs
+sdk/tenzro-ts-sdk/node_modules/
+sdk/tenzro-ts-sdk/dist/
+sdk/tenzro-ts-sdk/.next/
+
+# Skills directory
+skills/
+
+# Deploy configs (not needed inside Docker image)
+deploy/
+
+# Proto files (documentation only)
+proto/
+
+# Model data / downloads
+*.bin
+*.gguf
+*.safetensors
+*.onnx
+
+# Local data directories
+data/
+tenzro-data/
+
+# Editor / OS junk
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Test / coverage artifacts
+coverage/
+*.profraw
+
+# Secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Large lock files for non-Rust package managers
+package-lock.json
+yarn.lock

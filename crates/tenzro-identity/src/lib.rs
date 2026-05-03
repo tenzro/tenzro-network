@@ -1,0 +1,94 @@
+//! Tenzro Decentralized Identity Protocol (TDIP)
+//!
+//! A unified identity protocol for humans and machines on the Tenzro Network.
+//! TDIP provides W3C DID-compatible decentralized identifiers with verifiable
+//! credentials, delegation scopes, and automatic wallet provisioning.
+//!
+//! # Overview
+//!
+//! TDIP is the primary identity standard. PDIS (Personal Decentralized Identity
+//! Standard) remains fully supported as a secondary standard:
+//!
+//! - **Human identities** (`did:tenzro:human:{uuid}`) — KYC-tiered, credential-holding
+//! - **Machine identities** (`did:tenzro:machine:{controller}:{uuid}`) — delegated, scoped
+//! - **Autonomous machines** (`did:tenzro:machine:{uuid}`) — self-sovereign
+//!
+//! # Key Features
+//!
+//! - **Unified identity type** — `TenzroIdentity` covers both humans and machines
+//! - **W3C DID Documents** — Export/import identities as standard DID Documents
+//! - **Verifiable Credentials** — Issue, inherit, and verify W3C VC-compatible credentials
+//! - **Delegation Scopes** — Fine-grained control over machine permissions including
+//!   payment protocol restrictions and chain allowlists
+//! - **Auto-provisioned wallets** — Every identity gets an MPC wallet automatically
+//! - **Cascading revocation** — Revoking a human revokes all controlled machines
+//! - **Backward compatibility** — Parses legacy `did:pdis:guardian:` and `did:pdis:agent:` formats
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use tenzro_identity::registry::IdentityRegistry;
+//! use tenzro_identity::delegation::DelegationScope;
+//! use tenzro_types::identity::KycTier;
+//!
+//! # async fn example() -> tenzro_identity::error::Result<()> {
+//! let registry = IdentityRegistry::new();
+//!
+//! // Register a human identity
+//! let human = registry.register_human_with_fee(
+//!     vec![1; 32],
+//!     "Alice".to_string(),
+//!     KycTier::Enhanced,
+//! ).await?.identity;
+//!
+//! // Register a machine under the human
+//! let machine = registry.register_machine_with_fee(
+//!     &human.did_string(),
+//!     vec![2; 32],
+//!     vec!["inference".to_string()],
+//!     DelegationScope::unrestricted()
+//!         .with_max_transaction_value(10_000)
+//!         .with_allowed_payment_protocols(vec!["mpp".to_string()]),
+//! ).await?.identity;
+//!
+//! println!("Human DID: {}", human.did_string());
+//! println!("Machine DID: {}", machine.did_string());
+//! # Ok(())
+//! # }
+//! ```
+
+pub mod credential;
+pub mod delegation;
+pub mod did;
+pub mod document;
+pub mod erc8004;
+pub mod error;
+pub mod identity;
+pub mod registry;
+pub mod verification;
+pub mod w3c;
+pub mod wallet_binding;
+
+// Re-export commonly used types
+pub use credential::{
+    sign_credential_hybrid, CredentialProof, TenzroCredentialType, VerifiableCredential,
+};
+pub use delegation::{DelegationEntry, DelegationScope, TimeBound};
+pub use did::{DidType, TenzroDid};
+pub use document::{DidDocument, DidService, VerificationMethod};
+pub use erc8004::{
+    derive_agent_id, AgentRecord, Erc8004Adapter, Erc8004Addresses, Erc8004Transport,
+    EthAddress, FeedbackEntry, ValidationRequest, ValidationResult,
+};
+pub use error::{IdentityError, Result};
+pub use identity::{
+    validate_username, IdentityData, IdentityStatus, KeyPurpose, PublicKeyInfo, RevocationEntry,
+    ServiceEndpoint, TenzroIdentity,
+};
+pub use registry::{
+    DelegationPolicy, DidResolutionBackend, IdentityRegistry, RegistrationResult,
+    RevocationBroadcaster, SignedRevocationEntry,
+};
+pub use verification::{IdentityVerifier, TrustChainResult};
+pub use w3c::{extract_public_keys_from_document, identity_to_did_document};
+pub use wallet_binding::{WalletBinder, WalletBinding};

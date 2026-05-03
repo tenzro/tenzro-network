@@ -1,0 +1,369 @@
+# Tenzro Node
+
+Full node implementation for Tenzro Network — the AI-Native, Agentic Settlement Protocol. Tenzro Ledger is the L1 settlement layer powered by the TNZO governance token.
+
+## Overview
+
+The `tenzro-node` crate provides the complete node binary that integrates all Tenzro Network subsystems into a unified, production-ready node capable of participating in the network in various roles.
+
+## Features
+
+- **Multi-Role Support**: Configure as Validator, ModelProvider, TeeProvider, or LightClient
+- **Modular Architecture**: Clean separation of concerns across subsystems
+- **Health Monitoring**: Real-time health tracking for all subsystems
+- **Metrics Collection**: Performance metrics and statistics
+- **JSON-RPC API**: Standard API for querying and interacting with the node (264+ methods across 26+ namespaces: blockchain, EVM-compat, accounts, token, models, inference, forecast, vision, text-embedding, segmentation, detection, audio, video, settlement, escrow, agents, identity, network, governance, payments, ap2, staking, canton, task marketplace, agent marketplace, token registry, bridge/crosschain, deBridge, wormhole, cct, erc8004, NFT, compliance, events, TEE, ZK, VRF, skill/tool registry, onboarding)
+- **MCP Server**: Model Context Protocol server with 191 tools (Streamable HTTP transport at /mcp, port 3001)
+- **A2A Server**: Agent-to-Agent protocol server with 30 skills (JSON-RPC 2.0, SSE streaming, Agent Card at port 3002)
+- **Web Verification API**: REST endpoints for ZK proof, TEE attestation, and transaction verification (port 8080)
+- **Graceful Shutdown**: Clean shutdown sequence for all subsystems
+- **TEE Integration**: Optional Trusted Execution Environment support (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU)
+- **AI Infrastructure**: Built-in model registry, inference routing, and agent runtime with durable persistence
+
+## Node Roles
+
+### Validator
+Participates in consensus and block production using HotStuff-2 BFT consensus.
+
+```bash
+tenzro-node --role validator --data-dir ./data/validator
+```
+
+### ModelProvider
+Serves AI model inference requests to the network.
+
+```bash
+tenzro-node --role model-provider --data-dir ./data/provider
+```
+
+### TeeProvider
+Provides confidential computing services with hardware-rooted attestation.
+
+```bash
+tenzro-node --role tee-provider --data-dir ./data/tee
+```
+
+### LightClient
+Participates in the network without providing services.
+
+```bash
+tenzro-node --role light-client --data-dir ./data/light
+```
+
+## Installation
+
+From the repository root:
+
+```bash
+cargo build --release -p tenzro-node
+```
+
+The binary will be available at `target/release/tenzro-node`.
+
+## Usage
+
+### Command-Line Options
+
+```
+USAGE:
+    tenzro-node [OPTIONS]
+
+OPTIONS:
+    -c, --config <FILE>         Path to configuration file
+    -d, --data-dir <DIR>        Data directory
+    -r, --role <ROLE>           Node role (validator, model-provider, tee-provider, light-client)
+    -l, --listen-addr <ADDR>    Network listen address
+    -b, --boot-nodes <NODES>    Bootstrap nodes (comma-separated multiaddrs)
+        --log-level <LEVEL>     Log level [default: info]
+        --rpc-addr <ADDR>       RPC listen address [default: 127.0.0.1:8545]
+        --web-addr <ADDR>       Web API listen address [default: 0.0.0.0:8080]
+        --mcp-addr <ADDR>       MCP server listen address [default: 0.0.0.0:3001]
+        --a2a-addr <ADDR>       A2A server listen address [default: 0.0.0.0:3002]
+        --solana-mcp-addr <ADDR>     Solana MCP server [default: 0.0.0.0:3003]
+        --ethereum-mcp-addr <ADDR>   Ethereum MCP server [default: 0.0.0.0:3004]
+        --canton-mcp-addr <ADDR>     Canton MCP server [default: 0.0.0.0:3005]
+        --layerzero-mcp-addr <ADDR>  LayerZero MCP server [default: 0.0.0.0:3006]
+        --chainlink-mcp-addr <ADDR>  Chainlink MCP server [default: 0.0.0.0:3007]
+        --lifi-mcp-addr <ADDR>       LI.FI MCP server [default: 0.0.0.0:3008]
+        --log-format <FMT>      Log format (text, json) [default: text]
+        --log-filter <FILTER>   Log filter (e.g. "tenzro_node=debug,tenzro_vm=trace")
+    -h, --help                  Print help
+    -V, --version               Print version
+```
+
+### Configuration File
+
+Create a configuration file (config.toml):
+
+```toml
+role = "Validator"
+data_dir = "./data/validator"
+log_level = "info"
+rpc_addr = "127.0.0.1:8545"
+web_addr = "0.0.0.0:8080"
+mcp_addr = "0.0.0.0:3001"
+a2a_addr = "0.0.0.0:3002"
+tee_enabled = false
+metrics_enabled = true
+health_enabled = true
+
+[network]
+# Network configuration...
+
+[consensus]
+# Consensus configuration (for validators)...
+```
+
+Load it with:
+
+```bash
+tenzro-node --config config.toml
+```
+
+## Architecture
+
+The node orchestrates subsystems in the following startup order:
+
+1. **Storage** - RocksDB-backed persistent state
+2. **Network** - libp2p P2P networking layer
+3. **TEE** - Trusted Execution Environment (if enabled)
+4. **VM Runtime** - Multi-VM execution environment (EVM + SVM + DAML)
+5. **Token Economics** - TNZO token, staking, governance, treasury
+6. **Wallet** - MPC wallet service
+7. **Consensus** - HotStuff-2 consensus (validators only)
+8. **Settlement** - Payment settlement engine
+9. **AI Infrastructure** - Model registry, provider management, agent runtime (with durable persistence via init_ai_infrastructure)
+10. **Bridge** - Cross-chain bridge router
+
+Shutdown occurs in reverse order to ensure clean resource cleanup.
+
+## JSON-RPC API
+
+The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0.1:8545`).
+
+### RPC Namespaces (264+ methods, 26+ namespaces)
+
+- **Blockchain**: blockNumber, getBlock, getBlockRange (batch fetch for catch-up sync), getTransaction, sendTransaction, submitBlock
+- **Accounts**: createAccount, createWallet, getBalance, getNonce, listAccounts
+- **Token**: tokenBalance, totalSupply
+- **Models**: listModels, inferenceRequest, downloadModel, serveModel, stopModel, chat, deleteModel, listModelEndpoints, getModelEndpoint
+- **Forecast**: listForecastCatalog, listForecastModels, loadForecastModel, unloadForecastModel, forecast
+- **Vision**: listVisionCatalog, listVisionModels, loadVisionModel, unloadVisionModel, visionEmbed, visionSimilarity, visionClassify
+- **TextEmbedding**: listTextEmbeddingCatalog, listTextEmbeddingModels, loadTextEmbeddingModel, unloadTextEmbeddingModel, textEmbed
+- **Segmentation**: listSegmentationCatalog, listSegmentationModels, loadSegmentationModel, unloadSegmentationModel, segment
+- **Detection**: listDetectionCatalog, listDetectionModels, loadDetectionModel, unloadDetectionModel, detect
+- **Audio (ASR)**: listAudioCatalog, listAudioModels, loadAudioModel, unloadAudioModel, transcribe
+- **Video**: listVideoCatalog, listVideoModels, loadVideoModel, unloadVideoModel, videoEmbed
+- **Settlement**: settle, getSettlement
+- **Agents**: registerAgent, sendAgentMessage
+- **Identity**: registerIdentity, importIdentity, resolveDidDocument, resolveIdentity, participate
+- **Network**: nodeInfo, peerCount, syncing, hardwareProfile, role
+- **Governance**: listProposals, vote, getVotingPower
+- **Payments**: createPaymentChallenge, payMpp, payX402, listPaymentSessions, paymentGatewayInfo, listX402Schemes (pluggable scheme registry: `exact`, `permit2`)
+- **AP2 (Agent Payments Protocol)**: createAp2Session, validateMandatePair (three-axis validation: mandate constraints + DelegationScope + SpendingPolicy)
+- **AAP (Agent Access Protocol)**: oauthDiscovery, exchangeToken, introspectToken — OAuth 2.1 + DPoP-bound JWTs (RFC 9449) + RAR (RFC 9396) over `tenzro-auth`
+- **ERC-8004 Trustless Agents**: registerErc8004Agent, getErc8004Agent, submitErc8004Feedback, requestErc8004Validation, submitErc8004Validation — interoperable with native EVM precompiles `0x101a` / `0x101b` / `0x101c` (`agentId = keccak256(utf8(did_string))`)
+- **Reputation & Approval**: getProviderReputation (provider score), listPendingApprovals / getApproval / decideApproval (out-of-scope agent operation queue)
+- **Disputes & Streaming**: getDispute, listDisputesByChannel, chatStream (per-token streaming with optional `channel_id` for micropayment-channel billing)
+- **EU AI Act §50 Provenance**: getProvenance — C2PA-style `ProvenanceManifest` keyed by `SHA-256(content_bytes)`, signed by validator block-signing keys (§50(1) chatbot disclosure via `aap_agent` claim, §50(2) provenance manifest, §50(4) deepfake labeling)
+- **Staking**: stake, unstake, registerProvider, providerStats
+- **Canton**: listCantonDomains, listDamlContracts, submitDamlCommand
+- **TaskMarketplace**: postTask, listTasks, getTask, cancelTask, submitQuote
+- **AgentMarketplace**: listAgentTemplates, registerAgentTemplate, getAgentTemplate, updateAgentTemplate, spawnAgentFromTemplate, runAgentTemplate, rateAgentTemplate, searchAgentTemplates, getAgentTemplateStats
+- **TokenRegistry**: createToken, getToken, listTokens, crossVmTransfer, wrapTnzo, getTokenBalance, deployContract
+
+### Paid Agent Marketplace
+
+The agent marketplace supports both free (community) and paid (creator-tied) templates end-to-end:
+
+- **Creator identity binding (optional):** at registration, a creator may bind a template to a `did:tenzro:` or `did:pdis:` identity via `creator_did`. The binding is immutable post-registration.
+- **Creator payout wallet (mandatory for paid pricing):** any non-`Free` `pricing` requires `creator_wallet`. Registration fails if the wallet is missing. `tenzro_runAgentTemplate` routes the creator share to this address.
+- **Pricing models** (`AgentPricingModel`): `Free`, `PerExecution { price }`, `PerToken { price_per_token }`, `Subscription { monthly_rate }`, `RevenueShare { creator_share_bps }`. Compact string form accepted by the RPC: `"free"`, `"per_execution:<u128>"`, `"per_token:<u128>"`, `"subscription:<u128>"`, `"revenue_share:<bps>"`.
+- **Network commission:** `AGENT_MARKETPLACE_COMMISSION_BPS = 500` (5%). On every paid invocation of `tenzro_runAgentTemplate`:
+  - `payer_wallet` is debited the full `fee_paid`
+  - `commission = fee_paid * 500 / 10_000` is credited to the network treasury
+  - `creator_share = fee_paid - commission` is credited to `creator_wallet`
+  - `invocation_count` and `total_revenue` on the template are incremented atomically
+- **Fee-split report** returned by `tenzro_runAgentTemplate`: `{ template_id, steps_executed, steps_failed, steps_skipped_by_dry_run, fee_paid, commission_bps, network_commission, creator_share, payer_wallet, creator_wallet, treasury, invocation_count, total_revenue }`.
+- **Free templates** bypass all fee collection — no commission, no creator wallet required, `fee_paid = 0`.
+
+Reference templates under `crates/tenzro-agent-kit/reference_templates/`:
+- `premium_alpha_advisor.json` — **paid** per-execution specialist (5 TNZO, 5%/95% split demonstrated end-to-end)
+- 10 additional free reference templates covering payment routing, RWA custody, arbitrage, trade settlement, portfolio management, and yield rebalancing
+- **EVM-compat**: eth_blockNumber, eth_getBalance, eth_getTransactionCount, eth_sendRawTransaction, eth_getBlockByNumber, eth_getBlockByHash, eth_chainId, eth_getTransactionReceipt
+
+## MCP Server
+
+The node runs a built-in [Model Context Protocol](https://modelcontextprotocol.io) server on port 3001 (configurable via `--mcp-addr`). It uses **Streamable HTTP** transport at `/mcp` endpoint.
+
+**Endpoint:** `POST /mcp`
+
+### Available Tools (191)
+
+The main Tenzro MCP server registers 191 tools across wallet, identity, payments, inference, multi-modal AI (forecast, vision, text-embed, segment, detect, transcribe, video), staking, tokens, NFTs, bridges, cross-chain, deBridge, Li.Fi, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, events, and administrative categories. The table below lists representative tools — consult `crates/tenzro-node/src/mcp/server.rs` for the complete authoritative inventory.
+
+| Category | Representative Tools |
+|----------|----------------------|
+| **Wallet & Ledger** | `create_wallet`, `get_balance`, `send_transaction`, `request_faucet` |
+| **Network & Blocks** | `get_node_status`, `get_block`, `get_transaction` |
+| **Identity & Delegation** | `register_identity`, `resolve_did`, `set_delegation_scope` |
+| **Payments** | `create_payment_challenge`, `verify_payment`, `list_payment_protocols` |
+| **AI Models & Inference** | `list_models`, `chat_completion`, `list_model_endpoints` |
+| **Multi-Modal AI** | `forecast`, `vision_embed`, `vision_similarity`, `text_embed`, `segment`, `detect`, `transcribe`, `video_embed` (plus catalog/load/unload variants per modality) |
+| **Cross-Chain Bridge** | `bridge_tokens`, `get_bridge_routes`, `list_bridge_adapters` |
+| **Verification** | `verify_zk_proof`, `verify_vrf_proof`, `generate_vrf_proof` |
+| **Staking & Providers** | `stake_tokens`, `unstake_tokens`, `register_provider`, `get_provider_stats` |
+| **Tokens & Contracts** | `create_token`, `get_token_info`, `list_tokens`, `deploy_contract`, `cross_vm_transfer`, `wrap_tnzo`, `get_token_balance` |
+
+### Claude Desktop / Claude Code
+
+```json
+{
+  "mcpServers": {
+    "tenzro": {
+      "url": "https://mcp.tenzro.network/mcp"
+    }
+  }
+}
+```
+
+For a local node, use `http://localhost:3001/mcp`.
+
+See [integrations/mcp/](../../integrations/mcp/) for full documentation.
+
+## A2A Protocol Server
+
+The node runs an [Agent-to-Agent (A2A)](https://a2a-protocol.org) protocol server on port 3002 (configurable via `--a2a-addr`).
+
+### Endpoints
+
+| Endpoint | URL | Description |
+|----------|-----|-------------|
+| Agent Card | `GET /.well-known/agent.json` | Agent capability discovery |
+| A2A RPC | `POST /a2a` | JSON-RPC 2.0 task execution |
+| A2A Stream | `POST /a2a/stream` | Server-Sent Events streaming |
+
+### Agent Skills (30)
+
+- **Wallet**: Create wallets, check balances, send TNZO transactions
+- **Identity**: Register and resolve TDIP decentralized identities
+- **Inference**: Route AI inference requests to network providers
+- **Forecast**: Run timeseries forecasting via `tenzro_forecast` (Chronos-2, Chronos-Bolt, TimesFM 2.5, Granite-TTM-r2)
+- **Vision**: Image embedding/similarity via CLIP, SigLIP2, DINOv3
+- **Text Embedding**: Qwen3-Embedding, EmbeddingGemma, BGE-M3, Snowflake Arctic
+- **Segmentation**: SAM 3 / 3.1, SAM 2, EdgeSAM, MobileSAM
+- **Detection**: RF-DETR, D-FINE
+- **Audio**: ASR via Moonshine v2, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT, Canary
+- **Video**: Frame-extraction + per-frame embedding scaffolding
+- **Settlement**: Settle payments via micropayment channels, escrow, batch
+- **Verification**: Verify ZK proofs, VRF proofs (RFC 9381), TEE attestations, transaction signatures
+- **Staking**: Stake/unstake TNZO, register as provider
+
+### JSON-RPC Methods
+
+- `message/send` -- Send a message between agents
+- `tasks/send` -- Send a message, create or continue a task
+- `tasks/get` -- Get task by ID
+- `tasks/list` -- List tasks
+- `tasks/cancel` -- Cancel a running task
+
+See [integrations/a2a/](../../integrations/a2a/) for full documentation.
+
+## Web Verification API
+
+The node runs a REST API on port 8080 for verification and status:
+
+```
+POST /verify/zk-proof          -- Verify ZK proof
+POST /verify/tee-attestation   -- Verify TEE attestation
+POST /verify/transaction       -- Verify transaction signature
+POST /verify/settlement        -- Verify settlement receipt
+POST /verify/inference         -- Verify inference result
+GET  /verify/health            -- Health check
+GET  /health                   -- Health check (alias)
+GET  /status                   -- Node status
+POST /faucet                   -- Request testnet TNZO tokens
+```
+
+## Ecosystem MCP Servers
+
+Five additional MCP servers provide direct blockchain interaction:
+
+| Server | Port | Description |
+|--------|------|-------------|
+| Solana MCP | 3003 | 14 tools: Jupiter, SPL, Metaplex, Bonfida SNS |
+| Ethereum MCP | 3004 | 16 tools: Chainlink, ENS, ERC-20, ERC-8004, EAS |
+| Canton MCP | 3005 | 14 tools: DAML, CIP-56, DvP, tokenization |
+| LayerZero MCP | 3006 | 20 tools: V2 messaging, OFT, Value Transfer API, Stargate V2 |
+| Chainlink MCP | 3007 | 20 tools: CCIP, data feeds, VRF v2.5, PoR, automation |
+| LI.FI MCP | 3008 | Cross-chain bridge aggregation |
+
+## Health & Metrics
+
+The node tracks health for all subsystems:
+
+- **Healthy**: All systems operational
+- **Degraded**: Some systems experiencing issues but functional
+- **Unhealthy**: Critical systems down
+
+Access health status via the `tenzro_nodeInfo` RPC method.
+
+Metrics tracked:
+- Blocks processed
+- Transactions processed
+- Inference requests handled
+- Settlements completed
+- Peer connections
+- Uptime
+
+## Development
+
+### Running Tests
+
+```bash
+cargo test -p tenzro-node
+```
+
+### Building from Source
+
+```bash
+cargo build -p tenzro-node
+```
+
+### Running in Development
+
+```bash
+cargo run -p tenzro-node -- --role validator --log-level debug
+```
+
+## Production Deployment
+
+For production deployment:
+
+1. Build in release mode:
+   ```bash
+   cargo build --release -p tenzro-node
+   ```
+
+2. Create a dedicated user:
+   ```bash
+   sudo useradd -r -s /bin/false tenzro
+   ```
+
+3. Set up data directories:
+   ```bash
+   sudo mkdir -p /var/lib/tenzro
+   sudo chown tenzro:tenzro /var/lib/tenzro
+   ```
+
+4. Create a systemd service (see `tenzro-node.service` example)
+
+5. Start the service:
+   ```bash
+   sudo systemctl start tenzro-node
+   sudo systemctl enable tenzro-node
+   ```
+
+## License
+
+Licensed under Apache License 2.0.

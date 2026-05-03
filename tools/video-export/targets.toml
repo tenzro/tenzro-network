@@ -1,0 +1,37 @@
+# Registry of video ONNX export targets.
+#
+# Each [[target]] block describes one model the harness knows how to
+# export. The `id` field is the local name used by `export.py`. The
+# `frame_size`, `num_frames`, `fps`, and `embedding_dim` fields will be
+# consumed by the Tenzro `VideoRuntime` when the resulting artifact is
+# registered (`tenzro_loadVideoModel` RPC).
+#
+# As of April 2026 the OSS landscape has no permissive +
+# ONNX-shippable encoder-only video model. Every entry below is
+# tentative pending license clarification or export-pipeline
+# verification — see `notes` for the specific blocker. The harness
+# ships now so adding entries later is mechanical.
+
+[[target]]
+id = "vjepa-2-1-base"
+hf_repo = "facebook/vjepa2"
+arch = "vjepa2"                  # ViT-L/16 with 3D-conv stem, predictor stripped
+license = "TBD"                  # license unclear on the model card as of 2026-04
+params = "300M"
+frame_size = 224
+num_frames = 16
+fps = 4
+embedding_dim = 1024
+notes = "Tier B — encoder-only export (predictor head dropped). License needs clarification with Meta before this can be redistributed under tenzro/ org."
+
+[[target]]
+id = "videomae-base"
+hf_repo = "MCG-NJU/videomae-base"
+arch = "videomae"                # ViT-B/16 with tubelet patch embedding
+license = "CC-BY-NC-4.0"          # non-commercial — see notes
+params = "87M"
+frame_size = 224
+num_frames = 16
+fps = 4
+embedding_dim = 768
+notes = "Tier A — straight encoder export, well-understood. License is CC-BY-NC-4.0 → registry will gate behind --accept-non-commercial. Kept as a working baseline while Meta/V-JEPA license shakes out."

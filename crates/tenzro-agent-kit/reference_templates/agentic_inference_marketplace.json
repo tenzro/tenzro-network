@@ -1,0 +1,124 @@
+{
+  "template_id": "ref-agentic-inference-marketplace-v1",
+  "name": "Agentic Inference Marketplace",
+  "description": "Orchestrator agent for the AI inference marketplace. Discovers available models and providers, routes inference requests based on cost, latency, and quality preferences, negotiates pricing, and handles payment automatically via MPP or x402 protocols. Supports streaming and batch inference.",
+  "template_type": "orchestrator",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1712534400,
+  "updated_at": 1712534400,
+  "capabilities": [
+    {
+      "id": "model_discovery",
+      "name": "Model Discovery",
+      "description": "Lists and filters available AI models by category, modality, price, and provider reputation across the Tenzro network",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\"},\"max_price_per_token\":{\"type\":\"number\"},\"min_reputation\":{\"type\":\"number\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"models\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"model_id\":{\"type\":\"string\"},\"provider\":{\"type\":\"string\"},\"price_per_token\":{\"type\":\"number\"},\"latency_p50_ms\":{\"type\":\"number\"},\"reputation\":{\"type\":\"number\"}}}}}}"
+    },
+    {
+      "id": "inference_routing",
+      "name": "Inference Routing",
+      "description": "Routes an inference request to the optimal provider based on the user's cost/latency/quality preference weights",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\"},\"model_category\":{\"type\":\"string\"},\"preference\":{\"type\":\"string\",\"enum\":[\"cheapest\",\"fastest\",\"best_quality\",\"balanced\"]},\"max_budget\":{\"type\":\"number\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"response\":{\"type\":\"string\"},\"model_used\":{\"type\":\"string\"},\"provider\":{\"type\":\"string\"},\"tokens_used\":{\"type\":\"integer\"},\"cost\":{\"type\":\"number\"},\"latency_ms\":{\"type\":\"number\"}}}"
+    },
+    {
+      "id": "payment_settlement",
+      "name": "Payment Settlement",
+      "description": "Settles inference payments to providers via MPP session billing or x402 one-shot payments",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"provider_did\":{\"type\":\"string\"},\"amount\":{\"type\":\"number\"},\"inference_id\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"payment_protocol\":{\"type\":\"string\"},\"tx_hash\":{\"type\":\"string\"},\"receipt\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 512,
+    "min_storage_mb": 128,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are an AI inference marketplace orchestrator. Your role: (1) Discover available models on the Tenzro network using list_models, filtering by category and budget. (2) For each candidate, fetch pricing quotes and recent latency metrics. (3) Route the inference request to the provider that best matches the user's preference (cheapest, fastest, best_quality, or balanced weighted scoring). (4) After receiving the inference response, settle the payment via MPP for streaming sessions or x402 for one-shot requests. Always verify the inference result hash before payment. Report: model used, provider, token count, cost, latency, and payment receipt. Never exceed the per-request or daily budget delegation.",
+  "examples": [
+    {
+      "description": "Route a chat completion to cheapest provider",
+      "user_input": "Run inference: 'Explain quantum computing in 3 sentences' using the cheapest LLM under 0.5 TNZO",
+      "expected_output": "Discovered 4 LLM providers. Selected provider P-007 (Gemma-4-9B, 0.002 TNZO/1k tokens, p50 latency 340ms, reputation 4.7). Response: [3 sentences]. Tokens: 82 input + 120 output = 202. Cost: 0.0004 TNZO. Paid via MPP session S-123. Receipt: r-456."
+    },
+    {
+      "description": "Batch inference with quality preference",
+      "user_input": "Summarize these 5 documents using the best quality model, budget 5 TNZO total",
+      "expected_output": "Selected provider P-012 (Claude-equivalent, 0.01 TNZO/1k tokens, reputation 4.9). Processed 5 documents in batch. Total tokens: 15,200. Cost: 3.04 TNZO (within 5 TNZO budget). Paid via x402. TX: 0xccc... All 5 summaries returned."
+    }
+  ],
+  "tags": ["inference", "ai", "marketplace", "routing", "models"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/agentic-inference-marketplace",
+  "metadata": {},
+  "execution_spec": {
+    "backend": "MultiVm",
+    "delegation": {
+      "max_transaction_value": 10000000000000000000,
+      "max_daily_spend": 100000000000000000000,
+      "allowed_operations": ["inference", "pay"],
+      "allowed_chains": ["ethereum", "base"],
+      "time_bound_days": 30,
+      "kyc_tier": "Basic"
+    },
+    "required_tool_tags": ["defi"],
+    "required_skill_tags": ["ethereum-defi"],
+    "steps": [
+      {
+        "ToolInvoke": {
+          "tool_tag": "defi",
+          "method": "list_models",
+          "params_template": "{\"category\":\"{{model_category}}\",\"max_price\":\"{{max_budget}}\"}"
+        }
+      },
+      {
+        "ForEach": {
+          "source_tool_tag": "defi",
+          "body": [
+            {
+              "ToolInvoke": {
+                "tool_tag": "defi",
+                "method": "quote_inference_pricing",
+                "params_template": "{\"model_id\":\"{{model.id}}\",\"estimated_tokens\":\"{{estimated_tokens}}\"}"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "When": {
+          "jmespath_expr": "best_provider.cost <= budget",
+          "body": [
+            {
+              "SkillInvoke": {
+                "skill_tag": "ethereum-defi",
+                "method": "inference_request",
+                "params_template": "{\"model_id\":\"{{best_provider.model_id}}\",\"prompt\":\"{{prompt}}\",\"max_tokens\":\"{{max_tokens}}\"}"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "MppPay": {
+          "recipient": "{{best_provider.did}}",
+          "amount": "{{inference_cost}}",
+          "asset": "TNZO",
+          "session_ttl_secs": 600
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 10000000000000000000,
+      "per_day_value": 100000000000000000000
+    }
+  }
+}

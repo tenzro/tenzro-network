@@ -1,0 +1,72 @@
+syntax = "proto3";
+package tenzro.v1;
+
+import "tenzro/v1/types.proto";
+
+message BridgeMessage {
+  string message_id = 1;
+  string source_chain = 2;
+  string destination_chain = 3;
+  string sender = 4;
+  string recipient = 5;
+  bytes payload = 6;
+  uint64 nonce = 7;
+  Timestamp timestamp = 8;
+  BridgeProtocol protocol = 9;
+  BridgeMessageStatus status = 10;
+}
+
+enum BridgeProtocol {
+  BRIDGE_PROTOCOL_UNSPECIFIED = 0;
+  BRIDGE_PROTOCOL_LOCK_AND_MINT = 1;
+  BRIDGE_PROTOCOL_BURN_AND_MINT = 2;
+  BRIDGE_PROTOCOL_LIQUIDITY_POOL = 3;
+  BRIDGE_PROTOCOL_ATOMIC_SWAP = 4;
+  BRIDGE_PROTOCOL_OPTIMISTIC = 5;
+  BRIDGE_PROTOCOL_ZERO_KNOWLEDGE = 6;
+}
+
+enum BridgeMessageStatus {
+  BRIDGE_MESSAGE_STATUS_UNSPECIFIED = 0;
+  BRIDGE_MESSAGE_STATUS_PENDING = 1;
+  BRIDGE_MESSAGE_STATUS_PROCESSING = 2;
+  BRIDGE_MESSAGE_STATUS_SOURCE_CONFIRMED = 3;
+  BRIDGE_MESSAGE_STATUS_RELAYING = 4;
+  BRIDGE_MESSAGE_STATUS_DELIVERED = 5;
+  BRIDGE_MESSAGE_STATUS_FAILED = 6;
+  BRIDGE_MESSAGE_STATUS_REFUNDED = 7;
+}
+
+message BridgeTransfer {
+  string transfer_id = 1;
+  BridgeMessage message = 2;
+  string asset_id = 3;
+  uint64 amount = 4;
+  uint64 bridge_fee = 5;
+  uint64 relayer_fee = 6;
+  Hash source_tx_hash = 7;
+  Hash destination_tx_hash = 8;
+  BridgeProof proof = 9;
+}
+
+message BridgeProof {
+  BridgeProofType proof_type = 1;
+  bytes proof_data = 2;
+  repeated ValidatorSignature signatures = 3;
+}
+
+enum BridgeProofType {
+  BRIDGE_PROOF_TYPE_UNSPECIFIED = 0;
+  BRIDGE_PROOF_TYPE_MERKLE = 1;
+  BRIDGE_PROOF_TYPE_MULTI_SIG = 2;
+  BRIDGE_PROOF_TYPE_ZERO_KNOWLEDGE = 3;
+  BRIDGE_PROOF_TYPE_LIGHT_CLIENT = 4;
+  BRIDGE_PROOF_TYPE_OPTIMISTIC = 5;
+}
+
+message ValidatorSignature {
+  Address validator = 1;
+  bytes signature = 2;
+  uint64 voting_power = 3;
+  Timestamp signed_at = 4;
+}

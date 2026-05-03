@@ -1,0 +1,84 @@
+{
+  "template_id": "ref-language-trainer-v1",
+  "name": "Language Foundation Model Trainer",
+  "description": "Trains decoder-only or encoder-decoder language models (Llama, Mistral, T5) over Decoupled DiLoCo. Enrolls in a Tenzro Train task, runs H inner SGD steps locally, and submits outer gradients to the syncer. Phase 1: Open trust tier, Mean aggregation. Inner training loop runs in the Python reference trainer (PyTorch FSDP2 + Hivemind).",
+  "template_type": "specialist",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1745539200,
+  "updated_at": 1745539200,
+  "capabilities": [
+    {
+      "id": "language_training",
+      "name": "Language Model Training",
+      "description": "Run inner SGD steps on a token shard and emit outer gradients per Decoupled DiLoCo",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"trainer_did\":{\"type\":\"string\"},\"shard_uri\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"round\":{\"type\":\"integer\"},\"fragment\":{\"type\":\"integer\"},\"safetensors_hash\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 32768,
+    "min_storage_mb": 102400,
+    "gpu_required": true,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are a language foundation model trainer. You enroll in posted Tenzro Train tasks, fetch your assigned token shard, run H inner SGD steps via the Python reference trainer, and submit safetensors-encoded outer gradients to the syncer. You must respect the configured aggregation rule and grace window.",
+  "examples": [
+    {
+      "description": "Enroll and train one round of a 7B Llama-class model",
+      "user_input": "Train task task-llama7b-202604 as did:tenzro:machine:trainer-3",
+      "expected_output": "Enrolled. Round 0 complete. Submitted gradient for fragment 5 (sha256:bcde...)."
+    }
+  ],
+  "tags": ["training", "language", "tenzro-train", "diloco", "llama", "transformer"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/language-trainer",
+  "metadata": {
+    "modality": "language",
+    "tier": "open",
+    "default_aggregation": "mean"
+  },
+  "execution_spec": {
+    "backend": "MultiVm",
+    "delegation": {
+      "max_transaction_value": 1000000000000000000,
+      "max_daily_spend": 10000000000000000000,
+      "allowed_operations": ["training_enroll", "training_submit_gradient"],
+      "allowed_chains": [],
+      "time_bound_days": 30,
+      "kyc_tier": "Unverified"
+    },
+    "required_tool_tags": ["tenzro-train"],
+    "required_skill_tags": ["language-training"],
+    "steps": [
+      {
+        "ToolInvoke": {
+          "tool_tag": "tenzro-train",
+          "arguments_json": "{\"method\": \"tenzro_training_enrollTrainer\", \"task_id\": \"{{task_id}}\", \"trainer_did\": \"{{trainer_did}}\"}"
+        }
+      },
+      {
+        "SkillInvoke": {
+          "skill_tag": "language-training",
+          "input_json": "{\"task_id\": \"{{task_id}}\", \"shard_uri\": \"{{shard_uri}}\"}"
+        }
+      },
+      {
+        "ToolInvoke": {
+          "tool_tag": "tenzro-train",
+          "arguments_json": "{\"method\": \"tenzro_training_submitOuterGradient\", \"gradient\": \"{{gradient}}\"}"
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 1000000000000000000,
+      "per_day_value": 10000000000000000000
+    }
+  }
+}

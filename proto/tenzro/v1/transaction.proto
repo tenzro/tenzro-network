@@ -1,0 +1,37 @@
+syntax = "proto3";
+package tenzro.v1;
+
+import "tenzro/v1/types.proto";
+
+enum TransactionType {
+  TRANSACTION_TYPE_UNSPECIFIED = 0;
+  TRANSACTION_TYPE_TRANSFER = 1;
+  TRANSACTION_TYPE_CONTRACT_CALL = 2;
+  TRANSACTION_TYPE_AGENT_ACTION = 3;
+  TRANSACTION_TYPE_INFERENCE_REQUEST = 4;
+  TRANSACTION_TYPE_TEE_OPERATION = 5;
+  TRANSACTION_TYPE_STAKE_DEPOSIT = 6;
+  TRANSACTION_TYPE_STAKE_WITHDRAW = 7;
+  TRANSACTION_TYPE_GOVERNANCE_VOTE = 8;
+  TRANSACTION_TYPE_CONTRACT_DEPLOY = 9;
+}
+
+message Transaction {
+  ChainId chain_id = 1;
+  uint64 nonce = 2;
+  Address from = 3;
+  Address to = 4;
+  Amount value = 5;
+  AssetId asset = 6;
+  bytes data = 7;
+  uint64 gas_limit = 8;
+  Amount gas_price = 9;
+  Signature signature = 10;
+  TransactionType tx_type = 11;
+  Timestamp timestamp = 12;
+}
+
+message SignedTransaction {
+  Transaction transaction = 1;
+  Hash tx_hash = 2;
+}

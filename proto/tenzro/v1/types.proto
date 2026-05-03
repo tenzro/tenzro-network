@@ -1,0 +1,46 @@
+syntax = "proto3";
+package tenzro.v1;
+
+message Hash {
+  bytes value = 1; // 32 bytes
+}
+
+message Address {
+  bytes value = 1; // 32 bytes
+}
+
+message Signature {
+  bytes signature_bytes = 1;
+  bytes public_key = 2;
+}
+
+// Use bytes for u128 values (16 bytes big-endian)
+message Amount {
+  bytes value = 1; // 16 bytes big-endian for u128
+}
+
+message Timestamp {
+  int64 millis = 1;
+}
+
+message ChainId {
+  uint64 id = 1;
+}
+
+enum NetworkRole {
+  NETWORK_ROLE_UNSPECIFIED = 0;
+  NETWORK_ROLE_VALIDATOR = 1;
+  NETWORK_ROLE_INFERENCE_PROVIDER = 2;
+  NETWORK_ROLE_TEE_PROVIDER = 3;
+  NETWORK_ROLE_USER = 4;
+}
+
+message AssetId {
+  string id = 1;
+}
+
+enum StablecoinType {
+  STABLECOIN_TYPE_UNSPECIFIED = 0;
+  STABLECOIN_TYPE_USDC = 1;
+  STABLECOIN_TYPE_USDT = 2;
+}

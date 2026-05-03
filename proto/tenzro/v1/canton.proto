@@ -1,0 +1,228 @@
+syntax = "proto3";
+package tenzro.v1;
+
+import "tenzro/v1/types.proto";
+
+// Canton DAML 3.x integration types for Tenzro Network
+// These types define the interface between Tenzro and Canton Ledger API
+
+// Daml contract identifier
+message DamlContractId {
+  string id = 1;
+}
+
+// Daml template identifier
+message DamlTemplateId {
+  string package_id = 1;
+  string module_name = 2;
+  string entity_name = 3;
+}
+
+// Daml party identifier
+message DamlParty {
+  string id = 1;
+}
+
+// Canton domain identifier
+message CantonDomainId {
+  string id = 1;
+}
+
+// Daml value types
+message DamlValue {
+  oneof value {
+    DamlRecord record = 1;
+    DamlVariant variant = 2;
+    DamlList list = 3;
+    int64 int64_value = 4;
+    string numeric_value = 5;
+    string text_value = 6;
+    bool bool_value = 7;
+    int64 timestamp_value = 8;
+    int32 date_value = 9;
+    string party_value = 10;
+    string contract_id_value = 11;
+    DamlOptional optional = 12;
+    DamlMap map = 13;
+    string enum_value = 14;
+    bool unit = 15;
+  }
+}
+
+message DamlRecord {
+  DamlTemplateId record_id = 1;
+  repeated DamlRecordField fields = 2;
+}
+
+message DamlRecordField {
+  string label = 1;
+  DamlValue value = 2;
+}
+
+message DamlVariant {
+  DamlTemplateId variant_id = 1;
+  string constructor = 2;
+  DamlValue value = 3;
+}
+
+message DamlList {
+  repeated DamlValue elements = 1;
+}
+
+message DamlOptional {
+  DamlValue value = 1; // absent means None
+}
+
+message DamlMap {
+  map<string, DamlValue> entries = 1;
+}
+
+// Daml command types
+message DamlCommand {
+  oneof command {
+    CreateCommand create = 1;
+    ExerciseCommand exercise = 2;
+    CreateAndExerciseCommand create_and_exercise = 3;
+  }
+}
+
+message CreateCommand {
+  DamlTemplateId template_id = 1;
+  DamlValue create_arguments = 2;
+}
+
+message ExerciseCommand {
+  DamlTemplateId template_id = 1;
+  DamlContractId contract_id = 2;
+  string choice = 3;
+  DamlValue choice_argument = 4;
+}
+
+message CreateAndExerciseCommand {
+  DamlTemplateId template_id = 1;
+  DamlValue create_arguments = 2;
+  string choice = 3;
+  DamlValue choice_argument = 4;
+}
+
+// Daml events
+message DamlEvent {
+  oneof event {
+    CreatedEvent created = 1;
+    ArchivedEvent archived = 2;
+  }
+}
+
+message CreatedEvent {
+  string event_id = 1;
+  DamlContractId contract_id = 2;
+  DamlTemplateId template_id = 3;
+  DamlValue create_arguments = 4;
+  repeated DamlParty signatories = 5;
+  repeated DamlParty observers = 6;
+}
+
+message ArchivedEvent {
+  string event_id = 1;
+  DamlContractId contract_id = 2;
+  DamlTemplateId template_id = 3;
+}
+
+// Daml transaction
+message DamlTransaction {
+  string transaction_id = 1;
+  string command_id = 2;
+  repeated DamlEvent events = 3;
+  int64 effective_at = 4;
+  string offset = 5;
+  CantonDomainId domain_id = 6;
+}
+
+// Canton command submission request (maps to /v2/commands/submit-and-wait-for-transaction)
+message CantonSubmitRequest {
+  string command_id = 1;
+  repeated DamlParty act_as = 2;
+  repeated DamlParty read_as = 3;
+  repeated DamlCommand commands = 4;
+  string application_id = 5;
+  string workflow_id = 6;
+}
+
+// Canton command submission response
+message CantonSubmitResponse {
+  DamlTransaction transaction = 1;
+  CantonCommandStatus status = 2;
+}
+
+enum CantonCommandStatus {
+  CANTON_COMMAND_STATUS_UNSPECIFIED = 0;
+  CANTON_COMMAND_STATUS_ACCEPTED = 1;
+  CANTON_COMMAND_STATUS_COMMITTED = 2;
+  CANTON_COMMAND_STATUS_REJECTED = 3;
+  CANTON_COMMAND_STATUS_TIMED_OUT = 4;
+}
+
+// DAR package upload request
+message UploadDarRequest {
+  bytes dar_file = 1;
+  string description = 2;
+}
+
+message UploadDarResponse {
+  string package_id = 1;
+}
+
+// Active contracts query (Canton 3.x JSON Ledger API v2 uses identifierFilter)
+message GetActiveContractsRequest {
+  DamlParty party = 1;
+  DamlTemplateId identifier_filter = 2;  // Canton 3.x: identifierFilter wrapping templateFilter
+}
+
+message GetActiveContractsResponse {
+  repeated CreatedEvent active_contracts = 1;
+  string offset = 2;
+}
+
+// Canton bridge transfer
+message CantonBridgeTransfer {
+  string transfer_id = 1;
+  CantonDomainId source_domain = 2;
+  CantonDomainId target_domain = 3;
+  DamlParty sender = 4;
+  DamlParty recipient = 5;
+  DamlContractId contract_id = 6;
+  CantonTransferStatus status = 7;
+  Timestamp initiated_at = 8;
+}
+
+enum CantonTransferStatus {
+  CANTON_TRANSFER_STATUS_UNSPECIFIED = 0;
+  CANTON_TRANSFER_STATUS_INITIATED = 1;
+  CANTON_TRANSFER_STATUS_IN_TRANSIT = 2;
+  CANTON_TRANSFER_STATUS_COMPLETED = 3;
+  CANTON_TRANSFER_STATUS_FAILED = 4;
+}
+
+// Canton domain info
+message CantonDomainInfo {
+  CantonDomainId domain_id = 1;
+  string display_name = 2;
+  uint64 participant_count = 3;
+  uint64 contract_count = 4;
+  bool is_active = 5;
+}
+
+// Service definition for Canton 3.x integration (JSON Ledger API v2)
+service CantonBridgeService {
+  // Submit a Daml command to Canton via submit-and-wait-for-transaction
+  rpc SubmitCommand(CantonSubmitRequest) returns (CantonSubmitResponse);
+
+  // Query active contracts
+  rpc GetActiveContracts(GetActiveContractsRequest) returns (GetActiveContractsResponse);
+
+  // Upload a DAR package
+  rpc UploadDar(UploadDarRequest) returns (UploadDarResponse);
+
+  // Initiate a cross-domain transfer
+  rpc InitiateTransfer(CantonBridgeTransfer) returns (CantonBridgeTransfer);
+}

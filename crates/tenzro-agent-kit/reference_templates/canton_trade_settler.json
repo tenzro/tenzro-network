@@ -1,0 +1,83 @@
+{
+  "template_id": "ref-canton-trade-settler-v1",
+  "name": "Canton Trade Settler",
+  "description": "Settles bilateral trades on Canton/DAML ledger. Discovers trade opportunities via a tagged tool, submits DAML Create commands for trade proposals, and exercises settlement choices when counterparty accepts.",
+  "template_type": "specialist",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1712534400,
+  "updated_at": 1712534400,
+  "capabilities": [
+    {
+      "id": "daml_settlement",
+      "name": "DAML Trade Settlement",
+      "description": "Creates and exercises DAML contracts for bilateral trade settlement",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"counterparty\":{\"type\":\"string\"},\"amount\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"contract_id\":{\"type\":\"string\"},\"status\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 256,
+    "min_storage_mb": 100,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are a Canton trade settlement agent. You propose bilateral trades as DAML contracts and exercise settlement choices upon acceptance.",
+  "examples": [
+    {
+      "description": "Settle a TNZO/USDC trade",
+      "user_input": "Propose a trade: sell 100 TNZO for 250 USDC to counterparty Alice",
+      "expected_output": "Created DAML TradeProposal contract #abc. Awaiting counterparty acceptance."
+    }
+  ],
+  "tags": ["canton", "daml", "trade", "settlement", "enterprise"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/canton-trade-settler",
+  "metadata": {},
+  "execution_spec": {
+    "backend": {
+      "Daml": {
+        "participant_host": "{{canton_host}}",
+        "participant_port": 6865
+      }
+    },
+    "delegation": {
+      "max_transaction_value": 1000000000000000000000,
+      "max_daily_spend": 5000000000000000000000,
+      "allowed_operations": ["daml_create", "daml_exercise"],
+      "allowed_chains": [],
+      "time_bound_days": 90,
+      "kyc_tier": "Enhanced"
+    },
+    "required_tool_tags": ["trade-opportunity"],
+    "required_skill_tags": [],
+    "steps": [
+      {
+        "ForEach": {
+          "source_tool_tag": "trade-opportunity",
+          "body": [
+            {
+              "DamlSubmit": {
+                "template_package": "com.tenzro.trade",
+                "module": "Trade",
+                "entity": "TradeProposal",
+                "command_variant": "Create",
+                "fields_json": "{\"seller\": \"{{agent_party}}\", \"buyer\": \"{{opportunity.counterparty}}\", \"asset\": \"TNZO\", \"amount\": \"{{opportunity.amount}}\", \"price_asset\": \"USDC\", \"price\": \"{{opportunity.price}}\"}"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 1000000000000000000000,
+      "per_day_value": 5000000000000000000000
+    }
+  }
+}

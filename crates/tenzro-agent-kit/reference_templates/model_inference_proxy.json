@@ -1,0 +1,85 @@
+{
+  "template_id": "ref-model-inference-proxy-v1",
+  "name": "Model Inference Proxy",
+  "description": "Proxies AI inference requests through the Tenzro model registry. Discovers available models via tagged tools, selects the best provider by latency or price, pays via x402, and forwards the chat completion request.",
+  "template_type": "tool_agent",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1712534400,
+  "updated_at": 1712534400,
+  "capabilities": [
+    {
+      "id": "inference_routing",
+      "name": "Inference Routing",
+      "description": "Routes chat completion requests to the best available model provider and handles payment",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"model\":{\"type\":\"string\"},\"prompt\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"response\":{\"type\":\"string\"},\"provider\":{\"type\":\"string\"},\"cost\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 256,
+    "min_storage_mb": 50,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are an inference proxy agent. You discover available model providers, select the best one by latency or price, handle x402 payment, and forward the user's inference request.",
+  "examples": [
+    {
+      "description": "Route a chat completion",
+      "user_input": "Send 'Explain quantum computing' to the cheapest GPT-4 provider",
+      "expected_output": "Routed to provider acme-ai (latency: 120ms, cost: 0.02 TNZO/1K tokens). Response: 'Quantum computing is...'"
+    }
+  ],
+  "tags": ["inference", "model", "ai", "routing", "x402", "proxy"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/model-inference-proxy",
+  "metadata": {},
+  "execution_spec": {
+    "backend": {
+      "X402Payment": {
+        "endpoint": "{{provider_endpoint}}"
+      }
+    },
+    "delegation": {
+      "max_transaction_value": 5000000000000000000,
+      "max_daily_spend": 50000000000000000000,
+      "allowed_operations": ["x402_pay", "inference"],
+      "allowed_chains": [],
+      "time_bound_days": 30,
+      "kyc_tier": "Unverified"
+    },
+    "required_tool_tags": ["model-discovery"],
+    "required_skill_tags": [],
+    "steps": [
+      {
+        "ToolInvoke": {
+          "tool_tag": "model-discovery",
+          "arguments_json": "{\"category\": \"{{model_category}}\", \"sort_by\": \"price\"}"
+        }
+      },
+      {
+        "X402Pay": {
+          "resource_url": "{{provider_endpoint}}/v1/chat/completions",
+          "amount": "{{estimated_cost}}",
+          "asset": "TNZO"
+        }
+      },
+      {
+        "SkillInvoke": {
+          "skill_tag": "chat-completion",
+          "input_json": "{\"model\": \"{{chosen_model}}\", \"messages\": [{\"role\": \"user\", \"content\": \"{{prompt}}\"}]}"
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": 5000000000000000000,
+      "per_day_value": 50000000000000000000
+    }
+  }
+}

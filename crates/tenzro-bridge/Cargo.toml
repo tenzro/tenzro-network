@@ -1,0 +1,31 @@
+[package]
+name = "tenzro-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cross-chain bridge adapters for Tenzro Network — LayerZero, Chainlink CCIP, deBridge, Canton, LI.FI aggregator"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-token = { workspace = true }
+tenzro-crypto = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
+tonic = "0.12"
+prost = { workspace = true }
+sha2 = { workspace = true }
+sha3 = "0.10"
+parking_lot = { workspace = true }
+k256 = { version = "0.13", features = ["ecdsa"] }
+reqwest = { version = "0.12", features = ["json"] }
+base64 = "0.22"

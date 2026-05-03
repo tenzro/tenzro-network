@@ -1,0 +1,131 @@
+syntax = "proto3";
+package tenzro.v1;
+
+import "tenzro/v1/types.proto";
+import "tenzro/v1/tee.proto";
+
+enum ModelModality {
+  MODEL_MODALITY_UNSPECIFIED = 0;
+  MODEL_MODALITY_TEXT = 1;
+  MODEL_MODALITY_IMAGE = 2;
+  MODEL_MODALITY_AUDIO = 3;
+  MODEL_MODALITY_VIDEO = 4;
+  MODEL_MODALITY_TEXT_IMAGE = 5;
+  MODEL_MODALITY_TEXT_AUDIO = 6;
+  MODEL_MODALITY_MULTIMODAL = 7;
+}
+
+message ModelInfo {
+  string model_id = 1;
+  string name = 2;
+  string version = 3;
+  string description = 4;
+  ModelModality modality = 5;
+  string architecture = 6;
+  Address provider = 7;
+  Hash model_hash = 8;
+  ModelParameters parameters = 9;
+  PricingConfig pricing = 10;
+  ModelStatus status = 11;
+  map<string, string> metadata = 12;
+}
+
+enum ModelStatus {
+  MODEL_STATUS_UNSPECIFIED = 0;
+  MODEL_STATUS_PENDING = 1;
+  MODEL_STATUS_ACTIVE = 2;
+  MODEL_STATUS_INACTIVE = 3;
+  MODEL_STATUS_DEPRECATED = 4;
+}
+
+message ModelParameters {
+  uint64 parameter_count = 1;
+  uint32 context_window = 2;
+  uint32 max_output_tokens = 3;
+  repeated string input_formats = 4;
+  repeated string output_formats = 5;
+  repeated string capabilities = 6;
+}
+
+message PricingConfig {
+  uint64 price_per_input_token = 1;
+  uint64 price_per_output_token = 2;
+  uint64 minimum_price = 3;
+  PricingModel pricing_model = 4;
+}
+
+enum PricingModel {
+  PRICING_MODEL_UNSPECIFIED = 0;
+  PRICING_MODEL_PER_TOKEN = 1;
+  PRICING_MODEL_PER_REQUEST = 2;
+  PRICING_MODEL_PER_COMPUTE_TIME = 3;
+  PRICING_MODEL_DYNAMIC = 4;
+}
+
+message InferenceRequest {
+  string request_id = 1;
+  string model_id = 2;
+  Address requester = 3;
+  bytes input = 4;
+  InferenceParameters parameters = 5;
+  uint64 max_price = 6;
+  Timestamp timestamp = 7;
+  Address callback = 8;
+  bool require_tee = 9;
+}
+
+message InferenceParameters {
+  uint32 temperature = 1;  // fixed-point: 100 = 1.0
+  uint32 top_p = 2;
+  uint32 top_k = 3;
+  uint32 max_tokens = 4;
+  repeated string stop_sequences = 5;
+  map<string, string> custom = 6;
+}
+
+message InferenceResponse {
+  string request_id = 1;
+  string response_id = 2;
+  string model_id = 3;
+  Address provider = 4;
+  bytes output = 5;
+  InferenceMetadata metadata = 6;
+  uint64 price = 7;
+  Timestamp timestamp = 8;
+  AttestationReport tee_attestation = 9;
+}
+
+message InferenceMetadata {
+  uint32 input_tokens = 1;
+  uint32 output_tokens = 2;
+  uint64 latency_ms = 3;
+  string model_version = 4;
+  string finish_reason = 5;
+}
+
+message InferenceProvider {
+  Address address = 1;
+  string name = 2;
+  repeated string models = 3;
+  ProviderCapacity capacity = 4;
+  PricingConfig pricing = 5;
+  uint64 reputation = 6;
+  uint64 total_inferences = 7;
+  ProviderStatus status = 8;
+  Timestamp registered_at = 9;
+}
+
+message ProviderCapacity {
+  uint32 max_concurrent_requests = 1;
+  uint32 active_requests = 2;
+  uint32 requests_per_second = 3;
+  uint32 max_batch_size = 4;
+}
+
+enum ProviderStatus {
+  PROVIDER_STATUS_UNSPECIFIED = 0;
+  PROVIDER_STATUS_PENDING = 1;
+  PROVIDER_STATUS_ACTIVE = 2;
+  PROVIDER_STATUS_INACTIVE = 3;
+  PROVIDER_STATUS_SUSPENDED = 4;
+}

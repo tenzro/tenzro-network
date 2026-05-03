@@ -1,0 +1,41 @@
+[build]
+# Use all available CPU cores (omit jobs to use default auto-detection)
+
+# Hardware autodetection strategy:
+# - Do NOT set target-cpu=native globally — it breaks llama-cpp-sys-2 on
+#   Apple Silicon (Apple Clang rejects -mcpu=native for aarch64).
+# - Instead, Rust codegen already targets the host architecture by default.
+# - For release builds wanting max SIMD, set RUSTFLAGS per-platform in CI:
+#     x86_64: RUSTFLAGS="-C target-cpu=x86-64-v3"  (AVX2, most modern CPUs)
+#     ARM64:  (no flag needed — compiler defaults are optimal)
+# - GPU acceleration (Metal/CUDA/ROCm/Vulkan) is handled by cargo features.
+# - llama.cpp native CPU detection is controlled via CMAKE_ARGS env var.
+
+[env]
+# Force GGML_NATIVE=OFF to prevent llama-cpp-sys-2 from passing -mcpu=native
+# to Apple Clang. Metal GPU acceleration is unaffected (auto-enabled on macOS).
+# On Linux x86_64, AVX2/AVX-512 are still auto-detected by the compiler.
+CMAKE_ARGS = "-DGGML_NATIVE=OFF"
+
+[target.x86_64-unknown-linux-gnu]
+# x86_64 Linux: enable AVX2 for modern CPUs (Haswell+ / Zen+)
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-unknown-linux-musl]
+# x86_64 Linux musl (Alpine/static): same AVX2 baseline
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.aarch64-unknown-linux-gnu]
+# ARM64 Linux (Graviton/Ampere/Docker): compiler defaults are optimal
+# No target-cpu override needed — avoids llama-cpp GGML_NATIVE issues
+rustflags = []
+
+[target.aarch64-apple-darwin]
+# Apple Silicon (M1/M2/M3/M4): compiler defaults are optimal
+# Metal GPU acceleration auto-enabled by llama-cpp-sys-2 on macOS
+# Do NOT set target-cpu=native — breaks llama-cpp cmake build
+rustflags = []
+
+[target.x86_64-apple-darwin]
+# Intel macOS: enable AVX2 baseline
+rustflags = ["-C", "target-cpu=x86-64-v3"]

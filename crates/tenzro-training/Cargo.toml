@@ -1,0 +1,24 @@
+[package]
+name = "tenzro-training"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tenzro Train — protocol-only Rust crate for decentralized verifiable foundation-model training (Decoupled DiLoCo). Inner training loops are dispatched to the Python reference trainer (PyTorch FSDP2 + Hivemind + safetensors)."
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-storage = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+ndarray = { workspace = true }

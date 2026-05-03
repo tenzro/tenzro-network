@@ -1,0 +1,150 @@
+"""4-tier keyword routing for natural language messages to handler skills."""
+
+
+def route_message(text: str) -> str:
+    """Route a natural language message to the appropriate handler skill.
+
+    Routing uses four priority tiers:
+      Tier 1 - Multi-word compound phrases (highest priority)
+      Tier 2 - Token sub-commands
+      Tier 3 - Single-keyword domain routes
+      Tier 4 - Generic / fallback (lowest priority)
+    """
+    t = text.lower()
+
+    # ------------------------------------------------------------------
+    # Tier 1: Multi-word compound phrases (highest priority)
+    # ------------------------------------------------------------------
+    if any(k in t for k in [
+        "refresh token", "refresh access token", "refresh my token",
+        "link wallet for auth", "link my wallet", "link wallet to auth",
+        "onboard human", "onboard delegated", "onboard autonomous",
+        "delegated agent", "autonomous agent",
+        "dpop", "access token", "auth token",
+    ]):
+        return "auth"
+    if any(k in t for k in ["join", "micronode", "onboard", "participate"]):
+        return "join"
+    if (
+        "agent template" in t
+        or "agent marketplace" in t
+        or ("list" in t and "template" in t)
+    ):
+        return "agent_marketplace"
+    if (
+        "task marketplace" in t
+        or "post task" in t
+        or "open task" in t
+        or ("task" in t and "marketplace" in t)
+    ):
+        return "task_marketplace"
+    if any(k in t for k in ["spawn", "child agent", "sub-agent", "subagent"]):
+        return "agent_spawning"
+    if any(k in t for k in ["swarm", "orchestrat"]):
+        return "swarm_orchestration"
+
+    # ------------------------------------------------------------------
+    # Tier 2: Token sub-commands
+    # ------------------------------------------------------------------
+    if "token" in t:
+        if any(k in t for k in ["create", "mint"]):
+            return "create_token"
+        if any(k in t for k in ["info", "details", "lookup"]):
+            return "token_info"
+        if "balance" in t:
+            return "token_balance"
+        if "cross" in t and "vm" in t:
+            return "cross_vm_transfer"
+        if "wrap" in t and "tnzo" in t:
+            return "wrap_tnzo"
+        return "list_tokens"
+
+    # ------------------------------------------------------------------
+    # Tier 2b: Crypto / TEE / Custody / ZK compound phrases
+    # ------------------------------------------------------------------
+    if any(k in t for k in ["key exchange", "x25519", "diffie-hellman"]):
+        return "crypto"
+    if any(k in t for k in ["mpc wallet", "keystore", "session key", "spending limit", "custody", "key share", "key rotation"]):
+        return "custody"
+    if any(k in t for k in ["zk proof", "zero knowledge", "zk circuit", "plonky3", "stark"]):
+        return "zk"
+    if any(k in t for k in ["tee enclave", "tee attestation", "tee provider", "seal data", "unseal data", "trusted execution"]):
+        return "tee"
+
+    # ------------------------------------------------------------------
+    # Tier 2c: AP2 mandate, ERC-8004, Wormhole, CCT compound phrases
+    # ------------------------------------------------------------------
+    if any(k in t for k in [
+        "ap2 mandate", "verify mandate", "validate mandate", "intent vdc", "cart vdc",
+        "payment vdc", "mandate pair", "ap2 session", "ap2 protocol", "ap2 intent",
+        "ap2 cart", "ap2 payment",
+    ]):
+        return "ap2"
+    if any(k in t for k in [
+        "erc-8004", "erc8004", "agent id", "agentid", "trustless agent",
+        "reputation feedback", "request validation", "submit validation",
+    ]):
+        return "erc8004"
+    if any(k in t for k in ["wormhole", "vaa"]):
+        return "wormhole"
+    if any(k in t for k in ["cct pool", "cct pools", "chainlink cross-chain token", "lockrelease pool", "burnmint pool"]):
+        return "cct"
+
+    # ------------------------------------------------------------------
+    # Tier 3: Single-keyword domain routes
+    # ------------------------------------------------------------------
+    if any(k in t for k in ["sign", "encrypt", "decrypt", "keccak"]):
+        return "crypto"
+    if any(k in t for k in ["tee", "enclave", "attestation", "seal"]):
+        return "tee"
+    if any(k in t for k in ["deploy", "contract", "bytecode"]):
+        return "contract"
+    if any(k in t for k in ["nft", "collection", "mint nft"]):
+        return "nft"
+    if any(k in t for k in ["debridge", "dln", "same chain swap"]):
+        return "debridge"
+    if any(k in t for k in ["bridge", "cross-chain", "layerzero", "ccip"]):
+        return "bridge"
+    if any(k in t for k in ["compliance", "kyc", "t-rex", "erc-3643", "whitelist"]):
+        return "compliance"
+    if any(k in t for k in ["erc-7802", "crosschain token"]):
+        return "crosschain"
+    if any(k in t for k in ["event", "subscribe", "webhook", "listen"]):
+        return "events"
+    if any(k in t for k in ["identity", "did", "register identity", "resolve", "username"]):
+        return "identity"
+    if any(k in t for k in ["balance", "wallet", "send", "transfer"]):
+        return "wallet"
+    if "faucet" in t:
+        return "faucet"
+    if any(k in t for k in ["model", "inference", "ai ", "chat"]):
+        return "inference"
+    if any(k in t for k in ["stake", "staking", "unstake", "validator"]):
+        return "staking"
+    if any(k in t for k in ["provider", "serving", "earnings"]):
+        return "provider"
+    if "ap2" in t:
+        return "ap2"
+    if any(k in t for k in ["payment", "challenge", "mpp", "x402"]):
+        return "payment"
+    if any(k in t for k in ["verify", "proof", "attestation", "zk"]):
+        return "verification"
+    if any(k in t for k in [
+        "block", "height", "transaction", "block range", "sync from",
+        "catch up", "catch-up",
+        "fee market", "gas price", "gasprice", "priority tip",
+        "fee history", "1559", "eip-1559", "eip1559",
+    ]):
+        return "block"
+    if any(k in t for k in ["canton", "daml"]):
+        return "canton"
+
+    # ------------------------------------------------------------------
+    # Tier 4: Most generic (lowest priority)
+    # ------------------------------------------------------------------
+    if any(k in t for k in ["peer", "network"]):
+        return "network"
+    if any(k in t for k in ["status", "health", "node"]):
+        return "status"
+
+    return "help"

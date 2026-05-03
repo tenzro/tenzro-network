@@ -1,0 +1,141 @@
+syntax = "proto3";
+package tenzro.v1;
+
+import "tenzro/v1/types.proto";
+
+message SettlementRequest {
+  string request_id = 1;
+  Address provider = 2;
+  Address customer = 3;
+  ServiceType service_type = 4;
+  PaymentIntent payment_intent = 5;
+  uint64 amount = 6;
+  ServiceProof service_proof = 7;
+  Timestamp timestamp = 8;
+  Timestamp deadline = 9;
+}
+
+message ServiceType {
+  oneof type {
+    ModelInferenceService model_inference = 1;
+    TeeComputationService tee_computation = 2;
+    StorageService storage = 3;
+    AgentExecutionService agent_execution = 4;
+    DataServiceInfo data_service = 5;
+    BridgeService bridge = 6;
+    CustomService custom = 7;
+  }
+}
+
+message ModelInferenceService {
+  string model_id = 1;
+  uint32 tokens = 2;
+}
+
+message TeeComputationService {
+  string computation_id = 1;
+  uint64 compute_units = 2;
+}
+
+message StorageService {
+  uint64 data_size = 1;
+  uint64 duration = 2;
+}
+
+message AgentExecutionService {
+  string agent_id = 1;
+  string task_id = 2;
+}
+
+message DataServiceInfo {
+  string service_id = 1;
+  uint64 volume = 2;
+}
+
+message BridgeService {
+  string transfer_id = 1;
+  uint64 amount = 2;
+}
+
+message CustomService {
+  string name = 1;
+  map<string, string> parameters = 2;
+}
+
+enum PaymentIntent {
+  PAYMENT_INTENT_UNSPECIFIED = 0;
+  PAYMENT_INTENT_IMMEDIATE = 1;
+  PAYMENT_INTENT_DEFERRED = 2;
+  PAYMENT_INTENT_ON_DELIVERY = 3;
+  PAYMENT_INTENT_ESCROW = 4;
+  PAYMENT_INTENT_SUBSCRIPTION = 5;
+}
+
+message ServiceProof {
+  ProofType proof_type = 1;
+  bytes proof_data = 2;
+  repeated ProofSignature signatures = 3;
+  bytes attestation = 4;
+}
+
+enum ProofType {
+  PROOF_TYPE_UNSPECIFIED = 0;
+  PROOF_TYPE_CRYPTOGRAPHIC = 1;
+  PROOF_TYPE_TEE_ATTESTATION = 2;
+  PROOF_TYPE_MULTI_PARTY = 3;
+  PROOF_TYPE_MERKLE = 4;
+  PROOF_TYPE_ZERO_KNOWLEDGE = 5;
+  PROOF_TYPE_ORACLE = 6;
+}
+
+message ProofSignature {
+  Address signer = 1;
+  bytes signature = 2;
+  SignerRole role = 3;
+}
+
+enum SignerRole {
+  SIGNER_ROLE_UNSPECIFIED = 0;
+  SIGNER_ROLE_PROVIDER = 1;
+  SIGNER_ROLE_CONSUMER = 2;
+  SIGNER_ROLE_VERIFIER = 3;
+  SIGNER_ROLE_ORACLE = 4;
+}
+
+message SettlementReceipt {
+  string receipt_id = 1;
+  string request_id = 2;
+  Hash transaction_hash = 3;
+  Address provider = 4;
+  Address customer = 5;
+  ServiceType service_type = 6;
+  uint64 amount = 7;
+  SettlementStatus status = 8;
+  Timestamp settled_at = 9;
+  map<string, string> metadata = 10;
+}
+
+enum SettlementStatus {
+  SETTLEMENT_STATUS_UNSPECIFIED = 0;
+  SETTLEMENT_STATUS_PENDING = 1;
+  SETTLEMENT_STATUS_COMPLETED = 2;
+  SETTLEMENT_STATUS_FAILED = 3;
+  SETTLEMENT_STATUS_DISPUTED = 4;
+  SETTLEMENT_STATUS_REFUNDED = 5;
+}
+
+message EscrowConfig {
+  Address escrow_address = 1;
+  uint64 amount = 2;
+  ReleaseConditions release_conditions = 3;
+  Timestamp timeout = 4;
+}
+
+enum ReleaseConditions {
+  RELEASE_CONDITIONS_UNSPECIFIED = 0;
+  RELEASE_CONDITIONS_PROVIDER_SIGNATURE = 1;
+  RELEASE_CONDITIONS_CONSUMER_SIGNATURE = 2;
+  RELEASE_CONDITIONS_BOTH_SIGNATURES = 3;
+  RELEASE_CONDITIONS_VERIFIER_SIGNATURE = 4;
+  RELEASE_CONDITIONS_TIMEOUT = 5;
+}

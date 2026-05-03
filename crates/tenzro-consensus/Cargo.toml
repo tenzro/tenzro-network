@@ -1,0 +1,32 @@
+[package]
+name = "tenzro-consensus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HotStuff-2 BFT consensus engine for Tenzro Network with TEE attestation"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tokio = { workspace = true }
+tempfile = "3"
+
+[[bench]]
+name = "consensus_benchmarks"
+harness = false
