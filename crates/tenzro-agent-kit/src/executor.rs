@@ -578,60 +578,27 @@ impl Executor {
             return Ok(());
         }
 
-        // Real dispatch: the runtime kit does not hold a signer, so we
-        // ask the local node to build and broadcast the transaction
-        // via the existing `eth_sendRawTransaction` pathway. Here we
-        // submit a pre-built transaction object; the node's handler
-        // signs it with the agent wallet bound to the spawned machine
-        // identity.
-        let chain_id = run_opts
-            .chain_id_override
-            .unwrap_or(match &spec.backend {
-                ExecutionBackend::Evm { chain_id } => *chain_id,
-                _ => 1337,
-            });
-
-        let rpc_params = json!({
-            "from": format!("0x{}", hex::encode(spawned.agent.wallet_id.as_bytes())),
-            "to": to_resolved,
-            "value": format!("0x{value_u128:x}"),
-            "data": calldata_resolved,
-            "gas_limit": gas_limit,
-            "chain_id": chain_id,
-            "agent_id": spawned.agent_id(),
-        });
-
-        match self
-            .registry
-            .call_raw("tenzro_sendTransaction", rpc_params)
-            .await
-        {
-            Ok(output) => {
-                ctx.running_total = ctx.running_total.saturating_add(value_u128);
-                report.push(
-                    StepResult {
-                        step_kind: "EvmDispatch".into(),
-                        operation: operation.into(),
-                        status: StepStatus::Executed,
-                        message: format!("dispatched to {to_resolved}"),
-                        output: Some(output),
-                    },
-                    value_u128,
-                );
-            }
-            Err(e) => {
-                report.push(
-                    StepResult {
-                        step_kind: "EvmDispatch".into(),
-                        operation: operation.into(),
-                        status: StepStatus::Failed,
-                        message: format!("rpc error: {e}"),
-                        output: None,
-                    },
-                    0,
-                );
-            }
-        }
+        // Real (non-dry-run) dispatch is not wired in this build. The agent-kit
+        // does not yet hold the DPoP-bound JWT credentials required by
+        // `tenzro_signAndSendTransaction`; the previous shortcut went through
+        // an unauthenticated RPC that has been removed. Surface the gap as an
+        // explicit failed step so callers see it instead of silently
+        // succeeding against a non-existent path.
+        let _ = (calldata_resolved, gas_limit, run_opts);
+        report.push(
+            StepResult {
+                step_kind: "EvmDispatch".into(),
+                operation: operation.into(),
+                status: StepStatus::Failed,
+                message: format!(
+                    "real EVM dispatch unavailable: agent-kit lacks DPoP credentials \
+                     for tenzro_signAndSendTransaction. to={to_resolved} value={value_u128}. \
+                     Use --dry-run for now."
+                ),
+                output: None,
+            },
+            0,
+        );
 
         Ok(())
     }

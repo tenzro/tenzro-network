@@ -75,7 +75,11 @@ tenzro node sync-range --start 0 --end 255
 ### Wallet Operations
 
 ```bash
-# Create a new MPC wallet (2-of-3 threshold by default)
+# Create a chain-agnostic 2-of-3 Ed25519 MPC wallet (calls tenzro_createWallet).
+# A single wallet projects into EVM, SVM, and Canton via the pointer-token
+# model — there is no per-chain wallet. Use `tenzro token cross-vm-transfer` /
+# `tenzro token wrap-tnzo` for VM-specific operations, and `tenzro bridge` /
+# `tenzro debridge` / `tenzro lifi` / `tenzro wormhole` for external chains.
 tenzro wallet create
 
 # Import existing wallet (calls tenzro_importIdentity RPC)
@@ -84,9 +88,12 @@ tenzro wallet import <seed-phrase|private-key>
 # Check balance (calls eth_getBalance)
 tenzro wallet balance --address <address>
 
-# Send tokens (queries nonce + chain ID, then calls tenzro_signAndSendTransaction:
-# node computes Transaction::hash() with canonical timestamp-inclusive preimage,
-# signs with Ed25519, synchronously verifies, and returns -32003 on bad signature)
+# Send tokens. The CLI calls tenzro_signAndSendTransaction; the node looks up
+# the live nonce and gas price, computes Transaction::hash() with the canonical
+# timestamp-inclusive preimage, signs with Ed25519 + ML-DSA-65, verifies both
+# legs synchronously, and returns -32003 on a bad signature. `value` and
+# `amount` are accepted aliases. Self-sends (to == from) return a
+# `cannot transfer to self` validation error.
 tenzro wallet send <to-address> <amount> --asset TNZO --private-key <hex>
 
 # List all wallets (calls tenzro_listAccounts)

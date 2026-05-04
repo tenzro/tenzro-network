@@ -143,8 +143,9 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0
 
 ### RPC Namespaces (264+ methods, 26+ namespaces)
 
-- **Blockchain**: blockNumber, getBlock, getBlockRange (batch fetch for catch-up sync), getTransaction, sendTransaction, submitBlock
-- **Accounts**: createAccount, createWallet, getBalance, getNonce, listAccounts
+- **Blockchain**: blockNumber, getBlock, getBlockRange (batch fetch for catch-up sync), getTransaction (returns `status: "pending" | "finalized"` so callers can distinguish in-mempool from block-included transactions), submitBlock
+- **Accounts**: createAccount, createWallet (chain-agnostic — see "Wallet model" below), getBalance, getNonce, listAccounts
+- **Signing**: tenzro_signMessage, tenzro_signTransaction (server-side signing, returns `{signature, public_key, timestamp, tx_hash}`), tenzro_signAndSendTransaction (atomic sign + submit with live nonce + gas), eth_sendRawTransaction (pre-signed submission requires explicit `signature`, `public_key`, and matching `timestamp`)
 - **Token**: tokenBalance, totalSupply
 - **Models**: listModels, inferenceRequest, downloadModel, serveModel, stopModel, chat, deleteModel, listModelEndpoints, getModelEndpoint
 - **Forecast**: listForecastCatalog, listForecastModels, loadForecastModel, unloadForecastModel, forecast
@@ -191,6 +192,48 @@ Reference templates under `crates/tenzro-agent-kit/reference_templates/`:
 - `premium_alpha_advisor.json` — **paid** per-execution specialist (5 TNZO, 5%/95% split demonstrated end-to-end)
 - 10 additional free reference templates covering payment routing, RWA custody, arbitrage, trade settlement, portfolio management, and yield rebalancing
 - **EVM-compat**: eth_blockNumber, eth_getBalance, eth_getTransactionCount, eth_sendRawTransaction, eth_getBlockByNumber, eth_getBlockByHash, eth_chainId, eth_getTransactionReceipt
+
+## Wallet Model
+
+Tenzro wallets are **chain-agnostic by design**. `tenzro_createWallet` provisions a single 2-of-3 Ed25519 MPC wallet that projects into every supported VM (EVM, SVM, Canton/DAML) via the pointer-token model — there is no "Solana wallet" vs "Ethereum wallet" distinction at the protocol layer. One identity, one address, one set of MPC shares.
+
+### How apps create wallets
+
+```jsonc
+// JSON-RPC: tenzro_createWallet
+// Request body — params are ignored; pass {} or omit entirely.
+{ "jsonrpc": "2.0", "method": "tenzro_createWallet", "params": {}, "id": 1 }
+
+// Response
+{
+  "wallet_id": "...",
+  "address": "0x...",       // canonical Tenzro address
+  "public_key": "...",
+  "key_type": "Ed25519",
+  "threshold": "2-of-3"
+}
+```
+
+The same address holds TNZO natively and is the source of truth for all VM projections. Per-chain views and operations are exposed through dedicated RPCs, not through separate wallets:
+
+| Goal | Use |
+|---|---|
+| Native TNZO transfer on Tenzro Ledger | `tenzro_signAndSendTransaction` (or `eth_sendRawTransaction` for pre-signed) |
+| TNZO balance across all VMs | `tenzro_getTokenBalance` |
+| ERC-20 / SPL / CIP-56 balance | `tenzro_getTokenBalance` (resolved by token_id, VM-agnostic) |
+| Atomic cross-VM token movement (no bridge) | `tenzro_crossVmTransfer` |
+| Send to a foreign chain (Ethereum, Solana, Base, …) | `tenzro_bridgeTokens` (LayerZero V2) / `tenzro_ccipSend` (Chainlink CCIP) / deBridge / Wormhole NTT |
+| Wrap native TNZO into a VM-specific representation | `tenzro_wrapTnzo` |
+
+### Why no `chain` parameter
+
+Adding a `chain` field would imply Tenzro keeps separate per-chain key material, which it does not. The pointer-token model (Sei V2 architecture) means wTNZO ERC-20 at `0x7a4bcb13a6b2b384c284b5caa6e5ef3126527f93`, the wTNZO SPL adapter on SVM, and the CIP-56 DAML holding on Canton all share the **same** underlying native balance through the `TnzoToken` layer. No bridge risk, no liquidity fragmentation, no per-chain wallet provisioning. Apps that prompt the user to "pick a chain" at wallet-creation time are modeling something that doesn't exist on Tenzro.
+
+### Sending and tracking transactions
+
+- `tenzro_signAndSendTransaction` looks up the live nonce and gas price server-side, signs with the wallet's MPC shares, and submits — clients pass `from`, `to`, and `value` (or its alias `amount`).
+- The server rejects self-sends (`from == to`) with a `cannot transfer to self` validation error; the desktop wallet form pre-empts this with a client-side guard.
+- After submission, `tenzro_getTransaction(hash)` returns the transaction with `status: "pending"` while it sits in the consensus mempool and flips to `status: "finalized"` once it's included in a block. Callers polling immediately after broadcast see `"pending"` rather than `null`, so retry logic can distinguish "not yet finalized" from "unknown hash."
 
 ## MCP Server
 

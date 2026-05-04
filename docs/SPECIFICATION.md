@@ -221,6 +221,10 @@ The node exposes four API interfaces:
 **JSON-RPC Server** (default `127.0.0.1:8545`):
 Standard Ethereum-compatible JSON-RPC for transaction submission, state queries, and subscription management. Tenzro-specific methods include `tenzro_createAccount`, `tenzro_createWallet`, `tenzro_registerIdentity`, `tenzro_resolveIdentity`, `tenzro_resolveDidDocument`, and `tenzro_listModels`.
 
+`tenzro_createWallet` provisions a chain-agnostic 2-of-3 Ed25519 MPC wallet — there is no per-chain parameter. A single wallet projects into EVM, SVM, and Canton via the pointer-token model (§7), so apps do not select a chain at creation time. VM-specific operations are exposed through `tenzro_crossVmTransfer` and `tenzro_wrapTnzo`; transfers to external chains use `tenzro_bridgeTokens` (LayerZero V2), Chainlink CCIP, deBridge DLN, or Wormhole NTT.
+
+Transaction submission goes through `tenzro_signAndSendTransaction` (server-side MPC signing with live nonce and gas-price lookup; clients pass `from`, `to`, and `value` — `amount` is accepted as an alias) or `eth_sendRawTransaction` (pre-signed; the caller supplies `signature`, `public_key`, and the explicit `timestamp` matching their signed hash). `tenzro_signTransaction` returns `{signature, public_key, timestamp, tx_hash}` for offline submission. `tenzro_getTransaction` returns the transaction with `status: "pending"` while it sits in the consensus mempool and `status: "finalized"` once it has been included in a block, so callers polling immediately after broadcast distinguish "not yet finalized" from "unknown hash." Self-sends (`from == to`) are rejected with a `cannot transfer to self` validation error.
+
 **Web Verification API** (default `0.0.0.0:8080`):
 
 | Endpoint | Purpose |

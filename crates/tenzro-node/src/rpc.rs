@@ -23,7 +23,7 @@ use tracing::{debug, error, info, warn};
 use futures_util::StreamExt;
 
 use crate::error::{NodeError, Result};
-use crate::node::{TenzroNode, detect_hardware, ModelDownloadStatus, UserResource, TransactionHistoryEntry};
+use crate::node::{TenzroNode, detect_hardware, ModelDownloadStatus, UserResource};
 use crate::event_loop::NodeEvent;
 use tenzro_crypto::{KeyPair, KeyType};
 use tenzro_model::{
@@ -606,7 +606,6 @@ pub(crate) async fn handle_request(
         "tenzro_unregisterModelEndpoint" => handle_unregister_model_endpoint(node, request.params).await,
         "tenzro_listProviders" => handle_list_providers(node).await,
         "tenzro_addResource" => handle_add_resource(node, request.params).await,
-        "tenzro_sendTransaction" => handle_send_transaction(node, request.params).await,
         "tenzro_submitBlock" => handle_submit_block(node, request.params).await,
         "tenzro_getTransactionHistory" => handle_get_transaction_history(node, request.params).await,
 
@@ -1196,36 +1195,66 @@ async fn handle_get_transaction(
     // `0x`-prefixed string. Strip the prefix if present so both forms resolve.
     let tx_hash_key = tx_hash_str.strip_prefix("0x").unwrap_or(tx_hash_str);
 
-    // Query transaction from storage
-    match storage.get(CF_TRANSACTIONS, tx_hash_key.as_bytes()) {
-        Ok(Some(tx_bytes)) => {
-            // Try to deserialize transaction from JSON
-            match serde_json::from_slice::<SignedTransaction>(&tx_bytes) {
-                Ok(tx) => {
-                    let (value, tx_type) = match &tx.transaction.tx_type {
+    // Query transaction from finalized storage first.
+    if let Ok(Some(tx_bytes)) = storage.get(CF_TRANSACTIONS, tx_hash_key.as_bytes()) {
+        if let Ok(tx) = serde_json::from_slice::<SignedTransaction>(&tx_bytes) {
+            let (value, tx_type) = match &tx.transaction.tx_type {
+                TransactionType::Transfer { amount } => (format!("{}", amount), "transfer"),
+                TransactionType::ContractDeploy { .. } => ("0".to_string(), "contract_deploy"),
+                TransactionType::ContractCall { .. } => ("0".to_string(), "contract_call"),
+                _ => ("0".to_string(), "other"),
+            };
+
+            return Ok(serde_json::json!({
+                "hash": tx_hash_str,
+                "from": format!("{}", tx.transaction.from),
+                "to": format!("{}", tx.transaction.to),
+                "value": value,
+                "nonce": tx.transaction.nonce.0,
+                "gas_limit": tx.transaction.gas_limit,
+                "gas_price": tx.transaction.gas_price,
+                "chain_id": tx.transaction.chain_id.0,
+                "type": tx_type,
+                "status": "finalized",
+            }));
+        }
+    }
+
+    // Not in finalized storage — fall back to the consensus mempool so callers
+    // who poll immediately after broadcast can distinguish "pending" from
+    // "unknown". Without this, every just-submitted tx looks indistinguishable
+    // from a non-existent one for the seconds between submit and finalization.
+    if let Some(consensus) = node.consensus() {
+        if let Ok(hash_bytes) = hex::decode(tx_hash_key) {
+            if hash_bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&hash_bytes);
+                let hash: tenzro_types::primitives::Hash = arr.into();
+                if let Some(signed_tx) = consensus.mempool().get_transaction(&hash) {
+                    let (value, tx_type) = match &signed_tx.transaction.tx_type {
                         TransactionType::Transfer { amount } => (format!("{}", amount), "transfer"),
                         TransactionType::ContractDeploy { .. } => ("0".to_string(), "contract_deploy"),
                         TransactionType::ContractCall { .. } => ("0".to_string(), "contract_call"),
                         _ => ("0".to_string(), "other"),
                     };
-
-                    Ok(serde_json::json!({
+                    return Ok(serde_json::json!({
                         "hash": tx_hash_str,
-                        "from": format!("{}", tx.transaction.from),
-                        "to": format!("{}", tx.transaction.to),
+                        "from": format!("{}", signed_tx.transaction.from),
+                        "to": format!("{}", signed_tx.transaction.to),
                         "value": value,
-                        "nonce": tx.transaction.nonce.0,
-                        "gas_limit": tx.transaction.gas_limit,
-                        "gas_price": tx.transaction.gas_price,
-                        "chain_id": tx.transaction.chain_id.0,
+                        "nonce": signed_tx.transaction.nonce.0,
+                        "gas_limit": signed_tx.transaction.gas_limit,
+                        "gas_price": signed_tx.transaction.gas_price,
+                        "chain_id": signed_tx.transaction.chain_id.0,
                         "type": tx_type,
-                    }))
-                },
-                Err(_) => Ok(Value::Null)
+                        "status": "pending",
+                    }));
+                }
             }
         }
-        _ => Ok(Value::Null)
     }
+
+    Ok(Value::Null)
 }
 
 async fn handle_get_balance(
@@ -1343,6 +1372,14 @@ async fn handle_create_account(
 
 /// Create an MPC wallet via the wallet service (2-of-3 threshold).
 /// Returns address and public key. Private key shares are managed by the node.
+/// Provisions a Tenzro 2-of-3 Ed25519 MPC wallet.
+///
+/// Tenzro wallets are chain-agnostic by design: a single wallet projects into
+/// EVM, SVM, and Canton via the pointer-token model (see `crates/tenzro-vm`).
+/// There is no `chain` parameter — for VM-specific operations, callers use
+/// `tenzro_crossVmTransfer` / `tenzro_wrapTnzo`; for sends to external chains
+/// (Ethereum, Solana, etc.), callers supply the foreign destination address
+/// to a bridge RPC. Any params passed to this method are ignored.
 async fn handle_create_wallet(
     node: &Arc<TenzroNode>,
     _params: Option<Value>,
@@ -1353,7 +1390,6 @@ async fn handle_create_wallet(
         data: None,
     })?;
 
-    // Use the WalletService trait's provision_wallet method
     use tenzro_wallet::WalletService;
     let wallet = wallet_service.provision_wallet().await.map_err(|e| JsonRpcError {
         code: -32000,
@@ -4717,46 +4753,28 @@ async fn handle_import_identity(
         params.clone()
     };
 
+    // The imported private key is recorded as a recovery hint in metadata
+    // (the on-chain identity's signing key is the binder-provisioned wallet's
+    // keypair, since the WalletService only manages MPC-generated keypairs and
+    // cannot adopt an external private key). The privkey/key_type fields are
+    // retained for the caller's record but do not become the identity's
+    // authentication key — the binder wallet's classical pubkey does.
     let private_key_hex = params_obj
         .get("private_key")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "Missing required param: private_key".to_string(),
-            data: None,
-        })?;
-
+        .unwrap_or("")
+        .to_string();
     let key_type_str = params_obj
         .get("key_type")
         .and_then(|v| v.as_str())
-        .unwrap_or("ed25519");
+        .unwrap_or("ed25519")
+        .to_string();
 
     let display_name = params_obj
         .get("display_name")
         .and_then(|v| v.as_str())
         .unwrap_or("Imported Identity")
         .to_string();
-
-    // Parse private key hex
-    let hex_clean = private_key_hex.strip_prefix("0x").unwrap_or(private_key_hex);
-    let key_bytes = hex::decode(hex_clean).map_err(|e| JsonRpcError {
-        code: -32602,
-        message: format!("Invalid private_key hex: {}", e),
-        data: None,
-    })?;
-
-    // Create keypair from imported private key
-    let kt = match key_type_str.to_lowercase().as_str() {
-        "secp256k1" | "evm" => KeyType::Secp256k1,
-        _ => KeyType::Ed25519,
-    };
-    let keypair = KeyPair::from_bytes(kt, &key_bytes).map_err(|e| JsonRpcError {
-        code: -32000,
-        message: format!("Failed to create keypair from private key: {}", e),
-        data: None,
-    })?;
-
-    let public_key_bytes = keypair.public_key().to_bytes();
 
     // Detect hardware
     let hardware = detect_hardware(&node.config().data_dir).await.map_err(|e| JsonRpcError {
@@ -4768,21 +4786,8 @@ async fn handle_import_identity(
     let device_fingerprint = hardware.device_fingerprint.clone();
     *node.hardware_profile.write() = Some(hardware.clone());
 
-    // Create wallet from imported key
-    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
-        code: -32000,
-        message: "Wallet service not initialized".to_string(),
-        data: None,
-    })?;
-
-    use tenzro_wallet::WalletService;
-    let wallet = wallet_service.provision_wallet().await.map_err(|e| JsonRpcError {
-        code: -32000,
-        message: format!("Wallet creation failed: {}", e),
-        data: None,
-    })?;
-
-    // Register identity with the imported public key
+    // Provision identity + wallet through the binder so find_wallet_id_for_did
+    // resolves to the same wallet_id the auth-mediated signing path expects.
     let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
         code: -32000,
         message: "Identity registry not initialized".to_string(),
@@ -4790,8 +4795,7 @@ async fn handle_import_identity(
     })?;
 
     let mut identity = registry
-        .register_human_with_fee(
-            public_key_bytes,
+        .register_human_via_binder(
             display_name.clone(),
             tenzro_types::identity::KycTier::Unverified,
         )
@@ -4803,12 +4807,13 @@ async fn handle_import_identity(
         })?
         .identity;
 
-    // Bind metadata
+    // Bind metadata: hardware + import provenance. The imported privkey is
+    // stored only as a recovery hint and is NOT used for authentication.
     identity.metadata.insert("device_fingerprint".to_string(), device_fingerprint.clone());
-    identity.metadata.insert("wallet_id".to_string(), wallet.wallet_id.0.clone());
-    identity.metadata.insert("wallet_address".to_string(), format!("{}", wallet.address));
     identity.metadata.insert("imported".to_string(), "true".to_string());
-    identity.metadata.insert("key_type".to_string(), key_type_str.to_string());
+    if !private_key_hex.is_empty() {
+        identity.metadata.insert("imported_key_hint_type".to_string(), key_type_str.clone());
+    }
 
     // Persist identity to RocksDB
     if let Some(storage) = node.storage() {
@@ -4830,6 +4835,12 @@ async fn handle_import_identity(
         );
     }
 
+    let wallet_pubkey_hex = identity
+        .public_keys
+        .first()
+        .map(|k| hex::encode(&k.public_key))
+        .unwrap_or_default();
+
     Ok(serde_json::json!({
         "identity": {
             "did": identity.did_string(),
@@ -4838,9 +4849,9 @@ async fn handle_import_identity(
             "status": format!("{}", identity.status),
         },
         "wallet": {
-            "wallet_id": wallet.wallet_id.0,
-            "address": format!("{}", wallet.address),
-            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+            "wallet_id": identity.wallet_id,
+            "address": format!("0x{}", hex::encode(identity.wallet_address.as_bytes())),
+            "public_key": format!("0x{}", wallet_pubkey_hex),
         },
         "hardware": hardware,
         "hardware_profile": hardware,
@@ -5354,13 +5365,14 @@ async fn handle_participate(
         .and_then(|v| v.as_str())
         .unwrap_or("Tenzro User")
         .to_string();
-    // Optional DPoP key thumbprint (RFC 7638) — bind the access token to a
-    // client-held key when supplied. Omit for the simpler bearer-only flow.
-    let dpop_jkt = params_obj
-        .as_ref()
-        .and_then(|p| p.get("dpop_jkt"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    // Optional DPoP binding (RFC 7638 + RFC 9449). Callers either pass
+    // the public JWK as `dpop_jwk` (server computes the thumbprint) or
+    // a pre-computed thumbprint as `dpop_jkt`. Omit both for a
+    // bearer-only token (read-only flows).
+    let dpop_jkt = match &params_obj {
+        Some(p) => resolve_dpop_jkt(p)?,
+        None => None,
+    };
     let ttl_secs = params_obj
         .as_ref()
         .and_then(|p| p.get("ttl_secs"))
@@ -5378,21 +5390,9 @@ async fn handle_participate(
     // Store hardware profile
     *node.hardware_profile.write() = Some(hardware.clone());
 
-    // Create wallet
-    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
-        code: -32000,
-        message: "Wallet service not initialized".to_string(),
-        data: None,
-    })?;
-
-    use tenzro_wallet::WalletService;
-    let wallet = wallet_service.provision_wallet().await.map_err(|e| JsonRpcError {
-        code: -32000,
-        message: format!("Wallet creation failed: {}", e),
-        data: None,
-    })?;
-
-    // Register identity
+    // Register identity (provisions an MPC wallet through the binder-shared
+    // WalletService and binds it to the new DID — single source of truth
+    // for `wallet_id`, no duplicate provisioning).
     let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
         code: -32000,
         message: "Identity registry not initialized".to_string(),
@@ -5400,8 +5400,7 @@ async fn handle_participate(
     })?;
 
     let mut identity = registry
-        .register_human_with_fee(
-            wallet.public_key.to_bytes(),
+        .register_human_via_binder(
             display_name.clone(),
             tenzro_types::identity::KycTier::Unverified,
         )
@@ -5415,8 +5414,6 @@ async fn handle_participate(
 
     // Bind hardware fingerprint to identity metadata (ties device to identity on-chain)
     identity.metadata.insert("device_fingerprint".to_string(), device_fingerprint.clone());
-    identity.metadata.insert("wallet_id".to_string(), wallet.wallet_id.0.clone());
-    identity.metadata.insert("wallet_address".to_string(), format!("{}", wallet.address));
 
     // Persist identity to RocksDB (on-chain storage on the Tenzro Ledger)
     if let Some(storage) = node.storage() {
@@ -5438,7 +5435,12 @@ async fn handle_participate(
         );
     }
 
-    let hex_address = format!("0x{}", hex::encode(wallet.public_key.as_bytes()));
+    let wallet_pubkey_hex = identity
+        .public_keys
+        .first()
+        .map(|pk| hex::encode(&pk.public_key))
+        .unwrap_or_default();
+    let hex_address = format!("0x{}", wallet_pubkey_hex);
     let did = identity.did_string();
 
     // Mint an access JWT + opaque refresh token bound to the new self-custody
@@ -5465,9 +5467,9 @@ async fn handle_participate(
             "status": format!("{}", identity.status),
         },
         "wallet": {
-            "wallet_id": wallet.wallet_id.0,
+            "wallet_id": identity.wallet_id,
             "address": hex_address,
-            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+            "public_key": format!("0x{}", wallet_pubkey_hex),
         },
         "hardware": hardware,
         "hardware_profile": hardware,
@@ -5479,7 +5481,7 @@ async fn handle_participate(
         "refresh_token_expires_in": refresh_expires_in,
         "dpop_bound": dpop_jkt.is_some(),
         "authorization_details": envelope,
-        "note": "Save the access_token AND refresh_token. The access_token expires in expires_in seconds; exchange the refresh_token at tenzro_refreshToken (or POST /token grant_type=refresh_token) for a new access_token. Use as: Authorization: Bearer <token>. For DPoP-bound signing RPCs, also send DPoP: <proof> header.",
+        "note": "Save the access_token AND refresh_token. The access_token expires in expires_in seconds; exchange the refresh_token at tenzro_refreshToken (or POST /token grant_type=refresh_token) for a new access_token. Use as: Authorization: Bearer <token>. To bind the token to a DPoP key (required for the signing RPCs), pass `dpop_jwk` (your public JWK as a JSON object) on this onboarding call — the response will then carry `dpop_bound: true`, and signing RPCs can be called with `Authorization: DPoP <token>` plus a `DPoP: <proof>` header.",
     });
 
     Ok(result)
@@ -5541,10 +5543,7 @@ async fn handle_onboard_human(
     )
     .map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
 
-    let dpop_jkt = params
-        .get("dpop_jkt")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let dpop_jkt = resolve_dpop_jkt(&params)?;
     let ttl_secs = params.get("ttl_secs").and_then(|v| v.as_u64());
 
     let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
@@ -5552,25 +5551,9 @@ async fn handle_onboard_human(
         message: "Identity registry not initialized".to_string(),
         data: None,
     })?;
-    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
-        code: -32000,
-        message: "Wallet service not initialized".to_string(),
-        data: None,
-    })?;
-
-    use tenzro_wallet::WalletService;
-    let wallet = wallet_service
-        .provision_wallet()
-        .await
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Wallet creation failed: {}", e),
-            data: None,
-        })?;
 
     let identity = registry
-        .register_human_with_fee(
-            wallet.public_key.to_bytes(),
+        .register_human_via_binder(
             display_name.clone(),
             tenzro_types::identity::KycTier::Unverified,
         )
@@ -5590,6 +5573,12 @@ async fn handle_onboard_human(
     let (refresh_token, refresh_expires_in) =
         mint_onboarding_refresh_token(node, &did, &did, dpop_jkt.as_deref(), envelope.clone())?;
 
+    let wallet_pubkey_hex = identity
+        .public_keys
+        .first()
+        .map(|pk| hex::encode(&pk.public_key))
+        .unwrap_or_default();
+
     Ok(serde_json::json!({
         "identity": {
             "did": did,
@@ -5598,9 +5587,9 @@ async fn handle_onboard_human(
             "status": format!("{}", identity.status),
         },
         "wallet": {
-            "wallet_id": wallet.wallet_id.0,
-            "address": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
-            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+            "wallet_id": identity.wallet_id,
+            "address": format!("0x{}", wallet_pubkey_hex),
+            "public_key": format!("0x{}", wallet_pubkey_hex),
         },
         "access_token": token,
         "token_type": "Bearer",
@@ -5609,7 +5598,7 @@ async fn handle_onboard_human(
         "refresh_token_expires_in": refresh_expires_in,
         "dpop_bound": dpop_jkt.is_some(),
         "authorization_details": envelope,
-        "note": "Save the access_token AND refresh_token. The access_token expires in expires_in seconds; exchange the refresh_token at tenzro_refreshToken (or POST /token grant_type=refresh_token) for a new access_token. Use as: Authorization: Bearer <token>. For DPoP-bound signing RPCs, also send DPoP: <proof> header.",
+        "note": "Save the access_token AND refresh_token. The access_token expires in expires_in seconds; exchange the refresh_token at tenzro_refreshToken (or POST /token grant_type=refresh_token) for a new access_token. Use as: Authorization: Bearer <token>. To bind the token to a DPoP key (required for the signing RPCs), pass `dpop_jwk` (your public JWK as a JSON object) on this onboarding call — the response will then carry `dpop_bound: true`, and signing RPCs can be called with `Authorization: DPoP <token>` plus a `DPoP: <proof>` header.",
     }))
 }
 
@@ -5685,10 +5674,7 @@ async fn handle_onboard_delegated_agent(
         delegation = delegation.with_allowed_chains(allowed_chains);
     }
 
-    let dpop_jkt = params
-        .get("dpop_jkt")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let dpop_jkt = resolve_dpop_jkt(&params)?;
     let ttl_secs = params.get("ttl_secs").and_then(|v| v.as_u64());
 
     let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
@@ -5696,26 +5682,10 @@ async fn handle_onboard_delegated_agent(
         message: "Identity registry not initialized".to_string(),
         data: None,
     })?;
-    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
-        code: -32000,
-        message: "Wallet service not initialized".to_string(),
-        data: None,
-    })?;
-
-    use tenzro_wallet::WalletService;
-    let wallet = wallet_service
-        .provision_wallet()
-        .await
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Wallet creation failed: {}", e),
-            data: None,
-        })?;
 
     let identity = registry
-        .register_machine_with_fee(
+        .register_machine_via_binder(
             &controller_did,
-            wallet.public_key.to_bytes(),
             capabilities.clone(),
             delegation,
         )
@@ -5742,6 +5712,12 @@ async fn handle_onboard_delegated_agent(
         envelope.clone(),
     )?;
 
+    let wallet_pubkey_hex = identity
+        .public_keys
+        .first()
+        .map(|k| hex::encode(&k.public_key))
+        .unwrap_or_default();
+
     Ok(serde_json::json!({
         "identity": {
             "did": did,
@@ -5751,9 +5727,9 @@ async fn handle_onboard_delegated_agent(
             "status": format!("{}", identity.status),
         },
         "wallet": {
-            "wallet_id": wallet.wallet_id.0,
-            "address": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
-            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+            "wallet_id": identity.wallet_id,
+            "address": format!("0x{}", hex::encode(identity.wallet_address.as_bytes())),
+            "public_key": format!("0x{}", wallet_pubkey_hex),
         },
         "access_token": token,
         "token_type": "Bearer",
@@ -5789,20 +5765,12 @@ async fn handle_onboard_autonomous_agent(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let dpop_jkt = params
-        .get("dpop_jkt")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let dpop_jkt = resolve_dpop_jkt(&params)?;
     let ttl_secs = params.get("ttl_secs").and_then(|v| v.as_u64());
 
     let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
         code: -32000,
         message: "Identity registry not initialized".to_string(),
-        data: None,
-    })?;
-    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
-        code: -32000,
-        message: "Wallet service not initialized".to_string(),
         data: None,
     })?;
     let token_state = node.token().ok_or_else(|| JsonRpcError {
@@ -5840,24 +5808,15 @@ async fn handle_onboard_autonomous_agent(
         });
     }
 
-    use tenzro_wallet::WalletService;
-    let wallet = wallet_service
-        .provision_wallet()
-        .await
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Wallet creation failed: {}", e),
-            data: None,
-        })?;
-
     // For autonomous agents, controller_did = self. The TDIP DID format
     // for autonomous machines is `did:tenzro:machine:<uuid>` (no controller
-    // segment). We use `register_machine_with_fee` with controller_did = "self";
-    // the registry treats self-controlled machines as autonomous.
+    // segment). The registry treats `controller_did = "self"` as autonomous.
+    // The wallet is provisioned through the binder so that find_wallet_id_for_did
+    // returns the same wallet_id surfaced in this response — the auth-mediated
+    // signing path can then resolve it against the shared WalletService.
     let identity = registry
-        .register_machine_with_fee(
+        .register_machine_via_binder(
             "self",
-            wallet.public_key.to_bytes(),
             capabilities.clone(),
             tenzro_identity::DelegationScope::default(),
         )
@@ -5881,6 +5840,12 @@ async fn handle_onboard_autonomous_agent(
     let (refresh_token, refresh_expires_in) =
         mint_onboarding_refresh_token(node, &did, &did, dpop_jkt.as_deref(), envelope.clone())?;
 
+    let wallet_pubkey_hex = identity
+        .public_keys
+        .first()
+        .map(|k| hex::encode(&k.public_key))
+        .unwrap_or_default();
+
     Ok(serde_json::json!({
         "identity": {
             "did": did,
@@ -5889,9 +5854,9 @@ async fn handle_onboard_autonomous_agent(
             "status": format!("{}", identity.status),
         },
         "wallet": {
-            "wallet_id": wallet.wallet_id.0,
-            "address": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
-            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+            "wallet_id": identity.wallet_id,
+            "address": format!("0x{}", hex::encode(identity.wallet_address.as_bytes())),
+            "public_key": format!("0x{}", wallet_pubkey_hex),
         },
         "bond": {
             "amount_base_units": AUTONOMOUS_AGENT_BOND_FLOOR.to_string(),
@@ -5933,10 +5898,7 @@ async fn handle_refresh_token(
             data: None,
         })?
         .to_string();
-    let dpop_jkt = params
-        .get("dpop_jkt")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let dpop_jkt = resolve_dpop_jkt(&params)?;
 
     let engine = node.auth_engine().ok_or_else(|| JsonRpcError {
         code: -32000,
@@ -6000,10 +5962,7 @@ async fn handle_link_wallet_for_auth(
             data: None,
         })?
         .to_string();
-    let dpop_jkt = params
-        .get("dpop_jkt")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let dpop_jkt = resolve_dpop_jkt(&params)?;
     let ttl_secs = params.get("ttl_secs").and_then(|v| v.as_u64());
     let display_name = params
         .get("display_name")
@@ -6136,6 +6095,70 @@ fn persist_identity(
             })?;
     }
     Ok(())
+}
+
+/// Resolve the DPoP key thumbprint that should be bound into the access
+/// token's `cnf.jkt` claim. The onboarding RPCs accept either:
+///
+/// 1. `dpop_jwk` — the public JWK as a JSON object (or its serialized
+///    string form). The server computes the canonical RFC 7638
+///    thumbprint via [`tenzro_auth::DpopProof::compute_jkt`].
+///    This is the path most clients should use: they already hold the
+///    public JWK they generated and don't need to know how to compute
+///    a thumbprint.
+///
+/// 2. `dpop_jkt` — a pre-computed thumbprint string. Power-user
+///    shortcut for callers that already have the thumbprint cached
+///    (for example, when rotating refresh tokens for an existing key).
+///
+/// Returns:
+///   - `Ok(Some(jkt))` when either param resolved to a thumbprint.
+///   - `Ok(None)` when neither is present (caller wants a bearer-only
+///     token — only valid for read-only flows).
+///   - `Err(-32602)` when `dpop_jwk` is present but malformed. We
+///     surface this loudly because the historical bug was that an
+///     invalid JWK silently produced an unbound token, which then
+///     blocked the next signing call with a confusing
+///     "token has no cnf.jkt claim" error far from the root cause.
+fn resolve_dpop_jkt(params: &Value) -> std::result::Result<Option<String>, JsonRpcError> {
+    if let Some(jwk_value) = params.get("dpop_jwk") {
+        let jwk_json = match jwk_value {
+            Value::String(s) => s.clone(),
+            Value::Object(_) => serde_json::to_string(jwk_value).map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("dpop_jwk is not serializable: {}", e),
+                data: None,
+            })?,
+            _ => {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: "dpop_jwk must be a JWK object or its JSON string form".to_string(),
+                    data: None,
+                });
+            }
+        };
+        let jkt =
+            tenzro_auth::DpopProof::compute_jkt(&jwk_json).map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("dpop_jwk thumbprint computation failed: {}", e),
+                data: None,
+            })?;
+        return Ok(Some(jkt));
+    }
+
+    if let Some(jkt) = params.get("dpop_jkt").and_then(|v| v.as_str()) {
+        if jkt.is_empty() {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "dpop_jkt is empty — pass the RFC 7638 thumbprint or omit the param"
+                    .to_string(),
+                data: None,
+            });
+        }
+        return Ok(Some(jkt.to_string()));
+    }
+
+    Ok(None)
 }
 
 fn mint_onboarding_jwt(
@@ -9549,172 +9572,6 @@ async fn handle_add_resource(
         "success": true,
         "resource_id": resource_id,
     }))
-}
-
-// Send transaction handler
-async fn handle_send_transaction(
-    node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let params = params.ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-
-    // Support both array and object params
-    let tx_obj = if let Some(arr) = params.as_array() {
-        arr.first().unwrap_or(&params)
-    } else {
-        &params
-    };
-
-    let from_str = tx_obj.get("from").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing 'from' field".to_string(), data: None,
-    })?;
-    let to_str = tx_obj.get("to").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing 'to' field".to_string(), data: None,
-    })?;
-    let amount = tx_obj.get("amount").and_then(|v| v.as_str()).unwrap_or("0").to_string();
-    let asset = tx_obj.get("asset").and_then(|v| v.as_str()).unwrap_or("TNZO").to_string();
-
-    // Parse amount and create transaction
-    let from_addr = parse_address(from_str)?;
-    let to_addr = parse_address(to_str)?;
-
-    let amount_f64 = amount.parse::<f64>().unwrap_or(0.0);
-    let amount_wei = (amount_f64 * 1_000_000_000_000_000_000.0) as u128; // 18 decimal places (TNZO)
-
-    // Look up wallet for the 'from' address to sign the transaction
-    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
-        code: -32000, message: "Wallet service not initialized".to_string(), data: None,
-    })?;
-
-    let wallet = wallet_service.find_wallet_by_address(&from_addr).ok_or_else(|| JsonRpcError {
-        code: -32000,
-        message: format!("No wallet found for sender address {}. Use tenzro_participate to create a wallet first.", from_str),
-        data: None,
-    })?;
-
-    // Validate sender owns the wallet (public key matches the from address)
-    if wallet.address != from_addr && wallet.public_key.as_bytes() != from_addr.as_bytes() {
-        return Err(JsonRpcError {
-            code: -32000,
-            message: format!("Wallet public key does not match sender address {}", from_str),
-            data: None,
-        });
-    }
-
-    // Build the transaction using the wallet's nonce. We peek here rather than
-    // consume, because the tx hasn't been admitted yet — we only consume the
-    // nonce once the event loop has accepted the tx for the mempool.
-    use tenzro_wallet::WalletService;
-    let nonce = wallet_service.peek_nonce(&from_addr);
-    let chain_id = node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337);
-
-    // Wave 3d PQ migration: every wallet carries a mandatory ML-DSA-65 key.
-    // Bind the wallet's verifying key into the transaction so `Transaction::hash()`
-    // commits to it; the wallet service then signs both the classical and PQ legs.
-    let tx = Transaction::new(
-        ChainId::from(chain_id),
-        from_addr,
-        to_addr,
-        nonce,
-        TransactionType::Transfer { amount: amount_wei },
-        21000,
-        1_000_000_000,
-        wallet.pq_verifying_key_bytes(),
-    );
-
-    // Sign the transaction with the MPC wallet. Returns a hybrid signature
-    // (classical Ed25519/Secp256k1 over SHA-256(Transaction) + ML-DSA-65 over
-    // the same preimage). Both legs are post-verified inside the wallet service.
-    let hybrid_sig = wallet_service
-        .sign_transaction(&wallet.wallet_id, &tx)
-        .await
-        .map_err(|e| JsonRpcError {
-            code: -32003,
-            message: format!("MPC signing failed for wallet {}: {}", wallet.wallet_id, e),
-            data: None,
-        })?;
-
-    let pubkey_bytes = wallet.public_key.as_bytes().to_vec();
-    let signed_tx = SignedTransaction::new(
-        tx,
-        Signature::new(hybrid_sig.classical, pubkey_bytes),
-        hybrid_sig.pq,
-    );
-    let tx_hash = signed_tx.clone().hash();
-    let tx_hash_str = format!("{}", tx_hash);
-
-    // Submit to the event loop so the tx enters the mempool, gossips to peers,
-    // and is admitted via consensus into a block. This is the same admission
-    // path as eth_sendRawTransaction — it guarantees state convergence across
-    // all validators instead of mutating local state only.
-    let event_sender = node.event_sender().ok_or_else(|| {
-        error!(target: "rpc", tx_hash = %tx_hash, "tenzro_sendTransaction: node event loop not running");
-        JsonRpcError {
-            code: -32000,
-            message: "Node event loop not running".to_string(),
-            data: None,
-        }
-    })?;
-
-    event_sender
-        .send(NodeEvent::NewTransaction(signed_tx))
-        .await
-        .map_err(|e| {
-            error!(
-                target: "rpc",
-                tx_hash = %tx_hash,
-                error = %e,
-                "tenzro_sendTransaction: failed to enqueue tx for event loop"
-            );
-            JsonRpcError {
-                code: -32000,
-                message: format!("Failed to submit transaction: {}", e),
-                data: None,
-            }
-        })?;
-
-    // Now that the tx was successfully enqueued, consume the nonce so the next
-    // call sees an advanced counter. If admission later fails inside the event
-    // loop, the user will need to retry with an explicit nonce reset.
-    let _ = wallet_service.next_nonce(&from_addr);
-
-    // Record in transaction history for the wallet UI. Actual tx state will be
-    // updated to Confirmed/Finalized when the block containing this tx is
-    // indexed in CF_TRANSACTIONS by the event loop.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let entry = TransactionHistoryEntry {
-        tx_hash: tx_hash_str.clone(),
-        from: from_str.to_string(),
-        to: to_str.to_string(),
-        amount,
-        asset,
-        status: "pending".to_string(),
-        timestamp: now,
-        tx_type: "send".to_string(),
-    };
-
-    node.transaction_history.write().push(entry);
-
-    info!(
-        target: "rpc",
-        tx_hash = %tx_hash_str,
-        from = %from_str,
-        to = %to_str,
-        value = amount_wei,
-        nonce = %nonce,
-        chain_id,
-        "tenzro_sendTransaction: signed + enqueued via consensus path"
-    );
-
-    Ok(serde_json::json!(tx_hash_str))
 }
 
 /// Submit a finalized block to the event loop for execution
@@ -19018,16 +18875,16 @@ async fn handle_sign_transaction(
     let to_str = params.get("to").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
         code: -32602, message: "Missing 'to' field".to_string(), data: None,
     })?;
-    let value = params.get("value")
+    // Accept `value` (canonical, wei base units) or `amount` (alias) — both as
+    // unsigned integer or decimal string. The decimal-string path is the only
+    // one that can carry the full u128 range; JSON numbers are clamped to u64
+    // by serde_json's `as_u64()`.
+    let value = params.get("value").or_else(|| params.get("amount"))
         .and_then(|v| v.as_u64().map(|n| n as u128).or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok())))
         .unwrap_or(0);
     let gas_limit = params.get("gas_limit").or_else(|| params.get("gasLimit"))
         .and_then(|v| v.as_u64())
         .unwrap_or(21000);
-    let gas_price = params.get("gas_price").or_else(|| params.get("gasPrice"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1_000_000_000);
-    let nonce = params.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
     let chain_id = params.get("chain_id").or_else(|| params.get("chainId"))
         .and_then(|v| v.as_u64())
         .unwrap_or_else(|| node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337));
@@ -19035,6 +18892,45 @@ async fn handle_sign_transaction(
     let from_addr = parse_address(from_str)?;
     let to_addr = parse_address(to_str)?;
     let timestamp = tenzro_types::primitives::Timestamp::now();
+
+    // Default `gas_price` to the live EIP-1559 effective price (base_fee + medium
+    // priority tip) so callers don't have to track the fee market themselves.
+    // A static 1 Gwei default would be rejected the moment base_fee climbs above
+    // 1 Gwei. Callers who want to override (legacy clients, replacement-tx
+    // bumps) can still pass `gas_price`/`gasPrice` explicitly.
+    let gas_price = if let Some(gp) = params.get("gas_price").or_else(|| params.get("gasPrice")).and_then(|v| v.as_u64()) {
+        gp
+    } else {
+        let vm_runtime = node.vm_runtime().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "VM runtime not initialized".to_string(),
+            data: None,
+        })?;
+        // `Transaction::gas_price` is u64; the fee market's effective_price is u128.
+        // At pre-launch testnet base fees the value is well under u64::MAX —
+        // saturate on the unlikely overflow rather than panicking.
+        let live = vm_runtime.gas_oracle().current_price().await.effective_price();
+        u64::try_from(live).unwrap_or(u64::MAX)
+    };
+
+    // Default `nonce` to the next available value from the account store so
+    // callers that don't track local nonce (web wallets, agent runtimes,
+    // one-shot scripts) don't collide on `0` and silently fail at admission.
+    let nonce = if let Some(n) = params.get("nonce").and_then(|v| v.as_u64()) {
+        n
+    } else {
+        let storage = node.storage().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Storage not initialized".to_string(),
+            data: None,
+        })?;
+        let account_store = AccountStoreImpl::new(storage.clone());
+        account_store.get_nonce(&from_addr).await.map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to read account nonce: {}", e),
+            data: None,
+        })?.0
+    };
 
     // Allow callers to pass a typed `tx_type` JSON object (the same shape produced
     // by `serde_json::to_value(&TransactionType::CreateEscrow { .. })` etc) so that
@@ -19164,25 +19060,68 @@ async fn handle_sign_and_send_transaction(
     params: Option<Value>,
     auth_ctx: &AuthContext,
 ) -> std::result::Result<Value, JsonRpcError> {
-    let params_inner = unwrap_params(params.clone())?;
+    let mut params_inner = unwrap_params(params)?;
 
     let from_str = params_inner.get("from").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
         code: -32602, message: "Missing 'from' field".to_string(), data: None,
-    })?;
+    })?.to_string();
     let to_str = params_inner.get("to").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
         code: -32602, message: "Missing 'to' field".to_string(), data: None,
-    })?;
-    let value = params_inner.get("value")
+    })?.to_string();
+    // `value` (canonical) or `amount` (alias) — wei base units, integer or
+    // decimal string.
+    let value = params_inner.get("value").or_else(|| params_inner.get("amount"))
         .and_then(|v| v.as_u64().map(|n| n as u128).or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok())))
         .unwrap_or(0);
     let gas_limit = params_inner.get("gas_limit").or_else(|| params_inner.get("gasLimit"))
         .and_then(|v| v.as_u64()).unwrap_or(21000);
-    let gas_price = params_inner.get("gas_price").or_else(|| params_inner.get("gasPrice"))
-        .and_then(|v| v.as_u64()).unwrap_or(1_000_000_000);
-    let nonce = params_inner.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
     let chain_id = params_inner.get("chain_id").or_else(|| params_inner.get("chainId"))
         .and_then(|v| v.as_u64())
         .unwrap_or_else(|| node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337));
+
+    let from_addr = parse_address(&from_str)?;
+
+    // Resolve gas_price + nonce live here so the wrapper passes the SAME values
+    // to the signer and the raw-tx submitter — otherwise the two sides could
+    // disagree under concurrent traffic and the submitted hash wouldn't match
+    // the signed hash. Callers may still override either field explicitly.
+    let gas_price = if let Some(gp) = params_inner.get("gas_price").or_else(|| params_inner.get("gasPrice")).and_then(|v| v.as_u64()) {
+        gp
+    } else {
+        let vm_runtime = node.vm_runtime().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "VM runtime not initialized".to_string(),
+            data: None,
+        })?;
+        // `Transaction::gas_price` is u64; the fee market's effective_price is u128.
+        // At pre-launch testnet base fees the value is well under u64::MAX —
+        // saturate on the unlikely overflow rather than panicking.
+        let live = vm_runtime.gas_oracle().current_price().await.effective_price();
+        u64::try_from(live).unwrap_or(u64::MAX)
+    };
+    let nonce = if let Some(n) = params_inner.get("nonce").and_then(|v| v.as_u64()) {
+        n
+    } else {
+        let storage = node.storage().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Storage not initialized".to_string(),
+            data: None,
+        })?;
+        let account_store = AccountStoreImpl::new(storage.clone());
+        account_store.get_nonce(&from_addr).await.map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to read account nonce: {}", e),
+            data: None,
+        })?.0
+    };
+
+    // Pin resolved values into params so the inner sign call uses them verbatim
+    // instead of re-resolving (which could read a different snapshot).
+    params_inner["value"] = serde_json::json!(value.to_string());
+    params_inner["nonce"] = serde_json::json!(nonce);
+    params_inner["gas_price"] = serde_json::json!(gas_price);
+    params_inner["gas_limit"] = serde_json::json!(gas_limit);
+    params_inner["chain_id"] = serde_json::json!(chain_id);
 
     info!(
         target: "rpc",
@@ -19196,7 +19135,7 @@ async fn handle_sign_and_send_transaction(
 
     // Sign first — auth_ctx flows through so the auth-mediated path is
     // selected when callers present DPoP+JWT headers.
-    let signed = handle_sign_transaction(node, params, auth_ctx).await.map_err(|e| {
+    let signed = handle_sign_transaction(node, Some(params_inner.clone()), auth_ctx).await.map_err(|e| {
         warn!(
             target: "rpc",
             from = %from_str,
@@ -19231,7 +19170,9 @@ async fn handle_sign_and_send_transaction(
     let mut send_params = serde_json::json!({
         "from": from_str,
         "to": to_str,
-        "value": value,
+        // u128 wei encoded as decimal string — JSON numbers cap at 2^53 so a
+        // raw integer would silently truncate large balances.
+        "value": value.to_string(),
         "gas_limit": gas_limit,
         "gas_price": gas_price,
         "nonce": nonce,
