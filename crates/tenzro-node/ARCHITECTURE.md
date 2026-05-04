@@ -242,7 +242,7 @@ Provide a standard JSON-RPC 2.0 API for querying and interacting with the node.
 **API Categories (242 methods, 26 namespaces):**
 
 1. **Blockchain Methods**
-   - `tenzro_blockNumber`, `tenzro_getBlock`, `tenzro_getTransaction`, `tenzro_sendTransaction`, `tenzro_submitBlock`
+   - `tenzro_blockNumber`, `tenzro_getBlock`, `tenzro_getTransaction`, `tenzro_signTransaction`, `tenzro_signAndSendTransaction`, `tenzro_submitBlock`
 
 2. **Account Methods**
    - `tenzro_createAccount`, `tenzro_createWallet`, `tenzro_getBalance`, `tenzro_getNonce`, `tenzro_listAccounts`

@@ -2830,6 +2830,23 @@ impl TenzroNode {
             IdentityRegistry::new()
         };
 
+        // Wire the shared wallet service into the identity registry so the
+        // binder-based registration path (`register_human_via_binder`) and
+        // the rpc-level signing handlers operate against the same
+        // `TenzroWalletService` instance. Without this binding, onboarding
+        // RPCs that call `register_human_via_binder` would fail with
+        // `WalletError("no wallet binder configured")`, and the legacy
+        // `register_human_with_fee(public_key, ...)` path falls back to a
+        // deterministic placeholder `wallet-{12hex}` id that the wallet
+        // service has no record of.
+        if let Some(wallet_service) = self.wallet_service.clone() {
+            let binder = Arc::new(tenzro_identity::WalletBinder::from_service(wallet_service));
+            registry = registry.with_wallet_binder_arc(binder);
+            info!("Wallet binder wired: identity registrations provision MPC wallets via the shared WalletService");
+        } else {
+            warn!("Wallet service unavailable at identity init — binder-based registration disabled");
+        }
+
         // Wire ERC-8004 auto-mirror: when a TDIP machine identity is
         // registered, write an `AgentRecord` straight into the precompile-
         // backed `Erc8004IdentityRegistry` so EVM contracts at 0x101a see
@@ -3839,6 +3856,16 @@ impl TenzroNode {
     /// Returns the storage backend if initialized
     pub fn storage(&self) -> Option<&Arc<RocksDbStore>> {
         self.storage.as_ref()
+    }
+
+    /// Returns the consensus engine if initialized.
+    ///
+    /// RPC handlers use this to inspect the in-flight mempool — e.g.
+    /// `tenzro_getTransaction` falls back to the mempool when a hash isn't yet
+    /// in `CF_TRANSACTIONS`, so callers can distinguish "pending" from "unknown"
+    /// without polling forever.
+    pub fn consensus(&self) -> Option<&Arc<HotStuff2Engine>> {
+        self.consensus.as_ref()
     }
 
     /// Returns the staking manager if initialized

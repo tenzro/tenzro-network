@@ -269,24 +269,6 @@ impl TenzroWalletService {
         Ok(())
     }
 
-    /// Find a wallet by its on-chain address.
-    ///
-    /// Scans the in-memory wallet cache for a wallet whose address matches.
-    /// Returns the wallet if found, None otherwise.
-    pub fn find_wallet_by_address(&self, address: &Address) -> Option<MpcWallet> {
-        for entry in self.wallets.iter() {
-            // Check both the derived address AND the public key (hex canonical address)
-            if entry.value().address == *address {
-                return Some(entry.value().clone());
-            }
-            // Also match by public key bytes (the hex address returned by tenzro_createWallet)
-            if entry.value().public_key.as_bytes() == address.as_bytes() {
-                return Some(entry.value().clone());
-            }
-        }
-        None
-    }
-
     /// Get wallet by ID (from cache or keystore)
     async fn get_wallet_internal(&self, wallet_id: &WalletId) -> Result<Option<MpcWallet>> {
         // Check cache first

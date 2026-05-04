@@ -35,7 +35,7 @@ The RPC server runs in one of three auth modes, selected by the `TENZRO_MCP_AUTH
 
 | Mode | Behavior |
 |------|----------|
-| `tiered` (default) | Read methods (`tenzro_listModels`, `tenzro_getBlock`, etc.) are public. Write methods (`tenzro_chat`, `tenzro_sendTransaction`, `tenzro_serveModel`, etc.) require a DPoP-bound bearer JWT. |
+| `tiered` (default) | Read methods (`tenzro_listModels`, `tenzro_getBlock`, etc.) are public. Write methods (`tenzro_chat`, `tenzro_signAndSendTransaction`, `tenzro_serveModel`, etc.) require a DPoP-bound bearer JWT. |
 | `full` | All methods require a DPoP-bound bearer JWT. |
 | `false` | Auth disabled. Suitable only for local development. |
 

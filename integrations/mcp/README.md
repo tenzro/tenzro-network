@@ -127,8 +127,8 @@ Pass `dpop_jkt` (RFC 7638 thumbprint of the holder's Ed25519 public key) to bind
 ### Wallet & Balance (6 tools)
 
 - `get_balance` — Get TNZO balance in wei
-- `create_wallet` — Provision a self-custody Tenzro 2-of-3 MPC wallet (32-byte address, no seed phrase)
-- `send_transaction` — Send TNZO transfer
+- `create_wallet` — Provision a chain-agnostic 2-of-3 Ed25519 MPC wallet (no seed phrase). Tenzro wallets are not per-chain — a single wallet projects into EVM, SVM, and Canton via the pointer-token model, so there is no `chain` parameter. Use `cross_vm_transfer` / `wrap_tnzo` for VM-specific operations and the bridge tools (`bridge_tokens`, deBridge, Wormhole, Li.Fi) for sends to external chains.
+- `send_transaction` — Send TNZO transfer via server-side `tenzro_signAndSendTransaction` (live nonce + gas-price lookup; accepts `value` or `amount` alias; rejects self-sends with `cannot transfer to self`)
 - `request_faucet` — Request 100 testnet TNZO (24h cooldown)
 - `token_balance` — Get TNZO balance via token subsystem
 - `total_supply` — Get total TNZO supply
@@ -138,7 +138,7 @@ Pass `dpop_jkt` (RFC 7638 thumbprint of the holder's Ed25519 public key) to bind
 - `get_node_status` — Node health, block height, peers, uptime, role
 - `get_block` — Get block by height with transactions
 - `get_block_range` — Batch-fetch a contiguous range of blocks for catch-up sync (max 256/call; returns `nextHeight` + `moreAvailable` for pagination)
-- `get_transaction` — Look up transaction by hash
+- `get_transaction` — Look up transaction by hash. Resolves from finalized storage first, then falls back to the consensus mempool: `status` is `"pending"` while in-mempool and `"finalized"` once block-included, so callers polling immediately after broadcast can distinguish "not yet finalized" from "unknown hash"
 
 ### Identity (5 tools)
 

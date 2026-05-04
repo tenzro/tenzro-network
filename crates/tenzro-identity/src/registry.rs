@@ -352,6 +352,20 @@ impl IdentityRegistry {
         self
     }
 
+    /// Attaches a wallet binder (builder pattern).
+    ///
+    /// Composes with `with_storage`, `with_resolution_backend`, etc. so the
+    /// node can stack persistent storage and a shared wallet service onto a
+    /// single registry instance. When set, `register_human_with_fee` and
+    /// `register_machine_with_fee` provision real MPC wallets through the
+    /// binder's `WalletService`; without it, those calls fall back to a
+    /// deterministic placeholder address with no signable wallet — useful for
+    /// tests but never correct for a live node.
+    pub fn with_wallet_binder_arc(mut self, wallet_binder: Arc<WalletBinder>) -> Self {
+        self.wallet_binder = Some(wallet_binder);
+        self
+    }
+
     /// Attaches a remote DID resolution backend (HIGH #93).
     ///
     /// When `resolve()` cannot find the DID locally, the registry will fall
@@ -512,6 +526,199 @@ impl IdentityRegistry {
             "Registered human identity: {} (name: {}, kyc: {:?}, fee: {} TNZO)",
             did_string, display_name, kyc_tier, fee_required / 1_000_000_000_000_000_000
         );
+
+        self.persist_identity(&did_string, &identity);
+        self.identities.insert(did_string, identity.clone());
+        Ok(RegistrationResult {
+            identity,
+            fee_required,
+        })
+    }
+
+    /// Registers a human identity by provisioning the wallet through the
+    /// configured `WalletBinder`, then using that wallet's classical public
+    /// key as the identity's `public_keys[0]`.
+    ///
+    /// This is the production onboarding path used by `tenzro_onboardHuman`,
+    /// `tenzro_participate`, and the desktop Setup flow: a single MPC wallet
+    /// is provisioned in the shared `WalletService`, its `wallet_id` is
+    /// stored on the identity, and the same keypair signs both at the
+    /// authentication layer (key purposes Authentication + AssertionMethod)
+    /// and at the wallet-mediated transaction layer. The auth-mediated
+    /// signing path (`AuthEngine::resolve_authority` →
+    /// `find_wallet_id_for_did`) returns the same `wallet_id` that the
+    /// onboarding response carried, so signing succeeds immediately.
+    ///
+    /// Returns `IdentityError::WalletError("no wallet binder configured")`
+    /// if called on a registry without a binder — production node startup
+    /// must wire one via `with_wallet_binder_arc`.
+    pub async fn register_human_via_binder(
+        &self,
+        display_name: String,
+        kyc_tier: KycTier,
+    ) -> Result<RegistrationResult> {
+        let did = TenzroDid::new_human();
+        let did_string = did.to_string();
+
+        let binder = self.wallet_binder.as_ref().ok_or_else(|| {
+            IdentityError::WalletError("no wallet binder configured".to_string())
+        })?;
+        let binding = binder.provision_wallet(&did_string).await?;
+
+        let identity = TenzroIdentity {
+            did,
+            public_keys: vec![PublicKeyInfo {
+                key_id: "key-1".to_string(),
+                key_type: binding.key_type.clone(),
+                public_key: binding.public_key.clone(),
+                purposes: vec![KeyPurpose::Authentication, KeyPurpose::AssertionMethod],
+            }],
+            identity_data: IdentityData::Human {
+                display_name: display_name.clone(),
+                kyc_tier,
+                controlled_machines: Vec::new(),
+            },
+            status: IdentityStatus::Active,
+            wallet_address: binding.address,
+            wallet_id: binding.wallet_id,
+            pq_verifying_key: binding.pq_verifying_key,
+            credentials: Vec::new(),
+            services: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata: HashMap::new(),
+            username: None,
+        };
+
+        let fee_required = self.fee_schedule.human_identity_registration;
+
+        info!(
+            "Registered human identity via binder: {} (name: {}, kyc: {:?}, fee: {} TNZO)",
+            did_string,
+            display_name,
+            kyc_tier,
+            fee_required / 1_000_000_000_000_000_000
+        );
+
+        self.persist_identity(&did_string, &identity);
+        self.identities.insert(did_string, identity.clone());
+        Ok(RegistrationResult {
+            identity,
+            fee_required,
+        })
+    }
+
+    /// Registers a machine identity by provisioning the wallet through the
+    /// configured `WalletBinder`. The binder-provisioned wallet's classical
+    /// public key becomes the identity's `public_keys[0]`, and the binder's
+    /// `wallet_id` is what `find_wallet_id_for_did` returns later — so the
+    /// auth-mediated signing path resolves to a wallet the shared
+    /// `WalletService` can actually sign with.
+    ///
+    /// Pass `controller_did = "self"` for an autonomous machine (the registry
+    /// stores `controller_did = None` for self-controlled machines per the
+    /// `did:tenzro:machine:<uuid>` convention); otherwise pass the human
+    /// controller's DID.
+    pub async fn register_machine_via_binder(
+        &self,
+        controller_did: &str,
+        capabilities: Vec<String>,
+        delegation_scope: DelegationScope,
+    ) -> Result<RegistrationResult> {
+        let is_autonomous = controller_did == "self";
+
+        // Validate controller (skip for autonomous self-controlled machines)
+        let controller_id = if is_autonomous {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            let controller = self
+                .identities
+                .get(controller_did)
+                .ok_or_else(|| IdentityError::NotFound(controller_did.to_string()))?;
+
+            if controller.status != IdentityStatus::Active {
+                return Err(IdentityError::NotActive(format!(
+                    "controller {} is {:?}",
+                    controller_did, controller.status
+                )));
+            }
+            if !controller.is_human() {
+                return Err(IdentityError::PermissionDenied(
+                    "controller must be a human identity".to_string(),
+                ));
+            }
+            controller.did.id.clone()
+        };
+
+        let did = if is_autonomous {
+            TenzroDid::new_autonomous_machine()
+        } else {
+            TenzroDid::new_machine(&controller_id)
+        };
+        let did_string = did.to_string();
+
+        let binder = self.wallet_binder.as_ref().ok_or_else(|| {
+            IdentityError::WalletError("no wallet binder configured".to_string())
+        })?;
+        let binding = binder.provision_wallet(&did_string).await?;
+
+        let identity = TenzroIdentity {
+            did,
+            public_keys: vec![PublicKeyInfo {
+                key_id: "key-1".to_string(),
+                key_type: binding.key_type.clone(),
+                public_key: binding.public_key.clone(),
+                purposes: vec![KeyPurpose::Authentication],
+            }],
+            identity_data: IdentityData::Machine {
+                capabilities: capabilities.clone(),
+                delegation_scope,
+                controller_did: if is_autonomous {
+                    None
+                } else {
+                    Some(controller_did.to_string())
+                },
+                reputation: 0,
+                tenzro_agent_id: None,
+            },
+            status: IdentityStatus::Active,
+            wallet_address: binding.address,
+            wallet_id: binding.wallet_id,
+            pq_verifying_key: binding.pq_verifying_key,
+            credentials: Vec::new(),
+            services: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata: HashMap::new(),
+            username: None,
+        };
+
+        let fee_required = self.fee_schedule.machine_identity_registration;
+
+        info!(
+            "Registered machine identity via binder: {} (controller: {}, capabilities: {:?}, fee: {} TNZO)",
+            did_string,
+            controller_did,
+            capabilities,
+            fee_required / 1_000_000_000_000_000_000
+        );
+
+        // Append child to controller's controlled_machines list
+        if !is_autonomous {
+            if let Some(mut controller) = self.identities.get_mut(controller_did) {
+                if let IdentityData::Human {
+                    ref mut controlled_machines,
+                    ..
+                } = controller.identity_data
+                {
+                    controlled_machines.push(did_string.clone());
+                    controller.updated_at = Utc::now();
+                    let snapshot = controller.clone();
+                    drop(controller);
+                    self.persist_identity(controller_did, &snapshot);
+                }
+            }
+        }
 
         self.persist_identity(&did_string, &identity);
         self.identities.insert(did_string, identity.clone());

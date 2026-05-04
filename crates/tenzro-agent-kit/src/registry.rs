@@ -92,8 +92,7 @@ impl RegistryClient {
     /// Public low-level JSON-RPC call that returns the raw
     /// [`serde_json::Value`] result. Used by the executor for dispatch
     /// methods that don't have a typed wrapper (e.g. `tenzro_bridgeTokens`,
-    /// `tenzro_payMpp`, `tenzro_payX402`, `tenzro_submitDamlCommand`,
-    /// `tenzro_sendTransaction`).
+    /// `tenzro_payMpp`, `tenzro_payX402`, `tenzro_submitDamlCommand`).
     pub async fn call_raw(
         &self,
         method: &str,
