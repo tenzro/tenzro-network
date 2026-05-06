@@ -110,3 +110,6 @@ apps/tenzro-desktop/src-tauri/gen/
 website/
 apps/
 sdk/
+
+# Marketing / campaign content — never published to GitHub
+marketing/
