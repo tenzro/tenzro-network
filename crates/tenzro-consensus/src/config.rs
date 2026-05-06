@@ -27,9 +27,6 @@ pub struct ConsensusConfig {
     /// Byzantine fault tolerance threshold (default: 2f+1 where f = (n-1)/3)
     pub bft_threshold: BftThreshold,
 
-    /// Enable TEE attestation priority (default: true)
-    pub enable_tee_priority: bool,
-
     /// Epoch duration in blocks (default: 10000)
     pub epoch_duration: u64,
 
@@ -54,8 +51,13 @@ pub struct ConsensusConfig {
     /// Enable optimistic responsiveness (default: true)
     pub optimistic_responsiveness: bool,
 
-    /// Leader rotation strategy
-    pub leader_rotation: LeaderRotation,
+    /// Proposer election strategy.
+    ///
+    /// Default is [`ProposerElectionKind::Reputation`] (Aptos LeaderReputation),
+    /// which prevents the chain from stalling when a single validator becomes
+    /// unresponsive. [`ProposerElectionKind::RoundRobin`] is retained for
+    /// tests and replay benchmarks.
+    pub proposer_election: ProposerElectionKind,
 }
 
 impl Default for ConsensusConfig {
@@ -68,14 +70,13 @@ impl Default for ConsensusConfig {
             view_timeout_ms: 2000,
             min_validators: 4,
             bft_threshold: BftThreshold::TwoThirdsPlusOne,
-            enable_tee_priority: true,
             epoch_duration: 10_000,
             mempool_size_limit: 100 * 1024 * 1024, // 100MB
             mempool_max_transactions: 10_000,
             mempool_min_gas_price: 1_000_000_000, // 1 Gwei
             transaction_ttl_seconds: 600,
             optimistic_responsiveness: true,
-            leader_rotation: LeaderRotation::RoundRobin,
+            proposer_election: ProposerElectionKind::Reputation,
         }
     }
 }
@@ -101,6 +102,12 @@ impl ConsensusConfig {
     /// Sets the view timeout
     pub fn with_view_timeout(mut self, view_timeout_ms: u64) -> Self {
         self.view_timeout_ms = view_timeout_ms;
+        self
+    }
+
+    /// Sets the proposer election strategy.
+    pub fn with_proposer_election(mut self, kind: ProposerElectionKind) -> Self {
+        self.proposer_election = kind;
         self
     }
 
@@ -149,15 +156,19 @@ impl BftThreshold {
     }
 }
 
-/// Leader rotation strategy
+/// Proposer election strategy.
+///
+/// Renamed from `LeaderRotation` to avoid colliding with the
+/// `ProposerElection` *trait* in `validator.rs`. The "Kind" suffix marks
+/// this as the configuration discriminator: the engine resolves it to a
+/// concrete `Box<dyn ProposerElection>` at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LeaderRotation {
-    /// Round-robin rotation based on view number
+pub enum ProposerElectionKind {
+    /// Naïve `view % N` round-robin. Tests and very small validator sets only.
     RoundRobin,
-    /// Weighted rotation based on stake
-    StakeWeighted,
-    /// Random rotation (using VRF)
-    Random,
+    /// Aptos LeaderReputation: stake-weighted seeded draw with observed-
+    /// behaviour multipliers. Default and recommended for production.
+    Reputation,
 }
 
 #[cfg(test)]

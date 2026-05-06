@@ -1,111 +1,160 @@
 # tenzro-consensus
 
-HotStuff-2 BFT consensus engine for Tenzro Network with TEE attestation. Powers consensus on Tenzro Ledger (the L1 settlement layer).
+HotStuff-2 BFT consensus engine with reputation-weighted proposer election, no-endorsement certificates, and hybrid post-quantum signatures. Powers the Tenzro Ledger L1 settlement layer.
+
+For the full protocol specification with formal arguments and references, see [`docs/papers/tenzro-consensus.md`](../../docs/papers/tenzro-consensus.md).
 
 ## Overview
 
-This crate implements the HotStuff-2 consensus protocol, a two-phase BFT consensus algorithm designed for high performance and strong finality guarantees.
+The crate composes four BFT mechanisms:
+
+1. **Two-phase HotStuff-2** — linear-communication, partially-synchronous BFT with 2Δ optimistic finality.
+2. **Reputation-weighted proposer election** — stake × observed-behaviour leader draw. Closes the small-validator-set stall mode that round-robin suffers when one validator is flaky.
+3. **No-endorsement certificates (NECs)** — closes the tail-fork attack class on 2-chain HotStuff.
+4. **Ed25519 + ML-DSA-65 hybrid signatures** — every safety-critical message (vote, timeout, no-endorsement) is hybrid-signed. NIST FIPS 204 compliant.
+
+For academic citations and the formal protocol specification, see [`docs/papers/tenzro-consensus.md`](../../docs/papers/tenzro-consensus.md).
 
 ## Modules
 
-**10 modules:** config, epoch_manager, error, finality, hotstuff2, mempool, proposer, traits, validator, voter
+| File | Lines | Role |
+|---|---:|---|
+| `lib.rs` | 231 | Public surface, type re-exports |
+| `config.rs` | 211 | `ConsensusConfig`, `BftThreshold`, `ProposerElectionKind` |
+| `hotstuff2.rs` | 3,562 | The HotStuff-2 state machine |
+| `validator.rs` | 736 | `ValidatorSet`, `ProposerElection` trait |
+| `proposer.rs` | 400 | `ReputationProposer`, `RoundRobinProposer` |
+| `leader_reputation.rs` | 855 | `LeaderReputation` engine, weight computation, anti-grinding seed |
+| `timeout.rs` | 1,710 | `TimeoutMsg` / `TimeoutCertificate` (TC) and `NoEndorsementMsg` / `NoEndorsementCertificate` (NEC) |
+| `vote_state.rs` | 570 | `EquivocationDetector` |
+| `voter.rs` | 724 | `Vote`, `QuorumCertificate`, `VoteCollector` |
+| `mempool.rs` | 875 | Transaction admission + ordering |
+| `admission.rs` | 622 | Lane-based fee floor admission |
+| `epoch_manager.rs` | 574 | Atomic epoch transitions |
+| `finality.rs` | 502 | 2-chain finality tracker |
+| `traits.rs` | 123 | `ConsensusEngine`, `SlashingCallback`, `ConsensusOutMessage` |
+| `error.rs` | 140 | `ConsensusError` |
 
-- `config` - ConsensusConfig, BftThreshold, LeaderRotation
-- `epoch_manager` - Epoch, EpochManager, EpochStats for validator set transitions
-- `error` - ConsensusError, Result types
-- `finality` - FinalityNotification, FinalityTracker, ForkChoice
-- `hotstuff2` - HotStuff2Engine, Phase (Prepare/Commit/Decide), StateRootProvider, ConsensusOutMessage
-- `mempool` - Mempool, MempoolStats with gas price ordering
-- `proposer` - BlockProposer for transaction selection
-- `traits` - ConsensusEngine, ConsensusNetwork, SlashingCallback, StateManager
-- `validator` - ValidatorInfo, ValidatorSet, ValidatorStatus, EquivocationDetector, EquivocationEvidence
-- `voter` - QuorumCertificate, Vote, VoteCollector, VoteType
+11,835 LOC total.
 
-## Key Features
+## Protocol
 
-- **Fast Finality**: Two-phase protocol (PREPARE → COMMIT → DECIDE)
-- **Linear Communication**: O(n) message complexity per view
-- **Optimistic Responsiveness**: Block commits in network delay time under good conditions
-- **TEE Integration**: Validators with TEE attestation receive 2x priority in leader selection
-- **Robust Liveness**: Automatic view changes on timeout
-- **Epoch-based Validator Management**: Clean validator set transitions at epoch boundaries
-- **Equivocation Detection**: `EquivocationDetector` catches double-votes, wires into `SlashingCallback` for stake penalties
-- **Peer Authentication**: `ValidatorRegistry` trait enforces validator-only topics (consensus, block proposals, attestations)
+### Two-phase HotStuff-2
 
-## HotStuff-2 Protocol
+Each view runs Prepare → Commit. A block is finalized once its child has formed a Commit QC at the next view (the 2-chain rule). Leader → replicas → leader vote flow keeps communication linear in the optimistic path.
 
-### Protocol Flow
+### Reputation-weighted proposer election
 
-1. **PREPARE Phase**:
-   - Leader proposes a block
-   - Validators vote on the proposal
-   - Prepare QC formed when 2f+1 votes collected
+Each round draws the leader from a stake-weighted seeded distribution where per-validator weight is multiplied by an observed-behaviour tier:
 
-2. **COMMIT Phase**:
-   - Leader shares prepare QC
-   - Validators vote to commit
-   - Commit QC formed when 2f+1 votes collected
-
-3. **DECIDE Phase**:
-   - Block is finalized with commit QC
-   - Transactions removed from mempool
-   - Advance to next height
-
-### Byzantine Fault Tolerance
-
-The protocol tolerates up to `f` Byzantine faults where `f = (n-1)/3` and `n` is the number of validators. A quorum requires `2f+1` votes, ensuring:
-
-- Safety: No two conflicting blocks can be finalized
-- Liveness: Progress is guaranteed with honest majority and synchrony
-
-### Leader Selection
-
-Leader selection uses deterministic rotation with optional TEE-based priority:
-
-- **Round-Robin**: Simple rotation based on view number (default)
-- **TEE-Weighted**: Validators with valid TEE attestation get 2x priority for leader selection (voting power remains standard)
-- **Stake-Weighted**: Selection weighted by validator stake
-
-## TEE Integration
-
-Validators can provide TEE attestation to gain priority in leader selection:
-
-```rust
-use tenzro_consensus::ValidatorInfo;
-use tenzro_types::tee::{AttestationReport, AttestationResult};
-
-let mut validator = ValidatorInfo::new(address, public_key, stake);
-
-// Add TEE attestation
-let attestation = AttestationReport::new(/* ... */);
-let result = AttestationResult::success(/* ... */);
-validator = validator.with_tee_attestation(attestation, result);
-
-// This validator now has 2x leader selection priority
 ```
+weight(v) = stake(v) × tier(v) × tee_multiplier(v) / 10000
+
+tier(v):
+  ACTIVE_WEIGHT   = 1000   if v proposed ≥1 QC-certified block recently
+                            and failed <10% of its proposer-window rounds
+  INACTIVE_WEIGHT = 10     if v voted but didn't propose
+  FAILED_WEIGHT   = 1      otherwise
+
+tee_multiplier(v):
+  15000 (1.5×) if v has a fresh valid TEE attestation in the current epoch
+  10000 (1.0×) otherwise
+```
+
+The 1000× spread between ACTIVE and FAILED collapses a chronically-flaky validator's effective draw probability to ~0.1% within ~20 rounds, long before its degradation propagates into chain-wide liveness loss.
+
+The leader-draw seed is anti-grinding:
+
+```
+seed = SHA-256(
+    "TENZRO_LEADER_REPUTATION:"
+    || epoch.to_be_bytes()
+    || round.to_be_bytes()
+    || prev_finalized_block_id
+)
+```
+
+`prev_finalized_block_id` is fixed at least one full QC ago, and the proposer-history window excludes the most recent 20 rounds (`TRAILING_BUFFER_ROUNDS = 20`), so an adversary leader cannot grind candidate blocks to bias future draws.
+
+### TEE multiplier (1.5×, multiplicative)
+
+A validator with a fresh, valid TEE attestation receives a 1.5× multiplier on its reputation-adjusted weight. The multiplicative form (rather than a hard 2× boost) preserves the property that observed behaviour can fully overcome attestation: a TEE-attested FAILED validator (weight = stake × 1 × 1.5) is still dwarfed by a non-TEE ACTIVE validator (weight = stake × 1000 × 1).
+
+### No-Endorsement Certificates (NEC)
+
+Closes the tail-fork attack on 2-chain HotStuff. The leader at view *v* must either:
+
+- **Re-propose the high-tip from view v−1**, or
+- **Attach a valid NEC for view v**
+
+A NEC is a *f+1* aggregation of `NoEndorsementMsg`s, each attesting "I observed no QC at view v−1". *f+1* (not 2f+1) is the correct threshold: with at most *f* Byzantine signers, *f+1* suffices to guarantee at least one truthful "no QC observed" attestation. Domain tag `TENZRO_NO_ENDORSEMENT:` distinct from the timeout and vote tags prevents cross-message replay.
+
+### Hybrid post-quantum signatures
+
+Every safety-critical message carries a `CompositeSignature = Ed25519 || ML-DSA-65`. Verification is AND-composed — forging requires breaking both schemes. A quantum adversary that breaks Ed25519 (Shor's algorithm on EC discrete log) still cannot forge, because ML-DSA-65 is conjectured quantum-secure.
+
+| Message | Domain tag |
+|---|---|
+| Vote | `TENZRO_VOTE:` |
+| TimeoutMsg | `TENZRO_TIMEOUT:` |
+| NoEndorsementMsg | `TENZRO_NO_ENDORSEMENT:` |
+| Block proposal | `TENZRO_BLOCK:` |
+| Reputation seed | `TENZRO_LEADER_REPUTATION:` |
+
+### Byzantine fault tolerance
+
+Tolerates up to *f* faulty validators where *f = ⌊(n−1)/3⌋*. Quorum is *2f+1*. With *n* = 4: *f* = 1, quorum = 3. With *n* = 100: *f* = 33, quorum = 67.
+
+### Equivocation detection and slashing
+
+The `EquivocationDetector` (in `vote_state.rs`) tracks per-validator votes per view. Two distinct votes from the same validator at the same view trigger:
+
+```
+StakingSlashingCallback::report_equivocation(validator, view, evidence) {
+    slash_amount = stake.amount / 10;     // 10%
+    staking.slash(validator, slash_amount, reason, ...);
+    epoch_manager.remove_pending_validator(validator);
+}
+```
+
+Pipeline: `EquivocationDetector` → `SlashingCallback` trait → `tenzro-node::StakingSlashingCallback` → `tenzro-token::StakingManager::slash` → on-chain TNZO burn. Slashed validators are dropped from the next epoch's pending queue.
+
+### View change (DiemBFT pacemaker)
+
+On local view timeout, replicas broadcast a signed `TimeoutMsg(view, high_qc_view)`. Receivers observing a higher-view timeout advance their local view. *2f+1* timeouts at the same view aggregate into a Timeout Certificate (TC). The next leader attaches the TC to its proposal.
+
+If `view v−1` produced no QC, replicas additionally broadcast `NoEndorsementMsg(view=v)`. *f+1* of these aggregate into a NEC.
 
 ## Configuration
 
 ```rust
-use tenzro_consensus::ConsensusConfig;
+use tenzro_consensus::{ConsensusConfig, ProposerElectionKind};
 
 let config = ConsensusConfig::default()
     .with_block_time(400)           // 400ms block time
     .with_view_timeout(2000)        // 2s view timeout
-    .with_max_block_size(2_097_152) // 2MB max block size
-    .with_max_gas_per_block(30_000_000);
+    .with_max_block_size(2_097_152) // 2MB
+    .with_proposer_election(ProposerElectionKind::Reputation); // default
 ```
 
-### Key Parameters
+Defaults:
 
-- **block_time_ms**: Target block time (default: 400ms)
-- **view_timeout_ms**: Timeout before view change (default: 2000ms)
-- **max_transactions_per_block**: Transaction limit (default: 10,000)
-- **max_gas_per_block**: Gas limit (default: 30M)
-- **max_block_size**: Block size limit (default: 2MB)
-- **epoch_duration**: Blocks per epoch (default: 10,000)
+| Parameter | Default |
+|---|---|
+| `block_time_ms` | 400 |
+| `view_timeout_ms` | 2000 |
+| `max_block_size` | 2 MiB |
+| `max_transactions_per_block` | 10,000 |
+| `max_gas_per_block` | 30,000,000 |
+| `min_validators` | 4 |
+| `bft_threshold` | TwoThirdsPlusOne |
+| `epoch_duration` | 10,000 blocks |
+| `proposer_election` | Reputation |
+| `optimistic_responsiveness` | true |
 
-## Usage Example
+`ProposerElectionKind::RoundRobin` is retained for tests and replay benchmarks.
+
+## Usage
 
 ```rust
 use tenzro_consensus::{
@@ -116,40 +165,23 @@ use tenzro_crypto::{KeyPair, KeyType};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Generate validator keypair
     let keypair = KeyPair::generate(KeyType::Ed25519)?;
+    let address = keypair.address_32();
 
-    // Convert address (20 bytes -> 32 bytes)
-    let crypto_addr = keypair.address();
-    let mut addr_bytes = [0u8; 32];
-    addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
-    let address = tenzro_types::primitives::Address::new(addr_bytes);
-
-    // Create validators
     let validators = vec![
-        ValidatorInfo::new(
-            address,
-            keypair.public_key().clone(),
-            1000, // stake
-        ),
+        ValidatorInfo::new(address, keypair.public_key().clone(), 1000),
     ];
 
-    // Create epoch manager
     let epoch_manager = EpochManager::new(validators, 10000)?;
-
-    // Create consensus engine
     let config = ConsensusConfig::default();
     let mut engine = HotStuff2Engine::new(keypair, config, epoch_manager);
 
-    // Start consensus
     engine.start().await?;
 
-    // Subscribe to finality notifications
     let mut finality_rx = engine.finality_tracker.subscribe();
-
     tokio::spawn(async move {
         while let Ok(notification) = finality_rx.recv().await {
-            println!("Block finalized: height={}, hash={}",
+            println!("Block finalized: height={} hash={}",
                 notification.height, notification.hash);
         }
     });
@@ -158,96 +190,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Epoch Management
+## Performance
 
-Validators are organized into epochs with clean transitions:
+Per consensus message, hybrid signing cost:
 
-```rust
-use tenzro_consensus::EpochManager;
+| Operation | Time |
+|---|---|
+| Sign (Ed25519 + ML-DSA-65) | ~300 µs |
+| Verify | ~280 µs |
+| Signature size | 3,373 bytes |
+| Public key size | 1,984 bytes |
 
-// Create epoch manager with 100-block epochs
-let manager = EpochManager::new(validators, 100)?;
+For *n* = 100 validators:
 
-// Add pending validator for next epoch
-manager.add_pending_validator(new_validator);
+- QC verification (2f+1 = 67 hybrid checks): ~18.7 ms
+- One block round (intra-region): ~40 ms
+- Theoretical ceiling: ~25 blocks/sec
 
-// Transition happens automatically at epoch boundary
-if manager.should_transition(current_height) {
-    let new_validator_set = manager.transition_epoch(current_height)?;
-}
-```
+For *n* = 4 (current testnet, single-zone):
 
-## Equivocation Detection and Slashing
+- QC verification (3 hybrid checks): ~0.84 ms
+- Observed: ~10 blocks/sec empty-block finalization
 
-```rust
-use tenzro_consensus::{EquivocationDetector, SlashingCallback};
+Real TPS is execution-layer-dependent and orthogonal to consensus throughput. Production HotStuff-2 deployments at *n* ≈ 150 sustain in the range of 5,000–12,000 TPS depending on execution layer and block size; we expect Tenzro to land in the same operating range when deployed at comparable validator counts.
 
-// EquivocationDetector is wired into VoteCollector
-// When double-vote detected:
-// 1. EquivocationEvidence generated
-// 2. SlashingCallback::on_equivocation() invoked
-// 3. In tenzro-node: StakingSlashingCallback slashes 10% of validator stake
-```
+## Safety and liveness
 
-## Performance Characteristics
+- **Safety.** No two honest replicas finalize different blocks at the same height. Follows from HotStuff-2's two-chain rule.
+- **Liveness (after GST).** Progress guaranteed once *2f+1* honest validators exchange messages within bounded delay. Follows from the DiemBFT v4 pacemaker argument.
+- **Single-validator-fault resilience.** Reputation election deprioritizes flaky validators within ~20 rounds.
+- **Tail-fork resistance.** NEC blocks fresh-block proposals after a timeout unless f+1 validators attest no QC was observed.
+- **Quantum forgery resistance.** Hybrid Ed25519 + ML-DSA-65 over every safety-critical signature.
 
-- **Throughput**: 2,500+ TPS (400ms blocks, 10k tx/block)
-- **Finality**: ~800ms (2 phases × 400ms)
-- **Communication**: O(n) messages per view
-- **Network Overhead**: ~64 bytes per vote signature
+## Test coverage
 
-## Safety and Liveness
+39 unit tests covering:
 
-### Safety Guarantees
-
-- No two conflicting blocks can be finalized
-- Finality is irreversible once achieved
-- Fork-choice follows highest QC view
-
-### Liveness Guarantees
-
-- Progress guaranteed with:
-  - 2f+1 honest validators
-  - Eventual synchrony
-  - Non-faulty leader
-
-- View changes ensure progress:
-  - Timeout triggers view change
-  - Round-robin ensures eventual honest leader
+- Reputation weight computation (16 tests)
+- Anti-grinding seed determinism and domain separation
+- Window edge cases (genesis, post-rollover)
+- Stake-weighted draw distribution
+- TC aggregation and verification
+- NEC aggregation and verification
+- Cross-message replay rejection (signing payload tag binding)
+- Equivocation detection
+- Epoch transition atomicity
+- Hybrid signature verification (rejecting either-half-only signatures)
 
 ## Dependencies
 
-- `tenzro-types` - Shared types
-- `tenzro-crypto` - Cryptographic primitives (Ed25519 signatures)
-- `tokio` - Async runtime
-- `async-trait` - Async trait support
-- `serde`, `serde_json` - Serialization
-- `thiserror` - Error handling
-- `tracing` - Logging
-- `futures` - Async utilities
-- `dashmap` - Concurrent maps
-- `parking_lot` - High-performance locks
-- `chrono` - Timestamps
-- `rand` - Randomness
-- `bytes` - Data buffers
-
-## Test Coverage
-
-39 unit tests covering:
-- HotStuff-2 two-phase protocol (Prepare/Commit/Decide)
-- Vote collection and QC formation
-- Leader selection (round-robin and TEE-weighted)
-- Epoch transitions and validator set updates
-- Mempool ordering and transaction selection
-- Equivocation detection and evidence generation
-- View change timeouts
-- Finality tracking and fork choice
+- `tenzro-types`, `tenzro-crypto` — primitives, hybrid signing
+- `tokio`, `async-trait` — async runtime
+- `dashmap`, `parking_lot` — concurrent state
+- `serde`, `serde_json`, `bincode` — serialization
+- `tracing` — logging
 
 ## License
 
-Licensed under either of:
-
-- MIT license ([LICENSE](../../LICENSE) or http://opensource.org/licenses/MIT)
-- Apache License, Version 2.0 ([LICENSE](../../LICENSE) or http://www.apache.org/licenses/LICENSE-2.0)
-
-at your option.
+Apache License 2.0 — see [LICENSE](../../LICENSE).

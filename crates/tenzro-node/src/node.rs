@@ -3849,6 +3849,7 @@ impl TenzroNode {
                                 round,
                                 high_qc_view,
                                 timeout_certificate,
+                                no_endorsement_certificate,
                             } => {
                                 // Decode hex proposer → Address. On malformed input,
                                 // log and drop — the proposer field is informational
@@ -3891,15 +3892,31 @@ impl TenzroNode {
                                         continue;
                                     }
                                 };
+                                let nec = match no_endorsement_certificate
+                                    .as_deref()
+                                    .map(bincode::deserialize::<tenzro_consensus::NoEndorsementCertificate>)
+                                {
+                                    None => None,
+                                    Some(Ok(nec)) => Some(nec),
+                                    Some(Err(e)) => {
+                                        tracing::warn!(
+                                            proposer = %hex::encode(proposer_addr.as_bytes()),
+                                            error = %e,
+                                            "Dropping proposal with malformed NEC"
+                                        );
+                                        continue;
+                                    }
+                                };
                                 let height = block.height();
                                 tracing::debug!(
                                     height = %height,
                                     round = round,
                                     proposer = %hex::encode(proposer_addr.as_bytes()),
                                     has_tc = tc.is_some(),
+                                    has_nec = nec.is_some(),
                                     "Received consensus proposal from peer"
                                 );
-                                match consensus.on_proposal(&block, tc, high_qc_view).await {
+                                match consensus.on_proposal(&block, tc, nec, high_qc_view).await {
                                     Ok(_vote) => {
                                         // The vote is also emitted on `consensus_out_rx`
                                         // by the engine, which the event loop picks up
@@ -4071,6 +4088,63 @@ impl TenzroNode {
                                 // Commit messages are not currently consumed by the
                                 // engine — finality is driven by QC formation in the
                                 // vote collector. Drop silently.
+                            }
+                            tenzro_network::ConsensusMessage::NoEndorsement {
+                                format_version,
+                                view,
+                                voter,
+                                signature,
+                                public_key,
+                            } => {
+                                if voter == local_addr {
+                                    // Echo of our own NEC msg — skip the deserialization cost.
+                                    continue;
+                                }
+                                let sig: tenzro_crypto::composite::CompositeSignature =
+                                    match bincode::deserialize(&signature) {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                voter = %hex::encode(voter.as_bytes()),
+                                                error = %e,
+                                                "Dropping NoEndorsement: failed to bincode-decode CompositeSignature"
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                let pk: tenzro_crypto::composite::CompositePublicKey =
+                                    match bincode::deserialize(&public_key) {
+                                        Ok(p) => p,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                voter = %hex::encode(voter.as_bytes()),
+                                                error = %e,
+                                                "Dropping NoEndorsement: failed to bincode-decode CompositePublicKey"
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                let nec_msg = tenzro_consensus::NoEndorsementMsg {
+                                    format_version,
+                                    view,
+                                    voter,
+                                    signature: sig,
+                                    public_key: pk,
+                                };
+                                tracing::debug!(
+                                    view = view,
+                                    voter = %hex::encode(voter.as_bytes()),
+                                    "Received NoEndorsementMsg from peer"
+                                );
+                                if let Err(e) = consensus.on_no_endorsement_msg(&nec_msg).await {
+                                    // on_no_endorsement_msg rejects unknown voters,
+                                    // bad signatures, format-version mismatches.
+                                    tracing::warn!(
+                                        view = view,
+                                        error = %e,
+                                        "on_no_endorsement_msg rejected peer NoEndorsement"
+                                    );
+                                }
                             }
                         }
                     }

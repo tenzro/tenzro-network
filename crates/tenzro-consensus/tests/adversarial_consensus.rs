@@ -425,7 +425,7 @@ async fn test_non_leader_proposal_rejected() {
         let em = EpochManager::new(infos.clone(), 10_000).unwrap();
         em.current_validator_set()
     };
-    let leader = vs.select_leader(0, false).unwrap();
+    let leader = vs.select_leader_round_robin(0).unwrap();
 
     // Pick a validator that is NOT the leader for view 0.
     let non_leader = validators
@@ -688,9 +688,9 @@ fn test_consensus_resumes_after_view_change() {
     let vs = ValidatorSet::new(0, infos).unwrap();
 
     // In round-robin mode, leader for view N = validators[N % 4].
-    let leader_v0 = vs.select_leader(0, false).unwrap();
-    let leader_v1 = vs.select_leader(1, false).unwrap();
-    let leader_v2 = vs.select_leader(2, false).unwrap();
+    let leader_v0 = vs.select_leader_round_robin(0).unwrap();
+    let leader_v1 = vs.select_leader_round_robin(1).unwrap();
+    let leader_v2 = vs.select_leader_round_robin(2).unwrap();
 
     // After a timeout at view 0, view 1 should have a different leader.
     assert_ne!(

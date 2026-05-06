@@ -1114,6 +1114,7 @@ impl EventLoop {
                             ConsensusOutMessage::Vote(_) => "Vote",
                             ConsensusOutMessage::Proposal { .. } => "Proposal",
                             ConsensusOutMessage::Timeout(_) => "Timeout",
+                            ConsensusOutMessage::NoEndorsement(_) => "NoEndorsement",
                         };
                         info!(kind = dbg_kind, "event_loop.outbound_consensus: received msg from consensus engine");
                         if let Some(ref network) = self.network {
@@ -1157,6 +1158,7 @@ impl EventLoop {
                                     view: _,
                                     high_qc_view,
                                     timeout_certificate,
+                                    no_endorsement_certificate,
                                 } => {
                                     // Serialize TC if present. Drop encode failures
                                     // (the proposal still goes out without it; the
@@ -1173,12 +1175,27 @@ impl EventLoop {
                                             }
                                         }
                                     });
+                                    // MonadBFT NEC (arXiv:2502.20692): same encoding
+                                    // strategy as TC. If the bytes drop, the receiver
+                                    // will reject the fresh-after-TC proposal — the
+                                    // chain falls back to a repropose-of-high-tip on
+                                    // the next view, which is the safe behaviour.
+                                    let nec_bytes = no_endorsement_certificate.as_ref().and_then(|nec| {
+                                        match bincode::serialize(nec) {
+                                            Ok(b) => Some(b),
+                                            Err(e) => {
+                                                warn!(error = %e, "Failed to encode NEC; dropping from proposal");
+                                                None
+                                            }
+                                        }
+                                    });
                                     Some(MessagePayload::Consensus(ConsensusMessage::Proposal {
                                         block: Box::new(block),
                                         proposer: hex::encode(proposer.as_bytes()),
                                         round,
                                         high_qc_view,
                                         timeout_certificate: tc_bytes,
+                                        no_endorsement_certificate: nec_bytes,
                                     }))
                                 }
                                 ConsensusOutMessage::Timeout(timeout_msg) => {
@@ -1203,6 +1220,28 @@ impl EventLoop {
                                         }
                                         Err(e) => {
                                             warn!(error = %e, "Failed to encode hybrid timeout payload; dropping");
+                                            None
+                                        }
+                                    }
+                                }
+                                ConsensusOutMessage::NoEndorsement(nec_msg) => {
+                                    // MonadBFT no-endorsement attestation
+                                    // (arXiv:2502.20692). Same hybrid signature
+                                    // encoding as Timeout.
+                                    let encoded = bincode::serialize(&nec_msg.signature)
+                                        .and_then(|s| bincode::serialize(&nec_msg.public_key).map(|p| (s, p)));
+                                    match encoded {
+                                        Ok((sig_bytes, pk_bytes)) => {
+                                            Some(MessagePayload::Consensus(ConsensusMessage::NoEndorsement {
+                                                format_version: nec_msg.format_version,
+                                                view: nec_msg.view,
+                                                voter: nec_msg.voter,
+                                                signature: sig_bytes,
+                                                public_key: pk_bytes,
+                                            }))
+                                        }
+                                        Err(e) => {
+                                            warn!(error = %e, "Failed to encode hybrid no-endorsement payload; dropping");
                                             None
                                         }
                                     }

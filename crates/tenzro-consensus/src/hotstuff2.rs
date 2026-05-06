@@ -11,14 +11,17 @@
 //! 2. COMMIT: Leader collects prepare QC, validators vote again
 //! 3. DECIDE: Leader collects commit QC, block is finalized
 
-use crate::config::ConsensusConfig;
+use crate::config::{ConsensusConfig, ProposerElectionKind};
 use crate::epoch_manager::EpochManager;
 use crate::error::{ConsensusError, Result};
 use crate::finality::{FinalityNotification, FinalityTracker, ForkChoice};
+use crate::leader_reputation::LeaderReputation;
 use crate::mempool::Mempool;
 use crate::proposer::BlockProposer;
 use crate::traits::{ConsensusEngine, SlashingCallback};
-use crate::validator::ValidatorSet;
+use crate::validator::{
+    ProposerElection, ReputationProposer, RoundRobinProposer, ValidatorSet,
+};
 use crate::vote_state::{LastSignState, MemoryVoteStateStore, VoteStateStore, VoteStep, VrsDecision};
 use crate::voter::{QuorumCertificate, Vote, VoteCollector, VoteType};
 use async_trait::async_trait;
@@ -209,6 +212,13 @@ impl ViewChangeTimer {
 /// Messages the consensus engine needs to broadcast via gossipsub.
 /// Uses an mpsc channel to avoid a circular crate dependency:
 /// tenzro-consensus cannot import tenzro-network.
+// `Proposal` carries a full `Block` plus optional TC and NEC; the enum is
+// intentionally large because it crosses an mpsc boundary exactly once per
+// view. Boxing every variant for the sake of one large arm would add an
+// allocation on the consensus hot path and obscure the wire shape — the
+// workspace `Cargo.toml` already lists `large_enum_variant = "allow"` for
+// exactly this reason.
+#[allow(clippy::large_enum_variant)]
 pub enum ConsensusOutMessage {
     /// A vote this node cast that peers must receive to form quorum
     Vote(Vote),
@@ -217,6 +227,14 @@ pub enum ConsensusOutMessage {
     /// from a view timeout — it carries 2f+1 timeout signatures from the
     /// previous view so peers can verify the new view was legitimately
     /// abandoned (Jolteon vote rule, DiemBFT v4 §3.5).
+    ///
+    /// `no_endorsement_certificate` is `Some(_)` when the leader is proposing
+    /// a *new* block at view N+1 after view N timed out — it carries f+1
+    /// no-endorsement signatures from view N proving the predecessor's QC
+    /// was not withheld. MonadBFT (arXiv:2502.20692) — closes the tail-fork
+    /// MEV vulnerability. If absent, receivers must require the proposal to
+    /// repropose the high-tip block; a fresh block with neither a NEC nor
+    /// a high-tip parent is rejected.
     ///
     /// `high_qc_view` is the leader's local highest-Prepare-QC view at the
     /// moment of proposing (#171, Aptos SyncInfo pattern). Receivers use it to
@@ -230,11 +248,17 @@ pub enum ConsensusOutMessage {
         view: u64,
         high_qc_view: u64,
         timeout_certificate: Option<crate::timeout::TimeoutCertificate>,
+        no_endorsement_certificate: Option<crate::timeout::NoEndorsementCertificate>,
     },
     /// A pacemaker timeout broadcast emitted on local view-timer expiry.
     /// Carries the sender's current view so a lagging peer can fast-forward
     /// (DiemBFT v4 §3.5 backward-sync channel; phase 1 of #164).
     Timeout(crate::timeout::TimeoutMsg),
+    /// A no-endorsement attestation broadcast emitted on local view-timer
+    /// expiry. Aggregates into an f+1 NoEndorsementCertificate that the next
+    /// leader attaches to its proposal when proposing a new block (MonadBFT,
+    /// arXiv:2502.20692).
+    NoEndorsement(crate::timeout::NoEndorsementMsg),
 }
 
 /// HotStuff-2 consensus engine
@@ -348,6 +372,33 @@ pub struct HotStuff2Engine {
     /// `start()` once the validator set is known. Re-built on epoch
     /// transition alongside the vote collector.
     timeout_collector: Arc<RwLock<Option<Arc<crate::timeout::TimeoutCollector>>>>,
+
+    /// The most recent [`crate::timeout::NoEndorsementCertificate`] this
+    /// replica has formed or learned of. Set by `on_no_endorsement_msg` once
+    /// f+1 attestations at the same view aggregate; cleared (or replaced)
+    /// when a new NEC at a higher view is formed. The leader at view N+1
+    /// attaches this NEC to its proposal when it cannot repropose a high-tip
+    /// block — closes the tail-fork MEV vulnerability (MonadBFT,
+    /// arXiv:2502.20692).
+    last_round_nec: Arc<RwLock<Option<crate::timeout::NoEndorsementCertificate>>>,
+
+    /// f+1 [`crate::timeout::NoEndorsementMsg`] aggregator. Initialized
+    /// lazily on `start()` and rebuilt on epoch transition alongside
+    /// `timeout_collector`.
+    nec_collector: Arc<RwLock<Option<Arc<crate::timeout::NoEndorsementCollector>>>>,
+
+    /// Strategy for selecting the leader of a given round/view. Resolved
+    /// from [`ConsensusConfig::proposer_election`] at construction time.
+    /// `RoundRobinProposer` (`view % N`) for tests, `ReputationProposer`
+    /// (Aptos LeaderReputation) for production.
+    proposer_election: Arc<dyn ProposerElection>,
+
+    /// Optional shared reputation state. Populated when
+    /// `config.proposer_election == ProposerElectionKind::Reputation`. The
+    /// engine feeds this with `record_round_outcome` and `record_round_voters`
+    /// after each round closes so the proposer-election strategy reflects
+    /// observed behaviour.
+    reputation: Option<Arc<LeaderReputation>>,
 }
 
 impl HotStuff2Engine {
@@ -388,6 +439,23 @@ impl HotStuff2Engine {
             Some(pq_signing_key.verifying_key_bytes().to_vec()),
         );
 
+        // Resolve proposer-election strategy from config. The `Reputation`
+        // path also constructs the shared `LeaderReputation` state that the
+        // engine feeds with round outcomes — `RoundRobin` skips it entirely.
+        let n = epoch_manager.current_validator_set().len();
+        let (proposer_election, reputation): (
+            Arc<dyn ProposerElection>,
+            Option<Arc<LeaderReputation>>,
+        ) = match config.proposer_election {
+            ProposerElectionKind::RoundRobin => {
+                (Arc::new(RoundRobinProposer::new()), None)
+            }
+            ProposerElectionKind::Reputation => {
+                let rep = Arc::new(LeaderReputation::new(n));
+                (Arc::new(ReputationProposer::new(rep.clone())), Some(rep))
+            }
+        };
+
         Self {
             keypair: Arc::new(keypair),
             pq_signing_key: Arc::new(pq_signing_key),
@@ -413,6 +481,10 @@ impl HotStuff2Engine {
             high_qc_view: Arc::new(RwLock::new(0)),
             last_round_tc: Arc::new(RwLock::new(None)),
             timeout_collector: Arc::new(RwLock::new(None)),
+            last_round_nec: Arc::new(RwLock::new(None)),
+            nec_collector: Arc::new(RwLock::new(None)),
+            proposer_election,
+            reputation,
         }
     }
 
@@ -490,6 +562,7 @@ impl HotStuff2Engine {
             ConsensusOutMessage::Vote(_) => "Vote",
             ConsensusOutMessage::Proposal { .. } => "Proposal",
             ConsensusOutMessage::Timeout(_) => "Timeout",
+            ConsensusOutMessage::NoEndorsement(_) => "NoEndorsement",
         };
         match self.consensus_out_tx {
             Some(ref tx) => {
@@ -642,12 +715,26 @@ impl HotStuff2Engine {
         self.validator_set().is_validator(&self.address)
     }
 
-    /// Gets the leader for the current view
+    /// Gets the leader for the current view via the configured
+    /// [`ProposerElection`] strategy.
+    ///
+    /// `prev_block_id` for the reputation seed is the most recently
+    /// finalized block's hash. Using a finalized hash (rather than a
+    /// tentative parent the current proposer could grind on) is the
+    /// anti-grinding invariant Aptos LeaderReputation relies on — see
+    /// [`crate::leader_reputation::reputation_seed`].
     fn get_leader(&self) -> Result<Address> {
         let view = self.view_state.read().view;
         let validator_set = self.validator_set();
-        let leader = validator_set.select_leader(view, self.config.enable_tee_priority)?;
-        Ok(leader.address)
+        let epoch = self.epoch_manager.current_epoch().number;
+        let finalized_height = self.finality_tracker.finalized_height();
+        let prev_block_id = self
+            .finality_tracker
+            .get_finalized_hash(finalized_height)
+            .map(|h| h.0)
+            .unwrap_or([0u8; 32]);
+        self.proposer_election
+            .select_leader(view, epoch, prev_block_id, &validator_set)
     }
 
     /// Advances to the next view
@@ -726,6 +813,12 @@ impl HotStuff2Engine {
             tc_collector.cleanup_below(min_view);
         }
 
+        // Same cleanup discipline for the NEC collector.
+        if let Some(nec_collector) = self.nec_collector.read().as_ref() {
+            let min_view = new_view.saturating_sub(VOTE_CACHE_VIEW_WINDOW);
+            nec_collector.cleanup_below(min_view);
+        }
+
         // If our last_round_tc is for a view older than the new local view
         // it can never be attached to a future proposal — drop it. We keep
         // it if it's at-or-above the new view so the next leader has it.
@@ -735,6 +828,18 @@ impl HotStuff2Engine {
                 && tc.view + 1 < new_view
             {
                 *maybe_tc = None;
+            }
+        }
+
+        // Same discipline for the NEC: a NEC for view v authorises a fresh
+        // proposal at view v+1. If new_view > v+1 the NEC is no longer
+        // attachable.
+        {
+            let mut maybe_nec = self.last_round_nec.write();
+            if let Some(nec) = maybe_nec.as_ref()
+                && nec.view + 1 < new_view
+            {
+                *maybe_nec = None;
             }
         }
 
@@ -789,8 +894,58 @@ impl HotStuff2Engine {
             }
         }
 
+        // Build & sign a NoEndorsementMsg for the timing-out view. The
+        // attestation is "I observed no QC for view current_view - 1" — the
+        // f+1 aggregation closes the tail-fork MEV vulnerability (MonadBFT,
+        // arXiv:2502.20692). Skipped at view 0 (no predecessor) and the same
+        // best-effort posture as the timeout broadcast: signing failure does
+        // not block the pacemaker.
+        if current_view > 0 {
+            match self.create_no_endorsement_msg(current_view) {
+                Ok(nec_msg) => {
+                    self.send_out(ConsensusOutMessage::NoEndorsement(nec_msg));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        view = current_view,
+                        error = %e,
+                        "Failed to create NoEndorsementMsg; advancing view without NEC broadcast"
+                    );
+                }
+            }
+        }
+
         // Apply capped exponential backoff
         self.view_timer.write().on_timeout();
+
+        // Feed the failure into LeaderReputation: the proposer at the
+        // timing-out view did not produce a finalized block. A `false`
+        // outcome flags this round in the trailing window so the next
+        // leader selection penalises this validator (`FAILED_WEIGHT = 1`
+        // vs `ACTIVE_WEIGHT = 1000`, gated by `FAILURE_THRESHOLD_PERCENT`).
+        if let Some(reputation) = self.reputation.as_ref() {
+            let validator_set = self.validator_set();
+            let prev_block_id = {
+                let h = self.finality_tracker.finalized_height();
+                self.finality_tracker
+                    .get_finalized_hash(h)
+                    .map(|hash| hash.0)
+                    .unwrap_or([0u8; 32])
+            };
+            let epoch = self.epoch_manager.current_epoch().number;
+            // Resolve proposer by replaying the same election the leader
+            // would have run for the timing-out view. If selection fails
+            // (e.g. empty validator set) we skip the recording rather
+            // than crash the timeout path.
+            if let Ok(proposer) = self.proposer_election.select_leader(
+                current_view,
+                epoch,
+                prev_block_id,
+                &validator_set,
+            ) {
+                reputation.record_round_outcome(current_view, proposer, false);
+            }
+        }
 
         // Advance to next view (which will select a new leader via round-robin)
         self.advance_view().await?;
@@ -1026,6 +1181,92 @@ impl HotStuff2Engine {
             state.commit_qc = None;
             state.reset_timer();
         }
+        Ok(())
+    }
+
+    /// Builds and hybrid-signs a [`crate::timeout::NoEndorsementMsg`] for the
+    /// given view. The attestation is "I observed no QC for view v - 1".
+    ///
+    /// Mirrors `create_timeout_msg` but with the NEC-specific signing
+    /// payload (`TENZRO_NO_ENDORSEMENT:`-tagged, no `high_qc_view`).
+    fn create_no_endorsement_msg(
+        &self,
+        view: u64,
+    ) -> Result<crate::timeout::NoEndorsementMsg> {
+        let placeholder_sig =
+            tenzro_crypto::composite::CompositeSignature::new(Vec::new(), None);
+        let unsigned = crate::timeout::NoEndorsementMsg::new(
+            view,
+            self.address,
+            placeholder_sig,
+            self.composite_public_key.clone(),
+        );
+        let payload = unsigned.signing_payload();
+
+        let keypair_bytes = self.keypair.to_bytes();
+        let keypair_copy =
+            KeyPair::from_bytes(self.keypair.key_type(), &keypair_bytes)?;
+        let classical = Ed25519SignerImpl::new(keypair_copy)?;
+        let pq_seed = self.pq_signing_key.seed_bytes();
+        let pq_copy = MlDsaSigningKey::from_seed(pq_seed)?;
+        let hybrid = InMemoryHybridSigner::new(Box::new(classical), pq_copy);
+
+        let signature = hybrid.sign(&payload)?;
+
+        Ok(crate::timeout::NoEndorsementMsg::new(
+            view,
+            self.address,
+            signature,
+            self.composite_public_key.clone(),
+        ))
+    }
+
+    /// Handles an inbound [`crate::timeout::NoEndorsementMsg`] from a peer.
+    ///
+    /// Verifies the message, then aggregates it into the per-view NEC
+    /// collector. When f+1 attestations at the same view aggregate, the
+    /// collector emits a [`crate::timeout::NoEndorsementCertificate`] which
+    /// we store as `last_round_nec` so the next leader can attach it to a
+    /// fresh proposal at view+1 (MonadBFT, arXiv:2502.20692).
+    ///
+    /// Unlike `on_timeout_msg`, this method does NOT advance the local view —
+    /// the NEC is purely a certificate-formation channel; view-sync remains
+    /// the responsibility of the TimeoutMsg path.
+    pub async fn on_no_endorsement_msg(
+        &self,
+        msg: &crate::timeout::NoEndorsementMsg,
+    ) -> Result<()> {
+        let validator_set = self.validator_set();
+        msg.verify(&validator_set)?;
+
+        let collect_outcome = {
+            let guard = self.nec_collector.read();
+            guard.as_ref().map(|collector| collector.add(msg))
+        };
+
+        if let Some(outcome) = collect_outcome {
+            use crate::timeout::NecCollectOutcome;
+            match outcome {
+                NecCollectOutcome::Added | NecCollectOutcome::Duplicate => {}
+                NecCollectOutcome::CertificateFormed(nec) => {
+                    tracing::info!(
+                        view = nec.view,
+                        signers = nec.signers.len(),
+                        "NoEndorsementCertificate formed for view {}",
+                        nec.view
+                    );
+                    let mut slot = self.last_round_nec.write();
+                    let should_update = match slot.as_ref() {
+                        Some(existing) => nec.view > existing.view,
+                        None => true,
+                    };
+                    if should_update {
+                        *slot = Some(nec);
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1364,7 +1605,10 @@ impl HotStuff2Engine {
                     new_validator_set.clone(),
                 )));
                 *self.timeout_collector.write() = Some(Arc::new(
-                    crate::timeout::TimeoutCollector::new(new_validator_set),
+                    crate::timeout::TimeoutCollector::new(new_validator_set.clone()),
+                ));
+                *self.nec_collector.write() = Some(Arc::new(
+                    crate::timeout::NoEndorsementCollector::new(new_validator_set),
                 ));
             }
         }
@@ -1433,6 +1677,28 @@ impl HotStuff2Engine {
                         // was abandoned (Jolteon safe_to_extend predicate).
                         let view = self.view_state.read().view;
                         let timeout_certificate = self.last_round_tc.read().clone();
+                        // MonadBFT NEC (arXiv:2502.20692 §4): when proposing a
+                        // fresh block after a TC, attach the f+1 NEC we
+                        // collected so peers can verify no Prepare-QC formed at
+                        // the timed-out view. When reproposing the high_tip
+                        // (because a QC was observed), the NEC is omitted —
+                        // `propose_block_internal` returns the existing high_tip
+                        // block in that case, and `on_proposal` recognises the
+                        // hash match to skip the NEC requirement.
+                        let no_endorsement_certificate = {
+                            let is_repropose = timeout_certificate.as_ref().is_some_and(|tc| {
+                                self.fork_choice
+                                    .select_best_block(block.header.height)
+                                    .map(|b| b.hash() == block.hash())
+                                    .unwrap_or(false)
+                                    && *self.high_qc_view.read() >= tc.view
+                            });
+                            if timeout_certificate.is_some() && !is_repropose {
+                                self.last_round_nec.read().clone()
+                            } else {
+                                None
+                            }
+                        };
                         // SyncInfo (#171): leader piggybacks its current
                         // high_qc_view, capped at `view - 1` (genesis = 0).
                         let high_qc_view = {
@@ -1446,6 +1712,7 @@ impl HotStuff2Engine {
                             view,
                             high_qc_view,
                             timeout_certificate,
+                            no_endorsement_certificate,
                         });
 
                         // Vote on our own proposal
@@ -1478,6 +1745,34 @@ impl HotStuff2Engine {
             let state = self.view_state.read();
             (state.height, state.view)
         };
+
+        // MonadBFT tail-fork defence (arXiv:2502.20692 §4):
+        // If we're recovering from a view timeout AND we observed a Prepare-QC
+        // for the timed-out view (i.e. `high_qc_view >= tc.view`), we MUST
+        // repropose the existing high_tip block at our current height — we
+        // cannot legally fork it off without producing an NEC, which is
+        // impossible in this state (an honest replica that saw the QC will
+        // refuse to sign an NEC for that view). Honest leaders therefore
+        // repropose; only when no QC was observed do they propose fresh
+        // (with an attached NEC, which `run_consensus_step` builds before
+        // broadcasting).
+        let last_tc = self.last_round_tc.read().clone();
+        let high_qc_view_local = *self.high_qc_view.read();
+        if let Some(tc) = last_tc.as_ref()
+            && high_qc_view_local >= tc.view
+            && let Some(high_tip) = self.fork_choice.select_best_block(height)
+        {
+            tracing::info!(
+                height = %height,
+                view = %view,
+                tc_view = tc.view,
+                high_qc_view = high_qc_view_local,
+                hash = %high_tip.hash(),
+                "Reproposing high_tip after TC (QC observed at timed-out view)"
+            );
+            // The high_tip block is already in `self.blocks` and `fork_choice`.
+            return Ok(high_tip);
+        }
 
         // Parent selection: prefer the fork-choice "highest QC view at
         // parent height" rule. Falls back to the last finalized hash if
@@ -1617,6 +1912,21 @@ impl HotStuff2Engine {
 
             self.view_timer.write().on_success();
 
+            // Feed the success into LeaderReputation: the proposer at the
+            // finalized view produced a finalized block (`success = true`)
+            // and the QC voters participated in finalization. Both signals
+            // boost the trailing-window weights for selection at future
+            // rounds. The captured `success_view` is the view that just
+            // finalized — recorded before we bump `state.view`.
+            let success_view = state.view;
+            let success_proposer = block.header.proposer;
+            if let Some(reputation) = self.reputation.as_ref() {
+                reputation.record_round_outcome(success_view, success_proposer, true);
+                let voters: Vec<Address> =
+                    commit_qc.votes.iter().map(|v| v.voter).collect();
+                reputation.record_round_voters(success_view, voters);
+            }
+
             // Advance height + view, reset phase
             state.height = state.height + 1u64;
             state.view += 1;
@@ -1642,7 +1952,10 @@ impl HotStuff2Engine {
             *self.vote_collector.write() =
                 Some(Arc::new(VoteCollector::new(new_validator_set.clone())));
             *self.timeout_collector.write() = Some(Arc::new(
-                crate::timeout::TimeoutCollector::new(new_validator_set),
+                crate::timeout::TimeoutCollector::new(new_validator_set.clone()),
+            ));
+            *self.nec_collector.write() = Some(Arc::new(
+                crate::timeout::NoEndorsementCollector::new(new_validator_set),
             ));
         }
 
@@ -1672,7 +1985,12 @@ impl ConsensusEngine for HotStuff2Engine {
         )));
         // Initialize timeout collector (Bracha boost + 2f+1 TC formation)
         *self.timeout_collector.write() = Some(Arc::new(
-            crate::timeout::TimeoutCollector::new(validator_set_arc),
+            crate::timeout::TimeoutCollector::new(validator_set_arc.clone()),
+        ));
+        // Initialize no-endorsement collector (f+1 NEC formation, MonadBFT
+        // tail-fork defence — arXiv:2502.20692)
+        *self.nec_collector.write() = Some(Arc::new(
+            crate::timeout::NoEndorsementCollector::new(validator_set_arc),
         ));
 
         // Create shutdown channel
@@ -1729,6 +2047,7 @@ impl ConsensusEngine for HotStuff2Engine {
         &self,
         block: &Block,
         timeout_certificate: Option<crate::timeout::TimeoutCertificate>,
+        no_endorsement_certificate: Option<crate::timeout::NoEndorsementCertificate>,
         proposer_high_qc_view: u64,
     ) -> Result<Vote> {
         // SyncInfo (#171, Aptos pattern): the proposer piggybacks its current
@@ -1846,6 +2165,89 @@ impl ConsensusEngine for HotStuff2Engine {
                 let mut hqc = self.high_qc_view.write();
                 if tc_max_hqc > *hqc {
                     *hqc = tc_max_hqc;
+                }
+            }
+
+            // MonadBFT tail-fork defence (arXiv:2502.20692 §4):
+            // After a TC for view v-1, the leader has two legal options:
+            //   (a) repropose the existing `high_tip` (block at the highest
+            //       observed Prepare-QC), OR
+            //   (b) propose a fresh block, but only if it can prove that no
+            //       Prepare-QC formed at the timed-out view v-1 — by attaching
+            //       an f+1 NoEndorsementCertificate.
+            //
+            // Without this rule, a Byzantine leader could silently fork off a
+            // QC that 2f+1 honest replicas observed, capturing tail-MEV. The
+            // NEC forces public attestation: f+1 validators must sign that
+            // they did not see the QC, which is impossible if a QC actually
+            // formed (since it took 2f+1 votes — and at most f are Byzantine,
+            // so at least f+1 honest replicas saw it and won't sign an NEC).
+            let high_qc_view_local = *self.high_qc_view.read();
+            let timed_out_view = tc.view;
+            let is_repropose_of_high_tip = {
+                // Compare against the most-recent fork-choice high_tip at the
+                // proposal's height. If we have no high_tip record (cold start
+                // or genesis-edge), fall back to permitting reproposal (the
+                // safe-to-extend predicate above already filtered stale TCs).
+                self.fork_choice
+                    .select_best_block(proposal_height)
+                    .map(|b| b.hash() == block.hash())
+                    .unwrap_or(false)
+            };
+            let has_qc_at_timed_out_view = high_qc_view_local >= timed_out_view;
+
+            if !is_repropose_of_high_tip {
+                // Fresh block after TC: the leader claims no QC formed at the
+                // timed-out view. Require an NEC to back that claim.
+                let nec = no_endorsement_certificate.as_ref().ok_or_else(|| {
+                    tracing::warn!(
+                        proposal_view = proposal_view,
+                        tc_view = tc.view,
+                        block_hash = ?block.hash(),
+                        "Rejecting fresh block after TC with no NoEndorsementCertificate"
+                    );
+                    ConsensusError::InvalidProposal(format!(
+                        "fresh block at view {} after TC requires NoEndorsementCertificate \
+                         for view {}",
+                        proposal_view, timed_out_view
+                    ))
+                })?;
+                if nec.view != timed_out_view {
+                    tracing::warn!(
+                        proposal_view = proposal_view,
+                        tc_view = tc.view,
+                        nec_view = nec.view,
+                        "Rejecting fresh block after TC: NEC view mismatch"
+                    );
+                    return Err(ConsensusError::InvalidProposal(format!(
+                        "NEC view {} != timed-out view {}",
+                        nec.view, timed_out_view
+                    )));
+                }
+                let validator_set = self.validator_set();
+                if let Err(e) = nec.verify(&validator_set) {
+                    tracing::warn!(
+                        proposal_view = proposal_view,
+                        nec_view = nec.view,
+                        error = %e,
+                        "Rejecting fresh block after TC: NEC failed verification"
+                    );
+                    return Err(ConsensusError::InvalidProposal(format!(
+                        "invalid NoEndorsementCertificate: {}",
+                        e
+                    )));
+                }
+                if has_qc_at_timed_out_view {
+                    tracing::warn!(
+                        proposal_view = proposal_view,
+                        tc_view = tc.view,
+                        local_high_qc_view = high_qc_view_local,
+                        "Rejecting fresh block after TC: NEC contradicts locally observed QC"
+                    );
+                    return Err(ConsensusError::InvalidProposal(format!(
+                        "NEC at view {} contradicts locally observed high_qc view {}",
+                        timed_out_view, high_qc_view_local
+                    )));
                 }
             }
         } else if proposal_view > local_view + 1 {
@@ -2162,6 +2564,10 @@ impl Clone for HotStuff2Engine {
             high_qc_view: self.high_qc_view.clone(),
             last_round_tc: self.last_round_tc.clone(),
             timeout_collector: self.timeout_collector.clone(),
+            last_round_nec: self.last_round_nec.clone(),
+            nec_collector: self.nec_collector.clone(),
+            proposer_election: self.proposer_election.clone(),
+            reputation: self.reputation.clone(),
         }
     }
 }
@@ -2461,7 +2867,10 @@ mod tests {
             validator_set.clone(),
         )));
         *engine.timeout_collector.write() = Some(Arc::new(
-            crate::timeout::TimeoutCollector::new(validator_set),
+            crate::timeout::TimeoutCollector::new(validator_set.clone()),
+        ));
+        *engine.nec_collector.write() = Some(Arc::new(
+            crate::timeout::NoEndorsementCollector::new(validator_set),
         ));
 
         (engine, proposer_addr)
@@ -2508,7 +2917,7 @@ mod tests {
         let block = stamp_genesis_edge_base_fee(Block::new(header, vec![]));
 
         // Process the proposal — should advance local view AND produce a vote.
-        let vote = engine.on_proposal(&block, None, 0).await.expect("on_proposal succeeded");
+        let vote = engine.on_proposal(&block, None, None, 0).await.expect("on_proposal succeeded");
 
         // The vote MUST be stamped at the proposer's view, not the stale
         // local view. This is the entire point of the fix.
@@ -2557,7 +2966,7 @@ mod tests {
         );
         let block = Block::new(header, vec![]);
 
-        let result = engine.on_proposal(&block, None, 0).await;
+        let result = engine.on_proposal(&block, None, None, 0).await;
         assert!(
             matches!(result, Err(ConsensusError::InvalidProposal(_))),
             "stale proposal must be rejected, got {:?}",
@@ -2596,7 +3005,7 @@ mod tests {
         );
         let block = Block::new(header, vec![]);
 
-        let result = engine.on_proposal(&block, None, 0).await;
+        let result = engine.on_proposal(&block, None, None, 0).await;
         assert!(
             matches!(result, Err(ConsensusError::InvalidProposal(_))),
             "view jump beyond MAX_VIEW_JUMP must be rejected, got {:?}",
@@ -2674,7 +3083,10 @@ mod tests {
             validator_set.clone(),
         )));
         *engine.timeout_collector.write() = Some(Arc::new(
-            crate::timeout::TimeoutCollector::new(validator_set),
+            crate::timeout::TimeoutCollector::new(validator_set.clone()),
+        ));
+        *engine.nec_collector.write() = Some(Arc::new(
+            crate::timeout::NoEndorsementCollector::new(validator_set),
         ));
 
         (engine, peer_keypair, peer_pq, peer_address)
@@ -2725,6 +3137,41 @@ mod tests {
 
         let signature = signer.sign(&payload).unwrap();
         crate::timeout::TimeoutMsg::new(view, high_qc_view, peer_address, signature, composite_pk)
+    }
+
+    /// Hybrid-sign a NoEndorsementMsg "from" the given peer for the given view.
+    fn peer_sign_no_endorsement(
+        view: u64,
+        peer_address: tenzro_types::primitives::Address,
+        peer_keypair: &KeyPair,
+        peer_pq: &MlDsaSigningKey,
+    ) -> crate::timeout::NoEndorsementMsg {
+        use tenzro_crypto::composite::{
+            CompositePublicKey, CompositeSignature, HybridSigner, InMemoryHybridSigner,
+        };
+        use tenzro_crypto::signatures::Ed25519SignerImpl;
+
+        let composite_pk = CompositePublicKey::new(
+            peer_keypair.public_key().clone(),
+            Some(peer_pq.verifying_key_bytes().to_vec()),
+        );
+        let placeholder = CompositeSignature::new(Vec::new(), None);
+        let unsigned = crate::timeout::NoEndorsementMsg::new(
+            view,
+            peer_address,
+            placeholder,
+            composite_pk.clone(),
+        );
+        let payload = unsigned.signing_payload();
+
+        let kp_bytes = peer_keypair.to_bytes();
+        let kp_copy = KeyPair::from_bytes(peer_keypair.key_type(), &kp_bytes).unwrap();
+        let classical = Ed25519SignerImpl::new(kp_copy).unwrap();
+        let pq_copy = MlDsaSigningKey::from_seed(peer_pq.seed_bytes()).unwrap();
+        let signer = InMemoryHybridSigner::new(Box::new(classical), pq_copy);
+
+        let signature = signer.sign(&payload).unwrap();
+        crate::timeout::NoEndorsementMsg::new(view, peer_address, signature, composite_pk)
     }
 
     /// Receiving a TimeoutMsg at a strictly higher view must advance the
@@ -2879,7 +3326,10 @@ mod tests {
         let validator_set = Arc::new(engine.validator_set());
         *engine.vote_collector.write() = Some(Arc::new(VoteCollector::new(validator_set.clone())));
         *engine.timeout_collector.write() = Some(Arc::new(
-            crate::timeout::TimeoutCollector::new(validator_set),
+            crate::timeout::TimeoutCollector::new(validator_set.clone()),
+        ));
+        *engine.nec_collector.write() = Some(Arc::new(
+            crate::timeout::NoEndorsementCollector::new(validator_set),
         ));
 
         (engine, peers)
@@ -2916,7 +3366,7 @@ mod tests {
         );
         let block = Block::new(header, vec![]);
 
-        let result = engine.on_proposal(&block, None, 0).await;
+        let result = engine.on_proposal(&block, None, None, 0).await;
         assert!(
             matches!(result, Err(ConsensusError::InvalidProposal(_))),
             "view jump > 1 without TC must be rejected, got {:?}",
@@ -2963,6 +3413,26 @@ mod tests {
             signers,
         };
 
+        // Build a NoEndorsementCertificate for view 4 (f+1 = 2 of 4 signers
+        // suffice). MonadBFT tail-fork defence: the proposer claims no QC
+        // formed at the timed-out view, and must back that claim with an
+        // f+1 attestation. Engine local high_qc_view is 0 < 4, consistent
+        // with "no QC observed" so the NEC will be accepted.
+        let mut nec_signers: Vec<crate::timeout::NecSigner> = Vec::new();
+        for (kp, pq, addr) in peers.iter().take(2) {
+            let nec_msg = peer_sign_no_endorsement(tc_view, *addr, kp, pq);
+            nec_signers.push(crate::timeout::NecSigner {
+                voter: nec_msg.voter,
+                signature: nec_msg.signature,
+                public_key: nec_msg.public_key,
+            });
+        }
+        let nec = crate::timeout::NoEndorsementCertificate {
+            format_version: crate::timeout::NO_ENDORSEMENT_CERTIFICATE_FORMAT_VERSION,
+            view: tc_view,
+            signers: nec_signers,
+        };
+
         let header = BlockHeader::new_at_view(
             BlockHeight::from(1),
             5,
@@ -2975,9 +3445,9 @@ mod tests {
         let block = stamp_genesis_edge_base_fee(Block::new(header, vec![]));
 
         let vote = engine
-            .on_proposal(&block, Some(tc), 0)
+            .on_proposal(&block, Some(tc), Some(nec), 0)
             .await
-            .expect("proposal with valid TC must be accepted");
+            .expect("proposal with valid TC + NEC must be accepted");
         assert_eq!(vote.view, 5, "vote stamped at proposer's view");
         assert_eq!(engine.view_state.read().view, 5, "local view advanced");
     }
@@ -3029,7 +3499,7 @@ mod tests {
         );
         let block = Block::new(header, vec![]);
 
-        let result = engine.on_proposal(&block, Some(tc), 0).await;
+        let result = engine.on_proposal(&block, Some(tc), None, 0).await;
         assert!(
             matches!(result, Err(ConsensusError::InvalidProposal(_))),
             "TC with wrong view must be rejected, got {:?}",
@@ -3082,7 +3552,7 @@ mod tests {
         );
         let block = Block::new(header, vec![]);
 
-        let result = engine.on_proposal(&block, Some(tc), 0).await;
+        let result = engine.on_proposal(&block, Some(tc), None, 0).await;
         assert!(
             matches!(result, Err(ConsensusError::InvalidProposal(_))),
             "TC below quorum must be rejected, got {:?}",

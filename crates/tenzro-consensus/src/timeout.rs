@@ -574,6 +574,448 @@ impl TimeoutCollector {
     }
 }
 
+// ---------------------------------------------------------------------------
+// MonadBFT No-Endorsement Certificate (NEC)
+// ---------------------------------------------------------------------------
+//
+// MonadBFT (arXiv:2502.20692) closes the "tail-fork MEV" attack on HotStuff-2:
+// a Byzantine leader at view v can withhold its proposal from honest replicas,
+// trigger a timeout, and then leak its proposal to its successor at view v+1.
+// The successor extends the (otherwise-orphan) v block, so the Byzantine
+// leader's transactions land on the canonical chain — sequencing them out of
+// observable order is the MEV.
+//
+// The fix: when an honest replica times out at view v, it broadcasts a signed
+// NoEndorsementMsg attesting "I observed no QC for view v-1's block". The
+// successor leader requires either (a) a high-tip block to repropose, or
+// (b) an f+1 NoEndorsementCertificate proving no QC was withheld. f+1 is
+// strictly weaker than 2f+1 by design — the attestation is "I personally did
+// not see a QC", and f+1 honest signatures suffice because Byzantine
+// equivocation can produce at most f false positives.
+//
+// Wire layout for the canonical signing payload:
+//   "TENZRO_NO_ENDORSEMENT:" (22 bytes)
+//   format_version           (1 byte)
+//   view                     (8 bytes LE)
+//   voter                    (32 bytes)
+//
+// Note: NEC payload deliberately omits high_qc_view — a NEC is *not* claiming
+// anything about high QCs; it is only claiming "I did not observe a QC at
+// view v-1". Including high_qc_view would conflate the two attestations and
+// would also make NECs forgeable from leaked TimeoutMsgs (the payloads would
+// share structure).
+
+/// Wire-format version for [`NoEndorsementMsg`]. Bumped on any breaking change.
+pub const NO_ENDORSEMENT_MSG_FORMAT_VERSION: u8 = 1;
+
+/// Wire-format version for [`NoEndorsementCertificate`].
+pub const NO_ENDORSEMENT_CERTIFICATE_FORMAT_VERSION: u8 = 1;
+
+/// Domain-separation tag for the NEC signing payload. Distinct from
+/// `TENZRO_TIMEOUT:` so a TimeoutMsg signature cannot be replayed as a
+/// NoEndorsementMsg signature, and vice versa.
+const NO_ENDORSEMENT_SIGNING_DOMAIN: &[u8] = b"TENZRO_NO_ENDORSEMENT:";
+
+/// A no-endorsement attestation broadcast by a replica that timed out at
+/// `view` without observing a QC for view `view - 1`.
+///
+/// f+1 of these aggregate into a [`NoEndorsementCertificate`], which the
+/// next leader attaches to its proposal when it cannot repropose a high-tip
+/// block. Without an attached NEC (and without a high-tip to repropose),
+/// receivers must reject the proposal — this is what closes the tail-fork
+/// MEV attack on naïve HotStuff-2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoEndorsementMsg {
+    /// Wire-format version. Must equal [`NO_ENDORSEMENT_MSG_FORMAT_VERSION`].
+    pub format_version: u8,
+
+    /// The view that timed out at the sender. The attestation is "I observed
+    /// no QC for view `view - 1`" — that is what the next leader uses the
+    /// resulting certificate to prove.
+    pub view: u64,
+
+    /// Voter's address (must be a registered, active validator).
+    pub voter: Address,
+
+    /// Composite (Ed25519 + ML-DSA-65) signature over the canonical payload.
+    pub signature: CompositeSignature,
+
+    /// Composite public key the message was signed under.
+    pub public_key: CompositePublicKey,
+}
+
+impl NoEndorsementMsg {
+    /// Creates a new no-endorsement message at the canonical wire-format version.
+    pub fn new(
+        view: u64,
+        voter: Address,
+        signature: CompositeSignature,
+        public_key: CompositePublicKey,
+    ) -> Self {
+        Self {
+            format_version: NO_ENDORSEMENT_MSG_FORMAT_VERSION,
+            view,
+            voter,
+            signature,
+            public_key,
+        }
+    }
+
+    /// Canonical signing payload.
+    ///
+    /// Layout:
+    /// - 22-byte ASCII domain tag `TENZRO_NO_ENDORSEMENT:`
+    /// - 1-byte format version
+    /// - 8-byte little-endian view
+    /// - 32-byte voter address
+    pub fn signing_payload(&self) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(22 + 1 + 8 + 32);
+        payload.extend_from_slice(NO_ENDORSEMENT_SIGNING_DOMAIN);
+        payload.push(self.format_version);
+        payload.extend_from_slice(&self.view.to_le_bytes());
+        payload.extend_from_slice(self.voter.as_bytes());
+        payload
+    }
+
+    /// Verifies this NEC message against the validator set.
+    ///
+    /// Checks performed:
+    /// 1. Wire-format version matches the current pinned version.
+    /// 2. `view > 0` — view 0 has no predecessor, so a no-endorsement
+    ///    attestation against view -1 is meaningless.
+    /// 3. Voter is a registered, active validator.
+    /// 4. Embedded composite public key matches the validator's registered
+    ///    classical and PQ keys exactly (key-substitution defence).
+    /// 5. Hybrid signature verifies against the canonical payload.
+    pub fn verify(&self, validator_set: &ValidatorSet) -> Result<()> {
+        if self.format_version != NO_ENDORSEMENT_MSG_FORMAT_VERSION {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "no-endorsement message rejected: unsupported format_version {} (expected {})",
+                self.format_version, NO_ENDORSEMENT_MSG_FORMAT_VERSION
+            )));
+        }
+
+        if self.view == 0 {
+            return Err(ConsensusError::InvalidSignature(
+                "no-endorsement message rejected: view 0 has no predecessor".to_string(),
+            ));
+        }
+
+        let validator = validator_set.get_by_address(&self.voter).ok_or_else(|| {
+            ConsensusError::NonValidator(format!("Address: {}", self.voter))
+        })?;
+
+        if !validator.is_active() {
+            return Err(ConsensusError::NonValidator(format!(
+                "Validator {} is not active",
+                self.voter
+            )));
+        }
+
+        if self.public_key.classical != validator.public_key {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "no-endorsement classical public key does not match registered validator key for {}",
+                self.voter
+            )));
+        }
+        match &self.public_key.pq {
+            Some(pq_bytes) if pq_bytes == &validator.pq_public_key => {}
+            Some(_) => {
+                return Err(ConsensusError::InvalidSignature(format!(
+                    "no-endorsement PQ public key does not match registered validator key for {}",
+                    self.voter
+                )));
+            }
+            None => {
+                return Err(ConsensusError::InvalidSignature(format!(
+                    "no-endorsement missing PQ public key (Wave 3d hybrid required) for {}",
+                    self.voter
+                )));
+            }
+        }
+
+        let payload = self.signing_payload();
+        let verifier = StandardHybridVerifier::new(validator.composite_public_key());
+        verifier.verify(&payload, &self.signature).map_err(|e| {
+            ConsensusError::InvalidSignature(format!(
+                "hybrid no-endorsement signature verification failed for {}: {}",
+                self.voter, e
+            ))
+        })?;
+
+        Ok(())
+    }
+}
+
+/// One signer's contribution to a [`NoEndorsementCertificate`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NecSigner {
+    /// Voter's address.
+    pub voter: Address,
+
+    /// Composite signature this signer produced over the canonical
+    /// `NoEndorsementMsg::signing_payload()` for `(view, signers[i].voter)`.
+    pub signature: CompositeSignature,
+
+    /// Composite public key the signature was produced under.
+    pub public_key: CompositePublicKey,
+}
+
+/// A f+1 aggregation of [`NoEndorsementMsg`]s for the same view.
+///
+/// f+1 (not 2f+1) is the threshold by design: an honest replica's
+/// no-endorsement attestation is "I personally did not observe a QC for view
+/// v-1". With at most f Byzantine signers, f+1 honest signatures across the
+/// validator set suffice to prove that at least one honest replica observed
+/// no QC — which is what the protocol needs to safely allow a *new* block
+/// (rather than re-proposing a high-tip) at view v.
+///
+/// MonadBFT calls this proof a "no-endorsement certificate" or "NEC".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoEndorsementCertificate {
+    /// Wire-format version. Must equal
+    /// [`NO_ENDORSEMENT_CERTIFICATE_FORMAT_VERSION`].
+    pub format_version: u8,
+
+    /// The view that this NEC certifies as having no observed QC at v-1.
+    pub view: u64,
+
+    /// The f+1 signers.
+    pub signers: Vec<NecSigner>,
+}
+
+impl NoEndorsementCertificate {
+    /// Constructs a NEC. Caller is responsible for ensuring `signers` has at
+    /// least f+1 entries from distinct registered validators.
+    pub fn new(view: u64, signers: Vec<NecSigner>) -> Self {
+        Self {
+            format_version: NO_ENDORSEMENT_CERTIFICATE_FORMAT_VERSION,
+            view,
+            signers,
+        }
+    }
+
+    /// Verifies this NEC against the validator set.
+    ///
+    /// Checks:
+    /// 1. Format version matches the pinned version.
+    /// 2. `view > 0`.
+    /// 3. Signer count is ≥ f+1 of the active validator set.
+    /// 4. All signers are distinct (no duplicate addresses).
+    /// 5. Every signer is a registered, active validator.
+    /// 6. Every embedded composite public key matches the validator's
+    ///    registered classical+PQ keys (key-substitution defence).
+    /// 7. Every signer's per-message hybrid signature verifies against the
+    ///    canonical `NoEndorsementMsg::signing_payload()` for `(nec.view,
+    ///    signer.voter)`.
+    pub fn verify(&self, validator_set: &ValidatorSet) -> Result<()> {
+        if self.format_version != NO_ENDORSEMENT_CERTIFICATE_FORMAT_VERSION {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "NEC rejected: unsupported format_version {} (expected {})",
+                self.format_version, NO_ENDORSEMENT_CERTIFICATE_FORMAT_VERSION
+            )));
+        }
+
+        if self.view == 0 {
+            return Err(ConsensusError::InvalidSignature(
+                "NEC rejected: view 0 has no predecessor".to_string(),
+            ));
+        }
+
+        // f+1 threshold: f = (n-1)/3, so f+1 = (n+2)/3 floored.
+        let n = validator_set.len();
+        let f = n.saturating_sub(1) / 3;
+        let bracha = f + 1;
+        if self.signers.len() < bracha {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "NEC has {} signers, below f+1 threshold {}",
+                self.signers.len(),
+                bracha
+            )));
+        }
+
+        let mut seen: HashSet<Address> = HashSet::with_capacity(self.signers.len());
+        for signer in &self.signers {
+            if !seen.insert(signer.voter) {
+                return Err(ConsensusError::InvalidSignature(format!(
+                    "NEC contains duplicate signer {}",
+                    signer.voter
+                )));
+            }
+
+            let validator = validator_set.get_by_address(&signer.voter).ok_or_else(|| {
+                ConsensusError::NonValidator(format!("NEC signer {}", signer.voter))
+            })?;
+
+            if !validator.is_active() {
+                return Err(ConsensusError::NonValidator(format!(
+                    "NEC signer {} is not active",
+                    signer.voter
+                )));
+            }
+
+            if signer.public_key.classical != validator.public_key {
+                return Err(ConsensusError::InvalidSignature(format!(
+                    "NEC signer {}: classical key mismatch with registered validator",
+                    signer.voter
+                )));
+            }
+            match &signer.public_key.pq {
+                Some(pq_bytes) if pq_bytes == &validator.pq_public_key => {}
+                Some(_) => {
+                    return Err(ConsensusError::InvalidSignature(format!(
+                        "NEC signer {}: PQ key mismatch with registered validator",
+                        signer.voter
+                    )));
+                }
+                None => {
+                    return Err(ConsensusError::InvalidSignature(format!(
+                        "NEC signer {}: missing PQ key (Wave 3d hybrid required)",
+                        signer.voter
+                    )));
+                }
+            }
+
+            // Reconstruct the canonical NoEndorsementMsg signing payload.
+            let placeholder = CompositeSignature::new(Vec::new(), None);
+            let unsigned = NoEndorsementMsg::new(
+                self.view,
+                signer.voter,
+                placeholder,
+                signer.public_key.clone(),
+            );
+            let payload = unsigned.signing_payload();
+
+            let verifier = StandardHybridVerifier::new(validator.composite_public_key());
+            verifier.verify(&payload, &signer.signature).map_err(|e| {
+                ConsensusError::InvalidSignature(format!(
+                    "NEC signer {}: hybrid signature verification failed: {}",
+                    signer.voter, e
+                ))
+            })?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Bookkeeping for an in-progress [`NoEndorsementCertificate`] aggregation.
+struct PerViewNecCollector {
+    by_voter: std::collections::HashMap<Address, NecSigner>,
+    nec_formed: bool,
+}
+
+impl PerViewNecCollector {
+    fn new() -> Self {
+        Self {
+            by_voter: std::collections::HashMap::new(),
+            nec_formed: false,
+        }
+    }
+}
+
+/// Outcome of [`NoEndorsementCollector::add`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NecCollectOutcome {
+    /// The message was added but the f+1 threshold was not yet crossed.
+    Added,
+
+    /// This message pushed the view's count to f+1: a [`NoEndorsementCertificate`]
+    /// has been formed. Idempotent — only emitted once per view.
+    CertificateFormed(NoEndorsementCertificate),
+
+    /// The message was a duplicate (same voter, same view) — silently ignored.
+    Duplicate,
+}
+
+/// Aggregates [`NoEndorsementMsg`]s per-view and emits f+1 NEC events.
+///
+/// All messages are assumed to have already passed
+/// [`NoEndorsementMsg::verify`] before being handed to `add`.
+pub struct NoEndorsementCollector {
+    views: DashMap<u64, Arc<Mutex<PerViewNecCollector>>>,
+
+    /// f+1 threshold snapshotted at construction.
+    bracha_threshold: usize,
+}
+
+impl NoEndorsementCollector {
+    /// Builds a collector for the given validator set.
+    pub fn new(validator_set: Arc<ValidatorSet>) -> Self {
+        let n = validator_set.len();
+        let f = n.saturating_sub(1) / 3;
+        let bracha_threshold = f + 1;
+        Self {
+            views: DashMap::new(),
+            bracha_threshold,
+        }
+    }
+
+    /// Adds a verified no-endorsement message to the per-view bucket.
+    pub fn add(&self, msg: &NoEndorsementMsg) -> NecCollectOutcome {
+        let view = msg.view;
+        let entry = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Arc::new(Mutex::new(PerViewNecCollector::new())))
+            .clone();
+        let mut state = entry.lock();
+
+        if state.nec_formed {
+            // NEC is already formed for this view. Record the message for
+            // duplicate detection but emit no further events.
+            return match state.by_voter.get(&msg.voter) {
+                Some(_) => NecCollectOutcome::Duplicate,
+                None => {
+                    state.by_voter.insert(
+                        msg.voter,
+                        NecSigner {
+                            voter: msg.voter,
+                            signature: msg.signature.clone(),
+                            public_key: msg.public_key.clone(),
+                        },
+                    );
+                    NecCollectOutcome::Added
+                }
+            };
+        }
+
+        if state.by_voter.contains_key(&msg.voter) {
+            return NecCollectOutcome::Duplicate;
+        }
+
+        state.by_voter.insert(
+            msg.voter,
+            NecSigner {
+                voter: msg.voter,
+                signature: msg.signature.clone(),
+                public_key: msg.public_key.clone(),
+            },
+        );
+
+        let count = state.by_voter.len();
+
+        if count >= self.bracha_threshold {
+            state.nec_formed = true;
+            let signers: Vec<NecSigner> = state.by_voter.values().cloned().collect();
+            let nec = NoEndorsementCertificate::new(view, signers);
+            return NecCollectOutcome::CertificateFormed(nec);
+        }
+
+        NecCollectOutcome::Added
+    }
+
+    /// Drops collector state for views below `min_view`.
+    pub fn cleanup_below(&self, min_view: u64) {
+        self.views.retain(|view, _| *view >= min_view);
+    }
+
+    /// f+1 threshold this collector was built with.
+    pub fn bracha_threshold(&self) -> usize {
+        self.bracha_threshold
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1000,6 +1442,267 @@ mod tests {
             CollectOutcome::CertificateFormed(tc) => {
                 tc.verify(&vset).expect("single-validator TC verifies");
                 assert_eq!(tc.signers.len(), 1);
+            }
+            other => panic!("expected CertificateFormed, got {other:?}"),
+        }
+    }
+
+    // --- NoEndorsementMsg / NoEndorsementCertificate / NoEndorsementCollector tests ---
+
+    fn sign_no_endorsement(
+        view: u64,
+        address: Address,
+        keypair: &KeyPair,
+        pq: &MlDsaSigningKey,
+    ) -> NoEndorsementMsg {
+        let composite_pk = CompositePublicKey::new(
+            keypair.public_key().clone(),
+            Some(pq.verifying_key_bytes().to_vec()),
+        );
+        let placeholder = CompositeSignature::new(Vec::new(), None);
+        let unsigned = NoEndorsementMsg::new(view, address, placeholder, composite_pk.clone());
+        let payload = unsigned.signing_payload();
+
+        let kp_bytes = keypair.to_bytes();
+        let kp_copy = KeyPair::from_bytes(keypair.key_type(), &kp_bytes).unwrap();
+        let classical = Ed25519SignerImpl::new(kp_copy).unwrap();
+        let pq_copy = MlDsaSigningKey::from_seed(pq.seed_bytes()).unwrap();
+        let signer = InMemoryHybridSigner::new(Box::new(classical), pq_copy);
+
+        let signature = signer.sign(&payload).unwrap();
+        NoEndorsementMsg::new(view, address, signature, composite_pk)
+    }
+
+    fn build_n_signed_no_endorsements(
+        n: usize,
+        view: u64,
+    ) -> (
+        Arc<ValidatorSet>,
+        Vec<(KeyPair, MlDsaSigningKey, Address)>,
+        Vec<NoEndorsementMsg>,
+    ) {
+        let mut keys = Vec::with_capacity(n);
+        let mut infos = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (kp, pq, addr, info) = build_validator(1000);
+            keys.push((kp, pq, addr));
+            infos.push(info);
+        }
+        let validator_set = vset(infos);
+        let msgs: Vec<NoEndorsementMsg> = keys
+            .iter()
+            .map(|(kp, pq, addr)| sign_no_endorsement(view, *addr, kp, pq))
+            .collect();
+        (validator_set, keys, msgs)
+    }
+
+    fn nec_from_msgs(view: u64, msgs: &[NoEndorsementMsg]) -> NoEndorsementCertificate {
+        let signers = msgs
+            .iter()
+            .map(|m| NecSigner {
+                voter: m.voter,
+                signature: m.signature.clone(),
+                public_key: m.public_key.clone(),
+            })
+            .collect();
+        NoEndorsementCertificate::new(view, signers)
+    }
+
+    #[test]
+    fn nec_msg_round_trips_signature() {
+        let (kp, pq, addr, info) = build_validator(1000);
+        let validator_set = vset(vec![info]);
+        let msg = sign_no_endorsement(42, addr, &kp, &pq);
+        msg.verify(&validator_set).expect("signature verifies");
+    }
+
+    #[test]
+    fn nec_msg_rejects_view_zero() {
+        let (kp, pq, addr, info) = build_validator(1000);
+        let validator_set = vset(vec![info]);
+        let msg = sign_no_endorsement(0, addr, &kp, &pq);
+        let err = msg.verify(&validator_set).unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nec_msg_rejects_unknown_voter() {
+        let (_kp, _pq, _addr, info) = build_validator(1000);
+        let validator_set = vset(vec![info]);
+        let (kp_other, pq_other, addr_other, _) = build_validator(1000);
+        let msg = sign_no_endorsement(42, addr_other, &kp_other, &pq_other);
+        let err = msg.verify(&validator_set).unwrap_err();
+        assert!(matches!(err, ConsensusError::NonValidator(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn nec_msg_rejects_format_version_mismatch() {
+        let (kp, pq, addr, info) = build_validator(1000);
+        let validator_set = vset(vec![info]);
+        let mut msg = sign_no_endorsement(42, addr, &kp, &pq);
+        msg.format_version = 99;
+        let err = msg.verify(&validator_set).unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nec_msg_rejects_tampered_view() {
+        let (kp, pq, addr, info) = build_validator(1000);
+        let validator_set = vset(vec![info]);
+        let mut msg = sign_no_endorsement(42, addr, &kp, &pq);
+        msg.view = 99;
+        let err = msg.verify(&validator_set).unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nec_payload_distinct_from_timeout_payload() {
+        // A TimeoutMsg signature must not be replayable as a
+        // NoEndorsementMsg signature. Sign a TimeoutMsg, swap its bytes into
+        // a NEC frame, and confirm verification fails.
+        let (kp, pq, addr, info) = build_validator(1000);
+        let validator_set = vset(vec![info]);
+        let timeout = sign_timeout(42, 41, addr, &kp, &pq);
+        let nec = NoEndorsementMsg::new(
+            42,
+            addr,
+            timeout.signature.clone(),
+            timeout.public_key.clone(),
+        );
+        let err = nec.verify(&validator_set).unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nec_verifies_with_f_plus_1_signers() {
+        // n=4 → f=1 → f+1 = 2
+        let (vset, _keys, msgs) = build_n_signed_no_endorsements(4, 100);
+        let nec = nec_from_msgs(100, &msgs[..2]);
+        nec.verify(&vset).expect("NEC verifies at f+1");
+    }
+
+    #[test]
+    fn nec_rejects_below_f_plus_1() {
+        let (vset, _keys, msgs) = build_n_signed_no_endorsements(4, 100);
+        let nec = nec_from_msgs(100, &msgs[..1]);
+        let err = nec.verify(&vset).unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nec_rejects_duplicate_signers() {
+        let (vset, _keys, msgs) = build_n_signed_no_endorsements(4, 100);
+        let mut signers: Vec<NecSigner> = msgs[..2]
+            .iter()
+            .map(|m| NecSigner {
+                voter: m.voter,
+                signature: m.signature.clone(),
+                public_key: m.public_key.clone(),
+            })
+            .collect();
+        signers.push(signers[0].clone());
+        let nec = NoEndorsementCertificate::new(100, signers);
+        let err = nec.verify(&vset).unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nec_rejects_tampered_view() {
+        let (vset, _keys, msgs) = build_n_signed_no_endorsements(4, 100);
+        let mut nec = nec_from_msgs(100, &msgs[..2]);
+        nec.view = 200;
+        let err = nec.verify(&vset).unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::InvalidSignature(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nec_collector_emits_added_for_first_msg() {
+        let (vset, _keys, msgs) = build_n_signed_no_endorsements(4, 100);
+        let collector = NoEndorsementCollector::new(vset);
+        // n=4: f=1, bracha_threshold=2
+        assert_eq!(collector.bracha_threshold(), 2);
+        let outcome = collector.add(&msgs[0]);
+        assert_eq!(outcome, NecCollectOutcome::Added);
+    }
+
+    #[test]
+    fn nec_collector_emits_certificate_at_f_plus_1() {
+        let (vset, _keys, msgs) = build_n_signed_no_endorsements(4, 100);
+        let collector = NoEndorsementCollector::new(vset.clone());
+        assert_eq!(collector.add(&msgs[0]), NecCollectOutcome::Added);
+        let outcome = collector.add(&msgs[1]);
+        match outcome {
+            NecCollectOutcome::CertificateFormed(nec) => {
+                nec.verify(&vset).expect("emitted NEC verifies");
+                assert_eq!(nec.view, 100);
+                assert_eq!(nec.signers.len(), 2);
+            }
+            other => panic!("expected CertificateFormed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nec_collector_certificate_is_idempotent() {
+        let (vset, _keys, msgs) = build_n_signed_no_endorsements(4, 100);
+        let collector = NoEndorsementCollector::new(vset);
+
+        let _ = collector.add(&msgs[0]);
+        let _ = collector.add(&msgs[1]); // forms NEC at f+1=2
+        let outcome = collector.add(&msgs[2]);
+        // 3rd msg: NEC already formed, voter is new, just Added
+        assert_eq!(outcome, NecCollectOutcome::Added);
+    }
+
+    #[test]
+    fn nec_collector_dedupes_same_voter() {
+        let (vset, _keys, msgs) = build_n_signed_no_endorsements(4, 100);
+        let collector = NoEndorsementCollector::new(vset);
+        assert_eq!(collector.add(&msgs[0]), NecCollectOutcome::Added);
+        assert_eq!(collector.add(&msgs[0]), NecCollectOutcome::Duplicate);
+    }
+
+    #[test]
+    fn nec_collector_cleanup_below_drops_old_views() {
+        let (vset, _keys, msgs) = build_n_signed_no_endorsements(4, 100);
+        let collector = NoEndorsementCollector::new(vset);
+        let _ = collector.add(&msgs[0]);
+        assert_eq!(collector.views.len(), 1);
+        collector.cleanup_below(101);
+        assert_eq!(collector.views.len(), 0);
+    }
+
+    #[test]
+    fn nec_collector_certificate_at_n_eq_1() {
+        // n=1: f=0, bracha=1 — first message forms the NEC immediately.
+        let (vset, _keys, msgs) = build_n_signed_no_endorsements(1, 50);
+        let collector = NoEndorsementCollector::new(vset.clone());
+        assert_eq!(collector.bracha_threshold(), 1);
+        let outcome = collector.add(&msgs[0]);
+        match outcome {
+            NecCollectOutcome::CertificateFormed(nec) => {
+                nec.verify(&vset).expect("single-validator NEC verifies");
+                assert_eq!(nec.signers.len(), 1);
             }
             other => panic!("expected CertificateFormed, got {other:?}"),
         }

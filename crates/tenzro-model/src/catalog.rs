@@ -61,6 +61,16 @@ pub struct HfModelEntry {
     pub license: String,
     /// Short description
     pub description: String,
+    /// Optional speculative-decoding drafter — the catalog ID of a smaller,
+    /// vocab-matched GGUF to load alongside this model as the speculative
+    /// drafter (llama.cpp `--spec-draft-model` / `-md`). The referenced ID
+    /// must resolve via `get_model_by_id`; the drafter entry itself is a
+    /// normal `HfModelEntry` and so is independently downloadable. `None`
+    /// means no drafter is recommended for this target — either because
+    /// none exists with a matching tokenizer, or because community
+    /// benchmarks show speculative decoding is net-negative for this
+    /// architecture (e.g. small-active-path MoE on consumer GPUs).
+    pub drafter_id: Option<String>,
 }
 
 /// Model architecture — informational only.
@@ -1228,6 +1238,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 2,
         license: "Apache 2.0".into(),
         description: "Compact model optimized for edge deployment".into(),
+        drafter_id: None,
     }];
     catalog.push(HfModelEntry {
         id: "qwen3-1.7b".into(),
@@ -1243,6 +1254,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 3,
         license: "Apache 2.0".into(),
         description: "Versatile model for various language tasks".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-4b".into(),
@@ -1258,6 +1270,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 4,
         license: "Apache 2.0".into(),
         description: "Well-balanced model for production use".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-8b".into(),
@@ -1273,6 +1286,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 8,
         license: "Apache 2.0".into(),
         description: "Extended context model for long-form tasks".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-14b".into(),
@@ -1288,6 +1302,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 12,
         license: "Apache 2.0".into(),
         description: "Premium model with extended context support".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-32b".into(),
@@ -1303,6 +1318,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 24,
         license: "Apache 2.0".into(),
         description: "Top-tier model with 128K context window".into(),
+        drafter_id: Some("qwen3-0.6b".into()),
     });
     catalog.push(HfModelEntry {
         id: "qwen3-30b-a3b".into(),
@@ -1318,6 +1334,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 12,
         license: "Apache 2.0".into(),
         description: "Mixture-of-Experts with 3B active params for efficient scaling".into(),
+        drafter_id: None,
     });
 
     // ── Qwen 3.5 (Apache 2.0, ungated, unsloth GGUF) ──────────────────
@@ -1335,6 +1352,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 2,
         license: "Apache 2.0".into(),
         description: "Compact multilingual model for efficient on-device inference".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-2b".into(),
@@ -1350,6 +1368,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 3,
         license: "Apache 2.0".into(),
         description: "Efficient small model for chat and text generation".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-4b".into(),
@@ -1365,6 +1384,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 4,
         license: "Apache 2.0".into(),
         description: "Mid-size model with strong reasoning and coding performance".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-9b".into(),
@@ -1380,6 +1400,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 8,
         license: "Apache 2.0".into(),
         description: "High-performance model for complex language understanding".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-27b".into(),
@@ -1395,6 +1416,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 20,
         license: "Apache 2.0".into(),
         description: "Flagship Qwen 3.5 model with state-of-the-art performance".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-35b-a3b".into(),
@@ -1410,6 +1432,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 14,
         license: "Apache 2.0".into(),
         description: "Mixture-of-Experts with only 3B active params — fast inference at 35B quality".into(),
+        drafter_id: None,
     });
 
     // ── Gemma 3 (Google, ungated via unsloth GGUF) ─────────────────────
@@ -1427,6 +1450,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 1,
         license: "Gemma License".into(),
         description: "Tiny Gemma model for ultra-lightweight on-device inference".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-1b".into(),
@@ -1442,6 +1466,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 2,
         license: "Gemma License".into(),
         description: "Google's compact instruction-tuned model".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-4b".into(),
@@ -1457,6 +1482,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 4,
         license: "Gemma License".into(),
         description: "Extended context Gemma model for chat applications".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-12b".into(),
@@ -1472,6 +1498,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 10,
         license: "Gemma License".into(),
         description: "High-performance instruction-tuned model from Google".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-27b".into(),
@@ -1487,9 +1514,47 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 20,
         license: "Gemma License".into(),
         description: "Google's largest Gemma model with exceptional capabilities".into(),
+        drafter_id: None,
     });
 
     // ── Gemma 4 (Gemma License, via unsloth GGUF) ──────────────────────
+    // Drafters: Google's official MTP "assistant" 0.5B-class drafters live at
+    // `google/gemma-4-*-it-assistant` (safetensors, Apache-2.0, published
+    // 2026-05-05). Community GGUF conversions ship Q8_0/F16 only — no
+    // Q4_K_M yet. As of 2026-05-06 only the E2B and 31B sizes have GGUF
+    // mirrors; E4B and 26B-A4B drafters are safetensors-only upstream.
+    catalog.push(HfModelEntry {
+        id: "gemma4-e2b-it-assistant".into(),
+        name: "Gemma 4 E2B Assistant (Drafter)".into(),
+        family: "gemma4".into(),
+        hf_repo: "Radamanthys11/Gemma-4-E2B-it-assistant-GGUF".into(),
+        hf_filename: "Gemma-4-E2B-it-assistant.Q8_0.gguf".into(),
+        parameters: "0.5B".into(),
+        architecture: ModelArchitecture::Gemma4,
+        context_length: 131072,
+        quantization: "Q8_0".into(),
+        size_bytes: 170_000_000,
+        min_ram_gb: 1,
+        license: "Apache 2.0".into(),
+        description: "Google's official MTP drafter for Gemma 4 E2B — speculative decoding pair.".into(),
+        drafter_id: None,
+    });
+    catalog.push(HfModelEntry {
+        id: "gemma4-31b-it-assistant".into(),
+        name: "Gemma 4 31B Assistant (Drafter)".into(),
+        family: "gemma4".into(),
+        hf_repo: "Radamanthys11/Gemma-4-31B-it-assistant-GGUF".into(),
+        hf_filename: "Gemma-4-31B-it-assistant.Q8_0.gguf".into(),
+        parameters: "0.5B".into(),
+        architecture: ModelArchitecture::Gemma4,
+        context_length: 131072,
+        quantization: "Q8_0".into(),
+        size_bytes: 1_000_000_000,
+        min_ram_gb: 2,
+        license: "Apache 2.0".into(),
+        description: "Google's official MTP drafter for Gemma 4 31B — speculative decoding pair.".into(),
+        drafter_id: None,
+    });
     catalog.push(HfModelEntry {
         id: "gemma4-e2b".into(),
         name: "Gemma 4 E2B".into(),
@@ -1504,6 +1569,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 4,
         license: "Gemma License".into(),
         description: "Google's compact Gemma 4 multimodal model (text + image, 128K context)".into(),
+        drafter_id: Some("gemma4-e2b-it-assistant".into()),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e4b".into(),
@@ -1519,6 +1585,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 8,
         license: "Gemma License".into(),
         description: "Google's efficient Gemma 4 multimodal model (text + image, 128K context)".into(),
+        // No drafter wired: `google/gemma-4-E4B-it-assistant` is safetensors-only
+        // upstream; community GGUF conversion not yet published. Wire when one lands.
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-26b-a4b".into(),
@@ -1534,6 +1603,10 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 20,
         license: "Gemma License".into(),
         description: "Gemma 4 Mixture-of-Experts: 26B total params, 4B active per token (128K context)".into(),
+        // No drafter wired: same situation as E4B — safetensors-only at
+        // `google/gemma-4-26B-A4B-it-assistant`. MoE 4B-active also risks
+        // the same net-negative speculative profile as Qwen3.6-35B-A3B.
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-31b".into(),
@@ -1549,6 +1622,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 24,
         license: "Gemma License".into(),
         description: "Google's largest dense Gemma 4 model with exceptional capabilities (128K context)".into(),
+        drafter_id: Some("gemma4-31b-it-assistant".into()),
     });
 
     // ── Mistral (Apache 2.0, ungated) ──────────────────────────────────
@@ -1566,6 +1640,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 6,
         license: "Apache 2.0".into(),
         description: "Mistral AI's classic 7B instruction model".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-nemo-12b".into(),
@@ -1581,6 +1656,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 10,
         license: "Apache 2.0".into(),
         description: "Extended-context Mistral model built with NVIDIA".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-24b".into(),
@@ -1596,6 +1672,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 18,
         license: "Apache 2.0".into(),
         description: "Mistral's latest Small 3.2 model for demanding workloads".into(),
+        drafter_id: None,
     });
 
     // ── Ministral 3 (Mistral AI, Apache 2.0, ungated) ──────────────────
@@ -1613,6 +1690,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 3,
         license: "Apache 2.0".into(),
         description: "Compact Ministral 3 for lightweight tasks".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "ministral3-8b".into(),
@@ -1628,6 +1706,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 8,
         license: "Apache 2.0".into(),
         description: "Versatile Ministral 3 for general-purpose tasks".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "ministral3-14b".into(),
@@ -1643,6 +1722,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 12,
         license: "Apache 2.0".into(),
         description: "High-performance Ministral 3 for complex reasoning".into(),
+        drafter_id: None,
     });
 
     // ── Phi 4 (Microsoft, MIT, ungated) ─────────────────────────────
@@ -1660,6 +1740,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 3,
         license: "MIT".into(),
         description: "Compact Phi-4 Mini with 128K context".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "phi4".into(),
@@ -1675,6 +1756,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 10,
         license: "MIT".into(),
         description: "Microsoft Phi-4 — strong reasoning at 14B".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "phi4-reasoning".into(),
@@ -1690,6 +1772,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 10,
         license: "MIT".into(),
         description: "Phi-4 fine-tuned for chain-of-thought reasoning".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "phi4-mini-reasoning".into(),
@@ -1705,6 +1788,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 3,
         license: "MIT".into(),
         description: "Compact Phi-4 Mini fine-tuned for reasoning tasks".into(),
+        drafter_id: None,
     });
 
     // ── SmolLM (HuggingFace, Apache 2.0, ungated) ───────────────────
@@ -1722,6 +1806,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 2,
         license: "Apache-2.0".into(),
         description: "Compact SmolLM2 for on-device AI".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "smollm3-3b".into(),
@@ -1737,6 +1822,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 3,
         license: "Apache-2.0".into(),
         description: "SmolLM3 — 11T tokens, dual-mode reasoning".into(),
+        drafter_id: None,
     });
 
     // ── Qwen 3 Coder (Apache 2.0, ungated, unsloth GGUF) ───────────────
@@ -1754,6 +1840,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 12,
         license: "Apache 2.0".into(),
         description: "Code-focused MoE — 30B total, 3B active, 256K context".into(),
+        drafter_id: None,
     });
 
     // ── Nemotron (NVIDIA Open, ungated, unsloth GGUF) ────────────────
@@ -1771,6 +1858,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 4,
         license: "NVIDIA Open".into(),
         description: "Hybrid Mamba-2 + Attention edge model, 256K context".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "nemotron-nano-30b-a3b".into(),
@@ -1786,6 +1874,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 16,
         license: "NVIDIA Open".into(),
         description: "Hybrid Mamba-2 MoE — 30B total, 3.5B active, 128K context".into(),
+        drafter_id: None,
     });
 
     // ── GLM-4 (Apache 2.0, via bartowski GGUF) ─────────────────────────
@@ -1803,6 +1892,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 8,
         license: "Apache 2.0".into(),
         description: "Zhipu AI GLM-4 9B instruction-tuned, 128K context".into(),
+        drafter_id: None,
     });
 
     // ── Kimi K2 (MIT, via unsloth GGUF) ──────────────────────────────
@@ -1820,6 +1910,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 24,
         license: "MIT".into(),
         description: "Moonshot AI Kimi K2 MoE — 1T total, 32B active, 128K context".into(),
+        drafter_id: None,
     });
 
     // ── MiniMax M1 (MiniMax Open, via unsloth GGUF) ──────────────────
@@ -1837,6 +1928,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 28,
         license: "MiniMax Open".into(),
         description: "MiniMax M1 40B with Lightning Attention, 1M context".into(),
+        drafter_id: None,
     });
 
     // ── DeepSeek V3 (MIT, via unsloth GGUF) ──────────────────────────
@@ -1854,6 +1946,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 256,
         license: "MIT".into(),
         description: "DeepSeek V3 MoE — 685B total, 37B active, 128K context".into(),
+        drafter_id: None,
     });
 
     // NOTE: Llama models removed — not supported on Tenzro Network.
@@ -1876,6 +1969,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 24,
         license: "Apache 2.0".into(),
         description: "Qwen 3.6 27B — flagship dense model with 128K context".into(),
+        // Vocab-matched (248320) per llama.cpp PR #19493; community-validated pairing.
+        drafter_id: Some("qwen3.5-0.8b".into()),
     });
     catalog.push(HfModelEntry {
         id: "qwen3.6-35b-a3b".into(),
@@ -1891,9 +1986,34 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 24,
         license: "Apache 2.0".into(),
         description: "Qwen 3.6 MoE — 35B total, ~3B active per token".into(),
+        // Intentionally no drafter: `qwen3.5-0.8b` would be vocab-matched, but the
+        // 3B-active-path MoE makes the speculative verify cost outweigh the draft
+        // savings on consumer GPUs (RTX 3090: net-negative throughput). Re-evaluate
+        // when a smaller MoE-aware drafter or llama.cpp PR #22673 (native MTP) lands.
+        drafter_id: None,
     });
 
     // ── Mistral Small 3.1 / 3.2 (Apache 2.0, via unsloth GGUF) ───────
+    // Drafter: alamios/Mistral-Small-3.1-DRAFT-0.5B-GGUF — Qwen2.5-0.5B base
+    // fine-tuned on Mistral-Small-3.1 outputs across 6 languages. Tokenizer
+    // is vocab-compatible with Mistral-Small-3.1/3.2 by construction.
+    catalog.push(HfModelEntry {
+        id: "mistral-small-3.1-draft-0.5b".into(),
+        name: "Mistral Small 3.1 DRAFT 0.5B".into(),
+        family: "mistral".into(),
+        hf_repo: "alamios/Mistral-Small-3.1-DRAFT-0.5B-GGUF".into(),
+        hf_filename: "Mistral-Small-3.1-DRAFT-0.5B.Q4_K_M.gguf".into(),
+        parameters: "0.5B".into(),
+        // GGUF is a Qwen2.5-0.5B fine-tune — llama.cpp loads it as Qwen2.
+        architecture: ModelArchitecture::Qwen2,
+        context_length: 32768,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 397_000_000,
+        min_ram_gb: 1,
+        license: "Apache 2.0".into(),
+        description: "Speculative drafter for Mistral Small 3.1/3.2 — vocab-matched, 6-language fine-tune.".into(),
+        drafter_id: None,
+    });
     catalog.push(HfModelEntry {
         id: "mistral-small-3.1-24b".into(),
         name: "Mistral Small 3.1 24B".into(),
@@ -1908,6 +2028,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 16,
         license: "Apache 2.0".into(),
         description: "Mistral Small 3.1 — improved reasoning over 3.0 baseline".into(),
+        drafter_id: Some("mistral-small-3.1-draft-0.5b".into()),
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-3.2-24b".into(),
@@ -1923,6 +2044,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 16,
         license: "Apache 2.0".into(),
         description: "Mistral Small 3.2 — latest 3-series point release".into(),
+        drafter_id: Some("mistral-small-3.1-draft-0.5b".into()),
     });
 
     // ── GPT-OSS (Apache 2.0, OpenAI's open-weights release) ──────────
@@ -1940,6 +2062,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 16,
         license: "Apache 2.0".into(),
         description: "OpenAI GPT-OSS 20B — open-weights release, native MXFP4".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "gpt-oss-120b".into(),
@@ -1955,6 +2078,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 80,
         license: "Apache 2.0".into(),
         description: "OpenAI GPT-OSS 120B — open-weights release, native MXFP4".into(),
+        drafter_id: None,
     });
 
     // ── IBM Granite 4.0 (Apache 2.0) ─────────────────────────────────
@@ -1972,6 +2096,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 1,
         license: "Apache 2.0".into(),
         description: "IBM Granite 4.0 350M — ultra-compact for edge deployment".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "granite4-1b".into(),
@@ -1987,6 +2112,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 2,
         license: "Apache 2.0".into(),
         description: "IBM Granite 4.0 1B — compact enterprise model".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "granite4-h-tiny".into(),
@@ -2002,6 +2128,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 8,
         license: "Apache 2.0".into(),
         description: "IBM Granite 4.0 H-Tiny — hybrid Mamba/Transformer architecture".into(),
+        drafter_id: None,
     });
     catalog.push(HfModelEntry {
         id: "granite4-h-small".into(),
@@ -2017,6 +2144,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         min_ram_gb: 24,
         license: "Apache 2.0".into(),
         description: "IBM Granite 4.0 H-Small — 32B hybrid for long-context enterprise".into(),
+        drafter_id: None,
     });
 
     catalog
@@ -2065,6 +2193,67 @@ mod tests {
         assert!(get_model_by_id("qwen3-0.6b").is_some());
         assert!(get_model_by_id("gemma3-4b").is_some());
         assert!(get_model_by_id("nonexistent").is_none());
+    }
+
+    /// Every `drafter_id` in the catalog must resolve to another catalog
+    /// entry. A dangling reference would break speculative-decoding load.
+    #[test]
+    fn test_drafter_ids_resolve() {
+        let catalog = get_model_catalog();
+        for entry in &catalog {
+            if let Some(drafter) = entry.drafter_id.as_ref() {
+                assert!(
+                    get_model_by_id(drafter).is_some(),
+                    "model `{}` references unknown drafter `{}`",
+                    entry.id,
+                    drafter,
+                );
+                // A drafter must not itself nest a drafter.
+                let drafter_entry = get_model_by_id(drafter).unwrap();
+                assert!(
+                    drafter_entry.drafter_id.is_none(),
+                    "drafter `{}` itself has a drafter_id — nesting not supported",
+                    drafter,
+                );
+                // Drafter must be smaller than target — sanity check, not a hard
+                // requirement of llama.cpp but a precondition for net-positive
+                // speculative decoding throughput.
+                assert!(
+                    drafter_entry.size_bytes < entry.size_bytes,
+                    "drafter `{}` ({} bytes) is not smaller than target `{}` ({} bytes)",
+                    drafter,
+                    drafter_entry.size_bytes,
+                    entry.id,
+                    entry.size_bytes,
+                );
+            }
+        }
+    }
+
+    /// The four target/drafter pairings we explicitly ship as of 2026-05-06.
+    /// If any of these stop being wired, speculative decoding regresses for
+    /// the corresponding family.
+    #[test]
+    fn test_known_drafter_pairings() {
+        let pairs = [
+            ("qwen3-32b", "qwen3-0.6b"),
+            ("qwen3.6-27b", "qwen3.5-0.8b"),
+            ("mistral-small-3.1-24b", "mistral-small-3.1-draft-0.5b"),
+            ("mistral-small-3.2-24b", "mistral-small-3.1-draft-0.5b"),
+            ("gemma4-e2b", "gemma4-e2b-it-assistant"),
+            ("gemma4-31b", "gemma4-31b-it-assistant"),
+        ];
+        for (target, expected_drafter) in pairs {
+            let entry = get_model_by_id(target)
+                .unwrap_or_else(|| panic!("missing target `{}`", target));
+            assert_eq!(
+                entry.drafter_id.as_deref(),
+                Some(expected_drafter),
+                "target `{}` should pair with drafter `{}`",
+                target,
+                expected_drafter,
+            );
+        }
     }
 
     #[test]

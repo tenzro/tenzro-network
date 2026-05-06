@@ -4,6 +4,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::sync::Arc;
+use tenzro_consensus::leader_reputation::LeaderReputation;
 use tenzro_consensus::validator::{EquivocationDetector, ValidatorInfo, ValidatorSet};
 use tenzro_consensus::voter::{Vote, VoteCollector, VoteType};
 use tenzro_consensus::{ConsensusConfig, EpochManager, Mempool};
@@ -228,15 +229,24 @@ fn bench_leader_selection(c: &mut Criterion) {
         let mut view = 0u64;
         b.iter(|| {
             view = view.wrapping_add(1);
-            black_box(set.select_leader(black_box(view), false).unwrap());
+            black_box(set.select_leader_round_robin(black_box(view)).unwrap());
         });
     });
 
-    group.bench_function("tee_weighted", |b| {
-        let mut view = 0u64;
+    // Aptos LeaderReputation selector — stake-weighted seeded draw with
+    // observed-behaviour multipliers. Cold cache (no proposer/voter history
+    // recorded), so this measures the seeding + draw cost.
+    group.bench_function("reputation", |b| {
+        let reputation = LeaderReputation::new(set.len());
+        let mut round = 0u64;
+        let prev_block_id = Hash::default();
         b.iter(|| {
-            view = view.wrapping_add(1);
-            black_box(set.select_leader(black_box(view), true).unwrap());
+            round = round.wrapping_add(1);
+            black_box(
+                reputation
+                    .select_leader(black_box(round), 0, &prev_block_id, &set)
+                    .unwrap(),
+            );
         });
     });
 

@@ -11,11 +11,21 @@
 
 Tenzro Network is a fully decentralized protocol for the AI economy:
 
-- **Providers** earn TNZO by securing the network (validators), serving AI models (inference), and running TEE enclaves (confidential computing)
+- **Providers** earn TNZO by securing the network (validators), serving AI models (inference), running TEE enclaves (confidential computing), and contributing GPU compute to verifiable training runs
 - **Users** discover and consume AI models, verify proofs, and interact through CLI, SDKs, or MCP
-- **Agents** operate autonomously with self-sovereign identities, MPC wallets, and delegation scopes
-- **Settlement** happens on-chain with micropayment channels for per-token billing
+- **Agents** operate autonomously with self-sovereign identities, MPC wallets, and delegation scopes — discovering compute, negotiating prices, and settling autonomously on the same TNZO rails
+- **Settlement** happens on-chain with micropayment channels for per-token billing and escrow + on-chain run-root commitments for training jobs
 - **Cross-chain** interoperability via LayerZero V2, Chainlink CCIP, deBridge DLN, LI.FI, Wormhole, and Canton
+
+## Compute as Currency
+
+Tenzro turns AI compute into a unit of economic exchange — denominated, settled, and verified in TNZO. Three surfaces share the same identity, payment, and settlement substrate:
+
+- **Tokenized AI inference.** Anyone can run AI models (chat, vision, audio, forecasting, embeddings, segmentation, detection) and offer them on the marketplace. Users and agents pay per token (or per inference); providers earn TNZO directly. Confidential variants run inside TEE enclaves (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC). Micropayment channels make high-frequency, low-value billing efficient.
+- **Tokenized AI training (Tenzro Train).** Decentralized verifiable training using a Decoupled DiLoCo–style protocol. GPU providers contribute compute and earn TNZO; sponsors fund runs from on-chain escrow. Every accepted outer gradient produces a signed receipt, and every run finalizes a run-root commitment on-chain. Phase 1 ships timeseries-first with simple mean aggregation, stake bonding, and the Open trust tier; Byzantine-robust aggregation, multi-region scale, and TEE-resident data are roadmap.
+- **Agentic finance.** Autonomous agents discover providers, negotiate, pay, and settle in TNZO using the same TDIP identity, MPC wallet, and delegation scope. AP2 mandates, x402 micropayments, ERC-8004 trustless-agent registries, and ERC-4337 v0.8 smart accounts all run inside Tenzro consensus.
+
+Verifiability is not optional. Inference results, settlements, and identity claims can be proven via Plonky3 STARKs over the KoalaBear field (transparent setup, post-quantum-conjectured soundness) or attested by hardware enclaves — both anchored on-chain via the `ZK_VERIFY` and `TEE_VERIFY` precompiles. Where Render rents raw GPUs and Bittensor coordinates subnet intelligence, Tenzro unifies inference, training, agent settlement, identity, verification, and cross-chain reach under one tokenized substrate.
 
 ## What Tenzro Does That No Other Chain Does
 
@@ -25,7 +35,7 @@ That makes Tenzro the only chain that natively bridges **retail-agent rails** (A
 
 Two more architectural calls worth flagging:
 
-- **Confidential agent compute is a consensus primitive, not a sidecar.** TEE-attested validators get 2× weight in HotStuff-2 leader selection; the `TEE_VERIFY` precompile verifies real Intel TDX, AMD SEV-SNP, AWS Nitro, and NVIDIA GPU CC quotes on-chain. Phala, Oasis Sapphire/ROFL, and NEAR AI all run TEE compute as middleware over a non-TEE chain.
+- **Confidential agent compute is a consensus primitive, not a sidecar.** TEE-attested validators get a 1.5× multiplier on their reputation-weighted leader-selection draw; the `TEE_VERIFY` precompile verifies real Intel TDX, AMD SEV-SNP, AWS Nitro, and NVIDIA GPU CC quotes on-chain. Phala, Oasis Sapphire/ROFL, and NEAR AI all run TEE compute as middleware over a non-TEE chain. Tenzro consensus is two-phase HotStuff-2 with reputation-weighted proposer election, no-endorsement certificates for tail-fork resistance, and Ed25519 + ML-DSA-65 hybrid post-quantum signatures on every safety-critical message — full spec at [`docs/papers/tenzro-consensus.md`](docs/papers/tenzro-consensus.md).
 - **TNZO is a pointer-model native asset.** One balance, three VM views (wTNZO ERC-20 on EVM, SPL adapter on SVM, CIP-56 holding on Canton) — no bridge risk, no liquidity fragmentation. Registered upstream via CAIP-2 (`tenzro` namespace), SLIP-44 (`1414421071` / `0xd44e5a4f`), and W3C DID (`did:tenzro`).
 
 For the full ecosystem context — what AP2, x402, ERC-8004, and CIP-56 are doing on EVM, SVM, and Canton in 2026 — see [docs/landscape-2026.md](docs/landscape-2026.md).

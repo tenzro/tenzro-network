@@ -767,7 +767,7 @@ The MPP and x402 protocols live inside `tenzro-payments` and are reachable from 
 
 ### 3. Treats Hardware-Attested Compute as a Consensus Primitive
 
-HotStuff-2 BFT gives TEE-attested validators 2x leader-selection weight, and the EVM exposes `TEE_VERIFY` as a precompile that consumes real Intel TDX, AMD SEV-SNP, AWS Nitro, or NVIDIA GPU CC quotes. This puts confidential agent compute in the trust path of consensus rather than next to it as a sidecar.
+HotStuff-2 BFT gives TEE-attested validators a 1.5× multiplier on their reputation-weighted leader-selection draw, and the EVM exposes `TEE_VERIFY` as a precompile that consumes real Intel TDX, AMD SEV-SNP, AWS Nitro, or NVIDIA GPU CC quotes. This puts confidential agent compute in the trust path of consensus rather than next to it as a sidecar.
 
 ### 4. Runs EVM, SVM, and Canton/DAML in the Same Chain
 
