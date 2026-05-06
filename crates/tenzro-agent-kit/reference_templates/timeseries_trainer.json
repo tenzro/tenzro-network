@@ -48,7 +48,7 @@
     "backend": "MultiVm",
     "delegation": {
       "max_transaction_value": 1000000000000000000,
-      "max_daily_spend": 10000000000000000000,
+      "max_daily_spend": "10000000000000000000",
       "allowed_operations": ["training_enroll", "training_submit_gradient"],
       "allowed_chains": [],
       "time_bound_days": 30,
@@ -78,7 +78,7 @@
     ],
     "hard_caps": {
       "per_operation_value": 1000000000000000000,
-      "per_day_value": 10000000000000000000
+      "per_day_value": "10000000000000000000"
     }
   }
 }

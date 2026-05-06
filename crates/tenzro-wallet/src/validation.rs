@@ -260,13 +260,13 @@ impl TransactionValidator {
         }
 
         // Sender and recipient should be different for transfers
-        if tx.from == tx.to {
-            if let TransactionType::Transfer { .. } = &tx.tx_type {
-                errors.push(ValidationError {
-                    field: "to".to_string(),
-                    message: "cannot transfer to self".to_string(),
-                });
-            }
+        if tx.from == tx.to
+            && let TransactionType::Transfer { .. } = &tx.tx_type
+        {
+            errors.push(ValidationError {
+                field: "to".to_string(),
+                message: "cannot transfer to self".to_string(),
+            });
         }
     }
 
@@ -344,17 +344,17 @@ impl TransactionValidator {
     }
 
     fn validate_memo(&self, tx: &Transaction, errors: &mut Vec<ValidationError>) {
-        if let Some(ref memo) = tx.memo {
-            if memo.len() > self.config.max_memo_length {
-                errors.push(ValidationError {
-                    field: "memo".to_string(),
-                    message: format!(
-                        "memo length {} exceeds maximum {}",
-                        memo.len(),
-                        self.config.max_memo_length
-                    ),
-                });
-            }
+        if let Some(ref memo) = tx.memo
+            && memo.len() > self.config.max_memo_length
+        {
+            errors.push(ValidationError {
+                field: "memo".to_string(),
+                message: format!(
+                    "memo length {} exceeds maximum {}",
+                    memo.len(),
+                    self.config.max_memo_length
+                ),
+            });
         }
     }
 

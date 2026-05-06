@@ -274,7 +274,7 @@ impl TransactionBuilder {
     ///
     /// The `escrow_id` is derived deterministically by the VM from the payer
     /// address and the transaction nonce; callers can recompute it as
-    /// `SHA-256("tenzro/escrow/id/v1" || payer || nonce_le)`.
+    /// `SHA-256("tenzro/escrow/id" || payer || nonce_le)`.
     pub fn create_escrow(
         mut self,
         payee: Address,

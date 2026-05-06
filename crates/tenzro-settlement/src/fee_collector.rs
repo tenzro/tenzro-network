@@ -423,10 +423,10 @@ impl FeeCollector {
                 })
                 .collect();
 
-            if !ops.is_empty() {
-                if let Err(e) = storage.write_batch_sync(ops) {
-                    warn!("Failed to delete pruned fee records from storage: {}", e);
-                }
+            if !ops.is_empty()
+                && let Err(e) = storage.write_batch_sync(ops)
+            {
+                warn!("Failed to delete pruned fee records from storage: {}", e);
             }
         }
 

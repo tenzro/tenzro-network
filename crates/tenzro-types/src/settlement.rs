@@ -4,6 +4,7 @@
 //! and transaction finalization on the network.
 
 use crate::primitives::{Address, Hash, Timestamp};
+use crate::principal_chain::PrincipalChain;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -97,12 +98,26 @@ pub struct SettlementReceipt {
     pub status: SettlementStatus,
     /// Settlement timestamp
     pub settled_at: Timestamp,
+    /// Frozen principal chain for the customer (payer) — see Agent-Swarm
+    /// Spec 5. Captures the controller, KYC tier, and bond at the time of
+    /// settlement so liability is identifiable from the receipt without
+    /// recursive identity-registry walks. Resolved by the settlement
+    /// engine via a `PrincipalChainResolver`; falls back to a synthetic
+    /// anonymous chain when the customer address has no bound DID.
+    pub principal_chain: PrincipalChain,
     /// Additional metadata
     pub metadata: HashMap<String, String>,
 }
 
 impl SettlementReceipt {
-    /// Creates a new settlement receipt
+    /// Creates a new settlement receipt with an explicit principal chain.
+    ///
+    /// Callers must resolve the chain via a `PrincipalChainResolver`
+    /// (typically `IdentityRegistry::resolve_principal_chain`) and pass
+    /// it in. There is no implicit fallback inside the type — callers
+    /// that genuinely have no chain context should use
+    /// `principal_chain::anonymous_chain_for_address`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         request_id: String,
         transaction_hash: Hash,
@@ -111,6 +126,7 @@ impl SettlementReceipt {
         service_type: ServiceType,
         amount: u64,
         status: SettlementStatus,
+        principal_chain: PrincipalChain,
     ) -> Self {
         Self {
             receipt_id: uuid::Uuid::new_v4().to_string(),
@@ -122,6 +138,7 @@ impl SettlementReceipt {
             amount,
             status,
             settled_at: Timestamp::now(),
+            principal_chain,
             metadata: HashMap::new(),
         }
     }

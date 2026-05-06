@@ -485,10 +485,10 @@ impl VmState for StateAdapter {
 
     fn get_storage(&self, address: &[u8], key: &[u8]) -> Option<Vec<u8>> {
         // Check cache first
-        if let Some(storage) = self.storage_cache.get(address) {
-            if let Some(entry) = storage.get(key) {
-                return Some(entry.value().clone());
-            }
+        if let Some(storage) = self.storage_cache.get(address)
+            && let Some(entry) = storage.get(key)
+        {
+            return Some(entry.value().clone());
         }
 
         // Fall back to RocksDB
@@ -536,28 +536,26 @@ impl VmState for StateAdapter {
         if let Some(store) = &self.storage {
             // 1. Canonical: native TNZO ledger (CF_ACCOUNTS).
             let native_key = tnzo_balance_key(address);
-            if let Ok(Some(bytes)) = store.get(CF_ACCOUNTS, &native_key) {
-                if bytes.len() == 16 {
-                    if let Ok(arr) = bytes.as_slice().try_into() {
-                        let balance = u128::from_le_bytes(arr);
-                        self.balance_cache.insert(address.to_vec(), balance);
-                        return balance;
-                    }
-                }
+            if let Ok(Some(bytes)) = store.get(CF_ACCOUNTS, &native_key)
+                && bytes.len() == 16
+                && let Ok(arr) = bytes.as_slice().try_into()
+            {
+                let balance = u128::from_le_bytes(arr);
+                self.balance_cache.insert(address.to_vec(), balance);
+                return balance;
             }
 
             // 2. Legacy fallback: VM state key (CF_STATE). Preserved for
             //    older snapshots, fixtures, and tests that populate balance
             //    via `CF_STATE:balance:<hex>`.
             let legacy_key = format!("balance:{}", hex::encode(address));
-            if let Ok(Some(bytes)) = store.get(CF_STATE, legacy_key.as_bytes()) {
-                if bytes.len() == 16 {
-                    if let Ok(arr) = bytes.as_slice().try_into() {
-                        let balance = u128::from_le_bytes(arr);
-                        self.balance_cache.insert(address.to_vec(), balance);
-                        return balance;
-                    }
-                }
+            if let Ok(Some(bytes)) = store.get(CF_STATE, legacy_key.as_bytes())
+                && bytes.len() == 16
+                && let Ok(arr) = bytes.as_slice().try_into()
+            {
+                let balance = u128::from_le_bytes(arr);
+                self.balance_cache.insert(address.to_vec(), balance);
+                return balance;
             }
         }
 
@@ -578,14 +576,13 @@ impl VmState for StateAdapter {
         // Fall back to RocksDB
         if let Some(store) = &self.storage {
             let key = format!("nonce:{}", hex::encode(address));
-            if let Ok(Some(bytes)) = store.get(CF_STATE, key.as_bytes()) {
-                if bytes.len() == 8 {
-                    if let Ok(arr) = bytes.as_slice().try_into() {
-                        let nonce = u64::from_le_bytes(arr);
-                        self.nonce_cache.insert(address.to_vec(), nonce);
-                        return nonce;
-                    }
-                }
+            if let Ok(Some(bytes)) = store.get(CF_STATE, key.as_bytes())
+                && bytes.len() == 8
+                && let Ok(arr) = bytes.as_slice().try_into()
+            {
+                let nonce = u64::from_le_bytes(arr);
+                self.nonce_cache.insert(address.to_vec(), nonce);
+                return nonce;
             }
         }
 

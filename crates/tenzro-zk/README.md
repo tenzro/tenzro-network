@@ -10,10 +10,10 @@ The Plonky3 git revision is pinned at `32079474b1d31d9221656ae774afb322d2597db0`
 
 ## Modules
 
-- `plonky3` — Plonky3 STARK prover/verifier wrappers, three concrete AIRs (`InferenceAir`, `SettlementAir`, `IdentityAir`), shared `KoalaBearStark` config
-- `proof` — `Proof` envelope, `ProofType`, `ProofMetadata`, JSON + binary serde
+- `plonky3` — Plonky3 STARK prover/verifier wrappers (`Plonky3Prover`, `Plonky3Verifier`, `TenzroStarkConfig`, `build_testnet_config`), `verify_proof_envelope` dispatcher
+- `circuits` — Three concrete AIRs (`InferenceAir`, `SettlementAir`, `IdentityAir`) with trace generators and public-input encoders
+- `proof` — `Proof` envelope, `ProofType` (`Plonky3` only), `ProofMetadata`, `TeeZkProof`
 - `tee_integration` — Hybrid ZK-in-TEE execution combining STARK proofs with hardware attestation
-- `traits` — `Circuit`, `ZkProver`, `ZkVerifier`, `FromFieldElements`, `ToFieldElements`
 - `error` — `ZkError`, `VerifyEnvelopeError` (`WrongProofType`, `UnknownCircuit`, `EnvelopeDecode`, `VerifierRejected`)
 - Top-level: `verify_proof_envelope`, `compute_zk_commitment`
 
@@ -100,7 +100,7 @@ let commitment = compute_zk_commitment(
 
 ## Test Coverage
 
-36 unit tests + 5 doc tests covering:
+40 unit tests + 5 doc tests covering:
 - Plonky3 STARK proof generation and verification across all three AIRs
 - `verify_proof_envelope` dispatch (correct circuit, unknown circuit, malformed bytes)
 - Public-input KoalaBear field-chunk encode/decode round-trip

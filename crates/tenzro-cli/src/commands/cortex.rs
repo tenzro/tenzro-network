@@ -266,11 +266,10 @@ impl CortexReasonCmd {
         if let Some(settled) = result.get("settled").and_then(|v| v.as_bool()) {
             output::print_field("Settled on-chain", if settled { "yes" } else { "no" });
         }
-        if let Some(receipt) = result.get("receipt") {
-            if let Some(sig) = receipt.get("signature") {
+        if let Some(receipt) = result.get("receipt")
+            && let Some(sig) = receipt.get("signature") {
                 output::print_field("Receipt sig", &sig.to_string());
             }
-        }
         Ok(())
     }
 }

@@ -15,10 +15,15 @@ This directory contains Kubernetes manifests and Terraform infrastructure-as-cod
 
 **Internal Services:**
 - JSON-RPC (8545) - Proxied via `rpc.tenzro.network`
-- Web API (8080) - Proxied via `api.tenzro.network`
-- Faucet - Proxied via `faucet.tenzro.network`
+- Web API (8080) - Proxied via `api.tenzro.network` (also serves `/faucet`)
 - MCP (3001) - Proxied via `mcp.tenzro.network`
 - A2A (3002) - Proxied via `a2a.tenzro.network`
+- Solana MCP (3003) - Proxied via `solana-mcp.tenzro.network`
+- Ethereum MCP (3004) - Proxied via `ethereum-mcp.tenzro.network`
+- Canton MCP (3005) - Proxied via `canton-mcp.tenzro.network`
+- LayerZero MCP (3006) - Proxied via `layerzero-mcp.tenzro.network`
+- Chainlink MCP (3007) - Proxied via `chainlink-mcp.tenzro.network`
+- Li.Fi MCP (3008) - Proxied via `lifi-mcp.tenzro.network`
 - Metrics (9090) - Internal only
 
 ## Architecture
@@ -47,14 +52,16 @@ This directory contains Kubernetes manifests and Terraform infrastructure-as-cod
              |          └────┬─────┘
              |               |
     ┌────────▼─────────┐  ┌──▼────────────────────┐
-    │   RPC Nodes      │  │    Validator Nodes    │
+    │   RPC Pod        │  │    Validator Nodes    │
     │  (Deployment)    │  │    (StatefulSet)      │
     │  1 replica       │  │    3 replicas         │
     │                  │  │                       │
-    │ - Role: user     │  │ - Role: validator     │
-    │ - ephemeral      │  │ - persistent 20Gi     │
+    │ - Role: validator│  │ - Role: validator     │
+    │ - persistent     │  │ - persistent 20Gi     │
     │   storage        │  │   volumes             │
     │ - MCP/A2A ports  │  │ - consensus           │
+    │ - 6 ecosystem    │  │                       │
+    │   MCP servers    │  │                       │
     └──────────────────┘  └───────────────────────┘
 ```
 
@@ -63,12 +70,19 @@ This directory contains Kubernetes manifests and Terraform infrastructure-as-cod
 2. LoadBalancer forwards to Caddy pod
 3. Caddy terminates TLS and routes by hostname:
    - `rpc.tenzro.network` -> `tenzro-rpc-internal:8545` (JSON-RPC)
-   - `api.tenzro.network` -> `tenzro-rpc-internal:8080` (Web API)
-   - `faucet.tenzro.network` -> `tenzro-rpc-internal:8080/faucet`
-   - `mcp.tenzro.network` -> `tenzro-rpc-internal:3001` (MCP protocol)
+   - `api.tenzro.network` -> `tenzro-rpc-internal:8080` (Web API + `/faucet`)
+   - `mcp.tenzro.network` -> `tenzro-rpc-internal:3001` (Tenzro MCP)
    - `a2a.tenzro.network` -> `tenzro-rpc-internal:3002` (A2A protocol)
+   - `solana-mcp.tenzro.network` -> `tenzro-rpc-internal:3003`
+   - `ethereum-mcp.tenzro.network` -> `tenzro-rpc-internal:3004`
+   - `canton-mcp.tenzro.network` -> `tenzro-rpc-internal:3005`
+   - `layerzero-mcp.tenzro.network` -> `tenzro-rpc-internal:3006`
+   - `chainlink-mcp.tenzro.network` -> `tenzro-rpc-internal:3007`
+   - `lifi-mcp.tenzro.network` -> `tenzro-rpc-internal:3008`
 4. RPC service forwards to RPC deployment pods
 5. Validator P2P traffic (9000) bypasses Caddy and connects directly to validator headless service
+
+**RPC pod role:** the RPC pod runs the same `tenzro-node` binary with `--role validator` and is effectively a 4th validator that also exposes the MCP, A2A, and ecosystem MCP surfaces. There is no "RPC-only" mode. When deploying a new image, all 4 pods (3 StatefulSet + 1 Deployment) need rolling.
 
 **Security Model:**
 - All RPC/API/metrics ports are firewalled at GCP level (deny external access)
@@ -118,8 +132,8 @@ The Terraform configuration provisions:
   - Pod secondary range: `10.4.0.0/14`
   - Service secondary range: `10.8.0.0/20`
 - **Node Pools:**
-  - Validator pool: 5 nodes (e2-medium, 20GB standard disk)
-  - RPC pool: 1 node (e2-small, 20GB standard disk)
+  - Validator pool: nodes for the 3-replica StatefulSet
+  - RPC pool: 1 node for the RPC Deployment (which also runs `--role validator`)
   - Optional TEE pool: AMD SEV confidential VMs (disabled by default)
 - **Artifact Registry** (`tenzro`) for Docker images
 - **Firewall Rules:**
@@ -131,9 +145,9 @@ The Terraform configuration provisions:
 ### Kubernetes Resources
 
 - **Namespace:** `tenzro-testnet`
-- **ConfigMap:** Genesis configuration with 5 validators, 1 funded account, faucet
-- **StatefulSet:** 3 validator nodes with persistent 20GB volumes
-- **Deployment:** 1 RPC node (ephemeral storage, MCP/A2A endpoints)
+- **ConfigMap:** Genesis configuration (validators, funded accounts, faucet)
+- **StatefulSet:** 3 validator nodes (`tenzro-validator`) with persistent 20GB volumes
+- **Deployment:** 1 RPC pod (`tenzro-rpc`) running `--role validator` and exposing the 6 ecosystem MCP servers (3003-3008) alongside Tenzro MCP (3001) and A2A (3002)
 - **Deployment:** 1 Caddy reverse proxy with persistent 1GB volume (TLS certs)
 - **Services:**
   - `tenzro-validator` (Headless) - P2P discovery
@@ -147,7 +161,7 @@ The Terraform configuration provisions:
 
 The multi-stage Dockerfile builds the `tenzro-node` binary:
 
-**Stage 1: Builder** (`rust:1.82-slim-bookworm`)
+**Stage 1: Builder** (`rust:1.85-slim-bookworm`)
 - Installs build dependencies: pkg-config, libssl-dev, clang, cmake, protobuf-compiler
 - Uses clang as C/C++ compiler (required by llama-cpp-sys-2)
 - Builds only `tenzro-node` crate (excludes desktop app)
@@ -156,7 +170,7 @@ The multi-stage Dockerfile builds the `tenzro-node` binary:
 **Stage 2: Runtime** (`debian:bookworm-slim`)
 - Minimal runtime with ca-certificates, libssl3, curl
 - Non-root user `tenzro` (UID/GID set by Kubernetes fsGroup)
-- Exposes ports: 9000 (P2P), 8545 (RPC), 8080 (Web), 9090 (Metrics), 3001 (MCP), 3002 (A2A)
+- Exposes ports: 9000 (P2P), 8545 (RPC), 8080 (Web), 9090 (Metrics), 3001 (MCP), 3002 (A2A), 3003-3008 (ecosystem MCP)
 - Health check on `http://localhost:8080/verify/health`
 - Default data directory: `/data/tenzro`
 
@@ -256,7 +270,7 @@ terraform apply
 ```
 
 **What Gets Created:**
-- GKE cluster with 6 total nodes (5 validator + 1 RPC)
+- GKE cluster with validator pool + RPC pool
 - VPC network with firewall rules
 - Artifact Registry repository
 - All resources tagged with `terraform:true`
@@ -274,54 +288,33 @@ gcloud container clusters get-credentials tenzro-testnet \
 # Verify connection
 kubectl cluster-info
 kubectl get nodes
-
-# Expected output: 6 nodes (e2-medium validators, e2-small RPC)
 ```
 
 ### Step 3: Build Docker Image
 
-**Option A: Cloud Build (Recommended)**
+**Cloud Build (canonical path)**
 
-Cloud Build uses a high-CPU machine (e2-highcpu-32) for fast compilation:
+Cloud Build uses a high-CPU machine for fast compilation. `n1-highcpu-32` is the largest `--machine-type` value accepted without a private worker pool; a typical release build completes in roughly 18 minutes.
 
 ```bash
 # From repository root
 cd /Users/hilarl/AI/tenzronetwork
 
-# Submit build to Cloud Build (30-minute timeout)
+TAG=$(date +%Y%m%d-%H%M%S)
+
 gcloud builds submit \
-  --tag us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:latest \
+  --tag us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:$TAG \
   --project=tenzro-infra \
-  --timeout=1800s \
-  --machine-type=e2-highcpu-32 \
+  --machine-type=n1-highcpu-32 \
+  --disk-size=200 \
+  --timeout=3600s \
   .
-
-# Build typically takes 15-20 minutes on e2-highcpu-32
-# Output: Image pushed to Artifact Registry with :latest tag
-```
-
-**Option B: Local Build + Push**
-
-Build locally and push to Artifact Registry:
-
-```bash
-# Authenticate Docker
-gcloud auth configure-docker us-central1-docker.pkg.dev
-
-# Build image (may take 20-40 minutes depending on local machine)
-docker build \
-  -t us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:latest \
-  -f Dockerfile \
-  .
-
-# Push to registry
-docker push us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:latest
 ```
 
 **Image Tagging Strategy:**
-- `latest` - Most recent build (used by Kubernetes manifests)
-- `v0.1.0`, `v0.2.0` - Semantic versioning for releases
-- `sha-abc1234` - Git commit SHA for reproducibility
+- Timestamp tags `YYYYMMDD-HHMMSS` are the canonical scheme for direct deploys from the dev tree
+- Git SHA tags (e.g. `:a36a421`) are produced when the image is built from a git checkout that has a meaningful commit
+- Manifests reference an explicit tag — never `:latest`
 
 ### Step 4: Deploy Kubernetes Manifests
 
@@ -409,9 +402,14 @@ curl http://$EXTERNAL_IP/verify/health
 # Note: Domain-based routing requires DNS A records pointing to EXTERNAL_IP:
 # rpc.tenzro.network -> 35.224.150.186
 # api.tenzro.network -> 35.224.150.186
-# faucet.tenzro.network -> 35.224.150.186
 # mcp.tenzro.network -> 35.224.150.186
 # a2a.tenzro.network -> 35.224.150.186
+# solana-mcp.tenzro.network    -> 35.224.150.186
+# ethereum-mcp.tenzro.network  -> 35.224.150.186
+# canton-mcp.tenzro.network    -> 35.224.150.186
+# layerzero-mcp.tenzro.network -> 35.224.150.186
+# chainlink-mcp.tenzro.network -> 35.224.150.186
+# lifi-mcp.tenzro.network      -> 35.224.150.186
 ```
 
 **Test via domains (requires DNS configuration):**
@@ -428,7 +426,7 @@ curl https://api.tenzro.network/verify/health
 # Status endpoint
 curl https://api.tenzro.network/status
 
-# Faucet (POST request body)
+# Faucet (POST request body) — served on api.tenzro.network at /faucet (no /api/ prefix)
 curl -X POST https://api.tenzro.network/faucet \
   -H "Content-Type: application/json" \
   -d '{"address":"0x..."}'
@@ -556,12 +554,17 @@ kubectl rollout restart deployment/caddy -n tenzro-testnet
 Point your domains to the LoadBalancer IP:
 
 ```
-Type  Name                    Value
-A     rpc.tenzro.network      35.224.150.186
-A     api.tenzro.network      35.224.150.186
-A     faucet.tenzro.network   35.224.150.186
-A     mcp.tenzro.network      35.224.150.186
-A     a2a.tenzro.network      35.224.150.186
+Type  Name                              Value
+A     rpc.tenzro.network                35.224.150.186
+A     api.tenzro.network                35.224.150.186
+A     mcp.tenzro.network                35.224.150.186
+A     a2a.tenzro.network                35.224.150.186
+A     solana-mcp.tenzro.network         35.224.150.186
+A     ethereum-mcp.tenzro.network       35.224.150.186
+A     canton-mcp.tenzro.network         35.224.150.186
+A     layerzero-mcp.tenzro.network      35.224.150.186
+A     chainlink-mcp.tenzro.network      35.224.150.186
+A     lifi-mcp.tenzro.network           35.224.150.186
 ```
 
 Caddy will automatically provision Let's Encrypt TLS certificates for all domains.
@@ -815,29 +818,26 @@ Common issues:
 
 ### Rolling Updates
 
-**Update Validator Image:**
+When deploying a new image, all 4 pods (3 StatefulSet + 1 Deployment) need to be rolled — the RPC pod runs the same `tenzro-node` binary with `--role validator`.
 
 ```bash
-# Update to new image tag
+TAG=<the same tag built above>
+
 kubectl set image statefulset/tenzro-validator \
   -n tenzro-testnet \
-  tenzro-node=us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:v0.2.0
+  tenzro-node=us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:$TAG
 
-# Watch rollout (updates in reverse order: 2 → 1 → 0)
-kubectl rollout status statefulset/tenzro-validator -n tenzro-testnet
+kubectl set image deployment/tenzro-rpc \
+  -n tenzro-testnet \
+  tenzro-node=us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:$TAG
+
+# Watch rollouts (StatefulSet rolls in reverse ordinal: 2 → 1 → 0)
+kubectl rollout status statefulset/tenzro-validator -n tenzro-testnet --timeout=600s
+kubectl rollout status deployment/tenzro-rpc -n tenzro-testnet --timeout=300s
 
 # Rollback if needed
 kubectl rollout undo statefulset/tenzro-validator -n tenzro-testnet
-```
-
-**Update RPC Image:**
-
-```bash
-kubectl set image deployment/tenzro-rpc \
-  -n tenzro-testnet \
-  tenzro-node=us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:v0.2.0
-
-kubectl rollout status deployment/tenzro-rpc -n tenzro-testnet
+kubectl rollout undo deployment/tenzro-rpc -n tenzro-testnet
 ```
 
 **Update Manifests:**
@@ -849,7 +849,7 @@ vim deploy/kubernetes/validator-statefulset.yaml
 # Apply changes
 kubectl apply -f deploy/kubernetes/validator-statefulset.yaml
 
-# Force restart if image tag is :latest
+# Force restart if the manifest didn't change but a config did
 kubectl rollout restart statefulset/tenzro-validator -n tenzro-testnet
 ```
 
@@ -1025,18 +1025,15 @@ Redeploy StatefulSet (requires recreating pods).
 
 ## Cost Estimation
 
-**Monthly costs (us-central1, as of March 2026):**
+Indicative monthly cost drivers (us-central1):
 
-| Resource | Spec | Quantity | Monthly Cost |
-|----------|------|----------|--------------|
-| GKE cluster management fee | - | 1 | $73.00 |
-| Validator nodes | e2-medium (2 vCPU, 4GB) | 5 | ~$160 |
-| RPC nodes | e2-small (2 vCPU, 2GB) | 1 | ~$25 |
-| Persistent disks (validators) | 20GB SSD | 3 | ~$6 |
-| Persistent disk (Caddy) | 1GB SSD | 1 | ~$0.20 |
-| LoadBalancer | - | 1 | ~$18 |
-| Egress (estimate) | - | - | ~$10 |
-| **Total** | | | **~$292/month** |
+| Resource | Notes |
+|----------|-------|
+| GKE cluster management fee | Flat per-cluster |
+| Validator + RPC nodes | Sized to the workload; 4 pods total (3 StatefulSet + 1 Deployment) |
+| Persistent disks | 20GB SSD per StatefulSet validator + 1GB SSD for Caddy |
+| LoadBalancer | One regional LB fronting Caddy |
+| Egress | Variable; most testnet traffic is small JSON-RPC payloads |
 
 **Cost varies by:**
 - Region (us-central1 is mid-priced)
@@ -1051,93 +1048,6 @@ Use [GCP Pricing Calculator](https://cloud.google.com/products/calculator) for a
 - Use standard persistent disks instead of SSD
 - Use preemptible nodes for RPC (not validators)
 - Delete unused snapshots and logs
-
-## CI/CD Integration
-
-### GitHub Actions
-
-Create `.github/workflows/deploy.yml`:
-
-```yaml
-name: Deploy to GKE
-
-on:
-  push:
-    branches: [main]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Authenticate to GCP
-        uses: google-github-actions/auth@v1
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v1
-
-      - name: Build and push image
-        run: |
-          gcloud builds submit \
-            --tag us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:${{ github.sha }} \
-            --project=tenzro-infra \
-            --timeout=1800s \
-            --machine-type=e2-highcpu-32 \
-            .
-
-      - name: Deploy to GKE
-        run: |
-          gcloud container clusters get-credentials tenzro-testnet \
-            --zone us-central1-a \
-            --project tenzro-infra
-
-          kubectl set image statefulset/tenzro-validator \
-            -n tenzro-testnet \
-            tenzro-node=us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:${{ github.sha }}
-
-          kubectl set image deployment/tenzro-rpc \
-            -n tenzro-testnet \
-            tenzro-node=us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:${{ github.sha }}
-```
-
-### Cloud Build Trigger
-
-Create automatic builds on git push:
-
-```bash
-gcloud builds triggers create github \
-  --repo-name=tenzronetwork \
-  --repo-owner=tenzro \
-  --branch-pattern="^main$" \
-  --build-config=cloudbuild.yaml \
-  --project=tenzro-infra
-```
-
-Create `cloudbuild.yaml`:
-
-```yaml
-steps:
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'build'
-      - '-t'
-      - 'us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:$COMMIT_SHA'
-      - '-t'
-      - 'us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:latest'
-      - '.'
-    timeout: 1800s
-
-images:
-  - 'us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:$COMMIT_SHA'
-  - 'us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:latest'
-
-options:
-  machineType: 'E2_HIGHCPU_32'
-  logging: CLOUD_LOGGING_ONLY
-```
 
 ## Next Steps
 
@@ -1216,7 +1126,7 @@ When making infrastructure changes:
 
 ---
 
-**Last Updated:** 2026-03-22
-**Deployment Version:** v0.1.0
+**Last Updated:** 2026-05-04
+**Deployment Version:** v0.1.0 (pre-alpha)
 **GKE Cluster:** tenzro-testnet (us-central1-a)
 **Project:** tenzro-infra

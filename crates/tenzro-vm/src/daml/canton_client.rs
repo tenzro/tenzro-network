@@ -1006,10 +1006,10 @@ impl CantonClient {
         ).await?;
 
         let mut contracts = Vec::new();
-        if let Some(entry) = response.contract_entry {
-            if let Some(created) = entry.created_event {
-                contracts.push(DamlContractId::new(&created.contract_id));
-            }
+        if let Some(entry) = response.contract_entry
+            && let Some(created) = entry.created_event
+        {
+            contracts.push(DamlContractId::new(&created.contract_id));
         }
 
         Ok(contracts)

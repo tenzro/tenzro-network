@@ -123,11 +123,11 @@ impl DownloadTask {
 
     /// Estimates time remaining in seconds
     pub fn estimated_time_remaining(&self) -> Option<u64> {
-        if let Some(speed) = self.download_speed() {
-            if speed > 0.0 {
-                let remaining_bytes = self.total_bytes.saturating_sub(self.downloaded_bytes);
-                return Some((remaining_bytes as f64 / speed) as u64);
-            }
+        if let Some(speed) = self.download_speed()
+            && speed > 0.0
+        {
+            let remaining_bytes = self.total_bytes.saturating_sub(self.downloaded_bytes);
+            return Some((remaining_bytes as f64 / speed) as u64);
         }
         None
     }

@@ -9,8 +9,10 @@ use tenzro_node::{NodeConfig, TenzroNode, MetricsCollector};
 /// Helper: create a NodeConfig with a unique temp data directory
 fn test_config() -> (NodeConfig, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("create temp dir");
-    let mut config = NodeConfig::default();
-    config.data_dir = tmp.path().to_path_buf();
+    let config = NodeConfig {
+        data_dir: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
     (config, tmp)
 }
 
@@ -197,6 +199,31 @@ async fn test_rpc_server_graceful_shutdown() {
     ).await;
 
     assert!(result.is_ok(), "Server should shut down within 5s");
+}
+
+/// Test: `RpcServer::start()` (the SDK-friendly no-args public API) binds
+/// successfully when spawned. `start()` itself runs forever (it allocates
+/// its own never-firing shutdown channel), so we spawn it and abort the
+/// task once we've confirmed it's running.
+#[tokio::test]
+async fn test_rpc_server_start_no_args() {
+    use tenzro_node::RpcServer;
+
+    let (config, _tmp) = test_config();
+    let mut node = TenzroNode::new(config).await.expect("node creation");
+    node.start().await.expect("node start");
+    let node_arc = Arc::new(node);
+
+    let rpc_server = RpcServer::new(node_arc, "127.0.0.1:0".to_string());
+    let handle = tokio::spawn(async move { rpc_server.start().await });
+
+    // Give the server a moment to bind. `start()` has no addr-discovery
+    // path (that's `start_with_shutdown_and_addr`'s job), so we just
+    // confirm the task is still running — i.e., didn't fail to bind.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(!handle.is_finished(), "start() should still be running");
+
+    handle.abort();
 }
 
 /// Test: Transaction submitted through event loop

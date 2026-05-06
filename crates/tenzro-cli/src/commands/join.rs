@@ -111,12 +111,11 @@ impl JoinCmd {
         println!();
         output::print_field("Wallet ID", &wallet_id);
         output::print_field("Address", &wallet_address);
-        if let Some(pk) = wallet.get("public_key").and_then(|v| v.as_str()) {
-            if !pk.is_empty() {
+        if let Some(pk) = wallet.get("public_key").and_then(|v| v.as_str())
+            && !pk.is_empty() {
                 let truncated = if pk.len() > 20 { format!("{}...", &pk[..20]) } else { pk.to_string() };
                 output::print_field("Public Key", &truncated);
             }
-        }
 
         // Display MicroNode capabilities (only when joinAsMicroNode is supported)
         if is_micro_node {

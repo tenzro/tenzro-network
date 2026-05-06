@@ -4,7 +4,7 @@
 //!
 //! The syncer holds one [`SyncerState`] per active run. Per round it:
 //! 1. Receives [`OuterGradient`] submissions over gossip topic
-//!    `tenzro/training/1.0.0`.
+//!    `tenzro/training`.
 //! 2. Calls [`accept_outer_gradient`](SyncerState::accept_outer_gradient) to
 //!    validate and buffer.
 //! 3. Once K-of-M is reached for a fragment (or grace window τ elapses),

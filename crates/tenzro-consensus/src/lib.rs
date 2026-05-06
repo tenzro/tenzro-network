@@ -100,6 +100,7 @@
 //! }
 //! ```
 
+pub mod admission;
 pub mod config;
 pub mod epoch_manager;
 pub mod error;
@@ -114,6 +115,10 @@ pub mod vote_state;
 pub mod voter;
 
 // Re-export commonly used types
+pub use admission::{
+    AdmissionConfig, AdmissionController, AdmissionDecision, BucketSnapshot,
+    DefaultLaneResolver, Lane, LaneResolver, LaneStats,
+};
 pub use config::{ConsensusConfig, BftThreshold, LeaderRotation};
 pub use epoch_manager::{Epoch, EpochManager, EpochStats};
 pub use error::{ConsensusError, Result};

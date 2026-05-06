@@ -125,11 +125,15 @@ impl Transaction {
     }
 }
 
-/// The type and payload of a transaction
+/// The type and payload of a transaction.
 ///
 /// Different transaction types enable different operations on Tenzro Network.
+///
+/// Uses serde's default externally-tagged enum representation
+/// (`{"Transfer": {...}}` in JSON, `u32` discriminant + payload in bincode).
+/// Adjacently-tagged form (`#[serde(tag = "type", content = "data")]`) is
+/// incompatible with bincode 1.x — see `tenzro_network::message::MessagePayload`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
 pub enum TransactionType {
     /// Transfer TNZO tokens
     Transfer {
@@ -210,9 +214,9 @@ pub enum TransactionType {
     /// Create a new escrow account, locking funds from the payer
     ///
     /// The escrow_id is derived deterministically by the VM as
-    /// `SHA-256("tenzro/escrow/id/v1" || payer || nonce_le)` and the funds are
+    /// `SHA-256("tenzro/escrow/id" || payer || nonce_le)` and the funds are
     /// transferred to a vault address derived as
-    /// `Address(SHA-256("tenzro/escrow/vault/v1" || escrow_id)[..20])`.
+    /// `Address(SHA-256("tenzro/escrow/vault" || escrow_id)[..20])`.
     ///
     /// Authorization: `tx.from` must equal the payer (enforced by signature verification).
     CreateEscrow {
@@ -243,6 +247,132 @@ pub enum TransactionType {
     RefundEscrow {
         /// 32-byte deterministic escrow identifier
         escrow_id: [u8; 32],
+    },
+    /// Pause an agent (Agent-Swarm Spec 1, tier 1).
+    ///
+    /// Reversible state. Agent stops accepting new tasks; existing
+    /// obligations are honored under the pause-bypass allow-list. Stake
+    /// untouched. Inbound payments still permitted; outbound payments
+    /// blocked.
+    ///
+    /// Authorization: `tx.from` MUST equal the agent's controller DID
+    /// (or hold a `DelegationScope.allowed_operations` entry of
+    /// `pause_agent`). Network-initiated pauses are not allowed — escalate
+    /// to Quarantine instead.
+    PauseAgent {
+        /// DID of the agent to pause (`did:tenzro:machine:...`)
+        agent_did: String,
+        /// DID of the authorising controller. Must match the identity
+        /// bound to `tx.from`; echoed on the wire so the receipt is
+        /// self-describing and the VM does not need an identity lookup.
+        controller_did: String,
+        /// Canonical reason code (see kill-switch spec §"Reason codes")
+        reason_code: u16,
+        /// Optional human reason text, capped at 256 bytes
+        reason_text: Option<String>,
+        /// Optional pause expiry; `None` means indefinite (capped by
+        /// governance `pause_max_duration`).
+        until: Option<Timestamp>,
+    },
+    /// Quarantine an agent (Agent-Swarm Spec 1, tier 2).
+    ///
+    /// Reversible only after evidence review. Inbound + outbound payments
+    /// blocked. Stake frozen — cannot withdraw, cannot earn rewards.
+    /// Existing tasks halt.
+    ///
+    /// Authorization: controller (as PauseAgent), OR slashing-committee
+    /// quorum via `StakingSlashingCallback`, OR governance proposal.
+    QuarantineAgent {
+        /// DID of the agent to quarantine
+        agent_did: String,
+        /// DID of the authorising controller. Must match the identity
+        /// bound to `tx.from`.
+        controller_did: String,
+        /// Canonical reason code
+        reason_code: u16,
+        /// Optional human reason text, capped at 256 bytes
+        reason_text: Option<String>,
+        /// Optional commitment hash to off-chain evidence (32-byte SHA-256)
+        evidence_hash: Option<[u8; 32]>,
+    },
+    /// Terminate an agent (Agent-Swarm Spec 1, tier 3).
+    ///
+    /// **Irreversible.** Identity revoked via the underlying
+    /// `revoke_did` primitive. Stake/bond slashed by `slash_bps` capped
+    /// at the governance `slash_bps_cap`. With `cascade=true`, all
+    /// descendants under the agent's `children:` index are terminated
+    /// recursively (depth-bounded by `cascade_max_depth`, default 32).
+    ///
+    /// Authorization: controller, OR governance proposal with timelock,
+    /// OR cascade=true descended from a parent's TerminateAgent.
+    TerminateAgent {
+        /// DID of the agent to terminate
+        agent_did: String,
+        /// DID of the authorising controller. Must match the identity
+        /// bound to `tx.from`.
+        controller_did: String,
+        /// Canonical reason code
+        reason_code: u16,
+        /// Basis points of stake/bond to slash (0..=10000), capped per
+        /// governance `slash_bps_cap`.
+        slash_bps: u16,
+        /// If true, recursively terminate descendants under `children:`.
+        cascade: bool,
+    },
+    /// Post a fresh AgentBond for `agent_did` (Agent-Swarm Spec 9).
+    ///
+    /// Locks `amount` TNZO from `tx.from` (the controller wallet) into
+    /// the bond vault derived as
+    /// `Address(SHA-256("tenzro/agent-bond/vault" || agent_did))`. The
+    /// bond enters `BondLifecycle::Active` and promotes the agent to the
+    /// Delegated admission lane while ≥ `bond_min_for_promotion`.
+    ///
+    /// Authorization: `tx.from` is the controller; the VM enforces that
+    /// the agent_did either has no prior bond or its prior bond is in a
+    /// terminal state (`Returned` / `Slashed`).
+    PostAgentBond {
+        /// DID of the agent being bonded (`did:tenzro:machine:...`)
+        agent_did: String,
+        /// DID of the controller posting the bond. Echoed on the wire so
+        /// the receipt is self-describing without an identity lookup.
+        controller_did: String,
+        /// Amount of TNZO to lock in the bond vault
+        amount: u128,
+    },
+    /// Top up an existing Active AgentBond by `amount`.
+    ///
+    /// Authorization: `tx.from` MUST equal the original poster (the
+    /// bond's `controller` field).
+    IncreaseAgentBond {
+        /// DID of the agent whose bond is being increased
+        agent_did: String,
+        /// Additional TNZO to lock
+        amount: u128,
+    },
+    /// Initiate the cooldown timer on an Active AgentBond. Funds are
+    /// **not** released by the VM — finalisation happens off-VM via the
+    /// node-side `BondManager` once `cooldown_ms` has elapsed.
+    ///
+    /// Authorization: `tx.from` MUST equal the bond's controller.
+    WithdrawAgentBond {
+        /// DID of the agent whose bond is being withdrawn
+        agent_did: String,
+    },
+    /// Pay out an `Approved` insurance claim from the insurance pool
+    /// vault to the claimant. The off-chain `BondManager` has already
+    /// validated the claim and reserved funds; this transaction performs
+    /// the on-chain transfer and persists a `paid_claim:<claim_id>`
+    /// marker so the same claim cannot be paid twice.
+    ///
+    /// Authorization: governance committee (or `tx.from` matching the
+    /// configured insurance-pool admin DID).
+    PayInsuranceClaim {
+        /// 32-byte deterministic claim identifier (lowercase hex)
+        claim_id_hex: String,
+        /// Recipient of the payout
+        claimant: Address,
+        /// Amount to pay from the pool vault, in TNZO base units
+        amount: u128,
     },
 }
 
@@ -392,6 +522,25 @@ impl SignedTransaction {
                 // Bound number of signatures to prevent DoS at verification time
                 if proof.signatures.len() > 16 {
                     return Err("Too many signatures in escrow release proof");
+                }
+            }
+            TransactionType::PauseAgent { agent_did, reason_text, .. }
+            | TransactionType::QuarantineAgent { agent_did, reason_text, .. } => {
+                if agent_did.len() > 256 {
+                    return Err("agent_did exceeds maximum length");
+                }
+                if let Some(t) = reason_text
+                    && t.len() > 256
+                {
+                    return Err("reason_text exceeds 256 bytes");
+                }
+            }
+            TransactionType::TerminateAgent { agent_did, slash_bps, .. } => {
+                if agent_did.len() > 256 {
+                    return Err("agent_did exceeds maximum length");
+                }
+                if *slash_bps > 10_000 {
+                    return Err("slash_bps exceeds 100%");
                 }
             }
             // Other transaction types have bounded data (strings, primitives)

@@ -149,9 +149,10 @@ pub struct CrosschainTokenManager {
     authorized_bridges: DashMap<[u8; 20], BridgeAuthorization>,
     /// Reference to the native TNZO token (mint/burn target).
     tnzo_token: Arc<TnzoToken>,
-    /// Reference to the unified token registry (used by token-specific bridge
-    /// authorization checks when `authorized_tokens` is non-empty).
-    #[allow(dead_code)]
+    /// Reference to the unified token registry. Used by
+    /// [`Self::resolve_authorized_tokens`] to project a bridge's
+    /// `authorized_tokens` set into full `TokenInfo` records for
+    /// observability and registry-aware authorization.
     registry: Arc<TokenRegistry>,
     /// Mint event log, keyed by nonce.
     mint_events: DashMap<u64, CrosschainMintEvent>,
@@ -296,6 +297,28 @@ impl CrosschainTokenManager {
         })
     }
 
+    /// Resolves a bridge's `authorized_tokens` set into full
+    /// [`TokenDefinition`] records via the unified token registry.
+    ///
+    /// Tokens that no longer exist in the registry are silently skipped,
+    /// allowing operators to detect orphaned authorizations by length
+    /// comparison against the bridge's raw `authorized_tokens` vector.
+    pub fn resolve_authorized_tokens(
+        &self,
+        bridge_address: &[u8; 20],
+    ) -> Vec<crate::TokenDefinition> {
+        let entry = match self.authorized_bridges.get(bridge_address) {
+            Some(e) => e,
+            None => return Vec::new(),
+        };
+        entry
+            .value()
+            .authorized_tokens
+            .iter()
+            .filter_map(|tid| self.registry.get(tid))
+            .collect()
+    }
+
     /// Lists all currently authorized bridges.
     pub fn list_authorized_bridges(&self) -> Vec<BridgeInfo> {
         self.authorized_bridges
@@ -364,13 +387,13 @@ impl CrosschainTokenManager {
 
         if is_mint {
             // Per-tx limit
-            if let Some(max) = auth.max_mint_per_tx {
-                if amount > max {
-                    return Err(TokenError::InvalidAmount(format!(
-                        "Mint amount {} exceeds per-tx limit {}",
-                        amount, max
-                    )));
-                }
+            if let Some(max) = auth.max_mint_per_tx
+                && amount > max
+            {
+                return Err(TokenError::InvalidAmount(format!(
+                    "Mint amount {} exceeds per-tx limit {}",
+                    amount, max
+                )));
             }
             // Daily limit
             if let Some(daily) = auth.daily_mint_limit {
@@ -384,13 +407,13 @@ impl CrosschainTokenManager {
             }
         } else {
             // Per-tx limit
-            if let Some(max) = auth.max_burn_per_tx {
-                if amount > max {
-                    return Err(TokenError::InvalidAmount(format!(
-                        "Burn amount {} exceeds per-tx limit {}",
-                        amount, max
-                    )));
-                }
+            if let Some(max) = auth.max_burn_per_tx
+                && amount > max
+            {
+                return Err(TokenError::InvalidAmount(format!(
+                    "Burn amount {} exceeds per-tx limit {}",
+                    amount, max
+                )));
             }
             // Daily limit
             if let Some(daily) = auth.daily_burn_limit {

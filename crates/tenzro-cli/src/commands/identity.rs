@@ -30,6 +30,14 @@ pub enum IdentityCommand {
     SetDelegation(IdentitySetDelegationCmd),
     /// Register a new machine identity
     RegisterMachine(IdentityRegisterMachineCmd),
+    /// List the public JWK Set published by this node (RFC 7517)
+    Jwks(IdentityJwksCmd),
+    /// Look up a single JWK by `keyid` (RFC 9421 keyid resolution)
+    JwksGet(IdentityJwksGetCmd),
+    /// Revoke an identity by DID (logical delete, cascades through act-chain)
+    Revoke(IdentityRevokeCmd),
+    /// Hard-delete a revoked identity (TDIP/GDPR Article 17 right-to-erasure)
+    Forget(IdentityForgetCmd),
 }
 
 impl IdentityCommand {
@@ -45,6 +53,10 @@ impl IdentityCommand {
             Self::ResolveDocument(cmd) => cmd.execute().await,
             Self::SetDelegation(cmd) => cmd.execute().await,
             Self::RegisterMachine(cmd) => cmd.execute().await,
+            Self::Jwks(cmd) => cmd.execute().await,
+            Self::JwksGet(cmd) => cmd.execute().await,
+            Self::Revoke(cmd) => cmd.execute().await,
+            Self::Forget(cmd) => cmd.execute().await,
         }
     }
 }
@@ -538,6 +550,209 @@ impl IdentityRegisterMachineCmd {
         if let Some(v) = result.get("did").and_then(|v| v.as_str()) { output::print_field("DID", v); }
         output::print_field("Controller", &self.controller);
         if let Some(v) = result.get("wallet_address").and_then(|v| v.as_str()) { output::print_field("Wallet", v); }
+        Ok(())
+    }
+}
+
+/// List the public JWK Set published by this node (RFC 7517)
+#[derive(Debug, Parser)]
+pub struct IdentityJwksCmd {
+    /// Emit raw JSON (the JWK Set object) instead of a human-readable table
+    #[arg(long)]
+    json: bool,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl IdentityJwksCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc.call("tenzro_listAgentJwks", serde_json::json!([])).await?;
+
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+
+        output::print_header("Public JWK Set");
+
+        let keys = result.get("keys").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        if keys.is_empty() {
+            output::print_info("No published keys.");
+            return Ok(());
+        }
+
+        for jwk in &keys {
+            println!();
+            if let Some(kid) = jwk.get("kid").and_then(|v| v.as_str()) {
+                output::print_field("kid", kid);
+            }
+            if let Some(kty) = jwk.get("kty").and_then(|v| v.as_str()) {
+                output::print_field("kty", kty);
+            }
+            if let Some(alg) = jwk.get("alg").and_then(|v| v.as_str()) {
+                output::print_field("alg", alg);
+            }
+            if let Some(crv) = jwk.get("crv").and_then(|v| v.as_str()) {
+                output::print_field("crv", crv);
+            }
+            if let Some(use_) = jwk.get("use").and_then(|v| v.as_str()) {
+                output::print_field("use", use_);
+            }
+        }
+
+        println!();
+        output::print_field("Total keys", &keys.len().to_string());
+        Ok(())
+    }
+}
+
+/// Look up a single JWK by `keyid` (RFC 9421 keyid resolution)
+#[derive(Debug, Parser)]
+pub struct IdentityJwksGetCmd {
+    /// The `kid` to look up — typically `<did>#<key_fragment>`
+    keyid: String,
+
+    /// Emit raw JSON (the JWK object) instead of a human-readable table
+    #[arg(long)]
+    json: bool,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl IdentityJwksGetCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_getAgentJwk", serde_json::json!([self.keyid]))
+            .await?;
+
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+
+        output::print_header("JWK");
+        if let Some(kid) = result.get("kid").and_then(|v| v.as_str()) {
+            output::print_field("kid", kid);
+        }
+        if let Some(kty) = result.get("kty").and_then(|v| v.as_str()) {
+            output::print_field("kty", kty);
+        }
+        if let Some(alg) = result.get("alg").and_then(|v| v.as_str()) {
+            output::print_field("alg", alg);
+        }
+        if let Some(crv) = result.get("crv").and_then(|v| v.as_str()) {
+            output::print_field("crv", crv);
+        }
+        if let Some(use_) = result.get("use").and_then(|v| v.as_str()) {
+            output::print_field("use", use_);
+        }
+        if let Some(x) = result.get("x").and_then(|v| v.as_str()) {
+            output::print_field("x", x);
+        }
+        if let Some(y) = result.get("y").and_then(|v| v.as_str()) {
+            output::print_field("y", y);
+        }
+        if let Some(n) = result.get("n").and_then(|v| v.as_str()) {
+            output::print_field("n", n);
+        }
+        if let Some(e) = result.get("e").and_then(|v| v.as_str()) {
+            output::print_field("e", e);
+        }
+        Ok(())
+    }
+}
+
+/// Revoke an identity (logical delete) — sets status to `Revoked` and
+/// cascades JWT invalidation through the entire act-chain rooted at this
+/// DID. Distinct from `forget` which is a hard-delete after revocation.
+#[derive(Debug, Parser)]
+pub struct IdentityRevokeCmd {
+    /// The DID to revoke
+    did: String,
+
+    /// Optional reason for revocation (recorded in audit log)
+    #[arg(long)]
+    reason: Option<String>,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl IdentityRevokeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Revoke Identity");
+        let spinner = output::create_spinner("Revoking DID...");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let mut params = serde_json::json!({ "did": self.did });
+        if let Some(reason) = &self.reason {
+            params["reason"] = serde_json::Value::String(reason.clone());
+        }
+        let result: serde_json::Value = rpc.call("tenzro_revokeDid", params).await?;
+
+        spinner.finish_and_clear();
+        output::print_success("Identity revoked");
+        println!();
+        output::print_field("DID", &self.did);
+        if let Some(count) = result.get("affected_jti_count").and_then(|v| v.as_u64()) {
+            output::print_field("Affected JTIs", &count.to_string());
+        }
+        if let Some(cascade) = result.get("cascade").and_then(|v| v.as_str()) {
+            output::print_field("Cascade", cascade);
+        }
+        Ok(())
+    }
+}
+
+/// TDIP/GDPR Article 17 right-to-erasure. Hard-deletes a previously
+/// revoked identity from the registry and persistent storage. The
+/// identity must already be in `Revoked` status — call `revoke` first,
+/// allow the cascading revocation to propagate, then call `forget`.
+#[derive(Debug, Parser)]
+pub struct IdentityForgetCmd {
+    /// The DID to erase. Must already be in `Revoked` status.
+    did: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl IdentityForgetCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Forget Identity (Article 17)");
+        let spinner = output::create_spinner("Erasing identity record...");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_forgetIdentity", serde_json::json!({ "did": self.did }))
+            .await?;
+
+        spinner.finish_and_clear();
+        output::print_success("Identity erased");
+        println!();
+        output::print_field("DID", &self.did);
+        if let Some(status) = result.get("status").and_then(|v| v.as_str()) {
+            output::print_field("Status", status);
+        }
+        if let Some(note) = result.get("note").and_then(|v| v.as_str()) {
+            output::print_field("Note", note);
+        }
         Ok(())
     }
 }

@@ -419,7 +419,3 @@ async fn e2e_signed_transaction_wire_format() {
     }
 }
 
-// Suppress the unused-imports lint when this file is compiled without the
-// `e2e` feature (i.e., never — the cfg-attr above gates the whole module).
-#[allow(dead_code)]
-const _SILENCE_UNUSED_PATHBUF: Option<PathBuf> = None;

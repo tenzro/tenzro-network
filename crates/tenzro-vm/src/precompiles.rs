@@ -75,8 +75,8 @@ pub const PRECOMPILE_ERC8004_IDENTITY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 /// `getFeedback` for cross-agent reputation, ABI-compatible with the Ethereum
 /// reference contracts.
 pub const PRECOMPILE_ERC8004_REPUTATION: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1b, 0];
-/// ERC-8004 ValidationRegistry system contract (0x101c) — `requestValidation`
-/// / `submitValidation` / `getValidation` for verifiable agent work
+/// ERC-8004 ValidationRegistry system contract (0x101c) — `validationRequest`
+/// / `validationResponse` / `getValidation` for verifiable agent work
 /// attestation, ABI-compatible with the Ethereum reference contracts.
 pub const PRECOMPILE_ERC8004_VALIDATION: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1c, 0];
 
@@ -480,7 +480,7 @@ impl PrecompileRegistry {
     ///
     /// - `0x101a`: IdentityRegistry — `registerAgent` / `getAgent`
     /// - `0x101b`: ReputationRegistry — `submitFeedback` / `getFeedback`
-    /// - `0x101c`: ValidationRegistry — `requestValidation` / `submitValidation` / `getValidation`
+    /// - `0x101c`: ValidationRegistry — `validationRequest` / `validationResponse` / `getValidation`
     pub fn register_erc8004_precompiles(
         &self,
     ) -> (
@@ -1983,7 +1983,7 @@ fn precompile_vrf_verify(input: &[u8], gas_limit: u64) -> Result<PrecompileResul
 ///
 /// Phase 1 (shell): given a JSON-serialized [`TrainingReceipt`], recompute
 /// `run_root` from `round_state_roots` using the `tenzro-training` Merkle
-/// scheme (SHA-256 with domain prefix `tenzro/train/run-root/v1`,
+/// scheme (SHA-256 with domain prefix `tenzro/train/run-root`,
 /// duplicate-last for unbalanced layers). Returns `[1]` iff the recomputed
 /// root matches `receipt.run_root`, else `[0]`.
 ///
@@ -2038,14 +2038,14 @@ fn precompile_training_verify(input: &[u8], gas_limit: u64) -> Result<Precompile
     // raw 32-byte array or that wrapped form for forward compatibility.
     fn extract_32(v: &serde_json::Value) -> Option<[u8; 32]> {
         // Form A: array of 32 numbers.
-        if let Some(arr) = v.as_array() {
-            if arr.len() == 32 {
-                let mut out = [0u8; 32];
-                for (i, b) in arr.iter().enumerate() {
-                    out[i] = b.as_u64()? as u8;
-                }
-                return Some(out);
+        if let Some(arr) = v.as_array()
+            && arr.len() == 32
+        {
+            let mut out = [0u8; 32];
+            for (i, b) in arr.iter().enumerate() {
+                out[i] = b.as_u64()? as u8;
             }
+            return Some(out);
         }
         // Form B: object with "0" key holding the byte array (newtype tuple).
         if let Some(inner) = v.get("0") {
@@ -2088,7 +2088,7 @@ fn precompile_training_verify(input: &[u8], gas_limit: u64) -> Result<Precompile
             let mut next = Vec::with_capacity(layer.len() / 2);
             for chunk in layer.chunks(2) {
                 let mut hasher = Sha256::new();
-                hasher.update(b"tenzro/train/run-root/v1");
+                hasher.update(b"tenzro/train/run-root");
                 hasher.update(chunk[0]);
                 hasher.update(chunk[1]);
                 let digest = hasher.finalize();

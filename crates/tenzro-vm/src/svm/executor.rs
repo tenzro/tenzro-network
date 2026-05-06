@@ -257,8 +257,9 @@ pub struct SvmExecutor {
     /// Configuration
     config: VmConfig,
 
-    /// Gas oracle for dynamic gas pricing (wired up, future enhancement)
-    #[allow(dead_code)]
+    /// Gas oracle, shared with the parent `MultiVmRuntime`. Exposed via
+    /// [`Self::gas_oracle`] so SVM-side callers can read the same
+    /// authoritative price source as EVM/Native paths.
     gas_oracle: Arc<GasOracle>,
 
     /// Default compute unit limit per transaction
@@ -285,6 +286,11 @@ impl SvmExecutor {
             max_compute_unit_limit: svm_gas_costs::MAX_COMPUTE_UNITS,
             loader,
         })
+    }
+
+    /// Returns the gas oracle shared with the parent runtime.
+    pub fn gas_oracle(&self) -> &Arc<GasOracle> {
+        &self.gas_oracle
     }
 
     /// Create the sBPF loader with Solana-compatible syscall registrations.
@@ -586,7 +592,7 @@ impl SvmExecutor {
             MemoryRegion::new(&mut stack, ebpf::MM_STACK_START),
             MemoryRegion::new(&mut heap, ebpf::MM_HEAP_START),
             MemoryRegion::new(
-                &raw mut *input_mem.as_mut_slice() as *mut [u8],
+                &raw mut *input_mem.as_mut_slice(),
                 ebpf::MM_INPUT_START,
             ),
         ];
@@ -1098,7 +1104,7 @@ mod tests {
             MemoryRegion::new(&mut stack, ebpf::MM_STACK_START),
             MemoryRegion::new(&mut heap, ebpf::MM_HEAP_START),
             MemoryRegion::new(
-                &raw mut *input.as_mut_slice() as *mut [u8],
+                &raw mut *input.as_mut_slice(),
                 ebpf::MM_INPUT_START,
             ),
         ];

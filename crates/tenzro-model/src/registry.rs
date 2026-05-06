@@ -72,16 +72,16 @@ impl ModelFilter {
 
     /// Checks if a model matches this filter
     pub fn matches(&self, model: &ModelInfo) -> bool {
-        if let Some(modality) = self.modality {
-            if !model.modality.supports(modality) {
-                return false;
-            }
+        if let Some(modality) = self.modality
+            && !model.modality.supports(modality)
+        {
+            return false;
         }
 
-        if let Some(min_ctx) = self.min_context_window {
-            if model.parameters.context_window < min_ctx {
-                return false;
-            }
+        if let Some(min_ctx) = self.min_context_window
+            && model.parameters.context_window < min_ctx
+        {
+            return false;
         }
 
         if let Some(max_price) = self.max_price {
@@ -92,22 +92,22 @@ impl ModelFilter {
             }
         }
 
-        if let Some(status) = self.status {
-            if model.status != status {
-                return false;
-            }
+        if let Some(status) = self.status
+            && model.status != status
+        {
+            return false;
         }
 
-        if let Some(ref name_filter) = self.name_contains {
-            if !model.name.to_lowercase().contains(&name_filter.to_lowercase()) {
-                return false;
-            }
+        if let Some(ref name_filter) = self.name_contains
+            && !model.name.to_lowercase().contains(&name_filter.to_lowercase())
+        {
+            return false;
         }
 
-        if let Some(provider) = self.provider {
-            if model.provider != provider {
-                return false;
-            }
+        if let Some(provider) = self.provider
+            && model.provider != provider
+        {
+            return false;
         }
 
         true

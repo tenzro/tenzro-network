@@ -65,12 +65,11 @@ impl HardwareCapabilities {
         #[cfg(target_os = "macos")]
         {
             use std::process::Command;
-            if let Ok(output) = Command::new("sysctl").arg("-n").arg("hw.memsize").output() {
-                if let Ok(bytes_str) = String::from_utf8(output.stdout) {
-                    if let Ok(bytes) = bytes_str.trim().parse::<u64>() {
-                        caps.ram_gb = (bytes / 1_073_741_824) as u32;
-                    }
-                }
+            if let Ok(output) = Command::new("sysctl").arg("-n").arg("hw.memsize").output()
+                && let Ok(bytes_str) = String::from_utf8(output.stdout)
+                && let Ok(bytes) = bytes_str.trim().parse::<u64>()
+            {
+                caps.ram_gb = (bytes / 1_073_741_824) as u32;
             }
         }
 

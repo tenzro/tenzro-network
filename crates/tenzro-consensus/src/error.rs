@@ -99,6 +99,38 @@ pub enum ConsensusError {
     /// Equivocation detected
     #[error("Equivocation detected: validator {validator} voted for multiple blocks in view {view}")]
     Equivocation { validator: String, view: u64 },
+
+    /// Per-DID admission lane bucket exhausted (Spec 2).
+    ///
+    /// `lane` carries the lane the controller was assigned to; `retry_after_ms`
+    /// is the controller's best-effort hint for when one bucket token will be
+    /// available; `current_rate` is the lane's per-second refill in tokens/sec.
+    #[error("Rate limit exceeded for lane {lane}: retry after {retry_after_ms}ms (rate {current_rate}/s)")]
+    RateLimited {
+        lane: &'static str,
+        retry_after_ms: u64,
+        burst_remaining: u32,
+        current_rate: f64,
+    },
+
+    /// Per-DID admission lane fee-floor not met (Spec 2).
+    ///
+    /// The lane multiplier is applied to the mempool's static minimum gas
+    /// price (`mempool_min_gas_price`) at admission time. Verified-lane
+    /// controllers pay `1.0×`, Delegated `1.5×`, Open `4.0×`. This makes
+    /// unverified controllers strictly more expensive per-tx so they can't
+    /// trivially crowd out verified traffic during congestion.
+    #[error(
+        "Fee floor not met for {lane} lane: gas_price {gas_price} < required {required} \
+         (base {base} × {multiplier:.2})"
+    )]
+    FeeFloorTooLow {
+        lane: &'static str,
+        gas_price: u64,
+        required: u64,
+        base: u64,
+        multiplier: f64,
+    },
 }
 
 impl From<tenzro_crypto::CryptoError> for ConsensusError {

@@ -98,9 +98,8 @@ impl ModelListCmd {
         if self.format == "json" {
             let json_models: Vec<serde_json::Value> = catalog.iter()
                 .filter(|m| {
-                    if let Some(ref family) = self.family {
-                        if m.family != *family { return false; }
-                    }
+                    if let Some(ref family) = self.family
+                        && m.family != *family { return false; }
                     let is_downloaded = downloader.is_downloaded(&m.id);
                     let is_serving = served_models.contains(&m.id);
                     if self.downloaded && !is_downloaded { return false; }
@@ -147,9 +146,8 @@ impl ModelListCmd {
         let mut rows = Vec::new();
 
         for m in &catalog {
-            if let Some(ref family) = self.family {
-                if m.family != *family { continue; }
-            }
+            if let Some(ref family) = self.family
+                && m.family != *family { continue; }
 
             let is_downloaded = downloader.is_downloaded(&m.id);
             let is_serving = served_models.contains(&m.id);
@@ -494,7 +492,7 @@ impl ModelServeCmd {
         let runtime = ModelRuntime::new();
         let gguf_path = downloader.model_path(&self.model_id);
 
-        match runtime.load_model_with_context(&self.model_id, &gguf_path, entry.architecture, Some(entry.context_length)).await {
+        match runtime.load_model_with_context(&self.model_id, &gguf_path, Some(entry.context_length)).await {
             Ok(()) => {
                 spinner.finish_and_clear();
                 output::print_success(&format!("Model '{}' loaded successfully!", entry.name));
@@ -809,11 +807,10 @@ impl ModelEndpointCmd {
                 output::print_field("Provider", provider_name);
                 output::print_field("Status", status);
 
-                if let Some(parameters) = endpoint.get("parameters") {
-                    if let Some(params_str) = parameters.as_str() {
+                if let Some(parameters) = endpoint.get("parameters")
+                    && let Some(params_str) = parameters.as_str() {
                         output::print_field("Parameters", params_str);
                     }
-                }
 
                 output::print_field("API Endpoint", api_endpoint);
 

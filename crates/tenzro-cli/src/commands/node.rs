@@ -23,6 +23,10 @@ pub enum NodeCommand {
     SyncRange(NodeSyncRangeCmd),
     /// Inspect the EIP-1559 fee market (current gas price, suggested tip, fee history)
     FeeMarket(NodeFeeMarketCmd),
+    /// Show Spec-2 admission-controller mempool stats (per-lane admit/reject counters + lane config)
+    MempoolStats(NodeMempoolStatsCmd),
+    /// Resolve which admission lane an address would land in, plus its current token-bucket state
+    MempoolLane(NodeMempoolLaneCmd),
 }
 
 impl NodeCommand {
@@ -35,6 +39,8 @@ impl NodeCommand {
             Self::Syncing(cmd) => cmd.execute().await,
             Self::SyncRange(cmd) => cmd.execute().await,
             Self::FeeMarket(cmd) => cmd.execute().await,
+            Self::MempoolStats(cmd) => cmd.execute().await,
+            Self::MempoolLane(cmd) => cmd.execute().await,
         }
     }
 }
@@ -534,5 +540,210 @@ fn parse_hex_u128_str(hex: &str) -> String {
     match u128::from_str_radix(stripped, 16) {
         Ok(v) => v.to_string(),
         Err(_) => hex.to_string(),
+    }
+}
+
+/// Show Spec-2 admission-controller mempool stats.
+///
+/// Calls `tenzro_getMempoolStats` and prints per-lane (Verified / Delegated /
+/// Open) admission counters, the active lane configuration (refill rate, burst
+/// capacity, fee-floor multiplier, leader weight), and the current bucket
+/// count. Useful for operators watching admission pressure under load or
+/// validating that lane assignment is working as intended.
+#[derive(Debug, Parser)]
+pub struct NodeMempoolStatsCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+impl NodeMempoolStatsCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_getMempoolStats", serde_json::json!([]))
+            .await?;
+
+        if self.format == "json" {
+            output::print_json(&result)?;
+            return Ok(());
+        }
+
+        output::print_header("Mempool Admission Stats (Spec 2)");
+
+        let bucket_count = result
+            .get("bucket_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let min_verified_stake = result
+            .get("min_verified_stake")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0");
+        let bond_promotes = result
+            .get("bond_promotes_to_delegated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        output::print_field("Active Buckets", &bucket_count.to_string());
+        output::print_field("Min Verified Stake (smallest unit)", min_verified_stake);
+        output::print_field(
+            "Bond → Delegated Promotion",
+            if bond_promotes { "enabled" } else { "disabled" },
+        );
+
+        if let Some(lanes) = result.get("lanes").and_then(|v| v.as_array()) {
+            for lane_data in lanes {
+                let lane_name = lane_data
+                    .get("lane")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unknown)");
+                println!();
+                output::print_info(&format!("Lane: {}", lane_name));
+                let admitted = lane_data
+                    .get("admitted")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let rejected_rate = lane_data
+                    .get("rejected_rate_limited")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let rejected_fee_floor = lane_data
+                    .get("rejected_fee_floor")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let rejected_mempool_full = lane_data
+                    .get("rejected_mempool_full")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let refill = lane_data
+                    .get("refill_per_sec")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let burst = lane_data
+                    .get("burst_capacity")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let fee_mult = lane_data
+                    .get("fee_floor_mult")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let weight = lane_data
+                    .get("weight")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                output::print_field("  Admitted", &admitted.to_string());
+                output::print_field("  Rejected (rate-limited)", &rejected_rate.to_string());
+                output::print_field("  Rejected (fee-floor)", &rejected_fee_floor.to_string());
+                output::print_field("  Rejected (mempool-full)", &rejected_mempool_full.to_string());
+                output::print_field("  Refill (tx/s)", &format!("{:.3}", refill));
+                output::print_field("  Burst Capacity", &burst.to_string());
+                output::print_field("  Fee Floor Multiplier", &format!("{:.3}x", fee_mult));
+                output::print_field("  Leader Weight", &weight.to_string());
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Resolve which admission lane an address would land in.
+///
+/// Calls `tenzro_getMempoolLane` with a probe transaction to determine which
+/// lane (Verified / Delegated / Open) a given address would be admitted on,
+/// the bucket key that owns its rate-limit state (controller wallet for
+/// machine DIDs, the address itself otherwise), and the current token-bucket
+/// snapshot (capacity, available tokens, refill rate).
+#[derive(Debug, Parser)]
+pub struct NodeMempoolLaneCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Address to probe (hex, 0x-prefixed or bare)
+    address: String,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+impl NodeMempoolLaneCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getMempoolLane",
+                serde_json::json!([{ "address": self.address }]),
+            )
+            .await?;
+
+        if self.format == "json" {
+            output::print_json(&result)?;
+            return Ok(());
+        }
+
+        output::print_header("Mempool Lane Resolution");
+
+        let address = result
+            .get("address")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unknown)");
+        let lane = result
+            .get("lane")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unknown)");
+        let bucket_key = result
+            .get("bucket_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unknown)");
+        let fee_mult = result
+            .get("fee_floor_mult")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let refill = result
+            .get("refill_per_sec")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let burst = result
+            .get("burst_capacity")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        output::print_field("Address", address);
+        output::print_field("Assigned Lane", lane);
+        output::print_field("Bucket Key", bucket_key);
+        output::print_field("Fee Floor Multiplier", &format!("{:.3}x", fee_mult));
+        output::print_field("Lane Refill (tx/s)", &format!("{:.3}", refill));
+        output::print_field("Lane Burst Capacity", &burst.to_string());
+
+        if let Some(bucket) = result.get("bucket").and_then(|v| v.as_object()) {
+            println!();
+            output::print_info("Current Bucket State");
+            let tokens = bucket.get("tokens").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let capacity = bucket
+                .get("capacity")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let bucket_refill = bucket
+                .get("refill_per_sec")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            output::print_field("  Tokens Available", &format!("{:.3}", tokens));
+            output::print_field("  Capacity", &capacity.to_string());
+            output::print_field("  Refill (tx/s)", &format!("{:.3}", bucket_refill));
+        } else {
+            output::print_info("Bucket has not been instantiated yet (no traffic from this address)");
+        }
+
+        Ok(())
     }
 }

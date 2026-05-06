@@ -63,6 +63,12 @@ pub struct GasOracle {
 
     /// Optional reference to EIP-1559 fee market for dynamic pricing
     fee_market: Arc<RwLock<Option<crate::eip1559::FeeMarket>>>,
+
+    /// Hot-state local fee market (Spec 6). Tracks per-account contention
+    /// over a rolling 64-block window and exposes a multiplier on top of
+    /// the EIP-1559 base fee for hot accounts. Cheap to clone — internally
+    /// `Arc`-backed.
+    hot_state: crate::hot_state::HotStateMarket,
 }
 
 impl GasOracle {
@@ -73,7 +79,36 @@ impl GasOracle {
             history: Arc::new(RwLock::new(Vec::new())),
             max_history: 1000,
             fee_market: Arc::new(RwLock::new(None)),
+            hot_state: crate::hot_state::HotStateMarket::new(),
         }
+    }
+
+    /// Borrow the hot-state local fee market. Used by the node event
+    /// loop to record per-account contention samples after each block,
+    /// and by the RPC layer to expose [`tenzro_getAccountContention`].
+    pub fn hot_state(&self) -> &crate::hot_state::HotStateMarket {
+        &self.hot_state
+    }
+
+    /// Compute the effective per-gas base fee for a transaction touching
+    /// the given write set. Returns `(effective_base_fee, surcharge)` —
+    /// the surcharge is the burn delta, accounted into the FeeMarket
+    /// `total_burned` counter by the executor.
+    ///
+    /// Multi-account writes use the **max** surcharge (Solana convention),
+    /// not the sum. An empty write set returns the unmodified base fee.
+    pub async fn effective_base_fee(
+        &self,
+        write_set: &[&[u8]],
+    ) -> (u128, u128) {
+        let base = self
+            .fee_market
+            .read()
+            .await
+            .as_ref()
+            .map(|m| m.base_fee())
+            .unwrap_or(GasPrice::default().base_fee);
+        self.hot_state.surcharge_multi(write_set, base)
     }
 
     /// Wire the oracle to an EIP-1559 fee market for dynamic pricing
@@ -94,6 +129,33 @@ impl GasOracle {
         let mut fm = self.fee_market.write().await;
         if let Some(market) = fm.as_mut() {
             market.on_block_finalized(gas_used);
+        }
+    }
+
+    /// Record a block's per-account contention samples into the hot-state
+    /// local fee market. Called from the node event loop alongside
+    /// [`on_block_finalized`] once Block-STM has finished executing the
+    /// block and aggregated reexec/write counts per address.
+    pub fn record_block_contention(
+        &self,
+        samples: std::collections::HashMap<Vec<u8>, crate::hot_state::AccountSample>,
+    ) {
+        self.hot_state.record_block(samples);
+    }
+
+    /// Account a hot-state surcharge as additional burn into the FeeMarket
+    /// `total_burned` counter. The executor calls this after every tx
+    /// whose `effective_base_fee` exceeded the global base fee, passing
+    /// `surcharge_per_gas * gas_used`.
+    ///
+    /// No-op when the FeeMarket is not configured.
+    pub async fn account_hot_state_burn(&self, surcharge_total: u128) {
+        if surcharge_total == 0 {
+            return;
+        }
+        let mut fm = self.fee_market.write().await;
+        if let Some(market) = fm.as_mut() {
+            market.add_external_burn(surcharge_total);
         }
     }
 

@@ -22,8 +22,12 @@ use tenzro_crypto::composite::{
 };
 use tenzro_storage::kv::{KvStore, CF_CREDENTIALS, CF_IDENTITIES};
 use tenzro_types::fees::ServiceFeeSchedule;
-use tenzro_types::identity::KycTier;
-use tenzro_types::primitives::Address;
+use tenzro_types::identity::{IdentityType as TenzroIdentityType, KycTier};
+use tenzro_types::primitives::{Address, BlockHeight};
+use tenzro_types::principal_chain::{
+    anonymous_chain_for_address, BondLookup, PrincipalChain, PrincipalChainResolver,
+    PrincipalLink, PrincipalRole, MAX_DELEGATION_DEPTH,
+};
 use tracing::{debug, info, warn};
 
 /// Optional remote DID resolution backend for HIGH #93.
@@ -189,6 +193,11 @@ pub struct IdentityRegistry {
     /// the precompile at `0x101a` on Tenzro). The hook is best-effort —
     /// failures are logged but never roll back the TDIP registration.
     on_chain_agent_registry: Option<Arc<dyn crate::erc8004::OnChainAgentRegistry>>,
+    /// Optional AgentBond lookup (Spec 9). When wired, the principal-chain
+    /// resolver populates `actor_bond` and `controller_bond_aggregate` on
+    /// every receipt. Implemented by `tenzro_token::bond::BondManager` at
+    /// node startup; tests may pass a fake.
+    bond_lookup: Option<Arc<dyn BondLookup>>,
 }
 
 impl IdentityRegistry {
@@ -207,6 +216,7 @@ impl IdentityRegistry {
             revocation_broadcaster: None,
             delegation_policy: DelegationPolicy::default(),
             on_chain_agent_registry: None,
+            bond_lookup: None,
         }
     }
 
@@ -225,6 +235,7 @@ impl IdentityRegistry {
             revocation_broadcaster: None,
             delegation_policy: DelegationPolicy::default(),
             on_chain_agent_registry: None,
+            bond_lookup: None,
         }
     }
 
@@ -243,6 +254,7 @@ impl IdentityRegistry {
             revocation_broadcaster: None,
             delegation_policy: DelegationPolicy::default(),
             on_chain_agent_registry: None,
+            bond_lookup: None,
         }
     }
 
@@ -263,20 +275,20 @@ impl IdentityRegistry {
             Ok(keys) => {
                 let mut loaded = 0usize;
                 for key in &keys {
-                    if let Ok(Some(data)) = storage.get(CF_IDENTITIES, key) {
-                        if let Ok(identity) = bincode::deserialize::<TenzroIdentity>(&data) {
-                            let did_string = identity.did.to_string();
-                            if identity.status == IdentityStatus::Revoked {
-                                revocations.insert(did_string.clone(), RevocationEntry {
-                                    did: did_string.clone(),
-                                    revoked_at: identity.updated_at,
-                                    reason: "loaded from storage".to_string(),
-                                    revoked_by: "system".to_string(),
-                                });
-                            }
-                            identities.insert(did_string, identity);
-                            loaded += 1;
+                    if let Ok(Some(data)) = storage.get(CF_IDENTITIES, key)
+                        && let Ok(identity) = bincode::deserialize::<TenzroIdentity>(&data)
+                    {
+                        let did_string = identity.did.to_string();
+                        if identity.status == IdentityStatus::Revoked {
+                            revocations.insert(did_string.clone(), RevocationEntry {
+                                did: did_string.clone(),
+                                revoked_at: identity.updated_at,
+                                reason: "loaded from storage".to_string(),
+                                revoked_by: "system".to_string(),
+                            });
                         }
+                        identities.insert(did_string, identity);
+                        loaded += 1;
                     }
                 }
                 info!("Loaded {} identities from persistent storage", loaded);
@@ -312,14 +324,13 @@ impl IdentityRegistry {
             Ok(keys) => {
                 let mut loaded_usernames = 0usize;
                 for key in &keys {
-                    if let Ok(Some(data)) = storage.get(CF_IDENTITIES, key) {
-                        if let Ok(did) = std::str::from_utf8(&data) {
-                            if let Ok(uname) = std::str::from_utf8(key) {
-                                let uname = uname.strip_prefix("username:").unwrap_or(uname);
-                                usernames.insert(uname.to_string(), did.to_string());
-                                loaded_usernames += 1;
-                            }
-                        }
+                    if let Ok(Some(data)) = storage.get(CF_IDENTITIES, key)
+                        && let Ok(did) = std::str::from_utf8(&data)
+                        && let Ok(uname) = std::str::from_utf8(key)
+                    {
+                        let uname = uname.strip_prefix("username:").unwrap_or(uname);
+                        usernames.insert(uname.to_string(), did.to_string());
+                        loaded_usernames += 1;
                     }
                 }
                 if loaded_usernames > 0 {
@@ -343,6 +354,7 @@ impl IdentityRegistry {
             revocation_broadcaster: None,
             delegation_policy: DelegationPolicy::default(),
             on_chain_agent_registry: None,
+            bond_lookup: None,
         }
     }
 
@@ -364,6 +376,20 @@ impl IdentityRegistry {
     pub fn with_wallet_binder_arc(mut self, wallet_binder: Arc<WalletBinder>) -> Self {
         self.wallet_binder = Some(wallet_binder);
         self
+    }
+
+    /// Returns `true` when this registry has a [`WalletBinder`] configured.
+    ///
+    /// Callers that require auto-provisioned wallets (e.g. the agent-kit
+    /// spawner, which mints both controller and machine identities and
+    /// expects each to come back with a signable on-chain address) can
+    /// assert this up-front rather than discover the missing-binder
+    /// fallback path silently. Returns `false` for in-memory test
+    /// registries constructed via [`Self::new`] / [`Self::with_storage`]
+    /// without a binder, where `register_*_with_fee` falls back to a
+    /// deterministic placeholder address with no signable wallet.
+    pub fn has_wallet_binder(&self) -> bool {
+        self.wallet_binder.is_some()
     }
 
     /// Attaches a remote DID resolution backend (HIGH #93).
@@ -401,6 +427,15 @@ impl IdentityRegistry {
         registry: Arc<dyn crate::erc8004::OnChainAgentRegistry>,
     ) -> Self {
         self.on_chain_agent_registry = Some(registry);
+        self
+    }
+
+    /// Wires an AgentBond lookup (Spec 9). When set, the principal-chain
+    /// resolver populates `actor_bond` and `controller_bond_aggregate` on
+    /// every receipt. Implemented by `tenzro_token::bond::BondManager` at
+    /// node startup.
+    pub fn with_bond_lookup(mut self, lookup: Arc<dyn BondLookup>) -> Self {
+        self.bond_lookup = Some(lookup);
         self
     }
 
@@ -448,14 +483,44 @@ impl IdentityRegistry {
         Ok(())
     }
 
-    /// Removes an identity from storage (unused: revocation marks as Revoked, doesn't delete)
-    #[allow(dead_code)]
+    /// Hard-deletes an identity record from RocksDB.
+    ///
+    /// Used by [`Self::forget_identity`] to satisfy TDIP/GDPR Article 17
+    /// right-to-erasure: the identity must already be `Revoked` (logical
+    /// delete) before the record can be physically removed from storage.
+    /// This is distinct from `revoke()`, which keeps the row for audit.
     fn remove_from_storage(&self, did: &str) {
-        if let Some(ref store) = self.storage {
-            if let Err(e) = store.delete(CF_IDENTITIES, did.as_bytes()) {
-                warn!("Failed to delete identity {} from storage: {}", did, e);
-            }
+        if let Some(ref store) = self.storage
+            && let Err(e) = store.delete(CF_IDENTITIES, did.as_bytes())
+        {
+            warn!("Failed to delete identity {} from storage: {}", did, e);
         }
+    }
+
+    /// TDIP/GDPR Article 17 right-to-erasure.
+    ///
+    /// Hard-deletes a previously-revoked identity from both the in-memory
+    /// registry and persistent storage. The identity MUST already be in
+    /// `IdentityStatus::Revoked` — callers must `revoke()` first, observe the
+    /// revocation has propagated, and only then call `forget_identity()`.
+    /// This two-phase approach gives downstream consumers (cascading revoke,
+    /// remote nodes via `RevocationBroadcaster`) a chance to react to the
+    /// status change before the record vanishes.
+    pub fn forget_identity(&self, did: &str) -> Result<()> {
+        let identity = self
+            .identities
+            .get(did)
+            .ok_or_else(|| IdentityError::NotFound(did.to_string()))?;
+        if identity.status != IdentityStatus::Revoked {
+            return Err(IdentityError::PermissionDenied(format!(
+                "identity {} must be Revoked before erasure (current: {:?})",
+                did, identity.status
+            )));
+        }
+        drop(identity);
+        self.identities.remove(did);
+        self.remove_from_storage(did);
+        Ok(())
     }
 
     /// Returns the current fee schedule
@@ -680,6 +745,7 @@ impl IdentityRegistry {
                 },
                 reputation: 0,
                 tenzro_agent_id: None,
+                is_seed_agent: false,
             },
             status: IdentityStatus::Active,
             wallet_address: binding.address,
@@ -704,20 +770,18 @@ impl IdentityRegistry {
         );
 
         // Append child to controller's controlled_machines list
-        if !is_autonomous {
-            if let Some(mut controller) = self.identities.get_mut(controller_did) {
-                if let IdentityData::Human {
-                    ref mut controlled_machines,
-                    ..
-                } = controller.identity_data
-                {
-                    controlled_machines.push(did_string.clone());
-                    controller.updated_at = Utc::now();
-                    let snapshot = controller.clone();
-                    drop(controller);
-                    self.persist_identity(controller_did, &snapshot);
-                }
-            }
+        if !is_autonomous
+            && let Some(mut controller) = self.identities.get_mut(controller_did)
+            && let IdentityData::Human {
+                ref mut controlled_machines,
+                ..
+            } = controller.identity_data
+        {
+            controlled_machines.push(did_string.clone());
+            controller.updated_at = Utc::now();
+            let snapshot = controller.clone();
+            drop(controller);
+            self.persist_identity(controller_did, &snapshot);
         }
 
         self.persist_identity(&did_string, &identity);
@@ -780,6 +844,7 @@ impl IdentityRegistry {
                 controller_did: Some(controller_did.to_string()),
                 reputation: 0,
                 tenzro_agent_id: None,
+                is_seed_agent: false,
             },
             status: IdentityStatus::Active,
             wallet_address,
@@ -861,6 +926,7 @@ impl IdentityRegistry {
                 controller_did: None,
                 reputation: 0,
                 tenzro_agent_id: None,
+                is_seed_agent: false,
             },
             status: IdentityStatus::Active,
             wallet_address,
@@ -1014,6 +1080,220 @@ impl IdentityRegistry {
             .map(|entry| entry.value().clone())
     }
 
+    /// Reverse-lookup: find the local DID bound to `address` via its
+    /// auto-provisioned MPC wallet.
+    ///
+    /// Linear scan over `identities` — fine for testnet sizes; if the
+    /// registry grows beyond ~10⁵ entries this should be replaced with a
+    /// `DashMap<Address, String>` reverse index maintained on every
+    /// `register_*` mutation. Used by [`Self::resolve_by_address`] to
+    /// build principal chains for receipts that key on EVM/SVM addresses
+    /// rather than DIDs.
+    pub fn find_did_by_address(&self, address: &Address) -> Option<String> {
+        self.identities
+            .iter()
+            .find(|entry| entry.value().wallet_address == *address)
+            .map(|entry| entry.key().clone())
+    }
+
+    /// Resolve the principal chain for a DID (Agent-Swarm Spec 5).
+    ///
+    /// Walks the controller chain bottom-up starting at `did`, capturing
+    /// each link as a `PrincipalLink` and snapshotting the controller's
+    /// KYC tier. Behavior:
+    ///
+    /// * The actor itself becomes either `chain[n-1]` (when it has a
+    ///   controller) or the controller link (when it acts directly).
+    /// * Walks `controller_did` up at most `MAX_DELEGATION_DEPTH` levels.
+    ///   Cycles are detected via a visited-DID set; the cycle is broken
+    ///   by tombstoning the offending link.
+    /// * Unresolvable controllers (revoked, not-found, remote-resolution
+    ///   failed) are recorded with `tombstone: true` rather than
+    ///   returning an error — receipt writes never fail because identity
+    ///   is unavailable.
+    /// * KYC tier is taken from the topmost human controller. If the
+    ///   chain terminates at an autonomous machine (no controller), tier
+    ///   defaults to 0.
+    /// * `controller_bond`, `actor_bond`, and `controller_bond_aggregate`
+    ///   are populated when a `BondLookup` is wired via
+    ///   `with_bond_lookup` (Spec 9). Without one, all bond fields are
+    ///   `None`.
+    ///
+    /// `frozen_at_block` is stamped into the returned chain so callers do
+    /// not need to mutate it. The chain is regulator-grade evidence and
+    /// must not be mutated after this call.
+    pub fn resolve_principal_chain(
+        &self,
+        did: &str,
+        frozen_at_block: impl Into<BlockHeight>,
+    ) -> PrincipalChain {
+        let frozen_at_block: BlockHeight = frozen_at_block.into();
+        // Spec 9 bond lookup helper — resolves actor_bond + controller_bond
+        // (singular, on the controller's own DID) + controller aggregate.
+        let actor_bond = self
+            .bond_lookup
+            .as_ref()
+            .and_then(|b| b.actor_bond(did));
+
+        // Resolve the actor itself; if unresolvable, return a synthetic
+        // tombstoned chain rooted at the supplied DID.
+        let actor = match self.resolve(did) {
+            Ok(id) => id,
+            Err(_) => {
+                let mut chain = PrincipalChain::direct(
+                    did.to_string(),
+                    TenzroIdentityType::Machine,
+                    0,
+                    None,
+                    frozen_at_block,
+                )
+                .with_actor_bond(actor_bond);
+                chain.controller.tombstone = true;
+                return chain;
+            }
+        };
+
+        let actor_did = actor.did.to_string();
+        let actor_type = identity_type_of(&actor);
+
+        // If actor is human, or autonomous machine (no controller_did),
+        // it is itself the controller. The controller and the actor are
+        // the same DID, so controller_bond == actor_bond and the
+        // controller aggregate also keys off the same DID.
+        let controller_did_opt = actor.controller_did().map(|s| s.to_string());
+        if controller_did_opt.is_none() {
+            let kyc = match actor_type {
+                TenzroIdentityType::Human => actor.kyc_tier().map(|t| t.level()).unwrap_or(0),
+                TenzroIdentityType::Machine => 0,
+            };
+            let controller_aggregate = self
+                .bond_lookup
+                .as_ref()
+                .and_then(|b| b.controller_aggregate(&actor_did));
+            return PrincipalChain::direct(
+                actor_did,
+                actor_type,
+                kyc,
+                actor_bond,
+                frozen_at_block,
+            )
+            .with_actor_bond(actor_bond)
+            .with_controller_bond_aggregate(controller_aggregate);
+        }
+
+        // Walk up the controller chain. We accumulate links top-down; the
+        // actor becomes the last entry. Order of construction is
+        // bottom-up: we push the actor first, then walk parents, then
+        // reverse at the end.
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        visited.insert(actor_did.clone());
+
+        let mut chain_top_down: Vec<PrincipalLink> = Vec::new();
+        // Start with the actor as the bottom link (DelegatedAgent or
+        // AutonomousAgent decided after we know whether we found a
+        // controller).
+        let actor_link = PrincipalLink::new(
+            actor_did.clone(),
+            actor_type,
+            None, // delegation_scope_id captured per-action, not here
+            PrincipalRole::DelegatedAgent,
+        );
+        chain_top_down.push(actor_link);
+
+        let mut current_controller_did = controller_did_opt;
+        let mut controller_kyc_tier: u8 = 0;
+
+        while let Some(parent_did) = current_controller_did.take() {
+            // Cycle detection — break with a tombstone on the offending
+            // link rather than looping forever.
+            if !visited.insert(parent_did.clone()) {
+                chain_top_down.push(PrincipalLink::tombstoned(
+                    parent_did,
+                    PrincipalRole::Controller,
+                ));
+                break;
+            }
+
+            // Depth bound — stop walking after MAX_DELEGATION_DEPTH
+            // links. The accumulated chain is what regulators need; an
+            // overly-deep chain is itself signal.
+            if chain_top_down.len() as u8 >= MAX_DELEGATION_DEPTH {
+                chain_top_down.push(PrincipalLink::tombstoned(
+                    parent_did,
+                    PrincipalRole::Controller,
+                ));
+                break;
+            }
+
+            match self.resolve(&parent_did) {
+                Ok(parent) => {
+                    let parent_type = identity_type_of(&parent);
+                    let role = if parent.controller_did().is_some() {
+                        PrincipalRole::DelegatedAgent
+                    } else {
+                        PrincipalRole::Controller
+                    };
+                    chain_top_down.push(PrincipalLink::new(
+                        parent.did.to_string(),
+                        parent_type,
+                        None,
+                        role,
+                    ));
+                    let next = parent.controller_did().map(|s| s.to_string());
+                    if next.is_none() {
+                        // Reached the top — snapshot KYC tier from this link.
+                        if let TenzroIdentityType::Human = parent_type {
+                            controller_kyc_tier =
+                                parent.kyc_tier().map(|t| t.level()).unwrap_or(0);
+                        }
+                    }
+                    current_controller_did = next;
+                }
+                Err(_) => {
+                    // Unresolvable controller — tombstone and stop walking.
+                    chain_top_down.push(PrincipalLink::tombstoned(
+                        parent_did,
+                        PrincipalRole::Controller,
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // Reverse so chain[0] is the controller and chain[n-1] is the
+        // actor's direct delegator. PrincipalChain::from_chain does the
+        // rest (sets controller from chain[0], computes depth, etc.).
+        chain_top_down.reverse();
+
+        // Spec 9: snapshot the controller's bond on its own DID and the
+        // aggregate across every agent it owns. Both are `None` when no
+        // resolver was wired or the controller has no Active bonds.
+        let controller_did_str = chain_top_down
+            .first()
+            .map(|l| l.did.clone())
+            .unwrap_or_default();
+        let controller_bond = self
+            .bond_lookup
+            .as_ref()
+            .filter(|_| !controller_did_str.is_empty())
+            .and_then(|b| b.actor_bond(&controller_did_str));
+        let controller_aggregate = self
+            .bond_lookup
+            .as_ref()
+            .filter(|_| !controller_did_str.is_empty())
+            .and_then(|b| b.controller_aggregate(&controller_did_str));
+
+        PrincipalChain::from_chain(
+            actor_did,
+            chain_top_down,
+            controller_kyc_tier,
+            controller_bond,
+            frozen_at_block,
+        )
+        .with_actor_bond(actor_bond)
+        .with_controller_bond_aggregate(controller_aggregate)
+    }
+
     /// Links a native Tenzro agent ID to a machine identity
     pub fn link_tenzro_agent(&self, machine_did: &str, tenzro_agent_id: String) -> Result<()> {
         let mut identity = self
@@ -1073,6 +1353,66 @@ impl IdentityRegistry {
         identity.updated_at = Utc::now();
         self.persist_identity(did, &identity);
         Ok(())
+    }
+
+    /// Adds a W3C DID Document service endpoint to an existing identity.
+    ///
+    /// Mutates the registry in place (DashMap `get_mut`) and writes through to
+    /// `CF_IDENTITIES`. The previous code path resolved by clone, mutated the
+    /// clone, and dropped the result — this is the persistent replacement.
+    ///
+    /// `service.id` is recorded verbatim; callers conventionally format it as
+    /// `<did>#<service_type>`. Duplicate `service.id` values are *not* rejected
+    /// (W3C DID Core does not prohibit duplicates), but a future helper may
+    /// add that check.
+    ///
+    /// Used by the `tenzro_addService` JSON-RPC and by the KYA federation flow
+    /// to register `MastercardKYA` / `VisaTAP` pointers on a machine identity.
+    pub fn add_service_to_identity(
+        &self,
+        did: &str,
+        service: crate::identity::ServiceEndpoint,
+    ) -> Result<()> {
+        // Validate the URL before taking the lock so we don't leave the
+        // identity untouched on a bad input.
+        tenzro_types::validation::validate_service_endpoint_url(&service.service_endpoint)
+            .map_err(|e| IdentityError::InvalidServiceEndpoint(e.to_string()))?;
+
+        let snapshot = {
+            let mut identity = self
+                .identities
+                .get_mut(did)
+                .ok_or_else(|| IdentityError::NotFound(did.to_string()))?;
+
+            if identity.status != IdentityStatus::Active {
+                return Err(IdentityError::NotActive(format!(
+                    "{} is {:?}",
+                    did, identity.status
+                )));
+            }
+
+            identity.services.push(service);
+            identity.updated_at = Utc::now();
+            identity.clone()
+        };
+
+        self.persist_identity(did, &snapshot);
+        Ok(())
+    }
+
+    /// Project a TDIP machine identity into a [`KyaRecord`] for DID-anchored
+    /// KYA federation.
+    ///
+    /// Returns `Err(NotFound)` if the DID is unknown, and `Err(PermissionDenied)`
+    /// if the identity is a human (KYA records are machine-only).
+    pub fn kya_record_for(&self, did: &str) -> Result<crate::kya::KyaRecord> {
+        let identity = self.resolve(did)?;
+        crate::kya::KyaRecord::from_identity(&identity).ok_or_else(|| {
+            IdentityError::PermissionDenied(format!(
+                "KYA record requested for non-machine identity: {}",
+                did
+            ))
+        })
     }
 
     /// Allows a machine to inherit a credential from its controller.
@@ -1277,13 +1617,13 @@ impl IdentityRegistry {
         signed.verify()?;
 
         let entry = signed.entry;
-        if let Some(mut identity) = self.identities.get_mut(&entry.did) {
-            if identity.status != IdentityStatus::Revoked {
-                warn!("Applying remote revocation for {}", entry.did);
-                identity.status = IdentityStatus::Revoked;
-                identity.updated_at = Utc::now();
-                self.persist_identity(&entry.did, &identity);
-            }
+        if let Some(mut identity) = self.identities.get_mut(&entry.did)
+            && identity.status != IdentityStatus::Revoked
+        {
+            warn!("Applying remote revocation for {}", entry.did);
+            identity.status = IdentityStatus::Revoked;
+            identity.updated_at = Utc::now();
+            self.persist_identity(&entry.did, &identity);
         }
         self.revocations.insert(entry.did.clone(), entry);
         Ok(())
@@ -1458,13 +1798,13 @@ impl IdentityRegistry {
                 operation
             )));
         }
-        if let Some(v) = value {
-            if !delegation_scope.is_value_allowed(v) {
-                return Err(IdentityError::DelegationViolation(format!(
-                    "value {} exceeds max_transaction_value",
-                    v
-                )));
-            }
+        if let Some(v) = value
+            && !delegation_scope.is_value_allowed(v)
+        {
+            return Err(IdentityError::DelegationViolation(format!(
+                "value {} exceeds max_transaction_value",
+                v
+            )));
         }
 
         if reputation < self.delegation_policy.min_reputation {
@@ -1474,15 +1814,15 @@ impl IdentityRegistry {
             )));
         }
 
-        if self.delegation_policy.require_active_controller {
-            if let Some(ctrl) = controller_did {
-                let controller = self.resolve(&ctrl)?;
-                if controller.status != IdentityStatus::Active {
-                    return Err(IdentityError::DelegationViolation(format!(
-                        "controller {} is {:?}",
-                        ctrl, controller.status
-                    )));
-                }
+        if self.delegation_policy.require_active_controller
+            && let Some(ctrl) = controller_did
+        {
+            let controller = self.resolve(&ctrl)?;
+            if controller.status != IdentityStatus::Active {
+                return Err(IdentityError::DelegationViolation(format!(
+                    "controller {} is {:?}",
+                    ctrl, controller.status
+                )));
             }
         }
 
@@ -1745,6 +2085,40 @@ fn derive_evm_address(tenzro_addr: &tenzro_types::Address) -> [u8; 20] {
     let start = bytes.len().saturating_sub(20);
     addr.copy_from_slice(&bytes[start..start + 20]);
     addr
+}
+
+/// Project a [`TenzroIdentity`] onto the public
+/// [`tenzro_types::identity::IdentityType`] enum used by principal chains.
+fn identity_type_of(identity: &TenzroIdentity) -> TenzroIdentityType {
+    match identity.identity_data {
+        IdentityData::Human { .. } => TenzroIdentityType::Human,
+        IdentityData::Machine { .. } => TenzroIdentityType::Machine,
+    }
+}
+
+/// Adapter that lets [`IdentityRegistry`] act as the live
+/// [`PrincipalChainResolver`] for receipt-write paths in the settlement
+/// engine, escrow manager, payment binder, and kill-switch dispatcher.
+///
+/// The settlement crate cannot depend on `tenzro-identity` (would create
+/// a cycle through `tenzro-wallet`), so the trait lives in `tenzro-types`
+/// and the live impl lives here. Node startup constructs the registry,
+/// wraps it in `Arc`, and calls `SettlementEngine::with_principal_resolver`.
+impl PrincipalChainResolver for IdentityRegistry {
+    fn resolve_by_did(&self, did: &str, frozen_at_block: BlockHeight) -> PrincipalChain {
+        self.resolve_principal_chain(did, frozen_at_block)
+    }
+
+    fn resolve_by_address(
+        &self,
+        address: &Address,
+        frozen_at_block: BlockHeight,
+    ) -> PrincipalChain {
+        match self.find_did_by_address(address) {
+            Some(did) => self.resolve_principal_chain(&did, frozen_at_block),
+            None => anonymous_chain_for_address(address, frozen_at_block),
+        }
+    }
 }
 
 impl Default for IdentityRegistry {
@@ -2791,5 +3165,242 @@ mod tests {
         // Both should succeed (different IDs)
         registry.issue_credential(&identity.did_string(), cred1).unwrap();
         registry.issue_credential(&identity.did_string(), cred2).unwrap();
+    }
+
+    // ----- Principal-chain resolver tests (Agent-Swarm Spec 5) -----
+
+    #[tokio::test]
+    async fn principal_chain_for_human_acting_directly() {
+        let registry = IdentityRegistry::new();
+        let alice = registry
+            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Enhanced)
+            .await
+            .unwrap()
+            .identity;
+
+        let pc = registry.resolve_principal_chain(&alice.did_string(), 100u64);
+
+        assert_eq!(pc.delegation_depth, 0);
+        assert!(pc.chain.is_empty());
+        assert_eq!(pc.actor, alice.did_string());
+        assert_eq!(pc.controller_did(), alice.did_string());
+        assert_eq!(pc.controller.role, PrincipalRole::Controller);
+        assert_eq!(pc.controller_kyc_tier, KycTier::Enhanced.level());
+        assert_eq!(pc.frozen_at_block, BlockHeight::new(100));
+        assert!(!pc.has_tombstone());
+    }
+
+    #[tokio::test]
+    async fn principal_chain_for_machine_under_human_controller() {
+        let registry = IdentityRegistry::new();
+        let alice = registry
+            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .await
+            .unwrap()
+            .identity;
+        let bot = registry
+            .register_machine_with_fee(
+                &alice.did_string(),
+                test_pubkey(2),
+                vec!["inference".to_string()],
+                DelegationScope::unrestricted(),
+            )
+            .await
+            .unwrap()
+            .identity;
+
+        let pc = registry.resolve_principal_chain(&bot.did_string(), 200u64);
+
+        assert_eq!(pc.delegation_depth, 2);
+        assert_eq!(pc.controller_did(), alice.did_string());
+        assert_eq!(pc.controller.role, PrincipalRole::Controller);
+        assert_eq!(pc.controller_kyc_tier, KycTier::Full.level());
+        assert_eq!(pc.actor, bot.did_string());
+        // chain[0] is the controller, chain[1] is the actor.
+        assert_eq!(pc.chain.len(), 2);
+        assert_eq!(pc.chain[0].did, alice.did_string());
+        assert_eq!(pc.chain[1].did, bot.did_string());
+        assert!(!pc.has_tombstone());
+    }
+
+    #[tokio::test]
+    async fn principal_chain_for_autonomous_machine() {
+        let registry = IdentityRegistry::new();
+        let bot = registry
+            .register_autonomous_machine(test_pubkey(1), vec!["monitoring".to_string()])
+            .await
+            .unwrap();
+
+        let pc = registry.resolve_principal_chain(&bot.did_string(), 50u64);
+
+        assert_eq!(pc.delegation_depth, 0);
+        assert!(pc.chain.is_empty());
+        assert_eq!(pc.controller.role, PrincipalRole::AutonomousAgent);
+        assert_eq!(pc.controller_kyc_tier, 0);
+    }
+
+    #[tokio::test]
+    async fn principal_chain_for_unresolvable_did_returns_tombstone() {
+        let registry = IdentityRegistry::new();
+        let pc = registry.resolve_principal_chain("did:tenzro:human:ghost:uuid", 7u64);
+
+        assert!(pc.has_tombstone());
+        assert_eq!(pc.controller_kyc_tier, 0);
+        assert_eq!(pc.frozen_at_block, BlockHeight::new(7));
+    }
+
+    #[tokio::test]
+    async fn resolver_trait_resolves_by_address() {
+        let registry = IdentityRegistry::new();
+        let alice = registry
+            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Basic)
+            .await
+            .unwrap()
+            .identity;
+
+        let resolver: &dyn PrincipalChainResolver = &registry;
+        let pc = resolver.resolve_by_address(&alice.wallet_address, BlockHeight::new(9));
+
+        assert_eq!(pc.controller_did(), alice.did_string());
+        assert_eq!(pc.controller_kyc_tier, KycTier::Basic.level());
+    }
+
+    #[tokio::test]
+    async fn resolver_trait_returns_anonymous_chain_for_unbound_address() {
+        let registry = IdentityRegistry::new();
+        let resolver: &dyn PrincipalChainResolver = &registry;
+        let unbound = Address::new([0xAB; 32]);
+
+        let pc = resolver.resolve_by_address(&unbound, BlockHeight::new(11));
+
+        assert!(pc.controller.tombstone);
+        assert!(pc.controller.did.starts_with("did:tenzro:anonymous:"));
+        assert_eq!(pc.controller_kyc_tier, 0);
+    }
+
+    // ----- Spec 9 BondLookup wiring tests -----
+
+    /// In-test `BondLookup` impl. Wraps DID→amount maps in `RwLock` so
+    /// tests can wire the lookup into the registry *before* DIDs are
+    /// minted, then populate the maps after registration. `TenzroDid::new_*`
+    /// mints a fresh UUID per call, so the lookup must be keyed by the
+    /// actual DIDs the registry produced.
+    struct FakeBondLookup {
+        actor: parking_lot::RwLock<std::collections::HashMap<String, u128>>,
+        aggregate: parking_lot::RwLock<std::collections::HashMap<String, u128>>,
+    }
+
+    impl FakeBondLookup {
+        fn new() -> Self {
+            Self {
+                actor: parking_lot::RwLock::new(std::collections::HashMap::new()),
+                aggregate: parking_lot::RwLock::new(std::collections::HashMap::new()),
+            }
+        }
+    }
+
+    impl BondLookup for FakeBondLookup {
+        fn actor_bond(&self, did: &str) -> Option<u128> {
+            self.actor.read().get(did).copied()
+        }
+        fn controller_aggregate(&self, controller_did: &str) -> Option<u128> {
+            self.aggregate.read().get(controller_did).copied()
+        }
+    }
+
+    #[tokio::test]
+    async fn principal_chain_populates_spec9_bond_fields_when_lookup_wired() {
+        // Use Arc<RwLock<...>> so we can wire the lookup into the registry
+        // *before* the DIDs are minted, then populate the maps after
+        // registration. `TenzroDid::new_*` mints a fresh UUID per call, so
+        // the lookup map must be keyed by the actual DIDs the registry
+        // produced — not by DIDs from a separate parallel registry.
+        let actor_amount = 5_000_000_000_000_000_000u128;
+        let aggregate_amount = 25_000_000_000_000_000_000u128;
+
+        let lookup = Arc::new(FakeBondLookup::new());
+        let registry = IdentityRegistry::new()
+            .with_bond_lookup(lookup.clone() as Arc<dyn BondLookup>);
+
+        let alice = registry
+            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .await
+            .unwrap()
+            .identity;
+        let bot = registry
+            .register_machine_with_fee(
+                &alice.did_string(),
+                test_pubkey(2),
+                vec!["inference".to_string()],
+                DelegationScope::unrestricted(),
+            )
+            .await
+            .unwrap()
+            .identity;
+
+        // Populate the lookup with the registry's actual DIDs.
+        lookup.actor.write().insert(bot.did_string(), actor_amount);
+        lookup
+            .aggregate
+            .write()
+            .insert(alice.did_string(), aggregate_amount);
+
+        let pc = registry.resolve_principal_chain(&bot.did_string(), 100u64);
+
+        assert_eq!(pc.actor_bond, Some(actor_amount));
+        assert_eq!(pc.controller_bond_aggregate, Some(aggregate_amount));
+        // controller_bond is the bond on the controller's *own* DID,
+        // which the lookup doesn't have an entry for.
+        assert_eq!(pc.controller_bond, None);
+    }
+
+    #[tokio::test]
+    async fn principal_chain_bond_fields_none_without_lookup() {
+        let registry = IdentityRegistry::new();
+        let alice = registry
+            .register_human_with_fee(test_pubkey(1), "Alice".to_string(), KycTier::Full)
+            .await
+            .unwrap()
+            .identity;
+        let bot = registry
+            .register_machine_with_fee(
+                &alice.did_string(),
+                test_pubkey(2),
+                vec!["inference".to_string()],
+                DelegationScope::unrestricted(),
+            )
+            .await
+            .unwrap()
+            .identity;
+
+        let pc = registry.resolve_principal_chain(&bot.did_string(), 1u64);
+        assert_eq!(pc.actor_bond, None);
+        assert_eq!(pc.controller_bond_aggregate, None);
+        assert_eq!(pc.controller_bond, None);
+    }
+
+    #[tokio::test]
+    async fn principal_chain_autonomous_machine_uses_self_as_controller_for_aggregate() {
+        // Autonomous machine (no controller) — actor IS the controller,
+        // so controller_aggregate keys off the actor's own DID. Wire the
+        // lookup before registration and populate using the registry's
+        // actual minted DID (UUIDs are fresh per call).
+        let amount = 10_000_000_000_000_000_000u128;
+
+        let lookup = Arc::new(FakeBondLookup::new());
+        let registry = IdentityRegistry::new()
+            .with_bond_lookup(lookup.clone() as Arc<dyn BondLookup>);
+        let bot = registry
+            .register_autonomous_machine(test_pubkey(7), vec!["monitoring".to_string()])
+            .await
+            .unwrap();
+
+        lookup.actor.write().insert(bot.did_string(), amount);
+        lookup.aggregate.write().insert(bot.did_string(), amount);
+
+        let pc = registry.resolve_principal_chain(&bot.did_string(), 1u64);
+
+        assert_eq!(pc.actor_bond, Some(amount));
+        assert_eq!(pc.controller_bond_aggregate, Some(amount));
     }
 }

@@ -87,6 +87,14 @@ pub enum TokenError {
     /// Invalid voting power
     #[error("Invalid voting power: must have staked TNZO to vote")]
     InvalidVotingPower,
+
+    /// Generic invalid-parameter error (used by bond/insurance flows).
+    #[error("Invalid parameter: {0}")]
+    InvalidParameter(String),
+
+    /// Generic not-found error (used by bond/insurance flows).
+    #[error("Not found: {0}")]
+    NotFound(String),
 }
 
 impl From<tenzro_storage::StorageError> for TokenError {

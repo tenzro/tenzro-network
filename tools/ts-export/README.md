@@ -11,8 +11,8 @@ As of 2026-04, no first-party ungated ONNX timeseries foundation models
 exist on HuggingFace. The upstream repos all ship safetensors only.
 Since Apache 2.0 / MIT licensed weights are redistributable, we export
 them ourselves and host the ONNX artifacts under a `tenzro/` org so the
-runtime catalog (`crates/tenzro-model/src/catalog.rs::get_timeseries_catalog`,
-when populated) can point to them.
+runtime catalog (`crates/tenzro-model/src/catalog.rs::get_forecast_catalog`)
+can point to them.
 
 ## Targets
 
@@ -71,4 +71,5 @@ real users at it.
    patch-based, etc.), add a per-model export hook in `export.py`.
 3. Run locally and confirm `verify.py` passes.
 4. Open a PR adding both the artifact (uploaded externally) and the
-   catalog entry in `crates/tenzro-model/src/catalog.rs`.
+   catalog entry in `crates/tenzro-model/src/catalog.rs`
+   (`get_forecast_catalog`).

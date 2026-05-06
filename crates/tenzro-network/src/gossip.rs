@@ -26,27 +26,27 @@ impl GossipTopics {
         let mut topics = HashMap::new();
 
         // Core protocol topics
-        topics.insert("blocks".to_string(), IdentTopic::new("tenzro/blocks/1.0.0"));
-        topics.insert("transactions".to_string(), IdentTopic::new("tenzro/transactions/1.0.0"));
-        topics.insert("consensus".to_string(), IdentTopic::new("tenzro/consensus/1.0.0"));
+        topics.insert("blocks".to_string(), IdentTopic::new("tenzro/blocks"));
+        topics.insert("transactions".to_string(), IdentTopic::new("tenzro/transactions"));
+        topics.insert("consensus".to_string(), IdentTopic::new("tenzro/consensus"));
 
         // Provider topics
-        topics.insert("attestations".to_string(), IdentTopic::new("tenzro/attestations/1.0.0"));
-        topics.insert("models".to_string(), IdentTopic::new("tenzro/models/1.0.0"));
-        topics.insert("inference".to_string(), IdentTopic::new("tenzro/inference/1.0.0"));
+        topics.insert("attestations".to_string(), IdentTopic::new("tenzro/attestations"));
+        topics.insert("models".to_string(), IdentTopic::new("tenzro/models"));
+        topics.insert("inference".to_string(), IdentTopic::new("tenzro/inference"));
 
         // Status and discovery
-        topics.insert("status".to_string(), IdentTopic::new("tenzro/status/1.0.0"));
+        topics.insert("status".to_string(), IdentTopic::new("tenzro/status"));
 
         // Agent and provider discovery
-        topics.insert("agents".to_string(), IdentTopic::new("tenzro/agents/1.0.0"));
-        topics.insert("providers".to_string(), IdentTopic::new("tenzro/providers/1.0.0"));
+        topics.insert("agents".to_string(), IdentTopic::new("tenzro/agents"));
+        topics.insert("providers".to_string(), IdentTopic::new("tenzro/providers"));
 
         // Cortex worker discovery (must match tenzro_cortex::CORTEX_TOPIC)
-        topics.insert("cortex".to_string(), IdentTopic::new("tenzro/cortex/1.0.0"));
+        topics.insert("cortex".to_string(), IdentTopic::new("tenzro/cortex"));
 
         // Tenzro Train: outer-gradient broadcast and syncer round publication
-        topics.insert("training".to_string(), IdentTopic::new("tenzro/training/1.0.0"));
+        topics.insert("training".to_string(), IdentTopic::new("tenzro/training"));
         topics.insert("training_syncer".to_string(), IdentTopic::new("tenzro/training/syncer/1.0.0"));
 
         Self { topics }
@@ -259,10 +259,10 @@ impl MessageDeduplicator {
         }
 
         // Evict oldest if at capacity
-        if self.seen.len() >= self.max_entries {
-            if let Some((old_hash, _)) = self.seen.pop_front() {
-                self.seen_set.remove(&old_hash);
-            }
+        if self.seen.len() >= self.max_entries
+            && let Some((old_hash, _)) = self.seen.pop_front()
+        {
+            self.seen_set.remove(&old_hash);
         }
 
         if self.seen_set.contains_key(&hash) {

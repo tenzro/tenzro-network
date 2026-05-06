@@ -32,10 +32,8 @@ mod helpers {
     }
 
     /// Build a fresh SvmExecutor (2 args — no precompile registry).
-    /// Currently unused; the SVM workflow tests drive SVM through
-    /// `MultiVmRuntime` to exercise the dispatch layer. Kept here
-    /// for future direct-executor tests.
-    #[allow(dead_code)]
+    /// Used by the direct-executor SVM tests to bypass the dispatch
+    /// layer in `MultiVmRuntime`.
     pub fn fresh_svm_executor() -> SvmExecutor {
         SvmExecutor::new(VmConfig::default(), Arc::new(GasOracle::new()))
             .expect("SvmExecutor::new should succeed with default config")
@@ -537,6 +535,38 @@ mod svm_workflows {
     #[tokio::test]
     async fn svm_automation_scheduler_tick() {
         run_svm_workflow(b"scheduler:tick=1;tasks=[a,b,c]", 0x40).await;
+    }
+
+    /// Direct-executor smoke test: exercises `SvmExecutor::execute_transaction`
+    /// without going through `MultiVmRuntime`'s dispatch layer. Confirms the
+    /// SVM executor can be constructed and used standalone (e.g. for embedded
+    /// SVM use cases that don't need multi-VM dispatch).
+    #[tokio::test]
+    async fn svm_direct_executor_dispatch() {
+        let executor = fresh_svm_executor();
+        let mut state = fresh_state();
+
+        let sender = mk_svm_pubkey(0x50);
+        let program = mk_svm_pubkey(0xD0);
+        state.set_balance(&sender, SEED_BALANCE);
+        state.set_code(&program, NON_ELF_PROGRAM_STUB.to_vec());
+
+        let tx = signed_tx(
+            sender.clone(),
+            Some(program),
+            0,
+            b"transfer:carol:dave:200".to_vec(),
+            200_000,
+            0,
+            VmType::Svm,
+        );
+
+        let result = executor
+            .execute_transaction(&tx, &mut state)
+            .await
+            .expect("direct SVM executor dispatch should succeed");
+        assert!(result.success, "direct SVM tx should succeed");
+        assert_eq!(state.get_nonce(&sender), 1, "nonce should bump");
     }
 }
 

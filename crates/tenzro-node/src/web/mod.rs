@@ -1,5 +1,6 @@
 //! Web Verification API — HTTP/REST endpoints for browser/external verification
 
+pub mod error;
 pub mod server;
 pub mod handlers;
 pub mod oauth;

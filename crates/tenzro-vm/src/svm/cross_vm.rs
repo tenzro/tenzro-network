@@ -9,9 +9,9 @@
 //! # Conventions
 //!
 //! - **Program ID**: deterministically derived as
-//!   `SHA-256("tenzro/svm/program/cross_vm/v1")`. Hex
-//!   `918f858b6b0dd134e9a1fcb73002428c5197093e76e536badc60382bb9f8ac78`.
-//!   Base58 `AoD3kebB2bYjLKyJtaqkyXqwJy4oQ949SnVhMwEYzGXR`. This mirrors the
+//!   `SHA-256("tenzro/svm/program/cross_vm")`. Hex
+//!   `5c03dd6cf580ecafb5ca11a9e1d6448176bb1dfa9d4886c65d9024df77542695`.
+//!   Base58 `7CBvjJtsMxYFsxYkpcXYoTDZpC8PhMVy1DVVQBopvWCC`. This mirrors the
 //!   `WTNZO_SPL_MINT` derivation pattern in [`spl_adapter`](super::spl_adapter)
 //!   — a public, reproducible address with no upgrade authority.
 //!
@@ -106,22 +106,22 @@ use sha2::{Digest, Sha256};
 
 /// Canonical Tenzro Cross-VM program ID.
 ///
-/// Derived as `SHA-256("tenzro/svm/program/cross_vm/v1")`. This is a
+/// Derived as `SHA-256("tenzro/svm/program/cross_vm")`. This is a
 /// deterministic, reproducible address with no associated keypair — the
 /// program is "native" (handled inline by the SVM executor) and therefore
 /// cannot be upgraded or redeployed by any account.
 ///
-/// Hex: `918f858b6b0dd134e9a1fcb73002428c5197093e76e536badc60382bb9f8ac78`
-/// Base58: `AoD3kebB2bYjLKyJtaqkyXqwJy4oQ949SnVhMwEYzGXR`
+/// Hex: `5c03dd6cf580ecafb5ca11a9e1d6448176bb1dfa9d4886c65d9024df77542695`
+/// Base58: `7CBvjJtsMxYFsxYkpcXYoTDZpC8PhMVy1DVVQBopvWCC`
 pub const TENZRO_CROSS_VM_PROGRAM_ID: [u8; 32] = [
-    0x91, 0x8f, 0x85, 0x8b, 0x6b, 0x0d, 0xd1, 0x34,
-    0xe9, 0xa1, 0xfc, 0xb7, 0x30, 0x02, 0x42, 0x8c,
-    0x51, 0x97, 0x09, 0x3e, 0x76, 0xe5, 0x36, 0xba,
-    0xdc, 0x60, 0x38, 0x2b, 0xb9, 0xf8, 0xac, 0x78,
+    0x5c, 0x03, 0xdd, 0x6c, 0xf5, 0x80, 0xec, 0xaf,
+    0xb5, 0xca, 0x11, 0xa9, 0xe1, 0xd6, 0x44, 0x81,
+    0x76, 0xbb, 0x1d, 0xfa, 0x9d, 0x48, 0x86, 0xc6,
+    0x5d, 0x90, 0x24, 0xdf, 0x77, 0x54, 0x26, 0x95,
 ];
 
 /// Domain string used to derive [`TENZRO_CROSS_VM_PROGRAM_ID`].
-pub const PROGRAM_ID_DERIVATION_DOMAIN: &str = "tenzro/svm/program/cross_vm/v1";
+pub const PROGRAM_ID_DERIVATION_DOMAIN: &str = "tenzro/svm/program/cross_vm";
 
 /// 8-byte Anchor-style instruction discriminators.
 ///
@@ -344,7 +344,7 @@ pub fn verify_program_id() -> bool {
     let mut hasher = Sha256::new();
     hasher.update(PROGRAM_ID_DERIVATION_DOMAIN.as_bytes());
     let digest = hasher.finalize();
-    digest.as_slice() == &TENZRO_CROSS_VM_PROGRAM_ID
+    digest.as_slice() == TENZRO_CROSS_VM_PROGRAM_ID
 }
 
 /// Re-compute an Anchor-style 8-byte discriminator at runtime. Useful for

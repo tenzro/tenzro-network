@@ -228,11 +228,10 @@ impl StakeWithdrawCmd {
             output::print_field("Transaction Hash", v);
         }
 
-        if self.force {
-            if let Some(v) = result.get("penalty").and_then(|v| v.as_str()) {
+        if self.force
+            && let Some(v) = result.get("penalty").and_then(|v| v.as_str()) {
                 output::print_field("Penalty Applied", v);
             }
-        }
 
         println!();
         output::print_info("Tokens will be available after the unbonding period.");
@@ -318,8 +317,8 @@ impl StakeInfoCmd {
                 }
             }
 
-            if let Some(unbonding) = staking_info.get("unbonding_stakes").and_then(|v| v.as_array()) {
-                if !unbonding.is_empty() {
+            if let Some(unbonding) = staking_info.get("unbonding_stakes").and_then(|v| v.as_array())
+                && !unbonding.is_empty() {
                     println!();
                     output::print_header("Unbonding Stakes");
 
@@ -333,7 +332,6 @@ impl StakeInfoCmd {
                     }
                     output::print_table(&headers, &rows);
                 }
-            }
         }
 
         Ok(())

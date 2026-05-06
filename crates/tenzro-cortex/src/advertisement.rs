@@ -1,7 +1,7 @@
 //! Cortex worker gossipsub advertisement.
 //!
 //! Workers periodically publish a signed [`CortexAdvertisement`] on the
-//! `tenzro/cortex/1.0.0` topic so that other nodes can discover remote
+//! `tenzro/cortex` topic so that other nodes can discover remote
 //! Cortex workers without needing to register them via RPC.
 //!
 //! The broadcasting transport is plugable via [`CortexGossipPublisher`];
@@ -28,7 +28,7 @@ use tenzro_types::{
 use crate::error::{CortexError, Result};
 
 /// Gossipsub topic used for Cortex worker advertisements.
-pub const CORTEX_TOPIC: &str = "tenzro/cortex/1.0.0";
+pub const CORTEX_TOPIC: &str = "tenzro/cortex";
 
 /// Default lifetime for an advertisement, in seconds.
 pub const DEFAULT_ADVERT_TTL_SECS: u64 = 90;

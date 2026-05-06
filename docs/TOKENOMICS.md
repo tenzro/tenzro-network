@@ -783,14 +783,7 @@ Tenzro's identity (TDIP), token (CAIP-2 `tenzro` namespace, SLIP-44 1414421071, 
 
 ### 7. Has a Live Testnet With Production-Quality Implementations
 
-The Tenzro testnet is live on GCP (`tenzro-infra` project) with the following infrastructure:
-
-- **3 validators** (StatefulSet) running HotStuff-2 consensus on GKE
-- **1 RPC node** (Deployment) serving public JSON-RPC at `https://rpc.tenzro.network` (Chain ID: 1337)
-- **Caddy reverse proxy** with TLS termination (external IP: 35.224.150.186)
-- **6-node GKE cluster** (5x e2-medium validators + 1x e2-small RPC) in us-central1-a
-- **Docker images** built via Cloud Build and stored in Artifact Registry (145.7MB)
-- **Active P2P networking** with libp2p peer discovery (Kademlia DHT), gossipsub messaging, and peer reputation tracking
+The Tenzro testnet is live and reachable at `https://rpc.tenzro.network` (Chain ID: 1337) with public Web API, Faucet, MCP, A2A, and six ecosystem MCP servers (Solana / Ethereum / Canton / LayerZero / Chainlink / Li.Fi). Genesis: 1,000,000,000 TNZO total supply, 10,000,000 TNZO faucet allocation (100 TNZO per request, 24-hour cooldown).
 
 The core infrastructure crates are production-quality implementations (testnet-ready):
 
@@ -806,6 +799,28 @@ The core infrastructure crates are production-quality implementations (testnet-r
 | Networking | tenzro-network | libp2p with gossipsub topics, Kademlia DHT, peer manager |
 
 The token, in other words, runs on a working consensus engine and VM execution layer today rather than ahead of one.
+
+### 8. Adaptive Burn Governance Dial
+
+The `tenzro-token::adaptive_burn` module implements a governance-controlled dial over every burn channel. `BurnRateConfig` carries `base_fee_burn_bps`, `local_fee_burn_bps`, and `paymaster_burn_bps` (the last locked at 100% so paymasters always burn TNZO from a treasury quota). `SupplyTargets` defines a rolling window, neutral band, and inflation/deflation alarms with magnitude caps; the pure transfer function `compute_recommendation(metrics, targets)` returns a `BurnRateRecommendation` that drives an auto-proposal generator. M2M volume is empirically ~100× human volume — a calcified burn taper either drains supply or no-ops, so the dial is designed to track realized supply against target ranges and adjust within governance-set bounds.
+
+Read-only RPCs `tenzro_getBurnRateConfig`, `tenzro_getSupplyMetrics`, `tenzro_getBurnRateRecommendation`, and `tenzro_listAdaptiveBurnProposals` surface the dial. The recommendation supersedes the static R1/R2 sketches above — the same intent (utilization-aware commission, inference-tied burn) is realized through a single governance-controlled primitive that operates over realized supply rather than utilization heuristics.
+
+### 9. Dual-Rail Gas + Paymaster Burn Quota
+
+Native TNZO gas is the default rail. Stablecoin paymasters provide a second rail for enterprise users who do not hold TNZO — but every paymaster sponsorship burns TNZO from a treasury quota at 100% of `paymaster_burn_bps`. The TNZO sink is preserved while the user-facing UX is denominated in whatever stablecoin the paymaster supports.
+
+### 10. AgentBond Surety + Insurance Pool
+
+Every autonomous agent posts a slashable TNZO bond at registration. Bonds are released through the same `DelegationScope` / `IdentityRegistry::enforce_operation` path that bounds spending, with a governance-controlled minimum. Slashed bonds flow into an on-chain insurance pool that pays out on file-able claims — typed as `tenzro_postAgentBond`, `tenzro_getAgentBond`, and `tenzro_fileInsuranceClaim` on the JSON-RPC, MCP, and A2A surfaces. This puts the cost of bad agent behavior onto the agent itself, while making victims whole from a pool funded by misbehavior — closing the externality that classical staking-only systems leave open.
+
+### 11. SeedAgent Treasury Earmark
+
+A dedicated `TreasuryEarmark` funds protocol-owned agents during the first 12 months. The `Charter` enumerates `OperationKind` (inference consumer, task marketplace consumer, template instantiator, bridge user, settlement probe, ERC-7683 settler probe, dispute filer) plus `SpendCaps`, `TargetThroughput`, `CounterpartyFilter`, and a sunset disposition. The `DecaySchedule` defaults to 100/100/100% for months 0-2, decaying through 75% / 50% / 25% in three-month tranches and reaching 0% from month 12. Surplus at sunset is burned per `surplus_burn_bps`. The SeedAgent counterparty filter explicitly excludes other SeedAgents (`CounterpartyFilter::deny_other_seed_agents`) so organic-activity metrics are not inflated by protocol-owned bootstrap traffic. The `is_seed_agent` flag on `IdentityData::Machine` is immutable, set at registration.
+
+### 12. Per-DID Flow Control + Local Fee Market
+
+Mempool admission lanes are keyed on `controller_did` rather than wallet address — multiple agents under one controller are one accountable unit, so a single swarm cannot saturate the chain. When swarms cluster on hot contracts, a per-account local fee market escalates fees on the hot contract specifically, leaving cold-path traffic at the global EIP-1559 base fee. Both lane fill rate and fee escalation thresholds are governance dials, not hardcoded constants.
 
 ---
 

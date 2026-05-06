@@ -2,19 +2,19 @@
 //!
 //! Builds an autonomous DCA agent that:
 //!
-//!   1. Provisions a human controller identity via TDIP
-//!   2. Provisions a machine identity under the human, with a fine-grained
-//!      delegation scope (per-buy cap, daily cap, allowed operations)
-//!   3. For each scheduled buy:
-//!      a. Creates an MPP payment challenge against the on-chain price oracle
-//!      b. Signs and submits a credential with a real Ed25519 signature
-//!      c. Verifies and settles the credential through `MppPaymentServer`
-//!      d. Pre-funds the customer in the settlement engine and asks the
-//!         engine to release the payment to the provider against a signed
-//!         service proof — exercising the real `SettlementEngine`
-//!   4. Enforces the delegation scope BEFORE every buy, so the agent cannot
-//!      exceed its per-buy cap or invoke disallowed operations
-//!   5. Demonstrates that the delegation scope rejects an oversized buy
+//! 1. Provisions a human controller identity via TDIP
+//! 2. Provisions a machine identity under the human, with a fine-grained
+//!    delegation scope (per-buy cap, daily cap, allowed operations)
+//! 3. For each scheduled buy:
+//!    a. Creates an MPP payment challenge against the on-chain price oracle
+//!    b. Signs and submits a credential with a real Ed25519 signature
+//!    c. Verifies and settles the credential through `MppPaymentServer`
+//!    d. Pre-funds the customer in the settlement engine and asks the
+//!    engine to release the payment to the provider against a signed
+//!    service proof — exercising the real `SettlementEngine`
+//! 4. Enforces the delegation scope BEFORE every buy, so the agent cannot
+//!    exceed its per-buy cap or invoke disallowed operations
+//! 5. Demonstrates that the delegation scope rejects an oversized buy
 //!
 //! Run it with:
 //!
@@ -58,17 +58,12 @@ struct ScheduledBuy {
 /// Sign an MPP credential message exactly the way `MppPaymentServer` expects.
 ///
 /// Canonical message: `challenge_id ++ payer_did ++ amount.to_le_bytes() ++ asset`
-/// Returns `(classical_pubkey, classical_sig, pq_pubkey, pq_sig)` for the
-/// hybrid `PaymentCredential` schema (Wave 3d).
 fn sign_mpp_credential(
     challenge_id: &str,
     payer_did: &str,
     amount: u128,
     asset: &str,
-) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
-    use tenzro_crypto::composite::{HybridSigner, InMemoryHybridSigner};
-    use tenzro_crypto::pq::MlDsaSigningKey;
-
+) -> (Vec<u8>, Vec<u8>) {
     let mut message = Vec::new();
     message.extend_from_slice(challenge_id.as_bytes());
     message.extend_from_slice(payer_did.as_bytes());
@@ -77,14 +72,10 @@ fn sign_mpp_credential(
 
     let keypair = KeyPair::generate(KeyType::Ed25519).expect("keypair");
     let public_key_bytes = keypair.public_key().as_bytes().to_vec();
-    let classical = Ed25519SignerImpl::new(keypair).expect("signer");
-    let pq = MlDsaSigningKey::generate();
-    let pq_public_key_bytes = pq.verifying_key_bytes().to_vec();
-    let hybrid = InMemoryHybridSigner::new(Box::new(classical), pq);
-    let composite = hybrid.sign(&message).expect("hybrid sign");
-    let pq_signature = composite.pq.expect("pq sig");
+    let signer = Ed25519SignerImpl::new(keypair).expect("signer");
+    let signature = signer.sign(&message).expect("sign");
 
-    (public_key_bytes, composite.classical, pq_public_key_bytes, pq_signature)
+    (public_key_bytes, signature.to_bytes())
 }
 
 /// Build a settlement-engine `ServiceProof` carrying a real Ed25519 signature
@@ -233,15 +224,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         println!("  challenge {} created", challenge.challenge_id);
 
-        // (4c) Sign a credential with a real hybrid (Ed25519 + ML-DSA-65) signature.
+        // (4c) Sign a credential with a real Ed25519 signature.
         let payer_did = "did:tenzro:human:dca-walkthrough-payer";
-        let (public_key_bytes, signature_bytes, pq_public_key_bytes, pq_signature_bytes) =
-            sign_mpp_credential(
-                &challenge.challenge_id,
-                payer_did,
-                challenge.amount,
-                &challenge.asset,
-            );
+        let (public_key_bytes, signature_bytes) = sign_mpp_credential(
+            &challenge.challenge_id,
+            payer_did,
+            challenge.amount,
+            &challenge.asset,
+        );
 
         let mut extra = std::collections::HashMap::new();
         extra.insert(
@@ -258,8 +248,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             amount: challenge.amount,
             asset: challenge.asset.clone(),
             signature: signature_bytes,
-            pq_signature: pq_signature_bytes,
-            pq_public_key: pq_public_key_bytes,
+            // External-protocol passthroughs (this MPP demo) leave the PQ leg empty —
+            // the hybrid verifier is exercised by the production credential path, not
+            // this walkthrough.
+            pq_signature: Vec::new(),
+            pq_public_key: Vec::new(),
             extra,
         };
 

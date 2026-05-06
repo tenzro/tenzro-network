@@ -8,7 +8,7 @@ Foundation crate providing shared types for the Tenzro Network.
 
 ## Modules
 
-**24 public modules:** primitives, transaction, block, account, asset, network, tee, agent, model, settlement, token, governance, bridge, wallet, canton, identity, fees, task, agent_template, skill, tool, error, config, constants, runtime, validation
+**Public modules:** primitives, transaction, block, account, asset, network, tee, agent, model, settlement, token, governance, bridge, wallet, canton, identity, fees, task, agent_template, skill, tool, error, config, constants, runtime, validation, cortex, training, principal_chain, kill_switch, intent_7683
 
 ### Primitives
 - `Hash` - 32-byte hash type
@@ -54,6 +54,20 @@ Foundation crate providing shared types for the Tenzro Network.
 
 ### Bridge Types
 - `BridgeMessage`, `BridgeProtocol`, `BridgeTransfer` - Cross-chain bridge operations
+
+### ERC-7683 Cross-Chain Intents (`intent_7683` module)
+- `CrossChainOrder`, `GaslessCrossChainOrder` - User-signed open envelopes
+- `ResolvedCrossChainOrder` - `IOriginSettler.resolve` return shape
+- `Output`, `TargetOutput` - Chain-discriminated 32-byte recipient + uint256 amount
+- `FillInstruction` - Per-output destination dispatch
+- `TenzroOrderData` - Tenzro-native opaque payload carried inside the 7683 envelope
+- `TokenAmount` - 32-byte token id + uint256 amount
+- `ProofRoute` - LayerZero / Wormhole / DeBridge / Hyperlane fill-proof route
+- `OrderState` - Open → AwaitingProof → Settled / Refunded / ForceRefundEligible
+- `Tenzro7683Order` - On-chain envelope persisted under the `7683_origin:` keyspace
+- `compute_order_id(order)` - `SHA-256("tenzro/7683/order" || swapper || nonce_le || origin_chain_id_le || fill_deadline_le || order_data_type || order_data)`
+- `u128_to_uint256_be` / `uint256_be_to_u128` - Big-endian uint256 conversion (rejects non-zero high 128 bits)
+- CAIP-2 chain IDs: `TENZRO_MAINNET_CHAIN_ID = 0x10ED20`, `TENZRO_TESTNET_CHAIN_ID = 0x10ED21`
 
 ### Wallet Types
 - `WalletInfo`, `WalletType` - Wallet management

@@ -47,6 +47,15 @@ pub enum AgentCommand {
     PayForInference(AgentPayForInferenceCmd),
     /// Reconcile the agent registry — auto-suspend idle agents (1h TTL)
     Prune(AgentPruneCmd),
+    /// Pause an agent via kill-switch (reversible). Freezes payments, allows
+    /// reward distribution + stake withdrawals.
+    Pause(AgentPauseCmd),
+    /// Quarantine an agent via kill-switch (reversible). Freezes payments,
+    /// reward distribution, and stake withdrawals; stake remains intact.
+    Quarantine(AgentQuarantineCmd),
+    /// Terminate an agent via kill-switch (irreversible). Slashes stake by
+    /// `slash_bps`, optionally cascades to descendants.
+    Terminate(AgentTerminateCmd),
 }
 
 impl AgentCommand {
@@ -71,6 +80,9 @@ impl AgentCommand {
             Self::SpawnWithSkill(cmd) => cmd.execute().await,
             Self::PayForInference(cmd) => cmd.execute().await,
             Self::Prune(cmd) => cmd.execute().await,
+            Self::Pause(cmd) => cmd.execute().await,
+            Self::Quarantine(cmd) => cmd.execute().await,
+            Self::Terminate(cmd) => cmd.execute().await,
         }
     }
 }
@@ -525,8 +537,8 @@ impl AgentGetSwarmCmd {
             output::print_field("Members", &v.to_string());
         }
 
-        if let Some(members) = result.get("members").and_then(|v| v.as_array()) {
-            if !members.is_empty() {
+        if let Some(members) = result.get("members").and_then(|v| v.as_array())
+            && !members.is_empty() {
                 println!();
                 let headers = vec!["Agent ID", "Role", "Status"];
                 let mut rows = Vec::new();
@@ -539,7 +551,6 @@ impl AgentGetSwarmCmd {
                 }
                 output::print_table(&headers, &rows);
             }
-        }
 
         Ok(())
     }
@@ -685,13 +696,11 @@ impl AgentGetTemplateCmd {
         let has_spec = result.get("execution_spec").is_some_and(|v| !v.is_null());
         output::print_field("Executable", if has_spec { "yes" } else { "no" });
 
-        if has_spec {
-            if let Some(spec) = result.get("execution_spec") {
-                if let Some(steps) = spec.get("steps").and_then(|v| v.as_array()) {
+        if has_spec
+            && let Some(spec) = result.get("execution_spec")
+                && let Some(steps) = spec.get("steps").and_then(|v| v.as_array()) {
                     output::print_field("Steps", &steps.len().to_string());
                 }
-            }
-        }
 
         Ok(())
     }
@@ -812,16 +821,14 @@ impl AgentRunTemplateCmd {
         if let Some(v) = result.get("steps_executed").and_then(|v| v.as_u64()) {
             output::print_field("Steps Executed", &v.to_string());
         }
-        if let Some(v) = result.get("steps_skipped_by_delegation").and_then(|v| v.as_u64()) {
-            if v > 0 {
+        if let Some(v) = result.get("steps_skipped_by_delegation").and_then(|v| v.as_u64())
+            && v > 0 {
                 output::print_field("Skipped (delegation)", &v.to_string());
             }
-        }
-        if let Some(v) = result.get("steps_failed").and_then(|v| v.as_u64()) {
-            if v > 0 {
+        if let Some(v) = result.get("steps_failed").and_then(|v| v.as_u64())
+            && v > 0 {
                 output::print_field("Failed", &v.to_string());
             }
-        }
         if let Some(v) = result.get("total_value_dispatched").and_then(|v| v.as_u64()) {
             output::print_field("Value Dispatched", &format!("{v} wei"));
         }
@@ -1040,6 +1047,300 @@ impl AgentPayForInferenceCmd {
         output::print_success("Payment authorized!");
         if let Some(v) = result.get("payment_id").and_then(|v| v.as_str()) { output::print_field("Payment ID", v); }
         if let Some(v) = result.get("amount").and_then(|v| v.as_str()) { output::print_field("Amount", v); }
+        Ok(())
+    }
+}
+
+// ── Kill-switch commands (Agent-Swarm Spec 1) ────────────────────────────
+//
+// All three submit a typed transaction (`PauseAgent` / `QuarantineAgent` /
+// `TerminateAgent`) via `tenzro_signAndSendTransaction`. The node-side
+// post-execute scan in `event_loop.rs::process_kill_switch_logs` drives the
+// lifecycle FSM, freezes/slashes stake, and (for terminate-cascade) walks
+// the spawn tree.
+
+const DEFAULT_KILLSWITCH_PAUSE_GAS: u64 = 60_000;
+const DEFAULT_KILLSWITCH_QUARANTINE_GAS: u64 = 90_000;
+const DEFAULT_KILLSWITCH_TERMINATE_GAS: u64 = 120_000;
+
+/// Query nonce + chain_id for the controller (defaults if unreachable).
+async fn fetch_controller_nonce_and_chain_id(
+    rpc: &crate::rpc::RpcClient,
+    address: &str,
+) -> (u64, u64) {
+    let nonce = rpc
+        .call::<serde_json::Value>(
+            "eth_getTransactionCount",
+            serde_json::json!([address, "latest"]),
+        )
+        .await
+        .ok()
+        .and_then(|v| v.as_str()
+            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()))
+        .unwrap_or(0);
+    let chain_id = rpc
+        .call::<serde_json::Value>("eth_chainId", serde_json::json!([]))
+        .await
+        .ok()
+        .and_then(|v| v.as_str()
+            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()))
+        .unwrap_or(1337);
+    (nonce, chain_id)
+}
+
+/// Pause an agent via the kill-switch (Agent-Swarm Spec 1, tier 1).
+#[derive(Debug, Parser)]
+pub struct AgentPauseCmd {
+    /// Controller address (hex, must match the signing key)
+    #[arg(long)]
+    controller: String,
+    /// Controller DID (e.g. `did:tenzro:human:...`)
+    #[arg(long)]
+    controller_did: String,
+    /// Agent DID to pause (`did:tenzro:machine:...`)
+    #[arg(long)]
+    agent_did: String,
+    /// Reason code (canonical kill-switch spec §"Reason codes")
+    #[arg(long, default_value_t = 0u16)]
+    reason_code: u16,
+    /// Optional human reason text (capped at 256 bytes)
+    #[arg(long)]
+    reason_text: Option<String>,
+    /// Optional pause expiry as Unix timestamp in milliseconds
+    #[arg(long)]
+    until: Option<u64>,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl AgentPauseCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Pause Agent");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Querying nonce and chain ID...");
+        let (nonce, chain_id) =
+            fetch_controller_nonce_and_chain_id(&rpc, &self.controller).await;
+        spinner.set_message("Signing PauseAgent transaction...");
+
+        let tx_type = serde_json::json!({
+            "type": "PauseAgent",
+            "data": {
+                "agent_did": self.agent_did,
+                "controller_did": self.controller_did,
+                "reason_code": self.reason_code,
+                "reason_text": self.reason_text,
+                "until": self.until,
+            }
+        });
+
+        let result: serde_json::Value = rpc.call(
+            "tenzro_signAndSendTransaction",
+            serde_json::json!({
+                "from": self.controller,
+                "to": self.controller,
+                "value": 0u64,
+                "gas_limit": DEFAULT_KILLSWITCH_PAUSE_GAS,
+                "gas_price": 1_000_000_000u64,
+                "nonce": nonce,
+                "chain_id": chain_id,
+                "tx_type": tx_type,
+            }),
+        ).await?;
+        spinner.finish_and_clear();
+
+        let tx_hash = result.get("tx_hash")
+            .or_else(|| result.get("transaction_hash"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unknown>");
+        output::print_success("PauseAgent transaction submitted");
+        println!();
+        output::print_field("Controller", &self.controller);
+        output::print_field("Agent DID", &self.agent_did);
+        output::print_field("Reason Code", &self.reason_code.to_string());
+        output::print_field("Transaction Hash", tx_hash);
+        Ok(())
+    }
+}
+
+/// Quarantine an agent via the kill-switch (Agent-Swarm Spec 1, tier 2).
+#[derive(Debug, Parser)]
+pub struct AgentQuarantineCmd {
+    /// Controller address (hex, must match the signing key)
+    #[arg(long)]
+    controller: String,
+    /// Controller DID
+    #[arg(long)]
+    controller_did: String,
+    /// Agent DID to quarantine
+    #[arg(long)]
+    agent_did: String,
+    /// Reason code
+    #[arg(long, default_value_t = 0u16)]
+    reason_code: u16,
+    /// Optional human reason text
+    #[arg(long)]
+    reason_text: Option<String>,
+    /// Optional 32-byte SHA-256 evidence hash (hex)
+    #[arg(long)]
+    evidence_hash: Option<String>,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl AgentQuarantineCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Quarantine Agent");
+
+        let evidence_hash_bytes: Option<[u8; 32]> = match self.evidence_hash.as_ref() {
+            None => None,
+            Some(h) => {
+                let bytes = hex::decode(h.trim_start_matches("0x"))
+                    .map_err(|e| anyhow::anyhow!("invalid evidence_hash hex: {}", e))?;
+                if bytes.len() != 32 {
+                    anyhow::bail!(
+                        "evidence_hash must be 32 bytes (64 hex chars), got {}",
+                        bytes.len()
+                    );
+                }
+                let mut a = [0u8; 32];
+                a.copy_from_slice(&bytes);
+                Some(a)
+            }
+        };
+
+        let rpc = RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Querying nonce and chain ID...");
+        let (nonce, chain_id) =
+            fetch_controller_nonce_and_chain_id(&rpc, &self.controller).await;
+        spinner.set_message("Signing QuarantineAgent transaction...");
+
+        let tx_type = serde_json::json!({
+            "type": "QuarantineAgent",
+            "data": {
+                "agent_did": self.agent_did,
+                "controller_did": self.controller_did,
+                "reason_code": self.reason_code,
+                "reason_text": self.reason_text,
+                "evidence_hash": evidence_hash_bytes,
+            }
+        });
+
+        let result: serde_json::Value = rpc.call(
+            "tenzro_signAndSendTransaction",
+            serde_json::json!({
+                "from": self.controller,
+                "to": self.controller,
+                "value": 0u64,
+                "gas_limit": DEFAULT_KILLSWITCH_QUARANTINE_GAS,
+                "gas_price": 1_000_000_000u64,
+                "nonce": nonce,
+                "chain_id": chain_id,
+                "tx_type": tx_type,
+            }),
+        ).await?;
+        spinner.finish_and_clear();
+
+        let tx_hash = result.get("tx_hash")
+            .or_else(|| result.get("transaction_hash"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unknown>");
+        output::print_success("QuarantineAgent transaction submitted");
+        println!();
+        output::print_field("Controller", &self.controller);
+        output::print_field("Agent DID", &self.agent_did);
+        output::print_field("Reason Code", &self.reason_code.to_string());
+        output::print_field("Transaction Hash", tx_hash);
+        Ok(())
+    }
+}
+
+/// Terminate an agent via the kill-switch (Agent-Swarm Spec 1, tier 3).
+#[derive(Debug, Parser)]
+pub struct AgentTerminateCmd {
+    /// Controller address (hex, must match the signing key)
+    #[arg(long)]
+    controller: String,
+    /// Controller DID
+    #[arg(long)]
+    controller_did: String,
+    /// Agent DID to terminate
+    #[arg(long)]
+    agent_did: String,
+    /// Reason code
+    #[arg(long, default_value_t = 0u16)]
+    reason_code: u16,
+    /// Basis points of stake to slash (0..=10000)
+    #[arg(long, default_value_t = 0u16)]
+    slash_bps: u16,
+    /// Recursively terminate descendants under children:<parent_id>
+    #[arg(long)]
+    cascade: bool,
+    /// Optional human reason text
+    #[arg(long)]
+    reason_text: Option<String>,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl AgentTerminateCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Terminate Agent");
+
+        if self.slash_bps > 10_000 {
+            anyhow::bail!("slash_bps must be in 0..=10000, got {}", self.slash_bps);
+        }
+
+        let rpc = RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Querying nonce and chain ID...");
+        let (nonce, chain_id) =
+            fetch_controller_nonce_and_chain_id(&rpc, &self.controller).await;
+        spinner.set_message("Signing TerminateAgent transaction...");
+
+        let tx_type = serde_json::json!({
+            "type": "TerminateAgent",
+            "data": {
+                "agent_did": self.agent_did,
+                "controller_did": self.controller_did,
+                "reason_code": self.reason_code,
+                "slash_bps": self.slash_bps,
+                "cascade": self.cascade,
+                "reason_text": self.reason_text,
+            }
+        });
+
+        let result: serde_json::Value = rpc.call(
+            "tenzro_signAndSendTransaction",
+            serde_json::json!({
+                "from": self.controller,
+                "to": self.controller,
+                "value": 0u64,
+                "gas_limit": DEFAULT_KILLSWITCH_TERMINATE_GAS,
+                "gas_price": 1_000_000_000u64,
+                "nonce": nonce,
+                "chain_id": chain_id,
+                "tx_type": tx_type,
+            }),
+        ).await?;
+        spinner.finish_and_clear();
+
+        let tx_hash = result.get("tx_hash")
+            .or_else(|| result.get("transaction_hash"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unknown>");
+        output::print_success("TerminateAgent transaction submitted");
+        println!();
+        output::print_field("Controller", &self.controller);
+        output::print_field("Agent DID", &self.agent_did);
+        output::print_field("Slash bps", &self.slash_bps.to_string());
+        output::print_field("Cascade", &self.cascade.to_string());
+        output::print_field("Transaction Hash", tx_hash);
         Ok(())
     }
 }

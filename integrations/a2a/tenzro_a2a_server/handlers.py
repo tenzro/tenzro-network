@@ -250,6 +250,26 @@ async def handle_identity(text: str, metadata: dict = None) -> str:
     t = text.lower()
     did = _extract_did(text)
 
+    # TDIP/GDPR Article 17 right-to-erasure. Two-phase: revoke first, then forget.
+    if did and ("forget" in t or "erase" in t or "right to be forgotten" in t):
+        result = await rpc_call("tenzro_forgetIdentity", {"did": did})
+        return (
+            f"Identity erased (Article 17):\n"
+            f"  DID: {did}\n"
+            f"  Status: {result.get('status', 'erased')}\n"
+            f"  Note: {result.get('note', 'Hard-deleted from CF_IDENTITIES')}"
+        )
+
+    if did and ("revoke" in t or "cancel" in t):
+        reason = metadata.get("reason", "revoked via A2A") if metadata else "revoked via A2A"
+        result = await rpc_call("tenzro_revokeDid", {"did": did, "reason": reason})
+        return (
+            f"Identity revoked:\n"
+            f"  DID: {did}\n"
+            f"  Affected JTIs: {result.get('affected_jti_count', 0)}\n"
+            f"  Cascade: {result.get('cascade', '')}"
+        )
+
     if did:
         result = await rpc_call("tenzro_resolveIdentity", [did])
         return json.dumps(result, indent=2)
@@ -282,6 +302,8 @@ async def handle_identity(text: str, metadata: dict = None) -> str:
         "Identity operations:\n"
         "  - 'Register a new human identity named Alice'\n"
         "  - 'Resolve DID did:tenzro:human:abc123'\n"
+        "  - 'Revoke DID did:tenzro:human:abc123'\n"
+        "  - 'Forget DID did:tenzro:human:abc123' (Article 17 right-to-erasure)\n"
         "  - 'Set my username to alice'\n"
         "  - 'Resolve username bob'"
     )
@@ -712,9 +734,9 @@ async def handle_svm_cross_vm_info(text: str, metadata: dict = None) -> str:
     Anchor-style instruction discriminators for SVM clients."""
     return (
         "Tenzro Cross-VM SVM-native program:\n"
-        "  Program ID (base58):  AoD3kebB2bYjLKyJtaqkyXqwJy4oQ949SnVhMwEYzGXR\n"
-        "  Program ID (hex):     918f858b6b0dd134e9a1fcb73002428c5197093e76e536badc60382bb9f8ac78\n"
-        "  Derivation:           SHA-256(\"tenzro/svm/program/cross_vm/v1\")\n"
+        "  Program ID (base58):  7CBvjJtsMxYFsxYkpcXYoTDZpC8PhMVy1DVVQBopvWCC\n"
+        "  Program ID (hex):     5c03dd6cf580ecafb5ca11a9e1d6448176bb1dfa9d4886c65d9024df77542695\n"
+        "  Derivation:           SHA-256(\"tenzro/svm/program/cross_vm\")\n"
         "\n"
         "Instruction discriminators (Anchor-style, 8 bytes):\n"
         "  bridge_to_evm           92a8a45c33225f25  (68-byte payload)\n"
@@ -1520,13 +1542,33 @@ async def handle_zk(text: str, metadata: dict = None) -> str:
 # ---------------------------------------------------------------------------
 
 async def handle_ap2(text: str, metadata: dict = None) -> str:
-    """AP2 session lifecycle + mandate verification (Intent/Cart/Payment VDCs)."""
+    """AP2 v0.2 session lifecycle + mandate verification (Checkout/Payment VDCs)."""
     t = text.lower()
 
     # Protocol info
     if "protocol" in t or "info" in t or "version" in t or "supported" in t:
         result = await rpc_call("tenzro_ap2ProtocolInfo", [])
         return f"AP2 protocol info:\n{json.dumps(result, indent=2)}"
+
+    # Sign a Checkout or Payment mandate via the auth-bound wallet
+    if "sign" in t and ("mandate" in t or "vdc" in t or "checkout" in t or "payment" in t):
+        md = metadata or {}
+        mandate_kind = md.get("mandate_kind")
+        mandate = md.get("mandate")
+        signer_did = md.get("signer_did") or _extract_did(text)
+        if mandate_kind not in ("checkout", "payment") or mandate is None or not signer_did:
+            return (
+                "To sign an AP2 v0.2 mandate, provide:\n"
+                "  metadata.mandate_kind  ('checkout' | 'payment')\n"
+                "  metadata.mandate       (full CheckoutMandate or PaymentMandate JSON)\n"
+                "  metadata.signer_did    (must match the auth-bound wallet's controller DID)\n"
+                "Auth: DPoP+JWT mandatory. Wallet must be Ed25519 (AP2 v0.2)."
+            )
+        result = await rpc_call(
+            "tenzro_ap2SignMandate",
+            [{"mandate_kind": mandate_kind, "mandate": mandate, "signer_did": signer_did}],
+        )
+        return f"AP2 mandate signed:\n{json.dumps(result, indent=2)}"
 
     # Verify a single mandate VDC - requires JSON in metadata
     if "verify" in t and ("mandate" in t or "vdc" in t):
@@ -1535,37 +1577,37 @@ async def handle_ap2(text: str, metadata: dict = None) -> str:
             return (
                 "To verify an AP2 mandate, send the full VDC envelope as "
                 "`metadata.vdc` (JSON-LD VC with proof).\n"
-                "Supports Intent, Cart, and Payment mandates per Google's AP2 spec."
+                "Supports CheckoutMandate and PaymentMandate per AP2 v0.2."
             )
         result = await rpc_call("tenzro_ap2VerifyMandate", [{"vdc": vdc}])
         return f"AP2 mandate verification:\n{json.dumps(result, indent=2)}"
 
-    # Validate Intent+Cart pair
-    if ("validate" in t or "pair" in t) and ("intent" in t or "cart" in t):
+    # Validate Checkout+Payment pair
+    if ("validate" in t or "pair" in t) and ("checkout" in t or "payment" in t):
         md = metadata or {}
-        intent_vdc = md.get("intent_vdc") or md.get("intent")
-        cart_vdc = md.get("cart_vdc") or md.get("cart")
+        checkout_vdc = md.get("checkout_vdc") or md.get("checkout")
+        payment_vdc = md.get("payment_vdc") or md.get("payment")
         # `metadata.enforce_delegation` (bool) opts into the TDIP gate:
-        # AP2 validates the cart, then `IdentityRegistry::enforce_operation`
-        # checks the agent's DelegationScope against the cart total.
+        # AP2 validates the payment, then `IdentityRegistry::enforce_operation`
+        # checks the agent's DelegationScope against the payment total.
         enforce_delegation = bool(md.get("enforce_delegation", False))
-        if intent_vdc is None or cart_vdc is None:
+        if checkout_vdc is None or payment_vdc is None:
             return (
-                "To validate an AP2 mandate pair, send both VDCs as "
-                "`metadata.intent_vdc` and `metadata.cart_vdc`.\n"
+                "To validate an AP2 v0.2 mandate pair, send both VDCs as "
+                "`metadata.checkout_vdc` and `metadata.payment_vdc`.\n"
                 "Set `metadata.enforce_delegation = true` to additionally "
-                "enforce the agent's TDIP DelegationScope against the cart total.\n"
-                "The node verifies each VDC and cross-checks intent↔cart consistency."
+                "enforce the agent's TDIP DelegationScope against the payment total.\n"
+                "The node verifies each VDC and cross-checks checkout↔payment consistency."
             )
         result = await rpc_call(
             "tenzro_ap2ValidateMandatePair",
             [{
-                "intent_vdc": intent_vdc,
-                "cart_vdc": cart_vdc,
+                "checkout_vdc": checkout_vdc,
+                "payment_vdc": payment_vdc,
                 "enforce_delegation": enforce_delegation,
             }],
         )
-        return f"AP2 Intent/Cart pair validation:\n{json.dumps(result, indent=2)}"
+        return f"AP2 Checkout/Payment pair validation:\n{json.dumps(result, indent=2)}"
 
     # Session lifecycle
     session_id = _extract_id(text)
@@ -1644,7 +1686,7 @@ async def handle_ap2(text: str, metadata: dict = None) -> str:
         "  - 'Execute session <id>' (needs metadata.authorization_id)\n"
         "  - 'Cancel session <id>' / 'Get session <id>' / 'List sessions'\n"
         "  - 'Verify AP2 mandate' (send metadata.vdc)\n"
-        "  - 'Validate AP2 intent/cart pair' (metadata.intent_vdc + cart_vdc)"
+        "  - 'Validate AP2 checkout/payment pair' (metadata.checkout_vdc + payment_vdc)"
     )
 
 
@@ -1653,51 +1695,136 @@ async def handle_ap2(text: str, metadata: dict = None) -> str:
 # ---------------------------------------------------------------------------
 
 async def handle_erc8004(text: str, metadata: dict = None) -> str:
-    """ERC-8004 on-chain agent identity and reputation (EVM calldata helpers)."""
+    """ERC-8004 Trustless Agents Registry — full v0.6+ calldata surface (Identity / Reputation / Validation)."""
     t = text.lower()
     md = metadata or {}
 
+    # ── Identity registry ────────────────────────────────────────────
+
     if "derive" in t or "agent id" in t or "agentid" in t:
-        owner = md.get("owner") or _extract_address(text)
-        salt = md.get("salt")
-        if owner and salt is not None:
+        did = md.get("did")
+        if did:
             result = await rpc_call(
                 "tenzro_erc8004DeriveAgentId",
-                [{"owner": owner, "salt": salt}],
+                [{"did": did}],
             )
             return f"ERC-8004 agentId:\n{json.dumps(result, indent=2)}"
         return (
-            "Derive an ERC-8004 agentId with:\n"
-            "  metadata.owner (0x address), metadata.salt (bytes32 hex)"
+            "Derive an ERC-8004 agentId (= keccak256(utf8(did))) with:\n"
+            "  metadata.did (Tenzro DID string)"
         )
 
     if "register" in t:
-        agent_id = md.get("agent_id")
-        uri = md.get("registration_data_uri") or md.get("uri")
-        owner = md.get("owner") or _extract_address(text)
-        if agent_id and uri and owner:
+        did = md.get("did")
+        agent_address = md.get("agent_address") or _extract_address(text)
+        metadata_uri = md.get("metadata_uri") or md.get("uri")
+        if did and agent_address and metadata_uri:
             result = await rpc_call(
                 "tenzro_erc8004EncodeRegister",
                 [{
-                    "agent_id": agent_id,
-                    "registration_data_uri": uri,
-                    "owner": owner,
+                    "did": did,
+                    "agent_address": agent_address,
+                    "metadata_uri": metadata_uri,
                 }],
             )
-            return f"ERC-8004 register calldata:\n{json.dumps(result, indent=2)}"
+            return f"ERC-8004 registerAgent calldata:\n{json.dumps(result, indent=2)}"
         return (
-            "Encode an ERC-8004 register() call with:\n"
-            "  metadata.agent_id, metadata.registration_data_uri, metadata.owner"
+            "Encode IdentityRegistry.registerAgent() with:\n"
+            "  metadata.did, metadata.agent_address, metadata.metadata_uri"
         )
+
+    if "set agent uri" in t or ("set" in t and "uri" in t):
+        agent_id = md.get("agent_id")
+        metadata_uri = md.get("metadata_uri") or md.get("uri")
+        if agent_id and metadata_uri:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeSetAgentURI",
+                [{"agent_id": agent_id, "metadata_uri": metadata_uri}],
+            )
+            return f"ERC-8004 setAgentURI calldata:\n{json.dumps(result, indent=2)}"
+        return "Encode setAgentURI() with: metadata.agent_id, metadata.metadata_uri"
+
+    if "set agent wallet" in t or ("rotate" in t and "wallet" in t):
+        agent_id = md.get("agent_id")
+        new_wallet = md.get("new_wallet")
+        deadline = md.get("deadline")
+        signature = md.get("signature")
+        if agent_id and new_wallet and deadline is not None and signature:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeSetAgentWallet",
+                [{
+                    "agent_id": agent_id,
+                    "new_wallet": new_wallet,
+                    "deadline": int(deadline),
+                    "signature": signature,
+                }],
+            )
+            return f"ERC-8004 setAgentWallet calldata:\n{json.dumps(result, indent=2)}"
+        return (
+            "Encode setAgentWallet() with:\n"
+            "  metadata.agent_id, metadata.new_wallet, metadata.deadline, metadata.signature"
+        )
+
+    if "set metadata" in t:
+        agent_id = md.get("agent_id")
+        key = md.get("metadata_key") or md.get("key")
+        value = md.get("metadata_value") or md.get("value")
+        if agent_id and key and value is not None:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeSetMetadata",
+                [{"agent_id": agent_id, "metadata_key": key, "metadata_value": value}],
+            )
+            return f"ERC-8004 setMetadata calldata:\n{json.dumps(result, indent=2)}"
+        return "Encode setMetadata() with: metadata.agent_id, metadata.metadata_key, metadata.metadata_value (hex)"
+
+    if "get metadata" in t:
+        agent_id = md.get("agent_id")
+        key = md.get("metadata_key") or md.get("key")
+        if md.get("return_data"):
+            result = await rpc_call(
+                "tenzro_erc8004DecodeGetMetadata",
+                [{"return_data": md["return_data"]}],
+            )
+            return f"ERC-8004 metadata (decoded):\n{json.dumps(result, indent=2)}"
+        if agent_id and key:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeGetMetadata",
+                [{"agent_id": agent_id, "metadata_key": key}],
+            )
+            return f"ERC-8004 getMetadata calldata:\n{json.dumps(result, indent=2)}"
+        return (
+            "Encode getMetadata() with: metadata.agent_id, metadata.metadata_key\n"
+            "Decode by passing metadata.return_data (eth_call return)."
+        )
+
+    if "get agent uri" in t:
+        agent_id = md.get("agent_id")
+        if agent_id:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeGetAgentURI",
+                [{"agent_id": agent_id}],
+            )
+            return f"ERC-8004 getAgentURI calldata:\n{json.dumps(result, indent=2)}"
+        return "Provide metadata.agent_id to encode getAgentURI() calldata."
+
+    if "get agent wallet" in t:
+        agent_id = md.get("agent_id")
+        if agent_id:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeGetAgentWallet",
+                [{"agent_id": agent_id}],
+            )
+            return f"ERC-8004 getAgentWallet calldata:\n{json.dumps(result, indent=2)}"
+        return "Provide metadata.agent_id to encode getAgentWallet() calldata."
 
     if "get agent" in t or ("get" in t and "agent" in t and "id" in t):
         agent_id = md.get("agent_id")
-        if not agent_id:
+        if not agent_id and not md.get("return_data"):
             return "Provide metadata.agent_id to encode getAgent() calldata."
-        if md.get("returndata"):
+        if md.get("return_data"):
             result = await rpc_call(
                 "tenzro_erc8004DecodeGetAgent",
-                [{"returndata": md["returndata"]}],
+                [{"return_data": md["return_data"]}],
             )
             return f"ERC-8004 agent (decoded):\n{json.dumps(result, indent=2)}"
         result = await rpc_call(
@@ -1705,77 +1832,170 @@ async def handle_erc8004(text: str, metadata: dict = None) -> str:
         )
         return f"ERC-8004 getAgent calldata:\n{json.dumps(result, indent=2)}"
 
-    if "feedback" in t or "reputation" in t:
+    # ── Reputation registry ──────────────────────────────────────────
+
+    if "revoke" in t and "feedback" in t:
         agent_id = md.get("agent_id")
-        score = md.get("score")
-        feedback_auth_id = md.get("feedback_auth_id") or md.get("auth_id")
-        feedback_uri = md.get("feedback_uri") or md.get("uri")
-        if agent_id and score is not None and feedback_auth_id and feedback_uri:
+        feedback_id = md.get("feedback_id")
+        if agent_id and feedback_id:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeRevokeFeedback",
+                [{"agent_id": agent_id, "feedback_id": feedback_id}],
+            )
+            return f"ERC-8004 revokeFeedback calldata:\n{json.dumps(result, indent=2)}"
+        return "Encode revokeFeedback() with: metadata.agent_id, metadata.feedback_id"
+
+    if "append" in t and ("response" in t or "feedback" in t):
+        agent_id = md.get("agent_id")
+        feedback_id = md.get("feedback_id")
+        response_uri = md.get("response_uri") or md.get("uri")
+        if agent_id and feedback_id and response_uri:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeAppendResponse",
+                [{
+                    "agent_id": agent_id,
+                    "feedback_id": feedback_id,
+                    "response_uri": response_uri,
+                }],
+            )
+            return f"ERC-8004 appendResponse calldata:\n{json.dumps(result, indent=2)}"
+        return "Encode appendResponse() with: metadata.agent_id, metadata.feedback_id, metadata.response_uri"
+
+    if "is" in t and "revoked" in t:
+        agent_id = md.get("agent_id")
+        feedback_id = md.get("feedback_id")
+        if agent_id and feedback_id:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeIsFeedbackRevoked",
+                [{"agent_id": agent_id, "feedback_id": feedback_id}],
+            )
+            return f"ERC-8004 isFeedbackRevoked calldata:\n{json.dumps(result, indent=2)}"
+        return "Encode isFeedbackRevoked() with: metadata.agent_id, metadata.feedback_id"
+
+    if "feedback" in t and "responses" in t:
+        agent_id = md.get("agent_id")
+        feedback_id = md.get("feedback_id")
+        if agent_id and feedback_id:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeGetFeedbackResponses",
+                [{"agent_id": agent_id, "feedback_id": feedback_id}],
+            )
+            return f"ERC-8004 getFeedbackResponses calldata:\n{json.dumps(result, indent=2)}"
+        return "Encode getFeedbackResponses() with: metadata.agent_id, metadata.feedback_id"
+
+    if "feedback count" in t or ("count" in t and "feedback" in t):
+        subject = md.get("subject_agent_id") or md.get("agent_id")
+        if subject:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeGetFeedbackCount",
+                [{"subject_agent_id": subject}],
+            )
+            return f"ERC-8004 getFeedbackCount calldata:\n{json.dumps(result, indent=2)}"
+        return "Encode getFeedbackCount() with: metadata.subject_agent_id"
+
+    if "get feedback" in t:
+        subject = md.get("subject_agent_id") or md.get("agent_id")
+        index = md.get("index")
+        if subject and index is not None:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeGetFeedback",
+                [{"subject_agent_id": subject, "index": int(index)}],
+            )
+            return f"ERC-8004 getFeedback calldata:\n{json.dumps(result, indent=2)}"
+        return "Encode getFeedback() with: metadata.subject_agent_id, metadata.index"
+
+    if "feedback" in t or "reputation" in t:
+        subject = md.get("subject_agent_id") or md.get("agent_id")
+        rating = md.get("rating") if md.get("rating") is not None else md.get("score")
+        context_uri = md.get("context_uri") or md.get("uri")
+        if subject and rating is not None and context_uri:
             result = await rpc_call(
                 "tenzro_erc8004EncodeFeedback",
                 [{
-                    "agent_id": agent_id,
-                    "score": score,
-                    "feedback_auth_id": feedback_auth_id,
-                    "feedback_uri": feedback_uri,
+                    "subject_agent_id": subject,
+                    "rating": int(rating),
+                    "context_uri": context_uri,
                 }],
             )
-            return f"ERC-8004 feedback calldata:\n{json.dumps(result, indent=2)}"
+            return f"ERC-8004 submitFeedback calldata:\n{json.dumps(result, indent=2)}"
         return (
-            "Encode ERC-8004 reputation feedback with:\n"
-            "  metadata.agent_id, metadata.score, metadata.feedback_auth_id, metadata.feedback_uri"
+            "Encode submitFeedback() with:\n"
+            "  metadata.subject_agent_id, metadata.rating (-100..=100), metadata.context_uri"
         )
+
+    # ── Validation registry ──────────────────────────────────────────
 
     if "request" in t and "validation" in t:
+        validator_address = md.get("validator_address") or md.get("validator_id")
         agent_id = md.get("agent_id")
-        validator_id = md.get("validator_id")
         request_uri = md.get("request_uri") or md.get("uri")
-        data_hash = md.get("data_hash")
-        if agent_id and validator_id and request_uri and data_hash:
+        request_hash = md.get("request_hash") or md.get("data_hash")
+        if validator_address and agent_id and request_uri and request_hash:
             result = await rpc_call(
-                "tenzro_erc8004EncodeRequestValidation",
+                "tenzro_erc8004EncodeValidationRequest",
                 [{
+                    "validator_address": validator_address,
                     "agent_id": agent_id,
-                    "validator_id": validator_id,
                     "request_uri": request_uri,
-                    "data_hash": data_hash,
+                    "request_hash": request_hash,
                 }],
             )
-            return f"ERC-8004 requestValidation calldata:\n{json.dumps(result, indent=2)}"
+            return f"ERC-8004 validationRequest calldata:\n{json.dumps(result, indent=2)}"
         return (
-            "Encode ERC-8004 requestValidation() with:\n"
-            "  metadata.agent_id, metadata.validator_id, metadata.request_uri, metadata.data_hash"
+            "Encode validationRequest() with:\n"
+            "  metadata.validator_address, metadata.agent_id, metadata.request_uri, metadata.request_hash"
         )
 
-    if "submit" in t and "validation" in t:
-        data_hash = md.get("data_hash")
+    if "get validation" in t:
+        request_hash = md.get("request_hash") or md.get("data_hash")
+        if request_hash:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeGetValidation",
+                [{"request_hash": request_hash}],
+            )
+            return f"ERC-8004 getValidation calldata:\n{json.dumps(result, indent=2)}"
+        return "Encode getValidation() with: metadata.request_hash"
+
+    if ("submit" in t or "response" in t) and "validation" in t:
+        request_hash = md.get("request_hash") or md.get("data_hash")
         response = md.get("response")
         response_uri = md.get("response_uri") or md.get("uri")
+        response_hash = md.get("response_hash")
         tag = md.get("tag")
-        if data_hash and response is not None and response_uri and tag:
+        if request_hash and response is not None and response_uri and response_hash and tag:
             result = await rpc_call(
-                "tenzro_erc8004EncodeSubmitValidation",
+                "tenzro_erc8004EncodeValidationResponse",
                 [{
-                    "data_hash": data_hash,
+                    "request_hash": request_hash,
                     "response": response,
                     "response_uri": response_uri,
+                    "response_hash": response_hash,
                     "tag": tag,
                 }],
             )
-            return f"ERC-8004 submitValidation calldata:\n{json.dumps(result, indent=2)}"
+            return f"ERC-8004 validationResponse calldata:\n{json.dumps(result, indent=2)}"
         return (
-            "Encode ERC-8004 submitValidation() with:\n"
-            "  metadata.data_hash, metadata.response, metadata.response_uri, metadata.tag"
+            "Encode validationResponse() with:\n"
+            "  metadata.request_hash, metadata.response (0..=100), metadata.response_uri,\n"
+            "  metadata.response_hash, metadata.tag"
         )
 
     return (
-        "ERC-8004 Trustless Agents Registry operations:\n"
-        "  - 'Derive agent id' (metadata.owner, metadata.salt)\n"
-        "  - 'Register agent' (metadata.agent_id, registration_data_uri, owner)\n"
-        "  - 'Get agent <id>' (metadata.agent_id; add metadata.returndata to decode)\n"
-        "  - 'Submit feedback' (agent_id, score, feedback_auth_id, feedback_uri)\n"
-        "  - 'Request validation' (agent_id, validator_id, request_uri, data_hash)\n"
-        "  - 'Submit validation' (data_hash, response, response_uri, tag)"
+        "ERC-8004 Trustless Agents Registry (v0.6+) operations:\n"
+        "  Identity:\n"
+        "    - 'Derive agent id' (metadata.did)\n"
+        "    - 'Register agent' (metadata.did, agent_address, metadata_uri)\n"
+        "    - 'Get agent <id>' (metadata.agent_id; pass metadata.return_data to decode)\n"
+        "    - 'Set agent uri' / 'set agent wallet' / 'set metadata' / 'get metadata'\n"
+        "    - 'Get agent uri' / 'get agent wallet'\n"
+        "  Reputation:\n"
+        "    - 'Submit feedback' (subject_agent_id, rating -100..=100, context_uri)\n"
+        "    - 'Get feedback' / 'get feedback count' / 'revoke feedback'\n"
+        "    - 'Append response' / 'is revoked' / 'feedback responses'\n"
+        "  Validation:\n"
+        "    - 'Request validation' (validator_address, agent_id, request_uri, request_hash)\n"
+        "    - 'Submit validation response' (request_hash, response, response_uri, response_hash, tag)\n"
+        "    - 'Get validation' (request_hash)"
     )
 
 
@@ -2098,6 +2318,66 @@ async def handle_help(text: str, metadata: dict = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Lifecycle (kill-switch)
+# ---------------------------------------------------------------------------
+
+async def handle_lifecycle(text: str, metadata: dict = None) -> str:
+    t = text.lower()
+    agent_did = _extract_id(text)
+
+    if "pause" in t:
+        return (
+            f"Pause agent {agent_did or '<agent-did>'}:\n"
+            f"  Sign and submit a PauseAgent transaction via tenzro_signAndSendTransaction.\n"
+            f"  Reversible: halts A2A messaging and inference dispatch but preserves stake.\n"
+            f"  Required fields: agent_did, controller_did, reason.\n"
+            f"  Gas: 60000."
+        )
+
+    if "quarantin" in t:
+        return (
+            f"Quarantine agent {agent_did or '<agent-did>'}:\n"
+            f"  Sign and submit a QuarantineAgent transaction via tenzro_signAndSendTransaction.\n"
+            f"  Reversible: halts messaging AND freezes stake (blocks unstake/withdraw).\n"
+            f"  Required fields: agent_did, controller_did, reason.\n"
+            f"  Optional: 32-byte evidence_hash for off-chain audit linkage.\n"
+            f"  Gas: 90000."
+        )
+
+    if "terminat" in t or "kill" in t:
+        cascade_hint = " with cascade" if "cascade" in t or "descend" in t else ""
+        return (
+            f"Terminate agent {agent_did or '<agent-did>'}{cascade_hint}:\n"
+            f"  Sign and submit a TerminateAgent transaction via tenzro_signAndSendTransaction.\n"
+            f"  TERMINAL — irreversible.\n"
+            f"  Required fields: agent_did, controller_did, reason.\n"
+            f"  Optional: evidence_hash, slash_bps (0-10000), cascade (bool).\n"
+            f"  Gas: 120000."
+        )
+
+    if "receipt" in t or "list" in t or "history" in t or "audit" in t:
+        return (
+            "Kill-switch receipts are persisted on-chain and queryable by:\n"
+            "  - tenzro_listKillSwitchReceiptsByAgent\n"
+            "  - tenzro_listKillSwitchReceiptsByController\n"
+            "  - tenzro_getKillSwitchReceipt\n"
+            "Each receipt records the action (Pause/Quarantine/Terminate), agent_did,\n"
+            "controller_did, reason, evidence_hash, slash_bps, cascade flag,\n"
+            "frozen_at_block, and tx_hash."
+        )
+
+    return (
+        "Agent lifecycle (kill-switch) — three-tier intervention:\n"
+        "  - 'Pause agent <did>'           (reversible halt)\n"
+        "  - 'Quarantine agent <did>'      (halt + freeze stake)\n"
+        "  - 'Terminate agent <did>'       (irreversible; optional slash + cascade)\n"
+        "  - 'List kill-switch receipts'   (audit trail)\n"
+        "All operations require the controller's signed transaction via\n"
+        "tenzro_signAndSendTransaction. EU AI Act Article 14/16 compliant."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Handler dispatch table
 # ---------------------------------------------------------------------------
 
@@ -2132,6 +2412,7 @@ HANDLERS: dict[str, callable] = {
     "agent_marketplace": handle_agent_marketplace,
     "agent_spawning": handle_agent_spawning,
     "swarm_orchestration": handle_swarm,
+    "lifecycle": handle_lifecycle,
     "debridge": handle_debridge,
     "crypto": handle_crypto,
     "tee": handle_tee,

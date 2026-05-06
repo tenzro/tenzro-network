@@ -38,8 +38,10 @@ use super::revm_db::RevmStateAdapter;
 /// go through revm for full Ethereum compatibility.
 pub struct EvmExecutor {
     config: VmConfig,
-    /// Gas oracle for dynamic gas pricing (wired up, future enhancement)
-    #[allow(dead_code)]
+    /// Gas oracle, shared with the parent `MultiVmRuntime`. Used by
+    /// [`Self::gas_oracle`] so EVM-side callers (RPC, mempool admission)
+    /// can read the same authoritative price source without round-tripping
+    /// through the runtime.
     gas_oracle: Arc<GasOracle>,
     precompiles: Arc<PrecompileRegistry>,
 }
@@ -57,6 +59,11 @@ impl EvmExecutor {
             gas_oracle,
             precompiles,
         })
+    }
+
+    /// Returns the gas oracle shared with the parent runtime.
+    pub fn gas_oracle(&self) -> &Arc<GasOracle> {
+        &self.gas_oracle
     }
 
     /// Execute transaction with a StateAdapter (uses revm)
@@ -250,13 +257,13 @@ impl EvmExecutor {
             }
 
             // Update code if new contract
-            if let Some(code) = &account.info.code {
-                if !code.is_empty() {
-                    let code_bytes = code.original_bytes().to_vec();
-                    let existing_code = state.get_code(&addr_bytes);
-                    if existing_code.is_none() || existing_code.as_ref() != Some(&code_bytes) {
-                        state.set_code(&addr_bytes, code_bytes);
-                    }
+            if let Some(code) = &account.info.code
+                && !code.is_empty()
+            {
+                let code_bytes = code.original_bytes().to_vec();
+                let existing_code = state.get_code(&addr_bytes);
+                if existing_code.is_none() || existing_code.as_ref() != Some(&code_bytes) {
+                    state.set_code(&addr_bytes, code_bytes);
                 }
             }
 

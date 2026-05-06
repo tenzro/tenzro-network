@@ -9,9 +9,17 @@ pub enum AgentKitError {
     #[error("rpc transport error: {0}")]
     RpcTransport(String),
 
-    /// JSON-RPC server returned an error response
+    /// JSON-RPC server returned an error response.
+    ///
+    /// `data` carries the optional `error.data` field per JSON-RPC 2.0 §5.1
+    /// (machine-parseable error context). Propagated so callers can act on
+    /// structured error payloads without re-decoding the wire response.
     #[error("rpc error (code={code}): {message}")]
-    RpcError { code: i64, message: String },
+    RpcError {
+        code: i64,
+        message: String,
+        data: Option<serde_json::Value>,
+    },
 
     /// Server response could not be parsed as JSON
     #[error("rpc deserialization error: {0}")]

@@ -309,7 +309,7 @@ impl PublicKeyResolver for LocalPublicKeyResolver {
 /// This transport bridges agent messages to/from the libp2p gossipsub network.
 /// The node binary injects an outbound sender channel connected to the
 /// `tenzro-network` `NetworkService::broadcast()` method, enabling agent
-/// messages to be published on the `tenzro/agents/1.0.0` gossipsub topic.
+/// messages to be published on the `tenzro/agents` gossipsub topic.
 ///
 /// Inbound messages arrive via the `inbound_tx` channel, which the node
 /// populates from gossipsub subscription events.
@@ -336,7 +336,7 @@ impl GossipsubTransport {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(1000);
         Self {
-            topic: "tenzro/agents/1.0.0".to_string(),
+            topic: "tenzro/agents".to_string(),
             inbound_rx: Arc::new(RwLock::new(rx)),
             inbound_tx: tx,
             outbound_tx: None,
@@ -354,7 +354,7 @@ impl GossipsubTransport {
     ) -> (Self, mpsc::Sender<AgentMessage>) {
         let (tx, rx) = mpsc::channel(1000);
         let transport = Self {
-            topic: "tenzro/agents/1.0.0".to_string(),
+            topic: "tenzro/agents".to_string(),
             inbound_rx: Arc::new(RwLock::new(rx)),
             inbound_tx: tx.clone(),
             outbound_tx: Some(outbound_tx),

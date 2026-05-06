@@ -282,28 +282,28 @@ impl AttestationVerifier {
         match report.vendor {
             TeeVendor::IntelTdx => {
                 // Parse TDX quote to get TCB SVN
-                if let Ok(quote_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data) {
-                    if let Some(tcb_svn) = quote_data.get("tdx_tcb_svn").and_then(|v| v.as_str()) {
-                        return Ok(tcb_svn.to_string());
-                    }
+                if let Ok(quote_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
+                    && let Some(tcb_svn) = quote_data.get("tdx_tcb_svn").and_then(|v| v.as_str())
+                {
+                    return Ok(tcb_svn.to_string());
                 }
                 Ok("unknown".to_string())
             }
             TeeVendor::AmdSevSnp => {
                 // Parse SEV-SNP report to get TCB components
-                if let Ok(report_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data) {
-                    if let Some(tcb) = report_data.get("reported_tcb") {
-                        return Ok(serde_json::to_string(tcb).unwrap_or_else(|_| "unknown".to_string()));
-                    }
+                if let Ok(report_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
+                    && let Some(tcb) = report_data.get("reported_tcb")
+                {
+                    return Ok(serde_json::to_string(tcb).unwrap_or_else(|_| "unknown".to_string()));
                 }
                 Ok("unknown".to_string())
             }
             TeeVendor::AwsNitro => {
                 // Parse Nitro attestation document version
-                if let Ok(doc_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data) {
-                    if let Some(version) = doc_data.get("version") {
-                        return Ok(version.to_string());
-                    }
+                if let Ok(doc_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
+                    && let Some(version) = doc_data.get("version")
+                {
+                    return Ok(version.to_string());
                 }
                 Ok("unknown".to_string())
             }
@@ -342,26 +342,11 @@ impl AttestationVerifier {
                 if let Ok(quote_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data) {
                     for i in 0..4 {
                         let rtmr_key = format!("rtmr{}", i);
-                        if let Some(rtmr_val) = quote_data.get(&rtmr_key).and_then(|v| v.as_str()) {
-                            if let Ok(value) = hex::decode(rtmr_val) {
-                                measurements.push(Measurement {
-                                    index: i,
-                                    algorithm: "SHA384".to_string(),
-                                    value,
-                                    ..Default::default()
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            TeeVendor::AmdSevSnp => {
-                // Extract measurement from SEV-SNP report
-                if let Ok(report_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data) {
-                    if let Some(measurement) = report_data.get("measurement").and_then(|v| v.as_str()) {
-                        if let Ok(value) = hex::decode(measurement) {
+                        if let Some(rtmr_val) = quote_data.get(&rtmr_key).and_then(|v| v.as_str())
+                            && let Ok(value) = hex::decode(rtmr_val)
+                        {
                             measurements.push(Measurement {
-                                index: 0,
+                                index: i,
                                 algorithm: "SHA384".to_string(),
                                 value,
                                 ..Default::default()
@@ -370,23 +355,36 @@ impl AttestationVerifier {
                     }
                 }
             }
+            TeeVendor::AmdSevSnp => {
+                // Extract measurement from SEV-SNP report
+                if let Ok(report_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
+                    && let Some(measurement) = report_data.get("measurement").and_then(|v| v.as_str())
+                    && let Ok(value) = hex::decode(measurement)
+                {
+                    measurements.push(Measurement {
+                        index: 0,
+                        algorithm: "SHA384".to_string(),
+                        value,
+                        ..Default::default()
+                    });
+                }
+            }
             TeeVendor::AwsNitro => {
                 // Extract PCR values from Nitro document
-                if let Ok(doc_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data) {
-                    if let Some(pcrs) = doc_data.get("pcrs").and_then(|v| v.as_object()) {
-                        for (key, value) in pcrs {
-                            if let Ok(index) = key.parse::<u32>() {
-                                if let Some(pcr_val) = value.as_str() {
-                                    if let Ok(pcr_bytes) = hex::decode(pcr_val) {
-                                        measurements.push(Measurement {
-                                            index,
-                                            algorithm: "SHA384".to_string(),
-                                            value: pcr_bytes,
-                                            ..Default::default()
-                                        });
-                                    }
-                                }
-                            }
+                if let Ok(doc_data) = serde_json::from_slice::<serde_json::Value>(&report.attestation_data)
+                    && let Some(pcrs) = doc_data.get("pcrs").and_then(|v| v.as_object())
+                {
+                    for (key, value) in pcrs {
+                        if let Ok(index) = key.parse::<u32>()
+                            && let Some(pcr_val) = value.as_str()
+                            && let Ok(pcr_bytes) = hex::decode(pcr_val)
+                        {
+                            measurements.push(Measurement {
+                                index,
+                                algorithm: "SHA384".to_string(),
+                                value: pcr_bytes,
+                                ..Default::default()
+                            });
                         }
                     }
                 }
@@ -595,11 +593,11 @@ fn time_to_millis(time: &x509_cert::time::Time) -> i64 {
     let minute = dt.minutes() as u32;
     let second = dt.seconds() as u32;
 
-    if let Some(naive) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
-        if let Some(naive_dt) = naive.and_hms_opt(hour, minute, second) {
-            let dt = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive_dt, chrono::Utc);
-            return dt.timestamp_millis();
-        }
+    if let Some(naive) = chrono::NaiveDate::from_ymd_opt(year, month, day)
+        && let Some(naive_dt) = naive.and_hms_opt(hour, minute, second)
+    {
+        let dt = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive_dt, chrono::Utc);
+        return dt.timestamp_millis();
     }
     0
 }

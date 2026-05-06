@@ -2,13 +2,17 @@
 
 use crate::error::{Result, SettlementError};
 use dashmap::DashMap;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tenzro_crypto::keys::{KeyType, PublicKey};
 use tenzro_crypto::signatures::Signature as CryptoSignature;
 use tenzro_token::NetworkTreasury;
 use tenzro_types::asset::AssetId;
-use tenzro_types::primitives::{Address, Hash};
+use tenzro_types::primitives::{Address, BlockHeight, Hash};
+use tenzro_types::principal_chain::{
+    anonymous_chain_for_address, PrincipalChain, PrincipalChainResolver,
+};
 use tenzro_types::settlement::{
     ProofType, ServiceProof, SettlementReceipt, SettlementRequest, SettlementStatus,
 };
@@ -272,6 +276,16 @@ pub struct SettlementEngine {
     /// When `Some`, every successful settlement is written through to
     /// `CF_SETTLEMENTS` under `receipt:<id>` and `settlement_addr:<hex>`.
     storage: Option<Arc<dyn tenzro_storage::KvStore>>,
+    /// Optional principal-chain resolver. When `Some`, every receipt's
+    /// `principal_chain` field is materialized via the resolver at write
+    /// time (Agent-Swarm Spec 5). When `None`, receipts get a synthetic
+    /// anonymous chain rooted at the customer address.
+    ///
+    /// Wrapped in `RwLock` so the node can wire the live
+    /// `IdentityRegistry`-backed resolver after construction (the engine
+    /// is built before identity is initialized; cf. `init_settlement` →
+    /// `init_identity` ordering in `tenzro-node/src/node.rs`).
+    principal_resolver: RwLock<Option<Arc<dyn PrincipalChainResolver>>>,
 }
 
 impl std::fmt::Debug for SettlementEngine {
@@ -285,6 +299,14 @@ impl std::fmt::Debug for SettlementEngine {
             .field("zk_verifier", &"<dyn ZkProofVerifier>")
             .field("tee_verifier", &"<dyn TeeAttestationVerifier>")
             .field("storage", &self.storage.as_ref().map(|_| "<dyn KvStore>"))
+            .field(
+                "principal_resolver",
+                &self
+                    .principal_resolver
+                    .read()
+                    .as_ref()
+                    .map(|_| "<dyn PrincipalChainResolver>"),
+            )
             .finish()
     }
 }
@@ -294,6 +316,20 @@ impl SettlementEngine {
     const RECEIPT_PREFIX: &'static [u8] = b"receipt:";
     /// Per-address settlement index key prefix in CF_SETTLEMENTS
     const SETTLEMENT_ADDR_PREFIX: &'static [u8] = b"settlement_addr:";
+    /// Principal-chain actor → receipt-id index (Spec 5).
+    /// Key form: `principal_actor:<did>:<settled_at_secs>:<receipt_id>` → empty.
+    /// Lex-sortable: prefix scan on `principal_actor:<did>:` returns all
+    /// receipts an actor signed, ordered by settlement time.
+    const PRINCIPAL_ACTOR_PREFIX: &'static [u8] = b"principal_actor:";
+    /// Principal-chain controller → receipt-id index (Spec 5).
+    /// Same shape as actor index, but keyed by the topmost controller of
+    /// the chain so regulators can look up everything done under a
+    /// principal regardless of which delegated agent acted.
+    const PRINCIPAL_CONTROLLER_PREFIX: &'static [u8] = b"principal_controller:";
+    /// Principal-chain controller-KYC-tier → receipt-id index (Spec 5).
+    /// Useful for compliance dashboards that filter by tier ("show me all
+    /// settlements by Tier-3 controllers in the last 24h").
+    const PRINCIPAL_KYC_TIER_PREFIX: &'static [u8] = b"principal_kyc_tier:";
 
     fn receipt_key(receipt_id: &str) -> Vec<u8> {
         [Self::RECEIPT_PREFIX, receipt_id.as_bytes()].concat()
@@ -305,6 +341,65 @@ impl SettlementEngine {
             hex::encode(addr.as_bytes()).as_bytes(),
         ]
         .concat()
+    }
+
+    /// Build the principal-actor index key:
+    /// `principal_actor:<did>:<settled_at_secs_be>:<receipt_id>`.
+    ///
+    /// Big-endian seconds give correct lexicographic ordering when scanned.
+    fn principal_actor_key(actor_did: &str, settled_at_secs: u64, receipt_id: &str) -> Vec<u8> {
+        let mut k = Vec::with_capacity(
+            Self::PRINCIPAL_ACTOR_PREFIX.len()
+                + actor_did.len()
+                + 1
+                + 8
+                + 1
+                + receipt_id.len(),
+        );
+        k.extend_from_slice(Self::PRINCIPAL_ACTOR_PREFIX);
+        k.extend_from_slice(actor_did.as_bytes());
+        k.push(b':');
+        k.extend_from_slice(&settled_at_secs.to_be_bytes());
+        k.push(b':');
+        k.extend_from_slice(receipt_id.as_bytes());
+        k
+    }
+
+    /// Build the principal-controller index key.
+    fn principal_controller_key(
+        controller_did: &str,
+        settled_at_secs: u64,
+        receipt_id: &str,
+    ) -> Vec<u8> {
+        let mut k = Vec::with_capacity(
+            Self::PRINCIPAL_CONTROLLER_PREFIX.len()
+                + controller_did.len()
+                + 1
+                + 8
+                + 1
+                + receipt_id.len(),
+        );
+        k.extend_from_slice(Self::PRINCIPAL_CONTROLLER_PREFIX);
+        k.extend_from_slice(controller_did.as_bytes());
+        k.push(b':');
+        k.extend_from_slice(&settled_at_secs.to_be_bytes());
+        k.push(b':');
+        k.extend_from_slice(receipt_id.as_bytes());
+        k
+    }
+
+    /// Build the controller-KYC-tier index key.
+    fn principal_kyc_tier_key(tier: u8, settled_at_secs: u64, receipt_id: &str) -> Vec<u8> {
+        let mut k = Vec::with_capacity(
+            Self::PRINCIPAL_KYC_TIER_PREFIX.len() + 1 + 1 + 8 + 1 + receipt_id.len(),
+        );
+        k.extend_from_slice(Self::PRINCIPAL_KYC_TIER_PREFIX);
+        k.push(tier);
+        k.push(b':');
+        k.extend_from_slice(&settled_at_secs.to_be_bytes());
+        k.push(b':');
+        k.extend_from_slice(receipt_id.as_bytes());
+        k
     }
 
     /// Creates a new settlement engine with default verifiers and no persistence
@@ -320,6 +415,7 @@ impl SettlementEngine {
             zk_verifier: Arc::new(DefaultZkVerifier::new()),
             tee_verifier: Arc::new(DefaultTeeVerifier::default()),
             storage: None,
+            principal_resolver: RwLock::new(None),
         })
     }
 
@@ -345,10 +441,48 @@ impl SettlementEngine {
             zk_verifier: Arc::new(DefaultZkVerifier::new()),
             tee_verifier: Arc::new(DefaultTeeVerifier::default()),
             storage: Some(storage),
+            principal_resolver: RwLock::new(None),
         };
 
         engine.hydrate()?;
         Ok(engine)
+    }
+
+    /// Attach a principal-chain resolver. Receipts written after this call
+    /// will have `principal_chain` materialized via the resolver instead
+    /// of falling back to a synthetic anonymous chain.
+    ///
+    /// Builder form for use during construction.
+    pub fn with_principal_resolver(
+        self,
+        resolver: Arc<dyn PrincipalChainResolver>,
+    ) -> Self {
+        *self.principal_resolver.write() = Some(resolver);
+        self
+    }
+
+    /// Wire a principal-chain resolver after construction. Used by the
+    /// node startup path to attach the live `IdentityRegistry`-backed
+    /// resolver once both the settlement engine and identity registry
+    /// have been initialized (settlement is built before identity, so the
+    /// builder form alone is not sufficient).
+    pub fn set_principal_resolver(&self, resolver: Arc<dyn PrincipalChainResolver>) {
+        *self.principal_resolver.write() = Some(resolver);
+    }
+
+    /// Resolve the principal chain for a settlement payer (customer).
+    /// Falls back to `anonymous_chain_for_address` when no resolver is
+    /// attached or when the resolver returns no DID binding.
+    fn resolve_principal_chain(&self, customer: &Address) -> PrincipalChain {
+        // Block height is unknown to the engine itself — settlements that
+        // need a real height should be wired through a block-aware caller
+        // (kill-switch, escrow). For a generic settlement we stamp 0 and
+        // rely on `settled_at` for ordering.
+        let frozen = BlockHeight::new(0);
+        match self.principal_resolver.read().as_ref() {
+            Some(resolver) => resolver.resolve_by_address(customer, frozen),
+            None => anonymous_chain_for_address(customer, frozen),
+        }
     }
 
     /// Creates a new settlement engine with custom verifiers
@@ -369,6 +503,7 @@ impl SettlementEngine {
             zk_verifier,
             tee_verifier,
             storage: None,
+            principal_resolver: RwLock::new(None),
         })
     }
 
@@ -470,7 +605,7 @@ impl SettlementEngine {
             SettlementError::StorageError(format!("serialize customer index: {}", e))
         })?;
 
-        let ops = vec![
+        let mut ops = vec![
             tenzro_storage::WriteOp::Put {
                 cf: tenzro_storage::CF_SETTLEMENTS.to_string(),
                 key: Self::receipt_key(&receipt.receipt_id),
@@ -488,9 +623,215 @@ impl SettlementEngine {
             },
         ];
 
+        // Principal-chain indices (Spec 5): one entry per receipt for
+        // actor → receipt, controller → receipt, and tier → receipt.
+        // Values are empty — the receipt id lives in the key itself, so
+        // a prefix scan returns the receipt-id list directly.
+        let pc = &receipt.principal_chain;
+        // `Timestamp::as_secs` returns i64; clamp negatives to 0 so the
+        // big-endian encoding stays lex-sortable.
+        let settled_at_secs = receipt.settled_at.as_secs().max(0) as u64;
+        ops.push(tenzro_storage::WriteOp::Put {
+            cf: tenzro_storage::CF_SETTLEMENTS.to_string(),
+            key: Self::principal_actor_key(&pc.actor, settled_at_secs, &receipt.receipt_id),
+            value: Vec::new(),
+        });
+        ops.push(tenzro_storage::WriteOp::Put {
+            cf: tenzro_storage::CF_SETTLEMENTS.to_string(),
+            key: Self::principal_controller_key(
+                pc.controller_did(),
+                settled_at_secs,
+                &receipt.receipt_id,
+            ),
+            value: Vec::new(),
+        });
+        ops.push(tenzro_storage::WriteOp::Put {
+            cf: tenzro_storage::CF_SETTLEMENTS.to_string(),
+            key: Self::principal_kyc_tier_key(
+                pc.controller_kyc_tier,
+                settled_at_secs,
+                &receipt.receipt_id,
+            ),
+            value: Vec::new(),
+        });
+
         storage
             .write_batch_sync(ops)
             .map_err(|e| SettlementError::StorageError(e.to_string()))
+    }
+
+    // ---------- Principal-chain query helpers (Spec 5) ----------
+    //
+    // These fan out into RPC handlers in `tenzro-node`:
+    //   - tenzro_getReceiptPrincipalChain(receipt_id)  -> get_principal_chain
+    //   - tenzro_listReceiptsByActor(did)              -> list_receipts_by_actor
+    //   - tenzro_listReceiptsByController(did)         -> list_receipts_by_controller
+    //   - tenzro_summarizeController(did, since, until) -> summarize_controller
+    //
+    // They read from in-memory caches first and from RocksDB indices when
+    // a storage backend is attached. With no backend, only the live
+    // process's receipts are visible — same semantics as the existing
+    // settlement-by-address query.
+
+    /// Look up the principal chain attached to a receipt. Returns `None`
+    /// when the receipt is unknown to this engine.
+    pub fn get_principal_chain(&self, receipt_id: &str) -> Option<PrincipalChain> {
+        self.receipts
+            .get(receipt_id)
+            .map(|r| r.principal_chain.clone())
+    }
+
+    /// List receipt ids signed by `actor_did`, oldest first. Falls back
+    /// to a full in-memory scan when no storage backend is attached.
+    pub fn list_receipts_by_actor(&self, actor_did: &str) -> Vec<String> {
+        if let Some(storage) = &self.storage {
+            let mut prefix = Vec::with_capacity(
+                Self::PRINCIPAL_ACTOR_PREFIX.len() + actor_did.len() + 1,
+            );
+            prefix.extend_from_slice(Self::PRINCIPAL_ACTOR_PREFIX);
+            prefix.extend_from_slice(actor_did.as_bytes());
+            prefix.push(b':');
+            return Self::extract_receipt_ids_from_keys(storage, &prefix);
+        }
+
+        let mut hits: Vec<(i64, String)> = self
+            .receipts
+            .iter()
+            .filter(|e| e.value().principal_chain.actor == actor_did)
+            .map(|e| (e.value().settled_at.as_millis(), e.value().receipt_id.clone()))
+            .collect();
+        hits.sort_by_key(|(t, _)| *t);
+        hits.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// List receipt ids whose principal chain terminates at
+    /// `controller_did`, oldest first.
+    pub fn list_receipts_by_controller(&self, controller_did: &str) -> Vec<String> {
+        if let Some(storage) = &self.storage {
+            let mut prefix = Vec::with_capacity(
+                Self::PRINCIPAL_CONTROLLER_PREFIX.len() + controller_did.len() + 1,
+            );
+            prefix.extend_from_slice(Self::PRINCIPAL_CONTROLLER_PREFIX);
+            prefix.extend_from_slice(controller_did.as_bytes());
+            prefix.push(b':');
+            return Self::extract_receipt_ids_from_keys(storage, &prefix);
+        }
+
+        let mut hits: Vec<(i64, String)> = self
+            .receipts
+            .iter()
+            .filter(|e| e.value().principal_chain.controller_did() == controller_did)
+            .map(|e| (e.value().settled_at.as_millis(), e.value().receipt_id.clone()))
+            .collect();
+        hits.sort_by_key(|(t, _)| *t);
+        hits.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// Summarize controller activity across an optional time window.
+    /// Window bounds are unix-second epochs; `None` means open-ended.
+    pub fn summarize_controller(
+        &self,
+        controller_did: &str,
+        since: Option<u64>,
+        until: Option<u64>,
+    ) -> tenzro_types::principal_chain::ControllerActivitySummary {
+        let mut count: u64 = 0;
+        let mut total_value: u128 = 0;
+        let mut agents: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut tier_oldest: u8 = 0;
+        let mut tier_newest: u8 = 0;
+        let mut bond_min: u128 = u128::MAX;
+        let mut bond_max: u128 = 0;
+        let mut oldest_seen: i64 = i64::MAX;
+        let mut newest_seen: i64 = i64::MIN;
+
+        for entry in self.receipts.iter() {
+            let r = entry.value();
+            if r.principal_chain.controller_did() != controller_did {
+                continue;
+            }
+            let secs = r.settled_at.as_secs().max(0) as u64;
+            if let Some(s) = since
+                && secs < s
+            {
+                continue;
+            }
+            if let Some(u) = until
+                && secs > u
+            {
+                continue;
+            }
+
+            count = count.saturating_add(1);
+            total_value = total_value.saturating_add(r.amount as u128);
+            agents.insert(r.principal_chain.actor.clone());
+
+            let ts = r.settled_at.as_millis();
+            if ts < oldest_seen {
+                oldest_seen = ts;
+                tier_oldest = r.principal_chain.controller_kyc_tier;
+            }
+            if ts > newest_seen {
+                newest_seen = ts;
+                tier_newest = r.principal_chain.controller_kyc_tier;
+            }
+            if let Some(b) = r.principal_chain.controller_bond {
+                if b < bond_min {
+                    bond_min = b;
+                }
+                if b > bond_max {
+                    bond_max = b;
+                }
+            }
+        }
+
+        if bond_min == u128::MAX {
+            bond_min = 0;
+        }
+
+        tenzro_types::principal_chain::ControllerActivitySummary {
+            controller_did: controller_did.to_string(),
+            receipt_count: count,
+            total_value_tnzo: total_value,
+            agents_acted_under: agents.into_iter().collect(),
+            kill_switch_events: 0, // wired in once Spec 1 lands
+            kyc_tier_at_oldest: tier_oldest,
+            kyc_tier_at_newest: tier_newest,
+            bond_min,
+            bond_max,
+            since,
+            until,
+        }
+    }
+
+    /// Decode receipt ids out of a set of `principal_*` index keys. The
+    /// receipt id is the trailing component after the timestamp.
+    fn extract_receipt_ids_from_keys(
+        storage: &Arc<dyn tenzro_storage::KvStore>,
+        prefix: &[u8],
+    ) -> Vec<String> {
+        let keys = match storage.get_keys_with_prefix(tenzro_storage::CF_SETTLEMENTS, prefix) {
+            Ok(k) => k,
+            Err(e) => {
+                warn!("principal index scan failed: {}", e);
+                return Vec::new();
+            }
+        };
+        // Keys are already lex-sorted by RocksDB. Each looks like
+        // `<prefix><did_or_tier>:<be_secs:8>:<receipt_id>`. Slice off
+        // everything up to and including the second-to-last `:`.
+        keys.into_iter()
+            .filter_map(|k| {
+                // Receipt id is everything after the last 8-byte BE timestamp,
+                // which is preceded by `:` and followed by `:` then the id.
+                // Since the timestamp may legitimately contain any byte,
+                // we instead split on the LAST `:` — receipt ids are
+                // UUIDs and never contain `:`.
+                let pos = k.iter().rposition(|&b| b == b':')?;
+                let id_bytes = &k[pos + 1..];
+                std::str::from_utf8(id_bytes).ok().map(|s| s.to_string())
+            })
+            .collect()
     }
 
     /// Processes a single settlement
@@ -573,6 +914,9 @@ impl SettlementEngine {
         // Generate transaction hash (simplified)
         let tx_hash = self.generate_tx_hash(&request);
 
+        // Resolve principal chain (Agent-Swarm Spec 5)
+        let principal_chain = self.resolve_principal_chain(&request.customer);
+
         // Create receipt
         let receipt = SettlementReceipt::new(
             request.request_id.clone(),
@@ -582,6 +926,7 @@ impl SettlementEngine {
             request.service_type.clone(),
             request.amount,
             SettlementStatus::Completed,
+            principal_chain,
         );
 
         // Store receipt
@@ -730,6 +1075,9 @@ impl SettlementEngine {
             // Generate transaction hash
             let tx_hash = self.generate_tx_hash(request);
 
+            // Resolve principal chain (Agent-Swarm Spec 5)
+            let principal_chain = self.resolve_principal_chain(&request.customer);
+
             // Create receipt
             let receipt = SettlementReceipt::new(
                 request.request_id.clone(),
@@ -739,6 +1087,7 @@ impl SettlementEngine {
                 request.service_type.clone(),
                 request.amount,
                 SettlementStatus::Completed,
+                principal_chain,
             );
 
             // Store receipt

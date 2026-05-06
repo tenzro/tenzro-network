@@ -184,6 +184,19 @@ lz_oft_list
 lz_encode_options
 ```
 
+## Skill registration
+
+This skill is registered in the Tenzro Skills Registry (`CF_SKILLS`) at node startup as:
+
+| Field | Value |
+|---|---|
+| Skill ID | `layerzero-bridge` |
+| Category | `bridge` |
+| Tags | `layerzero, cross-chain, bridge, omnichain, oft` |
+| MCP backend | LayerZero MCP server on port 3006 (`https://layerzero-mcp.tenzro.network/mcp`) |
+
+Discover it from any Tenzro node via `tenzro_listSkills` / `tenzro_searchSkills` and invoke its tools through the MCP endpoint above.
+
 ## References
 
 - [LayerZero V2 Docs](https://docs.layerzero.network/v2)

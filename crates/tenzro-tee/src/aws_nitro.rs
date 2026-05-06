@@ -66,13 +66,21 @@ use crate::traits::TeeProvider;
 // NSM (Nitro Secure Module) types
 // ============================================================================
 
-/// NSM ioctl magic number
-#[allow(dead_code)]
-const NSM_IOCTL_MAGIC: u8 = 0x0A;
+/// NSM ioctl magic number.
+///
+/// Reserved for the alternative ioctl-based NSM transport path on kernels that
+/// expose `/dev/nsm` via `ioctl(NSM_IOCTL_MAGIC, ...)` instead of the read/write
+/// CBOR pipe used by [`AwsNitroProvider::generate_nsm_attestation`]. Surfaced
+/// publicly so audit tooling and alternative transports can reference the
+/// canonical AWS-published magic number.
+pub const NSM_IOCTL_MAGIC: u8 = 0x0A;
 
-/// Number of PCRs in Nitro Enclaves
-#[allow(dead_code)]
-const NITRO_PCR_COUNT: usize = 16;
+/// Number of PCRs in Nitro Enclaves (canonical PCR0..PCR15).
+///
+/// Used by [`AwsNitroProvider::verify_attestation`] to bound PCR-index
+/// validation and surfaced publicly so downstream verifiers can size their
+/// expected-measurement tables identically.
+pub const NITRO_PCR_COUNT: usize = 16;
 
 /// PCR register descriptions
 const PCR_DESCRIPTIONS: &[(u32, &str)] = &[
@@ -85,7 +93,6 @@ const PCR_DESCRIPTIONS: &[(u32, &str)] = &[
 ];
 
 /// Parsed Nitro attestation document
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct NitroAttestationDoc {
     /// Enclave module ID
@@ -312,10 +319,10 @@ impl AwsNitroProvider {
     /// Parses a Nitro attestation document (real COSE or simulated JSON).
     fn parse_document(&self, data: &[u8]) -> Result<NitroAttestationDoc> {
         // Try JSON first (simulated)
-        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(data) {
-            if json.get("simulated").and_then(|v| v.as_bool()).unwrap_or(false) {
-                return self.parse_simulated_document(&json, data);
-            }
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(data)
+            && json.get("simulated").and_then(|v| v.as_bool()).unwrap_or(false)
+        {
+            return self.parse_simulated_document(&json, data);
         }
 
         // Parse real COSE Sign1 document
@@ -333,10 +340,10 @@ impl AwsNitroProvider {
         let mut pcrs = HashMap::new();
         if let Some(pcr_map) = json.get("pcrs").and_then(|v| v.as_object()) {
             for (key, value) in pcr_map {
-                if let (Ok(index), Some(pcr_val)) = (key.parse::<u32>(), value.as_str()) {
-                    if let Ok(pcr_bytes) = hex::decode(pcr_val) {
-                        pcrs.insert(index, pcr_bytes);
-                    }
+                if let (Ok(index), Some(pcr_val)) = (key.parse::<u32>(), value.as_str())
+                    && let Ok(pcr_bytes) = hex::decode(pcr_val)
+                {
+                    pcrs.insert(index, pcr_bytes);
                 }
             }
         }
@@ -492,8 +499,9 @@ impl AwsNitroProvider {
         }
 
         tracing::debug!(
-            "Parsed COSE Sign1: module_id={}, timestamp={}, {} PCRs, cert={} bytes, cabundle={} certs",
-            module_id, timestamp, pcrs.len(), certificate.len(), cabundle.len()
+            "Parsed COSE Sign1: module_id={}, timestamp={}, {} PCRs, cert={} bytes, cabundle={} certs, payload_consumed={} bytes",
+            module_id, timestamp, pcrs.len(), certificate.len(), cabundle.len(),
+            payload_parser.position()
         );
 
         Ok(NitroAttestationDoc {
@@ -529,7 +537,12 @@ impl AwsNitroProvider {
     async fn verify_nitro_document(&self, doc_data: &[u8], certificates: &[Vec<u8>]) -> Result<AttestationResult> {
         let doc = self.parse_document(doc_data)?;
 
+        // Bound PCR indices to the canonical Nitro PCR0..PCR15 range. Documents
+        // that report PCRs beyond NITRO_PCR_COUNT - 1 are spec-violating and
+        // are dropped from the surfaced measurement set so downstream policy
+        // engines never see synthetic indices.
         let measurements: Vec<Measurement> = doc.pcrs.iter()
+            .filter(|(index, _)| (**index as usize) < NITRO_PCR_COUNT)
             .map(|(index, value)| {
                 let description = PCR_DESCRIPTIONS.iter()
                     .find(|(i, _)| i == index)
@@ -548,6 +561,18 @@ impl AwsNitroProvider {
             ("module_id".to_string(), doc.module_id.clone()),
             ("digest".to_string(), doc.digest.clone()),
         ]);
+        // Surface optional COSE_Sign1 attestation document fields so verifiers
+        // can match nonce / user_data they handed the enclave and correlate
+        // against the embedded enclave public_key (e.g. for TLS pinning).
+        if let Some(pk) = doc.public_key.as_ref() {
+            details.insert("public_key".to_string(), hex::encode(pk));
+        }
+        if let Some(ud) = doc.user_data.as_ref() {
+            details.insert("user_data".to_string(), hex::encode(ud));
+        }
+        if let Some(nonce) = doc.nonce.as_ref() {
+            details.insert("nonce".to_string(), hex::encode(nonce));
+        }
 
         let mut cert_chain_valid = false;
 
@@ -557,7 +582,10 @@ impl AwsNitroProvider {
             tracing::debug!("Verifying simulated AWS Nitro document");
         } else {
             details.insert("type".to_string(), "real".to_string());
-            tracing::info!("Verifying real AWS Nitro document");
+            // Surface raw COSE_Sign1 byte length so downstream verifiers can
+            // sanity-check the wire size against expected document bounds.
+            details.insert("raw_doc_bytes".to_string(), doc.raw.len().to_string());
+            tracing::info!("Verifying real AWS Nitro document ({} raw bytes)", doc.raw.len());
 
             // Verify certificate chain against pinned AWS Nitro Root CA
             if !certificates.is_empty() {
@@ -915,7 +943,9 @@ impl<'a> CborParser<'a> {
         Self { data, pos: 0 }
     }
 
-    #[allow(dead_code)]
+    /// Current parser cursor offset (bytes consumed from the start of the
+    /// input slice). Used by the COSE Sign1 parser to log how much of the
+    /// payload was actually consumed vs. the total input length.
     fn position(&self) -> usize {
         self.pos
     }
@@ -1242,7 +1272,7 @@ impl<'a> CborParser<'a> {
 ///   }
 /// }
 /// ```
-#[allow(dead_code)]
+#[cfg(any(target_os = "linux", test))]
 fn build_nsm_request_cbor(
     user_data: Option<&[u8]>,
     nonce: Option<&[u8]>,
@@ -1294,7 +1324,7 @@ fn build_nsm_request_cbor(
 ///   }
 /// }
 /// ```
-#[allow(dead_code)]
+#[cfg(any(target_os = "linux", test))]
 fn parse_nsm_response_cbor(data: &[u8]) -> Result<Vec<u8>> {
     let mut parser = CborParser::new(data);
 
@@ -1335,7 +1365,7 @@ fn parse_nsm_response_cbor(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Writes a CBOR map header.
-#[allow(dead_code)]
+#[cfg(any(target_os = "linux", test))]
 fn write_cbor_map_header(buf: &mut Vec<u8>, count: usize) {
     match count {
         0..=23 => buf.push(0xA0 | (count as u8)),
@@ -1355,7 +1385,7 @@ fn write_cbor_map_header(buf: &mut Vec<u8>, count: usize) {
 }
 
 /// Writes a CBOR text string.
-#[allow(dead_code)]
+#[cfg(any(target_os = "linux", test))]
 fn write_cbor_tstr(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     let len = bytes.len();
@@ -1378,7 +1408,7 @@ fn write_cbor_tstr(buf: &mut Vec<u8>, s: &str) {
 }
 
 /// Writes a CBOR byte string.
-#[allow(dead_code)]
+#[cfg(any(target_os = "linux", test))]
 fn write_cbor_bstr(buf: &mut Vec<u8>, data: &[u8]) {
     let len = data.len();
     match len {

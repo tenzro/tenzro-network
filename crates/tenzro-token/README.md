@@ -19,6 +19,10 @@ TNZO token economics for the Tenzro Network, including staking, governance, trea
 - `registry` - Unified token registry across VMs
 - `erc7802` - Cross-chain token manager (ERC-7802)
 - `erc3643` - Compliance registry (ERC-3643)
+- `adaptive_burn` - Governance dial over EIP-1559 burn fractions and supply targets
+- `seed_agent` - SeedAgent treasury earmark, charter registry, monthly decay schedule
+- `bond` - AgentBond stake registry and insurance claim pool
+- `burn_quota` - Per-epoch burn quota accounting
 - `error` - Error types
 
 ## Key Features
@@ -35,7 +39,9 @@ TNZO token economics for the Tenzro Network, including staking, governance, trea
   - 7-day unbonding period (604,800 seconds)
   - Overflow-safe u128 arithmetic with quotient/remainder decomposition
 - **Cross-VM Token Architecture**: Sei V2 pointer model with wTNZO ERC-20, SPL adapter, CIP-56 DAML template
-- **RocksDB Persistence**: Token supply, staking state, and balances backed by CF_ACCOUNTS
+- **Adaptive burn governance dial**: `BurnRateConfig` (base/local/paymaster bps with paymaster locked at 100%), `SupplyTargets` (rolling-window epochs, neutral band, alarms, magnitude caps, fast-track timelock), `SupplyMetricsSnapshot`, and `BurnRateConfigManager` write-through to `CF_TOKENS` under `burn_rate:current` / `burn_targets:current` / `burn_metrics:latest`. Pure transfer function `compute_recommendation(metrics, targets) -> BurnRateRecommendation` returns `RecommendationAction::{Disabled, NoChange, IncreaseBurnPct, DecreaseBurnPct, AlarmHighInflation, AlarmHighDeflation}` with magnitude bps capped at `magnitude_cap_normal_bps` (default 200) or `magnitude_cap_alarm_bps` (default 100). Surfaced via `tenzro_getBurnRateConfig`, `tenzro_getSupplyMetrics`, `tenzro_getBurnRateRecommendation`, `tenzro_listAdaptiveBurnProposals`.
+- **SeedAgent treasury earmark**: `TreasuryEarmark` singleton (genesis-funded TNZO allocation, decay schedule, `enabled` master switch, `surplus_burn_bps` sunset disposition), `Charter` (governance-signed mandate enumerating `OperationKind::{InferenceConsumer, TaskMarketplaceConsumer, TemplateInstantiator, BridgeUser, SettlementProbe, Settler7683Probe, DisputeFiler}`, `SpendCaps`, `TargetThroughput`, `CounterpartyFilter`, sunset, enabled flag), `DecaySchedule` (default 100/100/100 months 0-2 → 75 months 3-5 → 50 months 6-8 → 25 months 9-11 → 0 from month 12), `SeedAgentRecord` (per-DID provisioning state with `SeedAgentStatus::{Active, Paused, Quarantined, Terminated}`), and `SeedAgentEarmarkManager` write-through to `CF_TOKENS` under `seed_earmark:singleton` / `seed_charter:<id>` / `seed_agent:<did>`. Surfaced via `tenzro_getTreasuryEarmark`, `tenzro_getSeedAgentCharter`, `tenzro_listSeedAgentCharters`, `tenzro_listSeedAgents`, `tenzro_getNetworkActivity`.
+- **RocksDB Persistence**: Token supply, staking state, balances, adaptive-burn dial, SeedAgent registry, and AgentBond stakes backed by CF_ACCOUNTS / CF_TOKENS
 
 ## Constants
 
@@ -176,6 +182,8 @@ Production-ready components:
 - Stake-weighted governance with real voting power tracking
 - Multisig treasury with approval threshold enforcement
 - Liquid staking with overflow-safe u128 arithmetic
+- Adaptive burn dial with read-only RPC surface and write-through persistence; auto-proposal generator and EIP-1559 fee-market consumer wire in alongside the governance executor in a later wave
+- SeedAgent treasury earmark with read-only RPC surface and write-through persistence; off-chain provisioning daemon, governance-executor mutation paths, monthly decay enforcement at refill, sunset wind-down sweep, and the `tenzro_seed_agents/1.0.0` gossipsub topic land in a later wave
 
 ## Dependencies
 

@@ -219,12 +219,12 @@ impl DeBridgeAdapter {
             };
 
             // Update local cache if status changed
-            if let Some(mut order) = self.orders.get_mut(order_id) {
-                if order.status != status {
-                    order.status = status;
-                    if status == DlnOrderStatus::Filled && order.filled_at.is_none() {
-                        order.filled_at = Some(Timestamp::now());
-                    }
+            if let Some(mut order) = self.orders.get_mut(order_id)
+                && order.status != status
+            {
+                order.status = status;
+                if status == DlnOrderStatus::Filled && order.filled_at.is_none() {
+                    order.filled_at = Some(Timestamp::now());
                 }
             }
 

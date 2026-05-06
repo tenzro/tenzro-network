@@ -8,7 +8,8 @@ The `tenzro-storage` crate provides a comprehensive storage infrastructure for t
 
 ## Features
 
-- **RocksDB Integration**: High-performance persistent storage with 24 column families
+- **RocksDB Integration**: High-performance persistent storage with 28 column families
+- **`KvStore` trait**: `get`, `put`, `delete`, `get_keys_with_prefix`, `write_batch`, `write_batch_sync` — used by upper-layer registries for write-through persistence and startup hydration
 - **Merkle Patricia Trie**: Efficient state commitment and cryptographic proof generation
 - **Block Storage**: Fast indexing and retrieval of blocks by hash and height
 - **Account Storage**: Comprehensive account state management with balance and nonce tracking
@@ -19,7 +20,7 @@ The `tenzro-storage` crate provides a comprehensive storage infrastructure for t
 
 ## Architecture
 
-### Column Families (24 total)
+### Column Families (28 total)
 
 The storage layer uses RocksDB with the following column families:
 
@@ -47,6 +48,22 @@ The storage layer uses RocksDB with the following column families:
 - `events` - Event store for event sourcing
 - `webhooks` - Webhook subscriptions
 - `compliance` - Compliance and audit logs
+- `training_runs` - Tenzro Train run metadata
+- `training_receipts` - Tenzro Train commitment receipts
+- `audit` - Audit log records
+- `approvals` - Approval state for multi-step flows
+
+### Data Availability Primitives (`da` module)
+
+High-volume receipts (inference, agent message, channel updates) ship a commitment + pointer instead of the full payload; sensitive low-volume receipts (kill-switch, governance, escrow, lifecycle) stay inline.
+
+- `ReceiptEnvelope { kind, storage_mode, inline_summary, inline_payload, da_pointer, commitment }` - Receipts either embed the payload (`Inline`) or record a pointer to an external DA layer (`OffloadedDA`). `commitment` is always `SHA-256(canonical_payload)` regardless of mode
+- `ReceiptKind` - `SettlementEscrow | SettlementChannel | Inference | AgentMessage | KillSwitch | Lifecycle | Governance` with per-kind `default_mode()`
+- `DaPointer { backend, namespace, locator, commitment_kzg, attestation_root }` - Reference to an external DA layer (EigenDA / Celestia / Avail)
+- `DaBackendId`, `DaBackendStatus`
+- `#[async_trait] DaBackend` trait - `submit` / `fetch` / `verify_availability`
+- `InlineFallbackBackend` - Safe default; refuses offload until external backends are wired behind feature flags
+- `compute_commitment(payload) -> Hash` - Canonical SHA-256 commitment
 
 ### Merkle Patricia Trie
 

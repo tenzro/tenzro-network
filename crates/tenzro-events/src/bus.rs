@@ -129,10 +129,9 @@ pub struct StatsSnapshot {
 /// [`EventBusError::Lagged`] notification containing the number of missed
 /// events rather than being silently disconnected.
 pub struct EventBus {
+    config: EventBusConfig,
     sender: broadcast::Sender<Arc<EventEnvelope>>,
     sequence_counter: AtomicU64,
-    #[allow(dead_code)]
-    config: EventBusConfig,
     stats: Arc<EventBusStats>,
     next_subscription_id: AtomicU64,
 }
@@ -142,12 +141,33 @@ impl EventBus {
     pub fn new(config: EventBusConfig) -> Self {
         let (sender, _) = broadcast::channel(config.capacity);
         Self {
+            config,
             sender,
             sequence_counter: AtomicU64::new(0),
-            config,
             stats: Arc::new(EventBusStats::new()),
             next_subscription_id: AtomicU64::new(1),
         }
+    }
+
+    /// Returns the configuration this bus was created with.
+    ///
+    /// Used by introspection RPCs (`tenzro_eventBusInfo`) and by persistence
+    /// adapters that need to know whether `enable_persistence` is set before
+    /// attaching a downstream sink.
+    pub fn config(&self) -> &EventBusConfig {
+        &self.config
+    }
+
+    /// Returns the broadcast channel capacity. Convenience for callers that
+    /// only need the capacity (most common config field).
+    pub fn capacity(&self) -> usize {
+        self.config.capacity
+    }
+
+    /// Returns whether persistence is enabled. Persistence sinks (RocksDB,
+    /// webhooks, file appenders) consult this before attaching to the bus.
+    pub fn persistence_enabled(&self) -> bool {
+        self.config.enable_persistence
     }
 
     /// Create an EventBus with default configuration (capacity = 65536).

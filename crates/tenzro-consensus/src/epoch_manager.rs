@@ -71,8 +71,17 @@ pub struct EpochManager {
     /// Epoch duration in blocks
     epoch_duration: u64,
 
-    /// Pending validator changes for next epoch (protected by RwLock)
+    /// Pending validator additions/updates for next epoch.
+    ///
+    /// Each entry is upserted into the next epoch's validator set on
+    /// transition: a matching address is replaced; new addresses are added.
     pending_validators: Arc<RwLock<Vec<ValidatorInfo>>>,
+
+    /// Pending validator removals for next epoch (e.g. unstake or slashing).
+    ///
+    /// On transition, every address in this list is dropped from the next
+    /// epoch's validator set before pending_validators is upserted in.
+    pending_removals: Arc<RwLock<Vec<tenzro_types::primitives::Address>>>,
 
     /// History of past epochs (protected by RwLock)
     epoch_history: Arc<RwLock<Vec<Epoch>>>,
@@ -100,6 +109,7 @@ impl EpochManager {
             current_epoch: Arc::new(RwLock::new(current_epoch)),
             epoch_duration,
             pending_validators: Arc::new(RwLock::new(Vec::new())),
+            pending_removals: Arc::new(RwLock::new(Vec::new())),
             epoch_history: Arc::new(RwLock::new(Vec::new())),
             max_history: 10, // Keep last 10 epochs
         })
@@ -146,16 +156,30 @@ impl EpochManager {
 
         let next_epoch_number = current.number + 1;
 
-        // Get validators for next epoch (atomic snapshot)
-        let next_validators = {
-            let pending = self.pending_validators.read();
-            if pending.is_empty() {
-                // No changes, reuse current validators
-                current.validator_set.iter().cloned().collect()
-            } else {
-                // Use pending validators
-                pending.clone()
+        // Compute next validator set as: current set, with pending_removals
+        // dropped, then pending_validators upserted (matching address replaces;
+        // new address appends). This makes pending entries deltas rather than
+        // a full replacement, so a single stake event doesn't reset the set.
+        let next_validators: Vec<ValidatorInfo> = {
+            let pending_adds = self.pending_validators.read();
+            let pending_drops = self.pending_removals.read();
+
+            let mut next: Vec<ValidatorInfo> = current
+                .validator_set
+                .iter()
+                .filter(|v| !pending_drops.iter().any(|addr| addr == &v.address))
+                .cloned()
+                .collect();
+
+            for upsert in pending_adds.iter() {
+                if let Some(existing) = next.iter_mut().find(|v| v.address == upsert.address) {
+                    *existing = upsert.clone();
+                } else {
+                    next.push(upsert.clone());
+                }
             }
+
+            next
         };
 
         // Create new validator set - this can fail, so we do it before modifying state
@@ -187,10 +211,11 @@ impl EpochManager {
             // history lock is released here
         }
 
-        // 2. Clear pending validators
+        // 2. Clear pending validator deltas (both adds and removals)
         {
             self.pending_validators.write().clear();
-            // pending_validators lock is released here
+            self.pending_removals.write().clear();
+            // pending_validators / pending_removals locks are released here
         }
 
         // 3. Update current epoch (this is the commit point)
@@ -210,29 +235,56 @@ impl EpochManager {
         Ok(validator_set)
     }
 
-    /// Adds a pending validator change for the next epoch
+    /// Queues a validator add/update for the next epoch. If `validator.address`
+    /// is already present in the pending queue, the prior entry is replaced.
+    /// Also clears any pending removal for the same address (an add wins over
+    /// a prior queued remove within the same epoch window).
     pub fn add_pending_validator(&self, validator: ValidatorInfo) {
         let addr = validator.address;
         let stake = validator.stake;
-        self.pending_validators.write().push(validator);
+
+        {
+            let mut pending = self.pending_validators.write();
+            if let Some(existing) = pending.iter_mut().find(|v| v.address == addr) {
+                *existing = validator;
+            } else {
+                pending.push(validator);
+            }
+        }
+        self.pending_removals.write().retain(|a| a != &addr);
 
         tracing::debug!(
             address = %addr,
             stake = stake,
-            "Pending validator added for next epoch"
+            "Pending validator add/update queued for next epoch"
         );
     }
 
-    /// Removes a pending validator
+    /// Queues a validator removal for the next epoch. Idempotent: queueing the
+    /// same address twice records one removal. Also drops any pending add for
+    /// the same address (a remove wins over a prior queued add within the same
+    /// epoch window).
     pub fn remove_pending_validator(&self, address: &tenzro_types::primitives::Address) {
         self.pending_validators
             .write()
             .retain(|v| &v.address != address);
+
+        let mut removals = self.pending_removals.write();
+        if !removals.iter().any(|a| a == address) {
+            removals.push(*address);
+        }
+
+        tracing::debug!(address = %address, "Pending validator removal queued for next epoch");
     }
 
-    /// Returns the pending validators for the next epoch
+    /// Returns the pending validator additions/updates for the next epoch
     pub fn pending_validators(&self) -> Vec<ValidatorInfo> {
         self.pending_validators.read().clone()
+    }
+
+    /// Returns the pending validator removals for the next epoch
+    pub fn pending_removals(&self) -> Vec<tenzro_types::primitives::Address> {
+        self.pending_removals.read().clone()
     }
 
     /// Returns an epoch from history
@@ -361,22 +413,128 @@ mod tests {
     }
 
     #[test]
-    fn test_pending_validators() {
-        let validators = vec![create_test_validator(1000)];
-        let manager = EpochManager::new(validators, 100).unwrap();
+    fn test_pending_validators_merge_add() {
+        // 3 initial validators + 1 pending add → 4 in next epoch (merge, not replace)
+        let v0 = create_test_validator(1000);
+        let v1 = create_test_validator(2000);
+        let v2 = create_test_validator(3000);
+        let manager =
+            EpochManager::new(vec![v0.clone(), v1.clone(), v2.clone()], 100).unwrap();
 
-        let new_validator = create_test_validator(2000);
-        manager.add_pending_validator(new_validator.clone());
+        let v3 = create_test_validator(4000);
+        manager.add_pending_validator(v3.clone());
+        assert_eq!(manager.pending_validators().len(), 1);
 
-        let pending = manager.pending_validators();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].stake, 2000);
+        let next = manager.transition_epoch(BlockHeight::from(100)).unwrap();
 
-        // Transition should apply pending changes
-        manager.transition_epoch(BlockHeight::from(100)).unwrap();
+        assert_eq!(next.len(), 4, "next epoch must MERGE pending into current");
+        assert!(next.iter().any(|v| v.address == v0.address));
+        assert!(next.iter().any(|v| v.address == v1.address));
+        assert!(next.iter().any(|v| v.address == v2.address));
+        assert!(next.iter().any(|v| v.address == v3.address));
 
-        // Pending should be cleared
+        // Both queues cleared
         assert_eq!(manager.pending_validators().len(), 0);
+        assert_eq!(manager.pending_removals().len(), 0);
+    }
+
+    #[test]
+    fn test_pending_validators_remove() {
+        // 3 initial - 1 pending removal → 2 in next epoch
+        let v0 = create_test_validator(1000);
+        let v1 = create_test_validator(2000);
+        let v2 = create_test_validator(3000);
+        let manager =
+            EpochManager::new(vec![v0.clone(), v1.clone(), v2.clone()], 100).unwrap();
+
+        manager.remove_pending_validator(&v1.address);
+        assert_eq!(manager.pending_removals().len(), 1);
+
+        let next = manager.transition_epoch(BlockHeight::from(100)).unwrap();
+
+        assert_eq!(next.len(), 2);
+        assert!(next.iter().any(|v| v.address == v0.address));
+        assert!(!next.iter().any(|v| v.address == v1.address));
+        assert!(next.iter().any(|v| v.address == v2.address));
+
+        assert_eq!(manager.pending_removals().len(), 0);
+    }
+
+    #[test]
+    fn test_pending_validators_upsert_existing() {
+        // Pending add for existing address replaces (stake updated)
+        let v0 = create_test_validator(1000);
+        let v0_addr = v0.address;
+        let v0_pk = v0.public_key.clone();
+        let v0_pq = v0.pq_public_key.clone();
+        let manager = EpochManager::new(vec![v0.clone()], 100).unwrap();
+
+        // Same address, larger stake
+        let v0_updated = ValidatorInfo::new(v0_addr, v0_pk, v0_pq, 5000);
+        manager.add_pending_validator(v0_updated);
+
+        let next = manager.transition_epoch(BlockHeight::from(100)).unwrap();
+
+        assert_eq!(next.len(), 1, "upsert must not duplicate");
+        let only = next.get(0).unwrap();
+        assert_eq!(only.address, v0_addr);
+        assert_eq!(only.stake, 5000, "stake must be updated to new value");
+    }
+
+    #[test]
+    fn test_pending_validators_add_then_remove_same_address() {
+        // Conflict resolution: add then remove for same address → final state respects last op (remove)
+        let v0 = create_test_validator(1000);
+        let manager = EpochManager::new(vec![v0.clone()], 100).unwrap();
+
+        let v_new = create_test_validator(2000);
+        let v_new_addr = v_new.address;
+
+        manager.add_pending_validator(v_new);
+        manager.remove_pending_validator(&v_new_addr);
+
+        // After remove, the add for the same address should have been dropped
+        assert!(
+            !manager
+                .pending_validators()
+                .iter()
+                .any(|v| v.address == v_new_addr),
+            "add must be dropped when subsequent remove targets same address"
+        );
+
+        let next = manager.transition_epoch(BlockHeight::from(100)).unwrap();
+
+        // Only original v0 remains; v_new was added then removed
+        assert_eq!(next.len(), 1);
+        assert_eq!(next.get(0).unwrap().address, v0.address);
+    }
+
+    #[test]
+    fn test_pending_validators_remove_then_add_same_address() {
+        // Inverse conflict: remove then add for same existing address → add wins (re-stake)
+        let v0 = create_test_validator(1000);
+        let v0_addr = v0.address;
+        let v0_pk = v0.public_key.clone();
+        let v0_pq = v0.pq_public_key.clone();
+        let manager = EpochManager::new(vec![v0.clone()], 100).unwrap();
+
+        manager.remove_pending_validator(&v0_addr);
+        // Now re-stake same address with new amount
+        let v0_restaked = ValidatorInfo::new(v0_addr, v0_pk, v0_pq, 7777);
+        manager.add_pending_validator(v0_restaked);
+
+        // The add should clear the prior pending removal for the same address
+        assert!(
+            !manager
+                .pending_removals()
+                .iter()
+                .any(|addr| addr == &v0_addr),
+            "subsequent add for same address must clear pending removal"
+        );
+
+        let next = manager.transition_epoch(BlockHeight::from(100)).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next.get(0).unwrap().stake, 7777);
     }
 
     #[test]

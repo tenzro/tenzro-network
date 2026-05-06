@@ -40,9 +40,18 @@ tower-http = { workspace = true }
 hex = { workspace = true }
 bytes = { workspace = true }
 k256 = { workspace = true }
+p256 = { workspace = true }
+p384 = { workspace = true }
+rsa = { workspace = true }
+ecdsa = { workspace = true }
+signature = { workspace = true }
 sha2 = { workspace = true }
 sha3 = { workspace = true }
+hmac = "0.12"
+subtle = { workspace = true }
+spki = { workspace = true }
 rlp = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

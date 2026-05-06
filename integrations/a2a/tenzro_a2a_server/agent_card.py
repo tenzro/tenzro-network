@@ -223,6 +223,53 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "outputModes": ["application/json"],
             },
             {
+                "id": "lifecycle",
+                "name": "Agent Lifecycle Kill-Switch",
+                "description": (
+                    "Three-tier intervention for spawned agents: pause (reversible halt), "
+                    "quarantine (halt + freeze stake), terminate (irreversible, optional "
+                    "stake slash, optional cascade to descendants). Backed by on-chain "
+                    "kill-switch precompiles with full receipt audit trail. EU AI Act "
+                    "Article 14 / Article 16 compliant — controllers retain hard-stop "
+                    "authority over their machine identities."
+                ),
+                "tags": ["lifecycle", "kill-switch", "governance", "compliance", "safety"],
+                "examples": [
+                    "Pause agent did:tenzro:machine:abc123",
+                    "Quarantine agent did:tenzro:machine:xyz789 with evidence hash",
+                    "Terminate agent did:tenzro:machine:def456 with 50% slash and cascade",
+                    "List kill-switch receipts for controller did:tenzro:human:ctrl-1",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "bond-insurance",
+                "name": "AgentBond & Insurance",
+                "description": (
+                    "Surety primitive for autonomous agents (Agent-Swarm Spec 9). "
+                    "Controllers (or autonomous machines) post TNZO bonds as "
+                    "skin-in-the-game; an Active bond above the promotion threshold "
+                    "elevates a Machine identity into the Delegated admission lane "
+                    "even without a verified human controller. Bonds back insurance "
+                    "claims: harmed parties file claims with receipts, governance "
+                    "adjudicates, and approved payouts settle from a deterministic "
+                    "insurance pool. Lifecycle: Active → Cooldown → Returned, or "
+                    "Active → Frozen → Slashed under quarantine/termination."
+                ),
+                "tags": ["bond", "insurance", "surety", "delegation", "governance", "spec-9"],
+                "examples": [
+                    "Post a 1000 TNZO bond on agent did:tenzro:machine:abc123",
+                    "Increase the bond on did:tenzro:machine:abc123 by 500 TNZO",
+                    "Get the bond state for agent did:tenzro:machine:abc123",
+                    "List all bonds posted by did:tenzro:human:ctrl-1",
+                    "File an insurance claim against did:tenzro:machine:abc123 for 200 TNZO",
+                    "Show insurance pool balance and open claim count",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
                 "id": "token",
                 "name": "Token Management",
                 "description": (
@@ -265,13 +312,13 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "description": (
                     "Agent Payments Protocol (AP2) session lifecycle plus "
                     "Google-spec mandate verification. Create sessions, "
-                    "authorize/execute/cancel payments, verify Intent/Cart/Payment "
-                    "Verifiable Digital Credentials (VDCs), validate Intent+Cart pairs "
+                    "authorize/execute/cancel payments, verify Checkout/Payment "
+                    "Verifiable Digital Credentials (VDCs), validate Checkout+Payment pairs "
                     "for consistency, and fetch protocol metadata."
                 ),
                 "tags": [
                     "payments", "ap2", "agentic", "settlement", "mandates",
-                    "vdc", "intent", "cart", "verifiable-credentials",
+                    "vdc", "checkout", "payment", "verifiable-credentials",
                 ],
                 "examples": [
                     "AP2 protocol info",
@@ -280,7 +327,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "Execute session <id> (metadata.authorization_id)",
                     "Cancel session <id>",
                     "Verify AP2 mandate (metadata.vdc)",
-                    "Validate AP2 intent/cart pair (metadata.intent_vdc, cart_vdc)",
+                    "Validate AP2 checkout/payment pair (metadata.checkout_vdc, payment_vdc)",
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],
@@ -291,8 +338,8 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "description": (
                     "On-chain agent identity and reputation via ERC-8004. "
                     "Derive deterministic agent IDs, encode registry calldata "
-                    "(register, getAgent, feedback, requestValidation, "
-                    "submitValidation), and decode getAgent returndata for "
+                    "(register, getAgent, feedback, validationRequest, "
+                    "validationResponse), and decode getAgent returndata for "
                     "integration with any EVM-compatible registry contract."
                 ),
                 "tags": [

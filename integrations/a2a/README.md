@@ -108,11 +108,11 @@ curl -X POST https://a2a.tenzro.network/a2a \
 
 `status`/`health` queries also surface the live sync gap by comparing the
 local tip against peer-reported network tips (gossiped on
-`tenzro/status/1.0.0`).
+`tenzro/status`).
 
-## Agent Skills (31)
+## Agent Skills
 
-The Tenzro A2A agent exposes 31 skills covering blockchain, AI, identity, payments, and agent orchestration:
+The Tenzro A2A agent exposes the skills below covering blockchain, AI, identity, payments, lifecycle, bonds, and agent orchestration. The Agent Card at `tenzro_a2a_server/agent_card.py` is the authoritative source for skill IDs and descriptions.
 
 ### Core Blockchain
 
@@ -128,9 +128,10 @@ The Tenzro A2A agent exposes 31 skills covering blockchain, AI, identity, paymen
 
 | Skill | ID | Description |
 |-------|-----|-------------|
-| **Identity Management** | `identity` | Register/resolve DIDs (TDIP), set usernames |
+| **Identity Management** | `identity` | Register/resolve DIDs (TDIP), set usernames, GDPR Article 17 right-to-erasure (`forget_identity`) |
 | **Settlement & Payments** | `settlement` | Micropayment channels, escrow, batch settlement |
-| **AP2 Payments** | `ap2-payments` | Agent-to-agent autonomous financial transactions |
+| **AP2 Payments** | `ap2-payments` | AP2 v0.2 sign + verify + validate-pair (intent → cart) for agent-to-agent autonomous financial transactions, with three-axis ceiling enforcement (mandate constraints + TDIP DelegationScope + runtime SpendingPolicy) |
+| **Stripe SPT** | `stripe-spt` | SharedPaymentToken issuance + verify with TDIP cap-resolver, AP2 cart-mandate cross-check, ERC-8004 ReputationRegistry cross-write on settled outcome, `granted_token.deactivated` webhook cascade into TDIP `apply_remote_revocation` |
 
 ### AI & Agents
 
@@ -147,9 +148,11 @@ The Tenzro A2A agent exposes 31 skills covering blockchain, AI, identity, paymen
 | **Video** | `video` | Frame-extraction + per-frame embedding scaffolding (wave 1) |
 | **Agent Spawning** | `agent_spawning` | Spawn sub-agents with own DID and wallet (up to 50) |
 | **Swarm Orchestration** | `swarm_orchestration` | Create agent swarms for parallel task execution |
+| **Agent Lifecycle** | `lifecycle` | Driver of `Created → Active → Suspended → Terminated` state transitions, including parent→children spawn-tree audit |
+| **AgentBond & Insurance** | `bond-insurance` | Post/withdraw TNZO collateral against autonomous agent DIDs and file insurance claims (Spec 9) |
 | **Task Marketplace** | `task_marketplace` | Post/browse tasks with TNZO escrow payment |
 | **Agent Marketplace** | `agent_marketplace` | Publish, discover, rate, and spawn agent templates |
-| **ERC-8004 Trustless Agents** | `erc8004` | On-chain agent identity and reputation via ERC-8004 (derive IDs, encode registry calldata, decode getAgent returndata) |
+| **ERC-8004 Trustless Agents** (v0.6+) | `erc8004` | 22 surfaces across IdentityRegistry (10: derive, register, getAgent encode/decode, setAgentURI, setAgentWallet, setMetadata, getMetadata encode/decode, getAgentURI, getAgentWallet), ReputationRegistry (9: feedback, getFeedback, getFeedbackCount, revokeFeedback, isFeedbackRevoked, appendResponse, getFeedbackResponses), and ValidationRegistry (3: validationRequest, validationResponse, getValidation). Calldata is byte-identical to native EVM precompiles `0x101a` / `0x101b` / `0x101c` (`agentId = keccak256(utf8(did_string))`) |
 
 ### Cross-Chain & Compliance
 
@@ -288,7 +291,7 @@ def tenzro_blockchain(query: str) -> str:
 ```
 Your Agent                    Tenzro Node
     |                              |
-    |-- GET /.well-known/agent.json -->  Agent Card (30 skills)
+    |-- GET /.well-known/agent.json -->  Agent Card
     |                              |
     |-- POST /a2a (tasks/send) ------->  Task Manager
     |                              |     |

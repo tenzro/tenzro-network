@@ -14,7 +14,7 @@
 //! auto-discover from the registry by tag, and a declarative list of
 //! `ExecutionStep`s that map 1:1 to existing subsystems.
 
-use crate::primitives::{Address, Timestamp};
+use crate::primitives::{Address, Timestamp, u128_serde};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -534,10 +534,16 @@ pub enum ExecutionBackend {
 /// `tenzro_identity::DelegationScope` by the spawner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DelegationSpec {
-    /// Maximum value of a single transaction (raw u128, base units)
+    /// Maximum value of a single transaction (raw u128, base units).
+    /// Accepts JSON numbers (≤ u64::MAX) or strings (any u128). Serialized
+    /// as a number when it fits u64 and as a decimal string otherwise.
+    #[serde(with = "u128_serde")]
     pub max_transaction_value: u128,
 
-    /// Maximum cumulative spend per day (raw u128, base units)
+    /// Maximum cumulative spend per day (raw u128, base units).
+    /// Accepts JSON numbers (≤ u64::MAX) or strings (any u128). Serialized
+    /// as a number when it fits u64 and as a decimal string otherwise.
+    #[serde(with = "u128_serde")]
     pub max_daily_spend: u128,
 
     /// Operation labels the agent is allowed to perform
@@ -561,10 +567,14 @@ pub struct DelegationSpec {
 /// independent of the delegation scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HardCaps {
-    /// Per-operation value cap (raw u128, base units)
+    /// Per-operation value cap (raw u128, base units).
+    /// Accepts JSON numbers (≤ u64::MAX) or strings (any u128).
+    #[serde(with = "u128_serde")]
     pub per_operation_value: u128,
 
-    /// Per-day cumulative value cap (raw u128, base units)
+    /// Per-day cumulative value cap (raw u128, base units).
+    /// Accepts JSON numbers (≤ u64::MAX) or strings (any u128).
+    #[serde(with = "u128_serde")]
     pub per_day_value: u128,
 }
 

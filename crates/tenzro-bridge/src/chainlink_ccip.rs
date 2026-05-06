@@ -446,21 +446,21 @@ impl ChainlinkCcipAdapter {
             .get("result")
             .and_then(|r| r.as_array());
 
-        if let Some(logs) = logs {
-            if let Some(last_log) = logs.last() {
-                // The state is in the data field, first 32 bytes = uint8 state
-                if let Some(data) = last_log.get("data").and_then(|d| d.as_str()) {
-                    let data_bytes = hex::decode(data.trim_start_matches("0x")).unwrap_or_default();
-                    if !data_bytes.is_empty() {
-                        let state = data_bytes[31]; // uint8 is right-aligned in 32 bytes
-                        return Ok(match state {
-                            0 => TransferStatus::Pending,      // UNTOUCHED
-                            1 => TransferStatus::InTransit,     // IN_PROGRESS
-                            2 => TransferStatus::Delivered,     // SUCCESS
-                            3 => TransferStatus::Failed,        // FAILURE
-                            _ => TransferStatus::Pending,
-                        });
-                    }
+        if let Some(logs) = logs
+            && let Some(last_log) = logs.last()
+        {
+            // The state is in the data field, first 32 bytes = uint8 state
+            if let Some(data) = last_log.get("data").and_then(|d| d.as_str()) {
+                let data_bytes = hex::decode(data.trim_start_matches("0x")).unwrap_or_default();
+                if !data_bytes.is_empty() {
+                    let state = data_bytes[31]; // uint8 is right-aligned in 32 bytes
+                    return Ok(match state {
+                        0 => TransferStatus::Pending,      // UNTOUCHED
+                        1 => TransferStatus::InTransit,     // IN_PROGRESS
+                        2 => TransferStatus::Delivered,     // SUCCESS
+                        3 => TransferStatus::Failed,        // FAILURE
+                        _ => TransferStatus::Pending,
+                    });
                 }
             }
         }

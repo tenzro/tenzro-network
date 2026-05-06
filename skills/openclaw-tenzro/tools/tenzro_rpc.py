@@ -171,6 +171,33 @@ Usage:
     python tenzro_rpc.py onboard_autonomous_agent 0xbond_funding_address
     python tenzro_rpc.py revoke_jwt <jti> "lost device"
     python tenzro_rpc.py revoke_did did:tenzro:human:... "lost device"
+
+    # AgentBond + Insurance (Spec 9)
+    python tenzro_rpc.py get_agent_bond did:tenzro:machine:...
+    python tenzro_rpc.py post_agent_bond 0xcontroller did:tenzro:machine:agent did:tenzro:human:owner 1000000000000000000000
+    python tenzro_rpc.py file_insurance_claim did:tenzro:human:claimant 0xclaimant did:tenzro:machine:bad_agent 5000000000000000000 1
+    python tenzro_rpc.py get_insurance_pool_balance
+
+    # Adaptive Burn governance dial (Spec 8)
+    python tenzro_rpc.py get_burn_rate_config
+    python tenzro_rpc.py get_supply_metrics
+    python tenzro_rpc.py get_burn_rate_recommendation
+
+    # SeedAgent treasury (Spec 10)
+    python tenzro_rpc.py get_treasury_earmark
+    python tenzro_rpc.py list_seed_agents
+    python tenzro_rpc.py get_network_activity 24h true
+
+    # Mempool / dual-rail / hot-state (Specs 2, 3, 6)
+    python tenzro_rpc.py get_burn_quota
+    python tenzro_rpc.py get_mempool_stats
+    python tenzro_rpc.py get_account_contention 0x<address>
+
+    # Receipts & disputes
+    python tenzro_rpc.py list_receipts_by_controller did:tenzro:human:...
+    python tenzro_rpc.py summarize_controller did:tenzro:human:...
+    python tenzro_rpc.py get_provider_reputation 0x<provider>
+    python tenzro_rpc.py list_disputes_by_channel <channel_id>
 """
 
 import json
@@ -2304,7 +2331,7 @@ def create_escrow(payer: str, payee: str, amount_wei: int,
     and signs on its behalf. The bearer's wallet address must equal `payer`.
 
     The escrow_id is derived deterministically by the VM as
-    SHA-256("tenzro/escrow/id/v1" || payer || nonce_le); funds are locked at a
+    SHA-256("tenzro/escrow/id" || payer || nonce_le); funds are locked at a
     vault address derived from that id. Only the original payer can release or
     refund.
 
@@ -4057,6 +4084,15 @@ def revoke_did(did, reason="revoked"):
     return _rpc("tenzro_revokeDid", {"did": did, "reason": reason})
 
 
+def forget_identity(did):
+    """TDIP/GDPR Article 17 right-to-erasure. Hard-deletes a previously
+    revoked identity from the registry and persistent storage. The DID
+    must already be in `Revoked` status — call `revoke_did` first, allow
+    cascading revocation to propagate, then call this. Distinct from
+    `revoke_did` which is a logical delete."""
+    return _rpc("tenzro_forgetIdentity", {"did": did})
+
+
 def list_pending_approvals(approver_did):
     """List approvals in `Pending` status for the given approver DID."""
     return _rpc("tenzro_listPendingApprovals", {"approver_did": approver_did})
@@ -4142,27 +4178,45 @@ def ap2_protocol_info() -> dict:
     return _rpc("tenzro_ap2ProtocolInfo", {})
 
 
+def ap2_sign_mandate(mandate_kind: str, mandate: dict, signer_did: str) -> dict:
+    """Sign an AP2 v0.2 Checkout or Payment mandate via the auth-bound wallet's Ed25519 key.
+
+    Args:
+        mandate_kind: ``"checkout"`` (principal-signed pre-authorization) or
+            ``"payment"`` (agent-signed final-offer commit) per AP2 v0.2.
+        mandate: The full mandate object (CheckoutMandate or PaymentMandate JSON).
+        signer_did: Signer DID — must match the controller of the auth-bound
+            wallet (principal for checkout, agent for payment).
+
+    Returns the assembled, self-verified Vdc JSON.
+    """
+    return _rpc(
+        "tenzro_ap2SignMandate",
+        {"mandate_kind": mandate_kind, "mandate": mandate, "signer_did": signer_did},
+    )
+
+
 def ap2_verify_mandate(vdc: dict) -> dict:
     """Verify a single AP2 Verifiable Digital Credential envelope."""
     return _rpc("tenzro_ap2VerifyMandate", {"vdc": vdc})
 
 
 def ap2_validate_mandate_pair(
-    intent_vdc: dict,
-    cart_vdc: dict,
+    checkout_vdc: dict,
+    payment_vdc: dict,
     enforce_delegation: bool = False,
 ) -> dict:
-    """Validate that an Intent and Cart VDC pair are consistent.
+    """Validate that a CheckoutMandate + PaymentMandate VDC pair are consistent (AP2 v0.2).
 
     When ``enforce_delegation`` is True, the node additionally cross-checks
-    the agent's TDIP ``DelegationScope`` against the cart total via
+    the agent's TDIP ``DelegationScope`` against the payment total via
     ``IdentityRegistry.enforce_operation(agent_did, "payment", total)``.
-    Both layers must admit the cart for ``valid: true``. The response
+    Both layers must admit the payment for ``valid: true``. The response
     includes ``delegation_enforced`` so callers can confirm which path ran.
     """
     return _rpc("tenzro_ap2ValidateMandatePair", {
-        "intent_vdc": intent_vdc,
-        "cart_vdc": cart_vdc,
+        "checkout_vdc": checkout_vdc,
+        "payment_vdc": payment_vdc,
         "enforce_delegation": enforce_delegation,
     })
 
@@ -4210,71 +4264,186 @@ def ap2_list_agent_sessions(agent_did: str) -> dict:
     return _rpc("tenzro_ap2ListAgentSessions", {"agent_did": agent_did})
 
 
-# ── ERC-8004 (Trustless Agents Registry) ─────────────────────────
+# ── ERC-8004 (Trustless Agents Registry — full v0.6+ surface) ────
 
 
-def erc8004_derive_agent_id(owner: str, salt: str) -> dict:
-    """Derive deterministic ERC-8004 AgentId from owner + salt."""
-    return _rpc("tenzro_erc8004DeriveAgentId", {
-        "owner": owner,
-        "salt": salt,
-    })
+# -- Identity registry --------------------------------------------------
+
+def erc8004_derive_agent_id(did: str) -> dict:
+    """Derive the canonical ERC-8004 agentId = keccak256(utf8(did))."""
+    return _rpc("tenzro_erc8004DeriveAgentId", {"did": did})
 
 
-def erc8004_encode_register(agent_id: str, registration_data_uri: str,
-                            owner: str) -> dict:
-    """Encode calldata for ERC-8004 register(agentId, uri, owner)."""
+def erc8004_encode_register(did: str, agent_address: str,
+                            metadata_uri: str) -> dict:
+    """Encode calldata for IdentityRegistry.registerAgent(bytes32 agentId, address agentAddress, string metadataURI)."""
     return _rpc("tenzro_erc8004EncodeRegister", {
-        "agent_id": agent_id,
-        "registration_data_uri": registration_data_uri,
-        "owner": owner,
+        "did": did,
+        "agent_address": agent_address,
+        "metadata_uri": metadata_uri,
     })
 
 
 def erc8004_encode_get_agent(agent_id: str) -> dict:
-    """Encode calldata for ERC-8004 getAgent(agentId)."""
+    """Encode calldata for IdentityRegistry.getAgent(bytes32 agentId)."""
     return _rpc("tenzro_erc8004EncodeGetAgent", {"agent_id": agent_id})
 
 
-def erc8004_decode_get_agent(returndata: str) -> dict:
-    """Decode getAgent() returndata into an Agent struct."""
-    return _rpc("tenzro_erc8004DecodeGetAgent", {"returndata": returndata})
+def erc8004_decode_get_agent(return_data: str) -> dict:
+    """Decode (address, string) returndata from getAgent() into {agent_address, metadata_uri}."""
+    return _rpc("tenzro_erc8004DecodeGetAgent", {"return_data": return_data})
 
 
-def erc8004_encode_feedback(agent_id: str, score: int,
-                            feedback_auth_id: str,
-                            feedback_uri: str) -> dict:
-    """Encode calldata for ERC-8004 reputation feedback submission."""
+def erc8004_encode_set_agent_uri(agent_id: str, metadata_uri: str) -> dict:
+    """Encode calldata for IdentityRegistry.setAgentURI(uint256 agentId, string metadataURI) (v0.6+)."""
+    return _rpc("tenzro_erc8004EncodeSetAgentURI", {
+        "agent_id": agent_id,
+        "metadata_uri": metadata_uri,
+    })
+
+
+def erc8004_encode_set_agent_wallet(agent_id: str, new_wallet: str,
+                                     deadline: int, signature: str) -> dict:
+    """Encode calldata for IdentityRegistry.setAgentWallet(uint256, address, uint256, bytes) (v0.6+)."""
+    return _rpc("tenzro_erc8004EncodeSetAgentWallet", {
+        "agent_id": agent_id,
+        "new_wallet": new_wallet,
+        "deadline": deadline,
+        "signature": signature,
+    })
+
+
+def erc8004_encode_set_metadata(agent_id: str, metadata_key: str,
+                                 metadata_value: str) -> dict:
+    """Encode calldata for IdentityRegistry.setMetadata(uint256, string, bytes) (v0.6+)."""
+    return _rpc("tenzro_erc8004EncodeSetMetadata", {
+        "agent_id": agent_id,
+        "metadata_key": metadata_key,
+        "metadata_value": metadata_value,
+    })
+
+
+def erc8004_encode_get_metadata(agent_id: str, metadata_key: str) -> dict:
+    """Encode calldata for IdentityRegistry.getMetadata(uint256, string) (v0.6+)."""
+    return _rpc("tenzro_erc8004EncodeGetMetadata", {
+        "agent_id": agent_id,
+        "metadata_key": metadata_key,
+    })
+
+
+def erc8004_decode_get_metadata(return_data: str) -> dict:
+    """Decode bytes returndata from getMetadata() into {metadata_value} (v0.6+)."""
+    return _rpc("tenzro_erc8004DecodeGetMetadata", {"return_data": return_data})
+
+
+def erc8004_encode_get_agent_uri(agent_id: str) -> dict:
+    """Encode calldata for IdentityRegistry.getAgentURI(uint256 agentId) (v0.6+)."""
+    return _rpc("tenzro_erc8004EncodeGetAgentURI", {"agent_id": agent_id})
+
+
+def erc8004_encode_get_agent_wallet(agent_id: str) -> dict:
+    """Encode calldata for IdentityRegistry.getAgentWallet(uint256 agentId) (v0.6+)."""
+    return _rpc("tenzro_erc8004EncodeGetAgentWallet", {"agent_id": agent_id})
+
+
+# -- Reputation registry ------------------------------------------------
+
+def erc8004_encode_feedback(subject_agent_id: str, rating: int,
+                            context_uri: str) -> dict:
+    """Encode calldata for ReputationRegistry.submitFeedback(bytes32, int8, string).
+
+    `rating` is in -100..=100 (Tenzro convention).
+    """
     return _rpc("tenzro_erc8004EncodeFeedback", {
-        "agent_id": agent_id,
-        "score": score,
-        "feedback_auth_id": feedback_auth_id,
-        "feedback_uri": feedback_uri,
+        "subject_agent_id": subject_agent_id,
+        "rating": rating,
+        "context_uri": context_uri,
     })
 
 
-def erc8004_encode_request_validation(agent_id: str, validator_id: str,
+def erc8004_encode_get_feedback(subject_agent_id: str, index: int) -> dict:
+    """Encode calldata for ReputationRegistry.getFeedback(bytes32 subject, uint256 index)."""
+    return _rpc("tenzro_erc8004EncodeGetFeedback", {
+        "subject_agent_id": subject_agent_id,
+        "index": index,
+    })
+
+
+def erc8004_encode_get_feedback_count(subject_agent_id: str) -> dict:
+    """Encode calldata for ReputationRegistry.getFeedbackCount(bytes32 subject)."""
+    return _rpc("tenzro_erc8004EncodeGetFeedbackCount", {
+        "subject_agent_id": subject_agent_id,
+    })
+
+
+def erc8004_encode_revoke_feedback(agent_id: str, feedback_id: str) -> dict:
+    """Encode calldata for ReputationRegistry.revokeFeedback(uint256, bytes32) (v0.6+)."""
+    return _rpc("tenzro_erc8004EncodeRevokeFeedback", {
+        "agent_id": agent_id,
+        "feedback_id": feedback_id,
+    })
+
+
+def erc8004_encode_append_response(agent_id: str, feedback_id: str,
+                                    response_uri: str) -> dict:
+    """Encode calldata for ReputationRegistry.appendResponse(uint256, bytes32, string) (v0.6+)."""
+    return _rpc("tenzro_erc8004EncodeAppendResponse", {
+        "agent_id": agent_id,
+        "feedback_id": feedback_id,
+        "response_uri": response_uri,
+    })
+
+
+def erc8004_encode_is_feedback_revoked(agent_id: str, feedback_id: str) -> dict:
+    """Encode calldata for ReputationRegistry.isFeedbackRevoked(uint256, bytes32) (v0.6+)."""
+    return _rpc("tenzro_erc8004EncodeIsFeedbackRevoked", {
+        "agent_id": agent_id,
+        "feedback_id": feedback_id,
+    })
+
+
+def erc8004_encode_get_feedback_responses(agent_id: str, feedback_id: str) -> dict:
+    """Encode calldata for ReputationRegistry.getFeedbackResponses(uint256, bytes32) (v0.6+)."""
+    return _rpc("tenzro_erc8004EncodeGetFeedbackResponses", {
+        "agent_id": agent_id,
+        "feedback_id": feedback_id,
+    })
+
+
+# -- Validation registry -----------------------------------------------
+
+def erc8004_encode_validation_request(validator_address: str, agent_id: str,
                                        request_uri: str,
-                                       data_hash: str) -> dict:
-    """Encode calldata for ERC-8004 requestValidation()."""
-    return _rpc("tenzro_erc8004EncodeRequestValidation", {
+                                       request_hash: str) -> dict:
+    """Encode calldata for ValidationRegistry.validationRequest(address, uint256, string, bytes32)."""
+    return _rpc("tenzro_erc8004EncodeValidationRequest", {
+        "validator_address": validator_address,
         "agent_id": agent_id,
-        "validator_id": validator_id,
         "request_uri": request_uri,
-        "data_hash": data_hash,
+        "request_hash": request_hash,
     })
 
 
-def erc8004_encode_submit_validation(data_hash: str, response: int,
-                                      response_uri: str,
-                                      tag: str = "") -> dict:
-    """Encode calldata for ERC-8004 submitValidation()."""
-    return _rpc("tenzro_erc8004EncodeSubmitValidation", {
-        "data_hash": data_hash,
+def erc8004_encode_validation_response(request_hash: str, response: int,
+                                        response_uri: str,
+                                        response_hash: str,
+                                        tag: str = "") -> dict:
+    """Encode calldata for ValidationRegistry.validationResponse(bytes32, uint8, string, bytes32, string).
+
+    `response` is a 0..=100 quality score per the canonical ERC-8004 spec.
+    """
+    return _rpc("tenzro_erc8004EncodeValidationResponse", {
+        "request_hash": request_hash,
         "response": response,
         "response_uri": response_uri,
+        "response_hash": response_hash,
         "tag": tag,
     })
+
+
+def erc8004_encode_get_validation(request_hash: str) -> dict:
+    """Encode calldata for ValidationRegistry.getValidation(bytes32 requestHash) (v0.6+)."""
+    return _rpc("tenzro_erc8004EncodeGetValidation", {"request_hash": request_hash})
 
 
 # ── Wormhole (Cross-Chain Bridge) ────────────────────────────────
@@ -4485,6 +4654,493 @@ def video_embed(model_id: str, video_b64: str,
     })
 
 
+# ── AgentBond (Spec 9) ────────────────────────────────────────────
+
+
+def get_agent_bond(agent_did: str) -> dict:
+    """Read the AgentBond state for `agent_did`.
+
+    Returns the full bond record (controller_did, amount, lifecycle state,
+    cooldown, history depth, promotion eligibility) or `null` if the agent
+    has no bond posted.
+    """
+    return _rpc("tenzro_getAgentBond", {"agent_did": agent_did})
+
+
+def list_agent_bonds_by_controller(controller_did: str) -> dict:
+    """List every AgentBond posted by `controller_did`.
+
+    Returns `{ controller_did, count, aggregate_bond, bonds: [...] }`.
+    `aggregate_bond` is the sum of effective-for-promotion amounts across
+    all active bonds the controller holds.
+    """
+    return _rpc("tenzro_listAgentBondsByController", {
+        "controller_did": controller_did,
+    })
+
+
+def post_agent_bond(controller_address: str, agent_did: str,
+                    controller_did: str, amount_wei: int) -> dict:
+    """Post a new AgentBond via signed `PostAgentBond` transaction.
+
+    Locks `amount_wei` TNZO from `controller_address` (the bearer wallet)
+    into the bond vault for `agent_did`. The bond enters Active state and
+    promotes the agent to the Delegated admission lane while ≥ the
+    configured `bond_min_for_promotion`.
+
+    Uses ambient OAuth/DPoP auth — `controller_address` must match the
+    bearer's wallet. The VM enforces that `agent_did` either has no prior
+    bond or its prior bond is in a terminal state.
+    """
+    nonce, chain_id = _fetch_nonce_and_chain_id(controller_address)
+    tx_type = {
+        "type": "PostAgentBond",
+        "data": {
+            "agent_did": agent_did,
+            "controller_did": controller_did,
+            "amount": str(amount_wei),
+        },
+    }
+    params = {
+        "from": controller_address,
+        "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "value": 0,
+        "gas_limit": 90000,
+        "gas_price": 1_000_000_000,
+        "nonce": nonce,
+        "chain_id": chain_id,
+        "tx_type": tx_type,
+    }
+    return _rpc("tenzro_signAndSendTransaction", params)
+
+
+def increase_agent_bond(controller_address: str, agent_did: str,
+                        amount_wei: int) -> dict:
+    """Top up an existing Active AgentBond by `amount_wei`.
+
+    Uses ambient OAuth/DPoP auth — `controller_address` must equal the
+    original poster (the bond's controller). Locks additional TNZO into
+    the same bond vault.
+    """
+    nonce, chain_id = _fetch_nonce_and_chain_id(controller_address)
+    tx_type = {
+        "type": "IncreaseAgentBond",
+        "data": {
+            "agent_did": agent_did,
+            "amount": str(amount_wei),
+        },
+    }
+    params = {
+        "from": controller_address,
+        "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "value": 0,
+        "gas_limit": 75000,
+        "gas_price": 1_000_000_000,
+        "nonce": nonce,
+        "chain_id": chain_id,
+        "tx_type": tx_type,
+    }
+    return _rpc("tenzro_signAndSendTransaction", params)
+
+
+def withdraw_agent_bond(controller_address: str, agent_did: str) -> dict:
+    """Initiate cooldown on an Active AgentBond via `WithdrawAgentBond`.
+
+    Funds are not released by the VM — finalisation happens off-VM via the
+    node-side BondManager once `cooldown_ms` has elapsed. Uses ambient
+    OAuth/DPoP auth — `controller_address` must equal the bond's controller.
+    """
+    nonce, chain_id = _fetch_nonce_and_chain_id(controller_address)
+    tx_type = {
+        "type": "WithdrawAgentBond",
+        "data": {"agent_did": agent_did},
+    }
+    params = {
+        "from": controller_address,
+        "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "value": 0,
+        "gas_limit": 60000,
+        "gas_price": 1_000_000_000,
+        "nonce": nonce,
+        "chain_id": chain_id,
+        "tx_type": tx_type,
+    }
+    return _rpc("tenzro_signAndSendTransaction", params)
+
+
+# ── Insurance (Spec 9) ────────────────────────────────────────────
+
+
+def file_insurance_claim(claimant_did: str, claimant_address: str,
+                         against_agent_did: str, amount_requested_wei: int,
+                         nonce: int,
+                         receipt_refs: list = None,
+                         narrative: str = None) -> dict:
+    """Open a new insurance claim against a bonded agent.
+
+    The claim enters `Open` status awaiting governance adjudication; payout
+    (if approved) is settled via a separate `PayInsuranceClaim` transaction.
+    `nonce` is a per-claim disambiguator used in the deterministic claim_id
+    derivation. `receipt_refs` is an optional list of receipt-id strings;
+    `narrative` is capped at 1024 bytes server-side.
+    """
+    params = {
+        "claimant_did": claimant_did,
+        "claimant_address": claimant_address,
+        "against_agent_did": against_agent_did,
+        "amount_requested": str(amount_requested_wei),
+        "nonce": nonce,
+    }
+    if receipt_refs is not None:
+        params["receipt_refs"] = receipt_refs
+    if narrative is not None:
+        params["narrative"] = narrative
+    return _rpc("tenzro_fileInsuranceClaim", params)
+
+
+def list_insurance_claims() -> dict:
+    """List every insurance claim (Open + Approved + Rejected + Paid)."""
+    return _rpc("tenzro_listInsuranceClaims", {})
+
+
+def get_insurance_claim(claim_id: str) -> dict:
+    """Fetch a single insurance claim by its id."""
+    return _rpc("tenzro_getInsuranceClaim", {"claim_id": claim_id})
+
+
+def get_insurance_pool_balance() -> dict:
+    """Read the current insurance pool vault balance."""
+    return _rpc("tenzro_getInsurancePoolBalance", {})
+
+
+# ── Adaptive Burn (Spec 8) ────────────────────────────────────────
+
+
+def get_burn_rate_config() -> dict:
+    """Read the current adaptive-burn configuration and supply targets.
+
+    Returns `{ config: {...}, targets: {...} }` covering the per-rail burn
+    bps splits (base_fee, local_fee, paymaster) and the SupplyTargets
+    governance dial (rolling window, neutral band, alarm thresholds,
+    magnitude caps, fast-track timelock).
+    """
+    return _rpc("tenzro_getBurnRateConfig", {})
+
+
+def get_supply_metrics() -> dict:
+    """Read the latest SupplyMetricsSnapshot.
+
+    Includes block height, circulating supply, epoch delta, rolling-bps,
+    BurnBreakdown (per-rail), and EmissionBreakdown.
+    """
+    return _rpc("tenzro_getSupplyMetrics", {})
+
+
+def get_burn_rate_recommendation() -> dict:
+    """Read the latest BurnRateRecommendation.
+
+    Returns `{ action, is_alarm, magnitude_bps, above_proposal_floor,
+    deviation_bps, basis }` where `action` is one of Disabled / NoChange /
+    IncreaseBurnPct / DecreaseBurnPct / AlarmHighInflation / AlarmHighDeflation.
+    `magnitude_bps` is capped by `magnitude_cap_normal_bps` (or alarm cap).
+    """
+    return _rpc("tenzro_getBurnRateRecommendation", {})
+
+
+def list_adaptive_burn_proposals() -> dict:
+    """List adaptive-burn governance proposals.
+
+    Surfaces auto-generated burn-rate adjustment proposals queued by the
+    governance executor. Returns `{ proposals: [...], count }`.
+    """
+    return _rpc("tenzro_listAdaptiveBurnProposals", {})
+
+
+# ── SeedAgent (Spec 10) ───────────────────────────────────────────
+
+
+def get_treasury_earmark(name: str = None) -> dict:
+    """Read the SeedAgent treasury earmark singleton.
+
+    Returns the genesis-funded TNZO allocation, decay schedule, remaining
+    balance, drawn-to-date, and master `enabled` switch. Only one earmark
+    exists in wave 1 (`name == "SeedAgent"`); the optional `name` arg is a
+    forward-compat filter.
+    """
+    params = {}
+    if name is not None:
+        params["name"] = name
+    return _rpc("tenzro_getTreasuryEarmark", params)
+
+
+def get_seed_agent_charter(charter_id: str) -> dict:
+    """Read a SeedAgent governance charter by hex `charter_id`.
+
+    Returns the operations whitelist, spend caps (daily/monthly/per-tx),
+    target throughput, counterparty filter, sunset, and enabled flag.
+    """
+    return _rpc("tenzro_getSeedAgentCharter", {"charter_id": charter_id})
+
+
+def list_seed_agent_charters() -> dict:
+    """List every governance-signed SeedAgent charter."""
+    return _rpc("tenzro_listSeedAgentCharters", {})
+
+
+def list_seed_agents(charter_id: str = None) -> dict:
+    """List SeedAgent registry records, optionally filtered by `charter_id`.
+
+    Returns per-DID provisioning state: agent_did, controller_did,
+    charter_id, status (Active|Paused|Quarantined|Terminated), bond_id,
+    allocation_used, provisioned_at, last_active.
+    """
+    params = {}
+    if charter_id is not None:
+        params["charter_id"] = charter_id
+    return _rpc("tenzro_listSeedAgents", params)
+
+
+def get_network_activity(window: str = None,
+                         exclude_seed: bool = False) -> dict:
+    """Read aggregated network-activity counters.
+
+    `window` is a string like "24h" / "7d"; `exclude_seed` filters out
+    transactions where either side is flagged `is_seed_agent` (so organic
+    activity can be measured against the bootstrap baseline). Returns
+    inference / settlement / bridge / 7683 counts plus seed-agent totals.
+    """
+    params = {}
+    if window is not None:
+        params["window"] = window
+    if exclude_seed:
+        params["exclude_seed"] = exclude_seed
+    return _rpc("tenzro_getNetworkActivity", params)
+
+
+# ── Escrow listing ────────────────────────────────────────────────
+
+
+def list_escrows_by_payer(payer: str) -> dict:
+    """List every escrow opened by `payer` (hex address).
+
+    Returns `{ payer, count, escrows: [...] }`.
+    """
+    return _rpc("tenzro_listEscrowsByPayer", {"payer": payer})
+
+
+def list_escrows_by_payee(payee: str) -> dict:
+    """List every escrow whose recipient is `payee` (hex address).
+
+    Returns `{ payee, count, escrows: [...] }`.
+    """
+    return _rpc("tenzro_listEscrowsByPayee", {"payee": payee})
+
+
+# ── Burn quota & mempool (Specs 3 + 6) ────────────────────────────
+
+
+def get_burn_quota() -> dict:
+    """Read the singleton BurnQuota state (Spec 3 — dual-rail gas+burn).
+
+    Returns balance / cap / daily_target / min_reserve_bps / min_reserve /
+    last_refill / total_drained / total_refilled / deficit / can_drain_one.
+    Wave-1 is read-only — drains/refills happen in-process.
+    """
+    return _rpc("tenzro_getBurnQuota", {})
+
+
+def get_mempool_stats() -> dict:
+    """Read per-lane mempool statistics (Spec 2 — admission control).
+
+    Returns admitted / rejected_rate_limited / rejected_fee_floor /
+    rejected_mempool_full counters plus refill_per_sec / burst_capacity /
+    fee_floor_mult / weight per lane (Verified, Delegated, Open).
+    """
+    return _rpc("tenzro_getMempoolStats", {})
+
+
+def get_mempool_lane(address: str) -> dict:
+    """Inspect the lane assignment and bucket state for `address`.
+
+    Useful for debugging "why is my transaction being rate-limited?"
+    without consuming a token. Returns the resolved lane, bucket_key, and
+    current snapshot. For Machine identities, the bucket may be keyed on
+    the controller wallet rather than the queried address.
+    """
+    return _rpc("tenzro_getMempoolLane", {"address": address})
+
+
+def get_account_contention(address: str) -> dict:
+    """Read the hot-state local fee market score for `address` (Spec 6).
+
+    Returns score / reexecutions / writes / is_hot / multiplier and the
+    current effective base fee + per-gas surcharge for transactions
+    touching this account.
+    """
+    return _rpc("tenzro_getAccountContention", {"address": address})
+
+
+# ── DA offload (Spec 7) ───────────────────────────────────────────
+
+
+def get_da_backends() -> dict:
+    """List configured DA backends and their health status.
+
+    Wave-1 ships only `inline_fallback`; EigenDA / Celestia / Avail entries
+    appear when their feature-gated adapters land.
+    """
+    return _rpc("tenzro_getDaBackends", {})
+
+
+def verify_da_pointer(pointer: dict) -> dict:
+    """Probe whether a DA pointer is dereferenceable right now.
+
+    `pointer` is a dict with `backend` (`inline_fallback` | `eigenda` |
+    `celestia` | `avail`), hex `namespace`, hex `locator`, and optional
+    hex `commitment_kzg` / `attestation_root` (32 bytes).
+    """
+    return _rpc("tenzro_verifyDaPointer", {"pointer": pointer})
+
+
+# ── Receipts & principal chain (Spec 5) ───────────────────────────
+
+
+def get_receipt_principal_chain(receipt_id: str) -> dict:
+    """Walk the principal chain for a settlement receipt.
+
+    Returns the ordered chain of acting DIDs from the leaf actor up to the
+    terminal controller, reconstructed from the receipt's delegation graph.
+    """
+    return _rpc("tenzro_getReceiptPrincipalChain", {"receipt_id": receipt_id})
+
+
+def list_receipts_by_actor(actor_did: str) -> dict:
+    """List receipt ids whose acting DID matches `actor_did`. Oldest first."""
+    return _rpc("tenzro_listReceiptsByActor", {"did": actor_did})
+
+
+def list_receipts_by_controller(controller_did: str) -> dict:
+    """List receipt ids whose principal chain terminates at `controller_did`.
+
+    Oldest first.
+    """
+    return _rpc("tenzro_listReceiptsByController", {"did": controller_did})
+
+
+def summarize_controller(controller_did: str,
+                        since: int = None,
+                        until: int = None) -> dict:
+    """Aggregate a controller's activity across an optional unix-second window.
+
+    Returns receipt count, total settled value, distinct delegated agents,
+    KYC-tier evolution, and bond extremes.
+    """
+    params = {"did": controller_did}
+    if since is not None:
+        params["since"] = since
+    if until is not None:
+        params["until"] = until
+    return _rpc("tenzro_summarizeController", params)
+
+
+# ── Agent lifecycle & kill-switch ─────────────────────────────────
+
+
+def get_agent_lifecycle(agent_id: str) -> dict:
+    """Read the lifecycle state machine for `agent_id`.
+
+    Returns current state (Created|Active|Suspended|Terminated), last
+    state-change timestamp, last heartbeat, and the full state history.
+    """
+    return _rpc("tenzro_getAgentLifecycle", {"agent_id": agent_id})
+
+
+def list_kill_switch_by_agent(agent_did: str) -> dict:
+    """List every kill-switch receipt targeting `agent_did`.
+
+    Chronological order (oldest first). Each receipt is the on-VM record
+    of a `PauseAgent` / `QuarantineAgent` / `TerminateAgent` execution.
+    """
+    return _rpc("tenzro_listKillSwitchByAgent", {"agent_did": agent_did})
+
+
+def list_kill_switch_by_controller(controller_did: str) -> dict:
+    """List every kill-switch receipt authorised by `controller_did`.
+
+    Across all targeted agents, chronological order.
+    """
+    return _rpc("tenzro_listKillSwitchByController", {
+        "controller_did": controller_did,
+    })
+
+
+def get_kill_switch_receipt(receipt_id: str) -> dict:
+    """Fetch a single kill-switch receipt by hex `receipt_id`.
+
+    Returns `null` if the id is unknown.
+    """
+    return _rpc("tenzro_getKillSwitchReceipt", {"receipt_id": receipt_id})
+
+
+# ── Inference usage & provider reputation ─────────────────────────
+
+
+def list_inference_usage(model_id: str = None,
+                         provider: str = None) -> dict:
+    """List inference usage records / aggregates.
+
+    Both filters absent → `{ global, models, providers }` aggregates.
+    `model_id` only → per-model stats. `provider` only → per-provider stats.
+    Both → intersection records from the bounded recent ring.
+    """
+    params = {}
+    if model_id is not None:
+        params["model_id"] = model_id
+    if provider is not None:
+        params["provider"] = provider
+    return _rpc("tenzro_listInferenceUsage", params)
+
+
+def get_provider_reputation(provider_address: str) -> dict:
+    """Read the current reputation score for an inference provider.
+
+    Returns `{ provider, reputation }` where `reputation` is a u64 in
+    [0, 1000]. The score moves +1 / -5 per success/failure.
+    """
+    return _rpc("tenzro_getProviderReputation", {"provider": provider_address})
+
+
+# ── Provenance & disputes ─────────────────────────────────────────
+
+
+def get_provenance(content_hash: str) -> dict:
+    """Look up a cached ProvenanceManifest by 32-byte hex `content_hash`.
+
+    Wave-1 read path for the EU AI Act Art. 50(2) machine-readable
+    synthetic-content marker. The store is bounded LRU-by-signed_at, so a
+    `not found` does not prove the response was never signed.
+    """
+    return _rpc("tenzro_getProvenance", {"content_hash": content_hash})
+
+
+def get_dispute(dispute_id: str) -> dict:
+    """Fetch a single channel dispute record by id.
+
+    Returns the full ChannelDispute (challenger, evidence, status,
+    timestamps, resolution).
+    """
+    return _rpc("tenzro_getDispute", {"dispute_id": dispute_id})
+
+
+def list_disputes_by_channel(channel_id: str) -> dict:
+    """List every dispute (open or historical) attached to a channel.
+
+    Returns `{ channel_id, count, disputes: [...] }`. Empty list is not
+    an error.
+    """
+    return _rpc("tenzro_listDisputesByChannel", {"channel_id": channel_id})
+
+
 # ── CLI ───────────────────────────────────────────────────────────
 
 COMMANDS = {
@@ -4515,6 +5171,8 @@ COMMANDS = {
     "resolve_did_document": lambda args: resolve_did_document(args[0]),
     "set_username": lambda args: set_username(args[0], args[1]),
     "resolve_username": lambda args: resolve_username(args[0]),
+    "revoke_did": lambda args: revoke_did(args[0], args[1] if len(args) > 1 else "revoked"),
+    "forget_identity": lambda args: forget_identity(args[0]),
     # Verification
     "verify_zk_proof": lambda args: verify_zk_proof(
         args[0],
@@ -5147,6 +5805,9 @@ COMMANDS = {
     "decide_approval": lambda args: decide_approval(args[0], args[1], args[2]),
     # ── AP2 (Agent Payments Protocol) ──
     "ap2_protocol_info": lambda args: ap2_protocol_info(),
+    "ap2_sign_mandate": lambda args: ap2_sign_mandate(
+        args[0], json.loads(args[1]), args[2]
+    ),
     "ap2_verify_mandate": lambda args: ap2_verify_mandate(json.loads(args[0])),
     "ap2_validate_mandate_pair": lambda args: ap2_validate_mandate_pair(
         json.loads(args[0]),
@@ -5164,25 +5825,55 @@ COMMANDS = {
     "ap2_cancel_session": lambda args: ap2_cancel_session(args[0]),
     "ap2_get_session": lambda args: ap2_get_session(args[0]),
     "ap2_list_agent_sessions": lambda args: ap2_list_agent_sessions(args[0]),
-    # ── ERC-8004 (Trustless Agents Registry) ──
-    "erc8004_derive_agent_id": lambda args: erc8004_derive_agent_id(
-        args[0], args[1],
-    ),
+    # ── ERC-8004 (Trustless Agents Registry — full v0.6+ surface) ──
+    "erc8004_derive_agent_id": lambda args: erc8004_derive_agent_id(args[0]),
     "erc8004_encode_register": lambda args: erc8004_encode_register(
         args[0], args[1], args[2],
     ),
     "erc8004_encode_get_agent": lambda args: erc8004_encode_get_agent(args[0]),
     "erc8004_decode_get_agent": lambda args: erc8004_decode_get_agent(args[0]),
-    "erc8004_encode_feedback": lambda args: erc8004_encode_feedback(
-        args[0], int(args[1]), args[2], args[3],
+    "erc8004_encode_set_agent_uri": lambda args: erc8004_encode_set_agent_uri(
+        args[0], args[1],
     ),
-    "erc8004_encode_request_validation": lambda args: erc8004_encode_request_validation(
+    "erc8004_encode_set_agent_wallet": lambda args: erc8004_encode_set_agent_wallet(
+        args[0], args[1], int(args[2]), args[3],
+    ),
+    "erc8004_encode_set_metadata": lambda args: erc8004_encode_set_metadata(
+        args[0], args[1], args[2],
+    ),
+    "erc8004_encode_get_metadata": lambda args: erc8004_encode_get_metadata(
+        args[0], args[1],
+    ),
+    "erc8004_decode_get_metadata": lambda args: erc8004_decode_get_metadata(args[0]),
+    "erc8004_encode_get_agent_uri": lambda args: erc8004_encode_get_agent_uri(args[0]),
+    "erc8004_encode_get_agent_wallet": lambda args: erc8004_encode_get_agent_wallet(args[0]),
+    "erc8004_encode_feedback": lambda args: erc8004_encode_feedback(
+        args[0], int(args[1]), args[2],
+    ),
+    "erc8004_encode_get_feedback": lambda args: erc8004_encode_get_feedback(
+        args[0], int(args[1]),
+    ),
+    "erc8004_encode_get_feedback_count": lambda args: erc8004_encode_get_feedback_count(args[0]),
+    "erc8004_encode_revoke_feedback": lambda args: erc8004_encode_revoke_feedback(
+        args[0], args[1],
+    ),
+    "erc8004_encode_append_response": lambda args: erc8004_encode_append_response(
+        args[0], args[1], args[2],
+    ),
+    "erc8004_encode_is_feedback_revoked": lambda args: erc8004_encode_is_feedback_revoked(
+        args[0], args[1],
+    ),
+    "erc8004_encode_get_feedback_responses": lambda args: erc8004_encode_get_feedback_responses(
+        args[0], args[1],
+    ),
+    "erc8004_encode_validation_request": lambda args: erc8004_encode_validation_request(
         args[0], args[1], args[2], args[3],
     ),
-    "erc8004_encode_submit_validation": lambda args: erc8004_encode_submit_validation(
-        args[0], int(args[1]), args[2],
-        args[3] if len(args) > 3 else "",
+    "erc8004_encode_validation_response": lambda args: erc8004_encode_validation_response(
+        args[0], int(args[1]), args[2], args[3],
+        args[4] if len(args) > 4 else "",
     ),
+    "erc8004_encode_get_validation": lambda args: erc8004_encode_get_validation(args[0]),
     # ── Wormhole ──
     "wormhole_chain_id": lambda args: wormhole_chain_id(args[0]),
     "wormhole_parse_vaa_id": lambda args: wormhole_parse_vaa_id(args[0]),
@@ -5237,6 +5928,78 @@ COMMANDS = {
         args[0], args[1],
         int(args[2]) if len(args) > 2 else 30,
     ),
+    # ── AgentBond (Spec 9) ──
+    "get_agent_bond": lambda args: get_agent_bond(args[0]),
+    "list_agent_bonds_by_controller": lambda args: list_agent_bonds_by_controller(args[0]),
+    "post_agent_bond": lambda args: post_agent_bond(
+        args[0], args[1], args[2], int(args[3]),
+    ),
+    "increase_agent_bond": lambda args: increase_agent_bond(
+        args[0], args[1], int(args[2]),
+    ),
+    "withdraw_agent_bond": lambda args: withdraw_agent_bond(args[0], args[1]),
+    # ── Insurance (Spec 9) ──
+    "file_insurance_claim": lambda args: file_insurance_claim(
+        args[0], args[1], args[2], int(args[3]), int(args[4]),
+        json.loads(args[5]) if len(args) > 5 else None,
+        args[6] if len(args) > 6 else None,
+    ),
+    "list_insurance_claims": lambda args: list_insurance_claims(),
+    "get_insurance_claim": lambda args: get_insurance_claim(args[0]),
+    "get_insurance_pool_balance": lambda args: get_insurance_pool_balance(),
+    # ── Adaptive Burn (Spec 8) ──
+    "get_burn_rate_config": lambda args: get_burn_rate_config(),
+    "get_supply_metrics": lambda args: get_supply_metrics(),
+    "get_burn_rate_recommendation": lambda args: get_burn_rate_recommendation(),
+    "list_adaptive_burn_proposals": lambda args: list_adaptive_burn_proposals(),
+    # ── SeedAgent (Spec 10) ──
+    "get_treasury_earmark": lambda args: get_treasury_earmark(
+        args[0] if args else None,
+    ),
+    "get_seed_agent_charter": lambda args: get_seed_agent_charter(args[0]),
+    "list_seed_agent_charters": lambda args: list_seed_agent_charters(),
+    "list_seed_agents": lambda args: list_seed_agents(
+        args[0] if args else None,
+    ),
+    "get_network_activity": lambda args: get_network_activity(
+        args[0] if args else None,
+        args[1].lower() == "true" if len(args) > 1 else False,
+    ),
+    # ── Escrow listing ──
+    "list_escrows_by_payer": lambda args: list_escrows_by_payer(args[0]),
+    "list_escrows_by_payee": lambda args: list_escrows_by_payee(args[0]),
+    # ── Burn quota & mempool (Specs 3 + 6) ──
+    "get_burn_quota": lambda args: get_burn_quota(),
+    "get_mempool_stats": lambda args: get_mempool_stats(),
+    "get_mempool_lane": lambda args: get_mempool_lane(args[0]),
+    "get_account_contention": lambda args: get_account_contention(args[0]),
+    # ── DA offload (Spec 7) ──
+    "get_da_backends": lambda args: get_da_backends(),
+    "verify_da_pointer": lambda args: verify_da_pointer(json.loads(args[0])),
+    # ── Receipts & principal chain (Spec 5) ──
+    "get_receipt_principal_chain": lambda args: get_receipt_principal_chain(args[0]),
+    "list_receipts_by_actor": lambda args: list_receipts_by_actor(args[0]),
+    "list_receipts_by_controller": lambda args: list_receipts_by_controller(args[0]),
+    "summarize_controller": lambda args: summarize_controller(
+        args[0],
+        int(args[1]) if len(args) > 1 else None,
+        int(args[2]) if len(args) > 2 else None,
+    ),
+    # ── Agent lifecycle & kill-switch ──
+    "get_agent_lifecycle": lambda args: get_agent_lifecycle(args[0]),
+    "list_kill_switch_by_agent": lambda args: list_kill_switch_by_agent(args[0]),
+    "list_kill_switch_by_controller": lambda args: list_kill_switch_by_controller(args[0]),
+    "get_kill_switch_receipt": lambda args: get_kill_switch_receipt(args[0]),
+    # ── Inference usage & provider reputation ──
+    "list_inference_usage": lambda args: list_inference_usage(
+        args[0] if len(args) > 0 and args[0] else None,
+        args[1] if len(args) > 1 and args[1] else None,
+    ),
+    "get_provider_reputation": lambda args: get_provider_reputation(args[0]),
+    # ── Provenance & disputes ──
+    "get_provenance": lambda args: get_provenance(args[0]),
+    "get_dispute": lambda args: get_dispute(args[0]),
+    "list_disputes_by_channel": lambda args: list_disputes_by_channel(args[0]),
 }
 
 

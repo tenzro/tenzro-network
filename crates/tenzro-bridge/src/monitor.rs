@@ -34,9 +34,6 @@ pub struct TransferStatusEvent {
 /// A transfer being monitored
 #[derive(Debug, Clone)]
 struct MonitoredTransfer {
-    /// Transfer ID (used by Debug formatting and status events)
-    #[allow(dead_code)]
-    transfer_id: String,
     /// Name of the adapter that initiated the transfer
     adapter_name: String,
     /// Current known status
@@ -162,9 +159,8 @@ impl TransferMonitor {
         );
 
         self.transfers.insert(
-            transfer_id.clone(),
+            transfer_id,
             MonitoredTransfer {
-                transfer_id,
                 adapter_name,
                 current_status: TransferStatus::Pending,
                 source_chain,

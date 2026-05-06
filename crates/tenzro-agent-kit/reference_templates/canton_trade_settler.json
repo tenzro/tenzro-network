@@ -48,8 +48,8 @@
       }
     },
     "delegation": {
-      "max_transaction_value": 1000000000000000000000,
-      "max_daily_spend": 5000000000000000000000,
+      "max_transaction_value": "1000000000000000000000",
+      "max_daily_spend": "5000000000000000000000",
       "allowed_operations": ["daml_create", "daml_exercise"],
       "allowed_chains": [],
       "time_bound_days": 90,
@@ -76,8 +76,8 @@
       }
     ],
     "hard_caps": {
-      "per_operation_value": 1000000000000000000000,
-      "per_day_value": 5000000000000000000000
+      "per_operation_value": "1000000000000000000000",
+      "per_day_value": "5000000000000000000000"
     }
   }
 }

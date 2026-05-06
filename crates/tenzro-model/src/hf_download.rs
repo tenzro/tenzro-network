@@ -273,12 +273,11 @@ impl HfDownloader {
         if let Ok(entries) = std::fs::read_dir(&self.storage_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if let Some(ext) = path.extension() {
-                    if ext == "gguf" {
-                        if let Some(stem) = path.file_stem() {
-                            models.push(stem.to_string_lossy().to_string());
-                        }
-                    }
+                if let Some(ext) = path.extension()
+                    && ext == "gguf"
+                    && let Some(stem) = path.file_stem()
+                {
+                    models.push(stem.to_string_lossy().to_string());
                 }
             }
         }

@@ -183,8 +183,8 @@ impl ComplianceCheckCmd {
 
         output::print_field("Compliant", if compliant { "Yes" } else { "No" });
 
-        if let Some(violations) = result.get("violations").and_then(|v| v.as_array()) {
-            if !violations.is_empty() {
+        if let Some(violations) = result.get("violations").and_then(|v| v.as_array())
+            && !violations.is_empty() {
                 output::print_field("Violations", "");
                 for v in violations {
                     if let Some(msg) = v.as_str() {
@@ -192,7 +192,6 @@ impl ComplianceCheckCmd {
                     }
                 }
             }
-        }
 
         if let Some(rules) = result.get("checked_rules").and_then(|v| v.as_array()) {
             let rule_names: Vec<String> = rules

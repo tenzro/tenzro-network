@@ -22,8 +22,21 @@ pub enum AgentState {
     Initializing,
     /// Agent is active and operational
     Active,
-    /// Agent is temporarily suspended
+    /// Agent is temporarily suspended (operational pause, e.g. heartbeat
+    /// timeout). Kept distinct from `Paused` so that automated maintenance
+    /// suspensions don't collide with controller-driven kill-switch pauses.
     Suspended,
+    /// Agent is paused by an authorized controller via the kill-switch
+    /// `PauseAgent` precompile. New non-bypass operations are rejected; a
+    /// short allow-list (e.g. settling already-locked escrow) still flows
+    /// through. Reversible via the same controller graph.
+    Paused,
+    /// Agent is quarantined by an authorized controller (or committee) via
+    /// the kill-switch `QuarantineAgent` precompile. All operations are
+    /// frozen — no payments, no inference dispatch, no reward distribution
+    /// — but stake remains intact pending investigation. Reversible to
+    /// Active or terminal to Terminated.
+    Quarantined,
     /// Agent is permanently terminated
     Terminated,
 }
@@ -36,6 +49,8 @@ impl AgentState {
             AgentState::Initializing => "initializing",
             AgentState::Active => "active",
             AgentState::Suspended => "suspended",
+            AgentState::Paused => "paused",
+            AgentState::Quarantined => "quarantined",
             AgentState::Terminated => "terminated",
         }
     }
@@ -50,15 +65,50 @@ impl AgentState {
             (AgentState::Initializing, AgentState::Terminated) => true,
             // From Active
             (AgentState::Active, AgentState::Suspended) => true,
+            (AgentState::Active, AgentState::Paused) => true,
+            (AgentState::Active, AgentState::Quarantined) => true,
             (AgentState::Active, AgentState::Terminated) => true,
-            // From Suspended
+            // From Suspended (operational)
             (AgentState::Suspended, AgentState::Active) => true,
             (AgentState::Suspended, AgentState::Terminated) => true,
+            // From Paused (kill-switch). Resumes to Active; can be escalated
+            // to Quarantined or Terminated. Cannot fall back to Suspended —
+            // operational suspension and controller pause are different axes.
+            (AgentState::Paused, AgentState::Active) => true,
+            (AgentState::Paused, AgentState::Quarantined) => true,
+            (AgentState::Paused, AgentState::Terminated) => true,
+            // From Quarantined (kill-switch). Reversible to Active after
+            // investigation, or terminal to Terminated.
+            (AgentState::Quarantined, AgentState::Active) => true,
+            (AgentState::Quarantined, AgentState::Terminated) => true,
             // Cannot transition from Terminated
             (AgentState::Terminated, _) => false,
             // No other transitions allowed
             _ => false,
         }
+    }
+
+    /// Returns true if the agent is in a state where new (non-bypass)
+    /// operations should be rejected. Used by payment binders and reward
+    /// distributors to fail-closed without re-implementing the state table.
+    pub fn is_frozen(&self) -> bool {
+        matches!(
+            self,
+            AgentState::Paused | AgentState::Quarantined | AgentState::Terminated
+        )
+    }
+
+    /// Returns true if the agent is reversibly paused by a controller (i.e.
+    /// `Paused` — not the operational `Suspended` state, and not the
+    /// stronger `Quarantined`). Pause-bypass allow-list checks gate on this.
+    pub fn is_paused(&self) -> bool {
+        matches!(self, AgentState::Paused)
+    }
+
+    /// Returns true if the agent is quarantined by a controller. Stake and
+    /// reward flows must freeze in this state.
+    pub fn is_quarantined(&self) -> bool {
+        matches!(self, AgentState::Quarantined)
     }
 }
 
@@ -102,6 +152,50 @@ pub enum AgentLifecycleEvent {
         /// Timestamp
         timestamp: DateTime<Utc>,
     },
+    /// Agent was paused by a kill-switch controller
+    Paused {
+        /// Agent ID
+        agent_id: String,
+        /// Controller DID that issued the pause
+        controller_did: String,
+        /// Numeric reason code (see kill-switch reason-code table)
+        reason_code: u32,
+        /// Optional human-readable reason text
+        reason_text: Option<String>,
+        /// Timestamp
+        timestamp: DateTime<Utc>,
+    },
+    /// Agent was resumed from `Paused` back to `Active`
+    ResumedFromPause {
+        /// Agent ID
+        agent_id: String,
+        /// Controller DID that issued the resume
+        controller_did: String,
+        /// Timestamp
+        timestamp: DateTime<Utc>,
+    },
+    /// Agent was quarantined by a kill-switch controller or committee
+    Quarantined {
+        /// Agent ID
+        agent_id: String,
+        /// Controller DID that issued the quarantine
+        controller_did: String,
+        /// Numeric reason code
+        reason_code: u32,
+        /// Optional human-readable reason text
+        reason_text: Option<String>,
+        /// Timestamp
+        timestamp: DateTime<Utc>,
+    },
+    /// Agent was returned to `Active` from `Quarantined`
+    ResumedFromQuarantine {
+        /// Agent ID
+        agent_id: String,
+        /// Controller DID that issued the resume
+        controller_did: String,
+        /// Timestamp
+        timestamp: DateTime<Utc>,
+    },
     /// Agent was terminated
     Terminated {
         /// Agent ID
@@ -129,6 +223,10 @@ impl AgentLifecycleEvent {
             | AgentLifecycleEvent::Activated { agent_id, .. }
             | AgentLifecycleEvent::Suspended { agent_id, .. }
             | AgentLifecycleEvent::Resumed { agent_id, .. }
+            | AgentLifecycleEvent::Paused { agent_id, .. }
+            | AgentLifecycleEvent::ResumedFromPause { agent_id, .. }
+            | AgentLifecycleEvent::Quarantined { agent_id, .. }
+            | AgentLifecycleEvent::ResumedFromQuarantine { agent_id, .. }
             | AgentLifecycleEvent::Terminated { agent_id, .. }
             | AgentLifecycleEvent::HeartbeatReceived { agent_id, .. } => agent_id,
         }
@@ -142,6 +240,10 @@ impl AgentLifecycleEvent {
             | AgentLifecycleEvent::Activated { timestamp, .. }
             | AgentLifecycleEvent::Suspended { timestamp, .. }
             | AgentLifecycleEvent::Resumed { timestamp, .. }
+            | AgentLifecycleEvent::Paused { timestamp, .. }
+            | AgentLifecycleEvent::ResumedFromPause { timestamp, .. }
+            | AgentLifecycleEvent::Quarantined { timestamp, .. }
+            | AgentLifecycleEvent::ResumedFromQuarantine { timestamp, .. }
             | AgentLifecycleEvent::Terminated { timestamp, .. }
             | AgentLifecycleEvent::HeartbeatReceived { timestamp, .. } => *timestamp,
         }
@@ -264,16 +366,6 @@ impl AgentLifecycle {
         }
     }
 
-    /// Creates a new agent lifecycle manager with custom heartbeat timeout
-    #[deprecated(note = "Use with_heartbeat_config instead")]
-    pub fn with_heartbeat_timeout(heartbeat_timeout: i64) -> Self {
-        let config = HeartbeatConfig {
-            interval_secs: heartbeat_timeout,
-            timeout_multiplier: 1,
-        };
-        Self::with_heartbeat_config(config)
-    }
-
     /// Subscribes to lifecycle events
     pub fn subscribe(&self) -> broadcast::Receiver<AgentLifecycleEvent> {
         self.event_tx.subscribe()
@@ -387,6 +479,141 @@ impl AgentLifecycle {
 
         self.emit_event(AgentLifecycleEvent::Resumed {
             agent_id: agent_id.to_string(),
+            timestamp: Utc::now(),
+        });
+
+        Ok(())
+    }
+
+    /// Pauses an agent via the kill-switch precompile.
+    ///
+    /// Transitions Active → Paused. The pause is reversible via
+    /// [`resume_from_pause`]. While paused, the payment binder rejects new
+    /// non-bypass operations; reward distribution and stake withdrawals are
+    /// not affected (use `quarantine` for that).
+    pub fn pause(
+        &self,
+        agent_id: &str,
+        controller_did: String,
+        reason_code: u32,
+        reason_text: Option<String>,
+    ) -> Result<()> {
+        let mut entry = self
+            .lifecycles
+            .get_mut(agent_id)
+            .ok_or_else(|| AgentError::AgentNotFound(agent_id.to_string()))?;
+
+        entry.value_mut().transition(AgentState::Paused)?;
+
+        info!(
+            "Agent {} paused by {} (code={}, text={:?})",
+            agent_id, controller_did, reason_code, reason_text
+        );
+
+        self.emit_event(AgentLifecycleEvent::Paused {
+            agent_id: agent_id.to_string(),
+            controller_did,
+            reason_code,
+            reason_text,
+            timestamp: Utc::now(),
+        });
+
+        Ok(())
+    }
+
+    /// Resumes a paused agent back to Active.
+    pub fn resume_from_pause(&self, agent_id: &str, controller_did: String) -> Result<()> {
+        let mut entry = self
+            .lifecycles
+            .get_mut(agent_id)
+            .ok_or_else(|| AgentError::AgentNotFound(agent_id.to_string()))?;
+
+        // Defensive: only resume from Paused via this entry point. Suspended
+        // → Active still flows through the operational `resume` path.
+        if entry.value().state != AgentState::Paused {
+            return Err(AgentError::InvalidStateTransition {
+                from: entry.value().state.as_str().to_string(),
+                to: AgentState::Active.as_str().to_string(),
+            });
+        }
+
+        entry.value_mut().transition(AgentState::Active)?;
+
+        info!("Agent {} resumed from pause by {}", agent_id, controller_did);
+
+        self.emit_event(AgentLifecycleEvent::ResumedFromPause {
+            agent_id: agent_id.to_string(),
+            controller_did,
+            timestamp: Utc::now(),
+        });
+
+        Ok(())
+    }
+
+    /// Quarantines an agent via the kill-switch precompile.
+    ///
+    /// Transitions Active → Quarantined (or Paused → Quarantined for
+    /// escalation). All operations freeze including reward distribution and
+    /// stake withdrawals. Reversible via [`resume_from_quarantine`] or
+    /// terminal via [`terminate`].
+    pub fn quarantine(
+        &self,
+        agent_id: &str,
+        controller_did: String,
+        reason_code: u32,
+        reason_text: Option<String>,
+    ) -> Result<()> {
+        let mut entry = self
+            .lifecycles
+            .get_mut(agent_id)
+            .ok_or_else(|| AgentError::AgentNotFound(agent_id.to_string()))?;
+
+        entry.value_mut().transition(AgentState::Quarantined)?;
+
+        info!(
+            "Agent {} quarantined by {} (code={}, text={:?})",
+            agent_id, controller_did, reason_code, reason_text
+        );
+
+        self.emit_event(AgentLifecycleEvent::Quarantined {
+            agent_id: agent_id.to_string(),
+            controller_did,
+            reason_code,
+            reason_text,
+            timestamp: Utc::now(),
+        });
+
+        Ok(())
+    }
+
+    /// Returns a quarantined agent to Active after investigation.
+    pub fn resume_from_quarantine(
+        &self,
+        agent_id: &str,
+        controller_did: String,
+    ) -> Result<()> {
+        let mut entry = self
+            .lifecycles
+            .get_mut(agent_id)
+            .ok_or_else(|| AgentError::AgentNotFound(agent_id.to_string()))?;
+
+        if entry.value().state != AgentState::Quarantined {
+            return Err(AgentError::InvalidStateTransition {
+                from: entry.value().state.as_str().to_string(),
+                to: AgentState::Active.as_str().to_string(),
+            });
+        }
+
+        entry.value_mut().transition(AgentState::Active)?;
+
+        info!(
+            "Agent {} resumed from quarantine by {}",
+            agent_id, controller_did
+        );
+
+        self.emit_event(AgentLifecycleEvent::ResumedFromQuarantine {
+            agent_id: agent_id.to_string(),
+            controller_did,
             timestamp: Utc::now(),
         });
 
@@ -778,6 +1005,107 @@ mod tests {
         assert!(terminated.is_empty());
         let state = lifecycle.get_state(&agent_id).unwrap();
         assert_eq!(state, AgentState::Suspended);
+    }
+
+    #[test]
+    fn test_pause_resume_cycle() {
+        let lifecycle = AgentLifecycle::new();
+        let agent_id = "kill_switch_agent".to_string();
+
+        lifecycle.initialize(agent_id.clone()).unwrap();
+        lifecycle.activate(&agent_id).unwrap();
+
+        lifecycle
+            .pause(
+                &agent_id,
+                "did:tenzro:human:controller".to_string(),
+                10,
+                Some("manual".to_string()),
+            )
+            .unwrap();
+        assert_eq!(lifecycle.get_state(&agent_id).unwrap(), AgentState::Paused);
+
+        lifecycle
+            .resume_from_pause(&agent_id, "did:tenzro:human:controller".to_string())
+            .unwrap();
+        assert_eq!(lifecycle.get_state(&agent_id).unwrap(), AgentState::Active);
+    }
+
+    #[test]
+    fn test_quarantine_then_terminate() {
+        let lifecycle = AgentLifecycle::new();
+        let agent_id = "rogue_agent".to_string();
+
+        lifecycle.initialize(agent_id.clone()).unwrap();
+        lifecycle.activate(&agent_id).unwrap();
+
+        lifecycle
+            .quarantine(
+                &agent_id,
+                "did:tenzro:committee".to_string(),
+                100,
+                Some("safety violation".to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            lifecycle.get_state(&agent_id).unwrap(),
+            AgentState::Quarantined
+        );
+
+        lifecycle
+            .terminate(&agent_id, "investigation concluded".to_string())
+            .unwrap();
+        assert_eq!(
+            lifecycle.get_state(&agent_id).unwrap(),
+            AgentState::Terminated
+        );
+    }
+
+    #[test]
+    fn test_pause_to_quarantine_escalation() {
+        let lifecycle = AgentLifecycle::new();
+        let agent_id = "escalating_agent".to_string();
+
+        lifecycle.initialize(agent_id.clone()).unwrap();
+        lifecycle.activate(&agent_id).unwrap();
+        lifecycle
+            .pause(&agent_id, "did:tenzro:human:c".to_string(), 0, None)
+            .unwrap();
+        lifecycle
+            .quarantine(&agent_id, "did:tenzro:committee".to_string(), 100, None)
+            .unwrap();
+        assert_eq!(
+            lifecycle.get_state(&agent_id).unwrap(),
+            AgentState::Quarantined
+        );
+    }
+
+    #[test]
+    fn test_resume_from_pause_rejects_non_paused() {
+        let lifecycle = AgentLifecycle::new();
+        let agent_id = "still_active".to_string();
+
+        lifecycle.initialize(agent_id.clone()).unwrap();
+        lifecycle.activate(&agent_id).unwrap();
+
+        // Active is not Paused — must be rejected.
+        let result =
+            lifecycle.resume_from_pause(&agent_id, "did:tenzro:human:c".to_string());
+        assert!(matches!(
+            result,
+            Err(AgentError::InvalidStateTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn test_is_frozen_helper() {
+        assert!(!AgentState::Active.is_frozen());
+        assert!(!AgentState::Created.is_frozen());
+        assert!(!AgentState::Initializing.is_frozen());
+        assert!(!AgentState::Suspended.is_frozen());
+        assert!(AgentState::Paused.is_frozen());
+        assert!(AgentState::Quarantined.is_frozen());
+        assert!(AgentState::Terminated.is_frozen());
     }
 
     #[test]

@@ -964,10 +964,10 @@ impl SmartAccount {
         self.modules
             .iter()
             .filter_map(|m| {
-                if let AccountModule::SessionKey { key, expires_at, .. } = m {
-                    if *expires_at > current_time {
-                        return Some(key.clone());
-                    }
+                if let AccountModule::SessionKey { key, expires_at, .. } = m
+                    && *expires_at > current_time
+                {
+                    return Some(key.clone());
                 }
                 None
             })

@@ -46,11 +46,12 @@ The VM layer is designed with a pluggable executor architecture that implements 
 - **Gas Accounting**: Comprehensive gas metering and pricing
 - **Standard EVM Precompiles (0x01-0x09)**: ecRecover, SHA-256, RIPEMD-160, Identity, ModExp, EC_ADD, EC_MUL, EC_PAIRING, BLAKE2F
 - **BLS12-381 Precompiles (0x0a-0x10, EIP-2537)**: G1ADD, G1MSM, G2ADD, G2MSM, PAIRING_CHECK, MAP_FP_TO_G1, MAP_FP2_TO_G2 using blst
+- **EIP-7951 P256VERIFY (0x100)**: secp256r1 ECDSA signature verification (Fusaka Dec 2025) — bit-exact compatibility with FIDO2 / WebAuthn / Apple Secure Enclave / Android Keystore P-256 signatures
 - **Tenzro-Specific Precompiles**:
-  - TEE attestation verification (0x0100)
-  - ZK proof verification (0x0101)
-  - AI model inference triggering (0x0102)
-  - Settlement processing (0x0103)
+  - TEE attestation verification (0x010000)
+  - ZK proof verification (0x010001) — O(1) HashSet lookup against `ZkCommitmentRegistry`
+  - AI model inference triggering (0x010002)
+  - Settlement processing (0x010003)
   - TNZO_BRIDGE (0x1001)
   - TOKEN_FACTORY (0x1002)
   - CROSS_VM_BRIDGE (0x1003)
@@ -58,6 +59,11 @@ The VM layer is designed with a pluggable executor architecture that implements 
   - GOVERNANCE (0x1005)
   - NFT_FACTORY (0x1006)
   - VRF_VERIFY (0x1007) — ECVRF-EDWARDS25519-SHA512-TAI per RFC 9381
+  - TRAINING_VERIFY (0x1008) — Tenzro Train receipt commitment-chain verification
+- **ERC-8004 System Contracts**:
+  - IDENTITY (0x101a) — `registerAgent` / `getAgent` for native Tenzro agent discovery
+  - REPUTATION (0x101b) — `submitFeedback` / `getFeedback` for peer-to-peer agent reputation
+  - VALIDATION (0x101c) — `validationRequest` / `validationResponse` / `getValidation` for verifiable agent work attestation
 - **NFT Factory**: `mintRandom()` (selector 0x52517e21) for collision-checked VRF-randomized token ID assignment and rarity tier derivation
 - **Cross-VM Token Architecture (Sei V2 pointer model)**: wTNZO ERC-20 pointer at 0x7a4bcb13a6b2b384c284b5caa6e5ef3126527f93, SPL Token Adapter with 9-decimal truncation, CIP-56 DAML template — all share same underlying native TNZO balance
 - **Unified Token Registry**: DashMap-indexed catalog across all VMs with RocksDB persistence (CF_TOKENS)
@@ -142,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **Implementation**: revm
 - **Gas Costs**: Ethereum-compatible gas costs
 - **Bytecode**: EVM opcodes
-- **Precompiles**: Standard Ethereum precompiles (0x01-0x09), BLS12-381 (0x0a-0x10), Tenzro-specific (0x0100+)
+- **Precompiles**: Standard Ethereum precompiles (0x01-0x09), BLS12-381 (0x0a-0x10, EIP-2537), EIP-7951 P256VERIFY (0x100), Tenzro service precompiles (0x010000+), Tenzro token-system precompiles (0x1001+), ERC-8004 system contracts (0x101a-0x101c)
 
 ### SVM (Solana Virtual Machine)
 
@@ -197,12 +203,19 @@ All 9 standard precompiles fully implemented per EIPs 196/197/198/1108/2565/152:
 - `0x0f` - BLS12_MAP_FP_TO_G1
 - `0x10` - BLS12_MAP_FP2_TO_G2
 
-### Tenzro-Specific Precompiles (0x0100+)
+### EIP-7951 P256VERIFY (0x100)
 
-- `0x0100` - TEE Attestation Verification (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU)
-- `0x0101` - ZK Proof Verification (O(1) HashSet lookup against `ZkCommitmentRegistry`; Plonky3 STARK proofs are verified off-EVM by validators, who record 32-byte SHA-256 commitments)
-- `0x0102` - AI Model Inference (simulation)
-- `0x0103` - Settlement Processing
+- `0x100` - secp256r1 ECDSA signature verification (Fusaka Dec 2025) — bit-exact compatibility with FIDO2 / WebAuthn / Apple Secure Enclave / Android Keystore
+
+### Tenzro Service Precompiles (0x010000+)
+
+- `0x010000` - TEE Attestation Verification (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU)
+- `0x010001` - ZK Proof Verification (O(1) HashSet lookup against `ZkCommitmentRegistry`; Plonky3 STARK proofs are verified off-EVM by validators, who record 32-byte SHA-256 commitments)
+- `0x010002` - AI Model Inference (simulation)
+- `0x010003` - Settlement Processing
+
+### Tenzro Token-System Precompiles (0x1001+)
+
 - `0x1001` - TNZO Bridge (wTNZO pointer operations)
 - `0x1002` - Token Factory (ERC-20/SPL/CIP-56 creation)
 - `0x1003` - Cross-VM Bridge (atomic cross-VM transfers)
@@ -210,6 +223,15 @@ All 9 standard precompiles fully implemented per EIPs 196/197/198/1108/2565/152:
 - `0x1005` - Governance (proposal voting)
 - `0x1006` - NFT Factory (ERC-721/1155 creation, mintRandom)
 - `0x1007` - VRF Verify (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI)
+- `0x1008` - Training Verify (Tenzro Train receipt commitment-chain verification)
+
+### ERC-8004 System Contracts (0x101a-0x101c)
+
+- `0x101a` - IdentityRegistry (`registerAgent` / `getAgent`)
+- `0x101b` - ReputationRegistry (`submitFeedback` / `getFeedback` / `getFeedbackCount`)
+- `0x101c` - ValidationRegistry (`validationRequest` / `validationResponse` / `getValidation`)
+
+Selectors are byte-identical to `tenzro_identity::erc8004::selectors`, so the same calldata works against either the native Tenzro registry or the Ethereum mirror.
 
 ## State Management
 

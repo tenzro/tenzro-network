@@ -240,8 +240,8 @@ impl ProviderStatusCmd {
                 output::print_field("Utilization", v);
             }
 
-            if let Some(activity) = stats.get("recent_activity").and_then(|v| v.as_array()) {
-                if !activity.is_empty() {
+            if let Some(activity) = stats.get("recent_activity").and_then(|v| v.as_array())
+                && !activity.is_empty() {
                     println!();
                     output::print_header("Recent Activity");
                     let headers = vec!["Time", "Request ID", "Model", "Status", "Earned"];
@@ -257,7 +257,6 @@ impl ProviderStatusCmd {
                     }
                     output::print_table(&headers, &rows);
                 }
-            }
         }
 
         Ok(())

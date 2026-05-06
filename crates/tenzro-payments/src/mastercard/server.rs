@@ -362,6 +362,10 @@ impl PaymentProtocol for MastercardAgentPayServer {
             settlement_tx,
             chain: challenge.chain.clone(),
             settled_at: Utc::now(),
+            principal_chain: tenzro_types::principal_chain::anonymous_chain_for_did(
+                verification.payer_did.clone(),
+                tenzro_types::primitives::BlockHeight::new(0),
+            ),
             extra: HashMap::new(),
         };
 
@@ -460,7 +464,6 @@ impl PaymentProtocol for MastercardAgentPayServer {
 mod tests {
     use super::*;
     use crate::rfc9421::TenzroAgentRegistry;
-    use tenzro_identity::delegation::DelegationScope;
 
     async fn setup_server() -> (MastercardAgentPayServer, Arc<IdentityRegistry>) {
         let identity_registry = Arc::new(IdentityRegistry::new());

@@ -270,6 +270,10 @@ mod tests {
                 settlement_tx: None,
                 chain: "tenzro".to_string(),
                 settled_at: Utc::now(),
+                principal_chain: tenzro_types::principal_chain::anonymous_chain_for_did(
+                    verification.payer_did.clone(),
+                    tenzro_types::primitives::BlockHeight::new(0),
+                ),
                 extra: HashMap::new(),
             })
         }

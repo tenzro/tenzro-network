@@ -13,13 +13,14 @@ proto/
         ├── block.proto           # Block messages
         ├── consensus.proto       # HotStuff-2 consensus messages
         ├── network.proto         # P2P network messages
-        ├── tee.proto            # TEE attestation messages
-        ├── model.proto          # AI model and inference messages
-        ├── settlement.proto     # Payment settlement messages
-        ├── agent.proto          # AI agent messages
-        ├── governance.proto     # Governance proposal and voting messages
-        ├── bridge.proto         # Cross-chain bridge messages
-        └── rpc.proto            # gRPC service definitions
+        ├── tee.proto             # TEE attestation messages
+        ├── model.proto           # AI model and inference messages
+        ├── settlement.proto      # Payment settlement messages
+        ├── agent.proto           # AI agent messages
+        ├── governance.proto      # Governance proposal and voting messages
+        ├── bridge.proto          # Cross-chain bridge messages
+        ├── canton.proto          # Canton/DAML 3.x integration
+        └── rpc.proto             # gRPC service definitions
 ```
 
 ## Message Categories
@@ -94,10 +95,15 @@ proto/
 ### Interoperability
 
 - **bridge.proto**: Cross-chain bridges
-  - BridgeMessage and BridgeTransfer
-  - Support for multiple protocols (Lock & Mint, Burn & Mint, Atomic Swap, ZK)
+  - BridgeMessage and BridgeTransfer envelopes
+  - Adapter targets: Wormhole NTT (canonical TNZO), LayerZero V2 (with mandatory Tenzro DVN), Chainlink CCIP + CCT v1.6+, deBridge DLN, Li.Fi aggregator
   - BridgeChallenge for dispute resolution
   - LiquidityPool for liquidity-based bridges
+
+- **canton.proto**: Canton/DAML 3.x integration
+  - DamlContractId, DamlTemplateId, DamlParty, DamlValue
+  - DamlCommand, DamlEvent, DamlTransaction
+  - Synchronizer topology and Ledger API types
 
 ### RPC Interface
 
@@ -221,7 +227,7 @@ When adding new messages:
 2. Add comprehensive comments
 3. Follow existing naming conventions (PascalCase for messages, SCREAMING_SNAKE_CASE for enums)
 4. Update this README
-5. Regenerate code with `buf generate`
+5. Update the corresponding hand-coded Rust types (primarily in `tenzro-types`) to match — the proto definitions are documentation-only and stay in sync with the Rust source manually
 
 ## License
 

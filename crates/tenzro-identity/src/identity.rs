@@ -121,6 +121,13 @@ pub enum IdentityData {
         reputation: u32,
         /// Optional link to native Tenzro agent ID
         tenzro_agent_id: Option<String>,
+        /// Immutable flag set at registration time when this machine is a
+        /// protocol-owned SeedAgent (Agent-Swarm Spec 10). SeedAgents are
+        /// counterparty-filtered out of other SeedAgent transactions and
+        /// excluded from "organic activity" metrics. This flag is set
+        /// once at provisioning and never mutated; reverting it would
+        /// allow wash trading. Default `false` for ordinary machines.
+        is_seed_agent: bool,
     },
 }
 
@@ -247,6 +254,17 @@ impl TenzroIdentity {
                 ..
             } => Some(controlled_machines),
             IdentityData::Machine { .. } => None,
+        }
+    }
+
+    /// Returns true if this identity is a protocol-owned SeedAgent
+    /// (Agent-Swarm Spec 10). Always `false` for human identities and
+    /// for ordinary machine identities; `true` only for machines
+    /// provisioned by the SeedAgent controller at registration time.
+    pub fn is_seed_agent(&self) -> bool {
+        match &self.identity_data {
+            IdentityData::Human { .. } => false,
+            IdentityData::Machine { is_seed_agent, .. } => *is_seed_agent,
         }
     }
 
@@ -395,6 +413,7 @@ mod tests {
                 controller_did: Some(controller.to_string()),
                 reputation: 500,
                 tenzro_agent_id: None,
+                is_seed_agent: false,
             },
             status: IdentityStatus::Active,
             wallet_address: Address::new([1u8; 32]),

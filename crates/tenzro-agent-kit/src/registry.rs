@@ -42,10 +42,8 @@ struct JsonRpcRequest<'a> {
 #[derive(Debug, Deserialize)]
 struct JsonRpcResponse {
     #[serde(default)]
-    #[allow(dead_code)]
     jsonrpc: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     id: Option<u64>,
     #[serde(default)]
     result: Option<Value>,
@@ -58,7 +56,6 @@ struct JsonRpcError {
     code: i64,
     message: String,
     #[serde(default)]
-    #[allow(dead_code)]
     data: Option<Value>,
 }
 
@@ -138,10 +135,31 @@ impl RegistryClient {
         let envelope: JsonRpcResponse = serde_json::from_str(&body)
             .map_err(|e| AgentKitError::RpcDeserialize(format!("envelope: {e}; body: {body}")))?;
 
+        // Validate JSON-RPC 2.0 envelope per §5: `jsonrpc` MUST be "2.0",
+        // `id` MUST match the request id (servers may omit when echoing
+        // notifications, but for our request/response calls it is required).
+        if let Some(jr) = envelope.jsonrpc.as_deref()
+            && jr != "2.0"
+        {
+            return Err(AgentKitError::RpcDeserialize(format!(
+                "envelope jsonrpc field is '{jr}', expected '2.0'"
+            )));
+        }
+        if let Some(resp_id) = envelope.id
+            && resp_id != id
+        {
+            tracing::warn!(
+                target: "tenzro_agent_kit::registry",
+                request_id = id, response_id = resp_id,
+                "rpc id mismatch — server echoed unexpected id"
+            );
+        }
+
         if let Some(err) = envelope.error {
             return Err(AgentKitError::RpcError {
                 code: err.code,
                 message: err.message,
+                data: err.data,
             });
         }
 
@@ -212,10 +230,10 @@ impl RegistryClient {
         if let Some(docs_url) = &template.docs_url {
             params.insert("docs_url".to_string(), json!(docs_url));
         }
-        if let Some(ref hash) = template.content_hash {
-            if !hash.is_empty() {
-                params.insert("content_hash".to_string(), json!(hash));
-            }
+        if let Some(ref hash) = template.content_hash
+            && !hash.is_empty()
+        {
+            params.insert("content_hash".to_string(), json!(hash));
         }
         if let Some(spec) = &template.execution_spec {
             params.insert("execution_spec".to_string(), serde_json::to_value(spec)?);

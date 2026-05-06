@@ -39,6 +39,16 @@ pub struct StakeInfo {
     pub total_rewards: u128,
     /// Stake status
     pub status: StakeStatus,
+    /// Kill-switch lifecycle freeze (Agent-Swarm Spec 1).
+    ///
+    /// Set by the node post-execute scan when a `KillSwitchPause` or
+    /// `KillSwitchQuarantine` log is observed for the machine DID that
+    /// owns this stake address; cleared on `ResumedFromPause` /
+    /// `ResumedFromQuarantine`. While frozen, `unstake`, `withdraw`, and
+    /// reward accrual are rejected. `slash` is not gated — terminate
+    /// flow needs to slash even when frozen.
+    #[serde(default)]
+    pub lifecycle_freeze: bool,
 }
 
 impl StakeInfo {
@@ -54,6 +64,7 @@ impl StakeInfo {
             restoration_history: Vec::new(),
             total_rewards: 0,
             status: StakeStatus::Active,
+            lifecycle_freeze: false,
         }
     }
 
@@ -80,8 +91,18 @@ impl StakeInfo {
         self.slashing_history.push(event);
     }
 
-    /// Adds rewards
+    /// Adds rewards.
+    ///
+    /// Rejected when the stake is under a kill-switch lifecycle freeze
+    /// (Paused / Quarantined). The terminate path slashes via
+    /// `StakingManager::slash` directly and never reaches this method.
     pub fn add_rewards(&mut self, amount: u128) -> Result<()> {
+        if self.lifecycle_freeze {
+            return Err(TokenError::InvalidAmount(format!(
+                "stake for {} is frozen by kill-switch; rewards rejected",
+                self.staker
+            )));
+        }
         self.total_rewards = self.total_rewards.checked_add(amount)
             .ok_or_else(|| TokenError::ArithmeticOverflow {
                 operation: "stake add_rewards".to_string(),
@@ -295,14 +316,14 @@ impl StakingManager {
         }
 
         // Load staking config
-        if let Ok(Some(config_data)) = storage.get(STAKING_CF, STAKING_CONFIG_KEY.as_bytes()) {
-            if config_data.len() >= 24 {
-                let min_stake = u128::from_le_bytes(config_data[0..16].try_into().unwrap());
-                let unbonding_ms = i64::from_le_bytes(config_data[16..24].try_into().unwrap());
-                *self.min_stake.write() = min_stake;
-                *self.unbonding_period_ms.write() = unbonding_ms;
-                info!("Loaded staking config: min_stake={}, unbonding_period={}ms", min_stake, unbonding_ms);
-            }
+        if let Ok(Some(config_data)) = storage.get(STAKING_CF, STAKING_CONFIG_KEY.as_bytes())
+            && config_data.len() >= 24
+        {
+            let min_stake = u128::from_le_bytes(config_data[0..16].try_into().unwrap());
+            let unbonding_ms = i64::from_le_bytes(config_data[16..24].try_into().unwrap());
+            *self.min_stake.write() = min_stake;
+            *self.unbonding_period_ms.write() = unbonding_ms;
+            info!("Loaded staking config: min_stake={}, unbonding_period={}ms", min_stake, unbonding_ms);
         }
 
         Ok(())
@@ -360,12 +381,12 @@ impl StakingManager {
         }
 
         // Check if already staked
-        if let Some(existing) = self.stakes.get(&staker) {
-            if existing.is_locked() {
-                return Err(TokenError::InvalidAmount(
-                    "Already have an active stake. Unstake first.".to_string()
-                ));
-            }
+        if let Some(existing) = self.stakes.get(&staker)
+            && existing.is_locked()
+        {
+            return Err(TokenError::InvalidAmount(
+                "Already have an active stake. Unstake first.".to_string(),
+            ));
         }
 
         // Create stake info
@@ -398,6 +419,16 @@ impl StakingManager {
             .ok_or_else(|| TokenError::StakeNotFound {
                 address: staker.to_string(),
             })?;
+
+        // Kill-switch lifecycle freeze (Agent-Swarm Spec 1). Pause /
+        // quarantine block voluntary unstake; only `slash` (called by the
+        // terminate handler) can move funds out of a frozen stake.
+        if stake.lifecycle_freeze {
+            return Err(TokenError::InvalidAmount(format!(
+                "stake for {} is frozen by kill-switch; unstake rejected",
+                staker
+            )));
+        }
 
         // Check if already unbonding
         if stake.status == StakeStatus::Unbonding {
@@ -441,6 +472,16 @@ impl StakingManager {
             .ok_or_else(|| TokenError::StakeNotFound {
                 address: staker.to_string(),
             })?;
+
+        // Kill-switch freeze blocks completion of an in-flight unbonding
+        // window — a controller can pause/quarantine a validator that is
+        // already unbonding to keep stake claimable for slash.
+        if stake.lifecycle_freeze {
+            return Err(TokenError::InvalidAmount(format!(
+                "stake for {} is frozen by kill-switch; withdraw rejected",
+                staker
+            )));
+        }
 
         // Check unbonding status
         if stake.status != StakeStatus::Unbonding {
@@ -709,6 +750,59 @@ impl StakingManager {
             "Restored {} TNZO to {} under governance proposal {} (reason: {})",
             amount, staker, proposal_id, reason
         );
+        Ok(())
+    }
+
+    /// Freezes a stake under kill-switch authority (Agent-Swarm Spec 1).
+    ///
+    /// Called by the node post-execute scan when a `KillSwitchPause` or
+    /// `KillSwitchQuarantine` log is observed for the machine DID that
+    /// owns this stake address. While frozen, `unstake`, `withdraw`, and
+    /// reward accrual (`add_rewards`) are rejected. Idempotent — freezing
+    /// an already-frozen stake is a no-op.
+    ///
+    /// `slash` is intentionally NOT gated by `lifecycle_freeze`: the
+    /// terminate flow must be able to slash a frozen stake.
+    pub fn freeze_stake(&self, staker: &Address) -> Result<()> {
+        let mut stake = self.stakes.get_mut(staker)
+            .ok_or_else(|| TokenError::StakeNotFound {
+                address: staker.to_string(),
+            })?;
+
+        if stake.lifecycle_freeze {
+            return Ok(());
+        }
+        stake.lifecycle_freeze = true;
+
+        let stake_clone = stake.clone();
+        drop(stake);
+
+        self.persist_stake(staker, &stake_clone);
+        warn!("Froze stake for {} under kill-switch authority", staker);
+        Ok(())
+    }
+
+    /// Thaws a previously-frozen stake (Agent-Swarm Spec 1).
+    ///
+    /// Called by the node post-execute scan when a `ResumedFromPause` or
+    /// `ResumedFromQuarantine` log is observed. Idempotent — thawing an
+    /// already-thawed stake is a no-op.
+    pub fn thaw_stake(&self, staker: &Address) -> Result<()> {
+        let mut stake = self.stakes.get_mut(staker)
+            .ok_or_else(|| TokenError::StakeNotFound {
+                address: staker.to_string(),
+            })?;
+
+        if !stake.lifecycle_freeze {
+            return Ok(());
+        }
+        stake.lifecycle_freeze = false;
+
+        let stake_clone = stake.clone();
+        drop(stake);
+
+        self.persist_stake(staker, &stake_clone);
+        info!("Thawed stake for {} (kill-switch released)", staker);
         Ok(())
     }
 

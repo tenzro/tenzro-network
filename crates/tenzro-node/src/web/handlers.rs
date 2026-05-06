@@ -118,8 +118,10 @@ impl WebState {
         self
     }
 
-    /// Public API method for setting inference router (builder pattern, for future integration)
-    #[allow(dead_code)]
+    /// Wires the shared [`tenzro_model::InferenceRouter`] so the
+    /// `/chat` endpoint can dispatch OpenAI-compatible chat-completion
+    /// requests to the correct serving provider. Called from
+    /// `main.rs` after the node's AI infrastructure is initialised.
     pub fn with_inference_router(mut self, router: Arc<tenzro_model::InferenceRouter>) -> Self {
         self.inference_router = Some(router);
         self
@@ -789,11 +791,86 @@ pub async fn status(
     }
 }
 
+/// `GET /.well-known/jwks.json` — public JWK Set covering every active
+/// Tenzro identity's RFC-9421-compatible signing key.
+///
+/// Per RFC 7517 §5 the body is `{"keys": [<jwk>...]}`. External verifiers
+/// (Visa TAP, Mastercard, Stripe MPP, AP2 facilitators, x402 settlement
+/// nodes, generic RFC 9421 clients) can resolve a `keyid` parameter
+/// against this endpoint and use the returned key to verify HTTP message
+/// signatures issued by Tenzro agents.
+///
+/// Suspended/revoked identities are still listed but with `active: false`.
+/// Verifiers SHOULD reject signatures from inactive keys.
+pub async fn jwks(
+    State(state): State<Arc<WebState>>,
+) -> Json<tenzro_payments::rfc9421::JwkSet> {
+    let agents = if let Some(ref node) = state.node {
+        if let Some(registry) = node.identity_registry() {
+            let agent_registry =
+                tenzro_payments::rfc9421::TenzroAgentRegistry::new(registry.clone());
+            agent_registry.list_all_agents()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    Json(tenzro_payments::rfc9421::JwkSet::from_agents(&agents))
+}
+
+/// `GET /.well-known/jwks.json/:keyid` — single JWK lookup. The `:keyid`
+/// path segment is URL-decoded by axum and passed through to the agent
+/// registry, which accepts `did:tenzro:...` (first compatible key) and
+/// `did:tenzro:...#fragment` (specific key) forms.
+///
+/// Returns 404 if no agent matches `keyid` or the agent has no
+/// RFC-9421-compatible key. Returns 422 if the matched key cannot be
+/// JWK-encoded (e.g. malformed bytes); HMAC keys are rejected with 422.
+pub async fn jwks_get(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(keyid): axum::extract::Path<String>,
+) -> Result<Json<tenzro_payments::rfc9421::Jwk>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    use axum::http::StatusCode;
+    use tenzro_payments::rfc9421::{AgentRegistryClient, Jwk, TenzroAgentRegistry};
+
+    let node = state.node.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "node not initialized" })),
+        )
+    })?;
+    let registry = node.identity_registry().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "identity registry not initialized" })),
+        )
+    })?;
+
+    let agent_registry = TenzroAgentRegistry::new(registry.clone());
+    let agent = agent_registry.get_public_key(&keyid).await.map_err(|e| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e.to_string(), "keyid": keyid })),
+        )
+    })?;
+
+    let jwk = Jwk::try_from_agent(&agent).map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": e.to_string(), "keyid": keyid })),
+        )
+    })?;
+
+    Ok(Json(jwk))
+}
+
 /// Extract client IP from request headers (behind reverse proxy)
 fn extract_client_ip(headers: &HeaderMap) -> String {
     // Check X-Forwarded-For first (set by Caddy/nginx reverse proxy)
-    if let Some(xff) = headers.get("x-forwarded-for") {
-        if let Ok(val) = xff.to_str() {
+    if let Some(xff) = headers.get("x-forwarded-for")
+        && let Ok(val) = xff.to_str() {
             // X-Forwarded-For can be comma-separated; take the first (original client)
             if let Some(first_ip) = val.split(',').next() {
                 let ip = first_ip.trim();
@@ -802,16 +879,14 @@ fn extract_client_ip(headers: &HeaderMap) -> String {
                 }
             }
         }
-    }
     // Fallback to X-Real-Ip (set by some proxies)
-    if let Some(xri) = headers.get("x-real-ip") {
-        if let Ok(val) = xri.to_str() {
+    if let Some(xri) = headers.get("x-real-ip")
+        && let Ok(val) = xri.to_str() {
             let ip = val.trim();
             if !ip.is_empty() {
                 return ip.to_string();
             }
         }
-    }
     // No proxy header found — use "unknown"
     "unknown".to_string()
 }
@@ -1182,6 +1257,80 @@ pub async fn prometheus_metrics(
         node.cortex_metrics.encode_prometheus(&mut body);
     }
 
+    // Append Spec 2 (#312) per-DID admission lane metrics. The
+    // AdmissionController keeps cumulative LaneStats counters; the
+    // mempool exposes per-lane queue depth via `lane_depths()` which
+    // walks `transactions` and re-resolves each lane (O(n), only run
+    // on scrape — typically 10–60s).
+    //
+    // Emitted series:
+    //   - tenzro_mempool_admitted_total{lane}             (counter)
+    //   - tenzro_mempool_rejected_total{lane,reason}      (counter; reason ∈ rate_limited|fee_floor|mempool_full)
+    //   - tenzro_mempool_queue_depth{lane}                (gauge)
+    //   - tenzro_mempool_bucket_count                     (gauge)
+    if let Some(ref node) = state.node
+        && let Some(admission) = node.admission() {
+            use tenzro_consensus::admission::Lane;
+
+            let stats = admission.stats();
+
+            // admitted_total{lane}
+            body.push_str("# HELP tenzro_mempool_admitted_total Transactions admitted to the mempool, broken down by Spec 2 admission lane\n");
+            body.push_str("# TYPE tenzro_mempool_admitted_total counter\n");
+            for lane in Lane::all() {
+                body.push_str(&format!(
+                    "tenzro_mempool_admitted_total{{lane=\"{}\"}} {}\n",
+                    lane.as_str(),
+                    stats.admitted(lane),
+                ));
+            }
+            body.push('\n');
+
+            // rejected_total{lane,reason}
+            body.push_str("# HELP tenzro_mempool_rejected_total Transactions rejected at admission, broken down by lane and reason\n");
+            body.push_str("# TYPE tenzro_mempool_rejected_total counter\n");
+            for lane in Lane::all() {
+                body.push_str(&format!(
+                    "tenzro_mempool_rejected_total{{lane=\"{}\",reason=\"rate_limited\"}} {}\n",
+                    lane.as_str(),
+                    stats.rejected_rate_limited(lane),
+                ));
+                body.push_str(&format!(
+                    "tenzro_mempool_rejected_total{{lane=\"{}\",reason=\"fee_floor\"}} {}\n",
+                    lane.as_str(),
+                    stats.rejected_fee_floor(lane),
+                ));
+                body.push_str(&format!(
+                    "tenzro_mempool_rejected_total{{lane=\"{}\",reason=\"mempool_full\"}} {}\n",
+                    lane.as_str(),
+                    stats.rejected_mempool_full(lane),
+                ));
+            }
+            body.push('\n');
+
+            // bucket_count (gauge — the number of distinct controllers
+            // with a live token bucket on this validator)
+            body.push_str("# HELP tenzro_mempool_bucket_count Number of distinct controllers with an active per-DID admission bucket on this validator\n");
+            body.push_str("# TYPE tenzro_mempool_bucket_count gauge\n");
+            body.push_str(&format!("tenzro_mempool_bucket_count {}\n\n", stats.bucket_count));
+
+            // queue_depth{lane} — only emitted when consensus is wired
+            // (the mempool lives on the consensus engine).
+            if let Some(consensus) = node.consensus() {
+                let depths = consensus.mempool().lane_depths();
+                body.push_str("# HELP tenzro_mempool_queue_depth Current number of pending transactions in the mempool, broken down by lane\n");
+                body.push_str("# TYPE tenzro_mempool_queue_depth gauge\n");
+                for lane in Lane::all() {
+                    body.push_str(&format!(
+                        "tenzro_mempool_queue_depth{{lane=\"{}\"}} {}\n",
+                        lane.as_str(),
+                        depths[lane as usize],
+                    ));
+                }
+                body.push('\n');
+            }
+        }
+
     (
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         body,
@@ -1233,20 +1382,18 @@ pub async fn chat_completion(
             return (StatusCode::BAD_REQUEST, Json(error)).into_response();
         }
     }
-    if let Some(max_tokens) = request.max_tokens {
-        if let Err(e) = validation::validate_numeric_bound(
+    if let Some(max_tokens) = request.max_tokens
+        && let Err(e) = validation::validate_numeric_bound(
             max_tokens, "max_tokens", validation::MAX_INFERENCE_TOKENS,
         ) {
             let error = serde_json::json!({ "error": { "message": e.to_string(), "type": "invalid_request_error", "code": "max_tokens_exceeded" }});
             return (StatusCode::BAD_REQUEST, Json(error)).into_response();
         }
-    }
-    if let Some(temp) = request.temperature {
-        if let Err(e) = validation::validate_temperature(temp) {
+    if let Some(temp) = request.temperature
+        && let Err(e) = validation::validate_temperature(temp) {
             let error = serde_json::json!({ "error": { "message": e.to_string(), "type": "invalid_request_error", "code": "invalid_temperature" }});
             return (StatusCode::BAD_REQUEST, Json(error)).into_response();
         }
-    }
 
     // Generate unique chat completion ID
     let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());

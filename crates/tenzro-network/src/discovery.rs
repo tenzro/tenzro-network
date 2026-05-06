@@ -9,7 +9,7 @@ use tenzro_types::network::NetworkRole;
 
 /// Creates a Kademlia DHT behaviour for peer discovery
 pub fn create_kademlia(local_peer_id: PeerId) -> Kademlia<MemoryStore> {
-    let mut config = KademliaConfig::new(libp2p::StreamProtocol::new("/tenzro/kad/1.0.0"));
+    let mut config = KademliaConfig::new(libp2p::StreamProtocol::new("/tenzro/kad"));
 
     // A+++ 2026 hardening:
     //   * S/Kademlia disjoint query paths — Sybil-resistance per Baumgart & Mies 2007.

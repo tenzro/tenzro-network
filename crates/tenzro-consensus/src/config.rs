@@ -39,6 +39,15 @@ pub struct ConsensusConfig {
     /// Maximum number of transactions in mempool (default: 10000)
     pub mempool_max_transactions: usize,
 
+    /// Minimum gas price (in wei) accepted by the mempool, before lane
+    /// fee-floor multipliers are applied. Set to 0 to disable the static
+    /// floor entirely (mainnet should drive this off live EIP-1559 base fee).
+    /// Default: 1 Gwei (1e9 wei). Spec 2 lane fee-floor multipliers
+    /// (`fee_floor_mult(lane)`) scale this value at admission time so the
+    /// effective floor for a Verified-lane controller is `1.0 × mempool_min_gas_price`,
+    /// Delegated `1.5×`, and Open `4.0×` (per `AdmissionConfig::Default`).
+    pub mempool_min_gas_price: u64,
+
     /// Transaction TTL in seconds (default: 600)
     pub transaction_ttl_seconds: u64,
 
@@ -63,6 +72,7 @@ impl Default for ConsensusConfig {
             epoch_duration: 10_000,
             mempool_size_limit: 100 * 1024 * 1024, // 100MB
             mempool_max_transactions: 10_000,
+            mempool_min_gas_price: 1_000_000_000, // 1 Gwei
             transaction_ttl_seconds: 600,
             optimistic_responsiveness: true,
             leader_rotation: LeaderRotation::RoundRobin,

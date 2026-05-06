@@ -307,6 +307,25 @@ pub struct PaymentsConfig {
     /// Routes not in this list bypass the payment gate entirely.
     #[serde(default)]
     pub paid_routes: Vec<String>,
+
+    /// Stripe secret API key (e.g. `sk_test_...`).
+    ///
+    /// When set, the node constructs a [`StripeClient`] and wires a
+    /// `SptCeilingResolver` into the [`IdentityPaymentBinder`], which adds
+    /// Stripe SharedPaymentToken `usage_limits` enforcement as the third
+    /// ceiling at payment time (alongside TDIP DelegationScope and runtime
+    /// SpendingPolicy). Absent this key, SPT-authorized payments fall back
+    /// to scope+policy enforcement only.
+    ///
+    /// [`StripeClient`]: tenzro_payments::mpp::StripeClient
+    /// [`IdentityPaymentBinder`]: tenzro_payments::identity_binding::IdentityPaymentBinder
+    #[serde(default)]
+    pub stripe_api_key: Option<String>,
+
+    /// Stripe API base URL override. Defaults to `https://api.stripe.com`.
+    /// Useful for testing against a Stripe mock server.
+    #[serde(default)]
+    pub stripe_api_base: Option<String>,
 }
 
 impl Default for PaymentsConfig {
@@ -318,6 +337,8 @@ impl Default for PaymentsConfig {
             default_asset: "USDC".to_string(),
             recipient: String::new(),
             paid_routes: Vec::new(),
+            stripe_api_key: None,
+            stripe_api_base: None,
         }
     }
 }
@@ -760,9 +781,10 @@ mod tests {
 
     #[test]
     fn test_log_level_validation() {
-        let mut config = NodeConfig::default();
-
-        config.log_level = "invalid".to_string();
+        let mut config = NodeConfig {
+            log_level: "invalid".to_string(),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
 
         config.log_level = "debug".to_string();

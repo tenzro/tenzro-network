@@ -441,18 +441,16 @@ impl CapabilityRegistry {
 
         // Self-attestation guard: reject when the attester is the agent's
         // own wallet address (and we have a registered address to compare).
-        if !self.attestation_config.allow_self_attestation {
-            if let Some(agent_addr) = self.agent_address(&agent_id) {
-                if let Some(attester_addr) = attestation.attester_address.as_ref() {
-                    if attester_addr == &agent_addr {
-                        self.record_rejected_attestation();
-                        return Err(AgentError::InvalidAttestationSignature {
-                            agent_id,
-                            reason: "self-attestation is not allowed".to_string(),
-                        });
-                    }
-                }
-            }
+        if !self.attestation_config.allow_self_attestation
+            && let Some(agent_addr) = self.agent_address(&agent_id)
+            && let Some(attester_addr) = attestation.attester_address.as_ref()
+            && attester_addr == &agent_addr
+        {
+            self.record_rejected_attestation();
+            return Err(AgentError::InvalidAttestationSignature {
+                agent_id,
+                reason: "self-attestation is not allowed".to_string(),
+            });
         }
 
         // Trusted attester whitelist enforcement.

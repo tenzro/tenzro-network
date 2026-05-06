@@ -337,9 +337,9 @@ Escrow operations are submitted as typed transactions through
 | `0x01000012`   | RefundEscrow     | 50,000 |
 
 The `escrow_id` is derived deterministically by the VM as
-`SHA-256("tenzro/escrow/id/v1" || payer || nonce_le)` and emitted in the
+`SHA-256("tenzro/escrow/id" || payer || nonce_le)` and emitted in the
 receipt log of the `CreateEscrow` transaction. The vault address is
-`Address(SHA-256("tenzro/escrow/vault/v1" || escrow_id))` and has no private
+`Address(SHA-256("tenzro/escrow/vault" || escrow_id))` and has no private
 key — release/refund payouts are a privileged VM operation.
 
 ### 5.4 Escrow Lifecycle
@@ -380,7 +380,7 @@ If Tenzro is unreachable:
 
 ## 7. Security Considerations
 
-### 8.1 Registration Integrity
+### 7.1 Registration Integrity
 
 **Threat:** Unauthorized identity registration on Tenzro.
 
@@ -389,13 +389,13 @@ If Tenzro is unreachable:
 - 1 HUMAN identity per user (partial unique index)
 - Passkey verification for sensitive operations (Solana mint, autonomous agents)
 
-### 8.2 Reputation Manipulation
+### 7.2 Reputation Manipulation
 
 **Threat:** Agent inflates reputation through self-settlement.
 
 **Mitigation:** Tenzro's reputation algorithm weights settlement diversity (different counterparties) higher than volume. Self-referencing settlements are detected and excluded from reputation calculation.
 
-### 8.3 Settlement Finality
+### 7.3 Settlement Finality
 
 **Threat:** Double-spend via concurrent settlement requests.
 
@@ -404,7 +404,7 @@ If Tenzro is unreachable:
 - Tenzro's HotStuff-2 consensus provides immediate finality
 - Optimistic locking on signing requests (`WHERE status = 'APPROVED'`)
 
-### 8.4 Network Partition
+### 7.4 Network Partition
 
 **Threat:** Tenzro node becomes unreachable.
 
@@ -414,7 +414,7 @@ If Tenzro is unreachable:
 
 ## 8. Privacy Considerations
 
-### 9.1 On-Chain Data
+### 8.1 On-Chain Data
 
 Tenzro identity registration stores:
 - Identity name (human-readable)
@@ -424,14 +424,14 @@ Tenzro identity registration stores:
 - W3C DID
 - Platform metadata
 
-### 9.2 PII Protection
+### 8.2 PII Protection
 
 No PII is stored in Tenzro registrations:
 - No email, phone, biometrics, or government ID
 - DID is a cryptographic identifier, not a personal data store
 - Owner address is a public key derivative, not linkable to personal identity without platform cooperation
 
-### 9.3 Selective Disclosure
+### 8.3 Selective Disclosure
 
 Implementors SHOULD allow users to control what metadata is included in Tenzro registration beyond the required fields (name, agentType, capabilities, owner).
 
@@ -492,25 +492,25 @@ The `@tenzro/sdk` is imported dynamically to avoid hard dependencies in contexts
 
 ## 11. Test Cases
 
-### 12.1 Guardian Registration
+### 11.1 Guardian Registration
 
 **Input:** User creates account, `ensureHumanIdentity` called
 **Expected:** HUMAN identity registered on Tenzro with `agentType: 'guardian'`
 **Verification:** `tenzroAddress` populated, `tenzroSyncStatus = 'SYNCED'`
 
-### 12.2 Agent Registration
+### 11.2 Agent Registration
 
 **Input:** User creates TRADING agent
 **Expected:** AGENT identity registered on Tenzro with `agentType: 'trading'`, `guardian_did` in metadata
 **Verification:** `tenzroAgentId` populated, `tenzroSyncStatus = 'SYNCED'`
 
-### 12.3 Settlement
+### 11.3 Settlement
 
 **Input:** Agent executes trade, settlement routed to Tenzro
 **Expected:** `TenzroSettlementReceipt` with `status: 'completed'`
 **Verification:** Holdings updated, trade status updated
 
-### 12.4 Graceful Degradation
+### 11.4 Graceful Degradation
 
 **Input:** Tenzro RPC unreachable during identity creation
 **Expected:** Identity created with `tenzroSyncStatus = 'FAILED'`, other registrations proceed

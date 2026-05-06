@@ -237,9 +237,12 @@ pub enum IdentityData {
         controller_did: Option<String>,
         reputation: u32,
         tenzro_agent_id: Option<String>,
+        is_seed_agent: bool,
     },
 }
 ```
+
+The `is_seed_agent` flag is **immutable** — set at registration and exposed via `TenzroIdentity::is_seed_agent()`. It drives the SeedAgent counterparty filter (`CounterpartyFilter::deny_other_seed_agents`) so organic-activity metrics can exclude protocol-owned bootstrap traffic during the 12-month treasury earmark window.
 
 ---
 
@@ -287,6 +290,36 @@ pub struct DelegationEntry {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 ```
+
+### 6.5 Two-Axis Ceiling: Protocol Scope vs. Runtime Policy
+
+The `DelegationScope` above is the **structural ceiling** — set at identity registration, immutable except via cascading revocation. Every payment, mandate, and operation is also bounded by a separate **runtime ceiling**: the `SpendingPolicy`, registered per-machine-DID on `AgentRuntime` and tracking rolling daily-spend windows.
+
+```rust
+pub struct SpendingPolicy {
+    pub max_per_transaction: u64,
+    pub max_daily_spend: u64,
+    pub current_daily_spend: u64,
+    pub enabled: bool,
+}
+```
+
+Both ceilings must pass for the operation to settle:
+
+1. **Protocol-level** via `IdentityRegistry::enforce_operation` — checks `max_transaction_value`, `allowed_operations`, `allowed_payment_protocols`, `allowed_chains`, `time_bound`.
+2. **Runtime-level** via `SpendingPolicySnapshot::check` — checks `max_per_transaction` and rolling-window `max_daily_spend`.
+
+The `SpendingPolicyResolver` trait is wired into `IdentityPaymentBinder::with_spending_policy_resolver()` at node startup. The `tenzro-agent-kit` spawner default-populates the runtime registry from `DelegationSpec` at machine spawn time (u128→u64 saturation at the boundary). Absent a resolver entry, the binder falls back to DelegationScope-only.
+
+### 6.6 AP2 Mandate Validation
+
+For AP2-mediated agent commerce, `Ap2Validator::validate_with_delegation_and_policy` enforces all three nested ceilings on the PaymentMandate in one pass:
+
+1. AP2 v0.2 CheckoutMandate constraints (item set, max_amount).
+2. TDIP DelegationScope (`enforce_operation`).
+3. Runtime SpendingPolicy (`SpendingPolicySnapshot::check`).
+
+This is wired into `tenzro_validateMandatePair` and the `ap2-payments` A2A skill.
 
 ---
 
@@ -651,7 +684,15 @@ TDIP is the native identity standard. PDIS-TENZRO (PDIS-3) provides interoperabi
 
 ### 14.2 ERC-8004 Compatibility
 
-TDIP machine identities can be cross-registered as ERC-8004 agent identities on EVM chains via the Tenzro bridge. The `tenzro_agent_id` field in machine identity data provides the linking mechanism.
+TDIP machine identities are addressable through ERC-8004 system contracts on Tenzro's EVM via three native precompiles, with calldata byte-identical to canonical Ethereum deployments:
+
+| Precompile | Address | Function |
+|------------|---------|----------|
+| `ERC8004_IDENTITY` | `0x101a` | `registerAgent` / `getAgent` for native agent discovery |
+| `ERC8004_REPUTATION` | `0x101b` | `submitFeedback` / `getFeedback` / `getFeedbackCount` for peer-to-peer reputation |
+| `ERC8004_VALIDATION` | `0x101c` | `validationRequest` / `validationResponse` / `getValidation` for verifiable work attestation |
+
+Selectors match `tenzro_identity::erc8004::selectors` byte-for-byte, so the same calldata works against either the native Tenzro registry or any Ethereum mirror. `agentId = keccak256(utf8(did_string))` matches `derive_agent_id` exactly. The `tenzro_agent_id` field on machine identity data provides the linking mechanism for off-chain mirroring.
 
 ### 14.3 Cross-Chain Identity
 

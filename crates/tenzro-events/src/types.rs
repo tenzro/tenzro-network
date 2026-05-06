@@ -672,26 +672,24 @@ impl EventFilter {
     /// Returns `true` if the given envelope passes all filter predicates.
     pub fn matches(&self, envelope: &EventEnvelope) -> bool {
         // Block range
-        if let Some(from) = self.from_block {
-            if let Some(bh) = envelope.block_height {
-                if bh < from {
-                    return false;
-                }
-            }
+        if let Some(from) = self.from_block
+            && let Some(bh) = envelope.block_height
+            && bh < from
+        {
+            return false;
         }
-        if let Some(to) = self.to_block {
-            if let Some(bh) = envelope.block_height {
-                if bh > to {
-                    return false;
-                }
-            }
+        if let Some(to) = self.to_block
+            && let Some(bh) = envelope.block_height
+            && bh > to
+        {
+            return false;
         }
 
         // Sequence cursor
-        if let Some(from_seq) = self.from_sequence {
-            if envelope.sequence < from_seq {
-                return false;
-            }
+        if let Some(from_seq) = self.from_sequence
+            && envelope.sequence < from_seq
+        {
+            return false;
         }
 
         // Event type filter
@@ -734,10 +732,10 @@ impl EventFilter {
         }
 
         // Removed-log exclusion (even when no topic filter is set)
-        if !self.include_removed {
-            if let TenzroEvent::Log { removed: true, .. } = &envelope.event {
-                return false;
-            }
+        if !self.include_removed
+            && let TenzroEvent::Log { removed: true, .. } = &envelope.event
+        {
+            return false;
         }
 
         true

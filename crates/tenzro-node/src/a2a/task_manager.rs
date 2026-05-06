@@ -120,6 +120,12 @@ pub struct TaskManager {
     tasks: Arc<DashMap<String, A2aTask>>,
 }
 
+impl Default for TaskManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TaskManager {
     pub fn new() -> Self {
         Self {

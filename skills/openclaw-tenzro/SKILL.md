@@ -2,12 +2,16 @@
 name: tenzroclaw
 version: 0.1.0
 author: Tenzro Network
-description: TenzroClaw — OpenClaw skill for the Tenzro Network. Create wallets, send transactions, check balances, register identities, manage credentials and services, set usernames, set delegation scopes, make payments via MPP/x402, run AI inference, manage model endpoints, bridge tokens cross-chain, verify proofs, post and manage tasks on the decentralized AI task marketplace, publish and discover agent templates, spawn agents from templates, manage agent swarms, create and manage ERC-20 tokens, deploy smart contracts, transfer tokens across VMs, register and invoke tools/skills, manage settlement and escrow, participate in governance, interact with Canton/DAML, and request testnet tokens.
+description: TenzroClaw — OpenClaw skill for the Tenzro Network. Create wallets, send transactions, check balances, register identities, manage credentials and services, set usernames, set delegation scopes, exercise GDPR Article 17 right-to-erasure (forget_identity), make payments via AP2 v0.2 (sign + verify + validate-pair), MPP, x402 v1, Stripe SPT (SharedPaymentToken), ERC-8004 v0.6+ Trustless Agents Registry (22 surfaces across IdentityRegistry, ReputationRegistry, ValidationRegistry), run AI inference, manage model endpoints, bridge tokens cross-chain, verify proofs, post and manage tasks on the decentralized AI task marketplace, publish and discover agent templates, spawn agents from templates, manage agent swarms, create and manage ERC-20 tokens, deploy smart contracts, transfer tokens across VMs, register and invoke tools/skills, manage settlement and escrow, participate in governance, interact with Canton/DAML, and request testnet tokens.
 tags:
   - blockchain
   - ai
   - identity
+  - right_to_erasure
   - payments
+  - ap2
+  - stripe_spt
+  - erc8004
   - bridge
   - inference
   - web3
@@ -705,7 +709,7 @@ Load levels: `idle` (0%), `available` (1-50%), `busy` (51-80%), `near_capacity` 
 
 ## Network Provider Discovery
 
-Tenzro uses a decentralized provider registry — nodes that serve AI models or TEE services broadcast a `ProviderAnnouncement` every 60 seconds on the `tenzro/providers/1.0.0` gossipsub topic. All peers merge incoming announcements into their local `network_providers` cache, so any node can discover every provider without a central registry.
+Tenzro uses a decentralized provider registry — nodes that serve AI models or TEE services broadcast a `ProviderAnnouncement` every 60 seconds on the `tenzro/providers` gossipsub topic. All peers merge incoming announcements into their local `network_providers` cache, so any node can discover every provider without a central registry.
 
 ### List Network Providers
 

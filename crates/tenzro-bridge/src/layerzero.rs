@@ -370,16 +370,15 @@ impl LayerZeroAdapter {
 
         // Parse status from response
         // API returns { "messages": [{ "status": "DELIVERED" | "INFLIGHT" | "FAILED", ... }] }
-        if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
-            if let Some(message) = messages.first() {
-                if let Some(status) = message.get("status").and_then(|s| s.as_str()) {
-                    return Ok(match status {
-                        "DELIVERED" => TransferStatus::Delivered,
-                        "FAILED" => TransferStatus::Failed,
-                        _ => TransferStatus::Pending,
-                    });
-                }
-            }
+        if let Some(messages) = json.get("messages").and_then(|m| m.as_array())
+            && let Some(message) = messages.first()
+            && let Some(status) = message.get("status").and_then(|s| s.as_str())
+        {
+            return Ok(match status {
+                "DELIVERED" => TransferStatus::Delivered,
+                "FAILED" => TransferStatus::Failed,
+                _ => TransferStatus::Pending,
+            });
         }
 
         Ok(TransferStatus::Pending)

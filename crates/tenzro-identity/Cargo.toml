@@ -23,3 +23,6 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }
 bs58 = { workspace = true }
+
+[dev-dependencies]
+parking_lot = { workspace = true }

@@ -52,6 +52,9 @@ pub mod runtime;
 pub mod validation;
 pub mod cortex;
 pub mod training;
+pub mod principal_chain;
+pub mod kill_switch;
+pub mod intent_7683;
 
 // Re-export commonly used types
 pub use primitives::{Hash, Address, Signature, BlockHeight, Nonce, Timestamp, ChainId};
@@ -97,4 +100,15 @@ pub use training::{
     AggregationRule, ArchitectureSpec, FragmentQuorumStatus, OuterGradient, SyncRound,
     TrainingAttestation, TrainingModality, TrainingReceipt, TrainingRun, TrainingRunStatus,
     TrainingTaskSpec, TrainingTier,
+};
+pub use principal_chain::{
+    ControllerActivitySummary, PrincipalChain, PrincipalChainSummary, PrincipalLink,
+    PrincipalRole, MAX_DELEGATION_DEPTH,
+};
+pub use kill_switch::{KillSwitchAction, KillSwitchReceipt};
+pub use intent_7683::{
+    compute_order_id, u128_to_uint256_be, uint256_be_to_u128, CrossChainOrder, FillInstruction,
+    GaslessCrossChainOrder, OrderState, Output, ProofRoute, ResolvedCrossChainOrder, TargetOutput,
+    Tenzro7683Order, TenzroOrderData, TokenAmount, FILL_KEY_PREFIX, ORDER_KEY_PREFIX,
+    TENZRO_MAINNET_CHAIN_ID, TENZRO_TESTNET_CHAIN_ID,
 };

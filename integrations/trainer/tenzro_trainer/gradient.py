@@ -198,7 +198,7 @@ def gradient_signing_bytes(
     matches the field order on ``OuterGradient`` minus the signature itself.
     """
     buf = bytearray()
-    buf.extend(b"tenzro/train/outer-gradient/v1")
+    buf.extend(b"tenzro/train/outer-gradient")
     buf.extend(task_id.encode("utf-8"))
     buf.extend(round_index.to_bytes(4, "big"))
     buf.extend(fragment.to_bytes(4, "big"))

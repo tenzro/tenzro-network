@@ -551,15 +551,22 @@ fn test_epoch_transition_updates_validator_set() {
         .transition_epoch(BlockHeight::from(100))
         .unwrap();
 
-    // After transition: epoch 1, the pending validator is the full set
-    // (pending replaces current when non-empty).
+    // After transition: epoch 1, pending merged into existing set
+    // (4 originals + 1 new addition = 5).
     let epoch_after = epoch_manager.current_epoch();
     assert_eq!(epoch_after.number, 1);
-    assert_eq!(new_vs.len(), 1, "Pending set replaces old set");
+    assert_eq!(new_vs.len(), 5, "Pending merges into current set");
     assert!(new_vs.is_validator(&new_val.address));
+    for v in &initial_validators {
+        assert!(
+            new_vs.is_validator(&v.address),
+            "Original validator must persist across epoch transition"
+        );
+    }
 
-    // Pending should be cleared.
+    // Both pending queues should be cleared.
     assert!(epoch_manager.pending_validators().is_empty());
+    assert!(epoch_manager.pending_removals().is_empty());
 
     // Epoch 0 should be in history.
     let historical = epoch_manager.get_epoch(0);

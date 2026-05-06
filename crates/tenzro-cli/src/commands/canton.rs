@@ -113,11 +113,10 @@ impl CantonContractsCmd {
 
         spinner.finish_and_clear();
 
-        if let Some(filter) = result.get("filter").and_then(|v| v.as_str()) {
-            if !filter.is_empty() {
+        if let Some(filter) = result.get("filter").and_then(|v| v.as_str())
+            && !filter.is_empty() {
                 output::print_field("Filter", filter);
             }
-        }
 
         if let Some(host) = result.get("canton_host").and_then(|v| v.as_str()) {
             output::print_field("Canton Host", host);

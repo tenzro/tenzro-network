@@ -34,7 +34,7 @@ use tenzro_model::{
     ToolDefinition as RuntimeToolDefinition, TranscribeConfig, VideoEmbedConfig,
 };
 use tenzro_network::{NetworkMessage, MessagePayload, NetworkService};
-use tenzro_storage::{BlockStoreImpl, AccountStoreImpl, KvStore, CF_IDENTITIES, CF_TASKS, CF_AGENT_TEMPLATES, CF_MODELS, CF_AGENTS, CF_SKILLS, CF_TOOLS, CF_METADATA, traits::{BlockStore, AccountStore}};
+use tenzro_storage::{BlockStoreImpl, AccountStoreImpl, KvStore, CF_IDENTITIES, CF_TASKS, CF_AGENT_TEMPLATES, CF_MODELS, CF_AGENTS, CF_SKILLS, CF_TOOLS, CF_METADATA, CF_SETTLEMENTS, traits::{BlockStore, AccountStore}};
 use tenzro_types::block::Block;
 use tenzro_types::model::ModelLocation;
 use tenzro_types::primitives::{Address, BlockHeight, ChainId, Hash, Nonce};
@@ -66,9 +66,14 @@ impl RpcServer {
         self
     }
 
-    /// Start the RPC server (HTTP-based using axum)
-    /// Public API method for external use without shutdown signal
-    #[allow(dead_code)]
+    /// Start the RPC server (HTTP-based using axum) without an external
+    /// shutdown signal. This is the SDK-friendly public entry point used
+    /// by library consumers that don't need graceful shutdown.
+    ///
+    /// `main.rs` uses [`Self::start_with_shutdown`] instead because the
+    /// node binary wires shutdown into a broadcast channel for ctrl-C
+    /// handling. `start()` is exercised by the
+    /// `test_rpc_server_start_no_args` integration test.
     pub async fn start(self) -> Result<()> {
         self.start_with_shutdown(tokio::sync::broadcast::channel::<()>(1).1).await
     }
@@ -83,7 +88,8 @@ impl RpcServer {
 
     /// Start the RPC server and report the bound address via a oneshot channel.
     /// Useful for tests that bind to port 0 and need to discover the actual port.
-    #[allow(dead_code)]
+    /// Used by `tests/auth_integration.rs`, `tests/bond_onchain_integration.rs`,
+    /// `tests/escrow_onchain_integration.rs`, and `tests/rpc_settlement_integration.rs`.
     pub async fn start_with_shutdown_and_addr(
         self,
         shutdown_rx: tokio::sync::broadcast::Receiver<()>,
@@ -331,7 +337,9 @@ async fn handle_rpc_post(
 /// JSON-RPC request
 #[derive(Debug, Deserialize)]
 pub(crate) struct JsonRpcRequest {
-    #[allow(dead_code)]
+    /// JSON-RPC protocol version. Per JSON-RPC 2.0 §4, MUST be the string
+    /// `"2.0"`. Validated on entry to `handle_request`; non-2.0 values are
+    /// rejected with -32600 Invalid Request.
     pub(crate) jsonrpc: String,
     pub(crate) method: String,
     pub(crate) params: Option<Value>,
@@ -397,6 +405,27 @@ pub(crate) async fn handle_request(
     mut request: JsonRpcRequest,
     auth_ctx: &AuthContext,
 ) -> JsonRpcResponse {
+    // Per JSON-RPC 2.0 §4: the `jsonrpc` member MUST be exactly the string "2.0".
+    // Reject anything else with -32600 Invalid Request before dispatching the
+    // method — this protects downstream handlers from speaking against a 1.0
+    // client that omitted the field entirely (serde gives back the empty
+    // string when missing) or against a future incompatible 3.x dialect.
+    if request.jsonrpc != "2.0" {
+        return JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request.id,
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32600,
+                message: format!(
+                    "Invalid Request: jsonrpc field must be \"2.0\", got {:?}",
+                    request.jsonrpc
+                ),
+                data: None,
+            }),
+        };
+    }
+
     request.params = normalize_params(request.params);
     let result = match request.method.as_str() {
         // Chain methods
@@ -404,6 +433,10 @@ pub(crate) async fn handle_request(
         "tenzro_getBlock" => handle_get_block(node, request.params).await,
         "tenzro_getBlockRange" => handle_get_block_range(node, request.params).await,
         "tenzro_getTransaction" => handle_get_transaction(node, request.params).await,
+
+        // Spec 2: per-DID admission lanes (read-only inspection)
+        "tenzro_getMempoolStats" => handle_get_mempool_stats(node).await,
+        "tenzro_getMempoolLane" => handle_get_mempool_lane(node, request.params).await,
 
         // Account methods
         "tenzro_createAccount" => handle_create_account(node, request.params).await,
@@ -430,6 +463,19 @@ pub(crate) async fn handle_request(
         // Settlement methods
         "tenzro_settle" | "tenzro_settlePayment" => handle_settle(node, request.params).await,
         "tenzro_getSettlement" => handle_get_settlement(node, request.params).await,
+        // Principal-chain receipt RPCs (Agent-Swarm Spec 5)
+        "tenzro_getReceiptPrincipalChain" => {
+            handle_get_receipt_principal_chain(node, request.params).await
+        }
+        "tenzro_listReceiptsByActor" => {
+            handle_list_receipts_by_actor(node, request.params).await
+        }
+        "tenzro_listReceiptsByController" => {
+            handle_list_receipts_by_controller(node, request.params).await
+        }
+        "tenzro_summarizeController" => {
+            handle_summarize_controller(node, request.params).await
+        }
         // Escrow writes are now consensus-mediated: callers must build and sign
         // a `CreateEscrow`/`ReleaseEscrow`/`RefundEscrow` transaction and submit
         // it via `eth_sendRawTransaction` (or the helper `tenzro_signAndSendTransaction`).
@@ -441,6 +487,80 @@ pub(crate) async fn handle_request(
         "tenzro_getEscrow" => handle_get_escrow(node, request.params).await,
         "tenzro_listEscrowsByPayer" => handle_list_escrows_by_payer(node, request.params).await,
         "tenzro_listEscrowsByPayee" => handle_list_escrows_by_payee(node, request.params).await,
+        // Spec 4: ERC-7683 cross-chain intent settler. Wave 1 ships protocol
+        // primitives + read RPCs against CF_SETTLEMENTS. Settler precompiles,
+        // EIP-712 verification, escrow integration, gossipsub indexing, and
+        // bridge-adapter glue land in subsequent waves alongside their
+        // respective subsystems.
+        "tenzro_get7683Order" => handle_get_7683_order(node, request.params).await,
+        "tenzro_list7683Orders" => handle_list_7683_orders(node, request.params).await,
+        // Kill-switch read RPCs (Agent-Swarm Spec 1). Writes flow through
+        // tenzro_signAndSendTransaction with TransactionType::PauseAgent /
+        // QuarantineAgent / TerminateAgent — there are no separate write RPCs.
+        "tenzro_getAgentLifecycle" => handle_get_agent_lifecycle(node, request.params).await,
+        "tenzro_listKillSwitchByAgent" => handle_list_kill_switch_by_agent(node, request.params).await,
+        "tenzro_listKillSwitchByController" => handle_list_kill_switch_by_controller(node, request.params).await,
+        "tenzro_getKillSwitchReceipt" => handle_get_kill_switch_receipt(node, request.params).await,
+        // AgentBond surety RPCs (Agent-Swarm Spec 9). Writes flow through
+        // tenzro_signAndSendTransaction with TransactionType::PostAgentBond /
+        // IncreaseAgentBond / WithdrawAgentBond / PayInsuranceClaim — there
+        // are no separate write RPCs. `tenzro_fileInsuranceClaim` is the
+        // off-chain claim-filing entry point (governance reviews the claim
+        // before a `PayInsuranceClaim` transaction is submitted).
+        "tenzro_getAgentBond" => handle_get_agent_bond(node, request.params).await,
+        "tenzro_listAgentBondsByController" => handle_list_agent_bonds_by_controller(node, request.params).await,
+        "tenzro_fileInsuranceClaim" => handle_file_insurance_claim(node, request.params).await,
+        "tenzro_listInsuranceClaims" => handle_list_insurance_claims(node).await,
+        "tenzro_getInsuranceClaim" => handle_get_insurance_claim(node, request.params).await,
+        "tenzro_getInsurancePoolBalance" => handle_get_insurance_pool_balance(node).await,
+        // Hot-state local fee market (Agent-Swarm Spec 6). Read-only — exposes
+        // the per-account contention score, write count, reexecution count,
+        // and the resulting local fee multiplier over the rolling 64-block
+        // window. Surcharge is computed against the live EIP-1559 base fee.
+        "tenzro_getAccountContention" => handle_get_account_contention(node, request.params).await,
+        // Dual-rail gas burn quota (Agent-Swarm Spec 3 — wave 1). Read-only
+        // singleton: balance, cap, daily_target, last_refill, deficit, plus
+        // the derived min_reserve and can_drain hint. Wave 1 ships only the
+        // primitive — the StablecoinPaymaster, oracle, and TWAP swap loop
+        // ship in a later wave when the bridge mesh and oracles are wired.
+        "tenzro_getBurnQuota" => handle_get_burn_quota(node).await,
+
+        // Spec 7: DA offload — receipts can either embed payload (Inline) or
+        // record a DA backend pointer (OffloadedDA). Wave 1 ships only the
+        // protocol primitives + the inline-fallback backend; EigenDA /
+        // Celestia / Avail adapters land behind feature flags alongside the
+        // bridge mesh.
+        "tenzro_getDaBackends" => handle_get_da_backends(node).await,
+        "tenzro_verifyDaPointer" => handle_verify_da_pointer(node, request.params).await,
+
+        // Spec 8: Adaptive burn governance dial — read RPCs.
+        // The protocol exposes the live burn-rate split (base fee burn vs
+        // treasury, local fee, paymaster), the governance-tunable supply
+        // targets, the most recent supply metrics snapshot, and the current
+        // recommendation from the transfer function. Auto-proposal generation,
+        // fast-track timelock, and the `tenzro/burn-rate-changed`
+        // gossipsub topic land alongside the governance executor wiring.
+        "tenzro_getBurnRateConfig" => handle_get_burn_rate_config(node).await,
+        "tenzro_getSupplyMetrics" => handle_get_supply_metrics(node).await,
+        "tenzro_getBurnRateRecommendation" => handle_get_burn_rate_recommendation(node).await,
+        "tenzro_listAdaptiveBurnProposals" => {
+            handle_list_adaptive_burn_proposals(node, request.params).await
+        }
+
+        // Spec 10: SeedAgent treasury allocation — read RPCs.
+        // Surfaces the genesis-funded treasury earmark, the catalog of
+        // operation Charters (C1-C6), the per-DID SeedAgent registry, and
+        // the network-activity view (with optional `exclude_seed` filter
+        // for organic-traffic measurement). The off-chain provisioning
+        // daemon, monthly decay enforcement at refill, sunset wind-down
+        // sweep, and governance-executor mutation paths land in a later
+        // wave.
+        "tenzro_getTreasuryEarmark" => handle_get_treasury_earmark(node, request.params).await,
+        "tenzro_getSeedAgentCharter" => handle_get_seed_agent_charter(node, request.params).await,
+        "tenzro_listSeedAgentCharters" => handle_list_seed_agent_charters(node).await,
+        "tenzro_listSeedAgents" => handle_list_seed_agents(node, request.params).await,
+        "tenzro_getNetworkActivity" => handle_get_network_activity(node, request.params).await,
+
         "tenzro_openPaymentChannel" => handle_open_payment_channel(node, request.params).await,
         "tenzro_updatePaymentChannel" => handle_update_payment_channel(node, request.params).await,
         "tenzro_closePaymentChannel" => handle_close_payment_channel(node, request.params).await,
@@ -471,6 +591,22 @@ pub(crate) async fn handle_request(
         "tenzro_faucet" | "tenzro_requestFaucet" => handle_faucet(node, request.params).await,
         "tenzro_faucetInfo" => handle_faucet_info(node).await,
 
+        // Capability registry methods (read surface for the
+        // `CapabilityRegistry` held inside `AgentRuntime` — exposes
+        // registered capabilities, per-capability attestation lists, and
+        // per-agent attestation lists for capability discovery and trust
+        // scoring).
+        "tenzro_listCapabilities" => handle_list_capabilities(node).await,
+        "tenzro_getCapabilityAttestations" => {
+            handle_get_capability_attestations(node, request.params).await
+        }
+        "tenzro_getAgentCapabilityAttestations" => {
+            handle_get_agent_capability_attestations(node, request.params).await
+        }
+        "tenzro_findBestAgentForCapability" => {
+            handle_find_best_agent_for_capability(node, request.params).await
+        }
+
         // Identity methods (TDIP)
         "tenzro_registerIdentity" => handle_register_identity(node, request.params).await,
         "tenzro_registerMachineIdentity" => handle_register_machine_identity(node, request.params).await,
@@ -478,6 +614,9 @@ pub(crate) async fn handle_request(
         "tenzro_resolveDidDocument" => handle_resolve_did_document(node, request.params).await,
         "tenzro_resolveIdentity" | "tenzro_resolveDid" => handle_resolve_identity(node, request.params).await,
         "tenzro_listIdentities" => handle_list_identities(node).await,
+        // RFC 7517 / RFC 7518 — JWK Set publication (mirrors GET /.well-known/jwks.json)
+        "tenzro_listAgentJwks" => handle_list_agent_jwks(node).await,
+        "tenzro_getAgentJwk" => handle_get_agent_jwk(node, request.params).await,
         "tenzro_addCredential" => handle_add_credential(node, request.params).await,
         "tenzro_addService" => handle_add_service(node, request.params).await,
         "tenzro_setUsername" => handle_set_username(node, request.params).await,
@@ -522,6 +661,11 @@ pub(crate) async fn handle_request(
         // own audit row with `cascaded: true`.
         "tenzro_revokeJwt" => handle_revoke_jwt(node, request.params).await,
         "tenzro_revokeDid" => handle_revoke_did(node, request.params).await,
+        // TDIP/GDPR Article 17 right-to-erasure: hard-delete a previously
+        // revoked identity from the registry and persistent storage. The
+        // identity must already be `Revoked` — call `tenzro_revokeDid`
+        // first, observe propagation, then call `tenzro_forgetIdentity`.
+        "tenzro_forgetIdentity" => handle_forget_identity(node, request.params).await,
 
         // Token Exchange (RFC 8693) + Token Introspection (RFC 7662) +
         // OAuth/OpenID discovery. The HTTP equivalents live at
@@ -596,6 +740,7 @@ pub(crate) async fn handle_request(
         "tenzro_training_finalizeRound" => handle_training_finalize_round(node, request.params).await,
         "tenzro_deleteModel" | "tenzro_deleteModelMcp" => handle_delete_model(node, request.params).await,
         "tenzro_pruneModelRegistry" => handle_prune_model_registry(node).await,
+        "tenzro_cleanupIdleLocalModelServices" => handle_cleanup_idle_local_model_services(node).await,
         "tenzro_pruneAgentRegistry" => handle_prune_agent_registry(node).await,
         "tenzro_pruneTaskRegistry" => handle_prune_task_registry(node, request.params).await,
         "tenzro_pruneToolRegistry" => handle_prune_tool_registry(node, request.params).await,
@@ -626,6 +771,13 @@ pub(crate) async fn handle_request(
         "tenzro_listPaymentSessions" => handle_list_payment_sessions(node).await,
         "tenzro_paymentGatewayInfo" => handle_payment_gateway_info(node).await,
         "tenzro_getPaymentReceipt" => handle_get_payment_receipt(node, request.params).await,
+
+        // Agent payment methods (machine-DID-keyed runtime spending policy + service payments)
+        "tenzro_setSpendingPolicy" => handle_set_spending_policy(node, request.params).await,
+        "tenzro_getSpendingPolicy" => handle_get_spending_policy(node, request.params).await,
+        "tenzro_agentPayForService" => handle_agent_pay_for_service(node, request.params).await,
+        "tenzro_getAgentDailySpend" => handle_get_agent_daily_spend(node, request.params).await,
+        "tenzro_listAgentTransactions" => handle_list_agent_transactions(node, request.params).await,
 
         // Canton/DAML methods
         "tenzro_listCantonDomains" => handle_list_canton_domains(node).await,
@@ -836,9 +988,31 @@ pub(crate) async fn handle_request(
         "tenzro_subscribeEventsStream" => handle_subscribe_events_stream(node, request.params).await,
 
         // AP2 — Agent Payments Protocol
+        "tenzro_ap2SignMandate" => handle_ap2_sign_mandate(node, request.params, auth_ctx).await,
         "tenzro_ap2VerifyMandate" => crate::rpc_integrations::handle_ap2_verify_mandate(node, request.params).await,
         "tenzro_ap2ValidateMandatePair" => crate::rpc_integrations::handle_ap2_validate_mandate_pair(node, request.params).await,
         "tenzro_ap2ProtocolInfo" => crate::rpc_integrations::handle_ap2_protocol_info(node, request.params).await,
+        "tenzro_ap2ReportMandateViolation" => crate::rpc_integrations::handle_ap2_report_mandate_violation(node, request.params).await,
+
+        // x402 — Coinbase HTTP 402 protocol (Tenzro cross-VM + Plonky3 receipt extension)
+        "tenzro_x402ProtocolInfo" => crate::rpc_integrations::handle_x402_protocol_info(node, request.params).await,
+
+        // Visa TAP — Trusted Agent Protocol (RFC 9421 + tag taxonomy + DID-resolvable keyid)
+        "tenzro_visaTapProtocolInfo" => crate::rpc_integrations::handle_visa_tap_protocol_info(node, request.params).await,
+
+        // Mastercard KYA — DID-anchored federation (TDIP machine identity + ERC-8004 mirror + W3C DID Document service entries)
+        "tenzro_getKyaRecord" => crate::rpc_integrations::handle_get_kya_record(node, request.params).await,
+        "tenzro_mastercardKyaProtocolInfo" => crate::rpc_integrations::handle_mastercard_kya_protocol_info(node, request.params).await,
+
+        // Tempo L1 — Stripe + Paradigm payments chain (EIP-155 signing + TIP-20 settlement + DID-anchored TempoAccount federation)
+        "tenzro_tempoProtocolInfo" => crate::rpc_integrations::handle_tempo_protocol_info(node, request.params).await,
+
+        // Stripe SharedPaymentToken (SPT) — agentic payment primitive with four-ceiling enforcement (TDIP scope + runtime policy + SPT usage_limits + AP2 cart) and ERC-8004 reputation cross-write
+        "tenzro_stripeSptProtocolInfo" => crate::rpc_integrations::handle_stripe_spt_protocol_info(node, request.params).await,
+        // Stripe SPT webhook → TDIP cascade: dispatches a `granted_token.deactivated` event into IdentityRegistry::revoke + signed broadcast + cache invalidate
+        "tenzro_processSptGrantedTokenDeactivated" => crate::rpc_integrations::handle_process_spt_granted_token_deactivated(node, request.params).await,
+        // Stripe SPT settlement-outcome webhook → ERC-8004 ReputationRegistry cross-write at precompile 0x101b
+        "tenzro_processSptSettlementOutcome" => crate::rpc_integrations::handle_process_spt_settlement_outcome(node, request.params).await,
 
         // ERC-8004 — Trustless Agents Registry
         "tenzro_erc8004DeriveAgentId" => crate::rpc_integrations::handle_erc8004_derive_agent_id(node, request.params).await,
@@ -846,8 +1020,27 @@ pub(crate) async fn handle_request(
         "tenzro_erc8004EncodeGetAgent" => crate::rpc_integrations::handle_erc8004_encode_get_agent(node, request.params).await,
         "tenzro_erc8004DecodeGetAgent" => crate::rpc_integrations::handle_erc8004_decode_get_agent(node, request.params).await,
         "tenzro_erc8004EncodeFeedback" => crate::rpc_integrations::handle_erc8004_encode_feedback(node, request.params).await,
-        "tenzro_erc8004EncodeRequestValidation" => crate::rpc_integrations::handle_erc8004_encode_request_validation(node, request.params).await,
-        "tenzro_erc8004EncodeSubmitValidation" => crate::rpc_integrations::handle_erc8004_encode_submit_validation(node, request.params).await,
+        "tenzro_erc8004EncodeValidationRequest" => crate::rpc_integrations::handle_erc8004_encode_validation_request(node, request.params).await,
+        "tenzro_erc8004EncodeValidationResponse" => crate::rpc_integrations::handle_erc8004_encode_validation_response(node, request.params).await,
+        // ERC-8004 v0.6+ identity mutators
+        "tenzro_erc8004EncodeSetAgentURI" => crate::rpc_integrations::handle_erc8004_encode_set_agent_uri(node, request.params).await,
+        "tenzro_erc8004EncodeSetAgentWallet" => crate::rpc_integrations::handle_erc8004_encode_set_agent_wallet(node, request.params).await,
+        "tenzro_erc8004EncodeSetMetadata" => crate::rpc_integrations::handle_erc8004_encode_set_metadata(node, request.params).await,
+        // ERC-8004 v0.6+ identity reads
+        "tenzro_erc8004EncodeGetMetadata" => crate::rpc_integrations::handle_erc8004_encode_get_metadata(node, request.params).await,
+        "tenzro_erc8004DecodeGetMetadata" => crate::rpc_integrations::handle_erc8004_decode_get_metadata(node, request.params).await,
+        "tenzro_erc8004EncodeGetAgentURI" => crate::rpc_integrations::handle_erc8004_encode_get_agent_uri(node, request.params).await,
+        "tenzro_erc8004EncodeGetAgentWallet" => crate::rpc_integrations::handle_erc8004_encode_get_agent_wallet(node, request.params).await,
+        // ERC-8004 v0.6+ reputation mutators
+        "tenzro_erc8004EncodeRevokeFeedback" => crate::rpc_integrations::handle_erc8004_encode_revoke_feedback(node, request.params).await,
+        "tenzro_erc8004EncodeAppendResponse" => crate::rpc_integrations::handle_erc8004_encode_append_response(node, request.params).await,
+        // ERC-8004 v0.6+ reputation reads
+        "tenzro_erc8004EncodeIsFeedbackRevoked" => crate::rpc_integrations::handle_erc8004_encode_is_feedback_revoked(node, request.params).await,
+        "tenzro_erc8004EncodeGetFeedbackResponses" => crate::rpc_integrations::handle_erc8004_encode_get_feedback_responses(node, request.params).await,
+        // ERC-8004 reads (previously implemented but unexposed)
+        "tenzro_erc8004EncodeGetFeedback" => crate::rpc_integrations::handle_erc8004_encode_get_feedback(node, request.params).await,
+        "tenzro_erc8004EncodeGetFeedbackCount" => crate::rpc_integrations::handle_erc8004_encode_get_feedback_count(node, request.params).await,
+        "tenzro_erc8004EncodeGetValidation" => crate::rpc_integrations::handle_erc8004_encode_get_validation(node, request.params).await,
 
         // Wormhole
         "tenzro_wormholeChainId" => crate::rpc_integrations::handle_wormhole_chain_id(node, request.params).await,
@@ -1142,6 +1335,145 @@ async fn handle_get_block_range(
     }))
 }
 
+/// `tenzro_getMempoolStats` — Spec 2 admission counters (cumulative since
+/// process start) plus current bucket population.
+///
+/// Returns one entry per lane (Verified / Delegated / Open) with admit
+/// counts, rate-limit rejections, and other (size/count) rejections, along
+/// with the lane's configured refill rate, burst capacity, fee floor
+/// multiplier, and block-builder draw weight.
+async fn handle_get_mempool_stats(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_consensus::admission::Lane;
+
+    let admission = node.admission().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Admission controller not initialized (Spec 2 not wired)".to_string(),
+        data: None,
+    })?;
+
+    let stats = admission.stats();
+    let cfg = admission.config();
+
+    let lane_json = |lane: Lane| {
+        serde_json::json!({
+            "lane": lane.as_str(),
+            "admitted": stats.admitted(lane),
+            "rejected_rate_limited": stats.rejected_rate_limited(lane),
+            "rejected_fee_floor": stats.rejected_fee_floor(lane),
+            "rejected_mempool_full": stats.rejected_mempool_full(lane),
+            "refill_per_sec": cfg.refill_rate(lane),
+            "burst_capacity": cfg.burst_capacity(lane),
+            "fee_floor_mult": cfg.fee_floor_mult(lane),
+            "weight": cfg.weight(lane),
+        })
+    };
+
+    Ok(serde_json::json!({
+        "lanes": [
+            lane_json(Lane::Verified),
+            lane_json(Lane::Delegated),
+            lane_json(Lane::Open),
+        ],
+        "bucket_count": stats.bucket_count,
+        "min_verified_stake": cfg.min_verified_stake.to_string(),
+        "bond_promotes_to_delegated": cfg.bond_promotes_to_delegated,
+        "bond_min_for_promotion": cfg.bond_min_for_promotion.to_string(),
+    }))
+}
+
+/// `tenzro_getMempoolLane` — inspect the lane assignment and current
+/// bucket state for a given address. Useful for debugging "why is my
+/// transaction being rate-limited?" without forcing the caller to submit
+/// a probe tx and consume a token.
+///
+/// Params (object or positional): `{ address: "0x..." }` — the wallet
+/// address to look up. The handler synthesizes a minimal `SignedTransaction`
+/// shell (only `from` is used by the resolver) and calls
+/// `assign_lane(&tx)`. The returned bucket snapshot is keyed on the
+/// resolver's `bucket_key(&tx)`, which for identified senders is the
+/// controller wallet — so the snapshot may differ from the queried
+/// address when a Machine identity is rooted in a Human controller.
+async fn handle_get_mempool_lane(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_crypto::pq::MlDsaSigningKey;
+    use tenzro_types::primitives::{Signature, Timestamp};
+
+    let admission = node.admission().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Admission controller not initialized (Spec 2 not wired)".to_string(),
+        data: None,
+    })?;
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let addr_str = if let Some(arr) = params.as_array() {
+        arr.first().and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing address param".to_string(),
+            data: None,
+        })?
+    } else {
+        params
+            .get("address")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Missing address field".to_string(),
+                data: None,
+            })?
+    };
+
+    let address = parse_address(addr_str)?;
+
+    // Build a minimal transaction shell. The lane resolver only consults
+    // `tx.transaction.from`; signature/PQ key bytes are placeholder.
+    let pq_key_bytes = MlDsaSigningKey::generate().verifying_key_bytes().to_vec();
+    let probe = SignedTransaction::new(
+        Transaction {
+            chain_id: ChainId::from(1337u64),
+            from: address,
+            to: Address::new([0u8; 32]),
+            nonce: Nonce::from(0u64),
+            tx_type: TransactionType::Transfer { amount: 0 },
+            gas_limit: 21_000,
+            gas_price: 1_000_000_000,
+            timestamp: Timestamp::now(),
+            memo: None,
+            pq_public_key: pq_key_bytes,
+        },
+        Signature::new(vec![0u8; 64], vec![0u8; 32]),
+        vec![0u8; 3309],
+    );
+
+    let lane = admission.assign_lane(&probe);
+    let bucket_key = admission.bucket_key(&probe);
+    let cfg = admission.config();
+    let snapshot = admission.bucket_snapshot(&bucket_key);
+
+    Ok(serde_json::json!({
+        "address": format!("{}", address),
+        "lane": lane.as_str(),
+        "bucket_key": format!("{}", bucket_key),
+        "fee_floor_mult": cfg.fee_floor_mult(lane),
+        "refill_per_sec": cfg.refill_rate(lane),
+        "burst_capacity": cfg.burst_capacity(lane),
+        "bucket": snapshot.map(|s| serde_json::json!({
+            "lane": s.lane.as_str(),
+            "capacity": s.capacity,
+            "tokens": s.tokens,
+            "refill_per_sec": s.refill_per_sec,
+        })),
+    }))
+}
+
 /// Parse a JSON value as u64, accepting both integer and `0x`-prefixed hex strings.
 fn parse_u64_value(v: &Value) -> Option<u64> {
     match v {
@@ -1196,8 +1528,8 @@ async fn handle_get_transaction(
     let tx_hash_key = tx_hash_str.strip_prefix("0x").unwrap_or(tx_hash_str);
 
     // Query transaction from finalized storage first.
-    if let Ok(Some(tx_bytes)) = storage.get(CF_TRANSACTIONS, tx_hash_key.as_bytes()) {
-        if let Ok(tx) = serde_json::from_slice::<SignedTransaction>(&tx_bytes) {
+    if let Ok(Some(tx_bytes)) = storage.get(CF_TRANSACTIONS, tx_hash_key.as_bytes())
+        && let Ok(tx) = serde_json::from_slice::<SignedTransaction>(&tx_bytes) {
             let (value, tx_type) = match &tx.transaction.tx_type {
                 TransactionType::Transfer { amount } => (format!("{}", amount), "transfer"),
                 TransactionType::ContractDeploy { .. } => ("0".to_string(), "contract_deploy"),
@@ -1218,15 +1550,14 @@ async fn handle_get_transaction(
                 "status": "finalized",
             }));
         }
-    }
 
     // Not in finalized storage — fall back to the consensus mempool so callers
     // who poll immediately after broadcast can distinguish "pending" from
     // "unknown". Without this, every just-submitted tx looks indistinguishable
     // from a non-existent one for the seconds between submit and finalization.
-    if let Some(consensus) = node.consensus() {
-        if let Ok(hash_bytes) = hex::decode(tx_hash_key) {
-            if hash_bytes.len() == 32 {
+    if let Some(consensus) = node.consensus()
+        && let Ok(hash_bytes) = hex::decode(tx_hash_key)
+            && hash_bytes.len() == 32 {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&hash_bytes);
                 let hash: tenzro_types::primitives::Hash = arr.into();
@@ -1251,8 +1582,6 @@ async fn handle_get_transaction(
                     }));
                 }
             }
-        }
-    }
 
     Ok(Value::Null)
 }
@@ -1533,8 +1862,8 @@ async fn handle_list_models(node: &Arc<TenzroNode>) -> std::result::Result<Value
         });
 
         // Add load info for serving models
-        if is_serving {
-            if let Some(snap) = node.load_tracker.snapshot(&entry.id) {
+        if is_serving
+            && let Some(snap) = node.load_tracker.snapshot(&entry.id) {
                 model_json["load"] = serde_json::json!({
                     "active_requests": snap.active_requests,
                     "max_concurrent": snap.max_concurrent,
@@ -1542,7 +1871,6 @@ async fn handle_list_models(node: &Arc<TenzroNode>) -> std::result::Result<Value
                     "load_level": snap.load_level.to_string(),
                 });
             }
-        }
 
         model_json
     }).collect();
@@ -1641,9 +1969,9 @@ async fn handle_inference_request(
                 let cost = (result.input_tokens as f64 * pricing.input_price_per_token)
                     + (result.output_tokens as f64 * pricing.output_price_per_token);
                 drop(pricing);
-                if let Some(token) = node.token() {
-                    if let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str()) {
-                        if let Ok(caller_addr) = parse_address(caller_str) {
+                if let Some(token) = node.token()
+                    && let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str())
+                        && let Ok(caller_addr) = parse_address(caller_str) {
                             let cost_wei = (cost * 1_000_000_000_000_000_000f64) as u128;
                             if cost_wei > 0 {
                                 let provider_addr = if let Some(registry) = node.identity_registry() {
@@ -1656,15 +1984,12 @@ async fn handle_inference_request(
                                 } else {
                                     Address::default()
                                 };
-                                if provider_addr != Address::default() {
-                                    if let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
+                                if provider_addr != Address::default()
+                                    && let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
                                         tracing::warn!(caller = %caller_str, "Inference billing failed: {}", e);
                                     }
-                                }
                             }
                         }
-                    }
-                }
                 return Ok(serde_json::json!({
                     "model_id": model_id,
                     "output": result.text,
@@ -1884,7 +2209,7 @@ async fn handle_list_cortex_workers(
 }
 
 /// List remote Cortex workers this node has learned about via the
-/// `tenzro/cortex/1.0.0` gossip topic. Returns the signed advertisements
+/// `tenzro/cortex` gossip topic. Returns the signed advertisements
 /// that are still within their `expires_at` window (expired entries are
 /// pruned lazily by `RemoteWorkerRegistry::snapshot`).
 async fn handle_list_remote_cortex_workers(
@@ -2257,10 +2582,150 @@ async fn handle_get_settlement(
             "amount": receipt.amount,
             "status": format!("{:?}", receipt.status),
             "settled_at": receipt.settled_at.as_millis(),
+            "principal_chain": receipt.principal_chain,
             "metadata": receipt.metadata,
         })),
         Err(_) => Ok(Value::Null)
     }
+}
+
+// ----- Principal-chain receipt RPCs (Agent-Swarm Spec 5) -----
+
+/// `tenzro_getReceiptPrincipalChain` — return the frozen principal chain
+/// attached to a settlement receipt. Regulators and insurers use this to
+/// identify the legally responsible controller without recursive
+/// identity-registry walks.
+async fn handle_get_receipt_principal_chain(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let receipt_id = params.get("receipt_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing receipt_id".to_string(),
+            data: None,
+        })?;
+
+    let engine = node.settlement().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Settlement engine not initialized".to_string(),
+        data: None,
+    })?;
+
+    match engine.get_principal_chain(receipt_id) {
+        Some(chain) => serde_json::to_value(&chain).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("serialize principal chain: {}", e),
+            data: None,
+        }),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_listReceiptsByActor` — list receipt ids whose acting DID
+/// matches the supplied DID. Oldest first. Returns an array of
+/// receipt-id strings.
+async fn handle_list_receipts_by_actor(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let did = params.get("did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing did".to_string(),
+            data: None,
+        })?;
+
+    let engine = node.settlement().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Settlement engine not initialized".to_string(),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "did": did,
+        "receipt_ids": engine.list_receipts_by_actor(did),
+    }))
+}
+
+/// `tenzro_listReceiptsByController` — list receipt ids whose principal
+/// chain terminates at the supplied controller DID. Oldest first.
+async fn handle_list_receipts_by_controller(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let did = params.get("did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing did".to_string(),
+            data: None,
+        })?;
+
+    let engine = node.settlement().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Settlement engine not initialized".to_string(),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "did": did,
+        "receipt_ids": engine.list_receipts_by_controller(did),
+    }))
+}
+
+/// `tenzro_summarizeController` — aggregate a controller's activity
+/// across an optional unix-second `since` / `until` window. Returns
+/// receipt count, total settled value, distinct delegated agents,
+/// KYC-tier evolution, and bond extremes.
+async fn handle_summarize_controller(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let did = params.get("did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing did".to_string(),
+            data: None,
+        })?;
+    let since = params.get("since").and_then(|v| v.as_u64());
+    let until = params.get("until").and_then(|v| v.as_u64());
+
+    let engine = node.settlement().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Settlement engine not initialized".to_string(),
+        data: None,
+    })?;
+
+    let summary = engine.summarize_controller(did, since, until);
+    serde_json::to_value(&summary).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize controller summary: {}", e),
+        data: None,
+    })
 }
 
 async fn handle_register_agent(
@@ -2418,6 +2883,246 @@ async fn handle_send_agent_message(
         "to": to_id,
         "status": "sent",
         "timestamp": message.timestamp.as_millis(),
+    }))
+}
+
+// ---------------------------------------------------------------------
+// Capability registry RPC surface (#379)
+// ---------------------------------------------------------------------
+//
+// The `CapabilityRegistry` lives inside `AgentRuntime` and tracks which
+// agents claim which capabilities, plus signed/TEE-backed attestations
+// supporting those claims. The runtime accessor is
+// `AgentRuntime::capability_registry()` and the read API consumed here
+// is documented on `tenzro_agent::capabilities::CapabilityRegistry`.
+//
+// Wire surface:
+//   tenzro_listCapabilities                    → list_capabilities()
+//   tenzro_getCapabilityAttestations           → get_attestations(&cap)
+//   tenzro_getAgentCapabilityAttestations      → get_agent_attestations(&id)
+//   tenzro_findBestAgentForCapability          → find_best_agent(&cap)
+//
+// All four methods are read-only (no signing required). Attestation
+// submission goes through the agent registration / signed attestation
+// path on the runtime, not the RPC; querying the registered set is
+// what these RPCs expose.
+
+/// Parse a capability descriptor from JSON-RPC params. Accepts two forms:
+///
+/// 1. **Short string form** — `"nlp" | "vision" | "code" | "data" |
+///    "blockchain" | "smart_contract" | "api_integration" |
+///    "coordination"` map to their canonical enum variants with default
+///    sub-parameters (consistent with `handle_register_agent` parsing);
+///    any other string maps to `Capability::Custom { name, parameters: {} }`.
+///
+/// 2. **Structured form** — a JSON object compatible with the
+///    `#[serde(tag = "type", content = "config")]` representation of
+///    `Capability` (e.g. `{"type":"NaturalLanguageProcessing","config":{"languages":["en"]}}`).
+fn parse_capability_param(
+    value: &Value,
+) -> std::result::Result<tenzro_types::agent::Capability, JsonRpcError> {
+    use tenzro_types::agent::Capability;
+    if let Some(s) = value.as_str() {
+        return Ok(match s {
+            "nlp" => Capability::NaturalLanguageProcessing { languages: vec!["en".to_string()] },
+            "vision" => Capability::ComputerVision { tasks: vec!["detection".to_string()] },
+            "code" => Capability::CodeGeneration {
+                languages: vec!["rust".to_string(), "python".to_string()],
+            },
+            "data" => Capability::DataAnalysis {
+                formats: vec!["json".to_string(), "csv".to_string()],
+            },
+            "blockchain" => Capability::BlockchainInteraction { chains: vec!["tenzro".to_string()] },
+            "smart_contract" => Capability::SmartContractExecution,
+            "api_integration" => Capability::ExternalAPIIntegration { apis: vec![] },
+            "coordination" => Capability::MultiAgentCoordination,
+            other => Capability::Custom {
+                name: other.to_string(),
+                parameters: std::collections::HashMap::new(),
+            },
+        });
+    }
+    if value.is_object() {
+        return serde_json::from_value::<Capability>(value.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid capability descriptor: {}", e),
+            data: None,
+        });
+    }
+    Err(JsonRpcError {
+        code: -32602,
+        message: "capability must be a short-form string or a structured Capability object"
+            .to_string(),
+        data: None,
+    })
+}
+
+/// Convert an attestation to a JSON-RPC envelope. Bytes are emitted as
+/// hex strings so the surface is stable across language clients.
+fn attestation_to_json(att: &tenzro_agent::capabilities::CapabilityAttestation) -> Value {
+    serde_json::json!({
+        "agent_id": att.agent_id,
+        "capability": att.capability,
+        "attested_at": att.attested_at.to_rfc3339(),
+        "tee_backed": att.tee_backed,
+        "attester_address": att.attester_address.as_ref().map(|a| format!("0x{}", hex::encode(a.as_bytes()))),
+        "attester_public_key": att.attester_public_key.as_ref().map(|pk| serde_json::json!({
+            "key_type": format!("{:?}", pk.key_type()),
+            "bytes": hex::encode(pk.as_bytes()),
+        })),
+        "signature": att.signature.as_ref().map(hex::encode),
+        "metadata": att.metadata,
+    })
+}
+
+async fn handle_list_capabilities(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let agent_runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let registry = agent_runtime.capability_registry();
+    let capabilities = registry.list_capabilities();
+
+    let result: Vec<Value> = capabilities
+        .iter()
+        .map(|cap| {
+            serde_json::json!({
+                "capability": cap,
+                "agent_count": registry.capability_count(cap),
+                "attestation_count": registry.get_attestations(cap).len(),
+                "agents": registry.find_agents_with_capability(cap),
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "capabilities": result,
+        "total": capabilities.len(),
+        "rejected_attestation_count": registry.rejected_attestation_count(),
+    }))
+}
+
+async fn handle_get_capability_attestations(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let cap_value = params.get("capability").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing 'capability' field".to_string(),
+        data: None,
+    })?;
+    let capability = parse_capability_param(cap_value)?;
+
+    // When verified_only=true, run query-time signature/expiry checks via
+    // CapabilityRegistry::verify_attestation before returning. Default false
+    // so callers see all attestations the registry has accepted at submit
+    // time (which already pass strict eager verification per #52).
+    let verified_only = params
+        .get("verified_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let agent_runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let registry = agent_runtime.capability_registry();
+    let attestations = if verified_only {
+        registry.get_verified_attestations(&capability)
+    } else {
+        registry.get_attestations(&capability)
+    };
+
+    Ok(serde_json::json!({
+        "capability": capability,
+        "verified_only": verified_only,
+        "attestations": attestations.iter().map(attestation_to_json).collect::<Vec<_>>(),
+        "total": attestations.len(),
+    }))
+}
+
+async fn handle_get_agent_capability_attestations(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let agent_id = params
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'agent_id' field".to_string(),
+            data: None,
+        })?;
+
+    let agent_runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let registry = agent_runtime.capability_registry();
+    let attestations = registry.get_agent_attestations(agent_id);
+    let agent_capabilities = registry.get_agent_capabilities(agent_id).unwrap_or_default();
+    let registered_address = registry.agent_address(agent_id);
+
+    Ok(serde_json::json!({
+        "agent_id": agent_id,
+        "capabilities": agent_capabilities,
+        "attestations": attestations.iter().map(attestation_to_json).collect::<Vec<_>>(),
+        "total_attestations": attestations.len(),
+        "registered_address": registered_address.map(|a| format!("0x{}", hex::encode(a.as_bytes()))),
+    }))
+}
+
+async fn handle_find_best_agent_for_capability(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let cap_value = params.get("capability").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing 'capability' field".to_string(),
+        data: None,
+    })?;
+    let capability = parse_capability_param(cap_value)?;
+
+    let agent_runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let registry = agent_runtime.capability_registry();
+    let best_agent = registry.find_best_agent(&capability);
+    let total_candidates = registry.capability_count(&capability);
+
+    Ok(serde_json::json!({
+        "capability": capability,
+        "best_agent": best_agent,
+        "total_candidates": total_candidates,
     }))
 }
 
@@ -2869,11 +3574,11 @@ async fn handle_delegate_task(
 
     // Wire TNZO billing: flat 0.001 TNZO delegation fee from caller to receiver
     const DELEGATION_FEE_WEI: u128 = 1_000_000_000_000_000; // 0.001 TNZO
-    if let Some(token) = node.token() {
-        if let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str()) {
-            if let Ok(caller_addr) = parse_address(caller_str) {
-                if let Some(receiver_str) = params.get("receiver_address").and_then(|v| v.as_str()) {
-                    if let Ok(receiver_addr) = parse_address(receiver_str) {
+    if let Some(token) = node.token()
+        && let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str())
+            && let Ok(caller_addr) = parse_address(caller_str)
+                && let Some(receiver_str) = params.get("receiver_address").and_then(|v| v.as_str())
+                    && let Ok(receiver_addr) = parse_address(receiver_str) {
                         if let Err(e) = token.transfer(&caller_addr, &receiver_addr, DELEGATION_FEE_WEI) {
                             tracing::warn!(
                                 sender = %sender_id,
@@ -2890,10 +3595,6 @@ async fn handle_delegate_task(
                             );
                         }
                     }
-                }
-            }
-        }
-    }
 
     Ok(serde_json::json!({
         "task_id": task_id,
@@ -3334,6 +4035,1294 @@ async fn handle_list_escrows_by_payee(
         "payee": payee_hex,
         "count": escrows.len(),
         "escrows": escrows.iter().map(escrow_to_json).collect::<Vec<_>>(),
+    }))
+}
+
+// ---- Kill-switch read RPCs (Agent-Swarm Spec 1) -----------------------------
+
+/// Render a `KillSwitchReceipt` as JSON for read-only RPC responses.
+fn kill_switch_receipt_to_json(r: &tenzro_types::kill_switch::KillSwitchReceipt) -> Value {
+    serde_json::json!({
+        "receipt_id": r.receipt_id,
+        "action": r.action.as_str(),
+        "agent_did": r.agent_did,
+        "controller_did": r.controller_did,
+        "reason_code": r.reason_code,
+        "reason_text": r.reason_text,
+        "evidence_hash": r.evidence_hash,
+        "slash_bps": r.slash_bps,
+        "cascade": r.cascade,
+        "frozen_at_block": r.frozen_at_block.0,
+        "timestamp": r.timestamp.as_millis(),
+    })
+}
+
+/// `tenzro_getAgentLifecycle` — current FSM state for an agent. Reads
+/// the in-memory `AgentLifecycle` (populated by `AgentRuntime` and the
+/// post-execute kill-switch dispatch). Returns the agent's current
+/// state, last transition, last heartbeat, and full state history.
+async fn handle_get_agent_lifecycle(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let agent_id = params
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_id".to_string(),
+            data: None,
+        })?;
+
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let info = runtime
+        .lifecycle_manager()
+        .get_lifecycle_info(agent_id)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Lifecycle lookup failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "agent_id": info.agent_id,
+        "state": info.state.as_str(),
+        "last_state_change": info.last_state_change.timestamp_millis(),
+        "last_heartbeat": info.last_heartbeat.map(|t| t.timestamp_millis()),
+        "state_history": info.state_history.iter().map(|(s, t)| serde_json::json!({
+            "state": s.as_str(),
+            "at": t.timestamp_millis(),
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// `tenzro_listKillSwitchByAgent` — list every kill-switch receipt
+/// targeting `agent_did`, in chronological order (oldest first).
+async fn handle_list_kill_switch_by_agent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let agent_did = params
+        .get("agent_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_did".to_string(),
+            data: None,
+        })?;
+
+    let store = node.kill_switch_store().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "KillSwitchStore not initialized".to_string(),
+        data: None,
+    })?;
+
+    let receipts = store.list_by_agent(agent_did);
+    Ok(serde_json::json!({
+        "agent_did": agent_did,
+        "count": receipts.len(),
+        "receipts": receipts.iter().map(kill_switch_receipt_to_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `tenzro_listKillSwitchByController` — list every kill-switch receipt
+/// authorised by `controller_did` (across all targeted agents), in
+/// chronological order.
+async fn handle_list_kill_switch_by_controller(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let controller_did = params
+        .get("controller_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing controller_did".to_string(),
+            data: None,
+        })?;
+
+    let store = node.kill_switch_store().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "KillSwitchStore not initialized".to_string(),
+        data: None,
+    })?;
+
+    let receipts = store.list_by_controller(controller_did);
+    Ok(serde_json::json!({
+        "controller_did": controller_did,
+        "count": receipts.len(),
+        "receipts": receipts.iter().map(kill_switch_receipt_to_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `tenzro_getKillSwitchReceipt` — fetch a single kill-switch receipt by id.
+///
+/// `receipt_id` is the hex-encoded id emitted by the Native VM on
+/// `PauseAgent` / `QuarantineAgent` / `TerminateAgent` execution and surfaced
+/// in the receipt-log topic. Returns `null` if the id is unknown.
+async fn handle_get_kill_switch_receipt(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Accept both `{"receipt_id": "..."}` (object form) and `["..."]` (positional).
+    let receipt_id = if let Some(arr) = params.as_array() {
+        arr.first().and_then(|v| v.as_str()).map(str::to_string)
+    } else {
+        params
+            .get("receipt_id")
+            .or_else(|| params.get("id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+    .ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing receipt_id".to_string(),
+        data: None,
+    })?;
+
+    let store = node.kill_switch_store().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "KillSwitchStore not initialized".to_string(),
+        data: None,
+    })?;
+
+    match store.get(&receipt_id) {
+        Some(receipt) => Ok(kill_switch_receipt_to_json(&receipt)),
+        None => Ok(Value::Null),
+    }
+}
+
+// ---- AgentBond surety RPC handlers (Agent-Swarm Spec 9) ------------------
+//
+// Writes (post / increase / withdraw / pay-claim) flow through
+// `tenzro_signAndSendTransaction` with the matching `TransactionType`
+// variant — they must be cryptographically authorized by the controller
+// (or governance, for `PayInsuranceClaim`). The handlers below are
+// read-only or off-chain governance entry points.
+
+/// Project an `AgentBondState` into a JSON envelope. Used by both
+/// `tenzro_getAgentBond` and `tenzro_listAgentBondsByController`.
+fn agent_bond_state_to_json(state: &tenzro_token::bond::AgentBondState) -> Value {
+    serde_json::json!({
+        "agent_did": state.agent_did,
+        "controller_did": state.controller_did,
+        "amount": state.amount.to_string(),
+        "state": state.state.as_str(),
+        "cooldown_until": state.cooldown_until.map(|t| t.as_millis()),
+        "last_modified_block": state.last_modified_block,
+        "history_len": state.history.len(),
+        "is_promotion_eligible": state.is_promotion_eligible(),
+        "effective_for_promotion": state.effective_for_promotion().to_string(),
+    })
+}
+
+/// Project a `ClaimRecord` into a JSON envelope.
+fn claim_record_to_json(record: &tenzro_token::bond::ClaimRecord) -> Value {
+    serde_json::json!({
+        "claim_id": record.claim_id,
+        "claimant_did": record.claimant_did,
+        "claimant_address": format!("{}", record.claimant_address),
+        "against_agent_did": record.against_agent_did,
+        "amount_requested": record.amount_requested.to_string(),
+        "receipt_refs": record.receipt_refs,
+        "narrative": record.narrative,
+        "status": record.status.as_str(),
+        "governance_ref": record.governance_ref,
+        "paid_amount": record.paid_amount.map(|a| a.to_string()),
+        "filed_at": record.filed_at.as_millis(),
+    })
+}
+
+/// `tenzro_getAgentBond` — fetch a single agent's bond state by DID.
+/// Returns `null` if no bond exists for the agent.
+async fn handle_get_agent_bond(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let agent_did = params
+        .get("agent_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_did".to_string(),
+            data: None,
+        })?;
+
+    let bond_manager = node.bond_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "BondManager not initialized".to_string(),
+        data: None,
+    })?;
+
+    match bond_manager.get(agent_did) {
+        Some(state) => Ok(agent_bond_state_to_json(&state)),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_listAgentBondsByController` — every bond posted by `controller_did`.
+async fn handle_list_agent_bonds_by_controller(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let controller_did = params
+        .get("controller_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing controller_did".to_string(),
+            data: None,
+        })?;
+
+    let bond_manager = node.bond_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "BondManager not initialized".to_string(),
+        data: None,
+    })?;
+
+    let bonds = bond_manager.list_by_controller(controller_did);
+    let aggregate = bond_manager.aggregate_bond(controller_did);
+    Ok(serde_json::json!({
+        "controller_did": controller_did,
+        "count": bonds.len(),
+        "aggregate_bond": aggregate.to_string(),
+        "bonds": bonds.iter().map(agent_bond_state_to_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `tenzro_fileInsuranceClaim` — open a new insurance claim against a
+/// bonded agent. The claim enters `Open` status awaiting governance
+/// adjudication; payout (if approved) is settled via a separate
+/// `PayInsuranceClaim` transaction.
+///
+/// This handler is intentionally read-write at the BondManager layer
+/// only — it does not move on-chain funds and therefore does not need
+/// to flow through `tenzro_signAndSendTransaction`. Authorization is
+/// handled by the auth layer at the JSON-RPC dispatch site.
+async fn handle_file_insurance_claim(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let claimant_did = params
+        .get("claimant_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing claimant_did".to_string(),
+            data: None,
+        })?;
+
+    let claimant_addr_hex = params
+        .get("claimant_address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing claimant_address".to_string(),
+            data: None,
+        })?;
+    let claimant_address = parse_address(claimant_addr_hex)?;
+
+    let against_agent_did = params
+        .get("against_agent_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing against_agent_did".to_string(),
+            data: None,
+        })?;
+
+    // Accept both number and string-encoded u128 for safety with large amounts.
+    let amount_requested = params
+        .get("amount_requested")
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse::<u128>().ok())
+                .or_else(|| v.as_u64().map(|n| n as u128))
+        })
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or invalid amount_requested".to_string(),
+            data: None,
+        })?;
+
+    let receipt_refs = params
+        .get("receipt_refs")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let narrative = params
+        .get("narrative")
+        .and_then(|v| v.as_str())
+        .map(|s| {
+            // Cap at 1024 bytes per spec to bound storage row size.
+            let mut owned = s.to_string();
+            if owned.len() > 1024 {
+                owned.truncate(1024);
+            }
+            owned
+        });
+
+    let nonce_le = params
+        .get("nonce")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing nonce".to_string(),
+            data: None,
+        })?;
+
+    let bond_manager = node.bond_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "BondManager not initialized".to_string(),
+        data: None,
+    })?;
+
+    let record = bond_manager
+        .file_claim(
+            claimant_did,
+            claimant_address,
+            against_agent_did,
+            amount_requested,
+            receipt_refs,
+            narrative,
+            nonce_le,
+        )
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("file_claim failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(claim_record_to_json(&record))
+}
+
+/// `tenzro_listInsuranceClaims` — all claims (Open, Approved, Rejected,
+/// Paid). Operators sort/filter client-side; the on-chain count is
+/// expected to stay small.
+async fn handle_list_insurance_claims(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let bond_manager = node.bond_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "BondManager not initialized".to_string(),
+        data: None,
+    })?;
+    let claims = bond_manager.list_claims();
+    Ok(serde_json::json!({
+        "count": claims.len(),
+        "claims": claims.iter().map(claim_record_to_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `tenzro_getInsuranceClaim` — fetch a single claim by `claim_id`.
+async fn handle_get_insurance_claim(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let claim_id = params
+        .get("claim_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing claim_id".to_string(),
+            data: None,
+        })?;
+
+    let bond_manager = node.bond_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "BondManager not initialized".to_string(),
+        data: None,
+    })?;
+
+    match bond_manager.get_claim(claim_id) {
+        Some(record) => Ok(claim_record_to_json(&record)),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_getInsurancePoolBalance` — singleton aggregate state of the
+/// insurance pool: total balance, paid-claim count, total paid TNZO,
+/// open-claim count, plus the deterministic vault address.
+async fn handle_get_insurance_pool_balance(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let bond_manager = node.bond_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "BondManager not initialized".to_string(),
+        data: None,
+    })?;
+    let pool = bond_manager.pool_state();
+    let vault = tenzro_token::bond::derive_insurance_pool_address();
+    Ok(serde_json::json!({
+        "vault": format!("{}", vault),
+        "balance_tnzo": pool.balance_tnzo.to_string(),
+        "paid_claims": pool.paid_claims,
+        "total_paid_tnzo": pool.total_paid_tnzo.to_string(),
+        "open_claim_count": pool.open_claim_count,
+    }))
+}
+
+/// `tenzro_getAccountContention` — read the rolling Block-STM contention
+/// score for an account over the last 64 blocks (Agent-Swarm Spec 6).
+///
+/// Params: `{ "address": "0x..." }` (hex-encoded, with or without `0x` prefix).
+///
+/// Returns:
+/// ```json
+/// {
+///   "address": "0x...",
+///   "score": 0.42,                  // reexecutions / writes over the window
+///   "reexecutions": 21,             // total Block-STM reexec count over window
+///   "writes": 50,                   // total distinct address-write count
+///   "is_hot": true,                 // both score >= 0.20 and writes >= 50
+///   "multiplier": 2.10,             // local fee multiplier (1.0–5.0)
+///   "base_fee_per_gas": "0x...",    // current EIP-1559 base fee (hex u128)
+///   "effective_base_fee_per_gas": "0x...",  // base * multiplier
+///   "surcharge_per_gas": "0x...",   // burn delta (effective - base)
+///   "window_blocks": 64,
+///   "score_floor": 0.20,
+///   "write_floor": 50,
+///   "max_multiplier": 5.0
+/// }
+/// ```
+async fn handle_get_account_contention(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let address_str = params
+        .get("address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing address".to_string(),
+            data: None,
+        })?;
+    let address_hex = address_str.strip_prefix("0x").unwrap_or(address_str);
+    let address = hex::decode(address_hex).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid address hex: {}", e),
+        data: None,
+    })?;
+
+    let vm_runtime = node.vm_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "VM runtime not initialized".to_string(),
+        data: None,
+    })?;
+    let oracle = vm_runtime.gas_oracle();
+    let score = oracle.hot_state().contention(&address);
+    let multiplier = score.multiplier();
+    let base_fee = oracle.current_price().await.base_fee;
+    let (effective, surcharge) = oracle.hot_state().surcharge(&address, base_fee);
+
+    Ok(serde_json::json!({
+        "address": format!("0x{}", hex::encode(&address)),
+        "score": score.score,
+        "reexecutions": score.reexecutions,
+        "writes": score.writes,
+        "is_hot": score.is_hot,
+        "multiplier": multiplier,
+        "base_fee_per_gas": format!("0x{:x}", base_fee),
+        "effective_base_fee_per_gas": format!("0x{:x}", effective),
+        "surcharge_per_gas": format!("0x{:x}", surcharge),
+        "window_blocks": tenzro_vm::HOT_STATE_WINDOW_BLOCKS,
+        "score_floor": tenzro_vm::HOT_STATE_SCORE_FLOOR,
+        "write_floor": tenzro_vm::HOT_STATE_WRITE_FLOOR,
+        "max_multiplier": tenzro_vm::HOT_STATE_MAX_MULTIPLIER,
+    }))
+}
+
+/// `tenzro_getBurnQuota` — read the singleton BurnQuota state
+/// (Agent-Swarm Spec 3 — wave 1).
+///
+/// Params: none.
+///
+/// Returns:
+/// ```json
+/// {
+///   "balance":         "0x...",   // TNZO available to sponsor (1e18 base units, hex)
+///   "cap":             "0x...",
+///   "daily_target":    "0x...",
+///   "min_reserve_bps": 1000,       // basis points
+///   "min_reserve":     "0x...",   // derived: cap × bps / 10_000
+///   "last_refill":     1714824000, // ms timestamp
+///   "total_drained":   "0x...",
+///   "total_refilled":  "0x...",
+///   "deficit":         0,          // signed; negative is impossible in wave 1
+///   "can_drain_one":   true        // can_drain(1) — quick "is the quota live" hint
+/// }
+/// ```
+///
+/// In wave 1 the quota is read-only over RPC. Drains and refills happen
+/// in-process via `BurnQuotaManager::try_drain` / `refill`, which the
+/// future StablecoinPaymaster + QuotaReplenisher will invoke. There is
+/// no write RPC for refills — that channel is privileged-VM only and
+/// will be added when the replenisher lands.
+async fn handle_get_burn_quota(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let manager = node.burn_quota_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "BurnQuotaManager not initialized".to_string(),
+        data: None,
+    })?;
+    let s = manager.state();
+    let min_reserve = s.min_reserve();
+    let can_drain_one = s.can_drain(1);
+    Ok(serde_json::json!({
+        "balance": format!("0x{:x}", s.balance),
+        "cap": format!("0x{:x}", s.cap),
+        "daily_target": format!("0x{:x}", s.daily_target),
+        "min_reserve_bps": s.min_reserve_bps,
+        "min_reserve": format!("0x{:x}", min_reserve),
+        "last_refill": s.last_refill,
+        "total_drained": format!("0x{:x}", s.total_drained),
+        "total_refilled": format!("0x{:x}", s.total_refilled),
+        "deficit": s.deficit,
+        "can_drain_one": can_drain_one,
+    }))
+}
+
+/// `tenzro_getDaBackends` — list configured DA backends and their status
+/// (Agent-Swarm Spec 7 — wave 1).
+///
+/// Params: none.
+///
+/// Returns: `[{ backend, healthy, last_submission_ms, last_fetch_ms,
+/// error_rate_bps }]`. In wave 1 the only configured backend is
+/// `inline_fallback`, which refuses offload — receipts must use
+/// `storage_mode = Inline`. EigenDA / Celestia / Avail entries appear when
+/// their feature-gated adapters land.
+async fn handle_get_da_backends(
+    _node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let backend = tenzro_storage::InlineFallbackBackend::new();
+    let status = tenzro_storage::DaBackend::status(&backend);
+    let entry = serde_json::json!({
+        "backend": status.backend.as_str(),
+        "healthy": status.healthy,
+        "last_submission_ms": status.last_submission_ms,
+        "last_fetch_ms": status.last_fetch_ms,
+        "error_rate_bps": status.error_rate_bps,
+    });
+    Ok(serde_json::json!([entry]))
+}
+
+/// `tenzro_verifyDaPointer` — probe whether a DA pointer is dereferenceable
+/// right now without paying the retrieval bandwidth (Agent-Swarm Spec 7 —
+/// wave 1).
+///
+/// Params:
+/// ```json
+/// {
+///   "pointer": {
+///     "backend": "eigenda" | "celestia" | "avail" | "inline_fallback",
+///     "namespace": "0x..",      // hex-encoded bytes
+///     "locator":   "0x..",
+///     "commitment_kzg":   "0x..",   // optional
+///     "attestation_root": "0x.."   // optional, 32-byte hex
+///   }
+/// }
+/// ```
+///
+/// Returns: `{ available: bool, backend: "...", reason: "..." }`. In wave 1
+/// the only configured backend is `inline_fallback`, which always returns
+/// `available: false` because it cannot dereference external pointers — the
+/// real probes land alongside the EigenDA / Celestia / Avail adapters.
+async fn handle_verify_da_pointer(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let pointer_val = params.get("pointer").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing pointer".to_string(),
+        data: None,
+    })?;
+
+    let backend_str = pointer_val
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing pointer.backend".to_string(),
+            data: None,
+        })?;
+    let backend = match backend_str {
+        "inline_fallback" => tenzro_storage::DaBackendId::InlineFallback,
+        "eigenda" => tenzro_storage::DaBackendId::EigenDA,
+        "celestia" => tenzro_storage::DaBackendId::Celestia,
+        "avail" => tenzro_storage::DaBackendId::Avail,
+        other => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!("Unknown DA backend: {}", other),
+                data: None,
+            });
+        }
+    };
+
+    fn decode_hex_field(value: &str, field: &str) -> std::result::Result<Vec<u8>, JsonRpcError> {
+        let stripped = value.strip_prefix("0x").unwrap_or(value);
+        hex::decode(stripped).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid hex in pointer.{}: {}", field, e),
+            data: None,
+        })
+    }
+
+    let namespace = match pointer_val.get("namespace").and_then(|v| v.as_str()) {
+        Some(s) => decode_hex_field(s, "namespace")?,
+        None => Vec::new(),
+    };
+    let locator = match pointer_val.get("locator").and_then(|v| v.as_str()) {
+        Some(s) => decode_hex_field(s, "locator")?,
+        None => Vec::new(),
+    };
+    let commitment_kzg = match pointer_val.get("commitment_kzg").and_then(|v| v.as_str()) {
+        Some(s) => Some(decode_hex_field(s, "commitment_kzg")?),
+        None => None,
+    };
+    let attestation_root = match pointer_val.get("attestation_root").and_then(|v| v.as_str()) {
+        Some(s) => {
+            let bytes = decode_hex_field(s, "attestation_root")?;
+            Some(Hash::from_bytes(&bytes).ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "attestation_root must be 32 bytes".to_string(),
+                data: None,
+            })?)
+        }
+        None => None,
+    };
+
+    let pointer = tenzro_storage::DaPointer {
+        backend,
+        namespace,
+        locator,
+        commitment_kzg,
+        attestation_root,
+    };
+
+    // Wave 1: only the inline-fallback backend is wired. Probes against any
+    // external backend resolve to "not available" because the adapter is
+    // not loaded — a clear signal to operators that they need to enable the
+    // backend feature flag before relying on offload.
+    let inline = tenzro_storage::InlineFallbackBackend::new();
+    let result = tenzro_storage::DaBackend::verify_availability(&inline, &pointer).await;
+    let (available, reason) = match result {
+        Ok(()) => (true, String::new()),
+        Err(e) => (false, e.to_string()),
+    };
+    Ok(serde_json::json!({
+        "available": available,
+        "backend": backend.as_str(),
+        "reason": reason,
+    }))
+}
+
+// ---- ERC-7683 cross-chain intent read RPCs (Agent-Swarm Spec 4) -------------
+
+/// Render a `Tenzro7683Order` envelope as JSON for read-only RPC responses.
+fn tenzro_7683_order_to_json(order: &tenzro_types::intent_7683::Tenzro7683Order) -> Value {
+    serde_json::json!({
+        "order_id": format!("0x{}", hex::encode(order.order_id.as_bytes())),
+        "state": order.state.as_str(),
+        "escrow_id": format!("0x{}", hex::encode(order.escrow_id.as_bytes())),
+        "opened_at_ms": order.opened_at.as_millis(),
+        "fill_deadline": order.fill_deadline,
+        "filler": order.filler.as_ref().map(|a| format!("0x{}", hex::encode(a.as_bytes()))),
+        "fill_proof_hash": order.fill_proof_hash.as_ref().map(|h| format!("0x{}", hex::encode(h.as_bytes()))),
+        "proof_route": order.proof_route.as_str(),
+        "resolved": order.resolved,
+    })
+}
+
+/// `tenzro_get7683Order` — fetch a single ERC-7683 cross-chain order envelope
+/// by `order_id` (Agent-Swarm Spec 4 — wave 1, read path).
+///
+/// Params: `{ "order_id": "0x.." }` — 32-byte hex-encoded order id as
+/// computed by `compute_order_id`.
+///
+/// Returns the persisted `Tenzro7683Order` envelope or a JSON-RPC error if
+/// no order exists at that id. The envelope reports state, escrow handle,
+/// fill deadline, filler (if assigned), fill-proof hash (if landed), and
+/// proof route. Settler write paths land alongside the precompile + EIP-712
+/// flow in a follow-up; this RPC is the canonical read for indexers and
+/// solver UIs in the meantime.
+async fn handle_get_7683_order(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::intent_7683::{Tenzro7683Order, ORDER_KEY_PREFIX};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let order_id_hex = params
+        .get("order_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing order_id".to_string(),
+            data: None,
+        })?;
+
+    let stripped = order_id_hex.strip_prefix("0x").unwrap_or(order_id_hex);
+    let order_id_bytes = hex::decode(stripped).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid order_id hex: {}", e),
+        data: None,
+    })?;
+    if order_id_bytes.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "order_id must be 32 bytes".to_string(),
+            data: None,
+        });
+    }
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let mut key = Vec::with_capacity(ORDER_KEY_PREFIX.len() + 32);
+    key.extend_from_slice(ORDER_KEY_PREFIX);
+    key.extend_from_slice(&order_id_bytes);
+
+    let bytes = storage
+        .get(CF_SETTLEMENTS, &key)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: format!("Order not found: 0x{}", hex::encode(&order_id_bytes)),
+            data: None,
+        })?;
+
+    let order: Tenzro7683Order = serde_json::from_slice(&bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to deserialize order: {}", e),
+        data: None,
+    })?;
+
+    Ok(tenzro_7683_order_to_json(&order))
+}
+
+/// `tenzro_list7683Orders` — paginated scan of persisted ERC-7683 cross-chain
+/// orders (Agent-Swarm Spec 4 — wave 1, read path).
+///
+/// Params (all optional):
+/// - `state`: filter by order state — one of `open`, `awaiting_proof`,
+///   `settled`, `refunded`, `force_refund_eligible`.
+/// - `dest_chain`: u32 — filter by destination chain id (CAIP-2 numeric).
+/// - `limit`: usize — cap on returned envelopes (default 50).
+///
+/// Returns `{ orders: [...], count: N }` where each entry is the same
+/// JSON shape as `tenzro_get7683Order`. The scan walks the
+/// `7683_origin:` prefix in `CF_SETTLEMENTS`; the dual `7683_dest:` keyspace
+/// (fill idempotency guards, indexed on the destination side) is not
+/// surfaced here.
+async fn handle_list_7683_orders(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::intent_7683::{Tenzro7683Order, ORDER_KEY_PREFIX};
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let limit = params
+        .as_ref()
+        .and_then(|p| p.get("limit"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50) as usize;
+
+    let state_filter = params
+        .as_ref()
+        .and_then(|p| p.get("state"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let dest_chain_filter = params
+        .as_ref()
+        .and_then(|p| p.get("dest_chain"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+
+    let keys = storage
+        .get_keys_with_prefix(CF_SETTLEMENTS, ORDER_KEY_PREFIX)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?;
+
+    let mut orders = Vec::new();
+    for key in keys.iter().take(limit * 4) {
+        let Ok(Some(bytes)) = storage.get(CF_SETTLEMENTS, key) else {
+            continue;
+        };
+        let Ok(order) = serde_json::from_slice::<Tenzro7683Order>(&bytes) else {
+            continue;
+        };
+
+        if let Some(ref s) = state_filter {
+            use tenzro_types::intent_7683::OrderState;
+            let order_state_str = match order.state {
+                OrderState::Open => "open",
+                OrderState::AwaitingProof => "awaiting_proof",
+                OrderState::Settled => "settled",
+                OrderState::Refunded => "refunded",
+                OrderState::ForceRefundEligible => "force_refund_eligible",
+            };
+            if order_state_str != s.as_str() {
+                continue;
+            }
+        }
+
+        if let Some(dc) = dest_chain_filter {
+            // The destination chain lives inside the resolved order data; fall
+            // through cleanly if any output matches the filter.
+            let any_match = order
+                .resolved
+                .min_received
+                .iter()
+                .any(|o| o.chain_id == dc);
+            if !any_match {
+                continue;
+            }
+        }
+
+        orders.push(tenzro_7683_order_to_json(&order));
+        if orders.len() >= limit {
+            break;
+        }
+    }
+
+    Ok(serde_json::json!({
+        "orders": orders,
+        "count": orders.len(),
+    }))
+}
+
+// ========================================================================
+// Spec 8: Adaptive burn governance dial — read RPCs.
+//
+// The auto-proposal generator, the EIP-1559 fee-market consumer, and the
+// real epoch observer (aggregating from UsageTracker + the burn ledger)
+// land alongside the governance executor wiring in a later wave. The four
+// handlers below expose the protocol-side primitives — current dial,
+// latest snapshot, recommendation, and a placeholder proposal list — so
+// indexers and explorers can render adaptive-burn state today.
+// ========================================================================
+
+fn supply_metrics_to_json(snapshot: &tenzro_token::adaptive_burn::SupplyMetricsSnapshot) -> Value {
+    serde_json::json!({
+        "block_height": snapshot.block_height.as_u64(),
+        "captured_at_ms": snapshot.captured_at.as_millis(),
+        "circulating_supply": snapshot.circulating_supply.to_string(),
+        "epoch_supply_delta": snapshot.epoch_supply_delta.to_string(),
+        "rolling_window_supply_delta_bps": snapshot.rolling_window_supply_delta_bps,
+        "burn_breakdown": {
+            "base_fee": snapshot.burn_breakdown.base_fee.to_string(),
+            "local_fee": snapshot.burn_breakdown.local_fee.to_string(),
+            "paymaster": snapshot.burn_breakdown.paymaster.to_string(),
+            "slash": snapshot.burn_breakdown.slash.to_string(),
+            "total": snapshot.burn_breakdown.total().to_string(),
+        },
+        "emission_breakdown": {
+            "staking_rewards": snapshot.emission_breakdown.staking_rewards.to_string(),
+            "treasury_emissions": snapshot.emission_breakdown.treasury_emissions.to_string(),
+            "total": snapshot.emission_breakdown.total().to_string(),
+        },
+    })
+}
+
+async fn handle_get_burn_rate_config(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let manager = node.burn_rate_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Adaptive burn manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    let config = manager.config();
+    let targets = manager.targets();
+
+    Ok(serde_json::json!({
+        "config": {
+            "base_fee_burn_bps": config.base_fee_burn_bps,
+            "base_fee_treasury_bps": config.base_fee_treasury_bps(),
+            "local_fee_burn_bps": config.local_fee_burn_bps,
+            "local_fee_treasury_bps": config.local_fee_treasury_bps(),
+            "paymaster_burn_bps": config.paymaster_burn_bps,
+            "paymaster_treasury_bps": config.paymaster_treasury_bps(),
+        },
+        "targets": {
+            "enabled": targets.enabled,
+            "epoch_neutral_band_bps": targets.epoch_neutral_band_bps,
+            "rolling_window_epochs": targets.rolling_window_epochs,
+            "inflation_alarm_bps": targets.inflation_alarm_bps,
+            "deflation_alarm_bps": targets.deflation_alarm_bps,
+            "target_annual_supply_bps": targets.target_annual_supply_bps,
+            "gain_bps_per_pct": targets.gain_bps_per_pct,
+            "magnitude_cap_normal_bps": targets.magnitude_cap_normal_bps,
+            "magnitude_cap_alarm_bps": targets.magnitude_cap_alarm_bps,
+            "auto_proposal_min_magnitude_bps": targets.auto_proposal_min_magnitude_bps,
+            "alarm_fast_track_enabled": targets.alarm_fast_track_enabled,
+            "alarm_timelock_hours": targets.alarm_timelock_hours,
+        },
+    }))
+}
+
+async fn handle_get_supply_metrics(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let manager = node.burn_rate_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Adaptive burn manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    Ok(supply_metrics_to_json(&manager.latest_metrics()))
+}
+
+async fn handle_get_burn_rate_recommendation(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let manager = node.burn_rate_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Adaptive burn manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    let rec = manager.current_recommendation();
+    let metrics = manager.latest_metrics();
+
+    Ok(serde_json::json!({
+        "action": rec.action.as_str(),
+        "is_alarm": rec.action.is_alarm(),
+        "magnitude_bps": rec.magnitude_bps,
+        "above_proposal_floor": rec.above_proposal_floor,
+        "deviation_bps": rec.deviation_bps,
+        "basis": supply_metrics_to_json(&metrics),
+    }))
+}
+
+async fn handle_list_adaptive_burn_proposals(
+    node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    // Surface readiness so indexers can verify the manager is running, even
+    // before the auto-proposal generator + governance executor wiring lands.
+    let _ = node.burn_rate_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Adaptive burn manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "proposals": [],
+        "count": 0,
+    }))
+}
+
+// ---- Spec 10: SeedAgent treasury allocation -----------------------------
+
+fn charter_to_json(c: &tenzro_token::seed_agent::Charter) -> Value {
+    let ops: Vec<&str> = c.operations.iter().map(|o| o.as_str()).collect();
+    serde_json::json!({
+        "charter_id": format!("0x{}", hex::encode(c.charter_id.as_bytes())),
+        "name": c.name,
+        "purpose": c.purpose,
+        "operations": ops,
+        "spend_caps": {
+            "daily_cap_tnzo": c.spend_caps.daily_cap_tnzo.to_string(),
+            "monthly_cap_tnzo": c.spend_caps.monthly_cap_tnzo.to_string(),
+            "per_tx_cap_tnzo": c.spend_caps.per_tx_cap_tnzo.to_string(),
+        },
+        "target_throughput": c.target_throughput.as_ref().map(|t| serde_json::json!({
+            "ops_per_sec_milli": t.ops_per_sec_milli,
+        })),
+        "counterparty_filter": {
+            "deny_other_seed_agents": c.counterparty_filter.deny_other_seed_agents,
+            "denied_dids": c.counterparty_filter.denied_dids,
+        },
+        "sunset_ms": c.sunset.as_millis(),
+        "enabled": c.enabled,
+    })
+}
+
+fn earmark_to_json(e: &tenzro_token::seed_agent::TreasuryEarmark) -> Value {
+    let charter_ids: Vec<String> = e
+        .charter_ids
+        .iter()
+        .map(|h| format!("0x{}", hex::encode(h.as_bytes())))
+        .collect();
+    let decay_points: Vec<Value> = e
+        .decay_schedule
+        .points
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "month": p.month,
+                "max_draw_tnzo": p.max_draw_tnzo.to_string(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "name": e.name,
+        "initial_allocation_tnzo": e.initial_allocation_tnzo.to_string(),
+        "allocation_remaining_tnzo": e.allocation_remaining_tnzo.to_string(),
+        "total_drawn_tnzo": e.total_drawn_tnzo.to_string(),
+        "bootstrap_start_ms": e.bootstrap_start.as_millis(),
+        "bootstrap_end_ms": e.bootstrap_end.as_millis(),
+        "decay_schedule": { "points": decay_points },
+        "seed_agent_count": e.seed_agent_count,
+        "charter_ids": charter_ids,
+        "enabled": e.enabled,
+        "surplus_burn_bps": e.surplus_burn_bps,
+    })
+}
+
+fn seed_agent_record_to_json(r: &tenzro_token::seed_agent::SeedAgentRecord) -> Value {
+    serde_json::json!({
+        "agent_did": r.agent_did,
+        "controller_did": r.controller_did,
+        "charter_id": format!("0x{}", hex::encode(r.charter_id.as_bytes())),
+        "status": r.status.as_str(),
+        "allocation_used_tnzo": r.allocation_used_tnzo.to_string(),
+        "bond_id": r.bond_id.as_ref().map(|h| format!("0x{}", hex::encode(h.as_bytes()))),
+        "provisioned_at_ms": r.provisioned_at.as_millis(),
+        "last_active_ms": r.last_active.as_millis(),
+    })
+}
+
+fn parse_charter_id_param(s: &str) -> std::result::Result<tenzro_types::primitives::Hash, JsonRpcError> {
+    let stripped = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(stripped).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid charter_id hex: {}", e),
+        data: None,
+    })?;
+    tenzro_types::primitives::Hash::from_bytes(&bytes).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "charter_id must be 32 bytes".to_string(),
+        data: None,
+    })
+}
+
+async fn handle_get_treasury_earmark(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let manager = node.seed_agent_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "SeedAgent manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Optional `name` filter — only "SeedAgent" exists in wave 1.
+    if let Some(p) = params.as_ref()
+        && let Some(name) = p.get("name").and_then(|v| v.as_str()) {
+            let earmark = manager.earmark();
+            if name != earmark.name {
+                return Ok(Value::Null);
+            }
+        }
+
+    Ok(earmark_to_json(&manager.earmark()))
+}
+
+async fn handle_get_seed_agent_charter(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let manager = node.seed_agent_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "SeedAgent manager not initialized".to_string(),
+        data: None,
+    })?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let charter_id_hex = params
+        .get("charter_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing charter_id".to_string(),
+            data: None,
+        })?;
+    let cid = parse_charter_id_param(charter_id_hex)?;
+    match manager.get_charter(&cid) {
+        Some(c) => Ok(charter_to_json(&c)),
+        None => Ok(Value::Null),
+    }
+}
+
+async fn handle_list_seed_agent_charters(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let manager = node.seed_agent_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "SeedAgent manager not initialized".to_string(),
+        data: None,
+    })?;
+    let raw = manager.list_charters();
+    let count = raw.len();
+    let charters: Vec<Value> = raw.iter().map(charter_to_json).collect();
+    Ok(serde_json::json!({
+        "charters": charters,
+        "count": count,
+    }))
+}
+
+async fn handle_list_seed_agents(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let manager = node.seed_agent_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "SeedAgent manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    let charter_id = if let Some(p) = params.as_ref() {
+        if let Some(s) = p.get("charter_id").and_then(|v| v.as_str()) {
+            Some(parse_charter_id_param(s)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let agents: Vec<Value> = manager
+        .list_agents(charter_id.as_ref())
+        .iter()
+        .map(seed_agent_record_to_json)
+        .collect();
+    let count = agents.len();
+    Ok(serde_json::json!({
+        "agents": agents,
+        "count": count,
+    }))
+}
+
+async fn handle_get_network_activity(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    // Wave-1 stub: returns shape only. UsageTracker integration with
+    // exclude_seed filter (skipping txns where either side `is_seed_agent`)
+    // lands alongside the off-chain daemon and per-DID flow control wiring.
+    let manager = node.seed_agent_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "SeedAgent manager not initialized".to_string(),
+        data: None,
+    })?;
+
+    let exclude_seed = params
+        .as_ref()
+        .and_then(|p| p.get("exclude_seed"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let window = params
+        .as_ref()
+        .and_then(|p| p.get("window"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("24h")
+        .to_string();
+
+    let earmark = manager.earmark();
+
+    Ok(serde_json::json!({
+        "window": window,
+        "exclude_seed": exclude_seed,
+        "seed_agent_count": earmark.seed_agent_count,
+        "seed_total_drawn_tnzo": earmark.total_drawn_tnzo.to_string(),
+        // Aggregate usage counters land when the UsageTracker bridge ships.
+        "inference_count": 0_u64,
+        "settlement_count": 0_u64,
+        "bridge_count": 0_u64,
+        "intent_7683_count": 0_u64,
+        "note": "wave-1 stub; per-window aggregates land with the UsageTracker bridge",
     }))
 }
 
@@ -4021,6 +6010,94 @@ async fn handle_list_identities(
     }))
 }
 
+/// `tenzro_listAgentJwks` — JSON-RPC mirror of `GET /.well-known/jwks.json`.
+/// Returns the full RFC 7517 JWK Set for every active Tenzro identity's
+/// RFC-9421-compatible signing keys.
+async fn handle_list_agent_jwks(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let agent_registry =
+        tenzro_payments::rfc9421::TenzroAgentRegistry::new(registry.clone());
+    let agents = agent_registry.list_all_agents();
+    let set = tenzro_payments::rfc9421::JwkSet::from_agents(&agents);
+
+    serde_json::to_value(&set).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("JWK Set serialization failed: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_getAgentJwk` — single-key JWK lookup. Accepts a `keyid` parameter
+/// either as a positional first argument or as a named `keyid` field. The
+/// value may be `did:tenzro:...` (first compatible key) or
+/// `did:tenzro:...#fragment` (specific key).
+async fn handle_get_agent_jwk(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params (expected `keyid`)".to_string(),
+        data: None,
+    })?;
+
+    let keyid = if let Some(arr) = params.as_array() {
+        arr.first()
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    } else {
+        params
+            .get("keyid")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+    .ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing `keyid` parameter".to_string(),
+        data: None,
+    })?;
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let agent_registry =
+        tenzro_payments::rfc9421::TenzroAgentRegistry::new(registry.clone());
+
+    use tenzro_payments::rfc9421::AgentRegistryClient;
+    let agent = agent_registry
+        .get_public_key(&keyid)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32004,
+            message: format!("agent lookup failed: {}", e),
+            data: Some(serde_json::json!({ "keyid": keyid })),
+        })?;
+
+    let jwk = tenzro_payments::rfc9421::Jwk::try_from_agent(&agent).map_err(|e| {
+        JsonRpcError {
+            code: -32005,
+            message: format!("JWK encoding failed: {}", e),
+            data: Some(serde_json::json!({ "keyid": keyid })),
+        }
+    })?;
+
+    serde_json::to_value(&jwk).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("JWK serialization failed: {}", e),
+        data: None,
+    })
+}
+
 async fn handle_add_credential(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -4144,14 +6221,6 @@ async fn handle_add_service(
         data: None,
     })?;
 
-    // Resolve identity to add service
-    let mut identity = registry.resolve(did).map_err(|e| JsonRpcError {
-        code: -32000,
-        message: format!("Failed to resolve identity: {}", e),
-        data: None,
-    })?;
-
-    // Add service endpoint
     use tenzro_identity::ServiceEndpoint;
     let service = ServiceEndpoint {
         id: format!("{}#{}", did, service_type),
@@ -4159,11 +6228,16 @@ async fn handle_add_service(
         service_endpoint: endpoint.to_string(),
     };
 
-    identity.add_service(service.clone()).map_err(|e| JsonRpcError {
-        code: -32602,
-        message: format!("Invalid service endpoint: {}", e),
-        data: None,
-    })?;
+    // Mutate the in-place DashMap entry and write through to CF_IDENTITIES.
+    // The previous implementation resolved a clone, mutated locally, and
+    // discarded the result — services were never persisted.
+    registry
+        .add_service_to_identity(did, service.clone())
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Failed to add service: {}", e),
+            data: None,
+        })?;
 
     Ok(serde_json::json!({
         "did": did,
@@ -4294,6 +6368,357 @@ async fn handle_get_payment_receipt(
         })),
         Err(_) => Ok(Value::Null)
     }
+}
+
+// ----------------------------------------------------------------------------
+// Agent payment RPCs (machine-DID-keyed runtime spending policy + service
+// payments). Counterpart to the wallet kernel's `agent-payments.ts` adapter
+// in tenzro-ts-sdk. The runtime axis enforced here is the per-machine
+// `SpendingPolicy` (max_per_transaction + max_daily_spend); the protocol
+// axis (`DelegationScope`) is enforced separately by the payment gate.
+// ----------------------------------------------------------------------------
+
+/// `tenzro_setSpendingPolicy` — install or replace the runtime spending
+/// policy bound to a machine DID. Wallet-kernel-facing; `agent-payments.ts`
+/// calls this when an operator edits autonomy settings for a machine
+/// identity.
+///
+/// Params (object): `{ agent_did, max_per_transaction, max_daily_spend,
+///   allowed_services?, active? }`.
+///
+/// `allowed_services` and `active` are part of the wallet-kernel public
+/// shape but are **not** persisted at the runtime layer in this wave —
+/// `allowed_services` is a hint for client UX only, and `active=false` is
+/// surfaced through `enabled` on the runtime `SpendingPolicy`. When
+/// `active` is omitted it defaults to `true`.
+async fn handle_set_spending_policy(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_agent::SpendingPolicy;
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let agent_did = params
+        .get("agent_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_did".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let max_per_transaction = params
+        .get("max_per_transaction")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or invalid max_per_transaction".to_string(),
+            data: None,
+        })?;
+
+    let max_daily_spend = params
+        .get("max_daily_spend")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or invalid max_daily_spend".to_string(),
+            data: None,
+        })?;
+
+    let active = params
+        .get("active")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Preserve the existing daily counter when replacing an active policy
+    // so a mid-day cap edit doesn't reset spent-so-far. New policies start
+    // at 0.
+    let mut policy = SpendingPolicy::new(max_per_transaction, max_daily_spend);
+    if let Some(existing) = runtime.get_spending_policy(&agent_did) {
+        policy.current_daily_spend = existing.current_daily_spend;
+        policy.last_reset = existing.last_reset;
+    }
+    policy.enabled = active;
+
+    runtime.set_spending_policy(agent_did.clone(), policy);
+
+    Ok(serde_json::json!({
+        "success": true,
+        "agent_did": agent_did,
+    }))
+}
+
+/// `tenzro_getSpendingPolicy` — read the runtime spending policy for a
+/// machine DID. Returns `null` when no policy is bound.
+async fn handle_get_spending_policy(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let agent_did = params
+        .get("agent_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_did".to_string(),
+            data: None,
+        })?;
+
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    match runtime.get_spending_policy(agent_did) {
+        Some(p) => Ok(serde_json::json!({
+            "agent_did": agent_did,
+            "max_per_transaction": p.max_per_transaction,
+            "max_daily_spend": p.max_daily_spend,
+            "current_daily_spend": p.current_daily_spend,
+            "last_reset": p.last_reset,
+            "active": p.enabled,
+        })),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_agentPayForService` — record a service payment against a
+/// machine DID. Enforces the runtime `SpendingPolicy` ceiling (per-tx +
+/// daily) before recording. Returns an `AgentPaymentReceipt`-shaped
+/// response with the minted receipt id, settled amount, and timestamp.
+///
+/// Params (object): `{ agent_did, provider, amount, service_type }`.
+///
+/// Note: this is the *runtime debit* path — the actual on-chain settlement
+/// for a third-party provider goes through `tenzro_payX402`/`tenzro_payMpp`
+/// or the wallet's signed-transaction flow. This RPC is for the case where
+/// the wallet kernel wants to log an autonomous spend against the agent's
+/// runtime caps (e.g., a Tenzro-internal inference call) without spinning
+/// up a full payment-protocol challenge/credential round trip.
+async fn handle_agent_pay_for_service(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_agent::AgentTransactionRecord;
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let agent_did = params
+        .get("agent_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_did".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let provider = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing provider".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let amount = params
+        .get("amount")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or invalid amount".to_string(),
+            data: None,
+        })?;
+
+    let service_type = params
+        .get("service_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Gate: enforce per-tx + daily ceilings via record_spend. If no policy
+    // is bound, record_spend is a no-op (legacy / hand-registered DIDs);
+    // we still record audit history below.
+    runtime.record_spend(&agent_did, amount).map_err(|e| JsonRpcError {
+        code: -32004,
+        message: format!("Spending policy violation: {}", e),
+        data: None,
+    })?;
+
+    // Mint a receipt id deterministic on (agent_did, provider, timestamp_ns)
+    // so retries with identical inputs collide rather than create dupes.
+    let timestamp = chrono::Utc::now().timestamp();
+    let receipt_id = format!(
+        "agentpay-{}",
+        hex::encode(tenzro_crypto::hash::sha256(
+            format!(
+                "{}|{}|{}|{}|{}",
+                agent_did, provider, amount, service_type, timestamp
+            )
+            .as_bytes(),
+        ))
+    );
+
+    let record = AgentTransactionRecord {
+        agent_did: agent_did.clone(),
+        provider: provider.clone(),
+        service_type: service_type.clone(),
+        amount,
+        timestamp,
+        receipt_id: receipt_id.clone(),
+    };
+
+    runtime
+        .record_agent_transaction(record)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Failed to record agent transaction: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "agent_did": agent_did,
+        "provider": provider,
+        "amount": amount,
+        "service_type": service_type,
+        "receipt_id": receipt_id,
+        "timestamp": timestamp,
+        "success": true,
+    }))
+}
+
+/// `tenzro_getAgentDailySpend` — derive current-day spend + remaining cap
+/// for a machine DID from its runtime `SpendingPolicy`. Triggers the
+/// daily-window reset if the wall-clock has rolled past a UTC midnight
+/// since the last recorded transaction.
+async fn handle_get_agent_daily_spend(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let agent_did = params
+        .get("agent_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_did".to_string(),
+            data: None,
+        })?;
+
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Trigger a record_spend(0) to force the daily-window reset check
+    // before reading the snapshot, so a stale `current_daily_spend` from
+    // yesterday isn't reported. record_spend(0) is a no-op when no policy
+    // is bound.
+    let _ = runtime.record_spend(agent_did, 0);
+
+    match runtime.get_spending_policy(agent_did) {
+        Some(p) => {
+            let remaining = p.max_daily_spend.saturating_sub(p.current_daily_spend);
+            Ok(serde_json::json!({
+                "agent_did": agent_did,
+                "current_daily_spend": p.current_daily_spend,
+                "max_daily_spend": p.max_daily_spend,
+                "remaining": remaining,
+                "last_reset": p.last_reset,
+            }))
+        }
+        None => Ok(serde_json::json!({
+            "agent_did": agent_did,
+            "current_daily_spend": 0,
+            "max_daily_spend": 0,
+            "remaining": 0,
+            "last_reset": 0,
+        })),
+    }
+}
+
+/// `tenzro_listAgentTransactions` — return the audit trail of service
+/// payments recorded for a machine DID. Reads CF_AGENTS via the runtime's
+/// `list_agent_transactions` helper.
+///
+/// Params (object): `{ agent_did, limit? }`. When `limit` is set, only
+/// the most recent `limit` records are returned (still in chronological
+/// order, oldest first within the slice).
+async fn handle_list_agent_transactions(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let agent_did = params
+        .get("agent_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_did".to_string(),
+            data: None,
+        })?;
+
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let records = runtime
+        .list_agent_transactions(agent_did, limit)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Failed to list agent transactions: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::to_value(&records).unwrap_or(serde_json::json!([])))
 }
 
 async fn handle_pay_visa_tap(
@@ -4444,7 +6869,7 @@ async fn handle_syncing(node: &Arc<TenzroNode>) -> std::result::Result<Value, Js
     const SYNC_LAG_THRESHOLD: u64 = 2;
 
     // Network-tip estimate: max height across fresh peer status messages on
-    // tenzro/status/1.0.0. None ⇒ no fresh peer status (single-node, or
+    // tenzro/status. None ⇒ no fresh peer status (single-node, or
     // network silence). Defaults to local_tip in that case so we don't
     // falsely report syncing. TODO mainnet: use median (or local_tip + cap)
     // to harden against a malicious peer claiming a huge height.
@@ -5232,7 +7657,123 @@ async fn handle_send_raw_transaction(
         }
     }
 
-    // Submit to event loop
+    // TDIP delegation gate for Agent-Swarm Spec 1 kill-switch transactions.
+    //
+    // The VM trusts that admission already verified the sender's authority
+    // over `controller_did` and that `controller_did` is in fact the
+    // controller of `agent_did` (or holds an explicit delegation). We
+    // enforce that here so a forged controller_did claim is rejected
+    // before consensus even sees the tx — a bogus claim that reached the
+    // VM would still produce a receipt + log, just with the wrong
+    // controller stamped on it, and the lifecycle FSM would mutate state
+    // for the wrong actor. Reject at admission instead.
+    if let Some(violation) = check_kill_switch_authorization(node, &signed_tx.transaction) {
+        warn!(
+            target: "rpc",
+            tx_hash = %tx_hash,
+            from = %from_str,
+            violation = %violation,
+            "eth_sendRawTransaction: kill-switch authorization rejected (-32003)"
+        );
+        return Err(JsonRpcError {
+            code: -32003,
+            message: format!("Kill-switch authorization failed: {}", violation),
+            data: None,
+        });
+    }
+
+    // Synchronous Spec-2 admission: try the local consensus mempool first so
+    // rate-limited senders see JSON-RPC error -32011 immediately instead of a
+    // silent async drop. On success the tx is already in the mempool — we then
+    // dispatch a `LocallyAdmittedTransaction` event for gossip propagation only
+    // (the event loop skips re-admission to avoid double-charging the bucket).
+    if let Some(consensus) = node.consensus() {
+        match consensus.submit_transaction(signed_tx.clone()) {
+            Ok(()) => {
+                debug!(
+                    target: "rpc",
+                    tx_hash = %tx_hash,
+                    "eth_sendRawTransaction: admitted to consensus mempool synchronously"
+                );
+            }
+            Err(tenzro_consensus::ConsensusError::RateLimited {
+                lane,
+                retry_after_ms,
+                burst_remaining,
+                current_rate,
+            }) => {
+                warn!(
+                    target: "rpc",
+                    tx_hash = %tx_hash,
+                    lane,
+                    retry_after_ms,
+                    burst_remaining,
+                    current_rate,
+                    "eth_sendRawTransaction: rejected by per-DID admission (-32011)"
+                );
+                return Err(JsonRpcError {
+                    code: -32011,
+                    message: format!(
+                        "Rate limit exceeded for {} lane: retry after {}ms (refill {:.3}/s)",
+                        lane, retry_after_ms, current_rate
+                    ),
+                    data: Some(serde_json::json!({
+                        "lane": lane,
+                        "retryAfterMs": retry_after_ms,
+                        "burstRemaining": burst_remaining,
+                        "refillPerSec": current_rate,
+                    })),
+                });
+            }
+            Err(tenzro_consensus::ConsensusError::FeeFloorTooLow {
+                lane,
+                gas_price,
+                required,
+                base,
+                multiplier,
+            }) => {
+                warn!(
+                    target: "rpc",
+                    tx_hash = %tx_hash,
+                    lane,
+                    gas_price,
+                    required,
+                    base,
+                    multiplier,
+                    "eth_sendRawTransaction: rejected by lane fee floor (-32012)"
+                );
+                return Err(JsonRpcError {
+                    code: -32012,
+                    message: format!(
+                        "Fee floor not met for {} lane: gas_price {} < required {} ({:.2}× base {})",
+                        lane, gas_price, required, multiplier, base
+                    ),
+                    data: Some(serde_json::json!({
+                        "lane": lane,
+                        "gasPrice": gas_price,
+                        "required": required,
+                        "baseFloor": base,
+                        "laneMultiplier": multiplier,
+                    })),
+                });
+            }
+            Err(e) => {
+                warn!(
+                    target: "rpc",
+                    tx_hash = %tx_hash,
+                    error = %e,
+                    "eth_sendRawTransaction: consensus mempool rejected transaction"
+                );
+                return Err(JsonRpcError {
+                    code: -32000,
+                    message: format!("Mempool rejected transaction: {}", e),
+                    data: None,
+                });
+            }
+        }
+    }
+
+    // Submit to event loop for gossip propagation only (admission already done above).
     let event_sender = node.event_sender().ok_or_else(|| {
         error!(target: "rpc", tx_hash = %tx_hash, "eth_sendRawTransaction: node event loop not running");
         JsonRpcError {
@@ -5240,7 +7781,17 @@ async fn handle_send_raw_transaction(
         }
     })?;
 
-    event_sender.send(NodeEvent::NewTransaction(signed_tx)).await
+    let event = if node.consensus().is_some() {
+        // Already admitted synchronously above — event loop only does gossip.
+        NodeEvent::LocallyAdmittedTransaction(signed_tx)
+    } else {
+        // No consensus engine wired (light client / boot phase) — let the
+        // event loop run the full path so the tx still gets gossiped + locally
+        // queued.
+        NodeEvent::NewTransaction(signed_tx)
+    };
+
+    event_sender.send(event).await
         .map_err(|e| {
             error!(
                 target: "rpc",
@@ -5258,7 +7809,7 @@ async fn handle_send_raw_transaction(
     info!(
         target: "rpc",
         tx_hash = %tx_hash,
-        "eth_sendRawTransaction: tx enqueued for admission"
+        "eth_sendRawTransaction: tx admitted and queued for gossip"
     );
 
     Ok(serde_json::json!(format!("{}", tx_hash)))
@@ -6591,6 +9142,47 @@ async fn handle_revoke_did(
     }))
 }
 
+/// `tenzro_forgetIdentity` — TDIP/GDPR Article 17 right-to-erasure.
+///
+/// Hard-deletes a previously-revoked identity from the in-memory registry
+/// and from persistent storage (`CF_IDENTITIES`). Distinct from
+/// `tenzro_revokeDid` (logical delete via `IdentityStatus::Revoked`).
+/// The identity MUST already be `Revoked` — callers must first invoke
+/// `tenzro_revokeDid`, allow the cascading revocation broadcaster to
+/// propagate, then call this handler. Two-phase deletion gives downstream
+/// consumers a chance to react before the record vanishes.
+///
+/// Params: `{ did: "did:tenzro:..." }`
+async fn handle_forget_identity(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = unwrap_param_object(params);
+    let did = p["did"].as_str().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing required param: did".to_string(),
+        data: None,
+    })?;
+
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    registry.forget_identity(did).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("forget_identity failed: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "did": did,
+        "status": "erased",
+        "note": "Hard-deleted from CF_IDENTITIES per TDIP/GDPR Article 17",
+    }))
+}
+
 /// `tenzro_exchangeToken` — RFC 8693 OAuth 2.0 Token Exchange.
 ///
 /// JSON-RPC mirror of the HTTP `POST /oauth/token` endpoint at
@@ -6986,14 +9578,14 @@ async fn handle_set_role(
     if let Some(network) = node.network() {
         use tenzro_network::{NetworkMessage, MessagePayload, NetworkService};
         let status_msg = NetworkMessage::new(MessagePayload::Custom {
-            topic: "tenzro/status/1.0.0".to_string(),
+            topic: "tenzro/status".to_string(),
             data: serde_json::to_vec(&serde_json::json!({
                 "type": "role_change",
                 "previous_role": format!("{:?}", previous_role),
                 "new_role": format!("{:?}", new_role),
             })).unwrap_or_default(),
         });
-        if let Err(e) = network.broadcast("tenzro/status/1.0.0", status_msg).await {
+        if let Err(e) = network.broadcast("tenzro/status", status_msg).await {
             debug!("Failed to broadcast role change: {}", e);
         }
     }
@@ -7415,7 +10007,7 @@ async fn handle_serve_model(
 
     // Load model into runtime
     model_runtime
-        .load_model_with_context(model_id, std::path::Path::new(&gguf_path), entry.architecture, Some(entry.context_length))
+        .load_model_with_context(model_id, std::path::Path::new(&gguf_path), Some(entry.context_length))
         .await
         .map_err(|e| JsonRpcError {
             code: -32000,
@@ -7550,7 +10142,7 @@ async fn handle_serve_model(
             MessagePayload::ModelRegistration(reg),
         );
         tokio::spawn(async move {
-            if let Err(e) = network.broadcast("tenzro/models/1.0.0", broadcast_msg).await {
+            if let Err(e) = network.broadcast("tenzro/models", broadcast_msg).await {
                 tracing::warn!(error = %e, "Failed to broadcast model serving announcement");
             }
         });
@@ -7631,7 +10223,7 @@ async fn handle_stop_model(
             MessagePayload::ModelRegistration(reg),
         );
         tokio::spawn(async move {
-            if let Err(e) = network.broadcast("tenzro/models/1.0.0", broadcast_msg).await {
+            if let Err(e) = network.broadcast("tenzro/models", broadcast_msg).await {
                 tracing::warn!(error = %e, "Failed to broadcast model withdrawal");
             }
         });
@@ -7656,6 +10248,24 @@ async fn handle_prune_model_registry(
         "reloaded": reloaded,
         "cleared_models": cleared_models,
         "cleared_services": cleared_services,
+    }))
+}
+
+/// On-demand sweep of idle local model service instances.
+///
+/// Mirrors the periodic 60s heartbeat in the EventLoop, but available as an
+/// operator-callable RPC for forcing eviction without waiting for the next
+/// tick (e.g. after a manual model unload, or during a rolling restart).
+///
+/// Returns the number of evicted ModelServiceInstance rows and the number
+/// of cleared `served_models` flags.
+async fn handle_cleanup_idle_local_model_services(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let (evicted, cleared_served) = node.cleanup_idle_local_model_services();
+    Ok(serde_json::json!({
+        "evicted_instances": evicted,
+        "cleared_served_models": cleared_served,
     }))
 }
 
@@ -8637,7 +11247,7 @@ async fn handle_chat_simple(
     // Resolve model: try service registry, then local served_models, then
     // gossip-discovered network models. This ensures non-provider nodes (e.g.
     // the public RPC tier) can forward chat requests to any validator that
-    // has advertised itself via `tenzro/models/1.0.0`.
+    // has advertised itself via `tenzro/models`.
     let mut service = node.get_model_service(model_query)
         .or_else(|| node.find_model_service_by_model_id(model_query));
 
@@ -8755,9 +11365,9 @@ async fn handle_chat_simple(
         drop(pricing);
 
         // Wire TNZO billing: deduct from caller, credit this provider node
-        if let Some(token) = node.token() {
-            if let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str()) {
-                if let Ok(caller_addr) = parse_address(caller_str) {
+        if let Some(token) = node.token()
+            && let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str())
+                && let Ok(caller_addr) = parse_address(caller_str) {
                     let cost_wei = (cost * 1_000_000_000_000_000_000f64) as u128;
                     if cost_wei > 0 {
                         let provider_addr = if let Some(registry) = node.identity_registry() {
@@ -8781,8 +11391,6 @@ async fn handle_chat_simple(
                         }
                     }
                 }
-            }
-        }
 
         // Build load snapshot for response
         let load = node.load_tracker.snapshot(&model_id).map(|s| {
@@ -9157,9 +11765,9 @@ async fn handle_chat_rich(
         drop(pricing);
 
         // Wire TNZO billing (same as simple shape).
-        if let Some(token) = node.token() {
-            if let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str()) {
-                if let Ok(caller_addr) = parse_address(caller_str) {
+        if let Some(token) = node.token()
+            && let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str())
+                && let Ok(caller_addr) = parse_address(caller_str) {
                     let cost_wei = (cost * 1_000_000_000_000_000_000f64) as u128;
                     if cost_wei > 0 {
                         let provider_addr = if let Some(registry) = node.identity_registry() {
@@ -9172,16 +11780,13 @@ async fn handle_chat_rich(
                         } else {
                             Address::default()
                         };
-                        if provider_addr != Address::default() {
-                            if let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
+                        if provider_addr != Address::default()
+                            && let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
                                 tracing::warn!(caller = %caller_str, cost_tnzo = cost,
                                     "Rich-chat billing failed: {}", e);
                             }
-                        }
                     }
                 }
-            }
-        }
 
         // Map the inferred string stop reason onto the typed enum.
         let stop_reason = map_stop_reason(&inferred_stop_reason);
@@ -9258,11 +11863,10 @@ async fn handle_chat_rich(
         if let Some(sys) = params.get("system") {
             forward_params.insert("system".to_string(), sys.clone());
         }
-        if !tools.is_empty() {
-            if let Some(t) = params.get("tools") {
+        if !tools.is_empty()
+            && let Some(t) = params.get("tools") {
                 forward_params.insert("tools".to_string(), t.clone());
             }
-        }
         forward_params.insert("max_tokens".to_string(), serde_json::json!(config.max_tokens));
         forward_params.insert(
             "temperature".to_string(),
@@ -9442,11 +12046,10 @@ async fn handle_delete_model(
         })?;
 
     // Unload from runtime if serving
-    if let Some(runtime) = &node.model_runtime {
-        if runtime.is_loaded(model_id) {
+    if let Some(runtime) = &node.model_runtime
+        && runtime.is_loaded(model_id) {
             let _ = runtime.unload_model(model_id).await;
         }
-    }
 
     // Delete the GGUF file from disk
     if let Some(hf_dl) = &node.hf_downloader {
@@ -10480,9 +13083,9 @@ pub async fn handle_chat_stream_rich(
                 + (result.output_tokens as f64 * pricing.output_price_per_token)
         };
 
-        if let Some(token) = node_for_stream.token() {
-            if let Some(caller_str) = caller_address.as_deref() {
-                if let Ok(caller_addr) = parse_address(caller_str) {
+        if let Some(token) = node_for_stream.token()
+            && let Some(caller_str) = caller_address.as_deref()
+                && let Ok(caller_addr) = parse_address(caller_str) {
                     let cost_wei = (cost * 1_000_000_000_000_000_000f64) as u128;
                     if cost_wei > 0 {
                         let provider_addr = if let Some(registry) =
@@ -10497,18 +13100,15 @@ pub async fn handle_chat_stream_rich(
                         } else {
                             Address::default()
                         };
-                        if provider_addr != Address::default() {
-                            if let Err(e) =
+                        if provider_addr != Address::default()
+                            && let Err(e) =
                                 token.transfer(&caller_addr, &provider_addr, cost_wei)
                             {
                                 tracing::warn!(caller = %caller_str, cost_tnzo = cost,
                                     "Rich-stream billing failed: {}", e);
                             }
-                        }
                     }
                 }
-            }
-        }
 
         node_for_stream.metrics().record_inference();
         node_for_stream.touch_local_model_service(&model_id_for_stream);
@@ -10531,7 +13131,7 @@ async fn handle_list_model_endpoints(
 
     // Merge network-discovered model endpoints from gossipsub announcements.
     // Any node (validator, light client, RPC) can serve models. When they do,
-    // they broadcast a ModelRegistration via gossipsub topic tenzro/models/1.0.0.
+    // they broadcast a ModelRegistration via gossipsub topic tenzro/models.
     // Receiving nodes store these in network_models. We include them here so that
     // tenzro_listModelEndpoints returns ALL endpoints visible to this node.
     let network_entries = node.network_models_snapshot();
@@ -11235,16 +13835,17 @@ async fn handle_stake(
         data: None,
     })?;
 
-    // Use the node's own address as the staker
-    let staker_address = if let Some(registry) = node.identity_registry() {
+    // Use the node's own address as the staker, and capture the identity for
+    // potential pending-validator enqueue below.
+    let (staker_address, identity_for_validator) = if let Some(registry) = node.identity_registry() {
         let all = registry.list_all();
         if let Some((_, identity)) = all.first() {
-            identity.wallet_address
+            (identity.wallet_address, Some(identity.clone()))
         } else {
-            Address::default()
+            (Address::default(), None)
         }
     } else {
-        Address::default()
+        (Address::default(), None)
     };
 
     staking.stake(staker_address, amount, provider_type)
@@ -11253,6 +13854,54 @@ async fn handle_stake(
             message: format!("Staking failed: {}", e),
             data: None,
         })?;
+
+    // Enqueue this node into the next epoch's validator set when staking as a
+    // Validator. The consensus engine holds the EpochManager; we look up the
+    // node's identity for the consensus key material (Ed25519 + ML-DSA-65
+    // verifying key). Skipped silently if either the consensus engine isn't
+    // wired or the identity is missing one of the required keys — staking
+    // still succeeds in those cases (the node simply won't be promoted).
+    if matches!(provider_type, ProviderType::Validator)
+        && let (Some(engine), Some(identity)) = (node.consensus(), identity_for_validator.as_ref())
+    {
+        let ed25519_pk_bytes = identity
+            .public_keys
+            .iter()
+            .find(|k| k.key_type == "Ed25519")
+            .map(|k| k.public_key.clone());
+        let pq_vk = identity.pq_verifying_key.clone();
+
+        if let Some(pk_bytes) = ed25519_pk_bytes {
+            if !pq_vk.is_empty() {
+                let public_key = tenzro_crypto::PublicKey::new(
+                    tenzro_crypto::KeyType::Ed25519,
+                    pk_bytes,
+                );
+                let validator_info = tenzro_consensus::ValidatorInfo::new(
+                    staker_address,
+                    public_key,
+                    pq_vk,
+                    amount,
+                );
+                engine.epoch_manager().add_pending_validator(validator_info);
+                tracing::info!(
+                    address = %staker_address,
+                    stake = amount,
+                    "Enqueued pending validator for next epoch"
+                );
+            } else {
+                tracing::warn!(
+                    address = %staker_address,
+                    "Validator stake recorded but identity has empty PQ verifying key — skipping pending-validator enqueue"
+                );
+            }
+        } else {
+            tracing::warn!(
+                address = %staker_address,
+                "Validator stake recorded but identity has no Ed25519 key — skipping pending-validator enqueue"
+            );
+        }
+    }
 
     let stake_id = format!("stake-{}", hex::encode(&staker_address.as_bytes()[..8]));
     let tx_hash = format!("0x{}", hex::encode(tenzro_crypto::sha256(
@@ -11326,6 +13975,17 @@ async fn handle_unstake(
             data: None,
         })?;
 
+    // Drop the staker from the next epoch's pending-validator queue. Idempotent:
+    // remove_pending_validator just `retain`s, so unstaking a non-validator is a
+    // no-op. Skipped silently if consensus isn't wired.
+    if let Some(engine) = node.consensus() {
+        engine.epoch_manager().remove_pending_validator(&staker_address);
+        tracing::info!(
+            address = %staker_address,
+            "Removed pending validator from next epoch"
+        );
+    }
+
     let tx_hash = format!("0x{}", hex::encode(tenzro_crypto::sha256(
         format!("unstake:{}:{}", staker_address, chrono::Utc::now().timestamp()).as_bytes()
     )));
@@ -11397,11 +14057,10 @@ async fn handle_register_provider(
     };
 
     // Stake if amount provided
-    if stake_amount > 0 {
-        if let Some(staking) = node.staking() {
+    if stake_amount > 0
+        && let Some(staking) = node.staking() {
             let _ = staking.stake(provider_address, stake_amount, provider_type);
         }
-    }
 
     let provider_id = format!("provider-{}", hex::encode(&provider_address.as_bytes()[..8]));
     let tx_hash = format!("0x{}", hex::encode(tenzro_crypto::sha256(
@@ -11855,8 +14514,8 @@ async fn handle_fee_history(
 
     // Reward percentiles: only populate when caller asks for them.
     let mut reward: Option<Vec<Vec<String>>> = None;
-    if let Some(Value::Array(percentiles)) = percentiles_v {
-        if !percentiles.is_empty() {
+    if let Some(Value::Array(percentiles)) = percentiles_v
+        && !percentiles.is_empty() {
             // Echo the medium priority-fee suggestion across all requested
             // percentiles. When per-tx priority-fee sampling lands, this
             // becomes a real distribution.
@@ -11868,7 +14527,6 @@ async fn handle_fee_history(
             let row: Vec<String> = percentiles.iter().map(|_| suggestion_hex.clone()).collect();
             reward = Some(vec![row; actual_count as usize]);
         }
-    }
 
     let mut result = serde_json::json!({
         "oldestBlock": format!("0x{:x}", oldest_height),
@@ -11936,15 +14594,14 @@ async fn handle_get_code(
     // Check if account has code_hash in storage
     if let Some(storage) = node.storage() {
         let account_store = AccountStoreImpl::new(storage.clone());
-        if let Ok(Some(account)) = account_store.get_account(&address).await {
-            if account.code_hash.is_some() {
+        if let Ok(Some(account)) = account_store.get_account(&address).await
+            && account.code_hash.is_some() {
                 // Look up bytecode from VM state storage
                 let code_key = format!("code:{}", hex::encode(address.as_bytes()));
                 if let Ok(Some(code)) = storage.get("state", code_key.as_bytes()) {
                     return Ok(serde_json::json!(format!("0x{}", hex::encode(&code))));
                 }
             }
-        }
     }
 
     // No code at this address (EOA)
@@ -11983,11 +14640,10 @@ async fn handle_get_storage_at(
     // Query VM state storage
     if let Some(storage) = node.storage() {
         let slot_key = format!("storage:{}:{}", hex::encode(address.as_bytes()), position);
-        if let Ok(Some(value)) = storage.get("state", slot_key.as_bytes()) {
-            if value.len() == 32 {
+        if let Ok(Some(value)) = storage.get("state", slot_key.as_bytes())
+            && value.len() == 32 {
                 return Ok(serde_json::json!(format!("0x{}", hex::encode(&value))));
             }
-        }
     }
 
     // Return zero-filled 32 bytes for empty storage slot
@@ -12075,10 +14731,10 @@ async fn handle_get_block_tx_count_by_hash(
     }
 
     let hash_hex = hash_str.strip_prefix("0x").unwrap_or(hash_str);
-    if let Ok(hash_bytes) = hex::decode(hash_hex) {
-        if hash_bytes.len() == 32 {
-            if let Some(hash) = Hash::from_bytes(&hash_bytes) {
-                if let Some(storage) = node.storage() {
+    if let Ok(hash_bytes) = hex::decode(hash_hex)
+        && hash_bytes.len() == 32
+            && let Some(hash) = Hash::from_bytes(&hash_bytes)
+                && let Some(storage) = node.storage() {
                     let block_store = BlockStoreImpl::new(storage.clone())
                         .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?;
 
@@ -12086,9 +14742,6 @@ async fn handle_get_block_tx_count_by_hash(
                         return Ok(serde_json::json!(format!("0x{:x}", block.transactions.len())));
                     }
                 }
-            }
-        }
-    }
 
     Ok(Value::Null)
 }
@@ -12119,8 +14772,8 @@ async fn handle_get_tx_by_block_and_index(
         let block_store = BlockStoreImpl::new(storage.clone())
             .map_err(|e| JsonRpcError { code: -32603, message: format!("Storage error: {}", e), data: None })?;
 
-        if let Ok(Some(block)) = block_store.get_block_by_height(BlockHeight::new(height)).await {
-            if let Some(tx) = block.transactions.get(index) {
+        if let Ok(Some(block)) = block_store.get_block_by_height(BlockHeight::new(height)).await
+            && let Some(tx) = block.transactions.get(index) {
                 let mut tx_clone = tx.clone();
                 let tx_hash = tx_clone.hash();
                 let value: u128 = match &tx.transaction.tx_type {
@@ -12143,7 +14796,6 @@ async fn handle_get_tx_by_block_and_index(
                     "input": "0x",
                 }));
             }
-        }
     }
 
     Ok(Value::Null)
@@ -12155,7 +14807,7 @@ async fn handle_eth_syncing(
     // Per spec, returns `false` when not syncing or a sync status object when
     // catching up. The local tip comes from the live atomic chain_tip the
     // event loop maintains; the network tip comes from the PeerStatusTracker
-    // populated by tenzro/status/1.0.0 gossip.
+    // populated by tenzro/status gossip.
     let local_tip = node.chain_tip_height();
 
     const SYNC_LAG_THRESHOLD: u64 = 2;
@@ -12230,6 +14882,134 @@ fn parse_address(addr_str: &str) -> std::result::Result<Address, JsonRpcError> {
     let len = bytes.len().min(32);
     addr_bytes[..len].copy_from_slice(&bytes[..len]);
     Ok(Address::new(addr_bytes))
+}
+
+/// Admission-time TDIP delegation gate for `PauseAgent` /
+/// `QuarantineAgent` / `TerminateAgent` typed transactions.
+///
+/// Enforces both axes the spec requires before a kill-switch tx can reach
+/// consensus:
+///
+/// 1. **Sender authority over `controller_did`.** `tx.from` must resolve
+///    (via `IdentityRegistry::find_did_by_address`) to a DID that either:
+///    - equals `controller_did` exactly (direct authorization), or
+///    - holds the matching operation in its `DelegationScope.allowed_operations`
+///      list (`pause_agent` / `quarantine_agent` / `terminate_agent`).
+///
+/// 2. **`controller_did` is the actual controller of `agent_did`.** The
+///    machine identity registered for `agent_did` must carry
+///    `IdentityData::Machine.controller_did == Some(controller_did)`. Self-action
+///    (`agent_did == controller_did`) is also accepted, mirroring the
+///    autonomous-machine path where a machine can quarantine itself.
+///
+/// Returns `None` if the transaction is not a kill-switch type or if both
+/// gates pass; returns `Some(reason)` if the tx must be rejected. Reasons
+/// are user-facing strings that get echoed back as the JSON-RPC error
+/// message — keep them precise enough for an operator to debug.
+///
+/// If the registry is unavailable (e.g. node booting without
+/// CF_IDENTITIES wired) we fail closed with `"identity registry unavailable"`
+/// rather than admit unauthorized kill-switches. A node that cannot resolve
+/// identities cannot safely process kill-switch txs.
+fn check_kill_switch_authorization(
+    node: &Arc<TenzroNode>,
+    tx: &Transaction,
+) -> Option<String> {
+    use tenzro_identity::IdentityData;
+
+    let (agent_did, controller_did, op_name) = match &tx.tx_type {
+        TransactionType::PauseAgent { agent_did, controller_did, .. } => {
+            (agent_did.as_str(), controller_did.as_str(), "pause_agent")
+        }
+        TransactionType::QuarantineAgent { agent_did, controller_did, .. } => {
+            (agent_did.as_str(), controller_did.as_str(), "quarantine_agent")
+        }
+        TransactionType::TerminateAgent { agent_did, controller_did, .. } => {
+            (agent_did.as_str(), controller_did.as_str(), "terminate_agent")
+        }
+        _ => return None, // not a kill-switch tx; nothing to gate
+    };
+
+    let registry = match node.identity_registry() {
+        Some(r) => r,
+        None => return Some("identity registry unavailable".to_string()),
+    };
+
+    // Axis 1: tx.from must resolve to a DID that authorizes this op for
+    // controller_did. Either the sender IS the controller, or the sender
+    // holds an explicit delegation entry naming this op.
+    let sender_did = match registry.find_did_by_address(&tx.from) {
+        Some(d) => d,
+        None => {
+            return Some(format!(
+                "sender address {} is not bound to any registered identity",
+                hex::encode(tx.from.as_bytes())
+            ));
+        }
+    };
+    if sender_did != controller_did {
+        // Sender is not the controller directly — look for a delegation.
+        let sender_id = match registry.resolve(&sender_did) {
+            Ok(id) => id,
+            Err(e) => {
+                return Some(format!(
+                    "sender DID {} unresolvable: {}",
+                    sender_did, e
+                ));
+            }
+        };
+        let scope = match &sender_id.identity_data {
+            IdentityData::Human { .. } => {
+                // Humans authorize via being the controller, not via
+                // delegation_scope (which lives on Machine identities).
+                return Some(format!(
+                    "sender {} is a human identity but is not the declared controller_did {}",
+                    sender_did, controller_did
+                ));
+            }
+            IdentityData::Machine { delegation_scope, .. } => delegation_scope,
+        };
+        if !scope.is_operation_allowed(op_name) {
+            return Some(format!(
+                "sender {} has no '{}' delegation and is not the declared controller_did {}",
+                sender_did, op_name, controller_did
+            ));
+        }
+    }
+
+    // Axis 2: controller_did must actually control agent_did. Self-action
+    // is allowed (an autonomous machine quarantining itself, etc).
+    if agent_did == controller_did {
+        return None;
+    }
+    let agent_id = match registry.resolve(agent_did) {
+        Ok(id) => id,
+        Err(e) => {
+            return Some(format!(
+                "agent DID {} unresolvable: {}",
+                agent_did, e
+            ));
+        }
+    };
+    match &agent_id.identity_data {
+        IdentityData::Machine { controller_did: agent_controller, .. } => {
+            match agent_controller {
+                Some(c) if c == controller_did => None,
+                Some(c) => Some(format!(
+                    "controller_did mismatch: agent {} is controlled by {}, not {}",
+                    agent_did, c, controller_did
+                )),
+                None => Some(format!(
+                    "agent {} is autonomous (no controller); cannot accept third-party kill-switch from {}",
+                    agent_did, controller_did
+                )),
+            }
+        }
+        IdentityData::Human { .. } => Some(format!(
+            "agent_did {} resolves to a human identity; kill-switch only applies to machines",
+            agent_did
+        )),
+    }
 }
 
 // ============================================================================
@@ -12351,8 +15131,8 @@ async fn handle_list_tasks(
 
     let mut tasks = Vec::new();
     for key in keys.iter().take(limit * 2) {
-        if let Ok(Some(bytes)) = storage.get(CF_TASKS, key) {
-            if let Ok(task) = serde_json::from_slice::<TaskInfo>(&bytes) {
+        if let Ok(Some(bytes)) = storage.get(CF_TASKS, key)
+            && let Ok(task) = serde_json::from_slice::<TaskInfo>(&bytes) {
                 // Apply status filter
                 if let Some(ref s) = status_filter {
                     let task_status_str = match &task.status {
@@ -12381,7 +15161,6 @@ async fn handle_list_tasks(
                     break;
                 }
             }
-        }
     }
 
     Ok(serde_json::json!({
@@ -12820,18 +15599,16 @@ async fn handle_register_agent_template(
     // --- Marketplace monetization fields ---------------------------------
     // Optional DID binding (creator attribution). Accepted format: did:tenzro:...
     // Unbound here (we don't re-resolve), but the template carries it forward.
-    if let Some(did) = params.get("creator_did").and_then(|v| v.as_str()) {
-        if !did.is_empty() {
+    if let Some(did) = params.get("creator_did").and_then(|v| v.as_str())
+        && !did.is_empty() {
             template.creator_did = Some(did.to_string());
         }
-    }
 
     // Optional payout wallet. Mandatory when pricing != Free (validated below).
-    if let Some(w) = params.get("creator_wallet").and_then(|v| v.as_str()) {
-        if !w.is_empty() {
+    if let Some(w) = params.get("creator_wallet").and_then(|v| v.as_str())
+        && !w.is_empty() {
             template.creator_wallet = Some(parse_address(w)?);
         }
-    }
 
     // Pricing: accepted either as a canonical object (matches AgentPricingModel
     // serde) or as a compact string like "free" | "per_execution:<u128>" |
@@ -12967,17 +15744,16 @@ async fn handle_list_agent_templates(
 
     let mut templates = Vec::new();
     for key in keys.iter().take(limit * 2) {
-        if let Ok(Some(bytes)) = storage.get(CF_AGENT_TEMPLATES, key) {
-            if let Ok(tmpl) = serde_json::from_slice::<AgentTemplate>(&bytes) {
+        if let Ok(Some(bytes)) = storage.get(CF_AGENT_TEMPLATES, key)
+            && let Ok(tmpl) = serde_json::from_slice::<AgentTemplate>(&bytes) {
                 if !tmpl.is_available() {
                     continue;
                 }
                 // Apply tag filter
-                if let Some(ref tag) = tag_filter {
-                    if !tmpl.tags.iter().any(|t| t == tag) {
+                if let Some(ref tag) = tag_filter
+                    && !tmpl.tags.iter().any(|t| t == tag) {
                         continue;
                     }
-                }
                 // Apply creator filter
                 if let Some(ref c) = creator_filter {
                     let creator_hex = hex::encode(tmpl.creator.as_bytes());
@@ -12998,7 +15774,6 @@ async fn handle_list_agent_templates(
                     break;
                 }
             }
-        }
     }
 
     Ok(serde_json::to_value(&templates).unwrap_or_else(|_| serde_json::json!([])))
@@ -13611,11 +16386,10 @@ async fn handle_list_skills(
 
     let mut skills: Vec<tenzro_types::SkillDefinition> = Vec::new();
     for key in &keys {
-        if let Ok(Some(bytes)) = storage.get(CF_SKILLS, key.as_slice()) {
-            if let Ok(skill) = serde_json::from_slice::<tenzro_types::SkillDefinition>(&bytes) {
+        if let Ok(Some(bytes)) = storage.get(CF_SKILLS, key.as_slice())
+            && let Ok(skill) = serde_json::from_slice::<tenzro_types::SkillDefinition>(&bytes) {
                 skills.push(skill);
             }
-        }
     }
 
     // Liveness filter: default hides Inactive/Deprecated rows. Callers
@@ -13667,11 +16441,10 @@ async fn handle_search_skills(
 
     let mut skills: Vec<tenzro_types::SkillDefinition> = Vec::new();
     for key in &keys {
-        if let Ok(Some(bytes)) = storage.get(CF_SKILLS, key.as_slice()) {
-            if let Ok(skill) = serde_json::from_slice::<tenzro_types::SkillDefinition>(&bytes) {
+        if let Ok(Some(bytes)) = storage.get(CF_SKILLS, key.as_slice())
+            && let Ok(skill) = serde_json::from_slice::<tenzro_types::SkillDefinition>(&bytes) {
                 skills.push(skill);
             }
-        }
     }
 
     if !query.is_empty() {
@@ -13857,15 +16630,13 @@ async fn handle_list_tools(
 
     let mut tools: Vec<tenzro_types::ToolDefinition> = Vec::new();
     for key in keys {
-        if let Ok(Some(bytes)) = storage.get(CF_TOOLS, &key) {
-            if let Ok(tool) = serde_json::from_slice::<tenzro_types::ToolDefinition>(&bytes) {
+        if let Ok(Some(bytes)) = storage.get(CF_TOOLS, &key)
+            && let Ok(tool) = serde_json::from_slice::<tenzro_types::ToolDefinition>(&bytes) {
                 // Apply filters
-                if let Some(ref tt) = filter.tool_type {
-                    if &tool.tool_type != tt { continue; }
-                }
-                if let Some(ref cat) = filter.category {
-                    if &tool.category != cat { continue; }
-                }
+                if let Some(ref tt) = filter.tool_type
+                    && &tool.tool_type != tt { continue; }
+                if let Some(ref cat) = filter.category
+                    && &tool.category != cat { continue; }
                 if let Some(ref status_str) = filter.status {
                     let tool_status = format!("{:?}", tool.status).to_lowercase();
                     if !tool_status.contains(status_str.as_str()) { continue; }
@@ -13874,12 +16645,10 @@ async fn handle_list_tools(
                     // caller explicitly asked for a status (e.g. "inactive").
                     continue;
                 }
-                if let Some(ref did) = filter.creator_did {
-                    if tool.creator_did.as_deref() != Some(did.as_str()) { continue; }
-                }
+                if let Some(ref did) = filter.creator_did
+                    && tool.creator_did.as_deref() != Some(did.as_str()) { continue; }
                 tools.push(tool);
             }
-        }
     }
 
     // Pagination
@@ -13907,18 +16676,15 @@ async fn handle_search_tools(
 
     let mut tools: Vec<tenzro_types::ToolDefinition> = Vec::new();
     for key in keys {
-        if let Ok(Some(bytes)) = storage.get(CF_TOOLS, &key) {
-            if let Ok(tool) = serde_json::from_slice::<tenzro_types::ToolDefinition>(&bytes) {
+        if let Ok(Some(bytes)) = storage.get(CF_TOOLS, &key)
+            && let Ok(tool) = serde_json::from_slice::<tenzro_types::ToolDefinition>(&bytes) {
                 // Type/category/status/creator filters
-                if let Some(ref tt) = filter.tool_type {
-                    if &tool.tool_type != tt { continue; }
-                }
-                if let Some(ref cat) = filter.category {
-                    if &tool.category != cat { continue; }
-                }
-                if let Some(ref did) = filter.creator_did {
-                    if tool.creator_did.as_deref() != Some(did.as_str()) { continue; }
-                }
+                if let Some(ref tt) = filter.tool_type
+                    && &tool.tool_type != tt { continue; }
+                if let Some(ref cat) = filter.category
+                    && &tool.category != cat { continue; }
+                if let Some(ref did) = filter.creator_did
+                    && tool.creator_did.as_deref() != Some(did.as_str()) { continue; }
                 // Text query: match name, description, or capabilities
                 if let Some(ref q) = query {
                     let name_match = tool.name.to_lowercase().contains(q.as_str());
@@ -13928,7 +16694,6 @@ async fn handle_search_tools(
                 }
                 tools.push(tool);
             }
-        }
     }
 
     let offset = filter.offset.unwrap_or(0);
@@ -14182,11 +16947,10 @@ async fn handle_update_skill(
     if let Some(v) = params.get("description").and_then(|v| v.as_str()) { skill.description = v.to_string(); }
     if let Some(v) = params.get("version").and_then(|v| v.as_str()) { skill.version = v.to_string(); }
     if let Some(v) = params.get("creator_did").and_then(|v| v.as_str()) { skill.creator_did = v.to_string(); }
-    if let Some(v) = params.get("price_per_call") {
-        if let Some(price) = v.as_u64() {
+    if let Some(v) = params.get("price_per_call")
+        && let Some(price) = v.as_u64() {
             skill.price_per_call = price as u128;
         }
-    }
     if let Some(v) = params.get("status").and_then(|v| v.as_str()) {
         skill.status = match v {
             "active" => tenzro_types::SkillStatus::Active,
@@ -14731,14 +17495,12 @@ async fn handle_rate_agent_template(
     let mut total_score: u64 = 0;
     let mut count: u64 = 0;
     for rk in &rating_keys {
-        if let Ok(Some(rb)) = storage.get(CF_METADATA, rk.as_slice()) {
-            if let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&rb) {
-                if let Some(r) = entry.get("rating").and_then(|v| v.as_u64()) {
+        if let Ok(Some(rb)) = storage.get(CF_METADATA, rk.as_slice())
+            && let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&rb)
+                && let Some(r) = entry.get("rating").and_then(|v| v.as_u64()) {
                     total_score += r;
                     count += 1;
                 }
-            }
-        }
     }
 
     if count > 0 {
@@ -14788,8 +17550,8 @@ async fn handle_search_agent_templates(
 
     let mut templates: Vec<AgentTemplate> = Vec::new();
     for key in &keys {
-        if let Ok(Some(bytes)) = storage.get(CF_AGENT_TEMPLATES, key.as_slice()) {
-            if let Ok(tmpl) = serde_json::from_slice::<AgentTemplate>(&bytes) {
+        if let Ok(Some(bytes)) = storage.get(CF_AGENT_TEMPLATES, key.as_slice())
+            && let Ok(tmpl) = serde_json::from_slice::<AgentTemplate>(&bytes) {
                 if query.is_empty() {
                     templates.push(tmpl);
                     continue;
@@ -14802,7 +17564,6 @@ async fn handle_search_agent_templates(
                     templates.push(tmpl);
                 }
             }
-        }
     }
 
     let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -14850,14 +17611,12 @@ async fn handle_get_agent_template_stats(
     let mut total_score: u64 = 0;
     let mut total_ratings: u64 = 0;
     for rk in &rating_keys {
-        if let Ok(Some(rb)) = storage.get(CF_METADATA, rk.as_slice()) {
-            if let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&rb) {
-                if let Some(r) = entry.get("rating").and_then(|v| v.as_u64()) {
+        if let Ok(Some(rb)) = storage.get(CF_METADATA, rk.as_slice())
+            && let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&rb)
+                && let Some(r) = entry.get("rating").and_then(|v| v.as_u64()) {
                     total_score += r;
                     total_ratings += 1;
                 }
-            }
-        }
     }
 
     let average_rating: f64 = if total_ratings > 0 {
@@ -15883,13 +18642,25 @@ async fn handle_get_token(
             let mut arr = [0u8; 20]; arr.copy_from_slice(&b); arr
         });
         bytes.and_then(|a| registry.get_by_evm_address(&a))
+    } else if let Some(addr) = params.get("tempo_address").and_then(|v| v.as_str()) {
+        let addr_hex = addr.strip_prefix("0x").unwrap_or(addr);
+        let bytes = hex::decode(addr_hex).ok().filter(|b| b.len() == 20).map(|b| {
+            let mut arr = [0u8; 20]; arr.copy_from_slice(&b); arr
+        });
+        bytes.and_then(|a| registry.get_by_tempo_address(&a))
+    } else if let Some(mint) = params.get("svm_mint").and_then(|v| v.as_str()) {
+        let mint_hex = mint.strip_prefix("0x").unwrap_or(mint);
+        let bytes = hex::decode(mint_hex).ok().filter(|b| b.len() == 32).map(|b| {
+            let mut arr = [0u8; 32]; arr.copy_from_slice(&b); arr
+        });
+        bytes.and_then(|a| registry.get_by_svm_mint(&a))
     } else if let Some(id) = params.get("token_id").and_then(|v| v.as_str()) {
         let bytes = hex::decode(id).ok().filter(|b| b.len() == 32).map(|b| {
             let mut arr = [0u8; 32]; arr.copy_from_slice(&b); arr
         });
         bytes.and_then(|a| registry.get(&tenzro_token::TokenId::new(a)))
     } else {
-        return Err(JsonRpcError { code: -32602, message: "Provide symbol, evm_address, or token_id".to_string(), data: None });
+        return Err(JsonRpcError { code: -32602, message: "Provide symbol, evm_address, tempo_address, svm_mint, or token_id".to_string(), data: None });
     };
 
     match def {
@@ -15902,6 +18673,7 @@ async fn handle_get_token(
             "token_type": format!("{:?}", d.token_type),
             "evm_address": d.vm_addresses.evm_hex(),
             "svm_mint": d.vm_addresses.svm_hex(),
+            "tempo_address": d.vm_addresses.tempo_hex(),
             "creator": format!("0x{}", hex::encode(d.creator)),
         })),
         None => Err(JsonRpcError { code: -32603, message: "Token not found".to_string(), data: None }),
@@ -15924,6 +18696,7 @@ async fn handle_list_tokens(
             "svm" => Some(tenzro_token::TokenVmType::Svm),
             "daml" => Some(tenzro_token::TokenVmType::Daml),
             "native" => Some(tenzro_token::TokenVmType::Native),
+            "tempo-tip20" | "tempo" | "tip20" => Some(tenzro_token::TokenVmType::TempoTip20),
             _ => None,
         });
 
@@ -15942,6 +18715,8 @@ async fn handle_list_tokens(
             "decimals": d.decimals,
             "total_supply": d.total_supply.to_string(),
             "evm_address": d.vm_addresses.evm_hex(),
+            "svm_mint": d.vm_addresses.svm_hex(),
+            "tempo_address": d.vm_addresses.tempo_hex(),
         })
     }).collect();
 
@@ -15986,6 +18761,7 @@ async fn handle_cross_vm_transfer(
             "svm" => Ok(tenzro_token::TokenVmType::Svm),
             "daml" => Ok(tenzro_token::TokenVmType::Daml),
             "native" => Ok(tenzro_token::TokenVmType::Native),
+            "tempo-tip20" | "tempo" | "tip20" => Ok(tenzro_token::TokenVmType::TempoTip20),
             _ => Err(JsonRpcError { code: -32602, message: format!("Unknown VM type: {}", s), data: None }),
         }
     };
@@ -16302,7 +19078,11 @@ async fn handle_create_nft_collection(
     let value = serde_json::to_vec(&collection).map_err(|e| JsonRpcError {
         code: -32603, message: format!("Serialization error: {}", e), data: None,
     })?;
-    storage.put(CF_NFTS, &key, &value).map_err(|e| JsonRpcError {
+    storage.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
+        cf: CF_NFTS.to_string(),
+        key,
+        value,
+    }]).map_err(|e| JsonRpcError {
         code: -32603, message: format!("Storage error: {}", e), data: None,
     })?;
 
@@ -16372,9 +19152,6 @@ async fn handle_mint_nft(
     let nft_value = serde_json::to_vec(&nft).map_err(|e| JsonRpcError {
         code: -32603, message: format!("Serialization error: {}", e), data: None,
     })?;
-    storage.put(CF_NFTS, &nft_key, &nft_value).map_err(|e| JsonRpcError {
-        code: -32603, message: format!("Storage error: {}", e), data: None,
-    })?;
 
     // Update total_supply
     let prev_supply = collection.get("total_supply").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -16382,7 +19159,13 @@ async fn handle_mint_nft(
     let coll_value = serde_json::to_vec(&collection).map_err(|e| JsonRpcError {
         code: -32603, message: format!("Serialization error: {}", e), data: None,
     })?;
-    storage.put(CF_NFTS, &coll_key, &coll_value).map_err(|e| JsonRpcError {
+
+    // Atomically fsync both the new NFT row and the updated collection — a partial
+    // write would leave total_supply out of sync with the actual NFT keys.
+    storage.write_batch_sync(vec![
+        tenzro_storage::WriteOp::Put { cf: CF_NFTS.to_string(), key: nft_key, value: nft_value },
+        tenzro_storage::WriteOp::Put { cf: CF_NFTS.to_string(), key: coll_key, value: coll_value },
+    ]).map_err(|e| JsonRpcError {
         code: -32603, message: format!("Storage error: {}", e), data: None,
     })?;
 
@@ -16458,7 +19241,11 @@ async fn handle_transfer_nft(
     let nft_value = serde_json::to_vec(&nft).map_err(|e| JsonRpcError {
         code: -32603, message: format!("Serialization error: {}", e), data: None,
     })?;
-    storage.put(CF_NFTS, &nft_key, &nft_value).map_err(|e| JsonRpcError {
+    storage.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
+        cf: CF_NFTS.to_string(),
+        key: nft_key,
+        value: nft_value,
+    }]).map_err(|e| JsonRpcError {
         code: -32603, message: format!("Storage error: {}", e), data: None,
     })?;
 
@@ -16549,8 +19336,8 @@ async fn handle_list_nft_collections(
         if collections.len() >= limit {
             break;
         }
-        if let Ok(Some(raw)) = storage.get(CF_NFTS, &key) {
-            if let Ok(coll) = serde_json::from_slice::<Value>(&raw) {
+        if let Ok(Some(raw)) = storage.get(CF_NFTS, &key)
+            && let Ok(coll) = serde_json::from_slice::<Value>(&raw) {
                 if let Some(cf) = creator_filter {
                     let cf_hex = cf.strip_prefix("0x").unwrap_or(cf);
                     let coll_creator = coll.get("creator").and_then(|v| v.as_str()).unwrap_or("");
@@ -16572,7 +19359,6 @@ async fn handle_list_nft_collections(
                 }
                 collections.push(coll);
             }
-        }
     }
 
     Ok(serde_json::json!({
@@ -16637,7 +19423,11 @@ async fn handle_register_nft_pointer(
     let coll_value = serde_json::to_vec(&collection).map_err(|e| JsonRpcError {
         code: -32603, message: format!("Serialization error: {}", e), data: None,
     })?;
-    storage.put(CF_NFTS, &coll_key, &coll_value).map_err(|e| JsonRpcError {
+    storage.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
+        cf: CF_NFTS.to_string(),
+        key: coll_key,
+        value: coll_value,
+    }]).map_err(|e| JsonRpcError {
         code: -32603, message: format!("Storage error: {}", e), data: None,
     })?;
 
@@ -17018,20 +19808,16 @@ async fn debridge_mcp_proxy(tool_name: &str, arguments: serde_json::Value) -> st
 
     // Parse SSE response (event: message\ndata: {json})
     for line in body.lines() {
-        if let Some(data) = line.strip_prefix("data: ") {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                if let Some(result) = json.get("result") {
-                    if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
-                        if let Some(first) = content.first() {
-                            if let Some(text) = first.get("text").and_then(|t| t.as_str()) {
+        if let Some(data) = line.strip_prefix("data: ")
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(data)
+                && let Some(result) = json.get("result") {
+                    if let Some(content) = result.get("content").and_then(|c| c.as_array())
+                        && let Some(first) = content.first()
+                            && let Some(text) = first.get("text").and_then(|t| t.as_str()) {
                                 return serde_json::from_str(text).or_else(|_| Ok(serde_json::json!({"text": text})));
                             }
-                        }
-                    }
                     return Ok(result.clone());
                 }
-            }
-        }
     }
 
     // Try parsing as direct JSON
@@ -17457,7 +20243,7 @@ async fn handle_erc7802_crosschain_mint(
         code: -32603, message: "Storage not initialized".to_string(), data: None,
     })?;
 
-    let bridge = resolve_authorized_bridge(&storage, p.get("bridge").and_then(|v| v.as_str()))?;
+    let bridge = resolve_authorized_bridge(storage, p.get("bridge").and_then(|v| v.as_str()))?;
     let bridge_hex = bridge.strip_prefix("0x").unwrap_or(&bridge).to_lowercase();
 
     let recipient_hex = recipient.strip_prefix("0x").unwrap_or(&recipient);
@@ -17523,7 +20309,7 @@ async fn handle_erc7802_crosschain_burn(
         code: -32603, message: "Storage not initialized".to_string(), data: None,
     })?;
 
-    let bridge = resolve_authorized_bridge(&storage, p.get("bridge").and_then(|v| v.as_str()))?;
+    let bridge = resolve_authorized_bridge(storage, p.get("bridge").and_then(|v| v.as_str()))?;
     let bridge_hex = bridge.strip_prefix("0x").unwrap_or(&bridge).to_lowercase();
 
     let from_hex = from.strip_prefix("0x").unwrap_or(&from);
@@ -17661,13 +20447,11 @@ async fn handle_check_compliance(
     }
 
     // Check max balance per holder
-    if let Some(max_bal) = rules.get("max_balance_per_holder").and_then(|v| v.as_str()) {
-        if let Ok(max) = max_bal.parse::<u128>() {
-            if max > 0 && amount > max {
+    if let Some(max_bal) = rules.get("max_balance_per_holder").and_then(|v| v.as_str())
+        && let Ok(max) = max_bal.parse::<u128>()
+            && max > 0 && amount > max {
                 violations.push(format!("Transfer amount {} exceeds max balance per holder {}", amount, max));
             }
-        }
-    }
 
     Ok(serde_json::json!({
         "token_id": token_id,
@@ -17838,15 +20622,14 @@ async fn handle_get_events(
 
     for key in keys {
         if events.len() >= limit {
-            if let Ok(Some(raw)) = storage.get(CF_EVENTS, &key) {
-                if let Ok(evt) = serde_json::from_slice::<Value>(&raw) {
+            if let Ok(Some(raw)) = storage.get(CF_EVENTS, &key)
+                && let Ok(evt) = serde_json::from_slice::<Value>(&raw) {
                     next_cursor = evt.get("sequence").and_then(|v| v.as_u64());
                 }
-            }
             break;
         }
-        if let Ok(Some(raw)) = storage.get(CF_EVENTS, &key) {
-            if let Ok(evt) = serde_json::from_slice::<Value>(&raw) {
+        if let Ok(Some(raw)) = storage.get(CF_EVENTS, &key)
+            && let Ok(evt) = serde_json::from_slice::<Value>(&raw) {
                 let seq = evt.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0);
                 if seq < from_seq { continue; }
 
@@ -17873,7 +20656,6 @@ async fn handle_get_events(
                 }
                 events.push(evt);
             }
-        }
     }
 
     Ok(serde_json::json!({
@@ -18420,11 +21202,10 @@ async fn handle_get_role(node: &Arc<TenzroNode>) -> std::result::Result<Value, J
     let mut out = serde_json::json!({
         "role": format!("{:?}", role),
     });
-    if let Some(network) = node.network() {
-        if let Ok(peer_id) = network.local_peer_id().await {
+    if let Some(network) = node.network()
+        && let Ok(peer_id) = network.local_peer_id().await {
             out["peer_id"] = serde_json::json!(peer_id.to_string());
         }
-    }
     Ok(out)
 }
 
@@ -18481,11 +21262,10 @@ async fn handle_list_subscriptions(
 
     let mut subscriptions = Vec::with_capacity(keys.len());
     for key in &keys {
-        if let Ok(Some(bytes)) = storage.get(CF_METADATA, key) {
-            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+        if let Ok(Some(bytes)) = storage.get(CF_METADATA, key)
+            && let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
                 subscriptions.push(value);
             }
-        }
     }
 
     Ok(serde_json::json!({
@@ -18851,6 +21631,175 @@ async fn handle_sign_message(
         "pq_signature": format!("0x{}", hex::encode(&hybrid_sig.pq)),
         "pq_public_key": format!("0x{}", hex::encode(wallet.pq_verifying_key_bytes())),
     }))
+}
+
+/// `tenzro_ap2SignMandate` — produce a signed AP2 `Vdc` for a
+/// `CheckoutMandate` or `PaymentMandate` (AP2 v0.2 mandate-pair).
+///
+/// This is the sign-side counterpart to `tenzro_ap2VerifyMandate`. The
+/// canonical preimage is built by `tenzro_payments::ap2::Vdc::canonical_preimage`
+/// (so the bytes match what `Vdc::sign` would feed into `Signer::sign`),
+/// the auth-bound wallet signs the preimage with its Ed25519 classical
+/// key via `WalletService::sign_data`, and the result is reassembled
+/// into a `Vdc` that round-trips through `Vdc::verify()` before being
+/// returned. Wallets that aren't Ed25519 are rejected — AP2 v0.2 only
+/// defines `"ed25519"` as the signing alg.
+///
+/// Auth: mandatory DPoP+JWT. The signing key is the wallet bound to the
+/// controller DID — no raw private keys over the wire. The caller's
+/// `signer_did` MUST match the wallet's controller DID, otherwise the
+/// returned VDC would carry a DID the verifier can't bind back to the
+/// public key (which the AP2 validator would then reject anyway).
+///
+/// Params:
+/// ```json
+/// {
+///   "mandate_kind": "checkout" | "payment",
+///   "mandate":      { ...CheckoutMandate or PaymentMandate JSON... },
+///   "signer_did":   "did:tenzro:human:..." | "did:tenzro:machine:..."
+/// }
+/// ```
+async fn handle_ap2_sign_mandate(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+    auth_ctx: &AuthContext,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = unwrap_params(params)?;
+
+    let kind_str = p.get("mandate_kind").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing mandate_kind ('checkout' | 'payment')".to_string(),
+        data: None,
+    })?;
+    let mandate_val = p.get("mandate").cloned().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing mandate".to_string(),
+        data: None,
+    })?;
+    let signer_did = p
+        .get("signer_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing signer_did".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let payload = match kind_str {
+        "checkout" => {
+            let m: tenzro_payments::ap2::CheckoutMandate = serde_json::from_value(mandate_val)
+                .map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("invalid CheckoutMandate JSON: {e}"),
+                    data: None,
+                })?;
+            tenzro_payments::ap2::MandatePayload::Checkout(m)
+        }
+        "payment" => {
+            let m: tenzro_payments::ap2::PaymentMandate = serde_json::from_value(mandate_val)
+                .map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("invalid PaymentMandate JSON: {e}"),
+                    data: None,
+                })?;
+            tenzro_payments::ap2::MandatePayload::Payment(m)
+        }
+        other => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!("invalid mandate_kind '{other}': must be 'checkout' or 'payment'"),
+                data: None,
+            });
+        }
+    };
+
+    // Auth → wallet, mirroring `handle_sign_message`. No specific intent;
+    // AP2 signing is a low-level primitive, the engine validates JWT/DPoP only.
+    let outcome = resolve_auth_to_wallet(node, auth_ctx, None).await;
+    let wallet_id = match outcome {
+        AuthOutcome::Authenticated { wallet_id } => wallet_id,
+        AuthOutcome::AuthError(err) => return Err(err),
+        AuthOutcome::Unauthenticated => {
+            return Err(JsonRpcError {
+                code: -32001,
+                message: "Authentication required: present an OAuth/DPoP JWT \
+                          via the 'Authorization: DPoP <jwt>' + 'DPoP: <proof>' \
+                          headers."
+                    .to_string(),
+                data: None,
+            });
+        }
+    };
+
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Wallet service not initialized on this node".to_string(),
+        data: None,
+    })?;
+    use tenzro_wallet::{WalletId, WalletService};
+    let wid = WalletId::from_string(wallet_id.clone());
+    let wallet = wallet_service
+        .get_wallet(&wid)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Wallet lookup failed: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: format!("Wallet {} not found", wallet_id),
+            data: None,
+        })?;
+
+    if wallet.public_key.key_type() != KeyType::Ed25519 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "AP2 v0.2 only supports Ed25519 signing wallets; \
+                      this wallet is Secp256k1"
+                .to_string(),
+            data: None,
+        });
+    }
+
+    let signer_pk = wallet.public_key.as_bytes().to_vec();
+    let preimage = tenzro_payments::ap2::Vdc::canonical_preimage(
+        &payload, &signer_did, &signer_pk,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("AP2 canonical preimage failed: {e}"),
+        data: None,
+    })?;
+
+    let hybrid_sig = wallet_service
+        .sign_data(&wid, &preimage)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Wallet AP2 signing failed: {}", e),
+            data: None,
+        })?;
+
+    // Use the Ed25519 classical signature; assemble + self-verify.
+    let vdc = tenzro_payments::ap2::Vdc::assemble(
+        payload,
+        signer_did,
+        signer_pk,
+        hybrid_sig.classical.clone(),
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("AP2 VDC assembly/self-verify failed: {e}"),
+        data: None,
+    })?;
+
+    serde_json::to_value(&vdc).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("AP2 VDC serialization failed: {e}"),
+        data: None,
+    })
 }
 
 /// Signs a transaction server-side and returns a payload ready for `eth_sendRawTransaction`.
@@ -19461,7 +22410,7 @@ async fn handle_detect_tee(
 }
 
 async fn handle_get_attestation_tee(
-    _node: &Arc<TenzroNode>,
+    node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.map(|p| if let Some(arr) = p.as_array() { arr.first().cloned().unwrap_or(p) } else { p });
@@ -19476,13 +22425,23 @@ async fn handle_get_attestation_tee(
         vec![0u8; 64]
     };
 
-    let provider = tenzro_tee::detection::detect_tee().await.ok_or_else(|| JsonRpcError {
-        code: -32603, message: "No TEE hardware detected".to_string(), data: None,
-    })?;
-
-    let report = provider.generate_attestation(&user_data).await.map_err(|e| JsonRpcError {
-        code: -32603, message: format!("Attestation generation failed: {}", e), data: None,
-    })?;
+    // Use the local TEE provider stashed at node startup if it is available
+    // (the common case: `init_tee()` ran detection once and retained the
+    // provider). Fall back to live detection only when the node was started
+    // without TEE — this is the rare path on legacy operator setups where
+    // TEE hardware was hot-attached after node start.
+    let report = if let Some(provider) = node.tee_provider() {
+        provider.generate_attestation(&user_data).await.map_err(|e| JsonRpcError {
+            code: -32603, message: format!("Attestation generation failed: {}", e), data: None,
+        })?
+    } else {
+        let provider = tenzro_tee::detection::detect_tee().await.ok_or_else(|| JsonRpcError {
+            code: -32603, message: "No TEE hardware detected".to_string(), data: None,
+        })?;
+        provider.generate_attestation(&user_data).await.map_err(|e| JsonRpcError {
+            code: -32603, message: format!("Attestation generation failed: {}", e), data: None,
+        })?
+    };
 
     Ok(serde_json::json!({
         "vendor": format!("{:?}", report.vendor),
@@ -21170,12 +24129,9 @@ mod onnx_runtime_rpc_tests {
         assert_eq!(super::parse_u64_value(&json!(null)), None);
     }
 
-    #[test]
-    fn block_range_constants_are_within_safe_bounds() {
-        // Safety margin: the runtime-enforced upper bound must never exceed
-        // axum's default body limit window (we keep ~10x headroom).
-        assert!(super::BLOCK_RANGE_MAX <= 256);
-        assert!(super::BLOCK_RANGE_DEFAULT <= super::BLOCK_RANGE_MAX);
-        assert!(super::BLOCK_RANGE_DEFAULT > 0);
-    }
+    // Compile-time invariants: the runtime-enforced upper bound must never
+    // exceed axum's default body limit window (we keep ~10x headroom).
+    const _: () = assert!(super::BLOCK_RANGE_MAX <= 256);
+    const _: () = assert!(super::BLOCK_RANGE_DEFAULT <= super::BLOCK_RANGE_MAX);
+    const _: () = assert!(super::BLOCK_RANGE_DEFAULT > 0);
 }

@@ -4,6 +4,7 @@ use crate::challenge_store::ChallengeStore;
 use crate::error::{PaymentError, Result};
 use crate::traits::PaymentProtocol;
 use crate::types::{PaymentChallenge, PaymentCredential, PaymentReceipt, PaymentVerification};
+use crate::x402::receipt::X402SettlementReceiptBody;
 use crate::x402::scheme::{build_credential_preimage, SchemeRegistry};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -262,6 +263,52 @@ impl PaymentProtocol for X402PaymentServer {
 
             self.challenge_store.remove(&challenge.challenge_id);
 
+            // Tenzro x402 extension: emit a settlement-AIR commitment +
+            // cross-VM `network` field as the `X-PAYMENT-RESPONSE` body.
+            // We bind it by stashing the JSON receipt body in `extra` under
+            // the key `x_payment_response`. Transport layers
+            // (axum middleware, CLI, MCP) base64-encode this string and
+            // emit it as the `X-PAYMENT-RESPONSE` header.
+            let scheme_id = challenge
+                .extra
+                .get("scheme")
+                .and_then(|v| v.as_str())
+                .unwrap_or(crate::x402::DEFAULT_SCHEME)
+                .to_string();
+            let tx_hash_hex = hex::encode(receipt.transaction_hash.as_bytes());
+            let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
+            // Receipt body construction can fail only on malformed network
+            // string — in that case skip the extension and return the bare
+            // receipt rather than failing settlement.
+            if let Ok(body) = X402SettlementReceiptBody::finalized(
+                &scheme_id,
+                &challenge.chain,
+                &challenge.challenge_id,
+                &verification.credential_id,
+                &challenge.resource,
+                &challenge.asset,
+                &challenge.amount.to_string(),
+                &verification.payer_did,
+                &challenge.recipient,
+                &tx_hash_hex,
+            ) {
+                if let Ok(body_value) = serde_json::to_value(&body) {
+                    extra.insert("x_payment_response".to_string(), body_value);
+                }
+                if let Some(ref c) = body.tenzro_commitment {
+                    extra.insert(
+                        "tenzro_commitment".to_string(),
+                        serde_json::Value::String(c.clone()),
+                    );
+                }
+                if let Some(ref vm) = body.tenzro_vm {
+                    extra.insert(
+                        "tenzro_vm".to_string(),
+                        serde_json::Value::String(vm.clone()),
+                    );
+                }
+            }
+
             return Ok(PaymentReceipt {
                 receipt_id: receipt.receipt_id,
                 protocol: "x402".to_string(),
@@ -269,10 +316,11 @@ impl PaymentProtocol for X402PaymentServer {
                 credential_id: verification.credential_id.clone(),
                 amount: receipt.amount as u128,
                 asset: challenge.asset,
-                settlement_tx: Some(hex::encode(receipt.transaction_hash.as_bytes())),
+                settlement_tx: Some(tx_hash_hex),
                 chain: challenge.chain,
                 settled_at: Utc::now(),
-                extra: HashMap::new(),
+                principal_chain: receipt.principal_chain,
+                extra,
             });
         }
 
@@ -293,6 +341,10 @@ impl PaymentProtocol for X402PaymentServer {
             settlement_tx: verification.settlement_ref.clone(),
             chain: challenge.chain,
             settled_at: Utc::now(),
+            principal_chain: tenzro_types::principal_chain::anonymous_chain_for_did(
+                verification.payer_did.clone(),
+                tenzro_types::primitives::BlockHeight::new(0),
+            ),
             extra: HashMap::new(),
         })
     }

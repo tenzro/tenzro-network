@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tenzro_types::principal_chain::PrincipalChain;
 
 /// A payment challenge issued by a server (HTTP 402 response)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +81,12 @@ pub struct PaymentVerification {
     pub settlement_ref: Option<String>,
 }
 
-/// A receipt for a completed payment
+/// A receipt for a completed payment.
+///
+/// Carries the frozen `PrincipalChain` (Agent-Swarm Spec 5) of the payer at
+/// the time of settlement. Resolved via `IdentityPaymentBinder`'s
+/// `PrincipalChainResolver` from the credential's payer DID; falls back to
+/// a synthetic anonymous chain when no DID is bound to the payer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentReceipt {
     /// Receipt ID
@@ -101,6 +107,9 @@ pub struct PaymentReceipt {
     pub chain: String,
     /// Receipt timestamp
     pub settled_at: DateTime<Utc>,
+    /// Frozen principal chain for the payer at settlement time
+    /// (Agent-Swarm Spec 5).
+    pub principal_chain: PrincipalChain,
     /// Additional data
     pub extra: HashMap<String, serde_json::Value>,
 }

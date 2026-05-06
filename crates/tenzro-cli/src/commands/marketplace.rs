@@ -470,11 +470,10 @@ impl RunTemplateCmd {
                 if let Some(v) = report.get("steps_failed").and_then(|v| v.as_u64()) {
                     output::print_field("Steps Failed", &v.to_string());
                 }
-                if let Some(v) = report.get("steps_skipped_by_dry_run").and_then(|v| v.as_u64()) {
-                    if v > 0 {
+                if let Some(v) = report.get("steps_skipped_by_dry_run").and_then(|v| v.as_u64())
+                    && v > 0 {
                         output::print_field("Steps Skipped (dry-run)", &v.to_string());
                     }
-                }
                 if let Some(v) = report.get("fee_paid").and_then(|v| v.as_str()) {
                     output::print_field("Fee Paid", &format!("{} base units", v));
                 }

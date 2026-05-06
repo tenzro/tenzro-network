@@ -25,7 +25,7 @@ async fn test_topic_subscription() {
     let config = NetworkConfig::local();
     let network = TenzroNetworkService::new(config).await.unwrap();
 
-    let result = network.subscribe("tenzro/test/1.0.0").await;
+    let result = network.subscribe("tenzro/test").await;
     assert!(result.is_ok());
 }
 
@@ -35,12 +35,12 @@ async fn test_broadcast_message() {
     let network = TenzroNetworkService::new(config).await.unwrap();
 
     // Subscribe first
-    network.subscribe("tenzro/test/1.0.0").await.unwrap();
+    network.subscribe("tenzro/test").await.unwrap();
 
     // Broadcast message — may fail when no peers are subscribed to the topic,
     // which is expected in a single-node test environment
     let message = NetworkMessage::new(MessagePayload::Ping);
-    let _result = network.broadcast("tenzro/test/1.0.0", message).await;
+    let _result = network.broadcast("tenzro/test", message).await;
 }
 
 #[tokio::test]
@@ -104,9 +104,9 @@ async fn test_multiple_subscriptions() {
 
     // Subscribe to multiple topics
     let topics = vec![
-        "tenzro/blocks/1.0.0",
-        "tenzro/transactions/1.0.0",
-        "tenzro/consensus/1.0.0",
+        "tenzro/blocks",
+        "tenzro/transactions",
+        "tenzro/consensus",
     ];
 
     for topic in topics {

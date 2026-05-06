@@ -29,7 +29,8 @@ use crate::VmError;
 use dashmap::DashMap;
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tenzro_storage::{KvStore, CF_NFTS};
+use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
 // Gas constants
@@ -142,7 +143,16 @@ pub struct NftCollection {
     pub created_at: u64,
 }
 
-/// Central NFT state registry shared across precompile invocations
+/// Central NFT state registry shared across precompile invocations.
+///
+/// All state is held in-memory via `DashMap` for fast concurrent reads from the
+/// EVM precompile. When constructed via [`NftRegistry::with_storage`] the
+/// registry write-through-persists every mutation to RocksDB `CF_NFTS` and
+/// hydrates from the same column family on startup, so collections / owners /
+/// URIs / balances / pointers / nonces all survive node restarts. The
+/// persistent JSON format is shared with the `tenzro-node` RPC handlers
+/// (`handle_create_nft_collection`, `handle_mint_nft`, `handle_transfer_nft`,
+/// …) — both layers read and write the same keys.
 pub struct NftRegistry {
     /// Collections indexed by collection_id
     collections: DashMap<[u8; 32], NftCollection>,
@@ -160,10 +170,12 @@ pub struct NftRegistry {
     svm_pointers: DashMap<[u8; 32], [u8; 32]>,
     /// Per-creator nonce for deterministic collection ID generation
     creator_nonces: DashMap<[u8; 20], u64>,
+    /// Optional durable backing store. `None` for tests / ephemeral runs.
+    storage: Option<Arc<dyn KvStore>>,
 }
 
 impl NftRegistry {
-    /// Create a new empty NFT registry
+    /// Create a new empty in-memory NFT registry (no persistence).
     pub fn new() -> Self {
         Self {
             collections: DashMap::new(),
@@ -174,12 +186,295 @@ impl NftRegistry {
             evm_pointers: DashMap::new(),
             svm_pointers: DashMap::new(),
             creator_nonces: DashMap::new(),
+            storage: None,
         }
+    }
+
+    /// Create a registry backed by `store`, hydrating existing state from
+    /// `CF_NFTS` and write-through-persisting every subsequent mutation.
+    pub fn with_storage(store: Arc<dyn KvStore>) -> Self {
+        let registry = Self {
+            collections: DashMap::new(),
+            nft_owners: DashMap::new(),
+            token_uris: DashMap::new(),
+            erc721_balances: DashMap::new(),
+            erc1155_balances: DashMap::new(),
+            evm_pointers: DashMap::new(),
+            svm_pointers: DashMap::new(),
+            creator_nonces: DashMap::new(),
+            storage: Some(store),
+        };
+        registry.hydrate_from_storage();
+        registry
     }
 
     /// Returns the total number of registered collections
     pub fn collection_count(&self) -> usize {
         self.collections.len()
+    }
+
+    // -----------------------------------------------------------------
+    // Persistence helpers
+    // -----------------------------------------------------------------
+
+    fn hex32(b: &[u8; 32]) -> String { hex::encode(b) }
+    fn hex20(b: &[u8; 20]) -> String { hex::encode(b) }
+
+    fn collection_key(id: &[u8; 32]) -> Vec<u8> {
+        format!("collection:{}", Self::hex32(id)).into_bytes()
+    }
+    fn nft_key(coll: &[u8; 32], token_id: u128) -> Vec<u8> {
+        format!("nft:{}:{}", Self::hex32(coll), token_id).into_bytes()
+    }
+    fn bal721_key(coll: &[u8; 32], owner: &[u8; 20]) -> Vec<u8> {
+        format!("bal721:{}:{}", Self::hex32(coll), Self::hex20(owner)).into_bytes()
+    }
+    fn bal1155_key(coll: &[u8; 32], owner: &[u8; 20], token_id: u128) -> Vec<u8> {
+        format!("bal1155:{}:{}:{}", Self::hex32(coll), Self::hex20(owner), token_id).into_bytes()
+    }
+    fn evm_ptr_key(coll: &[u8; 32]) -> Vec<u8> {
+        format!("evm_ptr:{}", Self::hex32(coll)).into_bytes()
+    }
+    fn svm_ptr_key(coll: &[u8; 32]) -> Vec<u8> {
+        format!("svm_ptr:{}", Self::hex32(coll)).into_bytes()
+    }
+    fn nonce_key(creator: &[u8; 20]) -> Vec<u8> {
+        format!("nonce:{}", Self::hex20(creator)).into_bytes()
+    }
+
+    fn persist_collection(&self, c: &NftCollection) {
+        let Some(store) = &self.storage else { return };
+        let value = serde_json::json!({
+            "collection_id": format!("0x{}", Self::hex32(&c.collection_id)),
+            "name": c.name,
+            "symbol": c.symbol,
+            "creator": format!("0x{}", Self::hex20(&c.creator)),
+            "total_supply": c.total_supply.to_string(),
+            "standard": c.standard.as_u8(),
+            "created_at": c.created_at,
+        });
+        match serde_json::to_vec(&value) {
+            Ok(bytes) => {
+                if let Err(e) = store.put(CF_NFTS, &Self::collection_key(&c.collection_id), &bytes) {
+                    warn!(target: "nft_factory", error = %e, "persist_collection failed");
+                }
+            }
+            Err(e) => warn!(target: "nft_factory", error = %e, "persist_collection serialize"),
+        }
+    }
+
+    fn persist_nft(&self, coll: &[u8; 32], token_id: u128, owner: &[u8; 20], uri: &str, amount: u128) {
+        let Some(store) = &self.storage else { return };
+        let value = serde_json::json!({
+            "collection_id": format!("0x{}", Self::hex32(coll)),
+            "token_id": token_id.to_string(),
+            "owner": format!("0x{}", Self::hex20(owner)),
+            "uri": uri,
+            "amount": amount.to_string(),
+        });
+        if let Ok(bytes) = serde_json::to_vec(&value)
+            && let Err(e) = store.put(CF_NFTS, &Self::nft_key(coll, token_id), &bytes)
+        {
+            warn!(target: "nft_factory", error = %e, "persist_nft failed");
+        }
+    }
+
+    fn persist_balance_721(&self, coll: &[u8; 32], owner: &[u8; 20], balance: u128) {
+        let Some(store) = &self.storage else { return };
+        if let Err(e) = store.put(CF_NFTS, &Self::bal721_key(coll, owner), &balance.to_le_bytes()) {
+            warn!(target: "nft_factory", error = %e, "persist_balance_721 failed");
+        }
+    }
+
+    fn persist_balance_1155(&self, coll: &[u8; 32], owner: &[u8; 20], token_id: u128, balance: u128) {
+        let Some(store) = &self.storage else { return };
+        if let Err(e) = store.put(CF_NFTS, &Self::bal1155_key(coll, owner, token_id), &balance.to_le_bytes()) {
+            warn!(target: "nft_factory", error = %e, "persist_balance_1155 failed");
+        }
+    }
+
+    fn persist_evm_pointer(&self, coll: &[u8; 32], evm_contract: &[u8; 20]) {
+        let Some(store) = &self.storage else { return };
+        if let Err(e) = store.put(CF_NFTS, &Self::evm_ptr_key(coll), evm_contract) {
+            warn!(target: "nft_factory", error = %e, "persist_evm_pointer failed");
+        }
+    }
+
+    fn persist_svm_pointer(&self, coll: &[u8; 32], svm_mint: &[u8; 32]) {
+        let Some(store) = &self.storage else { return };
+        if let Err(e) = store.put(CF_NFTS, &Self::svm_ptr_key(coll), svm_mint) {
+            warn!(target: "nft_factory", error = %e, "persist_svm_pointer failed");
+        }
+    }
+
+    fn persist_nonce(&self, creator: &[u8; 20], nonce: u64) {
+        let Some(store) = &self.storage else { return };
+        if let Err(e) = store.put(CF_NFTS, &Self::nonce_key(creator), &nonce.to_le_bytes()) {
+            warn!(target: "nft_factory", error = %e, "persist_nonce failed");
+        }
+    }
+
+    /// Walk every key in `CF_NFTS` and rebuild the in-memory maps. Called once
+    /// from [`with_storage`].
+    fn hydrate_from_storage(&self) {
+        let Some(store) = &self.storage else { return };
+        let mut collection_count = 0usize;
+        let mut nft_count = 0usize;
+
+        // Collections
+        let coll_keys = match store.get_keys_with_prefix(CF_NFTS, b"collection:") {
+            Ok(keys) => keys,
+            Err(e) => { warn!(target: "nft_factory", error = %e, "hydrate: list collections"); return; }
+        };
+        for key in coll_keys {
+            let Ok(Some(bytes)) = store.get(CF_NFTS, &key) else { continue };
+            let Ok(v): serde_json::Result<serde_json::Value> = serde_json::from_slice(&bytes) else { continue };
+            let Some(id_hex) = v.get("collection_id").and_then(|x| x.as_str()) else { continue };
+            let id_hex = id_hex.strip_prefix("0x").unwrap_or(id_hex);
+            let Ok(id_bytes) = hex::decode(id_hex) else { continue };
+            if id_bytes.len() != 32 { continue }
+            let mut collection_id = [0u8; 32];
+            collection_id.copy_from_slice(&id_bytes);
+
+            let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let symbol = v.get("symbol").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let creator_hex = v.get("creator").and_then(|x| x.as_str()).unwrap_or("0x0000000000000000000000000000000000000000");
+            let creator_hex = creator_hex.strip_prefix("0x").unwrap_or(creator_hex);
+            let mut creator = [0u8; 20];
+            if let Ok(cb) = hex::decode(creator_hex)
+                && cb.len() == 20
+            {
+                creator.copy_from_slice(&cb)
+            }
+            let total_supply = v.get("total_supply")
+                .and_then(|x| x.as_str().and_then(|s| s.parse::<u128>().ok()).or_else(|| x.as_u64().map(|n| n as u128)))
+                .unwrap_or(0);
+            let standard = v.get("standard")
+                .and_then(|x| x.as_u64())
+                .and_then(|n| NftStandard::from_u8(n as u8))
+                .unwrap_or(NftStandard::Erc721);
+            let created_at = v.get("created_at").and_then(|x| x.as_u64()).unwrap_or(0);
+
+            self.collections.insert(collection_id, NftCollection {
+                collection_id, name, symbol, creator, total_supply, standard, created_at,
+            });
+            collection_count += 1;
+        }
+
+        // NFTs (owners + URIs)
+        if let Ok(nft_keys) = store.get_keys_with_prefix(CF_NFTS, b"nft:") {
+            for key in nft_keys {
+                let Ok(Some(bytes)) = store.get(CF_NFTS, &key) else { continue };
+                let Ok(v): serde_json::Result<serde_json::Value> = serde_json::from_slice(&bytes) else { continue };
+                let coll_hex = v.get("collection_id").and_then(|x| x.as_str()).map(|s| s.strip_prefix("0x").unwrap_or(s).to_string()).unwrap_or_default();
+                let token_id: u128 = v.get("token_id")
+                    .and_then(|x| x.as_str().and_then(|s| s.parse::<u128>().ok()).or_else(|| x.as_u64().map(|n| n as u128)))
+                    .unwrap_or(0);
+                let owner_hex = v.get("owner").and_then(|x| x.as_str()).map(|s| s.strip_prefix("0x").unwrap_or(s).to_string()).unwrap_or_default();
+                let uri = v.get("uri").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let Ok(coll_b) = hex::decode(&coll_hex) else { continue };
+                if coll_b.len() != 32 { continue }
+                let mut coll = [0u8; 32]; coll.copy_from_slice(&coll_b);
+                let Ok(owner_b) = hex::decode(&owner_hex) else { continue };
+                if owner_b.len() != 20 { continue }
+                let mut owner = [0u8; 20]; owner.copy_from_slice(&owner_b);
+                self.nft_owners.insert((coll, token_id), owner);
+                if !uri.is_empty() {
+                    self.token_uris.insert((coll, token_id), uri);
+                }
+                nft_count += 1;
+            }
+        }
+
+        // ERC-721 balances
+        if let Ok(keys) = store.get_keys_with_prefix(CF_NFTS, b"bal721:") {
+            for key in keys {
+                let Ok(Some(bytes)) = store.get(CF_NFTS, &key) else { continue };
+                if bytes.len() != 16 { continue }
+                let s = match std::str::from_utf8(&key) { Ok(s) => s, Err(_) => continue };
+                // bal721:<coll_hex>:<owner_hex>
+                let parts: Vec<&str> = s.splitn(3, ':').collect();
+                if parts.len() != 3 { continue }
+                let Ok(coll_b) = hex::decode(parts[1]) else { continue };
+                let Ok(owner_b) = hex::decode(parts[2]) else { continue };
+                if coll_b.len() != 32 || owner_b.len() != 20 { continue }
+                let mut coll = [0u8; 32]; coll.copy_from_slice(&coll_b);
+                let mut owner = [0u8; 20]; owner.copy_from_slice(&owner_b);
+                let mut buf = [0u8; 16]; buf.copy_from_slice(&bytes);
+                self.erc721_balances.insert((coll, owner), u128::from_le_bytes(buf));
+            }
+        }
+
+        // ERC-1155 balances
+        if let Ok(keys) = store.get_keys_with_prefix(CF_NFTS, b"bal1155:") {
+            for key in keys {
+                let Ok(Some(bytes)) = store.get(CF_NFTS, &key) else { continue };
+                if bytes.len() != 16 { continue }
+                let s = match std::str::from_utf8(&key) { Ok(s) => s, Err(_) => continue };
+                let parts: Vec<&str> = s.splitn(4, ':').collect();
+                if parts.len() != 4 { continue }
+                let Ok(coll_b) = hex::decode(parts[1]) else { continue };
+                let Ok(owner_b) = hex::decode(parts[2]) else { continue };
+                let Ok(token_id) = parts[3].parse::<u128>() else { continue };
+                if coll_b.len() != 32 || owner_b.len() != 20 { continue }
+                let mut coll = [0u8; 32]; coll.copy_from_slice(&coll_b);
+                let mut owner = [0u8; 20]; owner.copy_from_slice(&owner_b);
+                let mut buf = [0u8; 16]; buf.copy_from_slice(&bytes);
+                self.erc1155_balances.insert((coll, owner, token_id), u128::from_le_bytes(buf));
+            }
+        }
+
+        // EVM pointers
+        if let Ok(keys) = store.get_keys_with_prefix(CF_NFTS, b"evm_ptr:") {
+            for key in keys {
+                let Ok(Some(bytes)) = store.get(CF_NFTS, &key) else { continue };
+                if bytes.len() != 20 { continue }
+                let s = match std::str::from_utf8(&key) { Ok(s) => s, Err(_) => continue };
+                let coll_hex = s.trim_start_matches("evm_ptr:");
+                let Ok(coll_b) = hex::decode(coll_hex) else { continue };
+                if coll_b.len() != 32 { continue }
+                let mut coll = [0u8; 32]; coll.copy_from_slice(&coll_b);
+                let mut addr = [0u8; 20]; addr.copy_from_slice(&bytes);
+                self.evm_pointers.insert(coll, addr);
+            }
+        }
+
+        // SVM pointers
+        if let Ok(keys) = store.get_keys_with_prefix(CF_NFTS, b"svm_ptr:") {
+            for key in keys {
+                let Ok(Some(bytes)) = store.get(CF_NFTS, &key) else { continue };
+                if bytes.len() != 32 { continue }
+                let s = match std::str::from_utf8(&key) { Ok(s) => s, Err(_) => continue };
+                let coll_hex = s.trim_start_matches("svm_ptr:");
+                let Ok(coll_b) = hex::decode(coll_hex) else { continue };
+                if coll_b.len() != 32 { continue }
+                let mut coll = [0u8; 32]; coll.copy_from_slice(&coll_b);
+                let mut mint = [0u8; 32]; mint.copy_from_slice(&bytes);
+                self.svm_pointers.insert(coll, mint);
+            }
+        }
+
+        // Per-creator nonces
+        if let Ok(keys) = store.get_keys_with_prefix(CF_NFTS, b"nonce:") {
+            for key in keys {
+                let Ok(Some(bytes)) = store.get(CF_NFTS, &key) else { continue };
+                if bytes.len() != 8 { continue }
+                let s = match std::str::from_utf8(&key) { Ok(s) => s, Err(_) => continue };
+                let creator_hex = s.trim_start_matches("nonce:");
+                let Ok(b) = hex::decode(creator_hex) else { continue };
+                if b.len() != 20 { continue }
+                let mut creator = [0u8; 20]; creator.copy_from_slice(&b);
+                let mut buf = [0u8; 8]; buf.copy_from_slice(&bytes);
+                self.creator_nonces.insert(creator, u64::from_le_bytes(buf));
+            }
+        }
+
+        info!(
+            target: "nft_factory",
+            collections = collection_count,
+            nfts = nft_count,
+            "NftRegistry hydrated from CF_NFTS"
+        );
     }
 
     /// Compute a deterministic collection ID from creator address and nonce
@@ -196,10 +491,17 @@ impl NftRegistry {
 
     /// Allocate the next nonce for a creator and return the new nonce value
     fn next_nonce(&self, creator: &[u8; 20]) -> u64 {
-        let mut entry = self.creator_nonces.entry(*creator).or_insert(0);
-        let nonce = *entry;
-        *entry = nonce + 1;
-        nonce
+        let next_after_alloc = {
+            let mut entry = self.creator_nonces.entry(*creator).or_insert(0);
+            let nonce = *entry;
+            *entry = nonce + 1;
+            nonce
+        };
+        // Persist the *next* (post-increment) nonce so a restart resumes
+        // allocating without colliding on the just-issued one. The map stores
+        // post-increment too, so they stay in sync.
+        self.persist_nonce(creator, next_after_alloc + 1);
+        next_after_alloc
     }
 }
 
@@ -321,7 +623,8 @@ fn handle_create_collection(
         created_at: 0, // Would be set by block context in production
     };
 
-    registry.collections.insert(collection_id, collection);
+    registry.collections.insert(collection_id, collection.clone());
+    registry.persist_collection(&collection);
 
     info!(
         "NFT factory: created collection {} ({}) id=0x{}, standard={:?}",
@@ -480,16 +783,23 @@ fn handle_mint(
     // Mint: set owner, increment balance, store URI, increment supply
     registry.nft_owners.insert(owner_key, to);
     if !token_uri.is_empty() {
-        registry.token_uris.insert((collection_id, token_id), token_uri);
+        registry.token_uris.insert((collection_id, token_id), token_uri.clone());
     }
 
-    {
+    let new_balance = {
         let balance_key = (collection_id, to);
         let mut balance = registry.erc721_balances.entry(balance_key).or_insert(0);
         *balance += 1;
-    }
+        *balance
+    };
 
     collection.total_supply += 1;
+    let updated_collection = collection.clone();
+    drop(collection); // release RefMut before persisting
+
+    registry.persist_nft(&collection_id, token_id, &to, &token_uri, 1);
+    registry.persist_balance_721(&collection_id, &to, new_balance);
+    registry.persist_collection(&updated_collection);
 
     info!(
         "NFT factory: minted token {} in collection 0x{} to 0x{}",
@@ -577,22 +887,29 @@ fn handle_mint_batch(
     // Mint all tokens
     for (i, &tid) in token_ids.iter().enumerate() {
         registry.nft_owners.insert((collection_id, tid), to);
-        if let Some(uri) = token_uris.get(i) {
-            if !uri.is_empty() {
-                registry
-                    .token_uris
-                    .insert((collection_id, tid), uri.clone());
-            }
+        let uri_str = token_uris.get(i).cloned().unwrap_or_default();
+        if !uri_str.is_empty() {
+            registry
+                .token_uris
+                .insert((collection_id, tid), uri_str.clone());
         }
+        // Persist each token row with its URI (or empty string).
+        registry.persist_nft(&collection_id, tid, &to, &uri_str, 1);
     }
 
     // Update balance and supply atomically
-    {
+    let new_balance = {
         let balance_key = (collection_id, to);
         let mut balance = registry.erc721_balances.entry(balance_key).or_insert(0);
         *balance += token_ids.len() as u128;
-    }
+        *balance
+    };
     collection.total_supply += token_ids.len() as u128;
+    let updated_collection = collection.clone();
+    drop(collection);
+
+    registry.persist_balance_721(&collection_id, &to, new_balance);
+    registry.persist_collection(&updated_collection);
 
     info!(
         "NFT factory: batch minted {} tokens in collection 0x{} to 0x{}",
@@ -670,18 +987,34 @@ fn handle_transfer_nft(
     // Transfer ownership
     registry.nft_owners.insert(owner_key, to);
 
+    // Capture URI for persistence (so the persisted owner row stays consistent with the in-memory owner row)
+    let uri_str = registry
+        .token_uris
+        .get(&owner_key)
+        .map(|u| u.clone())
+        .unwrap_or_default();
+
     // Update balances: decrement `from`, increment `to`
-    {
+    let new_from_balance = {
         let from_key = (collection_id, from);
         if let Some(mut balance) = registry.erc721_balances.get_mut(&from_key) {
             *balance = balance.saturating_sub(1);
+            *balance
+        } else {
+            0
         }
-    }
-    {
+    };
+    let new_to_balance = {
         let to_key = (collection_id, to);
         let mut balance = registry.erc721_balances.entry(to_key).or_insert(0);
         *balance += 1;
-    }
+        *balance
+    };
+
+    // Persist updated owner row + both balance rows
+    registry.persist_nft(&collection_id, token_id, &to, &uri_str, 1);
+    registry.persist_balance_721(&collection_id, &from, new_from_balance);
+    registry.persist_balance_721(&collection_id, &to, new_to_balance);
 
     info!(
         "NFT factory: transferred token {} in 0x{} from 0x{} to 0x{}",
@@ -841,6 +1174,7 @@ fn handle_register_evm_pointer(
     }
 
     registry.evm_pointers.insert(collection_id, evm_contract);
+    registry.persist_evm_pointer(&collection_id, &evm_contract);
 
     info!(
         "NFT factory: registered EVM pointer 0x{} for collection 0x{}",
@@ -884,6 +1218,7 @@ fn handle_register_svm_pointer(
     }
 
     registry.svm_pointers.insert(collection_id, svm_mint);
+    registry.persist_svm_pointer(&collection_id, &svm_mint);
 
     info!(
         "NFT factory: registered SVM pointer 0x{} for collection 0x{}",
@@ -953,13 +1288,19 @@ fn handle_mint_multi(
     }
 
     // Increment the ERC-1155 balance
-    {
+    let new_balance = {
         let key = (collection_id, to, token_id);
         let mut balance = registry.erc1155_balances.entry(key).or_insert(0);
         *balance = balance.saturating_add(amount);
-    }
+        *balance
+    };
 
     collection.total_supply = collection.total_supply.saturating_add(amount);
+    let updated_collection = collection.clone();
+    drop(collection);
+
+    registry.persist_balance_1155(&collection_id, &to, token_id, new_balance);
+    registry.persist_collection(&updated_collection);
 
     info!(
         "NFT factory: minted {} copies of token {} in ERC-1155 collection 0x{} to 0x{}",
@@ -1171,20 +1512,27 @@ fn handle_mint_random(
     // Commit state
     let owner_key = (collection_id, token_id);
     registry.nft_owners.insert(owner_key, to);
-    registry.token_uris.insert(
-        (collection_id, token_id),
-        format!(
-            "tenzro-vrf://rarity/{}?alpha={}",
-            rarity,
-            hex::encode(alpha)
-        ),
+    let uri_str = format!(
+        "tenzro-vrf://rarity/{}?alpha={}",
+        rarity,
+        hex::encode(alpha)
     );
-    {
+    registry
+        .token_uris
+        .insert((collection_id, token_id), uri_str.clone());
+    let new_balance = {
         let balance_key = (collection_id, to);
         let mut balance = registry.erc721_balances.entry(balance_key).or_insert(0);
         *balance += 1;
-    }
+        *balance
+    };
     collection.total_supply += 1;
+    let updated_collection = collection.clone();
+    drop(collection);
+
+    registry.persist_nft(&collection_id, token_id, &to, &uri_str, 1);
+    registry.persist_balance_721(&collection_id, &to, new_balance);
+    registry.persist_collection(&updated_collection);
 
     info!(
         "NFT factory: VRF-minted token {} (rarity={}) in collection 0x{} to 0x{}",

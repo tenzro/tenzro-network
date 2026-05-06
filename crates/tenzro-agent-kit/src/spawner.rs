@@ -13,7 +13,8 @@
 //!      a real deployment would reuse a user-bound key, but for the agent
 //!      kit we mint a fresh one so the spawn API stays self-contained)
 //!   5. Register the controller via `IdentityRegistry::register_human_with_fee`
-//!      (which auto-provisions an MPC wallet via [`WalletBinder`])
+//!      (which auto-provisions an MPC wallet via
+//!      [`tenzro_identity::WalletBinder`])
 //!   6. Generate a fresh Ed25519 keypair for the machine identity
 //!   7. Build a [`DelegationScope`] from the template's `DelegationSpec`
 //!   8. Register the machine via `IdentityRegistry::register_machine_with_fee`
@@ -32,7 +33,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 
 use tenzro_agent::{AgentRuntime, RegisteredAgent, SpendingPolicy};
 use tenzro_crypto::keys::{KeyPair, KeyType};
-use tenzro_identity::{DelegationScope, IdentityRegistry, TenzroIdentity, TimeBound, WalletBinder};
+use tenzro_identity::{DelegationScope, IdentityRegistry, TenzroIdentity, TimeBound};
 use tenzro_types::agent_template::{AgentTemplate, DelegationSpec, ExecutionSpec};
 use tenzro_types::identity::KycTier;
 use tenzro_types::primitives::Address;
@@ -157,11 +158,32 @@ impl AgentSpawner {
     }
 
     /// Runs the full spawn pipeline.
+    ///
+    /// # Preconditions
+    ///
+    /// The configured `IdentityRegistry` must have a
+    /// [`tenzro_identity::WalletBinder`] wired (via
+    /// `IdentityRegistry::with_wallet_binder` /
+    /// `with_wallet_binder_arc`). Without it, identity registration falls
+    /// back to a deterministic placeholder address with no signable
+    /// wallet — the spawner refuses to proceed in that case so callers
+    /// don't silently end up with un-signable agents.
     pub async fn spawn(
         &self,
         template_id: &str,
         args: SpawnArgs,
     ) -> Result<SpawnedAgent, AgentKitError> {
+        if !self.identity_registry.has_wallet_binder() {
+            return Err(AgentKitError::IdentityProvisioning(
+                "IdentityRegistry has no WalletBinder configured — agents \
+                 spawned through this registry would have placeholder \
+                 addresses with no signable wallet. Wire a WalletBinder \
+                 via IdentityRegistry::with_wallet_binder_arc before \
+                 invoking spawn()."
+                    .to_string(),
+            ));
+        }
+
         let template = self.registry.get_template(template_id).await?;
         let spec = template
             .execution_spec
@@ -418,9 +440,10 @@ fn build_runtime_capabilities(template: &AgentTemplate) -> Vec<tenzro_types::age
 
 /// Derives a 32-byte [`Address`] from an identity DID. We hash the DID with
 /// SHA-256 and use the digest as the address bytes; the agent's real on-chain
-/// wallet address is bound separately by [`WalletBinder`] inside
-/// `register_human_with_fee`/`register_machine_with_fee`. This address is purely the runtime
-/// id passed to [`AgentRuntime::register_agent`].
+/// wallet address is bound separately by [`tenzro_identity::WalletBinder`]
+/// inside `register_human_with_fee` / `register_machine_with_fee`. This
+/// address is purely the runtime id passed to
+/// [`AgentRuntime::register_agent`].
 fn derive_wallet_address(machine: &TenzroIdentity) -> Address {
     use tenzro_crypto::hash;
     let digest = hash::sha256(machine.did.to_string().as_bytes());
@@ -428,10 +451,6 @@ fn derive_wallet_address(machine: &TenzroIdentity) -> Address {
     bytes.copy_from_slice(digest.as_ref());
     Address::new(bytes)
 }
-
-// Suppress unused-import warning when WalletBinder is referenced only in docs.
-#[allow(dead_code)]
-fn _link_wallet_binder(_w: WalletBinder) {}
 
 #[cfg(test)]
 mod tests {

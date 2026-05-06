@@ -545,8 +545,8 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                 name: "ERC-8004 Trustless Agents".to_string(),
                 description: "On-chain agent identity and reputation via ERC-8004. \
                               Derive deterministic agent IDs, encode registry calldata \
-                              (register, getAgent, feedback, requestValidation, \
-                              submitValidation), and decode getAgent returndata for \
+                              (register, getAgent, feedback, validationRequest, \
+                              validationResponse), and decode getAgent returndata for \
                               integration with any EVM-compatible registry contract."
                     .to_string(),
                 tags: vec![
@@ -652,6 +652,37 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                 input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
                 output_modes: vec!["application/json".to_string()],
             },
+            AgentSkill {
+                id: "capability_registry".to_string(),
+                name: "Capability Registry".to_string(),
+                description: "Discover registered agent capabilities and inspect signed/TEE-backed \
+                              attestations supporting capability claims. List all capabilities \
+                              with agent and attestation counts, fetch attestation envelopes for \
+                              a specific capability, fetch all attestations issued for a given \
+                              agent ID, and pick the best (TEE-backed-preferred) agent for a \
+                              capability. Eager signature verification per CRITICAL #52 means \
+                              every stored attestation already passed canonical signing-data \
+                              cryptographic checks."
+                    .to_string(),
+                tags: vec![
+                    "capabilities".to_string(),
+                    "attestations".to_string(),
+                    "discovery".to_string(),
+                    "trust".to_string(),
+                    "tee".to_string(),
+                    "ed25519".to_string(),
+                    "agentic".to_string(),
+                ],
+                examples: vec![
+                    "List all registered capabilities on this node".to_string(),
+                    "Show attestations for the 'nlp' capability".to_string(),
+                    "Show attestations issued for agent agent-id-123".to_string(),
+                    "Pick the best agent for 'code' generation".to_string(),
+                    "Find a TEE-backed agent for 'vision'".to_string(),
+                ],
+                input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
         ],
         security_schemes: vec![SecurityScheme {
             scheme_type: "bearer".to_string(),
@@ -726,7 +757,7 @@ mod tests {
     #[test]
     fn test_agent_card_has_all_skills() {
         let card = build_agent_card("localhost:3002", "LightClient");
-        assert_eq!(card.skills.len(), 23);
+        assert_eq!(card.skills.len(), 24);
 
         let skill_ids: Vec<&str> = card.skills.iter().map(|s| s.id.as_str()).collect();
         assert!(skill_ids.contains(&"wallet"));
@@ -752,6 +783,7 @@ mod tests {
         assert!(skill_ids.contains(&"wormhole"));
         assert!(skill_ids.contains(&"cct"));
         assert!(skill_ids.contains(&"cortex"));
+        assert!(skill_ids.contains(&"capability_registry"));
     }
 
     #[test]

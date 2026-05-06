@@ -357,7 +357,7 @@ async def get_fee_history(
 async def get_svm_cross_vm_program_info() -> str:
     """Return the canonical Tenzro Cross-VM SVM-native program ID and instruction
     discriminators. The program ID is deterministically derived as
-    `SHA-256("tenzro/svm/program/cross_vm/v1")`. Discriminators are
+    `SHA-256("tenzro/svm/program/cross_vm")`. Discriminators are
     Anchor-style 8-byte `SHA-256("global:<snake_case_name>")[..8]`.
 
     Use this to construct SVM Instructions targeting the Tenzro Cross-VM
@@ -365,9 +365,9 @@ async def get_svm_cross_vm_program_info() -> str:
     """
     return json.dumps({
         "program_id": {
-            "hex": "918f858b6b0dd134e9a1fcb73002428c5197093e76e536badc60382bb9f8ac78",
-            "base58": "AoD3kebB2bYjLKyJtaqkyXqwJy4oQ949SnVhMwEYzGXR",
-            "derivation_domain": "tenzro/svm/program/cross_vm/v1",
+            "hex": "5c03dd6cf580ecafb5ca11a9e1d6448176bb1dfa9d4886c65d9024df77542695",
+            "base58": "7CBvjJtsMxYFsxYkpcXYoTDZpC8PhMVy1DVVQBopvWCC",
+            "derivation_domain": "tenzro/svm/program/cross_vm",
         },
         "instructions": {
             "bridge_to_evm": {
@@ -423,6 +423,25 @@ async def register_identity(identity_type: str, display_name: str) -> str:
 async def resolve_did(did: str) -> str:
     """Resolve a DID to its identity info and delegation scope."""
     result = await rpc_call("tenzro_resolveIdentity", [did])
+    return json.dumps(result)
+
+
+@mcp.tool
+async def revoke_did(did: str, reason: str = "revoked via MCP") -> str:
+    """Revoke an identity by DID. Cascades JWT invalidation through the
+    entire act-chain. Logical delete — record stays in CF_IDENTITIES with
+    `Revoked` status. To hard-delete, follow up with `forget_identity`."""
+    result = await rpc_call("tenzro_revokeDid", {"did": did, "reason": reason})
+    return json.dumps(result)
+
+
+@mcp.tool
+async def forget_identity(did: str) -> str:
+    """TDIP/GDPR Article 17 right-to-erasure. Hard-deletes a previously
+    revoked identity from the registry and persistent storage. The DID
+    must already be in `Revoked` status — call `revoke_did` first, allow
+    cascading revocation to propagate, then call this."""
+    result = await rpc_call("tenzro_forgetIdentity", {"did": did})
     return json.dumps(result)
 
 
@@ -583,7 +602,7 @@ async def create_escrow(
     travel over the wire.
 
     The escrow_id is derived deterministically by the VM as
-    SHA-256("tenzro/escrow/id/v1" || payer || nonce_le) and funds are locked
+    SHA-256("tenzro/escrow/id" || payer || nonce_le) and funds are locked
     at a vault address derived from that id. Only the original payer can
     later release or refund.
 
@@ -727,8 +746,8 @@ async def close_payment_channel(channel_id: str) -> str:
 # AP2 — Agent Payments Protocol (3 tools)
 #
 # AP2 is Google/Stripe/Mastercard's verifiable-credential mandate model for
-# agentic commerce. The principal signs an IntentMandate ("agent X may spend
-# up to Y on Z before T") and the agent commits to a CartMandate (specific
+# agentic commerce. The principal signs a CheckoutMandate ("agent X may spend
+# up to Y on Z before T") and the agent commits to a PaymentMandate (specific
 # basket + total). Both are wrapped in `Vdc` envelopes carrying Ed25519
 # signatures and a JCS-style canonical preimage.
 #
@@ -737,8 +756,34 @@ async def close_payment_channel(channel_id: str) -> str:
 
 
 @mcp.tool
+async def ap2_sign_mandate(
+    mandate_kind: str,
+    mandate: dict,
+    signer_did: str,
+) -> str:
+    """Sign an AP2 v0.2 mandate (checkout or payment) with the auth-bound wallet's Ed25519 key.
+
+    Args:
+        mandate_kind: ``"checkout"`` (principal-signed pre-authorization) or
+            ``"payment"`` (agent-signed final-offer commit) per AP2 v0.2.
+        mandate: The mandate object — CheckoutMandate or PaymentMandate, matching
+            ``mandate_kind``.
+        signer_did: Signer DID — must match the controller of the auth-bound
+            wallet (principal for checkout, agent for payment).
+
+    Auth: DPoP+JWT mandatory. The wallet must be Ed25519 (AP2 v0.2 only
+    supports ``ed25519``). Returns the assembled, self-verified Vdc JSON.
+    """
+    result = await rpc_call(
+        "tenzro_ap2SignMandate",
+        [{"mandate_kind": mandate_kind, "mandate": mandate, "signer_did": signer_did}],
+    )
+    return json.dumps(result)
+
+
+@mcp.tool
 async def ap2_verify_mandate(vdc: dict) -> str:
-    """Verify the Ed25519 signature on a Vdc-wrapped AP2 mandate (intent or cart).
+    """Verify the Ed25519 signature on a Vdc-wrapped AP2 mandate (checkout or payment).
 
     Args:
         vdc: The full Vdc JSON envelope as produced by the AP2 SDK.
@@ -752,20 +797,20 @@ async def ap2_verify_mandate(vdc: dict) -> str:
 
 @mcp.tool
 async def ap2_validate_mandate_pair(
-    intent_vdc: dict,
-    cart_vdc: dict,
+    checkout_vdc: dict,
+    payment_vdc: dict,
     enforce_delegation: bool = False,
 ) -> str:
-    """Cross-validate an AP2 cart mandate against its parent intent mandate.
+    """Cross-validate an AP2 v0.2 PaymentMandate against its parent CheckoutMandate.
 
-    Checks both Vdc signatures, principal/agent binding, intent ceiling,
+    Checks both Vdc signatures, principal/agent binding, checkout ceiling,
     merchant whitelist, expiry, and (when ``enforce_delegation`` is true)
-    additionally enforces the agent's TDIP DelegationScope against the cart
+    additionally enforces the agent's TDIP DelegationScope against the payment
     total via ``IdentityRegistry::enforce_operation(agent_did, "payment", total)``.
 
     Args:
-        intent_vdc: The principal-signed IntentMandate Vdc.
-        cart_vdc: The agent-signed CartMandate Vdc.
+        checkout_vdc: The principal-signed CheckoutMandate Vdc (AP2 v0.2).
+        payment_vdc: The agent-signed PaymentMandate Vdc (AP2 v0.2).
         enforce_delegation: If true, run the TDIP delegation gate after
             AP2 validation succeeds. Default false (AP2-only).
 
@@ -776,8 +821,8 @@ async def ap2_validate_mandate_pair(
     result = await rpc_call(
         "tenzro_ap2ValidateMandatePair",
         [{
-            "intent_vdc": intent_vdc,
-            "cart_vdc": cart_vdc,
+            "checkout_vdc": checkout_vdc,
+            "payment_vdc": payment_vdc,
             "enforce_delegation": enforce_delegation,
         }],
     )

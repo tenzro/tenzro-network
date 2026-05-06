@@ -67,8 +67,8 @@
       }
     },
     "delegation": {
-      "max_transaction_value": 10000000000000000000000,
-      "max_daily_spend": 50000000000000000000000,
+      "max_transaction_value": "10000000000000000000000",
+      "max_daily_spend": "50000000000000000000000",
       "allowed_operations": ["custody", "settle", "collateralize"],
       "allowed_chains": ["canton"],
       "time_bound_days": 365,
@@ -132,8 +132,8 @@
       }
     ],
     "hard_caps": {
-      "per_operation_value": 10000000000000000000000,
-      "per_day_value": 50000000000000000000000
+      "per_operation_value": "10000000000000000000000",
+      "per_day_value": "50000000000000000000000"
     }
   }
 }

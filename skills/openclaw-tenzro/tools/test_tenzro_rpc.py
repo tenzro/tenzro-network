@@ -978,7 +978,7 @@ class TestCLIDispatch(unittest.TestCase):
             "get_balance", "send", "faucet", "status", "health",
             "block_height", "get_block", "chain_id", "node_info",
             "register_identity", "resolve_did", "resolve_did_document",
-            "set_username", "resolve_username",
+            "set_username", "resolve_username", "revoke_did", "forget_identity",
             "set_delegation", "verify_zk_proof",
             "verify_transaction", "verify_settlement", "verify_inference",
             "total_supply", "token_balance", "chat",
@@ -1013,17 +1013,26 @@ class TestCLIDispatch(unittest.TestCase):
             "get_events", "get_event_status",
             "register_webhook", "list_webhooks", "delete_webhook",
             # AP2 (Agent Payments Protocol)
-            "ap2_protocol_info", "ap2_verify_mandate",
+            "ap2_protocol_info", "ap2_sign_mandate", "ap2_verify_mandate",
             "ap2_validate_mandate_pair", "ap2_create_session",
             "ap2_authorize_payment", "ap2_execute_payment",
             "ap2_cancel_session", "ap2_get_session",
             "ap2_list_agent_sessions",
-            # ERC-8004 Trustless Agents
+            # ERC-8004 Trustless Agents (full v0.6+ surface)
             "erc8004_derive_agent_id", "erc8004_encode_register",
             "erc8004_encode_get_agent", "erc8004_decode_get_agent",
+            "erc8004_encode_set_agent_uri", "erc8004_encode_set_agent_wallet",
+            "erc8004_encode_set_metadata", "erc8004_encode_get_metadata",
+            "erc8004_decode_get_metadata",
+            "erc8004_encode_get_agent_uri", "erc8004_encode_get_agent_wallet",
             "erc8004_encode_feedback",
-            "erc8004_encode_request_validation",
-            "erc8004_encode_submit_validation",
+            "erc8004_encode_get_feedback", "erc8004_encode_get_feedback_count",
+            "erc8004_encode_revoke_feedback", "erc8004_encode_append_response",
+            "erc8004_encode_is_feedback_revoked",
+            "erc8004_encode_get_feedback_responses",
+            "erc8004_encode_validation_request",
+            "erc8004_encode_validation_response",
+            "erc8004_encode_get_validation",
             # Wormhole
             "wormhole_chain_id", "wormhole_parse_vaa_id",
             "wormhole_bridge",
@@ -1170,31 +1179,41 @@ class TestAp2(unittest.TestCase):
 
 
 class TestErc8004(unittest.TestCase):
-    """Tests for ERC-8004 Trustless Agents Registry wrappers."""
+    """Tests for ERC-8004 Trustless Agents Registry wrappers (full v0.6+ surface)."""
+
+    # ---- identity ----
 
     @patch("tenzro_rpc.requests.post")
     def test_derive_agent_id(self, mock_post):
         mock_post.return_value = _mock_rpc_response({
+            "did": "did:tenzro:machine:abc",
             "agent_id": "0xdeadbeef",
         })
-        result = tenzro_rpc.erc8004_derive_agent_id(
-            "0xowner", "0xsalt"
-        )
+        result = tenzro_rpc.erc8004_derive_agent_id("did:tenzro:machine:abc")
         self.assertEqual(result["agent_id"], "0xdeadbeef")
         args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_erc8004DeriveAgentId"
+        )
+        self.assertEqual(
+            kwargs["json"]["params"]["did"], "did:tenzro:machine:abc"
         )
 
     @patch("tenzro_rpc.requests.post")
     def test_encode_register(self, mock_post):
         mock_post.return_value = _mock_rpc_response({
             "calldata": "0xabcdef",
+            "agent_id": "0xagent",
         })
         result = tenzro_rpc.erc8004_encode_register(
-            "0xagent", "ipfs://Qm...", "0xowner"
+            "did:tenzro:machine:abc", "0xowner", "ipfs://Qm..."
         )
         self.assertTrue(result["calldata"].startswith("0x"))
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(params["did"], "did:tenzro:machine:abc")
+        self.assertEqual(params["agent_address"], "0xowner")
+        self.assertEqual(params["metadata_uri"], "ipfs://Qm...")
 
     @patch("tenzro_rpc.requests.post")
     def test_encode_get_agent(self, mock_post):
@@ -1205,38 +1224,191 @@ class TestErc8004(unittest.TestCase):
     @patch("tenzro_rpc.requests.post")
     def test_decode_get_agent(self, mock_post):
         mock_post.return_value = _mock_rpc_response({
-            "agent_id": "0xagent",
-            "owner": "0xowner",
-            "registration_data_uri": "ipfs://Qm...",
+            "agent_address": "0xowner",
+            "metadata_uri": "ipfs://Qm...",
         })
         result = tenzro_rpc.erc8004_decode_get_agent("0xreturndata")
-        self.assertEqual(result["owner"], "0xowner")
+        self.assertEqual(result["agent_address"], "0xowner")
+        args, kwargs = mock_post.call_args
+        self.assertEqual(
+            kwargs["json"]["params"]["return_data"], "0xreturndata"
+        )
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_set_agent_uri(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xseturi"})
+        result = tenzro_rpc.erc8004_encode_set_agent_uri(
+            "0xagent", "ipfs://new"
+        )
+        self.assertIn("calldata", result)
+        args, kwargs = mock_post.call_args
+        self.assertEqual(
+            kwargs["json"]["method"], "tenzro_erc8004EncodeSetAgentURI"
+        )
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_set_agent_wallet(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xsetw"})
+        result = tenzro_rpc.erc8004_encode_set_agent_wallet(
+            "0xagent", "0xnewwallet", 9999, "0xsig"
+        )
+        self.assertIn("calldata", result)
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(params["new_wallet"], "0xnewwallet")
+        self.assertEqual(params["deadline"], 9999)
+        self.assertEqual(params["signature"], "0xsig")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_set_metadata(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xsetm"})
+        result = tenzro_rpc.erc8004_encode_set_metadata(
+            "0xagent", "endpoint", "0xc0ffee"
+        )
+        self.assertIn("calldata", result)
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(params["metadata_key"], "endpoint")
+        self.assertEqual(params["metadata_value"], "0xc0ffee")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_get_metadata(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xgetm"})
+        result = tenzro_rpc.erc8004_encode_get_metadata("0xagent", "endpoint")
+        self.assertIn("calldata", result)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_decode_get_metadata(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "metadata_value": "0xc0ffee",
+        })
+        result = tenzro_rpc.erc8004_decode_get_metadata("0xrd")
+        self.assertEqual(result["metadata_value"], "0xc0ffee")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_get_agent_uri(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xguri"})
+        result = tenzro_rpc.erc8004_encode_get_agent_uri("0xagent")
+        self.assertIn("calldata", result)
+        args, kwargs = mock_post.call_args
+        self.assertEqual(
+            kwargs["json"]["method"], "tenzro_erc8004EncodeGetAgentURI"
+        )
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_get_agent_wallet(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xgwallet"})
+        result = tenzro_rpc.erc8004_encode_get_agent_wallet("0xagent")
+        self.assertIn("calldata", result)
+        args, kwargs = mock_post.call_args
+        self.assertEqual(
+            kwargs["json"]["method"], "tenzro_erc8004EncodeGetAgentWallet"
+        )
+
+    # ---- reputation ----
 
     @patch("tenzro_rpc.requests.post")
     def test_encode_feedback(self, mock_post):
         mock_post.return_value = _mock_rpc_response({"calldata": "0xfeed"})
         result = tenzro_rpc.erc8004_encode_feedback(
-            "0xagent", 95, "0xauth", "ipfs://feedback"
+            "0xsubject", 75, "ipfs://feedback"
         )
         self.assertIn("calldata", result)
         args, kwargs = mock_post.call_args
-        self.assertEqual(kwargs["json"]["params"]["score"], 95)
+        params = kwargs["json"]["params"]
+        self.assertEqual(params["subject_agent_id"], "0xsubject")
+        self.assertEqual(params["rating"], 75)
+        self.assertEqual(params["context_uri"], "ipfs://feedback")
 
     @patch("tenzro_rpc.requests.post")
-    def test_encode_request_validation(self, mock_post):
+    def test_encode_get_feedback(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xgf"})
+        result = tenzro_rpc.erc8004_encode_get_feedback("0xsubject", 3)
+        self.assertIn("calldata", result)
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(params["index"], 3)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_get_feedback_count(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xgfc"})
+        result = tenzro_rpc.erc8004_encode_get_feedback_count("0xsubject")
+        self.assertIn("calldata", result)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_revoke_feedback(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xrev"})
+        result = tenzro_rpc.erc8004_encode_revoke_feedback("0xagent", "0xfid")
+        self.assertIn("calldata", result)
+        args, kwargs = mock_post.call_args
+        self.assertEqual(
+            kwargs["json"]["method"], "tenzro_erc8004EncodeRevokeFeedback"
+        )
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_append_response(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xapp"})
+        result = tenzro_rpc.erc8004_encode_append_response(
+            "0xagent", "0xfid", "ipfs://resp"
+        )
+        self.assertIn("calldata", result)
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(params["response_uri"], "ipfs://resp")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_is_feedback_revoked(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xirev"})
+        result = tenzro_rpc.erc8004_encode_is_feedback_revoked(
+            "0xagent", "0xfid"
+        )
+        self.assertIn("calldata", result)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_get_feedback_responses(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xfr"})
+        result = tenzro_rpc.erc8004_encode_get_feedback_responses(
+            "0xagent", "0xfid"
+        )
+        self.assertIn("calldata", result)
+
+    # ---- validation ----
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_validation_request(self, mock_post):
         mock_post.return_value = _mock_rpc_response({"calldata": "0xreq"})
-        result = tenzro_rpc.erc8004_encode_request_validation(
-            "0xagent", "0xvalidator", "ipfs://req", "0xdatahash"
+        result = tenzro_rpc.erc8004_encode_validation_request(
+            "0xvalidator", "0xagentid", "ipfs://req", "0xrequesthash"
         )
         self.assertIn("calldata", result)
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(params["validator_address"], "0xvalidator")
+        self.assertEqual(params["agent_id"], "0xagentid")
+        self.assertEqual(params["request_hash"], "0xrequesthash")
 
     @patch("tenzro_rpc.requests.post")
-    def test_encode_submit_validation(self, mock_post):
+    def test_encode_validation_response(self, mock_post):
         mock_post.return_value = _mock_rpc_response({"calldata": "0xsub"})
-        result = tenzro_rpc.erc8004_encode_submit_validation(
-            "0xdatahash", 1, "ipfs://resp", "tag"
+        result = tenzro_rpc.erc8004_encode_validation_response(
+            "0xrequesthash", 95, "ipfs://resp", "0xresponsehash", "valid"
         )
         self.assertIn("calldata", result)
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(params["response"], 95)
+        self.assertEqual(params["response_hash"], "0xresponsehash")
+        self.assertEqual(params["tag"], "valid")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_get_validation(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xgv"})
+        result = tenzro_rpc.erc8004_encode_get_validation("0xrequesthash")
+        self.assertIn("calldata", result)
+        args, kwargs = mock_post.call_args
+        self.assertEqual(
+            kwargs["json"]["method"], "tenzro_erc8004EncodeGetValidation"
+        )
 
 
 class TestWormhole(unittest.TestCase):

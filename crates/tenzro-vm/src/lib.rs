@@ -58,6 +58,7 @@ pub mod daml;
 pub mod native;
 pub mod parallel;
 pub mod eip1559;
+pub mod hot_state;
 pub mod account_abstraction;
 pub mod cross_vm_bridge;
 
@@ -81,7 +82,7 @@ pub use precompiles::{
 pub use evm::erc8004::{
     AgentRecord as Erc8004AgentRecord, Erc8004IdentityRegistry, Erc8004ReputationRegistry,
     Erc8004ValidationRegistry, FeedbackEntry as Erc8004FeedbackEntry,
-    ValidationEntry as Erc8004ValidationEntry, ValidationStatus as Erc8004ValidationStatus,
+    ValidationEntry as Erc8004ValidationEntry,
 };
 pub use state_adapter::{StateAdapter, PersistentState, CacheStats};
 pub use evm::EvmExecutor;
@@ -90,6 +91,11 @@ pub use daml::DamlExecutor;
 pub use native::NativeExecutor;
 pub use parallel::{BlockStmExecutor, BlockStmConfig, ParallelExecutionResult};
 pub use eip1559::{FeeMarket, Eip1559Config, EffectiveGasPrice, FeeMarketStats, FeeUrgency};
+pub use hot_state::{
+    AccountSample, ContentionScore, HotStateMarket, local_multiplier_for_score,
+    HOT_STATE_MAX_MULTIPLIER, HOT_STATE_SCORE_FLOOR, HOT_STATE_WINDOW_BLOCKS,
+    HOT_STATE_WRITE_FLOOR,
+};
 pub use account_abstraction::{
     UserOperation, PackedUserOperation, EntryPoint, AccountFactory, SmartAccount, AccountModule,
     Paymaster, BundlerConfig, UserOpReceipt, SimulationResult, AccountAbstractionError,

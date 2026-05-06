@@ -1,19 +1,22 @@
-//! AP2 (Agent Payments Protocol) commands for the Tenzro CLI.
+//! AP2 (Agent Payments Protocol) v0.2 commands for the Tenzro CLI.
 //!
-//! Verifies Vdc-wrapped intent/cart mandates and validates mandate
-//! pairs. The node never signs — principals sign locally, Tenzro
-//! settles.
+//! Signs and verifies Vdc-wrapped Checkout/Payment mandates and validates
+//! mandate pairs. The `sign-mandate` subcommand uses the auth-bound
+//! wallet's Ed25519 key on the node — no raw private keys leave the
+//! caller's environment beyond the DPoP+JWT bearer.
 
 use clap::{Parser, Subcommand};
 use anyhow::{Context, Result};
 use crate::output;
 
-/// AP2 (Agent Payments Protocol) operations
+/// AP2 (Agent Payments Protocol) v0.2 operations
 #[derive(Debug, Subcommand)]
 pub enum Ap2Command {
+    /// Sign an AP2 v0.2 Checkout or Payment mandate via the auth-bound wallet
+    SignMandate(Ap2SignMandateCmd),
     /// Verify the Ed25519 signature on a Vdc-wrapped AP2 mandate
     VerifyMandate(Ap2VerifyMandateCmd),
-    /// Cross-validate a cart mandate against its parent intent mandate
+    /// Cross-validate a PaymentMandate against its parent CheckoutMandate
     ValidatePair(Ap2ValidatePairCmd),
     /// Print AP2 protocol metadata (version, signing alg, kinds)
     Info(Ap2InfoCmd),
@@ -22,10 +25,86 @@ pub enum Ap2Command {
 impl Ap2Command {
     pub async fn execute(&self) -> Result<()> {
         match self {
+            Self::SignMandate(cmd) => cmd.execute().await,
             Self::VerifyMandate(cmd) => cmd.execute().await,
             Self::ValidatePair(cmd) => cmd.execute().await,
             Self::Info(cmd) => cmd.execute().await,
         }
+    }
+}
+
+/// Sign an AP2 v0.2 Checkout or Payment mandate via the auth-bound wallet.
+///
+/// Auth: requires `TENZRO_BEARER_JWT` (and `TENZRO_DPOP_PROOF`) to be set
+/// — the RpcClient forwards them to the node, which signs the canonical
+/// AP2 v0.2 preimage with the wallet's Ed25519 key. The returned VDC
+/// self-verifies before being printed.
+#[derive(Debug, Parser)]
+pub struct Ap2SignMandateCmd {
+    /// Mandate kind: `checkout` (principal-signed pre-authorization) or
+    /// `payment` (agent-signed final-offer commit) per AP2 v0.2.
+    #[arg(long, value_parser = ["checkout", "payment"])]
+    kind: String,
+    /// Path to a JSON file containing the CheckoutMandate or PaymentMandate
+    #[arg(long)]
+    mandate_file: String,
+    /// Signer DID — must match the controller of the auth-bound wallet
+    /// (principal for checkout, agent for payment)
+    #[arg(long)]
+    signer_did: String,
+    /// Optional path to write the signed VDC; if omitted, prints to stdout
+    #[arg(long)]
+    out: Option<String>,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl Ap2SignMandateCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Sign AP2 Mandate");
+        let mandate_str = std::fs::read_to_string(&self.mandate_file)
+            .with_context(|| format!("reading {}", self.mandate_file))?;
+        let mandate: serde_json::Value = serde_json::from_str(&mandate_str)
+            .context("parsing mandate JSON")?;
+
+        let spinner = output::create_spinner("Signing via auth-bound wallet...");
+        let rpc = RpcClient::new(&self.rpc);
+        let vdc: serde_json::Value = rpc
+            .call(
+                "tenzro_ap2SignMandate",
+                serde_json::json!({
+                    "mandate_kind": self.kind,
+                    "mandate": mandate,
+                    "signer_did": self.signer_did,
+                }),
+            )
+            .await?;
+        spinner.finish_and_clear();
+
+        let pretty = serde_json::to_string_pretty(&vdc)?;
+        if let Some(path) = &self.out {
+            std::fs::write(path, &pretty)
+                .with_context(|| format!("writing {}", path))?;
+            output::print_success(&format!("VDC written to {}", path));
+            output::print_field(
+                "Mandate ID",
+                vdc.get("payload")
+                    .and_then(|p| p.get("mandate_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            );
+            output::print_field(
+                "Signer DID",
+                vdc.get("signer_did").and_then(|v| v.as_str()).unwrap_or(""),
+            );
+        } else {
+            output::print_success("Signed VDC:");
+            println!("{pretty}");
+        }
+        Ok(())
     }
 }
 
@@ -86,15 +165,15 @@ impl Ap2VerifyMandateCmd {
     }
 }
 
-/// Cross-validate an intent+cart mandate pair
+/// Cross-validate a CheckoutMandate + PaymentMandate pair (AP2 v0.2)
 #[derive(Debug, Parser)]
 pub struct Ap2ValidatePairCmd {
-    /// Path to JSON file with the parent intent Vdc
+    /// Path to JSON file with the parent CheckoutMandate Vdc (AP2 v0.2)
     #[arg(long)]
-    intent_file: String,
-    /// Path to JSON file with the child cart Vdc
+    checkout_file: String,
+    /// Path to JSON file with the child PaymentMandate Vdc (AP2 v0.2)
     #[arg(long)]
-    cart_file: String,
+    payment_file: String,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -105,13 +184,13 @@ impl Ap2ValidatePairCmd {
         use crate::rpc::RpcClient;
 
         output::print_header("Validate AP2 Mandate Pair");
-        let intent: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&self.intent_file)
-                .with_context(|| format!("reading {}", self.intent_file))?,
+        let checkout: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&self.checkout_file)
+                .with_context(|| format!("reading {}", self.checkout_file))?,
         )?;
-        let cart: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&self.cart_file)
-                .with_context(|| format!("reading {}", self.cart_file))?,
+        let payment: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&self.payment_file)
+                .with_context(|| format!("reading {}", self.payment_file))?,
         )?;
 
         let spinner = output::create_spinner("Cross-validating...");
@@ -119,7 +198,7 @@ impl Ap2ValidatePairCmd {
         let result: serde_json::Value = rpc
             .call(
                 "tenzro_ap2ValidateMandatePair",
-                serde_json::json!({ "intent_vdc": intent, "cart_vdc": cart }),
+                serde_json::json!({ "checkout_vdc": checkout, "payment_vdc": payment }),
             )
             .await?;
         spinner.finish_and_clear();
@@ -128,12 +207,12 @@ impl Ap2ValidatePairCmd {
         if valid {
             output::print_success("Mandate pair is valid");
             output::print_field(
-                "Intent ID",
-                result.get("intent_mandate_id").and_then(|v| v.as_str()).unwrap_or(""),
+                "Checkout ID",
+                result.get("checkout_mandate_id").and_then(|v| v.as_str()).unwrap_or(""),
             );
             output::print_field(
-                "Cart ID",
-                result.get("cart_mandate_id").and_then(|v| v.as_str()).unwrap_or(""),
+                "Payment ID",
+                result.get("payment_mandate_id").and_then(|v| v.as_str()).unwrap_or(""),
             );
             output::print_field(
                 "Principal DID",

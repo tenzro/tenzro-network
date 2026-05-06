@@ -188,7 +188,6 @@ impl KyaVerifier {
 mod tests {
     use super::*;
     use tenzro_identity::delegation::DelegationScope;
-    use tenzro_identity::identity::{IdentityData, TenzroIdentity};
     use tenzro_types::identity::KycTier;
 
     fn make_registry() -> Arc<IdentityRegistry> {

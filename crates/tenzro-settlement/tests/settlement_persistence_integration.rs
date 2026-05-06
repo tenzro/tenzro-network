@@ -23,8 +23,6 @@
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
-
 use tenzro_settlement::{
     BatchProcessor, ChannelManager, FeeCollector, RocksDbChannelStorage, SettlementConfig,
     SettlementEngine,
@@ -264,6 +262,7 @@ async fn test_batch_processor_result_survives_restart() {
                     req.service_type.clone(),
                     req.amount,
                     SettlementStatus::Completed,
+                    tenzro_types::principal_chain::anonymous_chain_for_address(&req.customer, 0),
                 ))
             })
             .await
@@ -512,9 +511,3 @@ fn test_channel_dispute_survives_restart() {
     }
 }
 
-/// Suppress unused-import warnings if the file is compiled with subset
-/// feature flags (kept at module level rather than per-test for clarity).
-#[allow(dead_code)]
-fn _unused_imports_anchor() {
-    let _: Option<DashMap<(Address, AssetId), u128>> = None;
-}

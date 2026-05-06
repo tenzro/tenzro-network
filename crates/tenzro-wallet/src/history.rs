@@ -318,11 +318,11 @@ impl TransactionHistory {
     pub fn update_status(&self, tx_hash: &Hash, status: TxStatus) -> Result<()> {
         if let Some(entry) = self.hash_index.get(tx_hash) {
             let (address, idx) = entry.value();
-            if let Some(mut records) = self.records.get_mut(address) {
-                if let Some(record) = records.get_mut(*idx) {
-                    record.status = status;
-                    return Ok(());
-                }
+            if let Some(mut records) = self.records.get_mut(address)
+                && let Some(record) = records.get_mut(*idx)
+            {
+                record.status = status;
+                return Ok(());
             }
         }
         Err(WalletError::Other(format!(
@@ -335,11 +335,11 @@ impl TransactionHistory {
     pub fn confirm(&self, tx_hash: &Hash, block_height: u64, gas_used: u64) -> Result<()> {
         if let Some(entry) = self.hash_index.get(tx_hash) {
             let (address, idx) = entry.value();
-            if let Some(mut records) = self.records.get_mut(address) {
-                if let Some(record) = records.get_mut(*idx) {
-                    record.mark_confirmed(block_height, gas_used);
-                    return Ok(());
-                }
+            if let Some(mut records) = self.records.get_mut(address)
+                && let Some(record) = records.get_mut(*idx)
+            {
+                record.mark_confirmed(block_height, gas_used);
+                return Ok(());
             }
         }
         Err(WalletError::Other(format!(
@@ -367,25 +367,25 @@ impl TransactionHistory {
         let filtered: Vec<TxRecord> = records
             .into_iter()
             .filter(|r| {
-                if let Some(status) = &filter.status {
-                    if r.status != *status {
-                        return false;
-                    }
+                if let Some(status) = &filter.status
+                    && r.status != *status
+                {
+                    return false;
                 }
-                if let Some(direction) = &filter.direction {
-                    if r.direction != *direction {
-                        return false;
-                    }
+                if let Some(direction) = &filter.direction
+                    && r.direction != *direction
+                {
+                    return false;
                 }
-                if let Some(after) = &filter.after {
-                    if r.created_at.0 < after.0 {
-                        return false;
-                    }
+                if let Some(after) = &filter.after
+                    && r.created_at.0 < after.0
+                {
+                    return false;
                 }
-                if let Some(before) = &filter.before {
-                    if r.created_at.0 > before.0 {
-                        return false;
-                    }
+                if let Some(before) = &filter.before
+                    && r.created_at.0 > before.0
+                {
+                    return false;
                 }
                 true
             })

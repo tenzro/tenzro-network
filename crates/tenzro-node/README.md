@@ -12,9 +12,9 @@ The `tenzro-node` crate provides the complete node binary that integrates all Te
 - **Modular Architecture**: Clean separation of concerns across subsystems
 - **Health Monitoring**: Real-time health tracking for all subsystems
 - **Metrics Collection**: Performance metrics and statistics
-- **JSON-RPC API**: Standard API for querying and interacting with the node (264+ methods across 26+ namespaces: blockchain, EVM-compat, accounts, token, models, inference, forecast, vision, text-embedding, segmentation, detection, audio, video, settlement, escrow, agents, identity, network, governance, payments, ap2, staking, canton, task marketplace, agent marketplace, token registry, bridge/crosschain, deBridge, wormhole, cct, erc8004, NFT, compliance, events, TEE, ZK, VRF, skill/tool registry, onboarding)
-- **MCP Server**: Model Context Protocol server with 191 tools (Streamable HTTP transport at /mcp, port 3001)
-- **A2A Server**: Agent-to-Agent protocol server with 30 skills (JSON-RPC 2.0, SSE streaming, Agent Card at port 3002)
+- **JSON-RPC API**: Standard API for querying and interacting with the node (350+ methods across 26+ namespaces: blockchain, EVM-compat, accounts, token, models, inference, forecast, vision, text-embedding, segmentation, detection, audio, video, settlement, escrow, agents, identity, network, governance, payments, ap2, staking, canton, task marketplace, agent marketplace, token registry, bridge/crosschain, deBridge, wormhole, cct, erc8004, NFT, compliance, events, TEE, ZK, VRF, skill/tool registry, onboarding)
+- **MCP Server**: Model Context Protocol server with 200+ tools (base + 24 multi-modal AI + 3 AgentBond/insurance) on `rmcp` Streamable HTTP transport at `/mcp`, port 3001
+- **A2A Server**: Agent-to-Agent protocol server with 33 skills (JSON-RPC 2.0, SSE streaming, Agent Card at port 3002)
 - **Web Verification API**: REST endpoints for ZK proof, TEE attestation, and transaction verification (port 8080)
 - **Graceful Shutdown**: Clean shutdown sequence for all subsystems
 - **TEE Integration**: Optional Trusted Execution Environment support (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU)
@@ -132,16 +132,22 @@ The node orchestrates subsystems in the following startup order:
 6. **Wallet** - MPC wallet service
 7. **Consensus** - HotStuff-2 consensus (validators only)
 8. **Settlement** - Payment settlement engine
-9. **AI Infrastructure** - Model registry, provider management, agent runtime (with durable persistence via init_ai_infrastructure)
+9. **AI Infrastructure** - Model registry, provider management, agent runtime, and swarm manager (durable persistence via `init_ai_infrastructure()`; restored model, agent, and swarm counts logged at startup)
 10. **Bridge** - Cross-chain bridge router
 
 Shutdown occurs in reverse order to ensure clean resource cleanup.
+
+### Cross-crate wiring
+
+- **`AgentRuntimeSpendingPolicyResolver`** (`spending_policy_bridge.rs`) — the only place in the workspace that depends on both `tenzro-payments` and `tenzro-agent`. Implements `tenzro_payments::SpendingPolicyResolver::resolve(payer_did)` by looking up the per-machine `SpendingPolicy` on `AgentRuntime` and projecting it into a `SpendingPolicySnapshot`. Wired into `IdentityPaymentBinder::with_spending_policy_resolver()` at startup and consulted by `handle_ap2_validate_mandate_pair` for AP2 cart validation.
+- **`StakingSlashingCallback`** — bridges consensus equivocation detection to token slashing (10% stake penalty).
+- **`NodeValidatorRegistry`** — implements `tenzro_network::ValidatorRegistry` for peer authentication on validator-only topics (consensus, blocks, attestations).
 
 ## JSON-RPC API
 
 The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0.1:8545`).
 
-### RPC Namespaces (264+ methods, 26+ namespaces)
+### RPC Namespaces (350+ methods, 26+ namespaces)
 
 - **Blockchain**: blockNumber, getBlock, getBlockRange (batch fetch for catch-up sync), getTransaction (returns `status: "pending" | "finalized"` so callers can distinguish in-mempool from block-included transactions), submitBlock
 - **Accounts**: createAccount, createWallet (chain-agnostic — see "Wallet model" below), getBalance, getNonce, listAccounts
@@ -157,13 +163,14 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0
 - **Video**: listVideoCatalog, listVideoModels, loadVideoModel, unloadVideoModel, videoEmbed
 - **Settlement**: settle, getSettlement
 - **Agents**: registerAgent, sendAgentMessage
-- **Identity**: registerIdentity, importIdentity, resolveDidDocument, resolveIdentity, participate
+- **Identity**: registerIdentity, importIdentity, resolveDidDocument, resolveIdentity, participate, forgetIdentity (GDPR Article 17 right-to-erasure — DID must already be `Revoked`)
 - **Network**: nodeInfo, peerCount, syncing, hardwareProfile, role
 - **Governance**: listProposals, vote, getVotingPower
 - **Payments**: createPaymentChallenge, payMpp, payX402, listPaymentSessions, paymentGatewayInfo, listX402Schemes (pluggable scheme registry: `exact`, `permit2`)
-- **AP2 (Agent Payments Protocol)**: createAp2Session, validateMandatePair (three-axis validation: mandate constraints + DelegationScope + SpendingPolicy)
+- **AP2 v0.2 (Agent Payments Protocol)**: createAp2Session, ap2SignMandate (Ed25519 sign-side for `checkout` and `payment` mandates), ap2VerifyMandate, ap2ValidateMandatePair (three-axis validation: mandate constraints + DelegationScope + SpendingPolicy)
+- **Stripe SPT**: sptIssue (TDIP cap-resolver enforces principal `DelegationScope` + runtime `SpendingPolicy`), sptVerify, with `granted_token.deactivated` webhook cascading into TDIP `apply_remote_revocation` and ERC-8004 ReputationRegistry cross-write on every settled outcome
 - **AAP (Agent Access Protocol)**: oauthDiscovery, exchangeToken, introspectToken — OAuth 2.1 + DPoP-bound JWTs (RFC 9449) + RAR (RFC 9396) over `tenzro-auth`
-- **ERC-8004 Trustless Agents**: registerErc8004Agent, getErc8004Agent, submitErc8004Feedback, requestErc8004Validation, submitErc8004Validation — interoperable with native EVM precompiles `0x101a` / `0x101b` / `0x101c` (`agentId = keccak256(utf8(did_string))`)
+- **ERC-8004 v0.6+ Trustless Agents** (22 surfaces): IdentityRegistry — deriveAgentId, encodeRegister, encodeGetAgent / decodeGetAgent, encodeSetAgentURI, encodeSetAgentWallet, encodeSetMetadata, encodeGetMetadata / decodeGetMetadata, encodeGetAgentURI, encodeGetAgentWallet. ReputationRegistry — encodeFeedback, encodeGetFeedback, encodeGetFeedbackCount, encodeRevokeFeedback, encodeIsFeedbackRevoked, encodeAppendResponse, encodeGetFeedbackResponses. ValidationRegistry — encodeValidationRequest, encodeValidationResponse, encodeGetValidation. All `tenzro_erc8004*`-prefixed; calldata is byte-identical to the native EVM precompiles `0x101a` / `0x101b` / `0x101c` (`agentId = keccak256(utf8(did_string))`)
 - **Reputation & Approval**: getProviderReputation (provider score), listPendingApprovals / getApproval / decideApproval (out-of-scope agent operation queue)
 - **Disputes & Streaming**: getDispute, listDisputesByChannel, chatStream (per-token streaming with optional `channel_id` for micropayment-channel billing)
 - **EU AI Act §50 Provenance**: getProvenance — C2PA-style `ProvenanceManifest` keyed by `SHA-256(content_bytes)`, signed by validator block-signing keys (§50(1) chatbot disclosure via `aap_agent` claim, §50(2) provenance manifest, §50(4) deepfake labeling)
@@ -172,6 +179,10 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0
 - **TaskMarketplace**: postTask, listTasks, getTask, cancelTask, submitQuote
 - **AgentMarketplace**: listAgentTemplates, registerAgentTemplate, getAgentTemplate, updateAgentTemplate, spawnAgentFromTemplate, runAgentTemplate, rateAgentTemplate, searchAgentTemplates, getAgentTemplateStats
 - **TokenRegistry**: createToken, getToken, listTokens, crossVmTransfer, wrapTnzo, getTokenBalance, deployContract
+- **Adaptive Burn**: getBurnRateConfig, getSupplyMetrics, getBurnRateRecommendation, listAdaptiveBurnProposals (read-only dial surface; auto-proposal generator and EIP-1559 fee-market consumer wire alongside the governance executor)
+- **SeedAgent Treasury**: getTreasuryEarmark, getSeedAgentCharter, listSeedAgentCharters, listSeedAgents, getNetworkActivity (read-only earmark and registry; off-chain provisioning daemon and governance-executor mutation paths land in a later wave)
+- **AgentBond / Insurance**: post_agent_bond / get_agent_bond / file_insurance_claim — stake-bonding for agents and insurance pool for cart-mandate fraud
+- **Training (Tenzro Train)**: tenzro_training_postTask, listRuns, getRun, getReceipt, enrollTrainer, submitOuterGradient, finalizeRound
 
 ### Paid Agent Marketplace
 
@@ -241,9 +252,9 @@ The node runs a built-in [Model Context Protocol](https://modelcontextprotocol.i
 
 **Endpoint:** `POST /mcp`
 
-### Available Tools (191)
+### Available Tools (200+)
 
-The main Tenzro MCP server registers 191 tools across wallet, identity, payments, inference, multi-modal AI (forecast, vision, text-embed, segment, detect, transcribe, video), staking, tokens, NFTs, bridges, cross-chain, deBridge, Li.Fi, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, events, and administrative categories. The table below lists representative tools — consult `crates/tenzro-node/src/mcp/server.rs` for the complete authoritative inventory.
+The main Tenzro MCP server registers 200+ tools (base + 24 multi-modal AI + 3 AgentBond/insurance: `post_agent_bond`, `get_agent_bond`, `file_insurance_claim`) across wallet, identity, payments, inference, multi-modal AI (forecast, vision, text-embed, segment, detect, transcribe, video), staking, tokens, NFTs, bridges, cross-chain, deBridge, Li.Fi, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, events, and administrative categories. The table below lists representative tools — consult `crates/tenzro-node/src/mcp/server.rs` for the complete authoritative inventory.
 
 | Category | Representative Tools |
 |----------|----------------------|
@@ -286,21 +297,9 @@ The node runs an [Agent-to-Agent (A2A)](https://a2a-protocol.org) protocol serve
 | A2A RPC | `POST /a2a` | JSON-RPC 2.0 task execution |
 | A2A Stream | `POST /a2a/stream` | Server-Sent Events streaming |
 
-### Agent Skills (30)
+### Agent Skills
 
-- **Wallet**: Create wallets, check balances, send TNZO transactions
-- **Identity**: Register and resolve TDIP decentralized identities
-- **Inference**: Route AI inference requests to network providers
-- **Forecast**: Run timeseries forecasting via `tenzro_forecast` (Chronos-2, Chronos-Bolt, TimesFM 2.5, Granite-TTM-r2)
-- **Vision**: Image embedding/similarity via CLIP, SigLIP2, DINOv3
-- **Text Embedding**: Qwen3-Embedding, EmbeddingGemma, BGE-M3, Snowflake Arctic
-- **Segmentation**: SAM 3 / 3.1, SAM 2, EdgeSAM, MobileSAM
-- **Detection**: RF-DETR, D-FINE
-- **Audio**: ASR via Moonshine v2, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT, Canary
-- **Video**: Frame-extraction + per-frame embedding scaffolding
-- **Settlement**: Settle payments via micropayment channels, escrow, batch
-- **Verification**: Verify ZK proofs, VRF proofs (RFC 9381), TEE attestations, transaction signatures
-- **Staking**: Stake/unstake TNZO, register as provider
+Skills are exposed by `integrations/a2a/tenzro_a2a_server/agent_card.py` and cover wallet, identity, inference, cortex, settlement, verification, staking, task and agent marketplaces, agent spawning, swarm orchestration, lifecycle, bond/insurance, token, contract, AP2 payments, ERC-8004, Wormhole, CCT, join, NFT, bridge, compliance, crosschain, and events. Consult the agent card module for the authoritative list.
 
 ### JSON-RPC Methods
 

@@ -49,8 +49,10 @@ fn now_unix_secs() -> i64 {
 
 fn test_config() -> (NodeConfig, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let mut cfg = NodeConfig::default();
-    cfg.data_dir = tmp.path().to_path_buf();
+    let cfg = NodeConfig {
+        data_dir: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
     (cfg, tmp)
 }
 
@@ -946,13 +948,71 @@ async fn test_onboard_without_jkt_emits_bearer_only_jwt() {
 }
 
 // ---------------------------------------------------------------------------
-// Smoke test: silence dead-code warnings for helpers used by every test.
+// Spec-conformance tests for the auth primitives directly.
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
-fn _ensure_helpers_compile() {
-    let _ = (
-        AuthorizationDetails::empty(),
-        Sha256::digest(b"ping"),
+/// RFC 9396 §2: an empty RAR envelope (no authorization_details grants) means
+/// the bearer can do nothing privileged. A `Transfer` request must resolve to
+/// `Deny` when the JWT carries an empty `AuthorizationDetails`.
+#[tokio::test]
+async fn test_empty_rar_envelope_denies_privileged_action() {
+    let (base_url, tx, handle, _tmp, node) = setup_test_server().await;
+    let client = reqwest::Client::new();
+    let engine = node.auth_engine().expect("auth engine");
+
+    let resp = rpc_call(
+        &client,
+        &base_url,
+        rpc_request(
+            "tenzro_onboardHuman",
+            json!({ "display_name": "Mallory" }),
+        ),
+    )
+    .await;
+    let token = resp["result"]["access_token"].as_str().unwrap().to_string();
+    let mut claims = engine.validate_jwt(&token, None).expect("validate");
+
+    // Force-clear the RAR envelope to simulate an attenuated token that
+    // grants nothing. (Onboarding mints a generous human envelope; we
+    // overwrite to test the empty-envelope policy explicitly.)
+    claims.authorization_details = AuthorizationDetails::empty();
+
+    let request = AuthorityRequest {
+        action: AuthorityAction::Transfer,
+        constraint: ResourceConstraint {
+            asset: Some(AssetId("TNZO".into())),
+            amount: Some(1_000_000u128),
+            counterparty: None,
+            resource_id: None,
+        },
+    };
+    let decision = engine
+        .resolve_authority(&claims, &request, None)
+        .expect("resolve");
+    let decision_str = format!("{:?}", decision);
+    assert!(
+        decision_str.starts_with("Deny"),
+        "empty RAR envelope must deny privileged action, got: {:?}",
+        decision_str
+    );
+
+    shutdown(tx, handle).await;
+}
+
+/// RFC 7638 §3: the JWK Thumbprint is `base64url(SHA-256(canonical-JWK))`
+/// where canonical form has the required members in lexicographic order with
+/// no whitespace. `DpopProof::compute_jkt` must match a manual SHA-256 over
+/// the canonical JWK string byte-for-byte.
+#[test]
+fn test_dpop_jkt_matches_manual_sha256() {
+    let holder = DpopHolder::new();
+    let canonical = holder.jwk_json.clone();
+
+    let manual_digest = Sha256::digest(canonical.as_bytes());
+    let manual_jkt = URL_SAFE_NO_PAD.encode(manual_digest);
+
+    assert_eq!(
+        holder.jkt, manual_jkt,
+        "DpopProof::compute_jkt must match manual SHA-256 over canonical JWK (RFC 7638 §3)"
     );
 }

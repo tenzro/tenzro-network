@@ -10,11 +10,17 @@ pub mod session;
 pub mod server;
 pub mod client;
 pub mod stripe;
+pub mod stripe_spt;
 
 pub use challenge::MppChallenge;
-pub use credential::MppCredential;
+pub use credential::{IetfPaymentBody, MppCredential, TenzroMandateExtension, TenzroSettlementProof};
 pub use receipt::MppReceipt;
 pub use session::{MppSession, MppSessionManager};
 pub use server::MppPaymentServer;
 pub use client::MppClient;
 pub use stripe::StripeClient;
+pub use stripe_spt::{
+    classify_spt_webhook, extract_granted_token, extract_issued_token, SharedPaymentGrantedToken,
+    SharedPaymentIssuedToken, SptCeilingResolver, SptCeilingSnapshot, SptOutcome, SptStatus,
+    SptWebhookEvent, UsageLimits,
+};
