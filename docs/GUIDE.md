@@ -614,7 +614,7 @@ By default the JSON-RPC server binds to `127.0.0.1:8545`. Exposing RPC to the pu
 ### 14.3 Validator hygiene
 
 - Run validators on dedicated hosts, not shared developer machines.
-- Use TEE-attested hardware where possible — TEE validators receive 2× consensus weight and significantly stronger protection against key extraction.
+- Use TEE-attested hardware where possible — TEE validators receive a 1.5× multiplier on their reputation-weighted leader-selection draw and significantly stronger protection against key extraction.
 - Monitor `tenzro_consensus_equivocation_total` — any non-zero value indicates a misconfigured or compromised validator (10% slash penalty applies).
 
 ### 14.4 Reporting vulnerabilities

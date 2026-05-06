@@ -144,8 +144,8 @@ above the consensus layer.
 
 In Tenzro the TEE primitive is at the consensus layer:
 
-- TEE-attested validators get **2× weight** in HotStuff-2 leader selection
-  (`tenzro-consensus`).
+- TEE-attested validators get a **1.5× multiplier** on their reputation-weighted
+  leader-selection draw in HotStuff-2 (`tenzro-consensus`).
 - The `TEE_VERIFY` precompile verifies real Intel TDX (P-256 ECDSA over
   Quote\[0..632\]), AMD SEV-SNP, AWS Nitro (COSE_Sign1 ES384 per RFC 8152
   §4.4), and NVIDIA GPU CC attestations on-chain, with pinned vendor root

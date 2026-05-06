@@ -165,6 +165,15 @@ pub enum ConsensusMessage {
         /// bincode-serialized `tenzro_consensus::timeout::TimeoutCertificate`,
         /// or `None` for the steady-state happy path.
         timeout_certificate: Option<Vec<u8>>,
+        /// bincode-serialized
+        /// `tenzro_consensus::timeout::NoEndorsementCertificate`. Carries f+1
+        /// no-endorsement signatures attesting that no Prepare-QC formed at
+        /// the timed-out view (MonadBFT, arXiv:2502.20692). `Some(_)` is
+        /// required when the leader is proposing a fresh block after a TC
+        /// — receivers reject an unaccompanied fresh block. `None` for the
+        /// steady-state happy path AND when the leader is reproposing the
+        /// existing high-tip block (the parent-hash match suffices).
+        no_endorsement_certificate: Option<Vec<u8>>,
     },
     /// Vote on a proposal
     ///
@@ -213,6 +222,28 @@ pub enum ConsensusMessage {
         /// Aggregated by the receiver into the TC's `max_high_qc_view()` so
         /// the next leader can compute the Jolteon `safe_to_extend` predicate.
         high_qc_view: u64,
+        voter: tenzro_types::primitives::Address,
+        /// bincode-serialized `tenzro_crypto::composite::CompositeSignature`
+        signature: Vec<u8>,
+        /// bincode-serialized `tenzro_crypto::composite::CompositePublicKey`
+        public_key: Vec<u8>,
+    },
+    /// MonadBFT no-endorsement attestation broadcast (arXiv:2502.20692).
+    ///
+    /// Sent on local view-timer expiry alongside the Timeout broadcast.
+    /// Aggregated by the receiver into a `NoEndorsementCertificate` (f+1
+    /// signatures) which the next leader attaches to a fresh block proposal
+    /// after the timed-out view. The f+1 threshold is the smallest set that
+    /// guarantees at least one honest signer — and any honest signer would
+    /// refuse to sign if it had observed a Prepare-QC at the timed-out view,
+    /// so the NEC is unforgeable evidence that no QC formed.
+    ///
+    /// The two opaque blobs mirror the Vote / Timeout variants — bincode-
+    /// serialized `CompositeSignature` / `CompositePublicKey`. Format version
+    /// is pinned by `tenzro_consensus::NO_ENDORSEMENT_MSG_FORMAT_VERSION`.
+    NoEndorsement {
+        format_version: u8,
+        view: u64,
         voter: tenzro_types::primitives::Address,
         /// bincode-serialized `tenzro_crypto::composite::CompositeSignature`
         signature: Vec<u8>,

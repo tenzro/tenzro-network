@@ -61,7 +61,7 @@ Tenzro does. Five things follow:
 1. **One chain spans EVM, SVM, and Canton/DAML.** `tenzro-vm` runs three executors behind one runtime, so DeFi, agent trading, and regulated tokenized-asset settlement happen on one ledger.
 2. **One identity spans retail-agent and institutional-RWA rails.** A single TDIP DID acts on AP2/x402/ERC-8004/ERC-4337 (retail-agent) and on Canton/CIP-56/DvP (institutional) with the same delegation scope, wallet, and on-chain settlement.
 3. **The agent-commerce stack is native.** AP2, x402, MPP, ERC-8004, ERC-4337 v0.8, A2A, and MCP run inside Tenzro consensus and settle in TNZO.
-4. **Confidential agent compute is a consensus primitive.** TEE-attested validators get 2× weight in HotStuff-2 leader selection; on-chain `TEE_VERIFY` covers Intel TDX, AMD SEV-SNP, AWS Nitro, and NVIDIA GPU CC.
+4. **Confidential agent compute is a consensus primitive.** TEE-attested validators get a 1.5× multiplier on their reputation-weighted leader-selection draw in HotStuff-2; on-chain `TEE_VERIFY` covers Intel TDX, AMD SEV-SNP, AWS Nitro, and NVIDIA GPU CC.
 5. **The native asset uses a pointer model.** TNZO has one balance and three VM views — no bridge risk, no liquidity fragmentation. Registered upstream via CAIP-2, SLIP-44 (`1414421071` / `0xd44e5a4f`), and W3C DID (`did:tenzro`).
 
 The Foundation's role is to steward this stack into community ownership without trading away the architectural decisions that make it cohere. For the full ecosystem context with citations, see [docs/landscape-2026.md](landscape-2026.md).
@@ -237,7 +237,7 @@ TNZO serves four functions within the network:
 
 1. **Transaction fees (gas).** All on-chain transactions on the Tenzro Ledger require TNZO for gas, following an EIP-1559 dynamic fee market with base fee adjustment (±12.5% per block), fee burning, and priority fee tipping.
 2. **Settlement currency.** AI inference payments, TEE service fees, and escrow settlements are denominated in TNZO. Micropayment channels enable per-token billing for streaming inference.
-3. **Staking and validation.** Validators and providers stake TNZO to participate in consensus and earn rewards. TEE-attested validators receive 2× consensus weight, creating strong economic incentives for hardware-secured participation.
+3. **Staking and validation.** Validators and providers stake TNZO to participate in consensus and earn rewards. TEE-attested validators receive a 1.5× multiplier on their reputation-weighted leader-selection draw, creating strong economic incentives for hardware-secured participation.
 4. **Governance.** TNZO holders vote on protocol proposals, treasury grants, parameter changes, and protocol upgrades. Voting power is stake-weighted with delegation support.
 
 ### 5.3 Initial Token Distribution
@@ -433,7 +433,7 @@ Different provider roles receive different reward multipliers reflecting their c
 | Model Provider | 1.1× | AI inference capacity increases network utility |
 | Storage Provider | 1.0× | Data availability and state persistence |
 
-TEE-attested validators additionally receive 2× consensus voting weight in HotStuff-2 leader selection, creating a compounding incentive for hardware-secured participation.
+TEE-attested validators additionally receive a 1.5× multiplier on their reputation-weighted leader-selection draw in HotStuff-2, creating a compounding incentive for hardware-secured participation. The multiplicative form preserves the property that observed behaviour fully overcomes attestation — a TEE-attested but flaky validator is dwarfed by a non-TEE validator with a clean recent track record.
 
 ### 8.3 Reward Calculation
 
@@ -903,8 +903,8 @@ Sections governing dissolution (§18) require Phase 3 governance with the enhanc
 | Default chain ID | 1337 | tenzro-vm |
 | Max contract size | 24,576 bytes | tenzro-vm |
 | Max call depth | 1,024 | tenzro-vm |
-| TEE consensus weight | 2× | tenzro-consensus |
-| HotStuff-2 phases | PREPARE, COMMIT, DECIDE | tenzro-consensus |
+| TEE multiplier on leader draw | 1.5× | tenzro-consensus |
+| HotStuff-2 phases | PREPARE, COMMIT (two-phase) | tenzro-consensus |
 | Block time | 400ms | tenzro-consensus |
 | Keystore encryption | Argon2id + AES-256-GCM | tenzro-wallet |
 | MPC threshold | 2-of-3 | tenzro-wallet |

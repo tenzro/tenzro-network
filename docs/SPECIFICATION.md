@@ -14,7 +14,7 @@
 
 **Tenzro Ledger** is the purpose-built Layer 1 settlement layer for humans and agents, providing verifiable, on-chain primitives for the AI age: **identity** (TDIP: Tenzro Decentralized Identity Protocol for humans and machines), **security** (TEE-weighted consensus with hardware attestations), **verification** (dual ZK + TEE proof systems), and **settlement** (micropayment channels, escrow, batch processing). All fees and settlements are denominated in **TNZO**, the governance token of the Tenzro Network protocol.
 
-Built from the ground up around Trusted Execution Environments (TEEs) and zero-knowledge proofs, the Ledger provides hardware-rooted trust at every layer — validators run inside TEEs and receive 2x consensus weight, smart contracts execute within hardware enclaves, and all on-chain claims can be independently verified through cryptographic proofs or hardware attestations. The Ledger supports a multi-VM execution environment (EVM, SVM, Daml/Canton), an autonomous agent framework with self-sovereign identity and MPC wallet ownership, a multi-modal AI model marketplace covering text, vision, audio, and timeseries inference with per-token settlement, recurrent-depth reasoning workers (Tenzro Cortex) priced by loop depth and bound to signed receipts, swarm orchestration for parallel agent execution, and cross-chain interoperability through LayerZero, Chainlink CCIP, deBridge, and Wormhole. Multi-protocol payment support (MPP, x402, Tempo) enables HTTP 402-based machine payments with identity-bound delegation enforcement. Consensus is driven by a HotStuff-2 BFT engine with 400ms block times, where TEE-attested validators carry double voting weight, creating strong economic incentives for hardware-secured participation.
+Built from the ground up around Trusted Execution Environments (TEEs) and zero-knowledge proofs, the Ledger provides hardware-rooted trust at every layer — TEE-attested validators receive a 1.5× multiplier on their reputation-weighted leader-selection draw, smart contracts execute within hardware enclaves, and all on-chain claims can be independently verified through cryptographic proofs or hardware attestations. The Ledger supports a multi-VM execution environment (EVM, SVM, Daml/Canton), an autonomous agent framework with self-sovereign identity and MPC wallet ownership, a multi-modal AI model marketplace covering text, vision, audio, and timeseries inference with per-token settlement, decentralized verifiable training (Tenzro Train, Decoupled DiLoCo–style with on-chain run-root commitments), recurrent-depth reasoning workers (Tenzro Cortex) priced by loop depth and bound to signed receipts, swarm orchestration for parallel agent execution, and cross-chain interoperability through Wormhole NTT, LayerZero V2, Chainlink CCIP, deBridge DLN, Li.Fi, and Canton. Multi-protocol payment support (MPP, x402, Tempo, Stripe SPT, AP2) enables HTTP 402-based machine payments with identity-bound delegation enforcement. Consensus is a two-phase HotStuff-2 BFT engine with 400ms block times, reputation-weighted proposer election, no-endorsement certificates for tail-fork resistance, and Ed25519 + ML-DSA-65 hybrid post-quantum signatures on every safety-critical message.
 
 Tenzro is not solely an inference marketplace — it is a general-purpose L1 settlement layer where verifiable computation, confidential execution, and agent-to-agent economic coordination are first-class primitives.
 
@@ -71,7 +71,7 @@ Providers, validators, and nodes earn by:
 
 **Tenzro Ledger** is the Layer 1 settlement layer that underpins the protocol. It treats hardware trust, verifiable computation, and autonomous agents as foundational primitives rather than application-layer add-ons:
 
-- **TEE-native consensus.** Validators running inside Trusted Execution Environments receive 2× voting weight in the HotStuff-2 BFT consensus protocol. This makes hardware-secured participation the economically rational default, not an optional enhancement. TEE attestations are verified on-chain and influence block validity.
+- **TEE-native consensus.** Validators running inside Trusted Execution Environments receive a **1.5× multiplier** on their reputation-weighted leader-selection draw in the HotStuff-2 BFT consensus protocol. The multiplicative form (rather than a hard 2× boost) preserves the property that observed behaviour can fully overcome attestation: a TEE-attested but chronically-flaky validator is still dwarfed in draw probability by a non-TEE active validator. TEE attestations are verified on-chain and influence block validity.
 - **Dual verification: ZK + TEE.** Every computation claim can be backed by a zero-knowledge proof (Plonky3 STARK over the KoalaBear field with FRI commitments), a TEE attestation, or both simultaneously through hybrid ZK-in-TEE execution. This provides two independent trust anchors — cryptographic (ZK) and hardware (TEE) — giving applications flexibility to choose their security/performance tradeoff. Plonky3 STARKs require no trusted setup and are post-quantum sound.
 - **Multi-VM execution.** The Ledger supports EVM, SVM, and Daml smart contracts through a unified runtime. Applications are not limited to inference — any programmable logic can run on Tenzro, with the added capability of invoking TEE execution and ZK verification through native precompiles.
 - **Agent-first design.** AI agents are first-class network participants with self-sovereign identity (DID-based via TDIP), MPC threshold wallets they control without custodians, capability-based permissions, and a native agent-to-agent (A2A) communication protocol. Agents can discover each other, negotiate services, and settle payments autonomously.
@@ -94,7 +94,7 @@ A small set of L1s pursue multi-VM execution. **Fluent** (mainnet 2026-04-24) is
 1. **Run EVM, SVM, and Canton/DAML in one chain.** `tenzro-vm` runs three executors (revm EVM, `solana_rbpf` SVM, Canton 3.x DAML) behind one runtime. Routing is at the transaction-type layer, not via cross-chain messaging. No 2026 chain combines all three.
 2. **Bridge retail-agent and institutional-RWA rails under one identity.** A single TDIP DID can act on AP2/x402/ERC-8004/ERC-4337 (retail-agent) and Canton/CIP-56/DvP (institutional) with the same delegation scope, the same wallet, and the same on-chain settlement.
 3. **Run the full agent-commerce stack natively, across crypto rails and card rails.** AP2 (`tenzro_validateMandatePair`), x402 with EIP-3009, MPP with Stripe Payment Intents — all settling on-chain in TNZO. For card rails (Visa Trusted Agent Protocol, Mastercard Agent Pay) where the money moves over the card network, Tenzro provides the layer the card networks do not: agent DID, signed delegation scope, AP2 mandate validation, and an on-chain audit receipt. ERC-8004 system precompiles at `0x101a/0x101b/0x101c` with byte-identical selectors to Ethereum, ERC-4337 v0.8 EntryPoint, A2A on port 3002, MCP via `rmcp` — all inside Tenzro consensus.
-4. **Treat confidential agent compute as a consensus primitive, not a sidecar.** TEE-attested validators get 2× weight in HotStuff-2 leader selection. The `TEE_VERIFY` precompile verifies real Intel TDX (P-256 ECDSA over Quote\[0..632\]), AMD SEV-SNP, AWS Nitro (COSE_Sign1 ES384 per RFC 8152 §4.4), and NVIDIA GPU CC quotes on-chain with pinned vendor root CAs. ZK proofs are commitment-attested via `ZkCommitmentRegistry` for O(1) EVM verification.
+4. **Treat confidential agent compute as a consensus primitive, not a sidecar.** TEE-attested validators get a 1.5× multiplier on their reputation-weighted leader-selection draw. The `TEE_VERIFY` precompile verifies real Intel TDX (P-256 ECDSA over Quote\[0..632\]), AMD SEV-SNP, AWS Nitro (COSE_Sign1 ES384 per RFC 8152 §4.4), and NVIDIA GPU CC quotes on-chain with pinned vendor root CAs. ZK proofs are commitment-attested via `ZkCommitmentRegistry` for O(1) EVM verification.
 5. **Settle agentic micropayments in a pointer-model native asset.** TNZO has one balance with three VM views — wTNZO ERC-20 at `0x7a4bcb13a6b2b384c284b5caa6e5ef3126527f93` on EVM, SPL adapter on SVM, CIP-56 holdings on Canton. All three views read and write the same underlying account state — no bridge risk, no liquidity fragmentation. Registered upstream via CAIP-2 (`tenzro` namespace), SLIP-44 (`1414421071` / `0xd44e5a4f` — encodes ASCII T+0x80, N, Z, O), and W3C DID (`did:tenzro`).
 
 What makes this work is the **combination**, not any single piece: AP2, x402, ERC-8004, ERC-4337, MCP, A2A, Plonky3, Poseidon2, FRI, KoalaBear, and TEE attestation are open standards adopted byte-for-byte rather than reinvented. The work is integrating them inside one consensus layer with one native asset and one identity surface.
@@ -305,17 +305,33 @@ The quorum threshold follows classic BFT: for n validators, the protocol tolerat
 
 When `optimistic_responsiveness` is enabled (default), the protocol advances at network speed rather than waiting for fixed timeouts. If a quorum of honest validators respond before the view timeout, the protocol proceeds immediately. This allows block times below the configured 400ms target under favorable network conditions.
 
-### 3.5 Leader Selection
+### 3.5 Reputation-Weighted Proposer Election
 
-Three leader rotation strategies are supported:
+Tenzro's default proposer-election strategy is reputation-weighted. Each round draws the leader from a stake-weighted seeded distribution where per-validator weight is multiplied by an observed-behaviour tier and a TEE multiplier:
 
-- **Round Robin** (default). Leaders rotate deterministically by view number: `leader = validators[view % n]`.
-- **Stake Weighted.** Leaders are selected with probability proportional to their stake, giving larger stakers more frequent proposal opportunities.
-- **Random (VRF).** A Verifiable Random Function determines the next leader, providing unpredictability to resist targeted attacks. Tenzro implements ECVRF-EDWARDS25519-SHA512-TAI per RFC 9381 §5.4.1.1, reusing existing Ed25519 validator keys. The same primitive is exposed to application layers through EVM precompile `0x1007` (for on-chain verification), the NFT factory's `mintRandom` entry point (for provably-fair NFT reveals and trait assignment), the `tenzro_generateVrfProof` / `tenzro_verifyVrfProof` JSON-RPC methods, and corresponding MCP and A2A tools.
+```
+weight(v) = stake(v) × tier(v) × tee_multiplier(v) / 10000
 
-### 3.6 TEE-Weighted Validation
+tier(v):
+  ACTIVE   = 1000   if v proposed ≥1 QC-certified block recently
+                     and failed <10% of its proposer-window rounds
+  INACTIVE = 10     if v voted but didn't propose
+  FAILED   = 1      otherwise
 
-Validators operating within a TEE receive **2x weight** in leader selection. This incentivizes hardware-attested validation, increasing network security. The TEE attestation is verified at epoch boundaries when the validator set is reconstituted.
+tee_multiplier(v):
+  15000 (1.5×) if v has a fresh valid TEE attestation in the current epoch
+  10000 (1.0×) otherwise
+```
+
+The 1000× spread between ACTIVE and FAILED collapses a chronically-flaky validator's effective draw probability to ~0.1% within ~20 rounds. The leader-draw seed is anti-grinding (`SHA-256("TENZRO_LEADER_REPUTATION:" || epoch || round || prev_finalized_block_id)`), with `prev_finalized_block_id` fixed at least one full QC ago and the proposer-history window excluding the most recent 20 rounds. `ProposerElectionKind::RoundRobin` is retained for tests and replay benchmarks. A VRF primitive (ECVRF-EDWARDS25519-SHA512-TAI per RFC 9381 §5.4.1.1) is exposed to applications through EVM precompile `0x1007`, the NFT factory's `mintRandom` entry point, and the `tenzro_generateVrfProof` / `tenzro_verifyVrfProof` JSON-RPC methods.
+
+### 3.6 No-Endorsement Certificates (Tail-Fork Resistance)
+
+Tenzro closes the tail-fork attack class on 2-chain HotStuff with no-endorsement certificates (NECs). The leader at view *v* must either re-propose the high-tip from view *v−1*, or attach a valid NEC for view *v*. A NEC is an *f+1* aggregation of `NoEndorsementMsg`s, each attesting "I observed no QC at view v−1". *f+1* (not *2f+1*) is the correct threshold: with at most *f* Byzantine signers, *f+1* suffices to guarantee at least one truthful "no QC observed" attestation. Domain tag `TENZRO_NO_ENDORSEMENT:` distinct from the timeout and vote tags prevents cross-message replay. Full protocol specification with formal arguments and academic citations: [`docs/papers/tenzro-consensus.md`](papers/tenzro-consensus.md).
+
+### 3.6.1 TEE-Weighted Validation
+
+The TEE multiplier described above (1.5× on the reputation-adjusted weight) makes hardware-secured participation the economically rational default while never gating liveness. TEE attestations are verified at epoch boundaries when the validator set is reconstituted.
 
 ### 3.7 Epoch Management
 
@@ -1620,7 +1636,7 @@ This flow supports migration from other networks or key management systems while
 | CPU model, cores, threads | Compute capacity for inference workloads |
 | Total RAM | Memory-bound model support |
 | GPU name, VRAM, architecture | GPU-accelerated inference and proving eligibility |
-| TEE availability | TEE-attested validator eligibility (2x consensus weight) |
+| TEE availability | TEE-attested validator eligibility (1.5× multiplier on reputation-weighted leader draw) |
 
 Hardware profiles are stored as identity metadata and used by the `InferenceRouter` to match inference requests to capable providers.
 

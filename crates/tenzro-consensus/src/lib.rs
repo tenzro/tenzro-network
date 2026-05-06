@@ -106,6 +106,7 @@ pub mod epoch_manager;
 pub mod error;
 pub mod finality;
 pub mod hotstuff2;
+pub mod leader_reputation;
 pub mod mempool;
 pub mod proposer;
 pub mod timeout;
@@ -119,22 +120,30 @@ pub use admission::{
     AdmissionConfig, AdmissionController, AdmissionDecision, BucketSnapshot,
     DefaultLaneResolver, Lane, LaneResolver, LaneStats,
 };
-pub use config::{ConsensusConfig, BftThreshold, LeaderRotation};
+pub use config::{BftThreshold, ConsensusConfig, ProposerElectionKind};
 pub use epoch_manager::{Epoch, EpochManager, EpochStats};
 pub use error::{ConsensusError, Result};
 pub use finality::{FinalityNotification, FinalityTracker, ForkChoice};
 pub use hotstuff2::{
     BlockProvider, ConsensusOutMessage, HotStuff2Engine, Phase, StateRootProvider,
 };
+pub use leader_reputation::{
+    proposer_window, reputation_seed, voter_window, LeaderReputation, ProposerHistory,
+    ProposerRecord, ValidatorWeights, VoterHistory, VoterRecord, ACTIVE_WEIGHT, FAILED_WEIGHT,
+    FAILURE_THRESHOLD_PERCENT, INACTIVE_WEIGHT, NO_TEE_MULTIPLIER_BPS, TEE_MULTIPLIER_BPS,
+};
 pub use mempool::{Mempool, MempoolStats};
 pub use proposer::BlockProposer;
 pub use timeout::{
-    CollectOutcome, TcSigner, TimeoutCertificate, TimeoutCollector, TimeoutMsg,
+    CollectOutcome, NecCollectOutcome, NecSigner, NoEndorsementCertificate, NoEndorsementCollector,
+    NoEndorsementMsg, TcSigner, TimeoutCertificate, TimeoutCollector, TimeoutMsg,
+    NO_ENDORSEMENT_CERTIFICATE_FORMAT_VERSION, NO_ENDORSEMENT_MSG_FORMAT_VERSION,
     TIMEOUT_CERTIFICATE_FORMAT_VERSION, TIMEOUT_MSG_FORMAT_VERSION,
 };
 pub use traits::{ConsensusEngine, ConsensusNetwork, SlashingCallback, StateManager};
 pub use validator::{
-    EquivocationDetector, EquivocationEvidence, ValidatorInfo, ValidatorSet, ValidatorStatus,
+    EquivocationDetector, EquivocationEvidence, ProposerElection, ReputationProposer,
+    RoundRobinProposer, ValidatorInfo, ValidatorSet, ValidatorStatus,
 };
 pub use vote_state::{
     open_default_file_store, FileVoteStateStore, LastSignState, MemoryVoteStateStore,

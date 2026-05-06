@@ -1,6 +1,7 @@
 //! Validator set management for consensus
 
 use crate::error::{ConsensusError, Result};
+use crate::leader_reputation::LeaderReputation;
 use crate::voter::Vote;
 use dashmap::DashMap;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -141,16 +142,15 @@ impl ValidatorInfo {
         }
     }
 
-    /// Returns the priority for leader selection
-    /// Validators with TEE attestation get higher priority
-    pub fn leader_priority(&self, tee_boost: bool) -> u128 {
-        let base_priority = self.voting_power();
-        if tee_boost && self.has_valid_tee_attestation() {
-            // 2x boost for TEE-attested validators
-            base_priority * 2
-        } else {
-            base_priority
-        }
+    /// Returns the base priority for leader selection.
+    ///
+    /// This is just the validator's voting power (stake when active, zero
+    /// otherwise). Any TEE multiplier is applied by the proposer-election
+    /// implementation (see [`ReputationProposer`]), not baked into the
+    /// validator's intrinsic priority — so a TEE-attested validator with
+    /// degraded behaviour can still be deprioritized by reputation.
+    pub fn leader_priority(&self) -> u128 {
+        self.voting_power()
     }
 }
 
@@ -223,7 +223,7 @@ impl ValidatorSet {
     }
 
     /// Returns an iterator over the validators
-    pub fn iter(&self) -> impl Iterator<Item = &ValidatorInfo> {
+    pub fn iter(&self) -> std::slice::Iter<'_, ValidatorInfo> {
         self.validators.iter()
     }
 
@@ -242,48 +242,20 @@ impl ValidatorSet {
         self.get_by_address(address).is_some()
     }
 
-    /// Selects the leader for the given view
+    /// Selects the leader for the given view via deterministic round-robin.
     ///
-    /// Uses round-robin selection with optional TEE-based priority
-    pub fn select_leader(&self, view: u64, tee_priority: bool) -> Result<&ValidatorInfo> {
+    /// This is the simplest possible proposer election: `view % N`. It is
+    /// retained as a fallback / test path; production deployments should use
+    /// [`ReputationProposer`] via [`ProposerElection`] which incorporates
+    /// observed-behaviour reputation and a stake-weighted draw.
+    pub fn select_leader_round_robin(&self, view: u64) -> Result<&ValidatorInfo> {
         if self.validators.is_empty() {
             return Err(ConsensusError::InvalidValidatorSet(
                 "No validators available".to_string(),
             ));
         }
-
-        if !tee_priority {
-            // Simple round-robin
-            let index = (view as usize) % self.validators.len();
-            return Ok(&self.validators[index]);
-        }
-
-        // Weighted selection based on priority
-        let total_priority: u128 = self
-            .validators
-            .iter()
-            .map(|v| v.leader_priority(tee_priority))
-            .sum();
-
-        if total_priority == 0 {
-            // Fallback to round-robin if no active validators
-            let index = (view as usize) % self.validators.len();
-            return Ok(&self.validators[index]);
-        }
-
-        // Use view as seed for deterministic selection
-        let target = (view as u128) % total_priority;
-        let mut cumulative = 0u128;
-
-        for validator in &self.validators {
-            cumulative += validator.leader_priority(tee_priority);
-            if cumulative > target {
-                return Ok(validator);
-            }
-        }
-
-        // Fallback to first validator
-        Ok(&self.validators[0])
+        let index = (view as usize) % self.validators.len();
+        Ok(&self.validators[index])
     }
 
     /// Calculates the quorum threshold (2f+1)
@@ -485,6 +457,112 @@ impl Default for EquivocationDetector {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Proposer election
+// ---------------------------------------------------------------------------
+
+/// Strategy interface for selecting the proposer of a given round/view.
+///
+/// Two concrete implementations are provided:
+///
+/// - [`RoundRobinProposer`] — naïve `view % N` rotation. Useful for tests and
+///   for validator sets so small that reputation history is not yet
+///   meaningful. **Not recommended for production.**
+/// - [`ReputationProposer`] — Aptos LeaderReputation. Stake-weighted draw
+///   whose per-validator weight is multiplied by an observed-behaviour term
+///   (active / inactive / failed). A flaky validator's effective weight
+///   collapses to ~0.1% of a healthy peer's within ~20 rounds, which is what
+///   prevents naïve round-robin from wedging the chain when one of N
+///   validators is unresponsive.
+///
+/// The trait returns an [`Address`] (not a `&ValidatorInfo`) so it composes
+/// cleanly with the engine's hot path: the engine resolves the address back
+/// to the validator info via `validator_set.get_by_address` only when needed.
+pub trait ProposerElection: Send + Sync {
+    /// Selects the proposer for `round` in `epoch`.
+    ///
+    /// `prev_block_id` is the hash of the most recently finalized block —
+    /// this is the anti-grinding seed component (the parent the new proposal
+    /// will extend). For round-robin this argument is unused; for
+    /// reputation-based selection it is mixed into the seed.
+    fn select_leader(
+        &self,
+        round: u64,
+        epoch: u64,
+        prev_block_id: [u8; 32],
+        validator_set: &ValidatorSet,
+    ) -> Result<Address>;
+}
+
+/// Naïve `view % N` round-robin proposer.
+///
+/// Retained because some configurations (smoke tests, very small validator
+/// sets, deterministic-replay benchmarks) genuinely want it. Production
+/// deployments must use [`ReputationProposer`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RoundRobinProposer;
+
+impl RoundRobinProposer {
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl ProposerElection for RoundRobinProposer {
+    fn select_leader(
+        &self,
+        round: u64,
+        _epoch: u64,
+        _prev_block_id: [u8; 32],
+        validator_set: &ValidatorSet,
+    ) -> Result<Address> {
+        validator_set
+            .select_leader_round_robin(round)
+            .map(|v| v.address)
+    }
+}
+
+/// Aptos LeaderReputation proposer.
+///
+/// Wraps a shared [`LeaderReputation`] state and dispatches to its seeded
+/// weighted draw. The wrapped state is the same one the engine feeds with
+/// `record_round_outcome` / `record_round_voters` after each round closes —
+/// so the reputation evolves alongside consensus rather than being a
+/// per-call computation.
+#[derive(Clone)]
+pub struct ReputationProposer {
+    reputation: Arc<LeaderReputation>,
+}
+
+impl ReputationProposer {
+    /// Wraps an existing [`LeaderReputation`] instance.
+    pub fn new(reputation: Arc<LeaderReputation>) -> Self {
+        Self { reputation }
+    }
+
+    /// Borrowed handle to the wrapped reputation state — useful for the
+    /// engine to record outcomes / voters after round close without going
+    /// through the trait.
+    pub fn reputation(&self) -> &Arc<LeaderReputation> {
+        &self.reputation
+    }
+}
+
+impl ProposerElection for ReputationProposer {
+    fn select_leader(
+        &self,
+        round: u64,
+        epoch: u64,
+        prev_block_id: [u8; 32],
+        validator_set: &ValidatorSet,
+    ) -> Result<Address> {
+        let prev_hash = Hash::new(prev_block_id);
+        self.reputation
+            .select_leader(round, epoch, &prev_hash, validator_set)
+            .map(|v| v.address)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,11 +617,11 @@ mod tests {
 
         let set = ValidatorSet::new(1, validators).unwrap();
 
-        // Round-robin without TEE priority
-        let leader0 = set.select_leader(0, false).unwrap();
-        let leader1 = set.select_leader(1, false).unwrap();
-        let leader2 = set.select_leader(2, false).unwrap();
-        let leader3 = set.select_leader(3, false).unwrap();
+        // Round-robin
+        let leader0 = set.select_leader_round_robin(0).unwrap();
+        let leader1 = set.select_leader_round_robin(1).unwrap();
+        let leader2 = set.select_leader_round_robin(2).unwrap();
+        let leader3 = set.select_leader_round_robin(3).unwrap();
 
         assert_eq!(leader0.address, set.validators[0].address);
         assert_eq!(leader1.address, set.validators[1].address);
