@@ -64,6 +64,7 @@ pub mod document;
 pub mod erc8004;
 pub mod error;
 pub mod identity;
+pub mod kya;
 pub mod registry;
 pub mod verification;
 pub mod w3c;
@@ -84,6 +85,11 @@ pub use error::{IdentityError, Result};
 pub use identity::{
     validate_username, IdentityData, IdentityStatus, KeyPurpose, PublicKeyInfo, RevocationEntry,
     ServiceEndpoint, TenzroIdentity,
+};
+pub use kya::{
+    compute_kya_level, is_kya_service_type, AuthenticatorBinding, KyaLevel, KyaRecord,
+    SERVICE_TYPE_MASTERCARD_KYA, SERVICE_TYPE_STRIPE_SPT, SERVICE_TYPE_TEMPO_ACCOUNT,
+    SERVICE_TYPE_VISA_TAP,
 };
 pub use registry::{
     DelegationPolicy, DidResolutionBackend, IdentityRegistry, RegistrationResult,

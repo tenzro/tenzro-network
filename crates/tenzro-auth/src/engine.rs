@@ -471,15 +471,14 @@ impl AuthEngine {
 
         // Validate that the inner time window (if any) does not
         // outlive the JWT itself.
-        if let Some(ctx) = &aap_overrides.context {
-            if let Some(tw) = &ctx.time_window {
-                if tw.exp > exp {
-                    return Err(AuthError::InvalidScope(format!(
-                        "aap_context.time_window.exp {} exceeds jwt exp {}",
-                        tw.exp, exp
-                    )));
-                }
-            }
+        if let Some(ctx) = &aap_overrides.context
+            && let Some(tw) = &ctx.time_window
+            && tw.exp > exp
+        {
+            return Err(AuthError::InvalidScope(format!(
+                "aap_context.time_window.exp {} exceeds jwt exp {}",
+                tw.exp, exp
+            )));
         }
 
         let claims = AuthClaims {
@@ -787,7 +786,7 @@ impl AuthEngine {
                     approver_did,
                     created_at_ms: now_ms,
                     expires_at_ms: now_ms + ttl_secs * 1000,
-                    action: authority_request_to_detail(&request),
+                    action: authority_request_to_detail(request),
                     summary: format!(
                         "AAP oversight: action {} requires approval",
                         action_name
@@ -927,13 +926,13 @@ impl AuthEngine {
             .get_approval(approval_id)?
             .ok_or_else(|| AuthError::Internal(format!("approval {} not found", approval_id)))?;
 
-        if let Some(expected) = expected_approver_did {
-            if record.approver_did != expected {
-                return Err(AuthError::Forbidden(format!(
-                    "approval {} is for approver {}, not {}",
-                    approval_id, record.approver_did, expected
-                )));
-            }
+        if let Some(expected) = expected_approver_did
+            && record.approver_did != expected
+        {
+            return Err(AuthError::Forbidden(format!(
+                "approval {} is for approver {}, not {}",
+                approval_id, record.approver_did, expected
+            )));
         }
 
         match record.status {
@@ -996,10 +995,10 @@ impl AuthEngine {
             let Some(approval_id) = key_str.strip_prefix(&prefix) else {
                 continue;
             };
-            if let Some(rec) = self.get_approval(approval_id)? {
-                if matches!(rec.status, ApprovalStatus::Pending) {
-                    out.push(rec);
-                }
+            if let Some(rec) = self.get_approval(approval_id)?
+                && matches!(rec.status, ApprovalStatus::Pending)
+            {
+                out.push(rec);
             }
         }
         Ok(out)
@@ -1624,7 +1623,7 @@ fn authority_request_to_detail(request: &AuthorityRequest) -> AuthorizationDetai
         .clone()
         .unwrap_or_else(tenzro_types::AssetId::tnzo);
     let amount = request.constraint.amount.unwrap_or(0);
-    let counterparty = request.constraint.counterparty.clone();
+    let counterparty = request.constraint.counterparty;
     match request.action {
         AuthorityAction::Transfer => AuthorizationDetail::Transfer {
             asset,
@@ -2194,10 +2193,10 @@ mod tests {
                 parent_event_id,
                 ..
             } = ev.kind
+                && cascaded
+                && parent_event_id.is_some()
             {
-                if cascaded && parent_event_id.is_some() {
-                    cascaded_count += 1;
-                }
+                cascaded_count += 1;
             }
         }
         assert_eq!(

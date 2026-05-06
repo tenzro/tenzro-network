@@ -11,7 +11,7 @@ use tenzro_node::config::{NodeConfig, GenesisConfig};
 use tenzro_node::error::{self, Result};
 use tenzro_node::node::TenzroNode;
 use tenzro_node::rpc::RpcServer;
-use tenzro_node::{a2a, event_loop, genesis, mcp, spending_policy_bridge, web};
+use tenzro_node::{a2a, event_loop, genesis, mcp, spending_policy_bridge, spt_ceiling_bridge, web};
 use tenzro_storage::KvStore;
 
 /// Tenzro Network Node CLI
@@ -177,6 +177,40 @@ async fn main() -> Result<()> {
     let mut node = TenzroNode::new(config.clone()).await?;
     node.start().await?;
 
+    // Construct the Stripe SPT ceiling-resolver cache adapter once (if a
+    // Stripe API key is configured) and register a typed handle on the
+    // node BEFORE the Arc wrap. The same adapter Arc is later cloned
+    // into the IdentityPaymentBinder as a `dyn SptCeilingResolver` and
+    // also reachable via `node.spt_ceiling_cache()` for the SPT
+    // revocation dispatcher's invalidate path. Constructing once,
+    // sharing via Arc, guarantees the binder read path and the
+    // dispatcher invalidate path see the same cache state.
+    let spt_ceiling_cache: Option<
+        std::sync::Arc<spt_ceiling_bridge::SptCeilingResolverAdapter>,
+    > = config
+        .payments
+        .stripe_api_key
+        .as_ref()
+        .filter(|k| !k.trim().is_empty())
+        .map(|api_key| {
+            let mut stripe = tenzro_payments::mpp::StripeClient::new(api_key.clone());
+            if let Some(api_base) = config
+                .payments
+                .stripe_api_base
+                .as_ref()
+                .filter(|b| !b.trim().is_empty())
+            {
+                stripe = stripe.with_api_base(api_base.clone());
+            }
+            std::sync::Arc::new(spt_ceiling_bridge::SptCeilingResolverAdapter::new(
+                std::sync::Arc::new(stripe),
+            ))
+        });
+    if let Some(ref cache) = spt_ceiling_cache {
+        node.set_spt_ceiling_cache(cache.clone());
+        tracing::info!("Stripe SPT ceiling-resolver cache registered on TenzroNode");
+    }
+
     // Start RPC server
     let node_arc = Arc::new(node);
     let mut rpc_server = RpcServer::new(node_arc.clone(), config.rpc_addr.clone());
@@ -207,11 +241,29 @@ async fn main() -> Result<()> {
                     );
                 binder = binder.with_spending_policy_resolver(resolver);
             }
+            // Phase D (Stripe SPT): consume the shared
+            // `spt_ceiling_cache` Arc constructed and registered on the
+            // node above. Reusing the same adapter Arc as the binder's
+            // resolver and the dispatcher's invalidate handle is the
+            // whole point — it guarantees cache state stays in lockstep
+            // between payment-admission reads and revocation invalidates.
+            // The four-ceiling enforcement path (`validate_payer_with_spt`)
+            // consults the resolver to verify a granted-token is Active
+            // and within `usage_limits` before admitting the payment.
+            // Cache-first reads with `Ok(None)` fallback semantics — see
+            // `spt_ceiling_bridge` module docs.
+            if let Some(cache) = spt_ceiling_cache.clone() {
+                let spt_resolver: std::sync::Arc<
+                    dyn tenzro_payments::mpp::stripe_spt::SptCeilingResolver,
+                > = cache;
+                binder = binder.with_spt_ceiling_resolver(spt_resolver);
+                tracing::info!("Stripe SPT ceiling resolver wired into IdentityPaymentBinder");
+            }
             std::sync::Arc::new(binder)
         });
 
-    if config.payments.enabled {
-        if let Some(gateway) = node_arc.payment_gateway() {
+    if config.payments.enabled
+        && let Some(gateway) = node_arc.payment_gateway() {
             let mut rpc_gate = tenzro_payments::middleware::PaymentGateMiddleware::new(
                 gateway.clone(),
                 tenzro_payments::middleware::PaymentGateConfig {
@@ -228,7 +280,6 @@ async fn main() -> Result<()> {
             info!("HTTP 402 payment gate enabled for RPC /v1/chat/completions");
             rpc_server = rpc_server.with_payment_gate(rpc_gate);
         }
-    }
 
     // Spawn RPC server with graceful shutdown
     let rpc_shutdown_rx = shutdown_tx.subscribe();
@@ -257,9 +308,9 @@ async fn main() -> Result<()> {
     // The migration moves all balance from the legacy sentinel to the
     // keypair-derived address; the web `/faucet` endpoint must transfer
     // from the same address that holds the funds.
-    if let Some(ref genesis) = config.genesis {
-        if let Some(ref faucet) = genesis.faucet {
-            if faucet.enabled {
+    if let Some(ref genesis) = config.genesis
+        && let Some(ref faucet) = genesis.faucet
+            && faucet.enabled {
                 let runtime_faucet_address = node_arc
                     .storage()
                     .and_then(|s| s.get("metadata", genesis::FAUCET_SIGNING_KEY_ADDRESS).ok().flatten())
@@ -280,12 +331,18 @@ async fn main() -> Result<()> {
                     faucet.cooldown_seconds,
                 );
             }
-        }
-    }
 
     // Wire event sender if available
     if let Some(event_sender) = node_arc.event_sender() {
         web_state = web_state.with_event_sender(event_sender.clone());
+    }
+
+    // Wire the inference router so the `/chat` endpoint can route
+    // OpenAI-compatible chat-completion requests to the correct
+    // model provider. Without this, `/chat` returns
+    // "no inference router configured".
+    if let Some(router) = node_arc.inference_router() {
+        web_state = web_state.with_inference_router(router.clone());
     }
 
     // Share web_state as Arc for both web server and MCP server
@@ -402,10 +459,29 @@ async fn main() -> Result<()> {
     });
 
     let canton_addr = config.canton_mcp_addr.clone();
+    // Pass Canton participant URLs + optional JWT into the Canton MCP server so
+    // its tools talk to the right Canton node instead of always hitting the
+    // hard-coded `localhost:7575/7576` defaults. Ledger and admin URLs are
+    // derived from `config.canton.host`/`port` (the same source `init_vm()`
+    // uses to wire the DamlExecutor); JWT is read from `CANTON_JWT_TOKEN` env
+    // since it's a secret and intentionally not on the on-disk config.
+    let canton_ledger_api_url =
+        format!("http://{}:{}", config.canton.host, config.canton.port);
+    let canton_admin_api_url = format!(
+        "http://{}:{}",
+        config.canton.host,
+        config.canton.port.saturating_add(1),
+    );
+    let canton_jwt_token = std::env::var("CANTON_JWT_TOKEN").ok();
     let mut canton_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
         tokio::select! {
-            result = mcp::canton::start_canton_mcp_server(canton_addr) => {
+            result = mcp::canton::start_canton_mcp_server(
+                canton_addr,
+                canton_ledger_api_url,
+                canton_admin_api_url,
+                canton_jwt_token,
+            ) => {
                 if let Err(e) = result { error!("Canton MCP server error: {}", e); }
             }
             _ = async { let _ = canton_shutdown_rx.recv().await; } => {

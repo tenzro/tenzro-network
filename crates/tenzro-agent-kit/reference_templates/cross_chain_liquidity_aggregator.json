@@ -59,8 +59,8 @@
       }
     },
     "delegation": {
-      "max_transaction_value": 5000000000000000000000,
-      "max_daily_spend": 20000000000000000000000,
+      "max_transaction_value": "5000000000000000000000",
+      "max_daily_spend": "20000000000000000000000",
       "allowed_operations": ["bridge", "swap"],
       "allowed_chains": ["ethereum", "arbitrum", "base", "optimism", "polygon", "solana"],
       "time_bound_days": 90,
@@ -131,8 +131,8 @@
       }
     ],
     "hard_caps": {
-      "per_operation_value": 5000000000000000000000,
-      "per_day_value": 20000000000000000000000
+      "per_operation_value": "5000000000000000000000",
+      "per_day_value": "20000000000000000000000"
     }
   }
 }

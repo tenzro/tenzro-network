@@ -79,10 +79,9 @@ async fn detect_accelerators() -> (Vec<AcceleratorInfo>, Vec<AcceleratorInfo>, b
                 .args(["SPDisplaysDataType", "-json"])
                 .output()
                 .await
-            {
-                if output.status.success() {
-                    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                        if let Some(displays) = json.get("SPDisplaysDataType").and_then(|v| v.as_array()) {
+                && output.status.success()
+                    && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                        && let Some(displays) = json.get("SPDisplaysDataType").and_then(|v| v.as_array()) {
                             for display in displays {
                                 let name = display.get("sppci_model")
                                     .and_then(|v| v.as_str())
@@ -94,14 +93,13 @@ async fn detect_accelerators() -> (Vec<AcceleratorInfo>, Vec<AcceleratorInfo>, b
                                     .map(parse_memory_string)
                                     .unwrap_or(0.0);
 
-                                if memory_gb == 0.0 {
-                                    if let Some(shared) = display.get("spdisplays_vram_shared")
+                                if memory_gb == 0.0
+                                    && let Some(shared) = display.get("spdisplays_vram_shared")
                                         .and_then(|v| v.as_str())
                                     {
                                         memory_gb = parse_memory_string(shared);
                                         unified_memory = true;
                                     }
-                                }
 
                                 if memory_gb == 0.0 {
                                     let sys = sysinfo::System::new_with_specifics(
@@ -125,17 +123,13 @@ async fn detect_accelerators() -> (Vec<AcceleratorInfo>, Vec<AcceleratorInfo>, b
                                 });
                             }
                         }
-                    }
-                }
-            }
 
             // Detect Neural Engine via ioreg
             if let Ok(output) = tokio::process::Command::new("ioreg")
                 .args(["-r", "-d", "1", "-c", "AppleARMIODevice"])
                 .output()
                 .await
-            {
-                if output.status.success() {
+                && output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     if stdout.contains("ane") || stdout.contains("neural-engine") || stdout.contains("ANE") {
                         accelerators.push(AcceleratorInfo {
@@ -146,15 +140,13 @@ async fn detect_accelerators() -> (Vec<AcceleratorInfo>, Vec<AcceleratorInfo>, b
                         });
                     }
                 }
-            }
         },
         "linux" => {
             if let Ok(output) = tokio::process::Command::new("lspci")
                 .args(["-mm", "-nn"])
                 .output()
                 .await
-            {
-                if output.status.success() {
+                && output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     for line in stdout.lines() {
                         let lower = line.to_lowercase();
@@ -176,15 +168,13 @@ async fn detect_accelerators() -> (Vec<AcceleratorInfo>, Vec<AcceleratorInfo>, b
                         }
                     }
                 }
-            }
 
             // nvidia-smi
             if let Ok(output) = tokio::process::Command::new("nvidia-smi")
                 .args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
                 .output()
                 .await
-            {
-                if output.status.success() {
+                && output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     for (i, line) in stdout.lines().enumerate() {
                         let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
@@ -202,15 +192,13 @@ async fn detect_accelerators() -> (Vec<AcceleratorInfo>, Vec<AcceleratorInfo>, b
                         }
                     }
                 }
-            }
 
             // rocm-smi (AMD GPUs)
             if let Ok(output) = tokio::process::Command::new("rocm-smi")
                 .args(["--showproductname", "--showmeminfo", "vram", "--csv"])
                 .output()
                 .await
-            {
-                if output.status.success() {
+                && output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     for line in stdout.lines().skip(1) {
                         let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
@@ -223,14 +211,13 @@ async fn detect_accelerators() -> (Vec<AcceleratorInfo>, Vec<AcceleratorInfo>, b
                         }
                     }
                 }
-            }
 
             // NPU devices in /sys/class
             if let Ok(entries) = std::fs::read_dir("/sys/class") {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if name.contains("npu") || name.contains("accel") || name.contains("habana") || name.contains("intel_vpu") {
-                        if let Ok(devices) = std::fs::read_dir(entry.path()) {
+                    if (name.contains("npu") || name.contains("accel") || name.contains("habana") || name.contains("intel_vpu"))
+                        && let Ok(devices) = std::fs::read_dir(entry.path()) {
                             for dev in devices.flatten() {
                                 let dev_name = dev.file_name().to_string_lossy().to_string();
                                 accelerators.push(AcceleratorInfo {
@@ -241,7 +228,6 @@ async fn detect_accelerators() -> (Vec<AcceleratorInfo>, Vec<AcceleratorInfo>, b
                                 });
                             }
                         }
-                    }
                 }
             }
         },
@@ -251,9 +237,8 @@ async fn detect_accelerators() -> (Vec<AcceleratorInfo>, Vec<AcceleratorInfo>, b
                     "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json"])
                 .output()
                 .await
-            {
-                if output.status.success() {
-                    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                && output.status.success()
+                    && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
                         let items = match json.as_array() {
                             Some(arr) => arr.clone(),
                             None => vec![json],
@@ -270,8 +255,6 @@ async fn detect_accelerators() -> (Vec<AcceleratorInfo>, Vec<AcceleratorInfo>, b
                             });
                         }
                     }
-                }
-            }
         },
         _ => {}
     }
@@ -291,8 +274,7 @@ async fn detect_tee_capabilities() -> (bool, Option<String>, Vec<String>) {
                 .args(["-r", "-d", "1", "-c", "AppleSEPManager"])
                 .output()
                 .await
-            {
-                if output.status.success() {
+                && output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     if stdout.contains("AppleSEPManager") || stdout.contains("SEP") {
                         tee_type = Some("Secure Enclave".to_string());
@@ -304,7 +286,6 @@ async fn detect_tee_capabilities() -> (bool, Option<String>, Vec<String>) {
                         ]);
                     }
                 }
-            }
         },
         "linux" => {
             let tee_devices = [
@@ -350,33 +331,27 @@ async fn detect_tee_capabilities() -> (bool, Option<String>, Vec<String>) {
                     "Get-Tpm | Select-Object TpmPresent,TpmReady,TpmEnabled | ConvertTo-Json"])
                 .output()
                 .await
-            {
-                if output.status.success() {
-                    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                        if json.get("TpmPresent").and_then(|v| v.as_bool()).unwrap_or(false) {
+                && output.status.success()
+                    && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                        && json.get("TpmPresent").and_then(|v| v.as_bool()).unwrap_or(false) {
                             tee_type = Some("TPM".to_string());
                             capabilities.push("tpm_available".to_string());
                             if json.get("TpmEnabled").and_then(|v| v.as_bool()).unwrap_or(false) {
                                 capabilities.push("tpm_enabled".to_string());
                             }
                         }
-                    }
-                }
-            }
 
             if let Ok(output) = tokio::process::Command::new("powershell")
                 .args(["-NoProfile", "-Command",
                     "Get-CimInstance Win32_DeviceGuard | Select-Object VirtualizationBasedSecurityStatus | ConvertTo-Json"])
                 .output()
                 .await
-            {
-                if output.status.success() {
+                && output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     if stdout.contains("Running") || stdout.contains("2") {
                         capabilities.push("virtualization_based_security".to_string());
                     }
                 }
-            }
         },
         _ => {}
     }

@@ -547,18 +547,17 @@ impl BridgeAdapter for WormholeAdapter {
             "{}/api/v1/vaas/{}",
             self.config.wormholescan_api, transfer_id
         );
-        if let Ok(resp) = self.http_client.get(&url).send().await {
-            if resp.status().is_success() {
-                if let Ok(js) = resp.json::<WormholescanVaa>().await {
-                    let status = if js.guardian_set_index >= 0 && js.has_signatures() {
-                        TransferStatus::Delivered
-                    } else {
-                        TransferStatus::InTransit
-                    };
-                    self.transfers.insert(transfer_id.to_string(), status);
-                    return Ok(status);
-                }
-            }
+        if let Ok(resp) = self.http_client.get(&url).send().await
+            && resp.status().is_success()
+            && let Ok(js) = resp.json::<WormholescanVaa>().await
+        {
+            let status = if js.guardian_set_index >= 0 && js.has_signatures() {
+                TransferStatus::Delivered
+            } else {
+                TransferStatus::InTransit
+            };
+            self.transfers.insert(transfer_id.to_string(), status);
+            return Ok(status);
         }
         Ok(self
             .transfers

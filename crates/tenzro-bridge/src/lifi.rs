@@ -30,7 +30,6 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tenzro_types::primitives::{Hash, Timestamp};
 use tracing::{debug, error, info, warn};
@@ -1142,16 +1141,6 @@ impl LiFiAdapter {
         }
     }
 
-    /// Computes a SHA-256 hash of the input and returns it as a Hash.
-    #[allow(dead_code)]
-    fn compute_hash(input: &str) -> Hash {
-        let mut hasher = Sha256::new();
-        hasher.update(input.as_bytes());
-        let result = hasher.finalize();
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&result);
-        Hash::new(hash)
-    }
 
     /// Offline, heuristic-only fee estimate used as a fallback when the
     /// real /quote API call is unavailable.
@@ -1170,10 +1159,10 @@ impl LiFiAdapter {
 
         if let Some(ref gas_costs) = estimate.gas_costs {
             for gc in gas_costs {
-                if let Some(ref amount_str) = gc.amount {
-                    if let Ok(amount) = amount_str.parse::<u128>() {
-                        total += amount;
-                    }
+                if let Some(ref amount_str) = gc.amount
+                    && let Ok(amount) = amount_str.parse::<u128>()
+                {
+                    total += amount;
                 }
             }
         }
@@ -1188,10 +1177,10 @@ impl LiFiAdapter {
 
         if let Some(ref fee_costs) = estimate.fee_costs {
             for fc in fee_costs {
-                if let Some(ref amount_str) = fc.amount {
-                    if let Ok(amount) = amount_str.parse::<u128>() {
-                        total += amount;
-                    }
+                if let Some(ref amount_str) = fc.amount
+                    && let Ok(amount) = amount_str.parse::<u128>()
+                {
+                    total += amount;
                 }
             }
         }
@@ -1523,10 +1512,10 @@ impl BridgeAdapter for LiFiAdapter {
                         .unwrap_or(TransferStatus::Pending);
 
                     // Update cache if status changed
-                    if new_status != current {
-                        if let Some(mut entry) = self.transfers.get_mut(transfer_id) {
-                            entry.status = new_status;
-                        }
+                    if new_status != current
+                        && let Some(mut entry) = self.transfers.get_mut(transfer_id)
+                    {
+                        entry.status = new_status;
                     }
 
                     return Ok(new_status);
@@ -1816,16 +1805,6 @@ mod tests {
         assert_eq!(LiFiAdapter::parse_value("1000000"), 1_000_000);
         assert_eq!(LiFiAdapter::parse_value("0xDE0B6B3A7640000"), 1_000_000_000_000_000_000);
         assert_eq!(LiFiAdapter::parse_value("invalid"), 0);
-    }
-
-    #[test]
-    fn test_compute_hash() {
-        let hash1 = LiFiAdapter::compute_hash("test");
-        let hash2 = LiFiAdapter::compute_hash("test");
-        let hash3 = LiFiAdapter::compute_hash("different");
-
-        assert_eq!(hash1, hash2);
-        assert_ne!(hash1, hash3);
     }
 
     #[tokio::test]

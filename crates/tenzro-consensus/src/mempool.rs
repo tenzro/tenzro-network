@@ -1,5 +1,6 @@
 //! Transaction mempool with priority ordering
 
+use crate::admission::{AdmissionController, AdmissionDecision, Lane};
 use crate::config::ConsensusConfig;
 use crate::error::{ConsensusError, Result};
 use dashmap::DashMap;
@@ -7,7 +8,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 use tenzro_types::primitives::Hash;
 use tenzro_types::transaction::SignedTransaction;
@@ -66,6 +67,19 @@ pub struct Mempool {
 
     /// Total size in bytes
     total_size: Arc<RwLock<usize>>,
+
+    /// Per-DID admission controller (Spec 2). When set, every
+    /// `add_transaction` call first runs lane assignment + token-bucket
+    /// rate limiting. When unset, the mempool falls back to the legacy
+    /// path (size/count limits only) — used by tests and very early
+    /// bootstrap before identity is wired.
+    ///
+    /// Stored in a `OnceLock` so it can be wired in *after* `Mempool::new`
+    /// (which happens inside `HotStuff2Engine::new` before the node has
+    /// `IdentityRegistry` and `StakingManager` handles), without forcing
+    /// any `&mut self` on the hot path. Read on every `add_transaction`,
+    /// written exactly once at node startup.
+    admission: OnceLock<Arc<AdmissionController>>,
 }
 
 impl Mempool {
@@ -76,7 +90,27 @@ impl Mempool {
             transactions: Arc::new(DashMap::new()),
             config,
             total_size: Arc::new(RwLock::new(0)),
+            admission: OnceLock::new(),
         }
+    }
+
+    /// Wire a Spec-2 admission controller into a live `Mempool`. The
+    /// controller is shared (via `Arc`) so RPC handlers and the node tick
+    /// loop can also read its bucket snapshots and stats. May be called
+    /// at most once per `Mempool` instance — subsequent calls return
+    /// `Err(ConsensusError::AlreadyStarted)` so a buggy second wiring
+    /// can't silently desync the resolver from the engine.
+    pub fn set_admission(&self, admission: Arc<AdmissionController>) -> Result<()> {
+        self.admission
+            .set(admission)
+            .map_err(|_| ConsensusError::AlreadyStarted)
+    }
+
+    /// Read access to the admission controller, if any. Used by RPC
+    /// handlers (`tenzro_getMempoolLane`, `tenzro_getMempoolStats`) and
+    /// metrics collection.
+    pub fn admission(&self) -> Option<&Arc<AdmissionController>> {
+        self.admission.get()
     }
 
     /// Adds a transaction to the mempool
@@ -100,6 +134,79 @@ impl Mempool {
             ));
         }
 
+        // Spec 2 (#312): per-DID admission lane + token bucket + fee floor.
+        // Runs before any size/count work so rate-limited / under-priced
+        // senders can't push out expensive eviction passes. Skipped when
+        // the controller is unwired (early bootstrap, test harness).
+        //
+        // Order matters:
+        //   1. assign_lane (cheap, no side effect)
+        //   2. fee-floor check — reject without consuming a bucket token
+        //   3. try_admit (consumes token; rejects if bucket empty)
+        //
+        // Doing fee-floor *before* try_admit ensures spam at zero gas
+        // doesn't drain a controller's bucket — only well-formed
+        // transactions burn admission rate.
+        let admitted_lane = if let Some(ctrl) = self.admission.get() {
+            let lane = ctrl.assign_lane(&transaction);
+
+            // (2) Fee-floor check.
+            let base_floor = self.config.mempool_min_gas_price;
+            if base_floor > 0 {
+                let multiplier = ctrl.fee_floor_mult(lane);
+                let required = (base_floor as f64 * multiplier).ceil() as u64;
+                if transaction.transaction.gas_price < required {
+                    ctrl.record_rejected_fee_floor(lane);
+                    tracing::debug!(
+                        target: "mempool::admission",
+                        hash = %hash,
+                        lane = %lane.as_str(),
+                        gas_price = transaction.transaction.gas_price,
+                        required,
+                        base = base_floor,
+                        multiplier,
+                        "Rejected at fee-floor"
+                    );
+                    return Err(ConsensusError::FeeFloorTooLow {
+                        lane: lane.as_str(),
+                        gas_price: transaction.transaction.gas_price,
+                        required,
+                        base: base_floor,
+                        multiplier,
+                    });
+                }
+            }
+
+            // (3) Token bucket — actually consume.
+            match ctrl.try_admit(&transaction) {
+                AdmissionDecision::Admit { lane } => Some(lane),
+                AdmissionDecision::RateLimited {
+                    lane,
+                    retry_after_ms,
+                    burst_remaining,
+                    current_rate,
+                } => {
+                    tracing::debug!(
+                        target: "mempool::admission",
+                        hash = %hash,
+                        lane = %lane.as_str(),
+                        retry_after_ms,
+                        burst_remaining,
+                        current_rate,
+                        "Rate-limited at admission"
+                    );
+                    return Err(ConsensusError::RateLimited {
+                        lane: lane.as_str(),
+                        retry_after_ms,
+                        burst_remaining,
+                        current_rate,
+                    });
+                }
+            }
+        } else {
+            None
+        };
+
         let tx_size = self.estimate_transaction_size(&transaction);
         let gas_price = transaction.transaction.gas_price;
 
@@ -108,6 +215,9 @@ impl Mempool {
         if self.transactions.len() >= self.config.mempool_max_transactions {
             // Try to evict the lowest-gas-price transaction
             if !self.evict_lowest_gas_price_transaction(gas_price)? {
+                if let (Some(ctrl), Some(lane)) = (self.admission.get(), admitted_lane) {
+                    ctrl.record_rejected_mempool_full(lane);
+                }
                 return Err(ConsensusError::Mempool(
                     "Mempool full and new transaction has lower gas price than all existing ones".to_string(),
                 ));
@@ -120,6 +230,9 @@ impl Mempool {
         if current_size + tx_size > self.config.mempool_size_limit {
             // Try to evict transactions until we have space
             if !self.evict_for_size(tx_size)? {
+                if let (Some(ctrl), Some(lane)) = (self.admission.get(), admitted_lane) {
+                    ctrl.record_rejected_mempool_full(lane);
+                }
                 return Err(ConsensusError::Mempool(
                     "Mempool size limit exceeded and cannot evict enough transactions".to_string(),
                 ));
@@ -146,6 +259,7 @@ impl Mempool {
             size = tx_size,
             total_size = *self.total_size.read(),
             count = self.transactions.len(),
+            lane = ?admitted_lane.map(|l| l.as_str()),
             "Transaction added to mempool"
         );
 
@@ -168,17 +282,17 @@ impl Mempool {
         }
 
         // Only evict if the new transaction has a higher gas price
-        if let Some(hash) = lowest_hash {
-            if new_gas_price > lowest_gas_price {
-                self.remove_transaction(&hash);
-                tracing::debug!(
-                    evicted_hash = %hash,
-                    evicted_gas_price = lowest_gas_price,
-                    new_gas_price = new_gas_price,
-                    "Evicted lowest gas price transaction"
-                );
-                return Ok(true);
-            }
+        if let Some(hash) = lowest_hash
+            && new_gas_price > lowest_gas_price
+        {
+            self.remove_transaction(&hash);
+            tracing::debug!(
+                evicted_hash = %hash,
+                evicted_gas_price = lowest_gas_price,
+                new_gas_price = new_gas_price,
+                "Evicted lowest gas price transaction"
+            );
+            return Ok(true);
         }
 
         Ok(false)
@@ -367,6 +481,30 @@ impl Mempool {
         self.queue.write().clear();
         self.transactions.clear();
         *self.total_size.write() = 0;
+    }
+
+    /// Returns current queue depth bucketed by admission lane.
+    ///
+    /// Returns `[verified_count, delegated_count, open_count]`; if no
+    /// admission controller is wired (early bootstrap) all transactions
+    /// are reported as Open. Walks the transaction map and re-resolves
+    /// each tx's lane — O(n) in the mempool size. Suitable for periodic
+    /// metrics scrapes (every 10–60s); not for the admission hot path.
+    pub fn lane_depths(&self) -> [u64; 3] {
+        let mut depths = [0u64; 3];
+        match self.admission.get() {
+            Some(ctrl) => {
+                for entry in self.transactions.iter() {
+                    let lane = ctrl.assign_lane(entry.value());
+                    depths[lane as usize] = depths[lane as usize].saturating_add(1);
+                }
+            }
+            None => {
+                // No admission wired — everything is Open lane.
+                depths[Lane::Open as usize] = self.transactions.len() as u64;
+            }
+        }
+        depths
     }
 
     /// Estimates the size of a transaction in bytes
@@ -564,5 +702,174 @@ mod tests {
         let result = mempool.add_transaction(create_test_transaction(50, 3));
         assert!(result.is_err());
         assert_eq!(mempool.len(), 2);
+    }
+
+    #[test]
+    fn test_fee_floor_rejects_below_open_lane_multiplier() {
+        // With admission wired and Open-lane multiplier 4.0× × base 1 Gwei = 4 Gwei,
+        // a 100-wei tx must be rejected with FeeFloorTooLow.
+        use crate::admission::{AdmissionConfig, AdmissionController, DefaultLaneResolver, Lane};
+
+        let config = ConsensusConfig::default(); // 1 Gwei base floor
+        let mempool = Mempool::new(Arc::new(config));
+
+        let admission = Arc::new(AdmissionController::new(
+            AdmissionConfig::default(),
+            Arc::new(DefaultLaneResolver),
+        ));
+        mempool.set_admission(admission.clone()).unwrap();
+
+        let tx = create_test_transaction(100, 1); // way below 1 Gwei
+        let result = mempool.add_transaction(tx);
+
+        match result {
+            Err(ConsensusError::FeeFloorTooLow {
+                lane,
+                gas_price,
+                required,
+                base,
+                multiplier,
+            }) => {
+                assert_eq!(lane, Lane::Open.as_str());
+                assert_eq!(gas_price, 100);
+                assert_eq!(base, 1_000_000_000);
+                assert!((multiplier - 4.0).abs() < 1e-9);
+                assert_eq!(required, 4_000_000_000);
+            }
+            other => panic!("expected FeeFloorTooLow, got {:?}", other),
+        }
+
+        assert_eq!(mempool.len(), 0, "rejected tx must not enter mempool");
+    }
+
+    #[test]
+    fn test_fee_floor_admits_at_or_above_open_lane_multiplier() {
+        use crate::admission::{AdmissionConfig, AdmissionController, DefaultLaneResolver};
+
+        let config = ConsensusConfig::default(); // 1 Gwei base floor
+        let mempool = Mempool::new(Arc::new(config));
+
+        let admission = Arc::new(AdmissionController::new(
+            AdmissionConfig::default(),
+            Arc::new(DefaultLaneResolver),
+        ));
+        mempool.set_admission(admission).unwrap();
+
+        // 4 Gwei = exactly the Open-lane floor — must be admitted.
+        let tx = create_test_transaction(4_000_000_000, 1);
+        mempool.add_transaction(tx).unwrap();
+        assert_eq!(mempool.len(), 1);
+    }
+
+    #[test]
+    fn test_fee_floor_disabled_when_base_is_zero() {
+        use crate::admission::{AdmissionConfig, AdmissionController, DefaultLaneResolver};
+
+        let config = ConsensusConfig {
+            mempool_min_gas_price: 0, // explicitly disable static floor
+            ..ConsensusConfig::default()
+        };
+        let mempool = Mempool::new(Arc::new(config));
+
+        let admission = Arc::new(AdmissionController::new(
+            AdmissionConfig::default(),
+            Arc::new(DefaultLaneResolver),
+        ));
+        mempool.set_admission(admission).unwrap();
+
+        // Even gas_price=0 should pass the floor check (then admission token bucket).
+        let tx = create_test_transaction(0, 1);
+        mempool.add_transaction(tx).unwrap();
+        assert_eq!(mempool.len(), 1);
+    }
+
+    /// Spec 2 metrics path: the per-lane queue-depth accessor reports
+    /// the number of pending transactions in each admission lane.
+    /// `DefaultLaneResolver` puts everything in Open, so all admitted
+    /// txs land there.
+    #[test]
+    fn test_lane_depths_with_default_resolver() {
+        use crate::admission::{AdmissionConfig, AdmissionController, DefaultLaneResolver, Lane};
+
+        let config = ConsensusConfig {
+            mempool_min_gas_price: 0, // skip fee-floor for simpler test
+            ..ConsensusConfig::default()
+        };
+        let mempool = Mempool::new(Arc::new(config));
+
+        let admission = Arc::new(AdmissionController::new(
+            AdmissionConfig::default(),
+            Arc::new(DefaultLaneResolver),
+        ));
+        mempool.set_admission(admission).unwrap();
+
+        // Empty mempool: all lanes are zero.
+        let depths = mempool.lane_depths();
+        assert_eq!(depths, [0, 0, 0]);
+
+        // Admit two transactions — both land in Open via the default resolver.
+        mempool.add_transaction(create_test_transaction(1_000_000_000, 1)).unwrap();
+        mempool.add_transaction(create_test_transaction(1_000_000_000, 2)).unwrap();
+
+        let depths = mempool.lane_depths();
+        assert_eq!(depths[Lane::Verified as usize], 0);
+        assert_eq!(depths[Lane::Delegated as usize], 0);
+        assert_eq!(depths[Lane::Open as usize], 2);
+    }
+
+    /// Without an admission controller wired, `lane_depths` falls back
+    /// to attributing every tx to Open. This is the bootstrap path
+    /// before identity/staking come online.
+    #[test]
+    fn test_lane_depths_without_admission_attributes_to_open() {
+        use crate::admission::Lane;
+
+        let config = ConsensusConfig {
+            mempool_min_gas_price: 0,
+            ..ConsensusConfig::default()
+        };
+        let mempool = Mempool::new(Arc::new(config));
+
+        // No `set_admission` call. Insert 3 txs.
+        mempool.add_transaction(create_test_transaction(1_000_000_000, 1)).unwrap();
+        mempool.add_transaction(create_test_transaction(1_000_000_000, 2)).unwrap();
+        mempool.add_transaction(create_test_transaction(1_000_000_000, 3)).unwrap();
+
+        let depths = mempool.lane_depths();
+        assert_eq!(depths[Lane::Verified as usize], 0);
+        assert_eq!(depths[Lane::Delegated as usize], 0);
+        assert_eq!(depths[Lane::Open as usize], 3);
+    }
+
+    /// A fee-floor rejection bumps `rejected_fee_floor` (not the
+    /// rate-limited or mempool-full counters) so /metrics can attribute
+    /// the cause cleanly.
+    #[test]
+    fn test_fee_floor_rejection_bumps_correct_counter() {
+        use crate::admission::{AdmissionConfig, AdmissionController, DefaultLaneResolver, Lane};
+
+        let config = ConsensusConfig::default();
+        let mempool = Mempool::new(Arc::new(config));
+
+        let admission = Arc::new(AdmissionController::new(
+            AdmissionConfig::default(),
+            Arc::new(DefaultLaneResolver),
+        ));
+        mempool.set_admission(admission.clone()).unwrap();
+
+        // Below 4× × 1 Gwei Open-lane floor — rejected at fee-floor.
+        let tx = create_test_transaction(100, 1);
+        let _ = mempool.add_transaction(tx);
+
+        let stats = admission.stats();
+        assert_eq!(stats.rejected_fee_floor(Lane::Open), 1);
+        assert_eq!(stats.rejected_rate_limited(Lane::Open), 0);
+        assert_eq!(stats.rejected_mempool_full(Lane::Open), 0);
+        // And the bucket token was *not* consumed — fee-floor runs
+        // before try_admit. Subsequent admission attempts must succeed.
+        let tx2 = create_test_transaction(4_000_000_000, 2);
+        mempool.add_transaction(tx2).unwrap();
+        let stats = admission.stats();
+        assert_eq!(stats.admitted(Lane::Open), 1);
     }
 }

@@ -13,7 +13,7 @@ use tenzro_types::training::{FragmentQuorumStatus, SyncRound};
 ///
 /// Layout (deterministic, BE-encoded):
 ///   sha256(
-///     "tenzro/train/state-root/v1"
+///     "tenzro/train/state-root"
 ///     || task_id_bytes
 ///     || round_be_u32
 ///     || for each fragment in sorted-by-id order:
@@ -29,7 +29,7 @@ pub fn compute_state_root(
     fragments: &[FragmentQuorumStatus],
 ) -> Hash {
     let mut hasher = Sha256::new();
-    hasher.update(b"tenzro/train/state-root/v1");
+    hasher.update(b"tenzro/train/state-root");
     hasher.update(task_id.as_bytes());
     hasher.update(round.to_be_bytes());
     let mut sorted: Vec<&FragmentQuorumStatus> = fragments.iter().collect();
@@ -72,7 +72,7 @@ pub fn compute_run_root(round_state_roots: &[Hash]) -> Hash {
         let mut next = Vec::with_capacity(layer.len() / 2);
         for chunk in layer.chunks(2) {
             let mut hasher = Sha256::new();
-            hasher.update(b"tenzro/train/run-root/v1");
+            hasher.update(b"tenzro/train/run-root");
             hasher.update(chunk[0]);
             hasher.update(chunk[1]);
             let digest = hasher.finalize();
@@ -88,7 +88,7 @@ pub fn compute_run_root(round_state_roots: &[Hash]) -> Hash {
 /// Canonical preimage the syncer signs to attest a [`SyncRound`].
 pub fn sync_round_signing_bytes(round: &SyncRound) -> Vec<u8> {
     let mut buf = Vec::with_capacity(64 + round.task_id.len());
-    buf.extend_from_slice(b"tenzro/train/sync-round/v1");
+    buf.extend_from_slice(b"tenzro/train/sync-round");
     buf.extend_from_slice(round.task_id.as_bytes());
     buf.extend_from_slice(&round.round.to_be_bytes());
     buf.extend_from_slice(round.state_root.as_bytes());

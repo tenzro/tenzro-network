@@ -206,16 +206,16 @@ impl Keystore {
             let entry = entry?;
             let path = entry.path();
 
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    // Skip ML-DSA-65 sealed-seed companion files (`<id>.pq.json`).
-                    // These are stored alongside the classical keystore but are
-                    // not separate wallets.
-                    if stem.ends_with(".pq") {
-                        continue;
-                    }
-                    wallet_ids.push(WalletId::from_string(stem.to_string()));
+            if path.extension().and_then(|s| s.to_str()) == Some("json")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                // Skip ML-DSA-65 sealed-seed companion files (`<id>.pq.json`).
+                // These are stored alongside the classical keystore but are
+                // not separate wallets.
+                if stem.ends_with(".pq") {
+                    continue;
                 }
+                wallet_ids.push(WalletId::from_string(stem.to_string()));
             }
         }
 

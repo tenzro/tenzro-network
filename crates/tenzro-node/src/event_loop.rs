@@ -21,9 +21,13 @@ use tracing::{debug, error, info, warn};
 use dashmap::DashMap;
 
 use tenzro_consensus::{BlockProvider, ConsensusOutMessage, FinalityNotification, HotStuff2Engine, StateRootProvider, VoteType as ConsVoteType};
+use tenzro_identity::IdentityRegistry;
 use tenzro_network::{ConsensusMessage, NetworkMessage, MessagePayload, NetworkService, TenzroNetworkService, VoteType as NetVoteType};
 use tenzro_storage::{RocksDbStore, KvStore, BlockStoreImpl, WriteOp, CF_MODELS, CF_MODEL_SERVICES, CF_TRANSACTIONS};
 use tenzro_storage::traits::BlockStore;
+use tenzro_token::StakingManager;
+use tenzro_token::bond::BondManager;
+use tenzro_types::kill_switch::{KillSwitchAction, KillSwitchReceipt};
 use tenzro_vm::{MultiVmRuntime, StateAdapter, VmTransaction, VmType};
 use tenzro_types::block::Block;
 use tenzro_types::transaction::{SignedTransaction, TransactionType};
@@ -35,8 +39,15 @@ use crate::metrics::MetricsCollector;
 /// Event types flowing through the node
 #[derive(Debug, Clone)]
 pub enum NodeEvent {
-    /// New transaction received (from RPC or network)
+    /// New transaction received (from network gossipsub or unauthenticated RPC fallback).
+    /// The event loop runs full validation + consensus admission for these.
     NewTransaction(SignedTransaction),
+    /// Transaction that was already admitted to the local consensus mempool by
+    /// the RPC layer (`eth_sendRawTransaction` / `tenzro_signAndSendTransaction`).
+    /// The event loop skips re-admission (which would double-charge the Spec 2
+    /// per-DID token bucket) and only handles gossip propagation + local pending
+    /// bookkeeping.
+    LocallyAdmittedTransaction(SignedTransaction),
     /// New block finalized by local consensus
     BlockFinalized(Block),
     /// Block received from the network via gossipsub (from another node's consensus)
@@ -274,8 +285,30 @@ pub struct EventLoop {
     load_tracker: Option<Arc<tenzro_model::LoadTracker>>,
     /// Shared reference to the node's `RemoteWorkerRegistry` used to ingest
     /// verified Cortex advertisements received over the
-    /// `tenzro/cortex/1.0.0` gossipsub topic.
+    /// `tenzro/cortex` gossipsub topic.
     remote_cortex_workers: Option<Arc<tenzro_cortex::RemoteWorkerRegistry>>,
+    /// Persistent kill-switch receipt store. Wired from the node so that the
+    /// post-execute scan in `handle_block_finalized` can record the
+    /// canonical `KillSwitchReceipt` (with the real `frozen_at_block`)
+    /// emitted by the VM precompiles.
+    kill_switch_store: Option<Arc<tenzro_settlement::KillSwitchStore>>,
+    /// Staking manager. Wired so the post-execute scan can freeze stakes on
+    /// pause/quarantine, thaw on resume, and slash on terminate. Required
+    /// to keep the kill-switch invariant: `Quarantined` and `Terminated`
+    /// agents cannot withdraw stake.
+    staking: Option<Arc<StakingManager>>,
+    /// Identity registry. Wired so the post-execute scan can resolve a
+    /// machine DID (carried on the kill-switch log) to the staker
+    /// `Address` that the staking manager keys on.
+    identity_registry: Option<Arc<IdentityRegistry>>,
+    /// AgentBond manager (Spec 9). Wired so the post-execute scan can
+    /// reflect VM-emitted `BondPosted` / `BondIncreased` /
+    /// `BondWithdrawInitiated` / `BondSlashed` / `InsuranceClaimPaid`
+    /// logs into the off-chain `BondManager` cache + RocksDB write-through.
+    /// The VM is the source of truth for vault balances and the on-chain
+    /// marker; this manager is the authoritative read model that lane
+    /// resolution and receipt envelopes consult.
+    bond_manager: Option<Arc<BondManager>>,
 }
 
 impl EventLoop {
@@ -333,6 +366,10 @@ impl EventLoop {
             model_runtime: None,
             load_tracker: None,
             remote_cortex_workers: None,
+            kill_switch_store: None,
+            staking: None,
+            identity_registry: None,
+            bond_manager: None,
         }
     }
 
@@ -390,6 +427,50 @@ impl EventLoop {
         self
     }
 
+    /// Wires the persistent kill-switch receipt store. Required for the
+    /// post-execute log scan that records the canonical
+    /// `KillSwitchReceipt` (with the real `frozen_at_block`) emitted by the
+    /// kill-switch precompiles.
+    pub fn with_kill_switch_store(
+        mut self,
+        kill_switch_store: Arc<tenzro_settlement::KillSwitchStore>,
+    ) -> Self {
+        self.kill_switch_store = Some(kill_switch_store);
+        self
+    }
+
+    /// Wires the staking manager. Required so the post-execute scan can
+    /// freeze stakes on Pause/Quarantine, thaw on resume, and slash on
+    /// Terminate. Without this, kill-switch transitions land in the
+    /// lifecycle FSM and receipt store but stake stays liquid — defeating
+    /// the EU AI Act intervention guarantee.
+    pub fn with_staking(mut self, staking: Arc<StakingManager>) -> Self {
+        self.staking = Some(staking);
+        self
+    }
+
+    /// Wires the identity registry. Required to map the machine DID
+    /// carried on a kill-switch log to the staker `Address` that
+    /// `StakingManager` keys on.
+    pub fn with_identity_registry(
+        mut self,
+        identity_registry: Arc<IdentityRegistry>,
+    ) -> Self {
+        self.identity_registry = Some(identity_registry);
+        self
+    }
+
+    /// Wires the AgentBond manager (Spec 9). Required for the
+    /// post-execute log scan to mirror VM-emitted bond events into the
+    /// off-chain manager state. Without this, the VM applies bond ops on
+    /// chain (vault balances + marker JSON) but the read model used by
+    /// lane resolution and receipt envelopes never updates — so freshly
+    /// posted bonds never promote their agents into Bonded lanes.
+    pub fn with_bond_manager(mut self, bond_manager: Arc<BondManager>) -> Self {
+        self.bond_manager = Some(bond_manager);
+        self
+    }
+
     /// Wires the model_services map for periodic cleanup of expired endpoints.
     pub fn with_model_services(
         mut self,
@@ -431,7 +512,7 @@ impl EventLoop {
 
     /// Wires the shared `RemoteWorkerRegistry` so the event loop can ingest
     /// verified Cortex advertisements received on the
-    /// `tenzro/cortex/1.0.0` gossipsub topic.
+    /// `tenzro/cortex` gossipsub topic.
     pub fn with_cortex_registry(
         mut self,
         registry: Arc<tenzro_cortex::RemoteWorkerRegistry>,
@@ -533,7 +614,7 @@ impl EventLoop {
         self.sync_height_from_storage().await?;
 
         // Admitted-mesh warm-up gate: before draining outbound consensus
-        // messages, wait for the gossipsub mesh on `tenzro/consensus/1.0.0`
+        // messages, wait for the gossipsub mesh on `tenzro/consensus`
         // to form AND for at least one mesh peer to be admitted to the
         // local validator registry via the identify handshake.
         //
@@ -575,7 +656,7 @@ impl EventLoop {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         if let Some(ref network) = self.network {
-            const CONSENSUS_TOPIC: &str = "tenzro/consensus/1.0.0";
+            const CONSENSUS_TOPIC: &str = "tenzro/consensus";
             const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
             let warmup_start = std::time::Instant::now();
             let mut attempt: u32 = 0;
@@ -677,13 +758,12 @@ impl EventLoop {
                 // Periodic peer count refresh — independent of block finalization.
                 // Ensures /status always reflects the current P2P connection state.
                 _ = peer_refresh.tick() => {
-                    if let Some(ref network) = self.network {
-                        if let Ok(peers) = network.connected_peers().await {
+                    if let Some(ref network) = self.network
+                        && let Ok(peers) = network.connected_peers().await {
                             let count = peers.len() as u64;
                             self.metrics.set_peer_count(count);
                             debug!(peer_count = count, "Periodic peer count refresh");
                         }
-                    }
                 }
                 // Model heartbeat: re-announce served models + evict expired network entries
                 _ = model_heartbeat.tick() => {
@@ -751,8 +831,8 @@ impl EventLoop {
                         for (instance_id, model_id, last_seen) in local_entries {
                             if runtime.is_loaded(&model_id) {
                                 // Runtime-live — refresh last_seen and persist
-                                if let Some(mut svc) = services.get_mut(&instance_id) {
-                                    if svc.last_seen < now {
+                                if let Some(mut svc) = services.get_mut(&instance_id)
+                                    && svc.last_seen < now {
                                         svc.last_seen = now;
                                         if let Ok(data) = serde_json::to_vec(svc.value()) {
                                             let _ = self.storage.put(
@@ -762,7 +842,6 @@ impl EventLoop {
                                             );
                                         }
                                     }
-                                }
                                 continue;
                             }
 
@@ -867,7 +946,7 @@ impl EventLoop {
                             );
                             let net = network.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = net.broadcast("tenzro/models/1.0.0", broadcast_msg).await {
+                                if let Err(e) = net.broadcast("tenzro/models", broadcast_msg).await {
                                     debug!(error = %e, model_id = %model_id, "Failed to broadcast model heartbeat");
                                 }
                             });
@@ -937,7 +1016,7 @@ impl EventLoop {
                             let net = network.clone();
                             let agent_id = a.identity.agent_id.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = net.broadcast("tenzro/agents/1.0.0", broadcast_msg).await {
+                                if let Err(e) = net.broadcast("tenzro/agents", broadcast_msg).await {
                                     tracing::debug!(error = %e, agent_id = %agent_id, "Failed to broadcast agent heartbeat");
                                 }
                             });
@@ -1012,11 +1091,10 @@ impl EventLoop {
                         None => std::future::pending().await,
                     }
                 } => {
-                    if let Some(notification) = notification {
-                        if let Err(e) = self.process_finality_notification(notification).await {
+                    if let Some(notification) = notification
+                        && let Err(e) = self.process_finality_notification(notification).await {
                             error!("Failed to handle finalized block: {}", e);
                         }
-                    }
                 }
                 // Broadcast outbound consensus messages (votes, proposals) to peer validators.
                 //
@@ -1096,7 +1174,7 @@ impl EventLoop {
                                         }
                                     });
                                     Some(MessagePayload::Consensus(ConsensusMessage::Proposal {
-                                        block,
+                                        block: Box::new(block),
                                         proposer: hex::encode(proposer.as_bytes()),
                                         round,
                                         high_qc_view,
@@ -1133,9 +1211,9 @@ impl EventLoop {
                             if let Some(payload) = net_payload {
                                 let broadcast_msg = NetworkMessage::new(payload);
                                 let network_clone = network.clone();
-                                info!("event_loop.outbound_consensus: spawning broadcast to tenzro/consensus/1.0.0");
+                                info!("event_loop.outbound_consensus: spawning broadcast to tenzro/consensus");
                                 tokio::spawn(async move {
-                                    match network_clone.broadcast("tenzro/consensus/1.0.0", broadcast_msg).await {
+                                    match network_clone.broadcast("tenzro/consensus", broadcast_msg).await {
                                         Ok(_) => info!("event_loop.outbound_consensus: broadcast OK"),
                                         Err(e) => warn!(error = %e, "event_loop.outbound_consensus: broadcast FAILED"),
                                     }
@@ -1152,6 +1230,11 @@ impl EventLoop {
                         NodeEvent::NewTransaction(tx) => {
                             if let Err(e) = self.handle_new_transaction(tx).await {
                                 error!("Failed to handle transaction: {}", e);
+                            }
+                        }
+                        NodeEvent::LocallyAdmittedTransaction(tx) => {
+                            if let Err(e) = self.handle_locally_admitted_transaction(tx).await {
+                                error!("Failed to handle locally-admitted transaction: {}", e);
                             }
                         }
                         NodeEvent::BlockFinalized(block) => {
@@ -1376,7 +1459,7 @@ impl EventLoop {
         // transient single-node mempool rejection.
         if let Some(ref network) = self.network {
             let payload = serde_json::to_vec(&tx).unwrap_or_default();
-            let topic = "tenzro/transactions/1.0.0".to_string();
+            let topic = "tenzro/transactions".to_string();
             let msg = tenzro_network::NetworkMessage::new(
                 tenzro_network::MessagePayload::Custom { topic: topic.clone(), data: payload },
             );
@@ -1392,6 +1475,57 @@ impl EventLoop {
             // No network and no local consensus admission — store locally as last resort
             self.pending_txs.push(tx);
             info!(hash = %tx_hash, "Transaction stored locally (no network)");
+        }
+
+        Ok(())
+    }
+
+    /// Handles a transaction that was already admitted to the consensus
+    /// mempool synchronously by the RPC layer.
+    ///
+    /// The Spec 2 admission controller is consume-on-admit (each accepted tx
+    /// drains one token from the controller's bucket). RPC paths that report
+    /// `RateLimited` synchronously (via JSON-RPC error -32011) call
+    /// `consensus.submit_transaction` *first*, then dispatch this event for
+    /// gossip propagation. We must NOT re-submit through the consensus
+    /// mempool here — that would double-charge the bucket and reject the
+    /// second attempt as a "transaction already in mempool" anyway.
+    ///
+    /// Path skipped vs. `handle_new_transaction`:
+    ///   1. signature verify  — already done at RPC
+    ///   2. consensus admission — already done at RPC
+    ///
+    /// Path executed:
+    ///   3. broadcast on `tenzro/transactions` so peers can pick it up
+    async fn handle_locally_admitted_transaction(&mut self, mut tx: SignedTransaction) -> Result<()> {
+        let tx_hash = tx.hash();
+
+        if let Some(ref network) = self.network {
+            let payload = serde_json::to_vec(&tx).unwrap_or_default();
+            let topic = "tenzro/transactions".to_string();
+            let msg = tenzro_network::NetworkMessage::new(
+                tenzro_network::MessagePayload::Custom {
+                    topic: topic.clone(),
+                    data: payload,
+                },
+            );
+            if let Err(e) = network.broadcast(&topic, msg).await {
+                warn!(
+                    hash = %tx_hash,
+                    error = %e,
+                    "Failed to broadcast locally-admitted transaction to gossipsub"
+                );
+            } else {
+                debug!(
+                    hash = %tx_hash,
+                    "Locally-admitted transaction forwarded to peers via gossipsub"
+                );
+            }
+        } else {
+            debug!(
+                hash = %tx_hash,
+                "Locally-admitted transaction has no gossipsub network — skipping broadcast"
+            );
         }
 
         Ok(())
@@ -1440,11 +1574,10 @@ impl EventLoop {
         self.metrics.record_block();
         self.metrics.record_transaction(tx_count as u64);
         // Refresh peer count on every finalized block so the metric stays current
-        if let Some(ref network) = self.network {
-            if let Ok(peers) = network.connected_peers().await {
+        if let Some(ref network) = self.network
+            && let Ok(peers) = network.connected_peers().await {
                 self.metrics.set_peer_count(peers.len() as u64);
             }
-        }
 
         // Execute all transactions in the block
         let mut gas_used_total = 0u64;
@@ -1456,6 +1589,16 @@ impl EventLoop {
         // report real status/gas_used/logs instead of fabricating values.
         let mut receipts_for_index: Vec<(Hash, TxReceiptRecord)> =
             Vec::with_capacity(block.transactions.len());
+
+        // Hot-state local fee market (Spec 6): per-account contention samples for
+        // this block. Sequential VM path produces zero reexecutions, so the
+        // attribution is `writes=1 per unique address per tx, reexecutions=0`.
+        // Block-STM parallel path (when wired) will populate the reexecution
+        // counter directly via `ParallelExecutionResult.account_contention`.
+        let mut block_contention: std::collections::HashMap<
+            Vec<u8>,
+            tenzro_vm::AccountSample,
+        > = std::collections::HashMap::new();
 
         for signed_tx in &block.transactions {
             let tx_hash = signed_tx.transaction.hash();
@@ -1493,6 +1636,29 @@ impl EventLoop {
             match result {
                 Ok(result) => {
                     gas_used_total += result.gas_used;
+
+                    // Spec 6 hot-state attribution: every distinct address
+                    // touched by a successful or reverted tx counts as one
+                    // write toward this block's contention sample. Sequential
+                    // execution → reexecutions=0; the surcharge fires on
+                    // sustained write volume + (eventual) Block-STM reexec
+                    // signal over the 64-block window.
+                    {
+                        let mut seen: std::collections::HashSet<Vec<u8>> =
+                            std::collections::HashSet::new();
+                        for sc in &result.state_changes {
+                            if seen.insert(sc.address.clone()) {
+                                let entry = block_contention
+                                    .entry(sc.address.clone())
+                                    .or_default();
+                                entry.merge(tenzro_vm::AccountSample {
+                                    reexecutions: 0,
+                                    writes: 1,
+                                });
+                            }
+                        }
+                    }
+
                     if result.success {
                         successful_txs += 1;
                         debug!(
@@ -1500,6 +1666,25 @@ impl EventLoop {
                             gas_used = result.gas_used,
                             "Transaction executed successfully"
                         );
+
+                        // Post-execute kill-switch scan: drives `AgentRuntime`
+                        // lifecycle FSM, persists the canonical
+                        // `KillSwitchReceipt` (with the real
+                        // `frozen_at_block`), freezes/thaws/slashes the
+                        // agent's stake, and (for terminate-cascade) recurses
+                        // through the spawn tree. The VM emits the log + state
+                        // change blob; everything cross-crate happens here.
+                        self.process_kill_switch_logs(&result, block_height).await;
+
+                        // Post-execute AgentBond scan (Spec 9): mirrors VM-
+                        // emitted `BondPosted` / `BondIncreased` /
+                        // `BondWithdrawInitiated` / `BondSlashed` /
+                        // `InsuranceClaimPaid` logs into the off-chain
+                        // `BondManager`, which is the read model used by
+                        // lane resolution and receipt envelopes. Vault
+                        // balances and on-chain markers are already
+                        // committed by the VM at this point.
+                        self.process_bond_logs(&result, block_height).await;
                     } else {
                         failed_txs += 1;
                         warn!(
@@ -1720,6 +1905,16 @@ impl EventLoop {
             .on_block_finalized(gas_used_total)
             .await;
 
+        // Spec 6: roll the hot-state contention window forward by exactly one
+        // block. The window is per-account, length-bounded at
+        // `HOT_STATE_WINDOW_BLOCKS`; eviction happens inside the market.
+        // Surcharge collection on hot accounts will be charged at admission
+        // time (RPC) once per-tx fee accounting is wired through; this hook
+        // is the per-block sample feed.
+        self.vm_runtime
+            .gas_oracle()
+            .record_block_contention(block_contention);
+
         // Remove finalized transactions from pending pool
         let finalized_hashes: Vec<Hash> = block.transactions.iter()
             .map(|tx| tx.transaction.hash())
@@ -1740,14 +1935,14 @@ impl EventLoop {
         //   3. It tries to deliver to the block-sync subscriber channel
         //   4. That channel's receiver (this event loop) is blocked in step 1
         //   5. DEADLOCK — with limited CPU (500m), this starves the web server too
-        if self.consensus.is_some() {
-            if let Some(ref network) = self.network {
+        if self.consensus.is_some()
+            && let Some(ref network) = self.network {
                 let network_clone = network.clone();
                 let msg = NetworkMessage::new(MessagePayload::Block(block.clone()));
                 let height_for_log = block_height;
                 let hash_for_log = block_hash;
                 tokio::spawn(async move {
-                    if let Err(e) = network_clone.broadcast("tenzro/blocks/1.0.0", msg).await {
+                    if let Err(e) = network_clone.broadcast("tenzro/blocks", msg).await {
                         warn!(
                             height = %height_for_log,
                             error = %e,
@@ -1762,7 +1957,6 @@ impl EventLoop {
                     }
                 });
             }
-        }
 
         Ok(())
     }
@@ -1832,6 +2026,652 @@ impl EventLoop {
         let _ = self.event_tx.try_send(NodeEvent::Shutdown);
         let _ = self.shutdown_tx.send(());
     }
+
+    /// Scans a successful VM execution result for kill-switch logs and
+    /// dispatches the cross-crate side-effects:
+    ///
+    /// 1. Decode the receipt blob the VM stashed in `state_changes` under
+    ///    `SYSTEM_ADDRESS / killswitch:<receipt_id>`.
+    /// 2. Rewrite `frozen_at_block` from the VM's nonce-stand-in to the
+    ///    real finalized `block_height`.
+    /// 3. Drive the matching `AgentRuntime` lifecycle FSM (Pause /
+    ///    Quarantine / Terminate).
+    /// 4. Resolve the agent's machine DID to a staker `Address` and
+    ///    freeze (Pause/Quarantine) or slash (Terminate) the stake.
+    /// 5. For Terminate with `cascade=true`, BFS through the
+    ///    `children:<parent_id>` spawn tree and apply the same termination
+    ///    + slash recursively (depth-bounded to 32).
+    /// 6. Persist the canonical `KillSwitchReceipt` to `KillSwitchStore`.
+    ///
+    /// All failures are logged at `warn`/`error` and swallowed: a partial
+    /// kill-switch transition is preferable to halting block finalization.
+    /// The on-chain log + receipt store is the durable audit trail; the
+    /// runtime side-effects are best-effort.
+    async fn process_kill_switch_logs(
+        &self,
+        result: &tenzro_vm::ExecutionResult,
+        block_height: BlockHeight,
+    ) {
+        // Cheap early exit: most blocks contain zero kill-switch logs.
+        let any_killswitch = result.logs.iter().any(|l| {
+            l.topics.first().map(|t| {
+                t.as_slice() == b"KillSwitchPause"
+                    || t.as_slice() == b"KillSwitchQuarantine"
+                    || t.as_slice() == b"KillSwitchTerminate"
+            }).unwrap_or(false)
+        });
+        if !any_killswitch {
+            return;
+        }
+
+        for log in &result.logs {
+            let topic = match log.topics.first() {
+                Some(t) => t.as_slice(),
+                None => continue,
+            };
+            let action = match topic {
+                b"KillSwitchPause" => KillSwitchAction::Pause,
+                b"KillSwitchQuarantine" => KillSwitchAction::Quarantine,
+                b"KillSwitchTerminate" => KillSwitchAction::Terminate,
+                _ => continue,
+            };
+
+            // Decode `agent_did_len(4) || agent_did || controller_did_len(4)
+            // || controller_did || receipt_id(32)`.
+            let (agent_did, _controller_did, receipt_id_hex) =
+                match decode_killswitch_log_data(&log.data) {
+                    Some(v) => v,
+                    None => {
+                        warn!(
+                            action = ?action,
+                            data_len = log.data.len(),
+                            "Malformed kill-switch log payload, skipping"
+                        );
+                        continue;
+                    }
+                };
+
+            // Recover the receipt blob the VM stashed under
+            // SYSTEM_ADDRESS storage with key `killswitch:<id>`.
+            let storage_key = format!("killswitch:{}", receipt_id_hex);
+            let receipt_blob = result.state_changes.iter().find(|sc| {
+                sc.key.as_slice() == storage_key.as_bytes() && sc.new_value.is_some()
+            });
+            let mut receipt: KillSwitchReceipt = match receipt_blob
+                .and_then(|sc| sc.new_value.as_ref())
+                .and_then(|v| serde_json::from_slice(v).ok())
+            {
+                Some(r) => r,
+                None => {
+                    warn!(
+                        receipt_id = %receipt_id_hex,
+                        "Kill-switch log has no matching state-change receipt blob, skipping"
+                    );
+                    continue;
+                }
+            };
+
+            // Rewrite the frozen_at_block placeholder (VM used tx.nonce as
+            // a stand-in) with the real finalized block height.
+            receipt.frozen_at_block = block_height;
+
+            self.apply_kill_switch_action(&action, &agent_did, &receipt).await;
+
+            // Persist the canonical receipt last so the audit trail
+            // matches what actually happened (lifecycle + stake side
+            // effects already attempted above; receipt store is the
+            // durable record either way).
+            if let Some(ref store) = self.kill_switch_store {
+                if let Err(e) = store.record(receipt.clone()) {
+                    error!(
+                        receipt_id = %receipt.receipt_id,
+                        error = %e,
+                        "Failed to persist KillSwitchReceipt"
+                    );
+                }
+            } else {
+                debug!(
+                    receipt_id = %receipt.receipt_id,
+                    "KillSwitchStore not wired; receipt observed but not persisted"
+                );
+            }
+
+            // Cascade traversal for Terminate with cascade=true: BFS
+            // through children:<parent_id> in CF_AGENTS and apply the
+            // same termination (+ proportional slash) to each
+            // descendant. Depth-bounded to 32 to defend against
+            // pathological spawn graphs.
+            if matches!(action, KillSwitchAction::Terminate)
+                && receipt.cascade.unwrap_or(false)
+            {
+                self.cascade_terminate(&agent_did, &receipt, block_height).await;
+            }
+        }
+    }
+
+    /// Post-execute AgentBond scan (Spec 9). Iterates `result.logs` and
+    /// reflects each VM-emitted bond event into the off-chain
+    /// `BondManager`. The VM has already mutated chain state (vault
+    /// balances + `bond:<agent_did>` storage marker); this scan is the
+    /// authoritative read model used by lane resolution and Spec-5
+    /// receipt envelopes (`actor_bond` / `controller_bond_aggregate`).
+    ///
+    /// Cheap early-exit if no relevant log is present in this tx.
+    ///
+    /// Log layouts (mirror the VM emit sites in
+    /// `tenzro_vm::native::execute_post/increase/withdraw_agent_bond`,
+    /// `execute_terminate_agent` slash branch, `execute_pay_insurance_claim`):
+    ///
+    /// - `BondPosted` / `BondIncreased` / `BondWithdrawInitiated`:
+    ///   `agent_did_len_le(4) || agent_did || controller_did_len_le(4)
+    ///    || controller_did || amount_le(16) || op_tag(1)`
+    ///
+    /// - `BondSlashed`:
+    ///   `agent_did_len_le(4) || agent_did || controller_did_len_le(4)
+    ///    || controller_did || slashed_amount_le(16) || bps_le(2)
+    ///    || terminal(1)`
+    ///
+    /// - `InsuranceClaimPaid`:
+    ///   `claim_id_len_le(4) || claim_id_bytes || claimant(32)
+    ///    || amount_le(16)`
+    async fn process_bond_logs(
+        &self,
+        result: &tenzro_vm::ExecutionResult,
+        block_height: BlockHeight,
+    ) {
+        let any_bond = result.logs.iter().any(|l| {
+            l.topics.first().map(|t| {
+                let s = t.as_slice();
+                s == b"BondPosted"
+                    || s == b"BondIncreased"
+                    || s == b"BondWithdrawInitiated"
+                    || s == b"BondSlashed"
+                    || s == b"InsuranceClaimPaid"
+            }).unwrap_or(false)
+        });
+        if !any_bond {
+            return;
+        }
+
+        let bond_manager = match self.bond_manager.as_ref() {
+            Some(m) => m.clone(),
+            None => {
+                debug!(
+                    block_height = block_height.0,
+                    "Bond log observed but BondManager not wired; skipping reflection"
+                );
+                return;
+            }
+        };
+        let block_height_u64 = block_height.0;
+
+        for log in &result.logs {
+            let topic = match log.topics.first() {
+                Some(t) => t.as_slice(),
+                None => continue,
+            };
+
+            match topic {
+                b"BondPosted" | b"BondIncreased" | b"BondWithdrawInitiated" => {
+                    let (agent_did, controller_did, amount, op_tag) =
+                        match decode_bond_lifecycle_log(&log.data) {
+                            Some(v) => v,
+                            None => {
+                                warn!(
+                                    topic = %String::from_utf8_lossy(topic),
+                                    data_len = log.data.len(),
+                                    "Malformed bond log payload, skipping"
+                                );
+                                continue;
+                            }
+                        };
+                    let outcome = match op_tag {
+                        0 => bond_manager
+                            .post(&agent_did, &controller_did, amount, block_height_u64)
+                            .map(|_| ()),
+                        1 => bond_manager
+                            .increase(&agent_did, amount, block_height_u64)
+                            .map(|_| ()),
+                        2 => bond_manager
+                            .withdraw(&agent_did, block_height_u64)
+                            .map(|_| ()),
+                        other => {
+                            warn!(
+                                op_tag = other,
+                                agent = %agent_did,
+                                "Unknown bond op_tag in log payload"
+                            );
+                            continue;
+                        }
+                    };
+                    if let Err(e) = outcome {
+                        warn!(
+                            topic = %String::from_utf8_lossy(topic),
+                            agent = %agent_did,
+                            controller = %controller_did,
+                            amount,
+                            error = %e,
+                            "BondManager rejected reflected log; on-chain marker and \
+                             off-chain state may have diverged"
+                        );
+                    } else {
+                        debug!(
+                            topic = %String::from_utf8_lossy(topic),
+                            agent = %agent_did,
+                            controller = %controller_did,
+                            amount,
+                            "BondManager reflected bond lifecycle log"
+                        );
+                    }
+                }
+
+                b"BondSlashed" => {
+                    let (agent_did, _controller_did, slashed_amount, bps, terminal) =
+                        match decode_bond_slashed_log(&log.data) {
+                            Some(v) => v,
+                            None => {
+                                warn!(
+                                    data_len = log.data.len(),
+                                    "Malformed BondSlashed log payload, skipping"
+                                );
+                                continue;
+                            }
+                        };
+                    // VM-driven slash (e.g. Terminate slash): no claim_id,
+                    // recipient is the InsurancePool. The VM already moved
+                    // funds; we only mirror lifecycle/amount state.
+                    match bond_manager.slash(
+                        &agent_did,
+                        bps,
+                        None,
+                        "InsurancePool",
+                        block_height_u64,
+                    ) {
+                        Ok((reflected_amount, _state)) => {
+                            if reflected_amount != slashed_amount {
+                                warn!(
+                                    agent = %agent_did,
+                                    vm_slashed = slashed_amount,
+                                    manager_slashed = reflected_amount,
+                                    "BondSlashed amount mismatch between VM and BondManager — \
+                                     slash math drift?"
+                                );
+                            }
+                            debug!(
+                                agent = %agent_did,
+                                bps,
+                                slashed_amount,
+                                terminal,
+                                "BondManager reflected BondSlashed log"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                agent = %agent_did,
+                                bps,
+                                error = %e,
+                                "BondManager rejected reflected BondSlashed; \
+                                 on-chain and off-chain may have diverged"
+                            );
+                        }
+                    }
+                }
+
+                b"InsuranceClaimPaid" => {
+                    let (claim_id_hex, _claimant_addr, amount) =
+                        match decode_insurance_claim_paid_log(&log.data) {
+                            Some(v) => v,
+                            None => {
+                                warn!(
+                                    data_len = log.data.len(),
+                                    "Malformed InsuranceClaimPaid log payload, skipping"
+                                );
+                                continue;
+                            }
+                        };
+                    match bond_manager.pay_claim(&claim_id_hex) {
+                        Ok(record) => {
+                            debug!(
+                                claim_id = %claim_id_hex,
+                                amount,
+                                claim_status = ?record.status,
+                                "BondManager reflected InsuranceClaimPaid log"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                claim_id = %claim_id_hex,
+                                amount,
+                                error = %e,
+                                "BondManager rejected reflected InsuranceClaimPaid; \
+                                 claim may have been settled out-of-band"
+                            );
+                        }
+                    }
+                }
+
+                _ => {}
+            }
+        }
+    }
+
+    /// Apply a single (non-cascade) kill-switch action to one agent: drive
+    /// the lifecycle FSM and adjust stake. Side-effects are independent —
+    /// a failure on one does not block the other.
+    async fn apply_kill_switch_action(
+        &self,
+        action: &KillSwitchAction,
+        agent_did: &str,
+        receipt: &KillSwitchReceipt,
+    ) {
+        // Lifecycle FSM transition.
+        if let Some(ref runtime) = self.agent_runtime {
+            let result = match action {
+                KillSwitchAction::Pause => {
+                    runtime.pause_agent(
+                        agent_did,
+                        receipt.controller_did.clone(),
+                        receipt.reason_code as u32,
+                        receipt.reason_text.clone(),
+                    ).await
+                }
+                KillSwitchAction::Quarantine => {
+                    runtime.quarantine_agent(
+                        agent_did,
+                        receipt.controller_did.clone(),
+                        receipt.reason_code as u32,
+                        receipt.reason_text.clone(),
+                    ).await
+                }
+                KillSwitchAction::Terminate => {
+                    let reason = receipt.reason_text.clone()
+                        .unwrap_or_else(|| format!(
+                            "kill-switch terminate (code={})",
+                            receipt.reason_code
+                        ));
+                    runtime.terminate_agent(agent_did, reason).await
+                }
+            };
+            if let Err(e) = result {
+                warn!(
+                    action = ?action,
+                    agent_did = %agent_did,
+                    error = %e,
+                    "Lifecycle transition failed for kill-switch action"
+                );
+            }
+        } else {
+            debug!(
+                "AgentRuntime not wired; kill-switch lifecycle transition skipped"
+            );
+        }
+
+        // Stake side-effects.
+        let staker_address = match self.resolve_staker_address(agent_did) {
+            Some(a) => a,
+            None => {
+                debug!(
+                    agent_did = %agent_did,
+                    "No staker address resolvable for agent; skipping stake side-effect"
+                );
+                return;
+            }
+        };
+        let staking = match self.staking.as_ref() {
+            Some(s) => s,
+            None => {
+                debug!("StakingManager not wired; stake side-effect skipped");
+                return;
+            }
+        };
+
+        match action {
+            KillSwitchAction::Pause | KillSwitchAction::Quarantine => {
+                if let Err(e) = staking.freeze_stake(&staker_address) {
+                    warn!(
+                        agent_did = %agent_did,
+                        staker = %staker_address,
+                        error = %e,
+                        "Failed to freeze stake under kill-switch"
+                    );
+                }
+            }
+            KillSwitchAction::Terminate => {
+                let stake_amount = staking
+                    .get_stake(&staker_address)
+                    .map(|s| s.amount)
+                    .unwrap_or(0);
+                let bps = receipt.slash_bps.unwrap_or(0) as u128;
+                let slash_amount = stake_amount.saturating_mul(bps) / 10_000u128;
+                if slash_amount > 0 {
+                    let slashed_by = staker_address;
+                    let reason = receipt.reason_text.clone().unwrap_or_else(|| {
+                        format!(
+                            "kill-switch terminate (code={}, controller={})",
+                            receipt.reason_code, receipt.controller_did
+                        )
+                    });
+                    if let Err(e) = staking.slash(
+                        &staker_address,
+                        slash_amount,
+                        reason,
+                        slashed_by,
+                    ) {
+                        warn!(
+                            agent_did = %agent_did,
+                            staker = %staker_address,
+                            slash_amount = slash_amount,
+                            error = %e,
+                            "Failed to slash stake under kill-switch terminate"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// BFS through the spawn tree (`AgentRuntime::get_children`) and
+    /// terminate every descendant of `root_did`. Depth-bounded so a
+    /// cyclic or deeply nested graph cannot stall block finalization.
+    async fn cascade_terminate(
+        &self,
+        root_did: &str,
+        receipt: &KillSwitchReceipt,
+        _block_height: BlockHeight,
+    ) {
+        const MAX_DEPTH: usize = 32;
+        let runtime = match self.agent_runtime.as_ref() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let mut frontier: Vec<(String, usize)> = vec![(root_did.to_string(), 0)];
+        let mut visited: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        visited.insert(root_did.to_string());
+
+        while let Some((parent, depth)) = frontier.pop() {
+            if depth >= MAX_DEPTH {
+                warn!(
+                    parent = %parent,
+                    depth = depth,
+                    "Kill-switch cascade depth bound reached; halting traversal"
+                );
+                continue;
+            }
+            for child in runtime.get_children(&parent) {
+                if !visited.insert(child.clone()) {
+                    continue;
+                }
+                // Apply termination to the child as a non-cascading event.
+                // We synthesize a per-child receipt anchored to the same
+                // controller and reason so the audit trail explains the
+                // chain of consequence.
+                let child_receipt = KillSwitchReceipt {
+                    receipt_id: format!("{}:cascade:{}", receipt.receipt_id, child),
+                    action: KillSwitchAction::Terminate,
+                    agent_did: child.clone(),
+                    controller_did: receipt.controller_did.clone(),
+                    reason_code: receipt.reason_code,
+                    reason_text: receipt.reason_text.clone(),
+                    evidence_hash: receipt.evidence_hash.clone(),
+                    slash_bps: receipt.slash_bps,
+                    cascade: Some(false),
+                    pause_until: None,
+                    frozen_at_block: receipt.frozen_at_block,
+                    timestamp: receipt.timestamp,
+                };
+                self.apply_kill_switch_action(
+                    &KillSwitchAction::Terminate,
+                    &child,
+                    &child_receipt,
+                ).await;
+                if let Some(ref store) = self.kill_switch_store
+                    && let Err(e) = store.record(child_receipt) {
+                        error!(
+                            parent = %parent,
+                            child = %child,
+                            error = %e,
+                            "Failed to persist cascade KillSwitchReceipt"
+                        );
+                    }
+                frontier.push((child, depth + 1));
+            }
+        }
+    }
+
+    /// Resolve a machine DID to the staker `Address` that the
+    /// `StakingManager` keys on. Returns `None` if the DID is unknown or
+    /// the identity has no wallet binding.
+    fn resolve_staker_address(
+        &self,
+        agent_did: &str,
+    ) -> Option<tenzro_types::primitives::Address> {
+        let registry = self.identity_registry.as_ref()?;
+        registry.resolve(agent_did).ok().map(|id| id.wallet_address)
+    }
+}
+
+/// Decode the kill-switch log `data` field per the VM wire format:
+/// `agent_did_len_le(4) || agent_did || controller_did_len_le(4) ||
+///  controller_did || receipt_id(32)`.
+///
+/// Returns `(agent_did, controller_did, receipt_id_hex)` on success, or
+/// `None` on malformed input.
+fn decode_killswitch_log_data(data: &[u8]) -> Option<(String, String, String)> {
+    if data.len() < 4 {
+        return None;
+    }
+    let agent_len = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
+    let cursor = 4usize.checked_add(agent_len)?;
+    if data.len() < cursor + 4 {
+        return None;
+    }
+    let agent_did = std::str::from_utf8(&data[4..cursor]).ok()?.to_string();
+    let ctrl_len = u32::from_le_bytes(data[cursor..cursor + 4].try_into().ok()?) as usize;
+    let cursor2 = cursor.checked_add(4)?.checked_add(ctrl_len)?;
+    if data.len() < cursor2 + 32 {
+        return None;
+    }
+    let controller_did =
+        std::str::from_utf8(&data[cursor + 4..cursor2]).ok()?.to_string();
+    let receipt_id_hex = hex::encode(&data[cursor2..cursor2 + 32]);
+    Some((agent_did, controller_did, receipt_id_hex))
+}
+
+/// Decode a `BondPosted` / `BondIncreased` / `BondWithdrawInitiated` log.
+///
+/// Layout (mirror of `tenzro_vm::native::encode_bond_log_data`):
+/// `agent_did_len_le(4) || agent_did || controller_did_len_le(4) ||
+///  controller_did || amount_le(16) || op_tag(1)`
+/// where `op_tag ∈ {0=Posted, 1=Increased, 2=WithdrawInitiated}`.
+///
+/// Returns `(agent_did, controller_did, amount, op_tag)`.
+fn decode_bond_lifecycle_log(data: &[u8]) -> Option<(String, String, u128, u8)> {
+    if data.len() < 4 {
+        return None;
+    }
+    let agent_len = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
+    let after_agent = 4usize.checked_add(agent_len)?;
+    if data.len() < after_agent + 4 {
+        return None;
+    }
+    let agent_did = std::str::from_utf8(&data[4..after_agent]).ok()?.to_string();
+    let ctrl_len =
+        u32::from_le_bytes(data[after_agent..after_agent + 4].try_into().ok()?) as usize;
+    let after_ctrl = after_agent.checked_add(4)?.checked_add(ctrl_len)?;
+    if data.len() < after_ctrl + 16 + 1 {
+        return None;
+    }
+    let controller_did = std::str::from_utf8(&data[after_agent + 4..after_ctrl])
+        .ok()?
+        .to_string();
+    let amount = u128::from_le_bytes(data[after_ctrl..after_ctrl + 16].try_into().ok()?);
+    let op_tag = data[after_ctrl + 16];
+    Some((agent_did, controller_did, amount, op_tag))
+}
+
+/// Decode a `BondSlashed` log.
+///
+/// Layout (mirror of the inline emit in
+/// `tenzro_vm::native::execute_terminate_agent` slash branch):
+/// `agent_did_len_le(4) || agent_did || controller_did_len_le(4) ||
+///  controller_did || slashed_amount_le(16) || bps_le(2) || terminal(1)`.
+///
+/// Returns `(agent_did, controller_did, slashed_amount, bps, terminal)`.
+fn decode_bond_slashed_log(data: &[u8]) -> Option<(String, String, u128, u16, bool)> {
+    if data.len() < 4 {
+        return None;
+    }
+    let agent_len = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
+    let after_agent = 4usize.checked_add(agent_len)?;
+    if data.len() < after_agent + 4 {
+        return None;
+    }
+    let agent_did = std::str::from_utf8(&data[4..after_agent]).ok()?.to_string();
+    let ctrl_len =
+        u32::from_le_bytes(data[after_agent..after_agent + 4].try_into().ok()?) as usize;
+    let after_ctrl = after_agent.checked_add(4)?.checked_add(ctrl_len)?;
+    if data.len() < after_ctrl + 16 + 2 + 1 {
+        return None;
+    }
+    let controller_did = std::str::from_utf8(&data[after_agent + 4..after_ctrl])
+        .ok()?
+        .to_string();
+    let slashed_amount =
+        u128::from_le_bytes(data[after_ctrl..after_ctrl + 16].try_into().ok()?);
+    let bps = u16::from_le_bytes(
+        data[after_ctrl + 16..after_ctrl + 18].try_into().ok()?,
+    );
+    let terminal = data[after_ctrl + 18] != 0;
+    Some((agent_did, controller_did, slashed_amount, bps, terminal))
+}
+
+/// Decode an `InsuranceClaimPaid` log.
+///
+/// Layout (mirror of the inline emit in
+/// `tenzro_vm::native::execute_pay_insurance_claim`):
+/// `claim_id_len_le(4) || claim_id_bytes || claimant(32) || amount_le(16)`.
+///
+/// Returns `(claim_id_hex, claimant_address_bytes, amount)`.
+fn decode_insurance_claim_paid_log(data: &[u8]) -> Option<(String, [u8; 32], u128)> {
+    if data.len() < 4 {
+        return None;
+    }
+    let claim_id_len = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
+    let after_claim_id = 4usize.checked_add(claim_id_len)?;
+    if data.len() < after_claim_id + 32 + 16 {
+        return None;
+    }
+    let claim_id_hex = std::str::from_utf8(&data[4..after_claim_id])
+        .ok()?
+        .to_string();
+    let mut claimant = [0u8; 32];
+    claimant.copy_from_slice(&data[after_claim_id..after_claim_id + 32]);
+    let amount = u128::from_le_bytes(
+        data[after_claim_id + 32..after_claim_id + 48].try_into().ok()?,
+    );
+    Some((claim_id_hex, claimant, amount))
 }
 
 /// Verifies the hybrid (classical + ML-DSA-65) signature of a transaction.
@@ -1890,7 +2730,22 @@ fn verify_transaction_signature(signed_tx: &SignedTransaction) -> Result<()> {
 }
 
 /// Converts a SignedTransaction to a VmTransaction
+///
+/// For native operations dispatched through 4-byte selectors (escrow,
+/// kill-switch), this builds `tx.data = SELECTOR || serde_json(payload)`
+/// matching the decoders in `tenzro-vm::native`. JSON serialization for
+/// these well-typed payloads cannot fail in practice (no non-stringable
+/// map keys, no `f32::NAN`); we panic loudly if it ever does so a bug
+/// surfaces immediately rather than producing a malformed wire payload.
 fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
+    use tenzro_vm::native::{
+        SELECTOR_ESCROW_CREATE, SELECTOR_ESCROW_REFUND, SELECTOR_ESCROW_RELEASE,
+        SELECTOR_KILLSWITCH_PAUSE, SELECTOR_KILLSWITCH_QUARANTINE,
+        SELECTOR_KILLSWITCH_TERMINATE,
+        SELECTOR_POST_AGENT_BOND, SELECTOR_INCREASE_AGENT_BOND,
+        SELECTOR_WITHDRAW_AGENT_BOND, SELECTOR_PAY_INSURANCE_CLAIM,
+    };
+
     let tx = &signed_tx.transaction;
 
     // Extract value, data, and VM type based on transaction type
@@ -1906,7 +2761,209 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             data.extend_from_slice(args);
             (0, data, VmType::Evm)
         }
-        // All Tenzro-native transaction types (agents, models, staking, TEE)
+        // ---- Escrow primitive (native VM dispatch) ------------------------
+        TransactionType::CreateEscrow { payee, amount, asset_id, expires_at, release_conditions } => {
+            #[derive(serde::Serialize)]
+            struct CreateEscrowPayload<'a> {
+                payee: &'a tenzro_types::primitives::Address,
+                amount: u128,
+                asset_id: &'a tenzro_types::asset::AssetId,
+                expires_at: u64,
+                release_conditions: &'a tenzro_types::settlement::ReleaseConditions,
+            }
+            let payload = CreateEscrowPayload {
+                payee,
+                amount: *amount,
+                asset_id,
+                expires_at: *expires_at,
+                release_conditions,
+            };
+            let mut data = SELECTOR_ESCROW_CREATE.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("CreateEscrow payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::ReleaseEscrow { escrow_id, proof } => {
+            #[derive(serde::Serialize)]
+            struct ReleaseEscrowPayload<'a> {
+                escrow_id: &'a [u8; 32],
+                proof: &'a tenzro_types::settlement::ServiceProof,
+            }
+            let payload = ReleaseEscrowPayload { escrow_id, proof };
+            let mut data = SELECTOR_ESCROW_RELEASE.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("ReleaseEscrow payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::RefundEscrow { escrow_id } => {
+            #[derive(serde::Serialize)]
+            struct RefundEscrowPayload<'a> {
+                escrow_id: &'a [u8; 32],
+            }
+            let payload = RefundEscrowPayload { escrow_id };
+            let mut data = SELECTOR_ESCROW_REFUND.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("RefundEscrow payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        // ---- Kill-switch (Agent-Swarm Spec 1, native VM dispatch) ---------
+        TransactionType::PauseAgent { agent_did, controller_did, reason_code, reason_text, until } => {
+            #[derive(serde::Serialize)]
+            struct PauseAgentPayload<'a> {
+                agent_did: &'a str,
+                controller_did: &'a str,
+                reason_code: u16,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                reason_text: Option<&'a str>,
+                /// `until` projected to millis-since-epoch for the VM's `u64` field.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                until: Option<u64>,
+            }
+            let payload = PauseAgentPayload {
+                agent_did,
+                controller_did,
+                reason_code: *reason_code,
+                reason_text: reason_text.as_deref(),
+                until: until.map(|t| t.as_millis() as u64),
+            };
+            let mut data = SELECTOR_KILLSWITCH_PAUSE.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("PauseAgent payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::QuarantineAgent { agent_did, controller_did, reason_code, reason_text, evidence_hash } => {
+            #[derive(serde::Serialize)]
+            struct QuarantineAgentPayload<'a> {
+                agent_did: &'a str,
+                controller_did: &'a str,
+                reason_code: u16,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                reason_text: Option<&'a str>,
+                /// VM-side payload expects the evidence commitment as 64-char
+                /// lowercase hex. We project the byte array here.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                evidence_hash: Option<String>,
+            }
+            let payload = QuarantineAgentPayload {
+                agent_did,
+                controller_did,
+                reason_code: *reason_code,
+                reason_text: reason_text.as_deref(),
+                evidence_hash: evidence_hash.as_ref().map(hex::encode),
+            };
+            let mut data = SELECTOR_KILLSWITCH_QUARANTINE.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("QuarantineAgent payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::TerminateAgent { agent_did, controller_did, reason_code, slash_bps, cascade } => {
+            #[derive(serde::Serialize)]
+            struct TerminateAgentPayload<'a> {
+                agent_did: &'a str,
+                controller_did: &'a str,
+                reason_code: u16,
+                slash_bps: u16,
+                cascade: bool,
+            }
+            let payload = TerminateAgentPayload {
+                agent_did,
+                controller_did,
+                reason_code: *reason_code,
+                slash_bps: *slash_bps,
+                cascade: *cascade,
+            };
+            let mut data = SELECTOR_KILLSWITCH_TERMINATE.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("TerminateAgent payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        // ---- AgentBond surety (Agent-Swarm Spec 9, native VM dispatch) ----
+        // Payload field names MUST match the VM-side `PostAgentBondPayload`,
+        // `IncreaseAgentBondPayload`, `WithdrawAgentBondPayload`, and
+        // `PayInsuranceClaimPayload` structs in
+        // `tenzro-vm/src/native/mod.rs` — they are deserialized via
+        // `serde_json::from_slice(&tx.data[4..])`.
+        TransactionType::PostAgentBond { agent_did, controller_did, amount } => {
+            #[derive(serde::Serialize)]
+            struct PostAgentBondPayload<'a> {
+                agent_did: &'a str,
+                controller_did: &'a str,
+                amount: u128,
+            }
+            let payload = PostAgentBondPayload {
+                agent_did,
+                controller_did,
+                amount: *amount,
+            };
+            let mut data = SELECTOR_POST_AGENT_BOND.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("PostAgentBond payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::IncreaseAgentBond { agent_did, amount } => {
+            #[derive(serde::Serialize)]
+            struct IncreaseAgentBondPayload<'a> {
+                agent_did: &'a str,
+                amount: u128,
+            }
+            let payload = IncreaseAgentBondPayload {
+                agent_did,
+                amount: *amount,
+            };
+            let mut data = SELECTOR_INCREASE_AGENT_BOND.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("IncreaseAgentBond payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::WithdrawAgentBond { agent_did } => {
+            #[derive(serde::Serialize)]
+            struct WithdrawAgentBondPayload<'a> {
+                agent_did: &'a str,
+            }
+            let payload = WithdrawAgentBondPayload { agent_did };
+            let mut data = SELECTOR_WITHDRAW_AGENT_BOND.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("WithdrawAgentBond payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::PayInsuranceClaim { claim_id_hex, claimant, amount } => {
+            #[derive(serde::Serialize)]
+            struct PayInsuranceClaimPayload<'a> {
+                claim_id_hex: &'a str,
+                claimant: &'a tenzro_types::primitives::Address,
+                amount: u128,
+            }
+            let payload = PayInsuranceClaimPayload {
+                claim_id_hex,
+                claimant,
+                amount: *amount,
+            };
+            let mut data = SELECTOR_PAY_INSURANCE_CLAIM.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("PayInsuranceClaim payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        // All other Tenzro-native transaction types (agents, models, staking, TEE)
         _ => (0, Vec::new(), VmType::Tenzro),
     };
 
@@ -2051,5 +3108,336 @@ mod tests {
         assert_eq!(vm_tx.value, 0);
         assert!(vm_tx.data.starts_with(&code));
         assert_eq!(&vm_tx.data[code.len()..], &args[..]);
+    }
+
+    // ---- Spec 9 AgentBond log decoders + reflection scan -----------------
+
+    /// Encode a `BondPosted` / `BondIncreased` / `BondWithdrawInitiated`
+    /// log payload using the same byte layout as the VM emit site.
+    /// Lives in the test module so the round-trip test cannot accidentally
+    /// drift with the VM-side helper.
+    fn encode_bond_lifecycle_log(
+        agent_did: &str,
+        controller_did: &str,
+        amount: u128,
+        op_tag: u8,
+    ) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + agent_did.len() + 4 + controller_did.len() + 16 + 1);
+        out.extend_from_slice(&(agent_did.len() as u32).to_le_bytes());
+        out.extend_from_slice(agent_did.as_bytes());
+        out.extend_from_slice(&(controller_did.len() as u32).to_le_bytes());
+        out.extend_from_slice(controller_did.as_bytes());
+        out.extend_from_slice(&amount.to_le_bytes());
+        out.push(op_tag);
+        out
+    }
+
+    /// Encode a `BondSlashed` log payload using the same byte layout as
+    /// the VM emit site (`execute_terminate_agent` slash branch).
+    fn encode_bond_slashed_log(
+        agent_did: &str,
+        controller_did: &str,
+        slashed_amount: u128,
+        bps: u16,
+        terminal: bool,
+    ) -> Vec<u8> {
+        let mut out = Vec::with_capacity(
+            4 + agent_did.len() + 4 + controller_did.len() + 16 + 2 + 1,
+        );
+        out.extend_from_slice(&(agent_did.len() as u32).to_le_bytes());
+        out.extend_from_slice(agent_did.as_bytes());
+        out.extend_from_slice(&(controller_did.len() as u32).to_le_bytes());
+        out.extend_from_slice(controller_did.as_bytes());
+        out.extend_from_slice(&slashed_amount.to_le_bytes());
+        out.extend_from_slice(&bps.to_le_bytes());
+        out.push(if terminal { 1 } else { 0 });
+        out
+    }
+
+    /// Encode an `InsuranceClaimPaid` log payload using the same byte
+    /// layout as the VM emit site (`execute_pay_insurance_claim`).
+    fn encode_insurance_claim_paid_log(
+        claim_id_hex: &str,
+        claimant: &[u8; 32],
+        amount: u128,
+    ) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + claim_id_hex.len() + 32 + 16);
+        out.extend_from_slice(&(claim_id_hex.len() as u32).to_le_bytes());
+        out.extend_from_slice(claim_id_hex.as_bytes());
+        out.extend_from_slice(claimant);
+        out.extend_from_slice(&amount.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn bond_lifecycle_log_decoder_roundtrip() {
+        let encoded = encode_bond_lifecycle_log(
+            "did:tenzro:machine:abc",
+            "did:tenzro:human:owner",
+            1_000_000_000_000_000_000,
+            0,
+        );
+        let (agent, controller, amount, op_tag) =
+            decode_bond_lifecycle_log(&encoded).expect("decode");
+        assert_eq!(agent, "did:tenzro:machine:abc");
+        assert_eq!(controller, "did:tenzro:human:owner");
+        assert_eq!(amount, 1_000_000_000_000_000_000);
+        assert_eq!(op_tag, 0);
+
+        // op_tag=2 (WithdrawInitiated) round-trips too
+        let encoded2 = encode_bond_lifecycle_log("a", "b", 1, 2);
+        let (_, _, _, op_tag2) = decode_bond_lifecycle_log(&encoded2).unwrap();
+        assert_eq!(op_tag2, 2);
+
+        // Truncated payload returns None instead of panicking
+        assert!(decode_bond_lifecycle_log(&encoded[..encoded.len() - 5]).is_none());
+        assert!(decode_bond_lifecycle_log(&[]).is_none());
+    }
+
+    #[test]
+    fn bond_slashed_log_decoder_roundtrip() {
+        let encoded = encode_bond_slashed_log(
+            "did:tenzro:machine:slashed",
+            "did:tenzro:human:ctrl",
+            42_000_000,
+            500,
+            true,
+        );
+        let (agent, controller, slashed, bps, terminal) =
+            decode_bond_slashed_log(&encoded).expect("decode");
+        assert_eq!(agent, "did:tenzro:machine:slashed");
+        assert_eq!(controller, "did:tenzro:human:ctrl");
+        assert_eq!(slashed, 42_000_000);
+        assert_eq!(bps, 500);
+        assert!(terminal);
+
+        let encoded_nonterm =
+            encode_bond_slashed_log("a", "b", 1, 1, false);
+        let (_, _, _, _, terminal2) = decode_bond_slashed_log(&encoded_nonterm).unwrap();
+        assert!(!terminal2);
+
+        assert!(decode_bond_slashed_log(&encoded[..3]).is_none());
+    }
+
+    #[test]
+    fn insurance_claim_paid_log_decoder_roundtrip() {
+        let claimant_addr = [9u8; 32];
+        let encoded = encode_insurance_claim_paid_log(
+            "deadbeef",
+            &claimant_addr,
+            7_000_000_000,
+        );
+        let (claim_id, recovered_claimant, amount) =
+            decode_insurance_claim_paid_log(&encoded).expect("decode");
+        assert_eq!(claim_id, "deadbeef");
+        assert_eq!(recovered_claimant, claimant_addr);
+        assert_eq!(amount, 7_000_000_000);
+
+        assert!(decode_insurance_claim_paid_log(&encoded[..2]).is_none());
+    }
+
+    /// Build a minimal `EventLoop` with only the storage + VM runtime
+    /// wired (no consensus/network), suitable for exercising the
+    /// `process_bond_logs` reflection path in isolation.
+    async fn make_event_loop_with_bond_manager(
+        bond_manager: Arc<BondManager>,
+    ) -> EventLoop {
+        use tenzro_vm::VmConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RocksDbStore::open_default(dir.path()).unwrap());
+        let vm_runtime = Arc::new(MultiVmRuntime::new(VmConfig::default()).await.unwrap());
+        let chain_tip = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let metrics = Arc::new(MetricsCollector::new());
+        EventLoop::new(storage, vm_runtime, None, None, chain_tip, metrics)
+            .with_bond_manager(bond_manager)
+    }
+
+    fn synth_bond_log(topic: &[u8], data: Vec<u8>) -> tenzro_vm::Log {
+        tenzro_vm::Log::new(vec![0u8; 32], vec![topic.to_vec()], data)
+    }
+
+    #[tokio::test]
+    async fn process_bond_logs_reflects_post_increase_withdraw() {
+        let bond_manager = Arc::new(BondManager::new());
+        let event_loop = make_event_loop_with_bond_manager(bond_manager.clone()).await;
+
+        let agent = "did:tenzro:machine:lifecycle";
+        let controller = "did:tenzro:human:ctrl";
+
+        // BondPosted (op=0)
+        let post_log = synth_bond_log(
+            b"BondPosted",
+            encode_bond_lifecycle_log(agent, controller, 5_000, 0),
+        );
+        let result = tenzro_vm::ExecutionResult::success(0, vec![], vec![post_log], vec![]);
+        event_loop.process_bond_logs(&result, BlockHeight::from(10)).await;
+
+        let bond = bond_manager.get(agent).expect("bond exists");
+        assert_eq!(bond.amount, 5_000);
+        assert_eq!(bond.controller_did, controller);
+        assert!(matches!(
+            bond.state,
+            tenzro_token::bond::BondLifecycle::Active
+        ));
+
+        // BondIncreased (op=1) — top up by 2_000
+        let inc_log = synth_bond_log(
+            b"BondIncreased",
+            encode_bond_lifecycle_log(agent, controller, 2_000, 1),
+        );
+        let result = tenzro_vm::ExecutionResult::success(0, vec![], vec![inc_log], vec![]);
+        event_loop.process_bond_logs(&result, BlockHeight::from(11)).await;
+
+        let bond = bond_manager.get(agent).expect("bond exists");
+        assert_eq!(bond.amount, 7_000);
+        assert!(matches!(
+            bond.state,
+            tenzro_token::bond::BondLifecycle::Active
+        ));
+
+        // BondWithdrawInitiated (op=2) — moves to Cooldown
+        let withdraw_log = synth_bond_log(
+            b"BondWithdrawInitiated",
+            encode_bond_lifecycle_log(agent, controller, 7_000, 2),
+        );
+        let result =
+            tenzro_vm::ExecutionResult::success(0, vec![], vec![withdraw_log], vec![]);
+        event_loop.process_bond_logs(&result, BlockHeight::from(12)).await;
+
+        let bond = bond_manager.get(agent).expect("bond exists");
+        assert!(matches!(
+            bond.state,
+            tenzro_token::bond::BondLifecycle::Cooldown
+        ));
+        assert!(bond.cooldown_until.is_some());
+    }
+
+    #[tokio::test]
+    async fn process_bond_logs_reflects_slash_into_manager_state() {
+        let bond_manager = Arc::new(BondManager::new());
+        let event_loop = make_event_loop_with_bond_manager(bond_manager.clone()).await;
+
+        let agent = "did:tenzro:machine:slashvictim";
+        let controller = "did:tenzro:human:ctrl";
+
+        // Seed an active bond well above `DEFAULT_MIN_RESIDUAL` (10 TNZO =
+        // 10 * 10^18 base units). A 10 % slash must still leave the bond
+        // above the residual floor so the slash stays non-terminal.
+        // 100 TNZO bond → 10 TNZO slashed → 90 TNZO remainder ≥ 10 TNZO floor.
+        let bond_amount: u128 = 100 * 1_000_000_000_000_000_000;
+        bond_manager.post(agent, controller, bond_amount, 100).expect("seed bond");
+
+        // VM-driven slash: 1000 bps = 10%. The VM has already moved
+        // funds; the log mirrors the math.
+        let slashed_amount = bond_amount * 1000 / 10_000;
+
+        let slash_log = synth_bond_log(
+            b"BondSlashed",
+            encode_bond_slashed_log(agent, controller, slashed_amount, 1000, false),
+        );
+        let result = tenzro_vm::ExecutionResult::success(0, vec![], vec![slash_log], vec![]);
+        event_loop.process_bond_logs(&result, BlockHeight::from(20)).await;
+
+        let bond = bond_manager.get(agent).expect("bond exists");
+        assert_eq!(bond.amount, bond_amount - slashed_amount);
+        // Non-terminal slash leaves the bond Active in BondManager state.
+        assert!(matches!(
+            bond.state,
+            tenzro_token::bond::BondLifecycle::Active
+        ));
+    }
+
+    #[tokio::test]
+    async fn process_bond_logs_reflects_insurance_claim_paid() {
+        use tenzro_types::primitives::Address;
+
+        let bond_manager = Arc::new(BondManager::new());
+        let event_loop = make_event_loop_with_bond_manager(bond_manager.clone()).await;
+
+        // Seed the pool from a slash so there's something to pay out.
+        let agent = "did:tenzro:machine:claimcase";
+        let controller = "did:tenzro:human:ctrl";
+        bond_manager
+            .post(agent, controller, 1_000_000, 100)
+            .expect("seed bond");
+        bond_manager
+            .slash(agent, 1000, None, "InsurancePool", 101)
+            .expect("seed pool via slash");
+
+        // File + approve the claim so it's in Approved state.
+        let claimant = Address::new([5u8; 32]);
+        let claim = bond_manager
+            .file_claim(
+                "did:tenzro:human:claimant",
+                claimant,
+                agent,
+                10_000,
+                vec![],
+                None,
+                42,
+            )
+            .expect("file claim");
+        bond_manager
+            .approve_claim(&claim.claim_id, 10_000, "gov:proposal:1".to_string())
+            .expect("approve");
+
+        // Now reflect the VM-emitted InsuranceClaimPaid log.
+        let mut claimant_bytes = [0u8; 32];
+        claimant_bytes.copy_from_slice(claimant.as_bytes());
+        let paid_log = synth_bond_log(
+            b"InsuranceClaimPaid",
+            encode_insurance_claim_paid_log(&claim.claim_id, &claimant_bytes, 10_000),
+        );
+        let result = tenzro_vm::ExecutionResult::success(0, vec![], vec![paid_log], vec![]);
+        event_loop.process_bond_logs(&result, BlockHeight::from(30)).await;
+
+        let updated = bond_manager
+            .get_claim(&claim.claim_id)
+            .expect("claim exists");
+        assert!(matches!(
+            updated.status,
+            tenzro_token::bond::ClaimStatus::Paid
+        ));
+    }
+
+    #[tokio::test]
+    async fn process_bond_logs_no_op_when_manager_unwired() {
+        // EventLoop without bond_manager: the early-exit path must not panic
+        // even when relevant logs are present. The scan should observe and
+        // log at debug, but BondManager state simply never updates because
+        // there is no manager.
+        use tenzro_vm::VmConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RocksDbStore::open_default(dir.path()).unwrap());
+        let vm_runtime = Arc::new(MultiVmRuntime::new(VmConfig::default()).await.unwrap());
+        let chain_tip = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let metrics = Arc::new(MetricsCollector::new());
+        let event_loop =
+            EventLoop::new(storage, vm_runtime, None, None, chain_tip, metrics);
+
+        let log = synth_bond_log(
+            b"BondPosted",
+            encode_bond_lifecycle_log("a", "b", 1, 0),
+        );
+        let result = tenzro_vm::ExecutionResult::success(0, vec![], vec![log], vec![]);
+        event_loop.process_bond_logs(&result, BlockHeight::from(1)).await;
+        // No assertion needed — test passes if no panic.
+    }
+
+    #[tokio::test]
+    async fn process_bond_logs_skips_unrelated_topics() {
+        let bond_manager = Arc::new(BondManager::new());
+        let event_loop = make_event_loop_with_bond_manager(bond_manager.clone()).await;
+
+        // A log whose topic isn't a bond event must be silently ignored
+        // (the early-exit `any_bond` check skips the whole loop).
+        let unrelated = synth_bond_log(b"KillSwitchPause", vec![1, 2, 3, 4]);
+        let result = tenzro_vm::ExecutionResult::success(0, vec![], vec![unrelated], vec![]);
+        event_loop.process_bond_logs(&result, BlockHeight::from(1)).await;
+
+        // Confirm BondManager is untouched.
+        assert!(bond_manager.get("anything").is_none());
     }
 }

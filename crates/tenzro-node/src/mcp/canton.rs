@@ -149,6 +149,15 @@ pub struct CantonGetFeeScheduleParams {
     pub synchronizer_id: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CantonReconnectSynchronizerParams {
+    #[schemars(description = "Synchronizer alias to reconnect (e.g. 'global', 'devnet')")]
+    pub synchronizer_alias: String,
+    #[schemars(description = "If true, retry the connection on transient failure (default: false)")]
+    #[serde(default)]
+    pub retry_on_failure: bool,
+}
+
 // ─── Helper functions ───
 
 fn err_internal(msg: impl Into<String>) -> ErrorData {
@@ -169,7 +178,10 @@ fn json_result(value: serde_json::Value) -> std::result::Result<CallToolResult, 
     )]))
 }
 
-#[allow(dead_code)]
+/// Wrap a plain-text status string as a successful tool result.
+///
+/// Used by tools that return a simple confirmation message rather than
+/// structured JSON (e.g. operational POST endpoints with empty 200 responses).
 fn text_result(text: impl Into<String>) -> std::result::Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(text.into())]))
 }
@@ -227,21 +239,18 @@ impl CantonMcpServer {
     }
 
     /// Create with custom JSON Ledger API URL.
-    #[allow(dead_code)]
     pub fn with_ledger_api_url(mut self, url: impl Into<String>) -> Self {
         self.ledger_api_url = url.into();
         self
     }
 
     /// Create with custom Admin API URL.
-    #[allow(dead_code)]
     pub fn with_admin_api_url(mut self, url: impl Into<String>) -> Self {
         self.admin_api_url = url.into();
         self
     }
 
     /// Set JWT authentication token.
-    #[allow(dead_code)]
     pub fn with_jwt_token(mut self, token: impl Into<String>) -> Self {
         self.jwt_token = Some(token.into());
         self
@@ -364,7 +373,9 @@ impl CantonMcpServer {
     }
 
     /// Execute an Admin API POST and return the response body as JSON.
-    #[allow(dead_code)]
+    ///
+    /// Used by mutating admin tools (e.g. reconnect / disconnect synchronizer,
+    /// dynamic parameter updates).
     async fn admin_post(
         &self,
         endpoint: &str,
@@ -401,7 +412,6 @@ impl CantonMcpServer {
     #[tool(description = "Submit a DAML command (Create or Exercise) to the Canton JSON Ledger API v2. Creates new contracts or exercises choices on existing ones. Returns the transaction with created/exercised events.")]
     async fn canton_submit_command(
         &self,
-        #[allow(unused_variables)]
         Parameters(params): Parameters<CantonSubmitCommandParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         // Parse arguments JSON string into a Value
@@ -468,7 +478,6 @@ impl CantonMcpServer {
     #[tool(description = "Query active DAML contracts on a Canton participant via the JSON Ledger API v2. Filters by template ID and party. Returns contract IDs, payloads, signatories, and observers.")]
     async fn canton_list_contracts(
         &self,
-        #[allow(unused_variables)]
         Parameters(params): Parameters<CantonListContractsParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let body = serde_json::json!({
@@ -510,7 +519,6 @@ impl CantonMcpServer {
     #[tool(description = "Get create and archive events for a specific DAML contract via the JSON Ledger API v2. Returns the contract lifecycle events including creation arguments, signatories, and archive status.")]
     async fn canton_get_events(
         &self,
-        #[allow(unused_variables)]
         Parameters(params): Parameters<CantonGetEventsParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let body = serde_json::json!({
@@ -532,7 +540,6 @@ impl CantonMcpServer {
     #[tool(description = "Get a transaction by transaction ID via the Canton JSON Ledger API v2. Returns the complete transaction including all created, exercised, and archived events.")]
     async fn canton_get_transaction(
         &self,
-        #[allow(unused_variables)]
         Parameters(params): Parameters<CantonGetTransactionParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         // Canton 3.5 unified the per-id update lookup at /v2/updates/update-by-id.
@@ -560,7 +567,6 @@ impl CantonMcpServer {
     #[tool(description = "Allocate a new party on the Canton participant node. Returns the fully-qualified party identifier (name::fingerprint) for use in DAML commands and queries.")]
     async fn canton_allocate_party(
         &self,
-        #[allow(unused_variables)]
         Parameters(params): Parameters<CantonAllocatePartyParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         // Canton 3.5: party allocation moved to POST /v2/parties.
@@ -590,8 +596,7 @@ impl CantonMcpServer {
     #[tool(description = "List all known parties on the Canton participant node. Returns party identifiers and hosting participant information.")]
     async fn canton_list_parties(
         &self,
-        #[allow(unused_variables)]
-        Parameters(_params): Parameters<CantonListPartiesParams>,
+        #[allow(unused)] Parameters(_params): Parameters<CantonListPartiesParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         // Canton 3.5: GET /v2/parties replaces POST /v2/party-management/list-known-parties.
         let response = self
@@ -615,8 +620,7 @@ impl CantonMcpServer {
     #[tool(description = "List connected Canton synchronization domains (synchronizers). Returns domain IDs, connection status, sequencer endpoints, and whether each is the Global Synchronizer.")]
     async fn canton_list_domains(
         &self,
-        #[allow(unused_variables)]
-        Parameters(_params): Parameters<CantonListDomainsParams>,
+        #[allow(unused)] Parameters(_params): Parameters<CantonListDomainsParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let response = self
             .admin_get("/admin/domain/list-connected")
@@ -650,8 +654,7 @@ impl CantonMcpServer {
     #[tool(description = "Check Canton participant health and connectivity. Returns node status, connected domains, active parties, and uptime information.")]
     async fn canton_get_health(
         &self,
-        #[allow(unused_variables)]
-        Parameters(_params): Parameters<CantonGetHealthParams>,
+        #[allow(unused)] Parameters(_params): Parameters<CantonGetHealthParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         // Try the health endpoint first
         let health = self
@@ -681,7 +684,6 @@ impl CantonMcpServer {
     #[tool(description = "Get the Canton Coin (CC) balance for a party. Queries the CIP-56 token balance via the Canton JSON Ledger API v2 by looking up active Holding contracts (Splice.Amulet:Amulet template).")]
     async fn canton_get_balance(
         &self,
-        #[allow(unused_variables)]
         Parameters(params): Parameters<CantonGetBalanceParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         // Query active Holding contracts for the party (CIP-56 standard)
@@ -759,7 +761,6 @@ impl CantonMcpServer {
     #[tool(description = "Transfer Canton Coin (CC) tokens between parties. Submits a DAML transfer command via the JSON Ledger API v2 using the CIP-56 Amulet transfer workflow (Splice.AmuletRules:Transfer template).")]
     async fn canton_transfer(
         &self,
-        #[allow(unused_variables)]
         Parameters(params): Parameters<CantonTransferParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let command_id = format!("tenzro-mcp-transfer-{}", uuid::Uuid::new_v4());
@@ -803,7 +804,6 @@ impl CantonMcpServer {
     #[tool(description = "Create a tokenized asset (bond, equity, repo, or custom) as a DAML contract on Canton. Submits a Create command with the asset parameters. For bonds, maturity_date is required.")]
     async fn canton_create_asset(
         &self,
-        #[allow(unused_variables)]
         Parameters(params): Parameters<CantonCreateAssetParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         // Validate asset type
@@ -883,7 +883,6 @@ impl CantonMcpServer {
     #[tool(description = "Execute atomic Delivery-vs-Payment (DvP) settlement on Canton. Creates a DvP settlement contract that atomically swaps the asset leg (delivery) and payment leg in a single DAML transaction, ensuring neither party bears settlement risk.")]
     async fn canton_dvp_settle(
         &self,
-        #[allow(unused_variables)]
         Parameters(params): Parameters<CantonDvpSettleParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let command_id = format!("tenzro-mcp-dvp-{}", uuid::Uuid::new_v4());
@@ -934,7 +933,6 @@ impl CantonMcpServer {
     #[tool(description = "Upload a DAR (DAML Archive) file to the Canton participant node. The DAR is installed and its packages become available for contract creation. Provide base64-encoded DAR content.")]
     async fn canton_upload_dar(
         &self,
-        #[allow(unused_variables)]
         Parameters(params): Parameters<CantonUploadDarParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         use base64::Engine;
@@ -992,10 +990,31 @@ impl CantonMcpServer {
         }))
     }
 
+    #[tool(description = "Reconnect a Canton participant to a synchronizer domain. Submits POST /admin/participant/synchronizer/{alias}/reconnect via the Canton Admin API. Used after a synchronizer outage or planned disconnection. Returns a plain-text confirmation on success.")]
+    async fn canton_reconnect_synchronizer(
+        &self,
+        Parameters(params): Parameters<CantonReconnectSynchronizerParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let endpoint = format!(
+            "/admin/participant/synchronizer/{}/reconnect",
+            params.synchronizer_alias
+        );
+        let body = serde_json::json!({
+            "retry_on_failure": params.retry_on_failure,
+        });
+
+        match self.admin_post(&endpoint, &body).await {
+            Ok(_) => text_result(format!(
+                "Canton participant reconnected to synchronizer '{}' (retry_on_failure={})",
+                params.synchronizer_alias, params.retry_on_failure
+            )),
+            Err(e) => Err(e),
+        }
+    }
+
     #[tool(description = "Get the fee schedule for a Canton synchronizer domain. Queries the Admin API at /admin/synchronizer/{id}/fee-schedule. Returns base fee, per-byte fee, and other fee parameters.")]
     async fn canton_get_fee_schedule(
         &self,
-        #[allow(unused_variables)]
         Parameters(params): Parameters<CantonGetFeeScheduleParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let endpoint = format!(
@@ -1089,8 +1108,15 @@ impl ServerHandler for CantonMcpServer {
 // ─── Server startup ───
 
 /// Start the Canton MCP server on the given address using Streamable HTTP transport.
+///
+/// `ledger_api_url` / `admin_api_url` configure the Canton participant endpoints
+/// the tools talk to (typically derived from the node's `CantonConfig`).
+/// `jwt_token` is the optional bearer token for authenticated participants.
 pub async fn start_canton_mcp_server(
     listen_addr: String,
+    ledger_api_url: String,
+    admin_api_url: String,
+    jwt_token: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
@@ -1109,8 +1135,21 @@ pub async fn start_canton_mcp_server(
             "canton-mcp.tenzro.network".to_string(),
         ]);
 
+    // Capture Canton endpoints into the per-session factory. The closure is
+    // invoked once per inbound MCP session and must return a fresh
+    // `CantonMcpServer`, so we clone the configured URLs/JWT into each
+    // instance via the `with_*` builders rather than relying on the
+    // hard-coded `new()` defaults.
     let service = StreamableHttpService::new(
-        move || Ok(CantonMcpServer::new()),
+        move || {
+            let mut server = CantonMcpServer::new()
+                .with_ledger_api_url(ledger_api_url.clone())
+                .with_admin_api_url(admin_api_url.clone());
+            if let Some(token) = jwt_token.clone() {
+                server = server.with_jwt_token(token);
+            }
+            Ok(server)
+        },
         Arc::new(LocalSessionManager::default()),
         config,
     );

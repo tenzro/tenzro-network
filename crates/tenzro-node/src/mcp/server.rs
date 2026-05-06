@@ -96,6 +96,12 @@ pub struct ResolveDidParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetAgentJwkParams {
+    #[schemars(description = "RFC 9421 keyid — `did:tenzro:...` (first compatible key) or `did:tenzro:...#fragment` (specific key)")]
+    pub keyid: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetTransactionParams {
     #[schemars(description = "Hex-encoded transaction hash (with or without 0x prefix)")]
     pub tx_hash: String,
@@ -889,6 +895,84 @@ pub struct DelegateTaskParams {
     pub max_budget_tnzo: Option<f64>,
 }
 
+// ─── Kill-Switch Params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PauseAgentParams {
+    #[schemars(description = "DID of the agent to pause")]
+    pub agent_did: String,
+    #[schemars(description = "DID of the controller authorizing the pause (must match controller_did on the agent identity)")]
+    pub controller_did: String,
+    #[schemars(description = "Free-text reason recorded on the kill-switch receipt")]
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct QuarantineAgentParams {
+    #[schemars(description = "DID of the agent to quarantine (freezes stake, blocks all messaging)")]
+    pub agent_did: String,
+    #[schemars(description = "DID of the controller authorizing the quarantine")]
+    pub controller_did: String,
+    #[schemars(description = "Free-text reason recorded on the kill-switch receipt")]
+    pub reason: String,
+    #[schemars(description = "Optional 32-byte evidence hash (hex-encoded, with or without 0x prefix)")]
+    pub evidence_hash: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TerminateAgentParams {
+    #[schemars(description = "DID of the agent to terminate (terminal state, optionally cascades to spawned children)")]
+    pub agent_did: String,
+    #[schemars(description = "DID of the controller authorizing the termination")]
+    pub controller_did: String,
+    #[schemars(description = "Free-text reason recorded on the kill-switch receipt")]
+    pub reason: String,
+    #[schemars(description = "Optional 32-byte evidence hash (hex-encoded, with or without 0x prefix)")]
+    pub evidence_hash: Option<String>,
+    #[schemars(description = "Slash basis points 0-10000 (10000 = 100%). Default 0.")]
+    pub slash_bps: Option<u16>,
+    #[schemars(description = "If true, recursively terminate all descendant agents in the spawn tree")]
+    pub cascade: Option<bool>,
+}
+
+// ─── AgentBond Params (Spec 9) ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PostAgentBondParams {
+    #[schemars(description = "Controller wallet address (hex). Must match the signing key.")]
+    pub from: String,
+    #[schemars(description = "DID of the agent the bond is posted against (e.g. did:tenzro:machine:...)")]
+    pub agent_did: String,
+    #[schemars(description = "Controller DID (e.g. did:tenzro:human:...) authorizing the bond")]
+    pub controller_did: String,
+    #[schemars(description = "Bond amount in wei as a decimal string (1 TNZO = 10^18 wei)")]
+    pub amount: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetAgentBondParams {
+    #[schemars(description = "Agent DID to look up")]
+    pub agent_did: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FileInsuranceClaimParams {
+    #[schemars(description = "Claimant DID (the harmed party)")]
+    pub claimant_did: String,
+    #[schemars(description = "Claimant wallet address (hex). Receives payout if approved.")]
+    pub claimant_address: String,
+    #[schemars(description = "DID of the bonded agent the claim is filed against")]
+    pub against_agent_did: String,
+    #[schemars(description = "Requested payout amount in wei (decimal string)")]
+    pub amount_requested: String,
+    #[schemars(description = "Receipt references: tx hashes, settlement ids, log refs")]
+    pub receipt_refs: Option<Vec<String>>,
+    #[schemars(description = "Optional narrative describing the harm (capped to 1024 bytes)")]
+    pub narrative: Option<String>,
+    #[schemars(description = "Nonce used to derive a deterministic claim_id")]
+    pub nonce: u64,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DiscoverModelsParams {
     #[schemars(description = "Optional model category filter: 'text', 'image', 'audio', 'multimodal'")]
@@ -907,6 +991,28 @@ pub struct DiscoverAgentsParams {
     pub agent_type: Option<String>,
     #[schemars(description = "Maximum number of agents to return (default 20)")]
     pub limit: Option<usize>,
+}
+
+// ─── Capability Registry Params (#379) ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetCapabilityAttestationsParams {
+    #[schemars(description = "Capability short-form name: 'nlp', 'vision', 'code', 'data', 'blockchain', 'smart_contract', 'api_integration', 'coordination', or any custom-capability name registered by an agent.")]
+    pub capability: String,
+    #[schemars(description = "If true, run query-time signature/expiry checks before returning. Default false: registry already verifies signatures eagerly at submit time per #52.")]
+    pub verified_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetAgentCapabilityAttestationsParams {
+    #[schemars(description = "Agent ID to fetch capability attestations for")]
+    pub agent_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FindBestAgentForCapabilityParams {
+    #[schemars(description = "Capability short-form name: 'nlp', 'vision', 'code', 'data', 'blockchain', 'smart_contract', 'api_integration', 'coordination', or any custom-capability name. Returns the agent with the most recent TEE-backed attestation (preferred), falling back to any agent with the capability.")]
+    pub capability: String,
 }
 
 // ─── Task Marketplace Params ───
@@ -1572,6 +1678,16 @@ pub struct DecodeResultParams {
 // ─── AP2 (Agent Payments Protocol) params ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Ap2SignMandateParams {
+    #[schemars(description = "Mandate kind (AP2 v0.2): 'checkout' (principal-signed pre-authorization) or 'payment' (agent-signed final-offer commit)")]
+    pub mandate_kind: String,
+    #[schemars(description = "The mandate object — CheckoutMandate or PaymentMandate, matching mandate_kind. Auth-bound wallet's Ed25519 key signs the canonical preimage.")]
+    pub mandate: serde_json::Value,
+    #[schemars(description = "Signer DID — must match the controller of the auth-bound wallet (principal for checkout, agent for payment).")]
+    pub signer_did: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Ap2VerifyMandateParams {
     #[schemars(description = "Verifiable Digital Credential (VDC) mandate object — the full JSON-LD VC envelope with proof")]
     pub vdc: serde_json::Value,
@@ -1579,11 +1695,11 @@ pub struct Ap2VerifyMandateParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Ap2ValidateMandatePairParams {
-    #[schemars(description = "Intent mandate VDC (user-to-agent authorization) as JSON-LD VC envelope")]
-    pub intent_vdc: serde_json::Value,
-    #[schemars(description = "Cart mandate VDC (agent-to-merchant execution) as JSON-LD VC envelope")]
-    pub cart_vdc: serde_json::Value,
-    #[schemars(description = "If true, also enforce the agent's TDIP DelegationScope against the cart total via IdentityRegistry::enforce_operation. Default: false (AP2-only validation).")]
+    #[schemars(description = "AP2 v0.2 CheckoutMandate VDC (principal-to-agent pre-authorization) as JSON-LD VC envelope")]
+    pub checkout_vdc: serde_json::Value,
+    #[schemars(description = "AP2 v0.2 PaymentMandate VDC (agent-to-merchant final-offer commit) as JSON-LD VC envelope")]
+    pub payment_vdc: serde_json::Value,
+    #[schemars(description = "If true, also enforce the agent's TDIP DelegationScope against the payment total via IdentityRegistry::enforce_operation. Default: false (AP2-only validation).")]
     #[serde(default)]
     pub enforce_delegation: bool,
 }
@@ -1592,20 +1708,18 @@ pub struct Ap2ValidateMandatePairParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004DeriveAgentIdParams {
-    #[schemars(description = "Agent owner EVM address (0x-prefixed hex)")]
-    pub owner: String,
-    #[schemars(description = "32-byte salt as hex (0x-prefixed, 64 hex chars)")]
-    pub salt: String,
+    #[schemars(description = "Tenzro DID string (agentId = keccak256(utf8(did)))")]
+    pub did: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeRegisterParams {
-    #[schemars(description = "Agent ID (bytes32 hex, 0x-prefixed)")]
-    pub agent_id: String,
-    #[schemars(description = "Registration data URI (e.g. ipfs:// or https:// link to agent metadata JSON)")]
-    pub registration_data_uri: String,
-    #[schemars(description = "Agent owner EVM address (0x-prefixed hex)")]
-    pub owner: String,
+    #[schemars(description = "Tenzro DID string (agentId is derived as keccak256(utf8(did)))")]
+    pub did: String,
+    #[schemars(description = "Agent owner / controller EVM address (0x-prefixed hex)")]
+    pub agent_address: String,
+    #[schemars(description = "Off-chain metadata URI (e.g. ipfs:// or https:// link to agent metadata JSON)")]
+    pub metadata_uri: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1617,43 +1731,153 @@ pub struct Erc8004EncodeGetAgentParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004DecodeGetAgentParams {
     #[schemars(description = "Hex-encoded return data from a getAgent(bytes32) eth_call")]
-    pub returndata: String,
+    pub return_data: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeSetAgentUriParams {
+    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
+    pub agent_id: String,
+    #[schemars(description = "Updated off-chain metadata URI")]
+    pub metadata_uri: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeSetAgentWalletParams {
+    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
+    pub agent_id: String,
+    #[schemars(description = "New wallet / controller EVM address (0x-prefixed hex)")]
+    pub new_wallet: String,
+    #[schemars(description = "Unix-seconds deadline after which the signature is invalid")]
+    pub deadline: u64,
+    #[schemars(description = "Hex-encoded EIP-712 signature (0x-prefixed) authorizing the wallet rotation")]
+    pub signature: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeSetMetadataParams {
+    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
+    pub agent_id: String,
+    #[schemars(description = "Metadata key string (free-form ASCII identifier)")]
+    pub metadata_key: String,
+    #[schemars(description = "Metadata value as 0x-prefixed hex bytes")]
+    pub metadata_value: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeGetMetadataParams {
+    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
+    pub agent_id: String,
+    #[schemars(description = "Metadata key string")]
+    pub metadata_key: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004DecodeGetMetadataParams {
+    #[schemars(description = "Hex-encoded return data from a getMetadata(uint256,string) eth_call")]
+    pub return_data: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeGetAgentUriParams {
+    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
+    pub agent_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeGetAgentWalletParams {
+    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
+    pub agent_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeFeedbackParams {
-    #[schemars(description = "Agent ID (bytes32 hex, 0x-prefixed)")]
-    pub agent_id: String,
-    #[schemars(description = "Feedback score (0-100)")]
-    pub score: u8,
-    #[schemars(description = "Feedback auth ID (bytes32 hex, 0x-prefixed) — binds the feedback to a task/response pair")]
-    pub feedback_auth_id: String,
-    #[schemars(description = "Feedback URI (e.g. ipfs:// or https:// link to full feedback JSON)")]
-    pub feedback_uri: String,
+    #[schemars(description = "Subject agent ID (bytes32 hex, 0x-prefixed) — the agent being rated")]
+    pub subject_agent_id: String,
+    #[schemars(description = "Rating in the range -100..=100 (Tenzro convention)")]
+    pub rating: i8,
+    #[schemars(description = "Resolvable URI to feedback context (e.g. ipfs:// or https:// link)")]
+    pub context_uri: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct Erc8004EncodeRequestValidationParams {
-    #[schemars(description = "Agent ID being validated (bytes32 hex, 0x-prefixed)")]
-    pub agent_id: String,
-    #[schemars(description = "Validator agent ID (bytes32 hex, 0x-prefixed)")]
-    pub validator_id: String,
-    #[schemars(description = "Validation request URI")]
-    pub request_uri: String,
-    #[schemars(description = "Data hash being validated (bytes32 hex, 0x-prefixed)")]
-    pub data_hash: String,
+pub struct Erc8004EncodeGetFeedbackParams {
+    #[schemars(description = "Subject agent ID (bytes32 hex, 0x-prefixed)")]
+    pub subject_agent_id: String,
+    #[schemars(description = "Index into the subject's feedback array")]
+    pub index: u64,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct Erc8004EncodeSubmitValidationParams {
-    #[schemars(description = "Data hash that was validated (bytes32 hex, 0x-prefixed)")]
-    pub data_hash: String,
-    #[schemars(description = "Validation response code (0-255, domain-specific)")]
-    pub response: u8,
-    #[schemars(description = "Response URI (link to full validation report)")]
+pub struct Erc8004EncodeGetFeedbackCountParams {
+    #[schemars(description = "Subject agent ID (bytes32 hex, 0x-prefixed)")]
+    pub subject_agent_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeRevokeFeedbackParams {
+    #[schemars(description = "Agent ID owning the feedback (uint256 hex word, 0x-prefixed)")]
+    pub agent_id: String,
+    #[schemars(description = "Feedback ID to revoke (bytes32 hex, 0x-prefixed)")]
+    pub feedback_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeAppendResponseParams {
+    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed) — must own the feedback")]
+    pub agent_id: String,
+    #[schemars(description = "Feedback ID being responded to (bytes32 hex, 0x-prefixed)")]
+    pub feedback_id: String,
+    #[schemars(description = "Resolvable URI to the response payload")]
     pub response_uri: String,
-    #[schemars(description = "Tag (bytes32 hex, 0x-prefixed) — domain separator")]
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeIsFeedbackRevokedParams {
+    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
+    pub agent_id: String,
+    #[schemars(description = "Feedback ID to check (bytes32 hex, 0x-prefixed)")]
+    pub feedback_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeGetFeedbackResponsesParams {
+    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
+    pub agent_id: String,
+    #[schemars(description = "Feedback ID (bytes32 hex, 0x-prefixed)")]
+    pub feedback_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeValidationRequestParams {
+    #[schemars(description = "Validator address (20-byte EVM address, 0x-prefixed)")]
+    pub validator_address: String,
+    #[schemars(description = "Agent ID of the subject being validated (bytes32 hex, 0x-prefixed; uint256 word)")]
+    pub agent_id: String,
+    #[schemars(description = "Resolvable URI to the work being validated")]
+    pub request_uri: String,
+    #[schemars(description = "32-byte commitment over the work (bytes32 hex, 0x-prefixed) — storage key for the matching response")]
+    pub request_hash: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeValidationResponseParams {
+    #[schemars(description = "Request hash from the matching validationRequest (bytes32 hex, 0x-prefixed)")]
+    pub request_hash: String,
+    #[schemars(description = "Quality score 0..=100 (Tenzro convention: 0..=49 invalid, 50..=79 partial, 80..=100 valid)")]
+    pub response: u8,
+    #[schemars(description = "Resolvable URI to proof material (ZK proof CID, TEE quote CID, etc.)")]
+    pub response_uri: String,
+    #[schemars(description = "32-byte commitment over the response payload (bytes32 hex, 0x-prefixed)")]
+    pub response_hash: String,
+    #[schemars(description = "Short categorical label (e.g. 'valid', 'invalid', 'abstain')")]
     pub tag: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeGetValidationParams {
+    #[schemars(description = "Request hash from the original validationRequest (bytes32 hex, 0x-prefixed)")]
+    pub request_hash: String,
 }
 
 // ─── Wormhole cross-chain params ───
@@ -1754,20 +1978,16 @@ async fn debridge_mcp_call(tool_name: &str, arguments: serde_json::Value) -> std
 
     // Parse SSE response (event: message\ndata: {json})
     for line in body.lines() {
-        if let Some(data) = line.strip_prefix("data: ") {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                if let Some(result) = json.get("result") {
-                    if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
-                        if let Some(first) = content.first() {
-                            if let Some(text) = first.get("text").and_then(|t| t.as_str()) {
+        if let Some(data) = line.strip_prefix("data: ")
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(data)
+                && let Some(result) = json.get("result") {
+                    if let Some(content) = result.get("content").and_then(|c| c.as_array())
+                        && let Some(first) = content.first()
+                            && let Some(text) = first.get("text").and_then(|t| t.as_str()) {
                                 return serde_json::from_str(text).or_else(|_| Ok(serde_json::json!({"text": text})));
                             }
-                        }
-                    }
                     return Ok(result.clone());
                 }
-            }
-        }
     }
 
     // Try parsing as direct JSON
@@ -1927,7 +2147,8 @@ fn parse_vm_type(s: &str) -> std::result::Result<tenzro_token::TokenVmType, Erro
         "svm" => Ok(tenzro_token::TokenVmType::Svm),
         "daml" => Ok(tenzro_token::TokenVmType::Daml),
         "native" => Ok(tenzro_token::TokenVmType::Native),
-        other => Err(err_internal_data(format!("Unknown VM type: '{}'. Use 'evm', 'svm', 'daml', or 'native'.", other))),
+        "tempo-tip20" | "tempo" | "tip20" => Ok(tenzro_token::TokenVmType::TempoTip20),
+        other => Err(err_internal_data(format!("Unknown VM type: '{}'. Use 'evm', 'svm', 'daml', 'native', or 'tempo-tip20'.", other))),
     }
 }
 
@@ -2014,6 +2235,52 @@ fn json_result(value: serde_json::Value) -> std::result::Result<CallToolResult, 
 
 fn text_result(text: impl Into<String>) -> std::result::Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(text.into())]))
+}
+
+/// Map a short-form capability name (matching the JSON-RPC and CLI
+/// vocabulary) to a fully-typed `Capability`. Unknown names map to
+/// `Capability::Custom { name, parameters: {} }` so the MCP surface
+/// can address the long tail of agent-defined capabilities without
+/// requiring a structured payload.
+fn parse_capability_short(name: &str) -> tenzro_types::agent::Capability {
+    use tenzro_types::agent::Capability;
+    match name {
+        "nlp" => Capability::NaturalLanguageProcessing { languages: vec!["en".to_string()] },
+        "vision" => Capability::ComputerVision { tasks: vec!["detection".to_string()] },
+        "code" => Capability::CodeGeneration {
+            languages: vec!["rust".to_string(), "python".to_string()],
+        },
+        "data" => Capability::DataAnalysis {
+            formats: vec!["json".to_string(), "csv".to_string()],
+        },
+        "blockchain" => Capability::BlockchainInteraction { chains: vec!["tenzro".to_string()] },
+        "smart_contract" => Capability::SmartContractExecution,
+        "api_integration" => Capability::ExternalAPIIntegration { apis: vec![] },
+        "coordination" => Capability::MultiAgentCoordination,
+        other => Capability::Custom {
+            name: other.to_string(),
+            parameters: std::collections::HashMap::new(),
+        },
+    }
+}
+
+/// Convert a `CapabilityAttestation` to an MCP-friendly JSON envelope.
+/// All raw byte fields are emitted as hex so they survive transport
+/// across language boundaries identically to the JSON-RPC surface.
+fn attestation_to_mcp_json(att: &tenzro_agent::capabilities::CapabilityAttestation) -> serde_json::Value {
+    serde_json::json!({
+        "agent_id": att.agent_id,
+        "capability": att.capability,
+        "attested_at": att.attested_at.to_rfc3339(),
+        "tee_backed": att.tee_backed,
+        "attester_address": att.attester_address.as_ref().map(|a| format!("0x{}", hex::encode(a.as_bytes()))),
+        "attester_public_key": att.attester_public_key.as_ref().map(|pk| serde_json::json!({
+            "key_type": format!("{:?}", pk.key_type()),
+            "bytes": hex::encode(pk.as_bytes()),
+        })),
+        "signature": att.signature.as_ref().map(hex::encode),
+        "metadata": att.metadata,
+    })
 }
 
 #[tool_router]
@@ -2106,9 +2373,9 @@ impl TenzroMcpServer {
         // from the MCP request's Authorization + DPoP headers via the
         // task-local in `rpc_dispatch`.
         if params.signature.is_none() && params.public_key.is_none() && params.timestamp.is_none() {
+            // Externally-tagged TransactionType — see tenzro_types::transaction::TransactionType
             let tx_type = serde_json::json!({
-                "type": "Transfer",
-                "data": { "amount": params.amount.to_string() }
+                "Transfer": { "amount": params.amount.to_string() }
             });
             let send_params = serde_json::json!({
                 "from": params.from,
@@ -2410,6 +2677,78 @@ impl TenzroMcpServer {
                 params.did
             )),
         }
+    }
+
+    #[tool(description = "TDIP/GDPR Article 17 right-to-erasure. Hard-deletes a previously revoked identity from the registry and persistent storage. The DID must already be in `Revoked` status — call `revoke_did` (RPC) first, allow cascading revocation to propagate, then call this. Distinct from revoke (logical delete).")]
+    async fn forget_identity(
+        &self,
+        Parameters(params): Parameters<ResolveDidParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let registry = self
+            .node
+            .identity_registry()
+            .ok_or_else(|| err_internal("Identity registry not initialized"))?;
+
+        registry
+            .forget_identity(&params.did)
+            .map_err(|e| err_internal(format!("forget_identity failed: {}", e)))?;
+
+        json_result(serde_json::json!({
+            "did": params.did,
+            "status": "erased",
+            "note": "Hard-deleted from CF_IDENTITIES per TDIP/GDPR Article 17",
+        }))
+    }
+
+    #[tool(description = "List all Tenzro agent public signing keys as an RFC 7517 JWK Set. Mirrors GET /.well-known/jwks.json. External RFC 9421 verifiers (Visa TAP, Mastercard, Stripe MPP, AP2, x402) use this to resolve `keyid` parameters.")]
+    async fn list_agent_jwks(
+        &self,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let registry = self
+            .node
+            .identity_registry()
+            .ok_or_else(|| err_internal("Identity registry not initialized"))?;
+
+        let agent_registry =
+            tenzro_payments::rfc9421::TenzroAgentRegistry::new(registry.clone());
+        let agents = agent_registry.list_all_agents();
+        let set = tenzro_payments::rfc9421::JwkSet::from_agents(&agents);
+
+        let value = serde_json::to_value(&set)
+            .map_err(|e| err_internal(format!("JWK Set serialization failed: {}", e)))?;
+        json_result(value)
+    }
+
+    #[tool(description = "Resolve a single agent JWK by RFC 9421 keyid. Accepts `did:tenzro:...` (first compatible key) or `did:tenzro:...#fragment` (specific key). Mirrors GET /.well-known/jwks.json/:keyid.")]
+    async fn get_agent_jwk(
+        &self,
+        Parameters(params): Parameters<GetAgentJwkParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        use tenzro_payments::rfc9421::AgentRegistryClient;
+
+        let registry = self
+            .node
+            .identity_registry()
+            .ok_or_else(|| err_internal("Identity registry not initialized"))?;
+
+        let agent_registry =
+            tenzro_payments::rfc9421::TenzroAgentRegistry::new(registry.clone());
+
+        let agent = agent_registry
+            .get_public_key(&params.keyid)
+            .await
+            .map_err(|e| ErrorData {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!("agent lookup failed: {}", e)),
+                data: None,
+            })?;
+
+        let jwk = tenzro_payments::rfc9421::Jwk::try_from_agent(&agent)
+            .map_err(|e| err_internal(format!("JWK encoding failed: {}", e)))?;
+
+        let value = serde_json::to_value(&jwk)
+            .map_err(|e| err_internal(format!("JWK serialization failed: {}", e)))?;
+        json_result(value)
     }
 
     #[tool(description = "Set the delegation scope for a machine identity, defining spending limits, allowed operations, payment protocols, and chains the agent may use")]
@@ -2918,7 +3257,7 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "List all providers discovered on the Tenzro Network. Providers broadcast announcements every 60s on the tenzro/providers/1.0.0 gossipsub topic. Returns both the local node (if serving) and all remotely discovered providers. Optionally filter by provider_type: 'llm', 'tee', or 'general'.")]
+    #[tool(description = "List all providers discovered on the Tenzro Network. Providers broadcast announcements every 60s on the tenzro/providers gossipsub topic. Returns both the local node (if serving) and all remotely discovered providers. Optionally filter by provider_type: 'llm', 'tee', or 'general'.")]
     async fn list_providers(
         &self,
         Parameters(params): Parameters<ListProvidersParams>,
@@ -2953,11 +3292,10 @@ impl TenzroMcpServer {
             let peer_id = entry.announcement.peer_id.clone();
             if !seen_ids.contains(&peer_id) {
                 // Apply optional provider_type filter
-                if let Some(ref pt) = params.provider_type {
-                    if !pt.is_empty() && entry.announcement.provider_type != *pt {
+                if let Some(ref pt) = params.provider_type
+                    && !pt.is_empty() && entry.announcement.provider_type != *pt {
                         continue;
                     }
-                }
                 seen_ids.insert(peer_id.clone());
                 result.push(serde_json::json!({
                     "peer_id": peer_id,
@@ -3043,8 +3381,8 @@ impl TenzroMcpServer {
                 },
             });
 
-            if is_serving {
-                if let Some(snap) = self.node.load_tracker.snapshot(&entry.id) {
+            if is_serving
+                && let Some(snap) = self.node.load_tracker.snapshot(&entry.id) {
                     model_json["load"] = serde_json::json!({
                         "active_requests": snap.active_requests,
                         "max_concurrent": snap.max_concurrent,
@@ -3052,7 +3390,6 @@ impl TenzroMcpServer {
                         "load_level": snap.load_level.to_string(),
                     });
                 }
-            }
 
             model_json
         }).collect();
@@ -3068,8 +3405,8 @@ impl TenzroMcpServer {
         }
 
         // Apply category filter if provided
-        if let Some(ref cat) = params.category {
-            if let Ok(modality) = parse_modality(cat) {
+        if let Some(ref cat) = params.category
+            && let Ok(modality) = parse_modality(cat) {
                 let modality_str = format!("{:?}", modality).to_lowercase();
                 model_list.retain(|m| {
                     // Catalog models are text-generation; keep them only if category is "text"
@@ -3079,7 +3416,6 @@ impl TenzroMcpServer {
                     || modality_str == "text"
                 });
             }
-        }
 
         json_result(serde_json::json!({
             "models": model_list,
@@ -3742,9 +4078,9 @@ impl TenzroMcpServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         json_result(serde_json::json!({
             "program_id": {
-                "hex": "918f858b6b0dd134e9a1fcb73002428c5197093e76e536badc60382bb9f8ac78",
-                "base58": "AoD3kebB2bYjLKyJtaqkyXqwJy4oQ949SnVhMwEYzGXR",
-                "derivation_domain": "tenzro/svm/program/cross_vm/v1",
+                "hex": "5c03dd6cf580ecafb5ca11a9e1d6448176bb1dfa9d4886c65d9024df77542695",
+                "base58": "7CBvjJtsMxYFsxYkpcXYoTDZpC8PhMVy1DVVQBopvWCC",
+                "derivation_domain": "tenzro/svm/program/cross_vm",
             },
             "instructions": {
                 "bridge_to_evm": {
@@ -4130,9 +4466,9 @@ impl TenzroMcpServer {
         let max_concurrent = params.max_concurrent.unwrap_or(10);
 
         // If stake amount provided, stake tokens
-        if let Some(stake_amount) = params.stake {
-            if stake_amount > 0.0 {
-                if let Some(staking) = self.node.staking() {
+        if let Some(stake_amount) = params.stake
+            && stake_amount > 0.0
+                && let Some(staking) = self.node.staking() {
                     let amount_wei = (stake_amount * 1e18) as u128;
                     let staker_address = if let Some(registry) = self.node.identity_registry() {
                         let identities = registry.list_all();
@@ -4143,8 +4479,6 @@ impl TenzroMcpServer {
                     };
                     let _ = staking.stake(staker_address, amount_wei, provider_type);
                 }
-            }
-        }
 
         json_result(serde_json::json!({
             "status": "registered",
@@ -4304,8 +4638,8 @@ impl TenzroMcpServer {
         let mut tasks: Vec<serde_json::Value> = Vec::new();
 
         for key in keys {
-            if let Ok(Some(raw)) = storage.get(CF_TASKS, &key) {
-                if let Ok(task) = serde_json::from_slice::<TaskInfo>(&raw) {
+            if let Ok(Some(raw)) = storage.get(CF_TASKS, &key)
+                && let Ok(task) = serde_json::from_slice::<TaskInfo>(&raw) {
                     // Apply filters
                     if let Some(ref filter_type) = params.task_type {
                         let type_str = format!("{:?}", task.task_type).to_lowercase();
@@ -4350,7 +4684,6 @@ impl TenzroMcpServer {
                         "deadline": task.deadline,
                     }));
                 }
-            }
         }
 
         let total = tasks.len();
@@ -4467,17 +4800,15 @@ impl TenzroMcpServer {
 
         // ── Marketplace monetization fields ──────────────────────────────
         // Optional creator DID binding (attribution).
-        if let Some(did) = params.creator_did.as_deref() {
-            if !did.is_empty() {
+        if let Some(did) = params.creator_did.as_deref()
+            && !did.is_empty() {
                 template.creator_did = Some(did.to_string());
             }
-        }
         // Optional creator payout wallet. Mandatory when pricing != Free (enforced below).
-        if let Some(w) = params.creator_wallet.as_deref() {
-            if !w.is_empty() {
+        if let Some(w) = params.creator_wallet.as_deref()
+            && !w.is_empty() {
                 template.creator_wallet = Some(parse_address(w)?);
             }
-        }
 
         // Pricing: compact string like "free" | "per_execution:<u128>" |
         // "per_token:<u128>" | "subscription:<u128>" | "revenue_share:<bps>".
@@ -4555,8 +4886,8 @@ impl TenzroMcpServer {
         let mut templates: Vec<serde_json::Value> = Vec::new();
 
         for key in keys {
-            if let Ok(Some(raw)) = storage.get(CF_AGENT_TEMPLATES, &key) {
-                if let Ok(tmpl) = serde_json::from_slice::<AgentTemplate>(&raw) {
+            if let Ok(Some(raw)) = storage.get(CF_AGENT_TEMPLATES, &key)
+                && let Ok(tmpl) = serde_json::from_slice::<AgentTemplate>(&raw) {
                     // Only show published templates
                     if !tmpl.is_available() {
                         continue;
@@ -4606,7 +4937,6 @@ impl TenzroMcpServer {
                         "updated_at": tmpl.updated_at.0,
                     }));
                 }
-            }
         }
 
         let total = templates.len();
@@ -5489,7 +5819,7 @@ impl TenzroMcpServer {
             )));
         }
         let gguf_path = hf_downloader.model_path(model_id);
-        model_runtime.load_model_with_context(model_id, &gguf_path, entry.architecture, Some(entry.context_length))
+        model_runtime.load_model_with_context(model_id, &gguf_path, Some(entry.context_length))
             .await
             .map_err(|e| err_internal(format!("Failed to load model: {}", e)))?;
         self.node.served_models.insert(model_id.to_string(), true);
@@ -5540,11 +5870,10 @@ impl TenzroMcpServer {
         Parameters(params): Parameters<DeleteModelParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let model_id = &params.model_id;
-        if let Some(runtime) = &self.node.model_runtime {
-            if runtime.is_loaded(model_id) {
+        if let Some(runtime) = &self.node.model_runtime
+            && runtime.is_loaded(model_id) {
                 let _ = runtime.unload_model(model_id).await;
             }
-        }
         if let Some(hf_dl) = &self.node.hf_downloader {
             hf_dl.delete_model(model_id)
                 .map_err(|e| err_internal(format!("Failed to delete model: {}", e)))?;
@@ -5685,6 +6014,148 @@ impl TenzroMcpServer {
         )))
     }
 
+    // ─── Kill-Switch Tools (Agent-Swarm Spec 1) ───
+    //
+    // These three tools describe the lifecycle intervention transactions but defer
+    // execution to JSON-RPC. The transactions are signed off-node and submitted via
+    // `tenzro_signAndSendTransaction` (TransactionType::PauseAgent / QuarantineAgent /
+    // TerminateAgent), where the Native VM dispatches them as kill-switch precompiles
+    // and the post-execute scan applies the FSM transition + stake freeze/slash +
+    // cascade. MCP cannot sign on behalf of the controller — only describe the call.
+
+    #[tool(description = "Pause an agent (reversible). Halts all outbound A2A messaging and inference dispatch but preserves stake. Requires controller_did to match the agent's registered controller. NOTE: this MCP tool describes the operation only — the transaction must be signed and submitted via tenzro_signAndSendTransaction with type=PauseAgent.")]
+    async fn pause_agent(
+        &self,
+        Parameters(params): Parameters<PauseAgentParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        Err(err_internal(format!(
+            "pause_agent requires network consensus — sign and submit a PauseAgent transaction via tenzro_signAndSendTransaction (agent={}, controller={}, reason={}). Gas: 60000.",
+            params.agent_did, params.controller_did, params.reason
+        )))
+    }
+
+    #[tool(description = "Quarantine an agent (reversible). Halts messaging AND freezes all stake (blocks unstake/withdraw, allows slash). Requires controller_did to match the agent's registered controller. Optionally accepts a 32-byte evidence hash for off-chain audit linkage. NOTE: this MCP tool describes the operation only — the transaction must be signed and submitted via tenzro_signAndSendTransaction with type=QuarantineAgent.")]
+    async fn quarantine_agent(
+        &self,
+        Parameters(params): Parameters<QuarantineAgentParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        Err(err_internal(format!(
+            "quarantine_agent requires network consensus — sign and submit a QuarantineAgent transaction via tenzro_signAndSendTransaction (agent={}, controller={}, reason={}, evidence={:?}). Gas: 90000.",
+            params.agent_did, params.controller_did, params.reason, params.evidence_hash
+        )))
+    }
+
+    #[tool(description = "Terminate an agent (TERMINAL — irreversible). Halts messaging, optionally slashes stake (slash_bps 0-10000), and optionally cascades to all descendant spawned agents. Requires controller_did to match. NOTE: this MCP tool describes the operation only — the transaction must be signed and submitted via tenzro_signAndSendTransaction with type=TerminateAgent.")]
+    async fn terminate_agent(
+        &self,
+        Parameters(params): Parameters<TerminateAgentParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let slash_bps = params.slash_bps.unwrap_or(0);
+        if slash_bps > 10_000 {
+            return Err(err_internal(format!(
+                "slash_bps must be 0..=10000 (got {})", slash_bps
+            )));
+        }
+        let cascade = params.cascade.unwrap_or(false);
+        Err(err_internal(format!(
+            "terminate_agent requires network consensus — sign and submit a TerminateAgent transaction via tenzro_signAndSendTransaction (agent={}, controller={}, reason={}, evidence={:?}, slash_bps={}, cascade={}). Gas: 120000.",
+            params.agent_did, params.controller_did, params.reason, params.evidence_hash, slash_bps, cascade
+        )))
+    }
+
+    // ─── AgentBond Tools (Agent-Swarm Spec 9) ───
+    //
+    // Bond writes (post / increase / withdraw) are typed transactions and
+    // must be signed off-node and submitted via tenzro_signAndSendTransaction.
+    // Reads (get_agent_bond) and claim filing (file_insurance_claim) hit the
+    // node's in-process BondManager directly — no signing required.
+
+    #[tool(description = "Post an AgentBond surety against an agent DID (Agent-Swarm Spec 9). An Active bond ≥ bond_min_for_promotion promotes a Machine identity into the Delegated admission lane even when its controller is unknown / sub-Enhanced KYC. NOTE: this MCP tool describes the operation only — sign and submit a PostAgentBond transaction via tenzro_signAndSendTransaction.")]
+    async fn post_agent_bond(
+        &self,
+        Parameters(params): Parameters<PostAgentBondParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let _amount = params.amount.parse::<u128>().map_err(|e| {
+            err_internal(format!("invalid amount '{}': {}", params.amount, e))
+        })?;
+        Err(err_internal(format!(
+            "post_agent_bond requires network consensus — sign and submit a PostAgentBond transaction via tenzro_signAndSendTransaction (from={}, agent={}, controller={}, amount={} wei). Gas: 80000.",
+            params.from, params.agent_did, params.controller_did, params.amount
+        )))
+    }
+
+    #[tool(description = "Inspect an AgentBond by agent DID. Returns lifecycle state (Active / Cooldown / Frozen / Slashed / Returned), amount, controller, cooldown_until, last_modified_block, and promotion eligibility. Returns null if no bond exists.")]
+    async fn get_agent_bond(
+        &self,
+        Parameters(params): Parameters<GetAgentBondParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let bond_manager = self.node.bond_manager().ok_or_else(|| {
+            err_internal("BondManager not initialized on this node")
+        })?;
+        match bond_manager.get(&params.agent_did) {
+            Some(state) => json_result(serde_json::json!({
+                "agent_did": state.agent_did,
+                "controller_did": state.controller_did,
+                "amount": state.amount.to_string(),
+                "state": state.state.as_str(),
+                "cooldown_until": state.cooldown_until.map(|t| t.as_millis()),
+                "last_modified_block": state.last_modified_block,
+                "history_len": state.history.len(),
+                "is_promotion_eligible": state.is_promotion_eligible(),
+                "effective_for_promotion": state.effective_for_promotion().to_string(),
+            })),
+            None => json_result(serde_json::Value::Null),
+        }
+    }
+
+    #[tool(description = "File an insurance claim against a bonded agent (Agent-Swarm Spec 9). The claim enters Open status awaiting governance adjudication; payout (if approved) is settled by a separate PayInsuranceClaim transaction. Returns the full ClaimRecord including the deterministic claim_id.")]
+    async fn file_insurance_claim(
+        &self,
+        Parameters(params): Parameters<FileInsuranceClaimParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let amount_requested = params.amount_requested.parse::<u128>().map_err(|e| {
+            err_internal(format!("invalid amount_requested '{}': {}", params.amount_requested, e))
+        })?;
+        let claimant_address = parse_address(&params.claimant_address)?;
+
+        let bond_manager = self.node.bond_manager().ok_or_else(|| {
+            err_internal("BondManager not initialized on this node")
+        })?;
+
+        // Cap narrative at 1024 bytes per spec.
+        let narrative = params.narrative.map(|mut s| {
+            if s.len() > 1024 { s.truncate(1024); }
+            s
+        });
+        let receipt_refs = params.receipt_refs.unwrap_or_default();
+
+        let record = bond_manager
+            .file_claim(
+                &params.claimant_did,
+                claimant_address,
+                &params.against_agent_did,
+                amount_requested,
+                receipt_refs,
+                narrative,
+                params.nonce,
+            )
+            .map_err(|e| err_internal(format!("file_claim failed: {}", e)))?;
+
+        json_result(serde_json::json!({
+            "claim_id": record.claim_id,
+            "claimant_did": record.claimant_did,
+            "claimant_address": format!("{}", record.claimant_address),
+            "against_agent_did": record.against_agent_did,
+            "amount_requested": record.amount_requested.to_string(),
+            "receipt_refs": record.receipt_refs,
+            "narrative": record.narrative,
+            "status": record.status.as_str(),
+            "governance_ref": record.governance_ref,
+            "paid_amount": record.paid_amount.map(|a| a.to_string()),
+            "filed_at": record.filed_at.as_millis(),
+        }))
+    }
+
     #[tool(description = "Discover available AI models on the Tenzro Network. Filter by category, serving status, or max price. Returns model IDs, providers, pricing, and endpoints.")]
     async fn discover_models(
         &self,
@@ -5725,17 +6196,15 @@ impl TenzroMcpServer {
                     }
                 }).collect();
 
-                if let Some(ref needle) = cap_filter {
-                    if !cap_names.iter().any(|n| n.to_lowercase().contains(needle)) {
+                if let Some(ref needle) = cap_filter
+                    && !cap_names.iter().any(|n| n.to_lowercase().contains(needle)) {
                         continue;
                     }
-                }
                 // Local runtime-registered agents are "tenzroclaw" type
-                if let Some(ref needle) = type_filter {
-                    if !"tenzroclaw".contains(needle.as_str()) {
+                if let Some(ref needle) = type_filter
+                    && !"tenzroclaw".contains(needle.as_str()) {
                         continue;
                     }
-                }
 
                 seen_ids.insert(a.identity.agent_id.clone());
                 result.push(serde_json::json!({
@@ -5761,16 +6230,14 @@ impl TenzroMcpServer {
                 if seen_ids.contains(&entry.announcement.agent_id) {
                     continue;
                 }
-                if let Some(ref needle) = cap_filter {
-                    if !entry.announcement.capabilities.iter().any(|c| c.to_lowercase().contains(needle)) {
+                if let Some(ref needle) = cap_filter
+                    && !entry.announcement.capabilities.iter().any(|c| c.to_lowercase().contains(needle)) {
                         continue;
                     }
-                }
-                if let Some(ref needle) = type_filter {
-                    if !entry.announcement.agent_type.to_lowercase().contains(needle.as_str()) {
+                if let Some(ref needle) = type_filter
+                    && !entry.announcement.agent_type.to_lowercase().contains(needle.as_str()) {
                         continue;
                     }
-                }
                 seen_ids.insert(entry.announcement.agent_id.clone());
                 result.push(serde_json::json!({
                     "agent_id": entry.announcement.agent_id,
@@ -5794,6 +6261,123 @@ impl TenzroMcpServer {
             "agents": result,
             "total": result.len(),
             "limit": limit,
+        }))
+    }
+
+    // ─── Capability Registry Tools (#379) ───
+    //
+    // Read-only views over `tenzro_agent::CapabilityRegistry`. Mirrors the
+    // `tenzro_listCapabilities` / `tenzro_getCapabilityAttestations` /
+    // `tenzro_getAgentCapabilityAttestations` / `tenzro_findBestAgentForCapability`
+    // RPCs, so callers reaching the node via MCP have feature-parity with
+    // JSON-RPC for capability discovery and attestation inspection.
+
+    #[tool(description = "List all registered capabilities on this Tenzro node. Returns each capability with the count of agents that have it, the count of attestations, and the list of agent IDs supporting that capability. Use to discover what specialized work the local agent runtime can route.")]
+    async fn list_capabilities(&self) -> std::result::Result<CallToolResult, ErrorData> {
+        let runtime = self.node.agent_runtime().ok_or_else(|| {
+            err_internal("agent runtime not initialized — capabilities unavailable")
+        })?;
+        let registry = runtime.capability_registry();
+        let capabilities = registry.list_capabilities();
+
+        let result: Vec<serde_json::Value> = capabilities
+            .iter()
+            .map(|cap| {
+                serde_json::json!({
+                    "capability": cap,
+                    "agent_count": registry.capability_count(cap),
+                    "attestation_count": registry.get_attestations(cap).len(),
+                    "agents": registry.find_agents_with_capability(cap),
+                })
+            })
+            .collect();
+
+        json_result(serde_json::json!({
+            "capabilities": result,
+            "total": capabilities.len(),
+            "rejected_attestation_count": registry.rejected_attestation_count(),
+        }))
+    }
+
+    #[tool(description = "Fetch all attestations registered for a given capability. Each attestation carries the agent ID, attestation timestamp, TEE-backed flag, attester address, attester public key, signature, and metadata. Set verified_only=true to filter for attestations that pass query-time signature/expiry verification.")]
+    async fn get_capability_attestations(
+        &self,
+        Parameters(params): Parameters<GetCapabilityAttestationsParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let capability = parse_capability_short(&params.capability);
+        let verified_only = params.verified_only.unwrap_or(false);
+
+        let runtime = self.node.agent_runtime().ok_or_else(|| {
+            err_internal("agent runtime not initialized — capabilities unavailable")
+        })?;
+        let registry = runtime.capability_registry();
+
+        let attestations = if verified_only {
+            registry.get_verified_attestations(&capability)
+        } else {
+            registry.get_attestations(&capability)
+        };
+
+        let envelopes: Vec<serde_json::Value> = attestations
+            .iter()
+            .map(attestation_to_mcp_json)
+            .collect();
+
+        json_result(serde_json::json!({
+            "capability": capability,
+            "verified_only": verified_only,
+            "attestations": envelopes,
+            "total": attestations.len(),
+        }))
+    }
+
+    #[tool(description = "Fetch all capability attestations issued for a specific agent (by agent ID). Returns the agent's registered capabilities, every attestation that names the agent across all capabilities, and the agent's registered wallet address (used by the self-attestation guard).")]
+    async fn get_agent_capability_attestations(
+        &self,
+        Parameters(params): Parameters<GetAgentCapabilityAttestationsParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let runtime = self.node.agent_runtime().ok_or_else(|| {
+            err_internal("agent runtime not initialized — capabilities unavailable")
+        })?;
+        let registry = runtime.capability_registry();
+        let attestations = registry.get_agent_attestations(&params.agent_id);
+        let agent_capabilities = registry
+            .get_agent_capabilities(&params.agent_id)
+            .unwrap_or_default();
+        let registered_address = registry.agent_address(&params.agent_id);
+
+        let envelopes: Vec<serde_json::Value> = attestations
+            .iter()
+            .map(attestation_to_mcp_json)
+            .collect();
+
+        json_result(serde_json::json!({
+            "agent_id": params.agent_id,
+            "capabilities": agent_capabilities,
+            "attestations": envelopes,
+            "total_attestations": attestations.len(),
+            "registered_address": registered_address.map(|a| format!("0x{}", hex::encode(a.as_bytes()))),
+        }))
+    }
+
+    #[tool(description = "Find the best agent on this node for a given capability. Prefers TEE-backed attestations (most recent wins), falling back to any agent with the capability registered. Returns the chosen agent_id and the total candidate count.")]
+    async fn find_best_agent_for_capability(
+        &self,
+        Parameters(params): Parameters<FindBestAgentForCapabilityParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let capability = parse_capability_short(&params.capability);
+
+        let runtime = self.node.agent_runtime().ok_or_else(|| {
+            err_internal("agent runtime not initialized — capabilities unavailable")
+        })?;
+        let registry = runtime.capability_registry();
+        let best_agent = registry.find_best_agent(&capability);
+        let total_candidates = registry.capability_count(&capability);
+
+        json_result(serde_json::json!({
+            "capability": capability,
+            "best_agent": best_agent,
+            "total_candidates": total_candidates,
         }))
     }
 
@@ -6064,11 +6648,12 @@ impl TenzroMcpServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let registry = self.node.token_registry().ok_or_else(|| err_internal_data("Token registry not initialized"))?;
 
-        let vm_filter = params.vm_type.as_deref().and_then(|s| match s {
-            "evm" | "EVM" => Some(tenzro_token::TokenVmType::Evm),
-            "svm" | "SVM" => Some(tenzro_token::TokenVmType::Svm),
-            "daml" | "DAML" => Some(tenzro_token::TokenVmType::Daml),
-            "native" | "Native" => Some(tenzro_token::TokenVmType::Native),
+        let vm_filter = params.vm_type.as_deref().and_then(|s| match s.to_lowercase().as_str() {
+            "evm" => Some(tenzro_token::TokenVmType::Evm),
+            "svm" => Some(tenzro_token::TokenVmType::Svm),
+            "daml" => Some(tenzro_token::TokenVmType::Daml),
+            "native" => Some(tenzro_token::TokenVmType::Native),
+            "tempo-tip20" | "tempo" | "tip20" => Some(tenzro_token::TokenVmType::TempoTip20),
             _ => None,
         });
 
@@ -6512,14 +7097,12 @@ impl TenzroMcpServer {
         let mut total_score: u64 = 0;
         let mut count: u64 = 0;
         for rk in &rating_keys {
-            if let Ok(Some(rb)) = storage.get(CF_METADATA, rk.as_slice()) {
-                if let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&rb) {
-                    if let Some(r) = entry.get("rating").and_then(|v| v.as_u64()) {
+            if let Ok(Some(rb)) = storage.get(CF_METADATA, rk.as_slice())
+                && let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&rb)
+                    && let Some(r) = entry.get("rating").and_then(|v| v.as_u64()) {
                         total_score += r;
                         count += 1;
                     }
-                }
-            }
         }
 
         if count > 0 {
@@ -6555,8 +7138,8 @@ impl TenzroMcpServer {
 
         let mut templates: Vec<serde_json::Value> = Vec::new();
         for key in &keys {
-            if let Ok(Some(bytes)) = storage.get(CF_AGENT_TEMPLATES, key.as_slice()) {
-                if let Ok(tmpl) = serde_json::from_slice::<tenzro_types::AgentTemplate>(&bytes) {
+            if let Ok(Some(bytes)) = storage.get(CF_AGENT_TEMPLATES, key.as_slice())
+                && let Ok(tmpl) = serde_json::from_slice::<tenzro_types::AgentTemplate>(&bytes) {
                     if query.is_empty() {
                         templates.push(serde_json::to_value(&tmpl).unwrap_or_default());
                         continue;
@@ -6568,7 +7151,6 @@ impl TenzroMcpServer {
                         templates.push(serde_json::to_value(&tmpl).unwrap_or_default());
                     }
                 }
-            }
         }
 
         json_result(serde_json::json!({
@@ -6602,14 +7184,12 @@ impl TenzroMcpServer {
         let mut total_score: u64 = 0;
         let mut total_ratings: u64 = 0;
         for rk in &rating_keys {
-            if let Ok(Some(rb)) = storage.get(CF_METADATA, rk.as_slice()) {
-                if let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&rb) {
-                    if let Some(r) = entry.get("rating").and_then(|v| v.as_u64()) {
+            if let Ok(Some(rb)) = storage.get(CF_METADATA, rk.as_slice())
+                && let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&rb)
+                    && let Some(r) = entry.get("rating").and_then(|v| v.as_u64()) {
                         total_score += r;
                         total_ratings += 1;
                     }
-                }
-            }
         }
 
         let average_rating: f64 = if total_ratings > 0 {
@@ -6851,8 +7431,8 @@ impl TenzroMcpServer {
             if collections.len() >= limit {
                 break;
             }
-            if let Ok(Some(raw)) = storage.get(CF_NFTS, &key) {
-                if let Ok(coll) = serde_json::from_slice::<serde_json::Value>(&raw) {
+            if let Ok(Some(raw)) = storage.get(CF_NFTS, &key)
+                && let Ok(coll) = serde_json::from_slice::<serde_json::Value>(&raw) {
                     // Apply filters
                     if let Some(ref creator_filter) = params.creator {
                         let creator_hex = creator_filter.strip_prefix("0x").unwrap_or(creator_filter);
@@ -6875,7 +7455,6 @@ impl TenzroMcpServer {
                     }
                     collections.push(coll);
                 }
-            }
         }
 
         json_result(serde_json::json!({
@@ -7262,16 +7841,14 @@ impl TenzroMcpServer {
         }
 
         // Check max balance per holder
-        if let Some(max_bal) = rules.get("max_balance_per_holder").and_then(|v| v.as_str()) {
-            if let Ok(max) = max_bal.parse::<u128>() {
-                if max > 0 && params.amount > max {
+        if let Some(max_bal) = rules.get("max_balance_per_holder").and_then(|v| v.as_str())
+            && let Ok(max) = max_bal.parse::<u128>()
+                && max > 0 && params.amount > max {
                     violations.push(format!(
                         "Transfer amount {} exceeds max balance per holder {}",
                         params.amount, max
                     ));
                 }
-            }
-        }
 
         json_result(serde_json::json!({
             "token_id": params.token_id,
@@ -7383,16 +7960,15 @@ impl TenzroMcpServer {
         for key in keys {
             if events.len() >= limit {
                 // Set cursor to the next event's sequence
-                if let Ok(Some(raw)) = storage.get(CF_EVENTS, &key) {
-                    if let Ok(evt) = serde_json::from_slice::<serde_json::Value>(&raw) {
+                if let Ok(Some(raw)) = storage.get(CF_EVENTS, &key)
+                    && let Ok(evt) = serde_json::from_slice::<serde_json::Value>(&raw) {
                         next_cursor = evt.get("sequence").and_then(|v| v.as_u64());
                     }
-                }
                 break;
             }
 
-            if let Ok(Some(raw)) = storage.get(CF_EVENTS, &key) {
-                if let Ok(evt) = serde_json::from_slice::<serde_json::Value>(&raw) {
+            if let Ok(Some(raw)) = storage.get(CF_EVENTS, &key)
+                && let Ok(evt) = serde_json::from_slice::<serde_json::Value>(&raw) {
                     let seq = evt.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0);
                     if seq < from_seq {
                         continue;
@@ -7435,7 +8011,6 @@ impl TenzroMcpServer {
 
                     events.push(evt);
                 }
-            }
         }
 
         json_result(serde_json::json!({
@@ -7970,6 +8545,19 @@ impl TenzroMcpServer {
 
     // ─── AP2 (Agent Payments Protocol) Tools ────────────────────────────────
 
+    #[tool(description = "Sign an AP2 mandate (Intent or Cart) with the auth-bound wallet's Ed25519 key, returning a verified Verifiable Digital Credential (VDC). Auth: DPoP+JWT mandatory. Wallet must be Ed25519. signer_did must match the wallet's controller DID.")]
+    async fn ap2_sign_mandate(
+        &self,
+        Parameters(params): Parameters<Ap2SignMandateParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_ap2SignMandate", serde_json::json!({
+            "mandate_kind": params.mandate_kind,
+            "mandate": params.mandate,
+            "signer_did": params.signer_did,
+        })).await.map_err(|e| err_internal(format!("ap2SignMandate failed: {}", e)))?;
+        json_result(result)
+    }
+
     #[tool(description = "Verify a single AP2 mandate (Verifiable Digital Credential). Checks the VDC proof, issuer, and schema for Intent, Cart, or Payment mandates per Google's AP2 spec.")]
     async fn ap2_verify_mandate(
         &self,
@@ -7981,14 +8569,14 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Validate an AP2 Intent+Cart mandate pair for consistency: ensures the cart references the intent, amounts/items match the intent's constraints, and both VDCs verify. When enforce_delegation=true, additionally cross-checks the agent's TDIP DelegationScope against the cart total (TDIP identifies. AP2 authorizes. Tenzro settles).")]
+    #[tool(description = "Validate an AP2 v0.2 Checkout+Payment mandate pair for consistency: ensures the PaymentMandate references the CheckoutMandate, amounts/items match the checkout's constraints, and both VDCs verify. When enforce_delegation=true, additionally cross-checks the agent's TDIP DelegationScope against the payment total (TDIP identifies. AP2 authorizes. Tenzro settles).")]
     async fn ap2_validate_mandate_pair(
         &self,
         Parameters(params): Parameters<Ap2ValidateMandatePairParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_ap2ValidateMandatePair", serde_json::json!({
-            "intent_vdc": params.intent_vdc,
-            "cart_vdc": params.cart_vdc,
+            "checkout_vdc": params.checkout_vdc,
+            "payment_vdc": params.payment_vdc,
             "enforce_delegation": params.enforce_delegation,
         })).await.map_err(|e| err_internal(format!("ap2ValidateMandatePair failed: {}", e)))?;
         json_result(result)
@@ -8003,32 +8591,31 @@ impl TenzroMcpServer {
 
     // ─── ERC-8004 (Trustless Agents Registry) Tools ─────────────────────────
 
-    #[tool(description = "Derive a deterministic ERC-8004 agent id from an owner address and salt (keccak256 domain-separated). Matches the on-chain IdentityRegistry computation.")]
+    #[tool(description = "Derive the canonical ERC-8004 agentId from a Tenzro DID via keccak256(utf8(did)). Returns { did, agent_id } where agent_id is a 32-byte hex word.")]
     async fn erc8004_derive_agent_id(
         &self,
         Parameters(params): Parameters<Erc8004DeriveAgentIdParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004DeriveAgentId", serde_json::json!({
-            "owner": params.owner,
-            "salt": params.salt,
+            "did": params.did,
         })).await.map_err(|e| err_internal(format!("erc8004DeriveAgentId failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode an ERC-8004 IdentityRegistry.register(agentId, registrationDataURI, owner) call. Returns hex calldata for signing/broadcasting on any EVM chain.")]
+    #[tool(description = "ABI-encode IdentityRegistry.registerAgent(bytes32 agentId, address agentAddress, string metadataURI). agentId is derived from the supplied DID. Returns hex calldata.")]
     async fn erc8004_encode_register(
         &self,
         Parameters(params): Parameters<Erc8004EncodeRegisterParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRegister", serde_json::json!({
-            "agent_id": params.agent_id,
-            "registration_data_uri": params.registration_data_uri,
-            "owner": params.owner,
+            "did": params.did,
+            "agent_address": params.agent_address,
+            "metadata_uri": params.metadata_uri,
         })).await.map_err(|e| err_internal(format!("erc8004EncodeRegister failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode an ERC-8004 IdentityRegistry.getAgent(agentId) call. Returns hex calldata for an eth_call lookup.")]
+    #[tool(description = "ABI-encode IdentityRegistry.getAgent(bytes32 agentId). Returns hex calldata for an eth_call lookup.")]
     async fn erc8004_encode_get_agent(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetAgentParams>,
@@ -8039,56 +8626,223 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Decode the return data of an ERC-8004 IdentityRegistry.getAgent() eth_call into { registrationDataURI, owner }.")]
+    #[tool(description = "Decode the (address, string) return data of an IdentityRegistry.getAgent() eth_call into { agent_address, metadata_uri }.")]
     async fn erc8004_decode_get_agent(
         &self,
         Parameters(params): Parameters<Erc8004DecodeGetAgentParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004DecodeGetAgent", serde_json::json!({
-            "returndata": params.returndata,
+            "return_data": params.return_data,
         })).await.map_err(|e| err_internal(format!("erc8004DecodeGetAgent failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode an ERC-8004 ReputationRegistry.submitFeedback(agentId, score, feedbackAuthId, feedbackURI) call. Score is 0-100.")]
+    #[tool(description = "ABI-encode IdentityRegistry.setAgentURI(uint256 agentId, string metadataURI) (ERC-8004 v0.6+ mutator). Returns hex calldata.")]
+    async fn erc8004_encode_set_agent_uri(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeSetAgentUriParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeSetAgentURI", serde_json::json!({
+            "agent_id": params.agent_id,
+            "metadata_uri": params.metadata_uri,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeSetAgentURI failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode IdentityRegistry.setAgentWallet(uint256 agentId, address newWallet, uint256 deadline, bytes signature) (ERC-8004 v0.6+ wallet rotation). Returns hex calldata.")]
+    async fn erc8004_encode_set_agent_wallet(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeSetAgentWalletParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeSetAgentWallet", serde_json::json!({
+            "agent_id": params.agent_id,
+            "new_wallet": params.new_wallet,
+            "deadline": params.deadline,
+            "signature": params.signature,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeSetAgentWallet failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode IdentityRegistry.setMetadata(uint256 agentId, string metadataKey, bytes metadataValue) (ERC-8004 v0.6+ key-value metadata). Returns hex calldata.")]
+    async fn erc8004_encode_set_metadata(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeSetMetadataParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeSetMetadata", serde_json::json!({
+            "agent_id": params.agent_id,
+            "metadata_key": params.metadata_key,
+            "metadata_value": params.metadata_value,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeSetMetadata failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode IdentityRegistry.getMetadata(uint256 agentId, string metadataKey) (ERC-8004 v0.6+ read). Returns hex calldata.")]
+    async fn erc8004_encode_get_metadata(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeGetMetadataParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetMetadata", serde_json::json!({
+            "agent_id": params.agent_id,
+            "metadata_key": params.metadata_key,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetMetadata failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Decode the bytes return data of an IdentityRegistry.getMetadata() eth_call into { metadata_value }.")]
+    async fn erc8004_decode_get_metadata(
+        &self,
+        Parameters(params): Parameters<Erc8004DecodeGetMetadataParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004DecodeGetMetadata", serde_json::json!({
+            "return_data": params.return_data,
+        })).await.map_err(|e| err_internal(format!("erc8004DecodeGetMetadata failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode IdentityRegistry.getAgentURI(uint256 agentId) (ERC-8004 v0.6+ read). Returns hex calldata.")]
+    async fn erc8004_encode_get_agent_uri(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeGetAgentUriParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetAgentURI", serde_json::json!({
+            "agent_id": params.agent_id,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetAgentURI failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode IdentityRegistry.getAgentWallet(uint256 agentId) (ERC-8004 v0.6+ read). Returns hex calldata.")]
+    async fn erc8004_encode_get_agent_wallet(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeGetAgentWalletParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetAgentWallet", serde_json::json!({
+            "agent_id": params.agent_id,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetAgentWallet failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode ReputationRegistry.submitFeedback(bytes32 subjectAgentId, int8 rating, string contextURI). Rating is in -100..=100.")]
     async fn erc8004_encode_feedback(
         &self,
         Parameters(params): Parameters<Erc8004EncodeFeedbackParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeFeedback", serde_json::json!({
-            "agent_id": params.agent_id,
-            "score": params.score,
-            "feedback_auth_id": params.feedback_auth_id,
-            "feedback_uri": params.feedback_uri,
+            "subject_agent_id": params.subject_agent_id,
+            "rating": params.rating,
+            "context_uri": params.context_uri,
         })).await.map_err(|e| err_internal(format!("erc8004EncodeFeedback failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode an ERC-8004 ValidationRegistry.requestValidation(agentId, validatorId, requestURI, dataHash) call. Returns hex calldata.")]
-    async fn erc8004_encode_request_validation(
+    #[tool(description = "ABI-encode ReputationRegistry.getFeedback(bytes32 subject, uint256 index). Returns hex calldata for an eth_call lookup.")]
+    async fn erc8004_encode_get_feedback(
         &self,
-        Parameters(params): Parameters<Erc8004EncodeRequestValidationParams>,
+        Parameters(params): Parameters<Erc8004EncodeGetFeedbackParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRequestValidation", serde_json::json!({
-            "agent_id": params.agent_id,
-            "validator_id": params.validator_id,
-            "request_uri": params.request_uri,
-            "data_hash": params.data_hash,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeRequestValidation failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetFeedback", serde_json::json!({
+            "subject_agent_id": params.subject_agent_id,
+            "index": params.index,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetFeedback failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode an ERC-8004 ValidationRegistry.submitValidation(dataHash, response, responseURI, tag) call. Response is 0-100 quality score.")]
-    async fn erc8004_encode_submit_validation(
+    #[tool(description = "ABI-encode ReputationRegistry.getFeedbackCount(bytes32 subject). Returns hex calldata.")]
+    async fn erc8004_encode_get_feedback_count(
         &self,
-        Parameters(params): Parameters<Erc8004EncodeSubmitValidationParams>,
+        Parameters(params): Parameters<Erc8004EncodeGetFeedbackCountParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeSubmitValidation", serde_json::json!({
-            "data_hash": params.data_hash,
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetFeedbackCount", serde_json::json!({
+            "subject_agent_id": params.subject_agent_id,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetFeedbackCount failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode ReputationRegistry.revokeFeedback(uint256 agentId, bytes32 feedbackId) (ERC-8004 v0.6+ mutator). Returns hex calldata.")]
+    async fn erc8004_encode_revoke_feedback(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeRevokeFeedbackParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRevokeFeedback", serde_json::json!({
+            "agent_id": params.agent_id,
+            "feedback_id": params.feedback_id,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeRevokeFeedback failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode ReputationRegistry.appendResponse(uint256 agentId, bytes32 feedbackId, string responseURI) (ERC-8004 v0.6+ mutator). Returns hex calldata.")]
+    async fn erc8004_encode_append_response(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeAppendResponseParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeAppendResponse", serde_json::json!({
+            "agent_id": params.agent_id,
+            "feedback_id": params.feedback_id,
+            "response_uri": params.response_uri,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeAppendResponse failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode ReputationRegistry.isFeedbackRevoked(uint256 agentId, bytes32 feedbackId) (ERC-8004 v0.6+ read). Returns hex calldata.")]
+    async fn erc8004_encode_is_feedback_revoked(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeIsFeedbackRevokedParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeIsFeedbackRevoked", serde_json::json!({
+            "agent_id": params.agent_id,
+            "feedback_id": params.feedback_id,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeIsFeedbackRevoked failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode ReputationRegistry.getFeedbackResponses(uint256 agentId, bytes32 feedbackId) (ERC-8004 v0.6+ read). Returns hex calldata.")]
+    async fn erc8004_encode_get_feedback_responses(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeGetFeedbackResponsesParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetFeedbackResponses", serde_json::json!({
+            "agent_id": params.agent_id,
+            "feedback_id": params.feedback_id,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetFeedbackResponses failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode ValidationRegistry.validationRequest(address validatorAddress, uint256 agentId, string requestURI, bytes32 requestHash). Returns hex calldata.")]
+    async fn erc8004_encode_validation_request(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeValidationRequestParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeValidationRequest", serde_json::json!({
+            "validator_address": params.validator_address,
+            "agent_id": params.agent_id,
+            "request_uri": params.request_uri,
+            "request_hash": params.request_hash,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeValidationRequest failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode ValidationRegistry.validationResponse(bytes32 requestHash, uint8 response, string responseURI, bytes32 responseHash, string tag). Response is a 0..=100 quality score.")]
+    async fn erc8004_encode_validation_response(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeValidationResponseParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeValidationResponse", serde_json::json!({
+            "request_hash": params.request_hash,
             "response": params.response,
             "response_uri": params.response_uri,
+            "response_hash": params.response_hash,
             "tag": params.tag,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeSubmitValidation failed: {}", e)))?;
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeValidationResponse failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode ValidationRegistry.getValidation(bytes32 requestHash) (ERC-8004 v0.6+ read). Returns hex calldata.")]
+    async fn erc8004_encode_get_validation(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeGetValidationParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetValidation", serde_json::json!({
+            "request_hash": params.request_hash,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeGetValidation failed: {}", e)))?;
         json_result(result)
     }
 
@@ -8733,6 +9487,11 @@ impl ServerHandler for TenzroMcpServer {
              • delegate_task — Delegate a task from one agent to another with optional budget\n\
              • discover_models — Discover available AI models (with optional category/price filter)\n\
              • discover_agents — Discover agents by capability or type\n\n\
+             Capability Registry:\n\
+             • list_capabilities — List all registered capabilities with agent + attestation counts\n\
+             • get_capability_attestations — Fetch all attestations for a given capability\n\
+             • get_agent_capability_attestations — Fetch all attestations issued for an agent ID\n\
+             • find_best_agent_for_capability — Pick the best (TEE-backed-preferred) agent for a capability\n\n\
              Cross-Chain Bridge:\n\
              • bridge_tokens — Bridge tokens between chains\n\
              • get_bridge_routes — Get available routes and fees\n\
@@ -8795,14 +9554,28 @@ impl ServerHandler for TenzroMcpServer {
              • ap2_verify_mandate — Verify a single AP2 VDC mandate (Intent/Cart/Payment)\n\
              • ap2_validate_mandate_pair — Validate Intent+Cart consistency\n\
              • ap2_protocol_info — AP2 protocol metadata (version, supported types)\n\n\
-             ERC-8004 (Trustless Agents Registry):\n\
-             • erc8004_derive_agent_id — Derive deterministic agent id from owner+salt\n\
-             • erc8004_encode_register — ABI-encode IdentityRegistry.register()\n\
+             ERC-8004 (Trustless Agents Registry — v0.6+ surface):\n\
+             • erc8004_derive_agent_id — Derive canonical agentId = keccak256(utf8(did))\n\
+             • erc8004_encode_register — ABI-encode IdentityRegistry.registerAgent()\n\
              • erc8004_encode_get_agent — ABI-encode IdentityRegistry.getAgent()\n\
-             • erc8004_decode_get_agent — Decode getAgent() returndata\n\
-             • erc8004_encode_feedback — ABI-encode ReputationRegistry.submitFeedback()\n\
-             • erc8004_encode_request_validation — ABI-encode ValidationRegistry.requestValidation()\n\
-             • erc8004_encode_submit_validation — ABI-encode ValidationRegistry.submitValidation()\n\n\
+             • erc8004_decode_get_agent — Decode (address,string) returndata from getAgent()\n\
+             • erc8004_encode_set_agent_uri — ABI-encode IdentityRegistry.setAgentURI() (v0.6+)\n\
+             • erc8004_encode_set_agent_wallet — ABI-encode IdentityRegistry.setAgentWallet() (v0.6+)\n\
+             • erc8004_encode_set_metadata — ABI-encode IdentityRegistry.setMetadata() (v0.6+)\n\
+             • erc8004_encode_get_metadata — ABI-encode IdentityRegistry.getMetadata() (v0.6+)\n\
+             • erc8004_decode_get_metadata — Decode bytes returndata from getMetadata() (v0.6+)\n\
+             • erc8004_encode_get_agent_uri — ABI-encode IdentityRegistry.getAgentURI() (v0.6+)\n\
+             • erc8004_encode_get_agent_wallet — ABI-encode IdentityRegistry.getAgentWallet() (v0.6+)\n\
+             • erc8004_encode_feedback — ABI-encode ReputationRegistry.submitFeedback(bytes32,int8,string)\n\
+             • erc8004_encode_get_feedback — ABI-encode ReputationRegistry.getFeedback()\n\
+             • erc8004_encode_get_feedback_count — ABI-encode ReputationRegistry.getFeedbackCount()\n\
+             • erc8004_encode_revoke_feedback — ABI-encode ReputationRegistry.revokeFeedback() (v0.6+)\n\
+             • erc8004_encode_append_response — ABI-encode ReputationRegistry.appendResponse() (v0.6+)\n\
+             • erc8004_encode_is_feedback_revoked — ABI-encode ReputationRegistry.isFeedbackRevoked() (v0.6+)\n\
+             • erc8004_encode_get_feedback_responses — ABI-encode ReputationRegistry.getFeedbackResponses() (v0.6+)\n\
+             • erc8004_encode_validation_request — ABI-encode ValidationRegistry.validationRequest(address,uint256,string,bytes32)\n\
+             • erc8004_encode_validation_response — ABI-encode ValidationRegistry.validationResponse(bytes32,uint8,string,bytes32,string)\n\
+             • erc8004_encode_get_validation — ABI-encode ValidationRegistry.getValidation() (v0.6+)\n\n\
              Wormhole Cross-Chain:\n\
              • wormhole_chain_id — Look up Wormhole numeric chain id by chain name\n\
              • wormhole_parse_vaa_id — Parse {chain}/{emitter}/{sequence} VAA id\n\

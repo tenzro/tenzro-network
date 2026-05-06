@@ -1,7 +1,7 @@
 //! Peer status / chain-tip tracker.
 //!
 //! Records the latest height each peer has advertised via `StatusMessage` on
-//! `tenzro/status/1.0.0`. Used by `eth_syncing` / `tenzro_syncing` to report a
+//! `tenzro/status`. Used by `eth_syncing` / `tenzro_syncing` to report a
 //! real network-tip estimate so external clients (block explorers, MetaMask,
 //! lagging validators) can tell whether the local node is caught up.
 //!

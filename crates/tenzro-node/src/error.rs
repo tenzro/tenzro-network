@@ -56,14 +56,18 @@ pub enum NodeError {
     #[error("Configuration error: {0}")]
     Config(String),
 
-    /// Subsystem already started (reserved for future lifecycle management)
+    /// Returned by `Node::start` when the node has already been started or
+    /// is currently transitioning to `Running`. Distinguishes the
+    /// idempotent "already running" case from a generic invalid-state
+    /// mismatch so operators can react appropriately (e.g., a startup
+    /// supervisor can treat this as success).
     #[error("Subsystem {0} already started")]
-    #[allow(dead_code)]
     AlreadyStarted(String),
 
-    /// Subsystem not started (reserved for future lifecycle management)
+    /// Returned by `Node::stop` when the node has not yet reached
+    /// `Running` (still in `Created` / `Starting`). Distinguishes the
+    /// "stop before start" case from a generic invalid-state mismatch.
     #[error("Subsystem {0} not started")]
-    #[allow(dead_code)]
     NotStarted(String),
 
     /// Invalid state transition

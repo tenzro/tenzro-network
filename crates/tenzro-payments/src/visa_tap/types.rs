@@ -5,6 +5,47 @@ use serde::{Deserialize, Serialize};
 
 use crate::rfc9421::SignatureAlgorithm;
 
+/// Visa TAP tag taxonomy for agent interactions.
+///
+/// Per Visa TAP spec: "the tag field indicates the type of agent interaction —
+/// if the agent is browsing, the tag should be `agent-browser-auth`, and if the
+/// agent is paying, the tag should be `agent-payer-auth`."
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AgentTag {
+    /// Agent is browsing — product details, catalog, search.
+    #[serde(rename = "agent-browser-auth")]
+    BrowserAuth,
+    /// Agent is paying — checkout, payment intent, settlement.
+    #[serde(rename = "agent-payer-auth")]
+    PayerAuth,
+}
+
+impl AgentTag {
+    /// Canonical wire string for the RFC 9421 `tag` parameter.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentTag::BrowserAuth => "agent-browser-auth",
+            AgentTag::PayerAuth => "agent-payer-auth",
+        }
+    }
+
+    /// Parse the wire string back into an [`AgentTag`].
+    /// Returns `None` for any unrecognized value — verifiers MUST reject unknown tags.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "agent-browser-auth" => Some(AgentTag::BrowserAuth),
+            "agent-payer-auth" => Some(AgentTag::PayerAuth),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for AgentTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Agent Recognition data from RFC 9421 HTTP Message Signatures
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRecognition {
@@ -163,6 +204,24 @@ mod tests {
         };
         assert_eq!(recognition.key_id, "agent-key-1");
         assert!(matches!(recognition.algorithm, SignatureAlgorithm::Ed25519));
+    }
+
+    #[test]
+    fn test_agent_tag_round_trip() {
+        assert_eq!(AgentTag::BrowserAuth.as_str(), "agent-browser-auth");
+        assert_eq!(AgentTag::PayerAuth.as_str(), "agent-payer-auth");
+        assert_eq!(AgentTag::parse("agent-browser-auth"), Some(AgentTag::BrowserAuth));
+        assert_eq!(AgentTag::parse("agent-payer-auth"), Some(AgentTag::PayerAuth));
+        assert_eq!(AgentTag::parse("agent-checkout"), None);
+        assert_eq!(AgentTag::parse(""), None);
+    }
+
+    #[test]
+    fn test_agent_tag_serde_kebab_case() {
+        let json = serde_json::to_string(&AgentTag::BrowserAuth).unwrap();
+        assert_eq!(json, "\"agent-browser-auth\"");
+        let parsed: AgentTag = serde_json::from_str("\"agent-payer-auth\"").unwrap();
+        assert_eq!(parsed, AgentTag::PayerAuth);
     }
 
     #[test]

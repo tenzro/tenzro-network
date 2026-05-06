@@ -92,6 +92,15 @@ pub struct ParallelExecutionResult {
     pub total_gas_used: u64,
     /// Per-transaction results (index -> success)
     pub transaction_results: Vec<TxExecutionStatus>,
+    /// Per-account contention samples for the hot-state local fee market
+    /// (Spec 6). Maps account address → `(reexecutions_attributed, writes)`.
+    /// Each tx's reexecution count is attributed to every address it
+    /// wrote (storage or balance), so a heavily-contended hot account
+    /// shows up across all the transactions trying to touch it. Empty for
+    /// blocks that ran sequentially before any conflict was observed.
+    #[serde(default)]
+    pub account_contention:
+        std::collections::HashMap<Vec<u8>, crate::hot_state::AccountSample>,
 }
 
 /// Status of an individual transaction in the parallel batch
@@ -334,6 +343,7 @@ impl BlockStmExecutor {
                 fell_back_to_sequential: false,
                 total_gas_used: 0,
                 transaction_results: Vec::new(),
+                account_contention: std::collections::HashMap::new(),
             };
         }
 
@@ -414,6 +424,10 @@ impl BlockStmExecutor {
 
         // Phase 3: Re-execute conflicting transactions sequentially
         let mut total_reexec = 0;
+        // Track which tx indices were re-executed at least once. Used to
+        // attribute Block-STM reexecutions back to the addresses each tx
+        // wrote, for the hot-state local fee market (Spec 6).
+        let mut was_reexecuted: Vec<bool> = vec![false; tx_count];
 
         if !needs_reexec.is_empty() {
             let conflict_rate = needs_reexec.len() as f64 / tx_count as f64;
@@ -457,7 +471,44 @@ impl BlockStmExecutor {
                     mvd.write_balance(addr, *balance, i, incarnation);
                 }
 
+                was_reexecuted[i] = true;
                 total_reexec += 1;
+            }
+        }
+
+        // Phase 4: Build per-account contention samples for the hot-state
+        // local fee market (Spec 6). For every tx, every address it wrote
+        // contributes 1 to the account's `writes` counter; if the tx was
+        // re-executed at least once, every address it wrote also gets
+        // 1 added to `reexecutions`. This attributes contention to the
+        // accounts that *caused* it — a hot account shows up in the
+        // contention map across all conflicting writers.
+        let mut account_contention: std::collections::HashMap<
+            Vec<u8>,
+            crate::hot_state::AccountSample,
+        > = std::collections::HashMap::new();
+        for i in 0..tx_count {
+            let rw_set = rw_sets[i].lock();
+            let reex_delta = if was_reexecuted[i] { 1u64 } else { 0u64 };
+            let mut seen: std::collections::HashSet<Vec<u8>> =
+                std::collections::HashSet::new();
+            for (addr, _key) in rw_set.writes.keys() {
+                if seen.insert(addr.clone()) {
+                    let entry = account_contention.entry(addr.clone()).or_default();
+                    entry.merge(crate::hot_state::AccountSample {
+                        reexecutions: reex_delta,
+                        writes: 1,
+                    });
+                }
+            }
+            for addr in rw_set.balance_writes.keys() {
+                if seen.insert(addr.clone()) {
+                    let entry = account_contention.entry(addr.clone()).or_default();
+                    entry.merge(crate::hot_state::AccountSample {
+                        reexecutions: reex_delta,
+                        writes: 1,
+                    });
+                }
             }
         }
 
@@ -500,6 +551,7 @@ impl BlockStmExecutor {
             fell_back_to_sequential: false,
             total_gas_used: total_gas,
             transaction_results: tx_results,
+            account_contention,
         }
     }
 
@@ -518,6 +570,10 @@ impl BlockStmExecutor {
         let mut failed = 0;
         let mut total_gas = 0u64;
         let mut tx_results = Vec::with_capacity(tx_count);
+        let mut account_contention: std::collections::HashMap<
+            Vec<u8>,
+            crate::hot_state::AccountSample,
+        > = std::collections::HashMap::new();
 
         for i in 0..tx_count {
             let mut rw_set = ReadWriteSet::new();
@@ -536,6 +592,29 @@ impl BlockStmExecutor {
                 }
             }
             tx_results.push(status);
+
+            // Sequential mode produces zero reexecutions, but write attribution
+            // still feeds the rolling contention window (writes=1 per unique address).
+            let mut seen: std::collections::HashSet<Vec<u8>> =
+                std::collections::HashSet::new();
+            for (addr, _key) in rw_set.writes.keys() {
+                if seen.insert(addr.clone()) {
+                    let entry = account_contention.entry(addr.clone()).or_default();
+                    entry.merge(crate::hot_state::AccountSample {
+                        reexecutions: 0,
+                        writes: 1,
+                    });
+                }
+            }
+            for addr in rw_set.balance_writes.keys() {
+                if seen.insert(addr.clone()) {
+                    let entry = account_contention.entry(addr.clone()).or_default();
+                    entry.merge(crate::hot_state::AccountSample {
+                        reexecutions: 0,
+                        writes: 1,
+                    });
+                }
+            }
         }
 
         ParallelExecutionResult {
@@ -546,6 +625,7 @@ impl BlockStmExecutor {
             fell_back_to_sequential: true,
             total_gas_used: total_gas,
             transaction_results: tx_results,
+            account_contention,
         }
     }
 
@@ -702,5 +782,56 @@ mod tests {
         });
 
         assert_eq!(executor.total_blocks(), 1);
+    }
+
+    /// Spec 6 hot-state attribution: every distinct address written by a tx
+    /// is registered with `writes=1` in `account_contention`. A storage write
+    /// + balance write to the same address dedupes to 1 write, not 2.
+    #[test]
+    fn test_account_contention_attribution_no_conflict() {
+        let executor = BlockStmExecutor::default();
+
+        let result = executor.execute_block(4, |i, rw_set| {
+            let addr = vec![i as u8; 32];
+            // Both storage and balance writes to the SAME address — must dedupe.
+            rw_set.record_write(&addr, &[0], Some(vec![1]));
+            rw_set.record_balance_write(&addr, 100);
+            TxExecutionStatus::Success { gas_used: 21_000 }
+        });
+
+        // 4 distinct addresses, 1 write each (dedupe storage+balance).
+        assert_eq!(result.account_contention.len(), 4);
+        for sample in result.account_contention.values() {
+            assert_eq!(sample.writes, 1, "writes must dedupe storage+balance");
+            // Sequential or parallel-without-conflicts → no reexecutions.
+            assert_eq!(sample.reexecutions, 0);
+        }
+    }
+
+    /// When a hot address is written by every tx, the contention map
+    /// aggregates the writes across all txs and records reexecutions only
+    /// for the txs that were actually re-run.
+    #[test]
+    fn test_account_contention_aggregates_shared_address() {
+        let executor = BlockStmExecutor::default();
+        let shared_addr = vec![0xabu8; 32];
+
+        let result = executor.execute_block(8, |_i, rw_set| {
+            let key = vec![0u8; 32];
+            rw_set.record_read(&shared_addr, &key, Some(vec![0]));
+            rw_set.record_write(&shared_addr, &key, Some(vec![1]));
+            TxExecutionStatus::Success { gas_used: 21_000 }
+        });
+
+        // Even on the sequential fallback path the contention map is populated.
+        let sample = result
+            .account_contention
+            .get(&shared_addr)
+            .expect("shared address must appear in contention map");
+        // One unique write per tx → 8 total.
+        assert_eq!(sample.writes, 8);
+        // reexecutions <= writes; on parallel-with-conflicts path it'll be > 0,
+        // on sequential fallback path it'll be 0. Either is valid.
+        assert!(sample.reexecutions <= sample.writes);
     }
 }

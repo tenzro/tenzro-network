@@ -14,34 +14,17 @@ pub struct VisaAgentRegistryClient {
     registry_url: String,
 }
 
-/// JWK response from Visa registry
-/// Used for bulk key fetching (not yet implemented, kept for future use)
-#[allow(dead_code)]
+/// JWK Set response from a `/.well-known/jwks` endpoint.
+/// Returned by `list_keys()` for bulk agent-key publication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JwkResponse {
     keys: Vec<JwkKey>,
 }
 
-/// JWK key entry
-/// Used for deserialization from Visa registry JWK format
-#[allow(dead_code)]
+/// Single JWK entry, as published either standalone (single-key fetch) or
+/// inside a [`JwkResponse`] (`/.well-known/jwks` bulk fetch).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JwkKey {
-    kid: String,
-    kty: String,
-    alg: Option<String>,
-    #[serde(rename = "use")]
-    use_: Option<String>,
-    x: Option<String>, // Base64url-encoded public key for Ed25519
-    n: Option<String>, // Base64url-encoded modulus for RSA
-    e: Option<String>, // Base64url-encoded exponent for RSA
-    #[serde(default)]
-    active: bool,
-}
-
-/// Single key response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct KeyResponse {
     kid: String,
     kty: String,
     alg: Option<String>,
@@ -68,7 +51,7 @@ impl VisaAgentRegistryClient {
     }
 
     /// Parse JWK key into AgentPublicKeyInfo
-    fn parse_jwk_key(key: &KeyResponse) -> Result<AgentPublicKeyInfo> {
+    fn parse_jwk_key(key: &JwkKey) -> Result<AgentPublicKeyInfo> {
         let algorithm = match key.kty.as_str() {
             "OKP" => {
                 // Ed25519 key
@@ -128,6 +111,19 @@ impl VisaAgentRegistryClient {
                 );
                 bytes
             }
+            // Visa TAP §JWKS only emits OKP/Ed25519 and RSA/RS256|PS256 →
+            // RsaPssSha256 from the `kty` switch above. The other RFC 9421
+            // algorithms (ECDSA P-256/P-384, RSA-PSS-SHA512, RSA-v1.5,
+            // HMAC) are not produced for Visa-issued JWK material, so this
+            // branch is unreachable — surface as an explicit error rather
+            // than panicking, in case Visa ever extends the JWKS contract.
+            other => {
+                return Err(PaymentError::AgentRegistryError(format!(
+                    "Visa JWK parser produced unexpected algorithm {:?} — \
+                     the kty→algorithm switch only emits Ed25519 / RsaPssSha256",
+                    other
+                )));
+            }
         };
 
         Ok(AgentPublicKeyInfo {
@@ -137,6 +133,42 @@ impl VisaAgentRegistryClient {
             agent_did: key.agent_did.clone(),
             is_active: key.active,
         })
+    }
+
+    /// Bulk-fetch every published agent key from the registry's JWK Set
+    /// endpoint (`{registry_url}` itself, since the default URL points at
+    /// `/.well-known/jwks`). Skips entries that don't parse rather than
+    /// failing the whole list.
+    pub async fn list_keys(&self) -> Result<Vec<AgentPublicKeyInfo>> {
+        debug!("Listing public keys from registry: {}", self.registry_url);
+
+        let response = self
+            .http_client
+            .get(&self.registry_url)
+            .send()
+            .await
+            .map_err(|e| PaymentError::AgentRegistryError(format!("HTTP request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            return Err(PaymentError::AgentRegistryError(format!(
+                "Registry returned status: {}",
+                response.status()
+            )));
+        }
+
+        let jwks: JwkResponse = response
+            .json()
+            .await
+            .map_err(|e| PaymentError::AgentRegistryError(format!("Failed to parse JWKS: {}", e)))?;
+
+        let mut out = Vec::with_capacity(jwks.keys.len());
+        for key in &jwks.keys {
+            match Self::parse_jwk_key(key) {
+                Ok(info) => out.push(info),
+                Err(e) => warn!("Skipping malformed JWK entry kid={}: {}", key.kid, e),
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -162,7 +194,7 @@ impl AgentRegistryClient for VisaAgentRegistryClient {
             )));
         }
 
-        let key_response: KeyResponse = response
+        let key_response: JwkKey = response
             .json()
             .await
             .map_err(|e| PaymentError::AgentRegistryError(format!("Failed to parse response: {}", e)))?;
@@ -205,7 +237,7 @@ mod tests {
 
     #[test]
     fn test_parse_ed25519_jwk() {
-        let key = KeyResponse {
+        let key = JwkKey {
             kid: "test-key-1".to_string(),
             kty: "OKP".to_string(),
             alg: Some("EdDSA".to_string()),
@@ -226,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_parse_rsa_jwk() {
-        let key = KeyResponse {
+        let key = JwkKey {
             kid: "test-rsa-key".to_string(),
             kty: "RSA".to_string(),
             alg: Some("PS256".to_string()),
@@ -246,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_parse_unsupported_key_type() {
-        let key = KeyResponse {
+        let key = JwkKey {
             kid: "bad-key".to_string(),
             kty: "EC".to_string(), // Unsupported
             alg: Some("ES256".to_string()),
@@ -264,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_parse_missing_x_parameter() {
-        let key = KeyResponse {
+        let key = JwkKey {
             kid: "incomplete-key".to_string(),
             kty: "OKP".to_string(),
             alg: Some("EdDSA".to_string()),

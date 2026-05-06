@@ -326,8 +326,8 @@ pub async fn register_handler(
         }
     }
 
-    if let Some(ref auth_method) = req.token_endpoint_auth_method {
-        if auth_method != "none" {
+    if let Some(ref auth_method) = req.token_endpoint_auth_method
+        && auth_method != "none" {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
@@ -337,7 +337,6 @@ pub async fn register_handler(
             )
                 .into_response();
         }
-    }
 
     let client_id = format!("client_{}", Uuid::new_v4().simple());
 
@@ -621,8 +620,8 @@ async fn handle_auth_code_grant(state: Arc<OAuthState>, req: TokenRequest) -> Re
         return oauth_error("invalid_grant", "Authorization code mismatch");
     }
 
-    if let Some(ref redirect_uri) = req.redirect_uri {
-        if *redirect_uri != session.redirect_uri {
+    if let Some(ref redirect_uri) = req.redirect_uri
+        && *redirect_uri != session.redirect_uri {
             tracing::warn!(
                 expected = %session.redirect_uri,
                 got = %redirect_uri,
@@ -633,10 +632,9 @@ async fn handle_auth_code_grant(state: Arc<OAuthState>, req: TokenRequest) -> Re
                 "redirect_uri does not match authorization request",
             );
         }
-    }
 
-    if let Some(ref client_id) = req.client_id {
-        if *client_id != session.client_id {
+    if let Some(ref client_id) = req.client_id
+        && *client_id != session.client_id {
             tracing::warn!(
                 expected = %session.client_id,
                 got = %client_id,
@@ -647,7 +645,6 @@ async fn handle_auth_code_grant(state: Arc<OAuthState>, req: TokenRequest) -> Re
                 "client_id does not match authorization request",
             );
         }
-    }
 
     if !session.approved {
         return oauth_error("invalid_grant", "Authorization was not approved");
@@ -674,7 +671,7 @@ async fn handle_auth_code_grant(state: Arc<OAuthState>, req: TokenRequest) -> Re
     let dpop_jkt = req.dpop_jkt.clone().or(session.dpop_jkt.clone());
     let access_token = match mint_jwt(&state, &did, dpop_jkt.as_deref(), &session.scope) {
         Ok(t) => t,
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
     };
 
     // Issue refresh token (opaque UUID, NOT a JWT).
@@ -750,7 +747,7 @@ async fn handle_refresh_grant(state: Arc<OAuthState>, req: TokenRequest) -> Resp
     let dpop_jkt = req.dpop_jkt.clone().or(entry.dpop_jkt.clone());
     let access_token = match mint_jwt(&state, &entry.did, dpop_jkt.as_deref(), &entry.scope) {
         Ok(t) => t,
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
     };
 
     tracing::info!(did = %entry.did, "Refreshed OAuth access token");
@@ -1051,13 +1048,12 @@ async fn provision_or_retrieve_identity(
         let did = String::from_utf8(did_bytes)
             .map_err(|e| NodeError::Internal(format!("Invalid DID encoding: {}", e)))?;
 
-        if let Some(registry) = node.identity_registry() {
-            if let Ok(identity) = registry.resolve(&did) {
+        if let Some(registry) = node.identity_registry()
+            && let Ok(identity) = registry.resolve(&did) {
                 let address = format!("0x{}", hex::encode(identity.wallet_address.as_bytes()));
                 tracing::info!(did = %did, address = %address, "Retrieved existing OAuth identity");
                 return Ok((did, address));
             }
-        }
         tracing::warn!(did = %did, "DID mapping exists but identity not found, re-provisioning");
     }
 
@@ -1089,9 +1085,9 @@ async fn provision_or_retrieve_identity(
 
     if let Some(token) = node.token() {
         let faucet_key = b"genesis_faucet_address";
-        if let Ok(Some(faucet_bytes)) = storage.get("metadata", faucet_key) {
-            if let Ok(faucet_hex) = String::from_utf8(faucet_bytes) {
-                if let Ok(faucet_addr) = tenzro_types::primitives::Address::from_hex(&faucet_hex) {
+        if let Ok(Some(faucet_bytes)) = storage.get("metadata", faucet_key)
+            && let Ok(faucet_hex) = String::from_utf8(faucet_bytes)
+                && let Ok(faucet_addr) = tenzro_types::primitives::Address::from_hex(&faucet_hex) {
                     let amount = 100u128 * 10u128.pow(18);
                     match token.transfer(&faucet_addr, &identity.wallet_address, amount) {
                         Ok(_) => tracing::info!(did = %did, "Funded new OAuth user with 100 TNZO"),
@@ -1100,8 +1096,6 @@ async fn provision_or_retrieve_identity(
                         }
                     }
                 }
-            }
-        }
     }
 
     Ok((did, address))
@@ -1130,9 +1124,13 @@ fn mint_jwt(
     did: &str,
     cnf_jkt: Option<&str>,
     _scope: &str,
-) -> std::result::Result<String, Response> {
+) -> std::result::Result<String, crate::web::error::WalletApiError> {
     let engine = state.node.auth_engine().ok_or_else(|| {
-        oauth_error("server_error", "Auth engine not initialized on this node")
+        crate::web::error::WalletApiError::new(
+            StatusCode::BAD_REQUEST,
+            "server_error",
+            "Auth engine not initialized on this node",
+        )
     })?;
 
     let details = developer_scope_envelope();
@@ -1143,7 +1141,11 @@ fn mint_jwt(
         .issue_jwt(did, did, jkt, details, None)
         .map_err(|e| {
             tracing::error!(error = %e, "AuthEngine::issue_jwt failed");
-            oauth_error("server_error", "Token generation failed")
+            crate::web::error::WalletApiError::new(
+                StatusCode::BAD_REQUEST,
+                "server_error",
+                "Token generation failed",
+            )
         })
 }
 

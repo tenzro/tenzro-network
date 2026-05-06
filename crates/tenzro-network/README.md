@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use tenzro_network::{NetworkMessage, MessagePayload};
 
 // Subscribe to blocks
-let mut blocks_rx = network.subscribe("tenzro/blocks/1.0.0").await?;
+let mut blocks_rx = network.subscribe("tenzro/blocks").await?;
 
 // Handle incoming messages
 tokio::spawn(async move {
@@ -112,7 +112,7 @@ use tenzro_network::{NetworkMessage, MessagePayload};
 let message = NetworkMessage::new(MessagePayload::Ping);
 
 // Broadcast to all peers on a topic
-network.broadcast("tenzro/status/1.0.0", message).await?;
+network.broadcast("tenzro/status", message).await?;
 ```
 
 ### Peer Management
@@ -140,14 +140,14 @@ The network uses different topics for different message types (8 topics):
 
 | Topic | Purpose |
 |-------|---------|
-| `tenzro/blocks/1.0.0` | Block propagation |
-| `tenzro/transactions/1.0.0` | Transaction broadcasting |
-| `tenzro/consensus/1.0.0` | Consensus messages (proposals, votes) - **validator-only** |
-| `tenzro/attestations/1.0.0` | TEE attestation reports |
-| `tenzro/models/1.0.0` | Model registration announcements |
-| `tenzro/inference/1.0.0` | Inference requests and responses |
-| `tenzro/status/1.0.0` | Node status and health checks |
-| `tenzro/agents/1.0.0` | Agent-to-agent messages |
+| `tenzro/blocks` | Block propagation |
+| `tenzro/transactions` | Transaction broadcasting |
+| `tenzro/consensus` | Consensus messages (proposals, votes) - **validator-only** |
+| `tenzro/attestations` | TEE attestation reports |
+| `tenzro/models` | Model registration announcements |
+| `tenzro/inference` | Inference requests and responses |
+| `tenzro/status` | Node status and health checks |
+| `tenzro/agents` | Agent-to-agent messages |
 
 For testnet and mainnet, topics are prefixed:
 - Testnet: `tenzro/testnet/blocks/1.0.0`
@@ -254,7 +254,7 @@ Peers are assigned reputation scores based on their behavior:
 
 Validators are authenticated for consensus-critical topics via `ValidatorRegistry` trait:
 - `authorize_peer_for_topic()` checks validator status
-- Validator-only topics: `tenzro/consensus/1.0.0`, `tenzro/blocks/1.0.0` (for block proposals), `tenzro/attestations/1.0.0`
+- Validator-only topics: `tenzro/consensus`, `tenzro/blocks` (for block proposals), `tenzro/attestations`
 - Non-validators are rejected from these topics
 
 ## Message Types (11 total)

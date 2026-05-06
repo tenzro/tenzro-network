@@ -50,6 +50,9 @@ pub mod reputation;
 pub mod approval;
 pub mod dispute;
 pub mod provenance;
+pub mod bond;
+pub mod insurance;
+pub mod capability;
 
 // Re-export command types
 pub use node::NodeCommand;
@@ -101,3 +104,6 @@ pub use reputation::ReputationCommand;
 pub use approval::ApprovalCommand;
 pub use dispute::DisputeCommand;
 pub use provenance::ProvenanceCommand;
+pub use bond::BondCommand;
+pub use insurance::InsuranceCommand;
+pub use capability::CapabilityCommand;

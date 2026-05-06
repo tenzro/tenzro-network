@@ -32,6 +32,7 @@ const VM_TYPE_NATIVE: u8 = 0;
 const VM_TYPE_EVM: u8 = 1;
 const VM_TYPE_SVM: u8 = 2;
 const VM_TYPE_DAML: u8 = 3;
+const VM_TYPE_TEMPO_TIP20: u8 = 4;
 
 /// Function selectors
 pub mod selectors {
@@ -246,14 +247,15 @@ fn handle_get_supported_vms(gas_limit: u64) -> Result<PrecompileResult> {
     }
 
     // Return supported VM types as a dynamic array
-    // [offset(32)] [length(32)] [vm0(32)] [vm1(32)] [vm2(32)] [vm3(32)]
-    let mut output = Vec::with_capacity(192);
+    // [offset(32)] [length(32)] [vm0..vm4(32 each)]
+    let mut output = Vec::with_capacity(224);
     output.extend_from_slice(&abi::encode_uint256(32)); // offset
-    output.extend_from_slice(&abi::encode_uint256(4)); // length
+    output.extend_from_slice(&abi::encode_uint256(5)); // length
     output.extend_from_slice(&abi::encode_uint256(VM_TYPE_NATIVE as u128));
     output.extend_from_slice(&abi::encode_uint256(VM_TYPE_EVM as u128));
     output.extend_from_slice(&abi::encode_uint256(VM_TYPE_SVM as u128));
     output.extend_from_slice(&abi::encode_uint256(VM_TYPE_DAML as u128));
+    output.extend_from_slice(&abi::encode_uint256(VM_TYPE_TEMPO_TIP20 as u128));
 
     Ok(PrecompileResult::success(output, GAS_READ))
 }
@@ -269,6 +271,7 @@ fn byte_to_vm_type(byte: u8) -> Option<TokenVmType> {
         VM_TYPE_EVM => Some(TokenVmType::Evm),
         VM_TYPE_SVM => Some(TokenVmType::Svm),
         VM_TYPE_DAML => Some(TokenVmType::Daml),
+        VM_TYPE_TEMPO_TIP20 => Some(TokenVmType::TempoTip20),
         _ => None,
     }
 }
@@ -342,9 +345,9 @@ mod tests {
         let input = [&selectors::GET_SUPPORTED_VMS[..]].concat();
         let result = execute_cross_vm_bridge(&token, &registry, &nonce_counter, &input, 100_000).unwrap();
         assert!(result.success);
-        // Should have 4 VM types
+        // Should have 5 VM types: Native, Evm, Svm, Daml, TempoTip20
         let length = abi::decode_uint256_at(&result.output, 32).unwrap();
-        assert_eq!(length, 4);
+        assert_eq!(length, 5);
     }
 
     #[test]
@@ -371,7 +374,8 @@ mod tests {
         assert_eq!(byte_to_vm_type(1), Some(TokenVmType::Evm));
         assert_eq!(byte_to_vm_type(2), Some(TokenVmType::Svm));
         assert_eq!(byte_to_vm_type(3), Some(TokenVmType::Daml));
-        assert_eq!(byte_to_vm_type(4), None);
+        assert_eq!(byte_to_vm_type(4), Some(TokenVmType::TempoTip20));
+        assert_eq!(byte_to_vm_type(5), None);
     }
 
     #[test]

@@ -240,6 +240,19 @@ rateLimits                            Functions
                                       getSubscription
 ```
 
+## Skill registration
+
+This skill is registered in the Tenzro Skills Registry (`CF_SKILLS`) at node startup as:
+
+| Field | Value |
+|---|---|
+| Skill ID | `chainlink-oracle` |
+| Category | `oracle` |
+| Tags | `chainlink, ccip, cross-chain, oracle, data-feeds` |
+| MCP backend | Chainlink MCP server on port 3007 (`https://chainlink-mcp.tenzro.network/mcp`) |
+
+Discover it from any Tenzro node via `tenzro_listSkills` / `tenzro_searchSkills` and invoke its tools through the MCP endpoint above.
+
 ## References
 
 - [Chainlink CCIP Docs](https://docs.chain.link/ccip)

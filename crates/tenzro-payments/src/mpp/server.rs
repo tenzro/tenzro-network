@@ -259,6 +259,7 @@ impl PaymentProtocol for MppPaymentServer {
                 settlement_tx: Some(hex::encode(receipt.transaction_hash.as_bytes())),
                 chain: challenge.chain,
                 settled_at: Utc::now(),
+                principal_chain: receipt.principal_chain,
                 extra: HashMap::new(),
             });
         }
@@ -280,6 +281,10 @@ impl PaymentProtocol for MppPaymentServer {
             settlement_tx: verification.settlement_ref.clone(),
             chain: challenge.chain,
             settled_at: Utc::now(),
+            principal_chain: tenzro_types::principal_chain::anonymous_chain_for_did(
+                verification.payer_did.clone(),
+                tenzro_types::primitives::BlockHeight::new(0),
+            ),
             extra: HashMap::new(),
         })
     }
@@ -367,13 +372,13 @@ impl MppPaymentServer {
     /// Extracts the public key from the credential's metadata
     fn extract_public_key(&self, credential: &PaymentCredential) -> Result<PublicKey> {
         // Look for public key in the credential's extra metadata
-        if let Some(pk_value) = credential.extra.get("public_key") {
-            if let Some(pk_hex) = pk_value.as_str() {
-                let pk_bytes = hex::decode(pk_hex).map_err(|e| {
-                    PaymentError::CredentialError(format!("Invalid public key hex: {}", e))
-                })?;
-                return Ok(PublicKey::new(KeyType::Ed25519, pk_bytes));
-            }
+        if let Some(pk_value) = credential.extra.get("public_key")
+            && let Some(pk_hex) = pk_value.as_str()
+        {
+            let pk_bytes = hex::decode(pk_hex).map_err(|e| {
+                PaymentError::CredentialError(format!("Invalid public key hex: {}", e))
+            })?;
+            return Ok(PublicKey::new(KeyType::Ed25519, pk_bytes));
         }
 
         // If no public key in metadata, derive from payer_address (simplified)

@@ -64,9 +64,9 @@ impl Default for NetworkConfig {
             max_inbound_peers: 200,
             max_outbound_peers: 200,
             gossip_topics: vec![
-                "tenzro/blocks/1.0.0".to_string(),
-                "tenzro/transactions/1.0.0".to_string(),
-                "tenzro/consensus/1.0.0".to_string(),
+                "tenzro/blocks".to_string(),
+                "tenzro/transactions".to_string(),
+                "tenzro/consensus".to_string(),
             ],
             enable_dht: true,
             // SECURITY: mDNS leaks LAN presence — disabled by default for production;

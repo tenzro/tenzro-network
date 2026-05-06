@@ -46,5 +46,6 @@ pub use types::{PaymentChallenge, PaymentCredential, PaymentReceipt, PaymentVeri
 pub use challenge_store::ChallengeStore;
 pub use gateway::SettlementCallback;
 pub use identity_binding::{
-    IdentityPaymentBinder, SpendingPolicyResolver, SpendingPolicySnapshot,
+    EscrowResolver, EscrowSnapshot, IdentityPaymentBinder, LifecyclePosture,
+    LifecycleStateResolver, SpendingPolicyResolver, SpendingPolicySnapshot,
 };

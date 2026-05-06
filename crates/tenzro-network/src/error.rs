@@ -27,7 +27,7 @@ pub enum NetworkError {
 
     /// Serialization error
     #[error("Serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
+    Serialization(#[from] bincode::Error),
 
     /// Gossipsub publish error
     #[error("Failed to publish to topic: {0}")]

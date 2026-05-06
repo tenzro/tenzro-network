@@ -21,6 +21,7 @@ Hardware TEE (Trusted Execution Environment) abstraction layer for the Tenzro Ne
   - Real `/dev/tdx-guest` ioctl integration
   - TDREPORT to Quote pipeline
   - Intel PCS certificate chain verification
+  - QE P-256 ECDSA signature verification over `Quote[0..632]` against the PCK leaf SPKI
 - **AMD SEV-SNP** - `AmdSevSnpProvider` for AMD Secure Encrypted Virtualization
   - Real `/dev/sev-guest` ioctl integration
   - SNP_GET_REPORT command
@@ -28,7 +29,7 @@ Hardware TEE (Trusted Execution Environment) abstraction layer for the Tenzro Ne
 - **AWS Nitro** - `AwsNitroProvider` for AWS Nitro Enclaves
   - Real NSM device (`/dev/nsm`) integration
   - CBOR attestation documents
-  - P-384 ECDSA signature verification
+  - COSE_Sign1 ES384 (P-384 ECDSA) signature verification per RFC 8152 §4.4 — rebuilds `Sig_structure1` and verifies the 96-byte signature against the leaf cert SPKI
   - AWS Nitro root CA chain validation
 - **NVIDIA GPU** - `NvidiaGpuProvider` for NVIDIA Confidential Computing
   - Supports Hopper, Blackwell, and Ada Lovelace architectures

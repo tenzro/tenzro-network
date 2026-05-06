@@ -8,10 +8,12 @@
 //! - **signature** — RFC 9421 signature parsing, creation, and verification
 //! - **nonce** — Nonce cache for replay attack prevention
 //! - **registry** — Agent public key registry abstraction for key lookup
+//! - **jwks** — JWK / JWK Set publication per RFC 7517 / RFC 7518
 
 pub mod signature;
 pub mod nonce;
 pub mod registry;
+pub mod jwks;
 
 pub use signature::{
     SignatureAlgorithm,
@@ -26,3 +28,4 @@ pub use signature::{
 };
 pub use nonce::NonceCache;
 pub use registry::{AgentRegistryClient, AgentPublicKeyInfo, TenzroAgentRegistry};
+pub use jwks::{Jwk, JwkSet};

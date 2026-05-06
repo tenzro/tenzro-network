@@ -1036,14 +1036,13 @@ impl ChannelManager {
         // Check if there's already an open dispute for this channel
         if let Some(dispute_ids) = self.disputes_by_channel.get(channel_id) {
             for dispute_id in dispute_ids.value() {
-                if let Some(dispute) = self.disputes.get(dispute_id) {
-                    if dispute.status == DisputeStatus::Opened
-                        || dispute.status == DisputeStatus::Responded
-                    {
-                        return Err(SettlementError::InvalidChannelState(
-                            "Channel already has an open dispute".to_string(),
-                        ));
-                    }
+                if let Some(dispute) = self.disputes.get(dispute_id)
+                    && (dispute.status == DisputeStatus::Opened
+                        || dispute.status == DisputeStatus::Responded)
+                {
+                    return Err(SettlementError::InvalidChannelState(
+                        "Channel already has an open dispute".to_string(),
+                    ));
                 }
             }
         }

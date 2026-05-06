@@ -2,24 +2,24 @@
 //!
 //! Builds an autonomous arbitrage agent that:
 //!
-//!   1. Provisions a human controller identity via TDIP
-//!   2. Provisions a machine identity under the human, with a fine-grained
-//!      delegation scope (per-trade cap, daily cap, allowed operations,
-//!      allowed chains)
-//!   3. Pre-installs a "DEX quote" runtime on a Tenzro EVM state adapter
-//!      so the agent can read prices from local storage slots and write the
-//!      executed trade as a real EVM transaction
-//!   4. Constructs a `BridgeRouter` with LayerZero V2 + deBridge adapters
-//!      so the agent can move capital between chains for cross-chain legs
-//!   5. For each detected price spread:
-//!      a. Enforces the delegation scope BEFORE doing anything
-//!      b. Bridges base asset from the buy chain to the sell chain
-//!         (when chains differ)
-//!      c. Submits a real EVM trade transaction whose calldata is the
-//!         executed price into storage slot 0
-//!      d. Computes net profit after fees
-//!   6. Demonstrates that the delegation scope rejects oversized trades
-//!      and that an unprofitable spread is filtered out by the agent
+//! 1. Provisions a human controller identity via TDIP
+//! 2. Provisions a machine identity under the human, with a fine-grained
+//!    delegation scope (per-trade cap, daily cap, allowed operations,
+//!    allowed chains)
+//! 3. Pre-installs a "DEX quote" runtime on a Tenzro EVM state adapter
+//!    so the agent can read prices from local storage slots and write the
+//!    executed trade as a real EVM transaction
+//! 4. Constructs a `BridgeRouter` with LayerZero V2 + deBridge adapters
+//!    so the agent can move capital between chains for cross-chain legs
+//! 5. For each detected price spread:
+//!    a. Enforces the delegation scope BEFORE doing anything
+//!    b. Bridges base asset from the buy chain to the sell chain
+//!    (when chains differ)
+//!    c. Submits a real EVM trade transaction whose calldata is the
+//!    executed price into storage slot 0
+//!    d. Computes net profit after fees
+//! 6. Demonstrates that the delegation scope rejects oversized trades
+//!    and that an unprofitable spread is filtered out by the agent
 //!
 //! Run it with:
 //!

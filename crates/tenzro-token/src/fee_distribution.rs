@@ -279,10 +279,10 @@ impl FeeProcessor {
     /// Starts a new history period
     pub fn start_new_period(&self, period_id: String, start_time: Timestamp) {
         // Close current period if exists
-        if let Some(current) = self.current_period.read().as_ref() {
-            if let Some(mut history) = self.history.get_mut(current) {
-                history.period_end = Timestamp::now();
-            }
+        if let Some(current) = self.current_period.read().as_ref()
+            && let Some(mut history) = self.history.get_mut(current)
+        {
+            history.period_end = Timestamp::now();
         }
 
         // Create new period

@@ -406,8 +406,8 @@ pub struct ComplianceRegistry {
     identity_claims: DashMap<Address, Vec<IdentityClaim>>,
     /// Trusted claim issuers.
     trusted_issuers: DashMap<String, TrustedIssuer>,
-    /// Claim topic metadata (available for external callers to query).
-    #[allow(dead_code)]
+    /// Claim topic metadata, governance-managed (`register_claim_topic` /
+    /// `list_claim_topics` / `get_claim_topic`).
     claim_topics: DashMap<u64, ClaimTopicInfo>,
     /// Frozen address set: (token_id, address) -> freeze info.
     frozen_addresses: DashMap<(TokenId, Address), FreezeInfo>,
@@ -542,6 +542,34 @@ impl ComplianceRegistry {
             .get(issuer_did)
             .map(|i| i.enabled && i.trusted_topics.contains(&topic))
             .unwrap_or(false)
+    }
+
+    // -- Claim topics --------------------------------------------------------
+
+    /// Registers (or replaces) metadata for a claim topic.
+    ///
+    /// ERC-3643 claim topics are governance-managed identifiers that
+    /// describe what a claim asserts (e.g. KYC tier, accredited investor
+    /// status, country of residence).
+    pub fn register_claim_topic(&self, info: ClaimTopicInfo) {
+        info!(
+            "Registered claim topic {}: {}",
+            info.topic_id, info.name
+        );
+        self.claim_topics.insert(info.topic_id, info);
+    }
+
+    /// Returns metadata for a registered claim topic.
+    pub fn get_claim_topic(&self, topic_id: u64) -> Option<ClaimTopicInfo> {
+        self.claim_topics.get(&topic_id).map(|e| e.clone())
+    }
+
+    /// Lists all registered claim topics.
+    pub fn list_claim_topics(&self) -> Vec<ClaimTopicInfo> {
+        self.claim_topics
+            .iter()
+            .map(|e| e.value().clone())
+            .collect()
     }
 
     // -- Freeze / unfreeze ---------------------------------------------------

@@ -17,6 +17,8 @@ pub enum TokenVmType {
     Svm,
     /// DAML CIP-56 token representation (arbitrary precision Decimal)
     Daml,
+    /// Tempo L1 TIP-20 stablecoin representation (Stripe + Paradigm chain, EIP-155 EVM)
+    TempoTip20,
 }
 
 impl fmt::Display for TokenVmType {
@@ -26,6 +28,7 @@ impl fmt::Display for TokenVmType {
             TokenVmType::Evm => write!(f, "evm"),
             TokenVmType::Svm => write!(f, "svm"),
             TokenVmType::Daml => write!(f, "daml"),
+            TokenVmType::TempoTip20 => write!(f, "tempo-tip20"),
         }
     }
 }
@@ -41,6 +44,8 @@ pub struct VmAddresses {
     pub daml_template_id: Option<String>,
     /// Native token address (for TNZO only)
     pub native: Option<[u8; 32]>,
+    /// Tempo L1 TIP-20 contract address (20 bytes, EIP-155 EVM at chain_id 42431)
+    pub tempo: Option<[u8; 20]>,
 }
 
 impl VmAddresses {
@@ -51,7 +56,13 @@ impl VmAddresses {
             TokenVmType::Evm => self.evm.is_some(),
             TokenVmType::Svm => self.svm.is_some(),
             TokenVmType::Daml => self.daml_template_id.is_some(),
+            TokenVmType::TempoTip20 => self.tempo.is_some(),
         }
+    }
+
+    /// Returns the Tempo TIP-20 address as a hex string (0x-prefixed)
+    pub fn tempo_hex(&self) -> Option<String> {
+        self.tempo.map(|addr| format!("0x{}", hex::encode(addr)))
     }
 
     /// Returns the EVM address as a hex string (0x-prefixed)

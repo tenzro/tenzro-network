@@ -315,6 +315,29 @@ impl KvStore for RocksDbStore {
 
         Ok(keys)
     }
+
+    /// Single-pass prefix scan that pulls keys *and* values in one iterator
+    /// traversal. The default trait impl issues N follow-up `get_cf` calls;
+    /// for hot paths like `BlockStorage::blocks_by_height_range` (catch-up
+    /// sync) that is O(N) extra lookups per range. RocksDB already returns
+    /// the value alongside the key inside `prefix_iterator_cf`, so we just
+    /// take both.
+    fn scan_prefix(&self, cf: &str, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let cf_handle = self.cf_handle(cf)?;
+        let mut results = Vec::new();
+        let iter = self.db.prefix_iterator_cf(cf_handle, prefix);
+
+        for item in iter {
+            let (key, value) = item?;
+            if key.starts_with(prefix) {
+                results.push((key.to_vec(), value.to_vec()));
+            } else {
+                break;
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 /// In-memory key-value store for testing
@@ -557,12 +580,12 @@ mod tests {
         if let Ok(entries) = std::fs::read_dir(&path) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if p.extension().and_then(|s| s.to_str()) == Some("log") {
-                    if let Ok(meta) = std::fs::metadata(&p) {
-                        let new_len = meta.len() / 2;
-                        if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&p) {
-                            let _ = file.set_len(new_len);
-                        }
+                if p.extension().and_then(|s| s.to_str()) == Some("log")
+                    && let Ok(meta) = std::fs::metadata(&p)
+                {
+                    let new_len = meta.len() / 2;
+                    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&p) {
+                        let _ = file.set_len(new_len);
                     }
                 }
             }
@@ -610,12 +633,12 @@ mod tests {
         if let Ok(entries) = std::fs::read_dir(&path) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if p.extension().and_then(|s| s.to_str()) == Some("log") {
-                    if let Ok(meta) = std::fs::metadata(&p) {
-                        let new_len = meta.len() / 3;
-                        if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&p) {
-                            let _ = file.set_len(new_len);
-                        }
+                if p.extension().and_then(|s| s.to_str()) == Some("log")
+                    && let Ok(meta) = std::fs::metadata(&p)
+                {
+                    let new_len = meta.len() / 3;
+                    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&p) {
+                        let _ = file.set_len(new_len);
                     }
                 }
             }

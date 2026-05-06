@@ -478,3 +478,138 @@ impl From<u64> for ChainId {
         Self(id)
     }
 }
+
+/// Serde adapter for `u128` fields that may carry values larger than
+/// `u64::MAX` (e.g. base-unit token amounts at 10^18 precision).
+///
+/// `serde_json`'s default number deserializer falls through `u64 → i64 →
+/// f64` and refuses values exceeding `u64::MAX` (~1.84×10^19) — which
+/// breaks reference templates whose delegation caps are denominated in
+/// 10^18-base-unit TNZO (e.g. `5_000_000_000_000_000_000_000`).
+///
+/// This adapter accepts both:
+///   - JSON numbers (any integer up to `u128::MAX` that fits in a
+///     `serde_json::Number`)
+///   - JSON strings (decimal digits only, no sign, no underscores)
+///
+/// On serialization it emits a number when the value fits `u64` and a
+/// decimal string otherwise, preserving readability for typical small
+/// values while remaining lossless for large ones.
+///
+/// Apply via `#[serde(with = "u128_serde")]` on a `u128` field.
+pub mod u128_serde {
+    use serde::de::{self, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(value: &u128, serializer: S) -> Result<S::Ok, S::Error> {
+        if *value <= u64::MAX as u128 {
+            serializer.serialize_u64(*value as u64)
+        } else {
+            serializer.serialize_str(&value.to_string())
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u128, D::Error> {
+        struct U128Visitor;
+
+        impl<'de> Visitor<'de> for U128Visitor {
+            type Value = u128;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a non-negative integer or decimal string fitting in u128")
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<u128, E> {
+                Ok(v as u128)
+            }
+
+            fn visit_u128<E: de::Error>(self, v: u128) -> Result<u128, E> {
+                Ok(v)
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<u128, E> {
+                if v < 0 {
+                    Err(E::custom(format!("negative integer {v} is not a valid u128")))
+                } else {
+                    Ok(v as u128)
+                }
+            }
+
+            fn visit_i128<E: de::Error>(self, v: i128) -> Result<u128, E> {
+                if v < 0 {
+                    Err(E::custom(format!("negative integer {v} is not a valid u128")))
+                } else {
+                    Ok(v as u128)
+                }
+            }
+
+            fn visit_str<E: de::Error>(self, s: &str) -> Result<u128, E> {
+                s.parse::<u128>()
+                    .map_err(|e| E::custom(format!("invalid u128 string {s:?}: {e}")))
+            }
+
+            fn visit_string<E: de::Error>(self, s: String) -> Result<u128, E> {
+                self.visit_str(&s)
+            }
+        }
+
+        deserializer.deserialize_any(U128Visitor)
+    }
+}
+
+#[cfg(test)]
+mod u128_serde_tests {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    struct Wrap {
+        #[serde(with = "super::u128_serde")]
+        v: u128,
+    }
+
+    #[test]
+    fn round_trips_small_value_as_number() {
+        let w = Wrap { v: 42 };
+        let json = serde_json::to_string(&w).unwrap();
+        assert_eq!(json, r#"{"v":42}"#);
+        let back: Wrap = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn round_trips_large_value_as_string() {
+        let w = Wrap { v: 5_000_000_000_000_000_000_000u128 };
+        let json = serde_json::to_string(&w).unwrap();
+        assert_eq!(json, r#"{"v":"5000000000000000000000"}"#);
+        let back: Wrap = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn deserializes_large_raw_number() {
+        // The whole point: accept the existing template JSON shape.
+        let json = r#"{"v":5000000000000000000000}"#;
+        let back: Wrap = serde_json::from_str(json).unwrap();
+        assert_eq!(back.v, 5_000_000_000_000_000_000_000u128);
+    }
+
+    #[test]
+    fn deserializes_string_at_u64_boundary() {
+        let json = r#"{"v":"18446744073709551616"}"#; // u64::MAX + 1
+        let back: Wrap = serde_json::from_str(json).unwrap();
+        assert_eq!(back.v, (u64::MAX as u128) + 1);
+    }
+
+    #[test]
+    fn rejects_negative_string() {
+        let json = r#"{"v":"-1"}"#;
+        assert!(serde_json::from_str::<Wrap>(json).is_err());
+    }
+
+    #[test]
+    fn rejects_negative_number() {
+        let json = r#"{"v":-1}"#;
+        assert!(serde_json::from_str::<Wrap>(json).is_err());
+    }
+}

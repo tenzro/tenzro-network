@@ -415,12 +415,11 @@ fn sweep_tasks(
 
         // Open/Assigned with deadline past now → Expired.
         let mut should_expire = false;
-        if matches!(task.status, TaskStatus::Open | TaskStatus::Assigned) {
-            if let Some(deadline) = task.deadline {
-                if deadline <= now {
-                    should_expire = true;
-                }
-            }
+        if matches!(task.status, TaskStatus::Open | TaskStatus::Assigned)
+            && let Some(deadline) = task.deadline
+            && deadline <= now
+        {
+            should_expire = true;
         }
         // Open with no deadline that's been sitting too long → Expired.
         if matches!(task.status, TaskStatus::Open)
@@ -562,16 +561,16 @@ fn sweep_model_services(
         if !status_str.contains("Inactive") && age >= cfg.model_service_stale_after_secs {
             // Surgical mutation: re-encode the original JSON with status
             // overridden to "Inactive". Avoids losing fields we don't model.
-            if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if let Some(obj) = value.as_object_mut() {
-                    obj.insert(
-                        "status".to_string(),
-                        serde_json::Value::String("Inactive".to_string()),
-                    );
-                    if let Ok(updated) = serde_json::to_vec(&value) {
-                        let _ = storage.put(CF_MODEL_SERVICES, &key, &updated);
-                        stats.model_services_marked_inactive += 1;
-                    }
+            if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                && let Some(obj) = value.as_object_mut()
+            {
+                obj.insert(
+                    "status".to_string(),
+                    serde_json::Value::String("Inactive".to_string()),
+                );
+                if let Ok(updated) = serde_json::to_vec(&value) {
+                    let _ = storage.put(CF_MODEL_SERVICES, &key, &updated);
+                    stats.model_services_marked_inactive += 1;
                 }
             }
         }

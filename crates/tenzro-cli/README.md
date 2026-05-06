@@ -49,7 +49,7 @@ tenzro model list
 tenzro chat
 ```
 
-## Commands (48 top-level)
+## Commands (51 command modules)
 
 All commands use real JSON-RPC calls via reqwest. No artificial delays.
 
@@ -63,13 +63,37 @@ tenzro join
 ### Node Management
 
 ```bash
+# Start a Tenzro Network node (forwards to the tenzro-node binary)
+tenzro node start --role validator --data-dir ~/.tenzro/data
+
+# Stop the running node
+tenzro node stop
+
 # Check node status
 tenzro node status
+
+# Show connected peer count (calls net_peerCount)
+tenzro node peers
+
+# Show sync status (calls eth_syncing)
+tenzro node syncing
 
 # Inspect a contiguous range of blocks (read-only catch-up probe).
 # Calls tenzro_getBlockRange — returns up to 256 blocks per request,
 # with nextHeight + moreAvailable for pagination across pruning gaps.
 tenzro node sync-range --start 0 --end 255
+
+# Inspect the EIP-1559 fee market: current base fee, suggested priority tip,
+# and recent fee history.
+tenzro node fee-market
+
+# Spec-2 admission-controller mempool stats: per-lane admit/reject counters
+# and lane configuration.
+tenzro node mempool-stats
+
+# Resolve which admission lane an address would land in, plus its current
+# token-bucket state.
+tenzro node mempool-lane --address 0xabc...
 ```
 
 ### Wallet Operations
@@ -368,6 +392,40 @@ identity registry, so the same calldata works against either surface.
 tenzro reputation get 0xabc...
 ```
 
+### AgentBond and Insurance
+
+```bash
+# Post a stake bond for an agent (refundable on clean exit, slashable on fraud).
+tenzro bond post --agent-id <id> --amount <tnzo>
+tenzro bond increase --agent-id <id> --amount <tnzo>
+tenzro bond withdraw --agent-id <id>
+tenzro bond get --agent-id <id>
+tenzro bond list
+
+# File a claim against the insurance pool for a fraudulent cart-mandate / failed
+# settlement. Surfaces the AgentBond stake as the first loss tranche.
+tenzro insurance claim --agent-id <id> --evidence <path>
+tenzro insurance list
+tenzro insurance get --claim-id <id>
+tenzro insurance pool
+```
+
+### Tenzro Train
+
+`tenzro train` is the CLI surface for the Tenzro Train protocol layer
+(`tenzro_training_*` RPCs). The Rust crate is protocol-only — the inner
+training loop runs in the Python reference trainer at `integrations/trainer/`.
+
+```bash
+tenzro train post-task --task-spec ./task.json
+tenzro train list-runs
+tenzro train get-run --run-id <id>
+tenzro train get-receipt --run-id <id> --round <r>
+tenzro train enroll-trainer --run-id <id>
+tenzro train submit-gradient --run-id <id> --round <r> --payload ./grad.bin
+tenzro train finalize-round --run-id <id> --round <r>
+```
+
 ### Approval Flow
 
 When a delegated machine attempts an operation outside its `DelegationScope`
@@ -460,6 +518,62 @@ tenzro agent spawn-template <template_id>
 
 # Run template
 tenzro agent run-template <template_id> <params>
+
+# Delegate a task to an agent with a maximum budget
+tenzro agent delegate --agent-id <id> --task <description> --max-budget <tnzo>
+
+# Discover agents on the network, optionally filtered by capability
+tenzro agent discover --capability inference --max 50
+
+# Fund an agent's wallet with TNZO
+tenzro agent fund --agent-id <id> --amount <tnzo>
+
+# Spawn an agent from a template (alternate flow with skill wiring)
+tenzro agent spawn-from-template --template-id <id> --name "MyAgent"
+
+# Spawn an agent equipped with a specific skill
+tenzro agent spawn-with-skill --skill-id <id> --name "MyAgent"
+
+# Pay for inference on behalf of an agent
+tenzro agent pay-for-inference --agent-id <id> --model-id <model> --max-amount <tnzo>
+
+# Reconcile the agent registry — auto-suspend idle agents (1h TTL)
+tenzro agent prune
+```
+
+#### Kill-switch (Spec 9)
+
+The kill-switch trio is a controller-signed safety primitive: pause is
+reversible (freezes payments, allows reward distribution + stake withdrawals);
+quarantine is reversible (freezes payments, rewards, and stake withdrawals);
+terminate is irreversible and slashes stake by `slash_bps`, optionally
+cascading to descendants under `children:<parent_id>`.
+
+```bash
+# Pause an agent (reversible). Optional pause_until expiry.
+tenzro agent pause \
+  --controller-address 0xabc... \
+  --controller-did <did> \
+  --agent-did <did:tenzro:machine:...> \
+  --reason-code <code> \
+  --pause-until <unix_ms>
+
+# Quarantine an agent (reversible). Optional 32-byte SHA-256 evidence hash.
+tenzro agent quarantine \
+  --controller-address 0xabc... \
+  --controller-did <did> \
+  --agent-did <did:tenzro:machine:...> \
+  --reason-code <code> \
+  --evidence-hash 0x<sha256_hex>
+
+# Terminate an agent (irreversible). Slashes stake by slash_bps (0..=10000).
+tenzro agent terminate \
+  --controller-address 0xabc... \
+  --controller-did <did> \
+  --agent-did <did:tenzro:machine:...> \
+  --reason-code <code> \
+  --slash-bps 5000 \
+  --cascade
 ```
 
 ### Canton Integration
@@ -522,7 +636,7 @@ tenzro escrow get-settlement <settlement_id>
 
 `--release` accepts: `timeout` | `provider` | `consumer` | `both` | `verifier` | `custom`.
 The `escrow_id` is derived deterministically by the VM as
-`SHA-256("tenzro/escrow/id/v1" || payer || nonce_le)` and emitted in the
+`SHA-256("tenzro/escrow/id" || payer || nonce_le)` and emitted in the
 receipt log of the `CreateEscrow` transaction.
 
 ### ZK Proofs (Plonky3 STARKs over KoalaBear)
@@ -641,6 +755,12 @@ tenzro token wrap --amount <amount> --to-vm evm
 
 # Transfer (tenzro_crossVmTransfer)
 tenzro token transfer --token <token_id> --to <address> --amount <amount>
+
+# Swap tokens via DEX
+tenzro token swap --from <token_id> --to <token_id> --amount <amount>
+
+# Inspect the dual-rail gas burn quota (Agent-Swarm Spec 3 wave 1)
+tenzro token burn-quota
 ```
 
 ### Contract Operations
@@ -896,7 +1016,7 @@ The CLI is organized into several modules:
 - `output.rs` - Output formatting utilities (tables, progress bars, colors)
 - `rpc.rs` - Real JSON-RPC client (reqwest)
 - `config.rs` - Configuration management
-- `commands/` - Command implementations (48 modules)
+- `commands/` - Command implementations (51 modules: agent, ap2, app, approval, auth, bond, bridge, canton, cct, compliance, contract, cortex, crosschain, crypto, custody, debridge, dispute, erc8004, escrow, events, governance, hardware, identity, inference, insurance, join, lifi, marketplace, model, multimodal, nft, node, payment, provenance, provider, reputation, schedule, skill, stake, task, tee, token, tool, train, username, vrf, wallet, wormhole, x402, zk)
 
 All commands use real JSON-RPC calls to tenzro-node RPC endpoints. No simulated calls, no artificial delays.
 

@@ -29,15 +29,22 @@ impl NetworkMessage {
         }
     }
 
-    /// Serializes the message to bytes
-    pub fn to_bytes(&self) -> Result<Bytes, serde_json::Error> {
-        let json = serde_json::to_vec(self)?;
-        Ok(Bytes::from(json))
+    /// Serializes the message to bytes using bincode.
+    ///
+    /// Wire format: bincode (length-prefixed varint sequences). Bincode is used
+    /// rather than `serde_json` because consensus payloads embed `Block` and
+    /// `Transaction` types that carry `u128` fields (token amounts, gas), and
+    /// `serde_json` does not support `u128` without `arbitrary_precision`.
+    /// Mismatched encoders/decoders previously caused honest peers to silently
+    /// drop each other's votes, stalling consensus.
+    pub fn to_bytes(&self) -> Result<Bytes, bincode::Error> {
+        let buf = bincode::serialize(self)?;
+        Ok(Bytes::from(buf))
     }
 
-    /// Deserializes a message from bytes
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
+    /// Deserializes a message from bincode bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        bincode::deserialize(bytes)
     }
 
     /// Returns the message topic
@@ -46,9 +53,16 @@ impl NetworkMessage {
     }
 }
 
-/// Message payload types
+/// Message payload types.
+///
+/// Uses serde's default externally-tagged enum representation
+/// (`{"Variant": payload}` in JSON, `u32` discriminant + payload in bincode).
+/// Adjacently/internally tagged forms (`#[serde(tag = "...", content = "...")]`)
+/// route through `serialize_struct`/`deserialize_identifier`, which bincode 1.x
+/// does not support — receivers reject every gossip message with
+/// "Bincode does not support Deserializer::deserialize_identifier", stalling
+/// consensus. See bincode-org/bincode#272 and #548.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
 pub enum MessagePayload {
     /// New block announcement
     Block(Block),
@@ -108,25 +122,28 @@ impl MessagePayload {
     /// Returns the topic for this message type
     pub fn topic(&self) -> &str {
         match self {
-            Self::Block(_) | Self::BlockRequest(_) | Self::BlockResponse(_) => "tenzro/blocks/1.0.0",
+            Self::Block(_) | Self::BlockRequest(_) | Self::BlockResponse(_) => "tenzro/blocks",
             Self::Transaction(_) | Self::TransactionRequest(_) | Self::TransactionResponse(_) => {
-                "tenzro/transactions/1.0.0"
+                "tenzro/transactions"
             }
-            Self::Consensus(_) => "tenzro/consensus/1.0.0",
-            Self::Attestation(_) => "tenzro/attestations/1.0.0",
-            Self::InferenceRequest(_) | Self::InferenceResponse(_) => "tenzro/inference/1.0.0",
-            Self::ModelRegistration(_) => "tenzro/models/1.0.0",
-            Self::AgentAnnouncement(_) => "tenzro/agents/1.0.0",
-            Self::ProviderAnnouncement(_) => "tenzro/providers/1.0.0",
-            Self::Status(_) | Self::Ping | Self::Pong => "tenzro/status/1.0.0",
+            Self::Consensus(_) => "tenzro/consensus",
+            Self::Attestation(_) => "tenzro/attestations",
+            Self::InferenceRequest(_) | Self::InferenceResponse(_) => "tenzro/inference",
+            Self::ModelRegistration(_) => "tenzro/models",
+            Self::AgentAnnouncement(_) => "tenzro/agents",
+            Self::ProviderAnnouncement(_) => "tenzro/providers",
+            Self::Status(_) | Self::Ping | Self::Pong => "tenzro/status",
             Self::Custom { topic, .. } => topic,
         }
     }
 }
 
-/// Consensus message types
+/// Consensus message types.
+///
+/// Uses serde's default externally-tagged enum representation. See
+/// `MessagePayload` above for the rationale — `#[serde(tag = "...")]` is
+/// internally-tagged and incompatible with bincode 1.x.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "consensus_type")]
 pub enum ConsensusMessage {
     /// Block proposal.
     ///
@@ -141,7 +158,7 @@ pub enum ConsensusMessage {
     /// if higher than their own to fast-forward the lagging-replica case.
     /// Must satisfy `high_qc_view < block.header.view`.
     Proposal {
-        block: Block,
+        block: Box<Block>,
         proposer: String,
         round: u64,
         high_qc_view: u64,
@@ -330,7 +347,7 @@ fn default_provider_ttl() -> u64 {
     120
 }
 
-/// Agent announcement message — broadcast over gossipsub topic "tenzro/agents/1.0.0"
+/// Agent announcement message — broadcast over gossipsub topic "tenzro/agents"
 /// every 60s by nodes that have registered agents. All peers merge incoming
 /// announcements into their `network_agents` DashMap so any node can discover
 /// every agent in the network without a central registry.
@@ -362,7 +379,7 @@ pub struct AgentAnnouncementMessage {
     pub ttl_secs: u64,
 }
 
-/// Provider announcement message — broadcast over gossipsub topic "tenzro/providers/1.0.0"
+/// Provider announcement message — broadcast over gossipsub topic "tenzro/providers"
 /// every 60s by nodes serving models or TEE services. All peers merge incoming
 /// announcements into their `network_providers` DashMap so any node can discover
 /// every provider in the network without a central registry.
@@ -457,7 +474,7 @@ pub struct PricingInfo {
 
 /// Status message for peer synchronization.
 ///
-/// Broadcast on `tenzro/status/1.0.0` every 10s by every node and consumed
+/// Broadcast on `tenzro/status` every 10s by every node and consumed
 /// by `PeerStatusTracker` to compute a network-tip estimate for `eth_syncing`.
 /// `peer_id` is embedded so subscribers can attribute the message to a sender —
 /// gossipsub does not surface the originating PeerId to topic subscribers,
@@ -528,7 +545,7 @@ mod tests {
 
     #[test]
     fn test_message_topics() {
-        assert_eq!(MessagePayload::Ping.topic(), "tenzro/status/1.0.0");
+        assert_eq!(MessagePayload::Ping.topic(), "tenzro/status");
         assert_eq!(
             MessagePayload::Custom {
                 topic: "test/topic".to_string(),

@@ -15,10 +15,10 @@
 //!
 //! ## Deterministic identifiers
 //!
-//! - **`escrow_id`** = `SHA-256("tenzro/escrow/id/v1" || payer || nonce_le)`,
+//! - **`escrow_id`** = `SHA-256("tenzro/escrow/id" || payer || nonce_le)`,
 //!   derived by the VM at `CreateEscrow` execution time and surfaced via the
 //!   receipt log.
-//! - **Vault address** = `Address(SHA-256("tenzro/escrow/vault/v1" || escrow_id))`.
+//! - **Vault address** = `Address(SHA-256("tenzro/escrow/vault" || escrow_id))`.
 //!   Has no private key. Release/refund payouts are a privileged VM operation
 //!   that calls `state.set_balance` directly via a single auditable helper,
 //!   never via normal `TnzoToken::transfer`.
@@ -970,10 +970,7 @@ mod tests {
             Arc::new(DashMap::new()),
             // Rehydrate from a fresh manager; balances DashMap is volatile by design.
             // We only verify the escrow record/status persisted.
-            {
-                let s = manager2.storage.as_ref().unwrap().clone();
-                s
-            },
+            manager2.storage.as_ref().unwrap().clone(),
         );
         let after_refund = manager3.get_escrow(&escrow_id).unwrap();
         assert_eq!(after_refund.status, EscrowStatus::Refunded);

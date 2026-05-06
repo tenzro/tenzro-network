@@ -187,10 +187,10 @@ impl ChainStateProvider for TenzroRpcChainProvider {
                 )
                 .await?;
             // Result may be {"balance": "0x..."} or a bare hex string.
-            if let Some(obj) = result.as_object() {
-                if let Some(bal) = obj.get("balance") {
-                    return Self::parse_hex_quantity(bal);
-                }
+            if let Some(obj) = result.as_object()
+                && let Some(bal) = obj.get("balance")
+            {
+                return Self::parse_hex_quantity(bal);
             }
             Self::parse_hex_quantity(&result)
         }

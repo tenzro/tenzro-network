@@ -1,7 +1,7 @@
 """Verify Ed25519 signing and the canonical preimage.
 
 The preimage layout matches the convention documented in ``gradient.py`` —
-domain prefix ``tenzro/train/outer-gradient/v1`` + BE-encoded fields. Phase 2
+domain prefix ``tenzro/train/outer-gradient`` + BE-encoded fields. Phase 2
 will lift signature verification into the Rust syncer; this test pins the
 preimage so the eventual Rust verifier is forwards-compatible.
 """
@@ -30,9 +30,9 @@ def test_preimage_layout_is_stable():
         submitted_at=1_745_539_200_000,
     )
     # Header.
-    assert msg.startswith(b"tenzro/train/outer-gradient/v1")
+    assert msg.startswith(b"tenzro/train/outer-gradient")
     # Round (BE u32).
-    rest = msg[len(b"tenzro/train/outer-gradient/v1") :]
+    rest = msg[len(b"tenzro/train/outer-gradient") :]
     rest = rest[len(b"task-A") :]
     assert rest[:4] == (3).to_bytes(4, "big")
     assert rest[4:8] == (2).to_bytes(4, "big")

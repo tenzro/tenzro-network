@@ -296,8 +296,9 @@ async fn stream_handler(
         let _ = tx.send(Ok(event)).await;
 
         // If the task was created, simulate streaming updates
-        if let Some(result_value) = &result.result {
-            if let Some(task_id) = result_value.get("id").and_then(|v| v.as_str()) {
+        if let Some(result_value) = &result.result
+            && let Some(task_id) = result_value.get("id").and_then(|v| v.as_str())
+        {
                 // Mark as working
                 if let Some(task) = state_clone.task_manager.update_status(
                     task_id,
@@ -335,7 +336,6 @@ async fn stream_handler(
                 let _ = tx
                     .send(Ok(Event::default().event("done").data("")))
                     .await;
-            }
         }
     });
 
@@ -388,8 +388,9 @@ fn handle_send_message(
         // `x402.payment.required` set must be resumed by an inbound message
         // carrying `x402.payment.payload`. See `crate::a2a::x402_extension`
         // for the wire-format and dispatcher contract.
-        if existing.status.state == TaskState::InputRequired {
-            if let Some(requirements) = existing.metadata.get_payment_required() {
+        if existing.status.state == TaskState::InputRequired
+            && let Some(requirements) = existing.metadata.get_payment_required()
+        {
                 let Some(payload) = inbound_metadata.get_payment_payload() else {
                     return JsonRpcResponse::error(
                         id,
@@ -476,7 +477,6 @@ fn handle_send_message(
                         };
                     }
                 }
-            }
         }
 
         // Add message to existing task and re-process
@@ -601,11 +601,11 @@ fn handle_get_task(
     match state.task_manager.get_task(&params.id) {
         Some(mut task) => {
             // Optionally limit history
-            if let Some(limit) = params.history_length {
-                if task.history.len() > limit {
-                    let start = task.history.len() - limit;
-                    task.history = task.history[start..].to_vec();
-                }
+            if let Some(limit) = params.history_length
+                && task.history.len() > limit
+            {
+                let start = task.history.len() - limit;
+                task.history = task.history[start..].to_vec();
             }
             JsonRpcResponse::success(id, serde_json::to_value(&task).unwrap())
         }
@@ -1372,18 +1372,16 @@ fn handle_create_token(
         }
     }
 
-    if !authenticated {
-        if let Some(agent_id) = task_metadata.get("agent_id").and_then(|v| v.as_str()) {
+    if !authenticated
+        && let Some(agent_id) = task_metadata.get("agent_id").and_then(|v| v.as_str()) {
             // Try to resolve the agent's wallet address from the agent runtime
-            if let Some(agent_runtime) = state.node.agent_runtime() {
-                if let Ok(agent) = agent_runtime.get_agent(agent_id) {
+            if let Some(agent_runtime) = state.node.agent_runtime()
+                && let Ok(agent) = agent_runtime.get_agent(agent_id) {
                     let addr_bytes = agent.wallet_address.0;
                     creator.copy_from_slice(&addr_bytes);
                     authenticated = true;
                 }
-            }
         }
-    }
 
     if !authenticated {
         // Legacy fallback: deterministic creator address derived from the symbol
@@ -1536,7 +1534,9 @@ fn handle_list_tokens(state: &A2aState, text: &str) -> String {
     let text_lower = text.to_lowercase();
 
     // Check for VM type filter
-    let vm_filter = if text_lower.contains("evm") {
+    let vm_filter = if text_lower.contains("tempo") || text_lower.contains("tip20") || text_lower.contains("tip-20") {
+        Some(tenzro_token::TokenVmType::TempoTip20)
+    } else if text_lower.contains("evm") {
         Some(tenzro_token::TokenVmType::Evm)
     } else if text_lower.contains("svm") || text_lower.contains("solana") {
         Some(tenzro_token::TokenVmType::Svm)
@@ -1662,6 +1662,7 @@ fn handle_cross_vm_transfer(state: &A2aState, text: &str) -> String {
             "svm" | "solana" => Some(tenzro_token::TokenVmType::Svm),
             "daml" | "canton" => Some(tenzro_token::TokenVmType::Daml),
             "native" => Some(tenzro_token::TokenVmType::Native),
+            "tempo-tip20" | "tempo" | "tip20" => Some(tenzro_token::TokenVmType::TempoTip20),
             _ => None,
         }
     };

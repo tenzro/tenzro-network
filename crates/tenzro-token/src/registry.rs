@@ -28,6 +28,8 @@ pub struct TokenRegistry {
     by_evm_address: DashMap<[u8; 20], TokenId>,
     /// SVM mint -> TokenId index
     by_svm_mint: DashMap<[u8; 32], TokenId>,
+    /// Tempo L1 TIP-20 address -> TokenId index
+    by_tempo_address: DashMap<[u8; 20], TokenId>,
     /// Symbol (uppercase) -> TokenId index
     by_symbol: DashMap<String, TokenId>,
     /// Creator -> list of TokenIds
@@ -50,6 +52,7 @@ impl std::fmt::Debug for TokenRegistry {
             .field("token_count", &self.tokens.len())
             .field("evm_index_count", &self.by_evm_address.len())
             .field("svm_index_count", &self.by_svm_mint.len())
+            .field("tempo_index_count", &self.by_tempo_address.len())
             .finish()
     }
 }
@@ -61,6 +64,7 @@ impl TokenRegistry {
             tokens: DashMap::new(),
             by_evm_address: DashMap::new(),
             by_svm_mint: DashMap::new(),
+            by_tempo_address: DashMap::new(),
             by_symbol: DashMap::new(),
             by_creator: DashMap::new(),
             approvals: DashMap::new(),
@@ -77,6 +81,7 @@ impl TokenRegistry {
             tokens: DashMap::new(),
             by_evm_address: DashMap::new(),
             by_svm_mint: DashMap::new(),
+            by_tempo_address: DashMap::new(),
             by_symbol: DashMap::new(),
             by_creator: DashMap::new(),
             approvals: DashMap::new(),
@@ -164,26 +169,26 @@ impl TokenRegistry {
         let balance_entries = storage.scan_prefix(CF_TOKENS, balance_prefix)?;
         for (key, value) in balance_entries {
             // Key format: "token_balance:" + 64 hex chars (owner) + ":" + 64 hex chars (token_id)
-            if let Ok(key_str) = std::str::from_utf8(&key) {
-                if let Some(rest) = key_str.strip_prefix("token_balance:") {
-                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                    if parts.len() == 2 && value.len() == 16 {
-                        if let (Ok(owner_bytes), Ok(token_bytes)) =
-                            (hex::decode(parts[0]), hex::decode(parts[1]))
-                        {
-                            if owner_bytes.len() == 32 && token_bytes.len() == 32 {
-                                let mut owner = [0u8; 32];
-                                let mut token = [0u8; 32];
-                                owner.copy_from_slice(&owner_bytes);
-                                token.copy_from_slice(&token_bytes);
-                                let mut amount_bytes = [0u8; 16];
-                                amount_bytes.copy_from_slice(&value);
-                                let amount = u128::from_le_bytes(amount_bytes);
-                                self.token_balances
-                                    .insert((owner, TokenId::new(token)), amount);
-                            }
-                        }
-                    }
+            if let Ok(key_str) = std::str::from_utf8(&key)
+                && let Some(rest) = key_str.strip_prefix("token_balance:")
+            {
+                let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                if parts.len() == 2
+                    && value.len() == 16
+                    && let (Ok(owner_bytes), Ok(token_bytes)) =
+                        (hex::decode(parts[0]), hex::decode(parts[1]))
+                    && owner_bytes.len() == 32
+                    && token_bytes.len() == 32
+                {
+                    let mut owner = [0u8; 32];
+                    let mut token = [0u8; 32];
+                    owner.copy_from_slice(&owner_bytes);
+                    token.copy_from_slice(&token_bytes);
+                    let mut amount_bytes = [0u8; 16];
+                    amount_bytes.copy_from_slice(&value);
+                    let amount = u128::from_le_bytes(amount_bytes);
+                    self.token_balances
+                        .insert((owner, TokenId::new(token)), amount);
                 }
             }
         }
@@ -204,6 +209,9 @@ impl TokenRegistry {
         if let Some(svm_mint) = def.vm_addresses.svm {
             self.by_svm_mint.insert(svm_mint, def.token_id);
         }
+        if let Some(tempo_addr) = def.vm_addresses.tempo {
+            self.by_tempo_address.insert(tempo_addr, def.token_id);
+        }
         self.by_symbol
             .insert(def.symbol.to_uppercase(), def.token_id);
 
@@ -220,6 +228,9 @@ impl TokenRegistry {
         }
         if let Some(svm_mint) = def.vm_addresses.svm {
             self.by_svm_mint.remove(&svm_mint);
+        }
+        if let Some(tempo_addr) = def.vm_addresses.tempo {
+            self.by_tempo_address.remove(&tempo_addr);
         }
         self.by_symbol.remove(&def.symbol.to_uppercase());
     }
@@ -318,6 +329,7 @@ impl TokenRegistry {
                 svm: svm_mint,
                 daml_template_id: daml_template,
                 native: Some([0u8; 32]), // Sentinel for native
+                tempo: None,
             },
             permissions: TokenPermissions {
                 mintable: true, // Treasury can mint
@@ -341,6 +353,91 @@ impl TokenRegistry {
 
         info!("Registered TNZO token in unified registry");
         Ok(())
+    }
+
+    /// Registers a Tempo L1 TIP-20 stablecoin in the catalog.
+    ///
+    /// Tempo (chain_id 42431, EIP-155 EVM, Stripe + Paradigm) hosts the canonical
+    /// USDC/PYUSD/USDT issuances under TIP-20. Registering them here lets the rest
+    /// of the workspace see Tempo as a first-class settlement venue alongside EVM/SVM/DAML.
+    pub fn register_tip20(
+        &self,
+        symbol: &str,
+        name: &str,
+        decimals: u8,
+        tempo_address: [u8; 20],
+        max_supply: Option<u128>,
+    ) -> Result<TokenId> {
+        if symbol.is_empty() || symbol.len() > 12 {
+            return Err(TokenError::InvalidAmount(
+                "Token symbol must be 1-12 characters".to_string(),
+            ));
+        }
+        if name.is_empty() || name.len() > 64 {
+            return Err(TokenError::InvalidAmount(
+                "Token name must be 1-64 characters".to_string(),
+            ));
+        }
+        if decimals > 18 {
+            return Err(TokenError::InvalidAmount(
+                "Decimals must be 0-18".to_string(),
+            ));
+        }
+        if self.by_symbol.contains_key(&symbol.to_uppercase()) {
+            return Err(TokenError::InvalidAmount(format!(
+                "Token symbol '{}' already registered",
+                symbol
+            )));
+        }
+
+        // Deterministic id: SHA-256("tenzro/tip20" || tempo_address)
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"tenzro/tip20");
+        hasher.update(tempo_address);
+        let mut id_bytes = [0u8; 32];
+        id_bytes.copy_from_slice(&hasher.finalize());
+        let token_id = TokenId(id_bytes);
+
+        let def = TokenDefinition {
+            token_id,
+            name: name.to_string(),
+            symbol: symbol.to_string(),
+            decimals,
+            total_supply: 0, // Tracked on Tempo, mirrored opportunistically
+            max_supply,
+            creator: [0u8; 32], // System catalog entry
+            token_type: TokenType::CrossVm,
+            vm_addresses: VmAddresses {
+                evm: None,
+                svm: None,
+                daml_template_id: None,
+                native: None,
+                tempo: Some(tempo_address),
+            },
+            permissions: TokenPermissions {
+                mintable: false, // Issuer-controlled on Tempo, not from Tenzro
+                burnable: false,
+                pausable: false,
+                freezable: false,
+                paused: false,
+            },
+            created_at: 0,
+            metadata: TokenMetadata {
+                description: Some(format!(
+                    "Tempo L1 TIP-20 stablecoin ({}) at chain_id 42431",
+                    symbol
+                )),
+                ..Default::default()
+            },
+        };
+
+        self.index_token(&def);
+        self.persist_token(&def)?;
+        self.tokens.insert(token_id, def);
+
+        info!("Registered Tempo TIP-20 token {} in unified registry", symbol);
+        Ok(token_id)
     }
 
     /// Registers a new user-created token
@@ -460,6 +557,13 @@ impl TokenRegistry {
             .and_then(|id| self.tokens.get(&id).map(|r| r.clone()))
     }
 
+    /// Gets a token by Tempo L1 TIP-20 contract address
+    pub fn get_by_tempo_address(&self, address: &[u8; 20]) -> Option<TokenDefinition> {
+        self.by_tempo_address
+            .get(address)
+            .and_then(|id| self.tokens.get(&id).map(|r| r.clone()))
+    }
+
     /// Gets a token by symbol (case-insensitive)
     pub fn get_by_symbol(&self, symbol: &str) -> Option<TokenDefinition> {
         self.by_symbol
@@ -480,13 +584,12 @@ impl TokenRegistry {
             // Use creator index
             if let Some(ids) = self.by_creator.get(creator) {
                 for id in ids.iter().take(limit) {
-                    if let Some(def) = self.tokens.get(id) {
-                        if vm_filter
+                    if let Some(def) = self.tokens.get(id)
+                        && vm_filter
                             .map(|vm| def.vm_addresses.has_vm(vm))
                             .unwrap_or(true)
-                        {
-                            results.push(def.clone());
-                        }
+                    {
+                        results.push(def.clone());
                     }
                 }
             }
@@ -591,12 +694,12 @@ impl TokenRegistry {
                 reason: "Only token creator can mint".to_string(),
             });
         }
-        if let Some(max) = def.max_supply {
-            if def.total_supply.saturating_add(amount) > max {
-                return Err(TokenError::InvalidAmount(
-                    "Minting would exceed max supply".to_string(),
-                ));
-            }
+        if let Some(max) = def.max_supply
+            && def.total_supply.saturating_add(amount) > max
+        {
+            return Err(TokenError::InvalidAmount(
+                "Minting would exceed max supply".to_string(),
+            ));
         }
         def.total_supply = def.total_supply.checked_add(amount).ok_or_else(|| {
             TokenError::ArithmeticOverflow {

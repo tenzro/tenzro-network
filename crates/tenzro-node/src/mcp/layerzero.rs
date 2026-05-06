@@ -497,6 +497,14 @@ pub struct LzOftSendParams {
     pub gas_limit: Option<u128>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LzBroadcastSignedTxParams {
+    #[schemars(description = "Source chain name (e.g. 'ethereum', 'arbitrum', 'base', 'optimism', 'polygon', 'avalanche', 'bsc')")]
+    pub src_chain: String,
+    #[schemars(description = "Pre-signed Ethereum transaction in hex format (the 0x-prefixed RLP-encoded signed transaction). Construct calldata via lz_send_message / lz_oft_send / lz_stargate_send / lz_transfer_build, sign locally with msg.value = nativeFee, then submit here.")]
+    pub signed_tx_hex: String,
+}
+
 // ─── Helper functions ───
 
 fn err_internal(msg: impl Into<String>) -> ErrorData {
@@ -517,7 +525,13 @@ fn json_result(value: serde_json::Value) -> std::result::Result<CallToolResult, 
     )]))
 }
 
-#[allow(dead_code)]
+/// Wrap a plain string into a successful `CallToolResult`.
+///
+/// Used by `lz_broadcast_signed_tx` to return the raw transaction hash from
+/// `eth_sendRawTransaction`. The hex calldata builders (`lz_send_message`,
+/// `lz_oft_send`, `lz_stargate_send`, `lz_transfer_build`) all instruct the
+/// caller to sign and broadcast — `lz_broadcast_signed_tx` is the canonical
+/// broadcast path.
 fn text_result(text: impl Into<String>) -> std::result::Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(text.into())]))
 }
@@ -1733,6 +1747,65 @@ impl LayerZeroMcpServer {
             ),
         }))
     }
+
+    #[tool(description = "Broadcast a pre-signed Ethereum transaction via eth_sendRawTransaction on the source chain RPC. Use this as the canonical broadcast path for calldata produced by lz_send_message (EndpointV2.send), lz_oft_send (OFT.send), lz_stargate_send (StargatePoolNative.sendToken), and lz_transfer_build (Value Transfer API steps). Returns the transaction hash on success. The caller must construct calldata, sign locally with msg.value = nativeFee from the corresponding quote tool, then submit the RLP-encoded signed tx hex here.")]
+    async fn lz_broadcast_signed_tx(
+        &self,
+        Parameters(params): Parameters<LzBroadcastSignedTxParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let rpc_url = chain_rpc(&params.src_chain).ok_or_else(|| {
+            err_invalid_params(format!("Unknown chain: {}", params.src_chain))
+        })?;
+
+        let raw = if params.signed_tx_hex.starts_with("0x") || params.signed_tx_hex.starts_with("0X") {
+            params.signed_tx_hex.clone()
+        } else {
+            format!("0x{}", params.signed_tx_hex)
+        };
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_sendRawTransaction",
+            "params": [raw],
+        });
+
+        let resp = self
+            .http
+            .post(&rpc_url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| err_internal(format!("RPC request to {} failed: {}", rpc_url, e)))?;
+
+        let status = resp.status();
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|e| err_internal(format!("Failed to read RPC response: {}", e)))?;
+
+        if !status.is_success() {
+            return Err(err_internal(format!(
+                "RPC returned HTTP {}: {}",
+                status, body_text
+            )));
+        }
+
+        let json: serde_json::Value = serde_json::from_str(&body_text)
+            .map_err(|e| err_internal(format!("Failed to parse RPC response: {}", e)))?;
+
+        if let Some(error) = json.get("error") {
+            return Err(err_internal(format!("eth_sendRawTransaction error: {}", error)));
+        }
+
+        let tx_hash = json
+            .get("result")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| err_internal("eth_sendRawTransaction response missing 'result' field"))?
+            .to_string();
+
+        text_result(tx_hash)
+    }
 }
 
 // ─── ServerHandler ───
@@ -1781,7 +1854,9 @@ impl rmcp::ServerHandler for LayerZeroMcpServer {
              - lz_list_dvns — List Decentralized Verifier Networks\n\
              - lz_get_messages_by_address — Get messages for a wallet address\n\
              - lz_list_chains — List supported chains with EIDs\n\
-             - lz_get_chain_rpc — Get RPC URL for a chain"
+             - lz_get_chain_rpc — Get RPC URL for a chain\n\n\
+             Transaction Submission (1 tool):\n\
+             - lz_broadcast_signed_tx — Broadcast a pre-signed transaction via eth_sendRawTransaction on the source chain RPC"
                 .to_string(),
         );
         info

@@ -59,11 +59,22 @@ use sha2::{Digest, Sha256};
 /// The default slash amount is 10% of the validator's total stake.
 pub struct StakingSlashingCallback {
     staking: Arc<StakingManager>,
+    /// Epoch manager handle. When wired, slashed validators are also dropped
+    /// from the next epoch's pending-validator queue so that a punished node
+    /// cannot be promoted in the rotation that immediately follows the slash.
+    epoch_manager: Option<Arc<EpochManager>>,
 }
 
 impl StakingSlashingCallback {
     pub fn new(staking: Arc<StakingManager>) -> Self {
-        Self { staking }
+        Self { staking, epoch_manager: None }
+    }
+
+    /// Attach an epoch manager so slashed validators are dropped from the
+    /// next epoch's pending-validator queue.
+    pub fn with_epoch_manager(mut self, epoch_manager: Arc<EpochManager>) -> Self {
+        self.epoch_manager = Some(epoch_manager);
+        self
     }
 }
 
@@ -103,6 +114,18 @@ impl SlashingCallback for StakingSlashingCallback {
                     slash_amount = slash_amount,
                     "Slashed validator for equivocation"
                 );
+
+                // Drop the slashed validator from the next epoch's pending
+                // queue if we have an epoch manager handle. Idempotent: a
+                // non-pending address is just retained-out as a no-op.
+                if let Some(em) = self.epoch_manager.as_ref() {
+                    em.remove_pending_validator(validator);
+                    tracing::info!(
+                        validator = %validator,
+                        view = view,
+                        "Removed slashed validator from next-epoch pending queue"
+                    );
+                }
             }
             Err(e) => {
                 tracing::error!(
@@ -150,11 +173,16 @@ impl NodeValidatorRegistry {
         tracing::info!(peer = %peer_id, "Registered validator peer");
     }
 
-    /// Removes a PeerId from the validator set (e.g., on epoch change or slashing)
-    #[allow(dead_code)]
+    /// Removes a PeerId from the validator set.
+    ///
+    /// Called by the network layer's `try_remove_validator` (via the
+    /// `ValidatorRegistry` trait) when a peer is banned for misbehavior, and
+    /// can also be called directly on epoch rotation or governance-driven
+    /// validator removal.
     pub fn remove_validator(&self, peer_id: &libp2p::PeerId) {
-        self.validator_peers.remove(peer_id);
-        tracing::info!(peer = %peer_id, "Removed validator peer");
+        if self.validator_peers.remove(peer_id).is_some() {
+            tracing::info!(peer = %peer_id, "Removed validator peer");
+        }
     }
 }
 
@@ -186,6 +214,13 @@ impl tenzro_network::ValidatorRegistry for NodeValidatorRegistry {
                 "Dynamically registered validator peer via identify"
             );
         }
+    }
+
+    /// Remove a peer from the validator set when it has been banned by the
+    /// peer manager. Mirrors `try_add_validator` so authorization stays
+    /// consistent with peer admission state.
+    fn try_remove_validator(&self, peer_id: &libp2p::PeerId) {
+        self.remove_validator(peer_id);
     }
 }
 
@@ -515,6 +550,21 @@ pub struct TenzroNode {
     /// redundant `on_proposal()` invocations.
     local_validator_address: Option<Address>,
 
+    /// Validator-owned hybrid (Ed25519 + ML-DSA-65) signer, constructed
+    /// from the same `validator_key` + `validator_pq_key` that consensus
+    /// loads in [`init_consensus`]. Used by webhook-sourced TDIP
+    /// revocation paths (e.g. Stripe SPT `granted_token.deactivated`)
+    /// that need to sign a `SignedRevocationEntry` before broadcasting
+    /// the revocation to the rest of the mesh via the
+    /// `RevocationBroadcaster`. `None` on non-validator roles.
+    validator_hybrid_signer: Option<Arc<dyn tenzro_crypto::composite::HybridSigner>>,
+
+    /// Stripe SPT ceiling-resolver cache adapter. Held here so the
+    /// SPT-revocation RPC + (future) webhook receive endpoint can
+    /// invalidate the cache in lockstep with `IdentityRegistry::revoke`.
+    /// `None` when no Stripe API key is configured.
+    spt_ceiling_cache: Option<Arc<crate::spt_ceiling_bridge::SptCeilingResolverAdapter>>,
+
     // Execution layer
     vm_runtime: Option<Arc<MultiVmRuntime>>,
 
@@ -522,11 +572,46 @@ pub struct TenzroNode {
     wallet_service: Option<Arc<TenzroWalletService>>,
     token: Option<Arc<TnzoToken>>,
     staking: Option<Arc<StakingManager>>,
+    /// AgentBond surety primitive (Agent-Swarm Spec 9). Single source of
+    /// truth for bond state across lane resolution, RPC reads, and
+    /// post-block scan dispatch from VM-emitted bond logs. Persists to
+    /// CF_AGENTS via `BondManager::with_storage`.
+    bond_manager: Option<Arc<tenzro_token::bond::BondManager>>,
+    /// BurnQuota singleton (Agent-Swarm Spec 3 — wave 1). Tracks the
+    /// protocol-side TNZO budget the stablecoin paymaster will draw from
+    /// once the dual-rail-gas paymaster + oracle + AMM swap loop lands.
+    /// In wave 1 only the read RPC `tenzro_getBurnQuota` is wired;
+    /// `try_drain` / `refill` are public on the manager but no caller
+    /// invokes them yet. Persists to CF_TOKENS via
+    /// `BurnQuotaManager::with_storage`.
+    burn_quota_manager: Option<Arc<tenzro_token::burn_quota::BurnQuotaManager>>,
+    /// Adaptive burn governance dial (Agent-Swarm Spec 8). Holds the
+    /// current `BurnRateConfig`, the `SupplyTargets` thresholds, and the
+    /// most recent `SupplyMetricsSnapshot`. Read-only RPCs surface the
+    /// recommendation produced by `compute_recommendation`; the
+    /// auto-proposal generator and EIP-1559 fee-market consumer land in a
+    /// later wave alongside the governance executor wiring. Persists to
+    /// CF_TOKENS via `BurnRateConfigManager::with_storage`.
+    burn_rate_manager: Option<Arc<tenzro_token::adaptive_burn::BurnRateConfigManager>>,
+    /// SeedAgent treasury earmark manager (Agent-Swarm Spec 10). Owns the
+    /// genesis-funded TreasuryEarmark, the catalog of operation Charters
+    /// (C1-C6), and the per-DID `SeedAgentRecord` registry that drives the
+    /// 12-month bootstrap traffic. Read-only RPCs surface earmark balance,
+    /// charter listings, and per-agent status; the off-chain provisioning
+    /// daemon, monthly decay enforcement, and governance-executor mutation
+    /// paths land in a later wave. Persists to CF_TOKENS via
+    /// `SeedAgentEarmarkManager::with_storage`.
+    seed_agent_manager: Option<Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>>,
     governance: Option<Arc<GovernanceEngine>>,
     treasury: Option<Arc<NetworkTreasury>>,
     settlement: Option<Arc<SettlementEngine>>,
     channel_manager: Option<Arc<ChannelManager>>,
     escrow_manager: Option<Arc<EscrowManager>>,
+    /// Kill-switch receipt store (Agent-Swarm Spec 1). Records every
+    /// `KillSwitchPause`/`KillSwitchQuarantine`/`KillSwitchTerminate` log
+    /// emitted by the VM so that read-RPCs can list receipts by agent or
+    /// controller DID. Persisted to CF_SETTLEMENTS.
+    kill_switch_store: Option<Arc<tenzro_settlement::KillSwitchStore>>,
     batch_processor: Option<Arc<BatchProcessor>>,
     fee_collector: Option<Arc<FeeCollector>>,
 
@@ -584,6 +669,12 @@ pub struct TenzroNode {
     payment_gateway: Option<Arc<TenzroPaymentGateway>>,
     x402_server: Option<Arc<X402PaymentServer>>,
 
+    /// Spec-2 per-DID admission controller. Wired into the consensus
+    /// mempool at startup (`set_admission`); also held here so RPC
+    /// handlers (`tenzro_getMempoolLane`, `tenzro_getMempoolStats`) can
+    /// consult buckets and stats without going through the engine.
+    admission: Option<Arc<tenzro_consensus::admission::AdmissionController>>,
+
     // Agent Kit (registry-driven agent runtime)
     agent_kit: Option<Arc<tenzro_agent_kit::AgentKit>>,
 
@@ -593,8 +684,12 @@ pub struct TenzroNode {
     // Interoperability
     bridge_router: Option<Arc<BridgeRouter>>,
 
-    // TEE (optional)
-    #[allow(dead_code)]
+    // TEE (optional). The local hardware provider is retained so attestation
+    // requests routed to this node (RPC `tenzro_attest`, MCP `attest`, agent
+    // workloads requesting confidential execution) can call
+    // `provider.generate_attestation(user_data)` instead of returning a stub.
+    // Populated by `init_tee()`; consumed by the TEE attestation request path
+    // and exposed via `tee_provider()` accessor.
     tee_provider: Option<Box<dyn TeeProvider>>,
     tee_registry: Option<Arc<TeeRegistry>>,
 
@@ -638,7 +733,7 @@ pub struct TenzroNode {
     chain_tip: Arc<AtomicU64>,
 
     /// Tracks the latest `StatusMessage` height advertised by each peer on
-    /// `tenzro/status/1.0.0`. Consumed by `eth_syncing` / `tenzro_syncing` to
+    /// `tenzro/status`. Consumed by `eth_syncing` / `tenzro_syncing` to
     /// report a real network-tip estimate (not just `local_tip`) so external
     /// clients can see when this node is lagging behind the network.
     ///
@@ -677,7 +772,7 @@ pub struct TenzroNode {
     pub cortex_workers: Arc<DashMap<String, Arc<tenzro_cortex::CortexWorker>>>,
 
     /// In-memory registry of remote Cortex workers discovered via the
-    /// `tenzro/cortex/1.0.0` gossipsub topic. The registry ingests signed
+    /// `tenzro/cortex` gossipsub topic. The registry ingests signed
     /// `CortexAdvertisement` payloads, lazily evicts expired entries on
     /// snapshot, and is surfaced to clients via
     /// `tenzro_listRemoteCortexWorkers`.
@@ -824,15 +919,22 @@ impl TenzroNode {
             consensus: None,
             consensus_out_rx: None,
             local_validator_address: None,
+            validator_hybrid_signer: None,
+            spt_ceiling_cache: None,
             vm_runtime: None,
             wallet_service: None,
             token: None,
             staking: None,
+            bond_manager: None,
+            burn_quota_manager: None,
+            burn_rate_manager: None,
+            seed_agent_manager: None,
             governance: None,
             treasury: None,
             settlement: None,
             channel_manager: None,
             escrow_manager: None,
+            kill_switch_store: None,
             batch_processor: None,
             fee_collector: None,
             auth_engine: None,
@@ -857,6 +959,7 @@ impl TenzroNode {
             identity_registry: None,
             payment_gateway: None,
             x402_server: None,
+            admission: None,
             agent_kit: None,
             token_registry: None,
             bridge_router: None,
@@ -905,7 +1008,7 @@ impl TenzroNode {
     }
 
     /// Returns the maximum block height advertised by any fresh peer on
-    /// `tenzro/status/1.0.0`, or `None` if no fresh peer status is recorded.
+    /// `tenzro/status`, or `None` if no fresh peer status is recorded.
     ///
     /// "Fresh" = received within the last 60 seconds. Stale entries are
     /// excluded so that a peer that disconnects without sending an explicit
@@ -958,11 +1061,21 @@ impl TenzroNode {
     pub async fn start(&mut self) -> Result<()> {
         {
             let mut state = self.state.write();
-            if *state != NodeState::Created {
-                return Err(NodeError::InvalidState(format!(
-                    "Cannot start node in state {:?}",
-                    *state
-                )));
+            // A node can only be started exactly once; any state other than
+            // `Created` means we're either already running, in the middle of
+            // a transition, or have been shut down. Distinguish "already
+            // started" from generic invalid-state for operator clarity.
+            match *state {
+                NodeState::Created => {}
+                NodeState::Starting | NodeState::Running => {
+                    return Err(NodeError::AlreadyStarted("node".to_string()));
+                }
+                _ => {
+                    return Err(NodeError::InvalidState(format!(
+                        "Cannot start node in state {:?}",
+                        *state
+                    )));
+                }
             }
             *state = NodeState::Starting;
         }
@@ -1005,12 +1118,11 @@ impl TenzroNode {
             let registry = Arc::new(NodeValidatorRegistry::new());
 
             // Register the local node's PeerId as a validator if we run consensus.
-            if should_init_consensus {
-                if let Ok(local_peer_id) = network.local_peer_id().await {
+            if should_init_consensus
+                && let Ok(local_peer_id) = network.local_peer_id().await {
                     registry.add_validator(local_peer_id);
                     info!("Registered local node {} as validator in peer authorization registry", local_peer_id);
                 }
-            }
 
             // Register boot node peer IDs as validators. On testnet, boot nodes ARE validators
             // and non-validator nodes need to accept block/consensus messages from them.
@@ -1099,6 +1211,56 @@ impl TenzroNode {
             self.health_monitor.mark_unhealthy("identity", e.to_string());
         })?;
 
+        // 10b. Wire Spec-2 per-DID admission controller into the consensus
+        //      mempool. Has to happen AFTER both consensus (#7) and identity
+        //      (#10) are up — `NodeLaneResolver` reads from
+        //      `IdentityRegistry` + `StakingManager`, neither of which exists
+        //      at `init_consensus` time. Until this call lands the mempool
+        //      runs in legacy size-only mode; the window is bounded by the
+        //      few async steps between init_consensus() and here, during
+        //      which the node has not yet started servicing inbound traffic.
+        if let (Some(consensus), Some(identity), Some(staking), Some(bond_manager)) = (
+            self.consensus.clone(),
+            self.identity_registry.clone(),
+            self.staking.clone(),
+            self.bond_manager.clone(),
+        ) {
+            use crate::lane_resolver::NodeLaneResolver;
+            use tenzro_consensus::admission::{AdmissionConfig, AdmissionController};
+
+            let admission_config = AdmissionConfig::default();
+            let resolver = Arc::new(NodeLaneResolver::new(
+                identity,
+                staking,
+                bond_manager,
+                admission_config.min_verified_stake,
+                admission_config.bond_promotes_to_delegated,
+                admission_config.bond_min_for_promotion,
+            ));
+            let admission = Arc::new(AdmissionController::new(admission_config, resolver));
+            match consensus.set_admission(admission.clone()) {
+                Ok(()) => {
+                    info!(
+                        "Spec-2 per-DID admission controller wired into consensus mempool \
+                         (verified={}/{} burst, delegated={}/{} burst, open={}/{} burst)",
+                        admission.config().verified_refill_rate_per_sec,
+                        admission.config().verified_burst,
+                        admission.config().delegated_refill_rate_per_sec,
+                        admission.config().delegated_burst,
+                        admission.config().open_refill_rate_per_sec,
+                        admission.config().open_burst,
+                    );
+                    self.admission = Some(admission);
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "Admission controller already wired — refusing to overwrite"
+                    );
+                }
+            }
+        }
+
         // 11. Initialize payment gateway (MPP/x402)
         self.init_payments().await.inspect_err(|e| {
             self.health_monitor.mark_unhealthy("payments", e.to_string());
@@ -1131,15 +1293,24 @@ impl TenzroNode {
     }
 
     /// Stop all subsystems gracefully
-    #[allow(dead_code)]
     pub async fn stop(&mut self) -> Result<()> {
         {
             let mut state = self.state.write();
-            if *state != NodeState::Running {
-                return Err(NodeError::InvalidState(format!(
-                    "Cannot stop node in state {:?}",
-                    *state
-                )));
+            // Only `Running` nodes can be stopped. `Created` / `Starting`
+            // means the node hasn't reached a steady state yet — surface
+            // that as the `NotStarted` variant so operators get an
+            // actionable error rather than a generic state mismatch.
+            match *state {
+                NodeState::Running => {}
+                NodeState::Created | NodeState::Starting => {
+                    return Err(NodeError::NotStarted("node".to_string()));
+                }
+                _ => {
+                    return Err(NodeError::InvalidState(format!(
+                        "Cannot stop node in state {:?}",
+                        *state
+                    )));
+                }
             }
             *state = NodeState::Stopping;
         }
@@ -1152,6 +1323,7 @@ impl TenzroNode {
         self.bridge_router = None;
         self.payment_gateway = None;
         self.x402_server = None;
+        self.admission = None;
         self.identity_registry = None;
         self.agent_runtime = None;
         self.inference_router = None;
@@ -1160,6 +1332,7 @@ impl TenzroNode {
         self.settlement = None;
         self.channel_manager = None;
         self.escrow_manager = None;
+        self.kill_switch_store = None;
         self.auth_engine = None;
         self.treasury = None;
         self.governance = None;
@@ -1267,6 +1440,11 @@ impl TenzroNode {
                 info!("Detected TEE vendor: {:?}", provider.vendor());
                 let registry = Arc::new(TeeRegistry::new(300));
                 self.tee_registry = Some(registry);
+                // Retain the local hardware provider so the attestation
+                // request paths (RPC, MCP, agent workloads) can call
+                // `tee_provider().generate_attestation(user_data)` directly
+                // against the local enclave instead of returning a stub.
+                self.tee_provider = Some(provider);
                 self.health_monitor.mark_healthy("tee");
             }
             None => {
@@ -1339,6 +1517,99 @@ impl TenzroNode {
         };
         self.staking = Some(staking);
 
+        // Initialize AgentBond manager (Spec 9). Uses CF_AGENTS for bond /
+        // claim / pool persistence; no manager-level wallet, just a write-
+        // through cache. The VM is the source of truth for bond *funds*
+        // (via vault addresses); BondManager owns lifecycle envelope state
+        // (Active / Cooldown / Frozen / Slashed / Returned) and the
+        // governance-tunable thresholds consulted by the lane resolver.
+        let bond_manager = if let Some(storage) = &self.storage {
+            match tenzro_token::bond::BondManager::with_storage(
+                storage.clone() as Arc<dyn KvStore>,
+            ) {
+                Ok(m) => Arc::new(m),
+                Err(e) => {
+                    warn!(
+                        "BondManager hydration failed ({}), falling back to in-memory",
+                        e
+                    );
+                    Arc::new(tenzro_token::bond::BondManager::new())
+                }
+            }
+        } else {
+            Arc::new(tenzro_token::bond::BondManager::new())
+        };
+        self.bond_manager = Some(bond_manager);
+
+        // Initialize BurnQuota singleton (Agent-Swarm Spec 3 — wave 1).
+        // The full dual-rail-gas paymaster ships in a later wave once the
+        // bridge mesh (Wormhole NTT USDC pool) and Chainlink/Pyth oracles
+        // are in place; in this wave we land the on-chain accounting
+        // primitive only, persisted under CF_TOKENS so genesis and any
+        // operator-initiated refill survive restarts.
+        let burn_quota_manager = if let Some(storage) = &self.storage {
+            match tenzro_token::burn_quota::BurnQuotaManager::with_storage(
+                storage.clone() as Arc<dyn KvStore>,
+            ) {
+                Ok(m) => Arc::new(m),
+                Err(e) => {
+                    warn!(
+                        "BurnQuotaManager hydration failed ({}), falling back to in-memory",
+                        e
+                    );
+                    Arc::new(tenzro_token::burn_quota::BurnQuotaManager::new())
+                }
+            }
+        } else {
+            Arc::new(tenzro_token::burn_quota::BurnQuotaManager::new())
+        };
+        self.burn_quota_manager = Some(burn_quota_manager);
+
+        // Initialize adaptive burn governance dial (Agent-Swarm Spec 8).
+        // Wave 1 lands the protocol primitives + read RPCs; the
+        // auto-proposal generator and the EIP-1559 fee-market consumer
+        // ship alongside the governance executor wiring in a later wave.
+        let burn_rate_manager = if let Some(storage) = &self.storage {
+            match tenzro_token::adaptive_burn::BurnRateConfigManager::with_storage(
+                storage.clone() as Arc<dyn KvStore>,
+            ) {
+                Ok(m) => Arc::new(m),
+                Err(e) => {
+                    warn!(
+                        "BurnRateConfigManager hydration failed ({}), falling back to in-memory",
+                        e
+                    );
+                    Arc::new(tenzro_token::adaptive_burn::BurnRateConfigManager::new())
+                }
+            }
+        } else {
+            Arc::new(tenzro_token::adaptive_burn::BurnRateConfigManager::new())
+        };
+        self.burn_rate_manager = Some(burn_rate_manager);
+
+        // Initialize SeedAgent treasury earmark manager (Agent-Swarm Spec 10).
+        // Wave 1 lands the protocol primitives, persistence, and read-only
+        // RPCs. The off-chain provisioning daemon, monthly decay enforcement,
+        // sunset wind-down sweep, and governance-executor mutation paths land
+        // in a later wave.
+        let seed_agent_manager = if let Some(storage) = &self.storage {
+            match tenzro_token::seed_agent::SeedAgentEarmarkManager::with_storage(
+                storage.clone() as Arc<dyn KvStore>,
+            ) {
+                Ok(m) => Arc::new(m),
+                Err(e) => {
+                    warn!(
+                        "SeedAgentEarmarkManager hydration failed ({}), falling back to in-memory",
+                        e
+                    );
+                    Arc::new(tenzro_token::seed_agent::SeedAgentEarmarkManager::new())
+                }
+            }
+        } else {
+            Arc::new(tenzro_token::seed_agent::SeedAgentEarmarkManager::new())
+        };
+        self.seed_agent_manager = Some(seed_agent_manager);
+
         // Initialize governance with persistent storage and staking integration
         let governance = if let Some(ref storage) = self.storage {
             if let Some(ref staking) = self.staking {
@@ -1384,6 +1655,26 @@ impl TenzroNode {
         ) {
             warn!("TNZO token registration: {} (may already be registered)", e);
         }
+
+        // Register canonical Tempo L1 TIP-20 stablecoins so the catalog reflects
+        // Tempo as a first-class settlement venue. Addresses are placeholders pending
+        // canonical Tempo issuance directory; deterministic so seeing-the-symbol
+        // gives downstream consumers a stable token_id.
+        // Once Stripe/Paradigm publish official issuance addresses, swap in cleanly.
+        for (symbol, name, decimals, addr_seed) in [
+            ("USDC", "USD Coin (Tempo)", 6u8, 0xC1u8),
+            ("PYUSD", "PayPal USD (Tempo)", 6u8, 0xC2u8),
+            ("USDT", "Tether USD (Tempo)", 6u8, 0xC3u8),
+        ] {
+            // Deterministic placeholder address: 19-byte zero-pad + per-symbol seed byte.
+            // Will be replaced via governance when canonical issuance lands.
+            let mut addr = [0u8; 20];
+            addr[19] = addr_seed;
+            if let Err(e) = token_registry.register_tip20(symbol, name, decimals, addr, None) {
+                warn!("Tempo TIP-20 {} registration: {}", symbol, e);
+            }
+        }
+
         self.token_registry = Some(token_registry);
 
         self.health_monitor.mark_healthy("token");
@@ -1407,6 +1698,32 @@ impl TenzroNode {
         let keypair = load_or_generate_validator_keypair(&self.config.data_dir)?;
         let pq_signing_key = load_or_generate_validator_pq_key(&self.config.data_dir)?;
         let local_pq_vk = pq_signing_key.verifying_key_bytes().to_vec();
+
+        // Build a sibling `InMemoryHybridSigner` from the same key material
+        // so webhook-sourced TDIP revocation paths (e.g. Stripe SPT
+        // `granted_token.deactivated`) can sign a `SignedRevocationEntry`
+        // and fan it out via the `RevocationBroadcaster`. The consensus
+        // engine consumes the originals below, so we rebuild a duplicate
+        // pair from the same bytes — `KeyPair`/`MlDsaSigningKey` are not
+        // `Clone` by design (secret material).
+        let signer_keypair = KeyPair::from_bytes(KeyType::Ed25519, &keypair.to_bytes())
+            .map_err(|e| NodeError::Other(format!(
+                "Failed to rebuild validator keypair for hybrid signer: {}", e
+            )))?;
+        let signer_pq = tenzro_crypto::pq::MlDsaSigningKey::from_seed(pq_signing_key.seed_bytes())
+            .map_err(|e| NodeError::Other(format!(
+                "Failed to rebuild validator PQ key for hybrid signer: {}", e
+            )))?;
+        let classical_signer: Box<dyn tenzro_crypto::signatures::Signer + Send + Sync> =
+            Box::new(tenzro_crypto::signatures::Ed25519SignerImpl::new(signer_keypair)
+                .map_err(|e| NodeError::Other(format!(
+                    "Failed to construct Ed25519 signer for hybrid signer: {}", e
+                )))?);
+        let hybrid_signer: Arc<dyn tenzro_crypto::composite::HybridSigner> = Arc::new(
+            tenzro_crypto::composite::InMemoryHybridSigner::new(classical_signer, signer_pq),
+        );
+        self.validator_hybrid_signer = Some(hybrid_signer);
+        info!("Validator hybrid signer (Ed25519 + ML-DSA-65) constructed for TDIP revocation paths");
 
         // Convert address
         let crypto_addr = keypair.address();
@@ -1525,11 +1842,16 @@ impl TenzroNode {
         // before they re-enter the engine.
         self.local_validator_address = Some(address);
 
-        // Wire slashing callback so equivocation triggers real stake slashing
+        // Wire slashing callback so equivocation triggers real stake slashing.
+        // Also pass the engine's epoch-manager handle so slashed validators are
+        // dropped from the next epoch's pending-validator queue.
         if let Some(ref staking) = self.staking {
-            let callback = Arc::new(StakingSlashingCallback::new(staking.clone()));
+            let callback = Arc::new(
+                StakingSlashingCallback::new(staking.clone())
+                    .with_epoch_manager(engine.epoch_manager()),
+            );
             engine = engine.with_slashing_callback(callback);
-            info!("Slashing callback wired to consensus engine");
+            info!("Slashing callback wired to consensus engine (with epoch-manager handle)");
         }
 
         // Wire state root provider so block proposals include real state roots.
@@ -1708,6 +2030,20 @@ impl TenzroNode {
             Arc::new(EscrowManager::new(balances))
         };
         self.escrow_manager = Some(escrow_manager);
+
+        // KillSwitchStore — write-through to CF_SETTLEMENTS for kill-switch
+        // receipts (Agent-Swarm Spec 1). Hydrates `by_agent`/`by_controller`
+        // indices on startup from persisted records.
+        let kill_switch_store = if let Some(ref storage) = self.storage {
+            let store = tenzro_settlement::KillSwitchStore::with_storage(
+                storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+            );
+            info!("KillSwitchStore initialized with persistent storage (CF_SETTLEMENTS)");
+            Arc::new(store)
+        } else {
+            Arc::new(tenzro_settlement::KillSwitchStore::new())
+        };
+        self.kill_switch_store = Some(kill_switch_store);
 
         // BatchProcessor — write-through to CF_SETTLEMENTS via the storage
         // builder. `BatchProcessor::with_storage` is a builder method on `new()`.
@@ -1922,7 +2258,7 @@ impl TenzroNode {
             // Spawn inbound bridge: subscribes to agents topic → feeds into transport
             let net_in = network.clone();
             tokio::spawn(async move {
-                match net_in.subscribe("tenzro/agents/1.0.0").await {
+                match net_in.subscribe("tenzro/agents").await {
                     Ok(mut rx) => {
                         while let Some(msg) = rx.recv().await {
                             if let tenzro_network::MessagePayload::Custom { data, .. } = msg.payload
@@ -1950,7 +2286,7 @@ impl TenzroNode {
                 }
             });
 
-            info!("Agent messaging wired to gossipsub (tenzro/agents/1.0.0)");
+            info!("Agent messaging wired to gossipsub (tenzro/agents)");
             // Prefer the storage-backed constructor so RegisteredAgent,
             // AgentLifecycleInfo, and the spawn tree are hydrated on boot and
             // every subsequent mutation is written through to CF_AGENTS.
@@ -2114,13 +2450,11 @@ impl TenzroNode {
                     .filter_map(|k| storage.get(CF_SKILLS, &k).ok().flatten())
                     .filter_map(|v| serde_json::from_slice::<SkillDefinition>(&v).ok())
                     .any(|s| s.name == skill.name && s.creator_did == skill.creator_did);
-                if !already_present {
-                    if let Ok(value) = serde_json::to_vec(skill) {
-                        if storage.put(CF_SKILLS, key, &value).is_ok() {
+                if !already_present
+                    && let Ok(value) = serde_json::to_vec(skill)
+                        && storage.put(CF_SKILLS, key, &value).is_ok() {
                             skills_registered += 1;
                         }
-                    }
-                }
             }
             if skills_registered > 0 {
                 info!("Auto-registered {} built-in skill(s) in CF_SKILLS", skills_registered);
@@ -2201,13 +2535,11 @@ impl TenzroNode {
                     .filter_map(|k| storage.get(CF_TOOLS, &k).ok().flatten())
                     .filter_map(|v| serde_json::from_slice::<ToolDefinition>(&v).ok())
                     .any(|t| t.name == tool.name && t.creator_did == tool.creator_did);
-                if !already_present {
-                    if let Ok(value) = serde_json::to_vec(tool) {
-                        if storage.put(CF_TOOLS, key, &value).is_ok() {
+                if !already_present
+                    && let Ok(value) = serde_json::to_vec(tool)
+                        && storage.put(CF_TOOLS, key, &value).is_ok() {
                             tools_registered += 1;
                         }
-                    }
-                }
             }
             if tools_registered > 0 {
                 info!("Auto-registered {} built-in tool(s) in CF_TOOLS", tools_registered);
@@ -2306,20 +2638,17 @@ impl TenzroNode {
                     if legacy_key == &key {
                         continue;
                     }
-                    if let Ok(Some(v)) = storage.get(CF_AGENT_TEMPLATES, legacy_key) {
-                        if let Ok(t) = serde_json::from_slice::<AgentTemplate>(&v) {
-                            if t.name == template.name && t.creator == template.creator
+                    if let Ok(Some(v)) = storage.get(CF_AGENT_TEMPLATES, legacy_key)
+                        && let Ok(t) = serde_json::from_slice::<AgentTemplate>(&v)
+                            && t.name == template.name && t.creator == template.creator
                                 && storage.delete(CF_AGENT_TEMPLATES, legacy_key).is_ok() {
                                     templates_migrated += 1;
                                 }
-                        }
-                    }
                 }
-                if let Ok(value) = serde_json::to_vec(template) {
-                    if storage.put(CF_AGENT_TEMPLATES, &key, &value).is_ok() {
+                if let Ok(value) = serde_json::to_vec(template)
+                    && storage.put(CF_AGENT_TEMPLATES, &key, &value).is_ok() {
                         templates_registered += 1;
                     }
-                }
             }
             if templates_registered > 0 || templates_migrated > 0 {
                 info!(
@@ -2384,14 +2713,12 @@ impl TenzroNode {
                 Ok(keys) => {
                     let mut restored = 0usize;
                     for key_bytes in &keys {
-                        if let Ok(instance_id) = std::str::from_utf8(key_bytes) {
-                            if let Ok(Some(data)) = storage.get(CF_MODEL_SERVICES, key_bytes) {
-                                if let Ok(instance) = serde_json::from_slice::<tenzro_types::model::ModelServiceInstance>(&data) {
+                        if let Ok(instance_id) = std::str::from_utf8(key_bytes)
+                            && let Ok(Some(data)) = storage.get(CF_MODEL_SERVICES, key_bytes)
+                                && let Ok(instance) = serde_json::from_slice::<tenzro_types::model::ModelServiceInstance>(&data) {
                                     self.model_services.insert(instance_id.to_string(), instance);
                                     restored += 1;
                                 }
-                            }
-                        }
                     }
                     if restored > 0 {
                         info!("Restored {} model service(s) from RocksDB CF_MODEL_SERVICES on startup", restored);
@@ -2400,10 +2727,10 @@ impl TenzroNode {
                     // Also restore network-discovered model endpoints (from gossipsub, persisted)
                     let mut net_restored = 0usize;
                     for key_bytes in &keys {
-                        if let Ok(key_str) = std::str::from_utf8(key_bytes) {
-                            if key_str.starts_with("net_model:") {
-                                if let Ok(Some(data)) = storage.get(CF_MODEL_SERVICES, key_bytes) {
-                                    if let Ok(reg) = serde_json::from_slice::<tenzro_network::ModelRegistrationMessage>(&data) {
+                        if let Ok(key_str) = std::str::from_utf8(key_bytes)
+                            && key_str.starts_with("net_model:")
+                                && let Ok(Some(data)) = storage.get(CF_MODEL_SERVICES, key_bytes)
+                                    && let Ok(reg) = serde_json::from_slice::<tenzro_network::ModelRegistrationMessage>(&data) {
                                         // Only restore non-withdrawn, non-expired entries
                                         if !reg.withdrawn {
                                             let model_key = key_str.trim_start_matches("net_model:").to_string();
@@ -2414,9 +2741,6 @@ impl TenzroNode {
                                             net_restored += 1;
                                         }
                                     }
-                                }
-                            }
-                        }
                     }
                     if net_restored > 0 {
                         info!("Restored {} network model endpoint(s) from RocksDB on startup", net_restored);
@@ -2607,7 +2931,7 @@ impl TenzroNode {
             }
 
             // Spawn a periodic advertisement broadcaster so peers can discover
-            // this cortex worker over the `tenzro/cortex/1.0.0` gossipsub
+            // this cortex worker over the `tenzro/cortex` gossipsub
             // topic. Requires libp2p `NetworkService` to be live — if the node
             // is running in single-process mode (e.g. an in-process test
             // harness with `network = None`) we skip the spawn and the worker
@@ -2703,8 +3027,8 @@ impl TenzroNode {
         }
 
         // LayerZero V2 adapter
-        if let Some(lz_cfg) = &bridge_cfg.layerzero {
-            if lz_cfg.enabled {
+        if let Some(lz_cfg) = &bridge_cfg.layerzero
+            && lz_cfg.enabled {
                 // LayerZero V2 EndpointV2 address is the same across all EVM chains
                 let lz_config = LayerZeroConfig::new(
                     "0x1a44076050125825900e736c501f859c50fE728c",
@@ -2739,11 +3063,10 @@ impl TenzroNode {
                 bridge_router.register_adapter("layerzero", Box::new(adapter)).await;
                 info!("Registered LayerZero V2 bridge adapter");
             }
-        }
 
         // Chainlink CCIP adapter
-        if let Some(ccip_cfg) = &bridge_cfg.ccip {
-            if ccip_cfg.enabled {
+        if let Some(ccip_cfg) = &bridge_cfg.ccip
+            && ccip_cfg.enabled {
                 let mut adapter = ChainlinkCcipAdapter::new(
                     CcipConfig::ethereum_mainnet(FeeToken::Native),
                 );
@@ -2773,11 +3096,10 @@ impl TenzroNode {
                 bridge_router.register_adapter("ccip", Box::new(adapter)).await;
                 info!("Registered Chainlink CCIP bridge adapter");
             }
-        }
 
         // deBridge DLN adapter
-        if let Some(db_cfg) = &bridge_cfg.debridge {
-            if db_cfg.enabled {
+        if let Some(db_cfg) = &bridge_cfg.debridge
+            && db_cfg.enabled {
                 let debridge_config = DeBridgeConfig::new(
                     "https://dln.debridge.finance",
                     db_cfg.chain_id,
@@ -2811,7 +3133,6 @@ impl TenzroNode {
                 bridge_router.register_adapter("debridge", Box::new(adapter)).await;
                 info!("Registered deBridge DLN bridge adapter");
             }
-        }
 
         self.bridge_router = Some(bridge_router);
         self.health_monitor.mark_healthy("bridge");
@@ -2860,7 +3181,38 @@ impl TenzroNode {
             info!("ERC-8004 auto-mirror wired: TDIP machine registrations replicate to 0x101a");
         }
 
-        self.identity_registry = Some(Arc::new(registry));
+        // Wire the AgentBond lookup (Spec 9). When set, every receipt
+        // the principal-chain resolver produces carries `actor_bond` and
+        // `controller_bond_aggregate` snapshots — regulators see real
+        // skin-in-the-game on every settlement, payment, and lifecycle
+        // event without recursive walks.
+        if let Some(ref bond_manager) = self.bond_manager {
+            registry = registry.with_bond_lookup(
+                bond_manager.clone()
+                    as Arc<dyn tenzro_types::principal_chain::BondLookup>,
+            );
+            info!("BondManager wired into IdentityRegistry: receipts will carry Spec-9 bond fields");
+        } else {
+            warn!("BondManager unavailable at identity init — receipt bond fields will be None");
+        }
+
+        let registry_arc = Arc::new(registry);
+        self.identity_registry = Some(registry_arc.clone());
+
+        // Wire the live `PrincipalChainResolver` (Agent-Swarm Spec 5)
+        // into the settlement engine. Settlement is constructed earlier
+        // (`init_settlement`) than identity, so we attach the resolver
+        // after both are up. From this point on every receipt the
+        // engine writes carries a real principal chain rather than a
+        // synthetic anonymous one.
+        if let Some(ref settlement) = self.settlement {
+            settlement.set_principal_resolver(
+                registry_arc.clone()
+                    as Arc<dyn tenzro_types::principal_chain::PrincipalChainResolver>,
+            );
+            info!("SettlementEngine wired with live PrincipalChainResolver (Spec 5)");
+        }
+
         self.health_monitor.mark_healthy("identity");
 
         Ok(())
@@ -2949,6 +3301,15 @@ impl TenzroNode {
 
     /// Initializes the AgentKit runtime and bootstraps reference templates.
     /// Non-fatal: logs warnings on failure so the node still starts.
+    ///
+    /// The reference-template bootstrap is dispatched as a background task
+    /// that waits for the RPC server to bind on `rpc_addr` before issuing
+    /// the `tenzro_registerAgentTemplate` calls. This is necessary because
+    /// `Self::start()` runs to completion *before* `main.rs` spawns the
+    /// RPC server (line 234 in `main.rs`) — calling the RPC inline from
+    /// `start()` produces `rpc transport error: connection refused` on
+    /// every template. The deferred task polls TCP connect against
+    /// `rpc_addr` for up to 30s before giving up.
     async fn bootstrap_agent_templates(&mut self) {
         let rpc_addr = if self.config.rpc_addr.is_empty() {
             "127.0.0.1:8545".to_string()
@@ -2958,6 +3319,7 @@ impl TenzroNode {
         let rpc_url = format!("http://{rpc_addr}");
 
         // Build the AgentKit instance if both identity_registry and agent_runtime are available.
+        // This is purely in-process state — does not touch the RPC, so it stays inline.
         if let (Some(identity_registry), Some(agent_runtime)) =
             (self.identity_registry.clone(), self.agent_runtime.clone())
         {
@@ -2974,30 +3336,62 @@ impl TenzroNode {
             );
         }
 
-        // Bootstrap reference templates (idempotent).
-        let registry = std::sync::Arc::new(tenzro_agent_kit::RegistryClient::new(rpc_url));
-        match tenzro_agent_kit::bootstrap_reference_templates(&registry).await {
-            Ok(report) => {
-                if !report.published.is_empty() {
-                    info!(
-                        published = report.published.len(),
-                        skipped = report.skipped.len(),
-                        "Bootstrapped reference agent templates"
-                    );
-                } else {
-                    tracing::debug!(
-                        skipped = report.skipped.len(),
-                        "All reference agent templates already registered"
-                    );
-                }
-                for (label, err) in &report.failed {
-                    tracing::warn!(template = %label, error = %err, "Failed to bootstrap template");
+        // Defer the actual registry bootstrap until after the RPC server
+        // is listening. main.rs spawns the RPC server after start() returns,
+        // so issuing RPCs inline here always fails with connection refused.
+        let probe_addr = rpc_addr.clone();
+        tokio::spawn(async move {
+            // Wait up to 30s for the RPC listener to accept connections.
+            // main.rs spawns the RPC server after node.start() returns, so we
+            // must poll until the listener binds before issuing any RPCs.
+            let timeout = std::time::Duration::from_secs(30);
+            let backoff = std::time::Duration::from_millis(250);
+            let deadline = std::time::Instant::now() + timeout;
+            let mut connected = false;
+            while std::time::Instant::now() < deadline {
+                match tokio::net::TcpStream::connect(&probe_addr).await {
+                    Ok(_) => { connected = true; break; }
+                    Err(_) => tokio::time::sleep(backoff).await,
                 }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "Agent template bootstrap failed (non-fatal)");
+            if !connected {
+                tracing::warn!(
+                    rpc_addr = %probe_addr,
+                    "RPC server did not bind within 30s — skipping reference-template bootstrap"
+                );
+                return;
             }
-        }
+            let registry = std::sync::Arc::new(tenzro_agent_kit::RegistryClient::new(rpc_url));
+            match tenzro_agent_kit::bootstrap_reference_templates(&registry).await {
+                Ok(report) => {
+                    if !report.published.is_empty() {
+                        info!(
+                            published = report.published.len(),
+                            skipped = report.skipped.len(),
+                            "Bootstrapped reference agent templates"
+                        );
+                    } else {
+                        tracing::debug!(
+                            skipped = report.skipped.len(),
+                            "All reference agent templates already registered"
+                        );
+                    }
+                    for (label, err) in &report.failed {
+                        tracing::warn!(
+                            template = %label,
+                            error = %err,
+                            "Failed to bootstrap template"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Agent template bootstrap failed (non-fatal)"
+                    );
+                }
+            }
+        });
     }
 
     /// Bootstrap ecosystem MCP server tools and skills into CF_TOOLS / CF_SKILLS.
@@ -3030,11 +3424,10 @@ impl TenzroNode {
             // Check if already exists by scanning for matching name
             let existing = storage.get_keys_with_prefix(CF_TOOLS, b"").ok().unwrap_or_default();
             let already_exists = existing.iter().any(|key| {
-                if let Ok(Some(bytes)) = storage.get(CF_TOOLS, key) {
-                    if let Ok(t) = serde_json::from_slice::<tenzro_types::ToolDefinition>(&bytes) {
+                if let Ok(Some(bytes)) = storage.get(CF_TOOLS, key)
+                    && let Ok(t) = serde_json::from_slice::<tenzro_types::ToolDefinition>(&bytes) {
                         return t.name == *name;
                     }
-                }
                 false
             });
 
@@ -3066,11 +3459,10 @@ impl TenzroNode {
             tool.capabilities = caps.iter().map(|s| s.to_string()).collect();
             tool.creator_did = Some("did:tenzro:human:tenzro-network".to_string());
 
-            if let Ok(bytes) = serde_json::to_vec(&tool) {
-                if storage.put(CF_TOOLS, tool.tool_id.as_bytes(), &bytes).is_ok() {
+            if let Ok(bytes) = serde_json::to_vec(&tool)
+                && storage.put(CF_TOOLS, tool.tool_id.as_bytes(), &bytes).is_ok() {
                     tool_registered += 1;
                 }
-            }
         }
 
         // ─── Skills ───
@@ -3091,11 +3483,10 @@ impl TenzroNode {
         for (name, description, tags, category) in &skills {
             let existing = storage.get_keys_with_prefix(CF_SKILLS, b"").ok().unwrap_or_default();
             let already_exists = existing.iter().any(|key| {
-                if let Ok(Some(bytes)) = storage.get(CF_SKILLS, key) {
-                    if let Ok(s) = serde_json::from_slice::<tenzro_types::SkillDefinition>(&bytes) {
+                if let Ok(Some(bytes)) = storage.get(CF_SKILLS, key)
+                    && let Ok(s) = serde_json::from_slice::<tenzro_types::SkillDefinition>(&bytes) {
                         return s.name == *name;
                     }
-                }
                 false
             });
 
@@ -3114,11 +3505,10 @@ impl TenzroNode {
             skill.tags = tags.iter().map(|s| s.to_string()).collect();
             skill.category = category.to_string();
 
-            if let Ok(bytes) = serde_json::to_vec(&skill) {
-                if storage.put(CF_SKILLS, skill.skill_id.as_bytes(), &bytes).is_ok() {
+            if let Ok(bytes) = serde_json::to_vec(&skill)
+                && storage.put(CF_SKILLS, skill.skill_id.as_bytes(), &bytes).is_ok() {
                     skill_registered += 1;
                 }
-            }
         }
 
         if tool_registered > 0 || skill_registered > 0 {
@@ -3211,8 +3601,38 @@ impl TenzroNode {
         // Wire network_providers map for gossipsub-discovered provider merging
         let event_loop = event_loop.with_provider_discovery(self.network_providers.clone());
 
+        // Wire kill-switch dependencies (post-execute scan side-effects:
+        // lifecycle FSM, stake freeze/slash, cascade traversal, receipt
+        // store). Each is best-effort: if a dependency is missing, the
+        // matching side-effect is logged at debug and skipped.
+        let event_loop = if let Some(ref store) = self.kill_switch_store {
+            event_loop.with_kill_switch_store(store.clone())
+        } else {
+            event_loop
+        };
+        let event_loop = if let Some(ref staking) = self.staking {
+            event_loop.with_staking(staking.clone())
+        } else {
+            event_loop
+        };
+        let event_loop = if let Some(ref registry) = self.identity_registry {
+            event_loop.with_identity_registry(registry.clone())
+        } else {
+            event_loop
+        };
+
+        // Wire the AgentBond manager (Spec 9) so the post-execute scan can
+        // mirror BondPosted/Increased/WithdrawInitiated/Slashed and
+        // InsuranceClaimPaid logs into the off-chain BondManager state
+        // that lane resolution and Spec-5 receipt envelopes consult.
+        let event_loop = if let Some(ref bond_manager) = self.bond_manager {
+            event_loop.with_bond_manager(bond_manager.clone())
+        } else {
+            event_loop
+        };
+
         // Wire the shared RemoteWorkerRegistry so the event loop can ingest verified
-        // Cortex advertisements received over the tenzro/cortex/1.0.0 gossipsub topic.
+        // Cortex advertisements received over the tenzro/cortex gossipsub topic.
         let event_loop = event_loop.with_cortex_registry(self.remote_cortex_workers.clone());
 
         // Store the event sender for RPC to submit transactions
@@ -3241,9 +3661,9 @@ impl TenzroNode {
             let event_tx = event_loop.event_sender();
             let net_in = network.clone();
             tokio::spawn(async move {
-                match net_in.subscribe("tenzro/blocks/1.0.0").await {
+                match net_in.subscribe("tenzro/blocks").await {
                     Ok(mut rx) => {
-                        tracing::info!("Block sync: subscribed to tenzro/blocks/1.0.0");
+                        tracing::info!("Block sync: subscribed to tenzro/blocks");
                         while let Some(msg) = rx.recv().await {
                             if let tenzro_network::MessagePayload::Block(block) = msg.payload {
                                 let height = block.height();
@@ -3260,9 +3680,9 @@ impl TenzroNode {
                     }
                 }
             });
-            info!("Block sync wired to gossipsub (tenzro/blocks/1.0.0)");
+            info!("Block sync wired to gossipsub (tenzro/blocks)");
 
-            // Wire status gossip: subscribe to tenzro/status/1.0.0 and feed
+            // Wire status gossip: subscribe to tenzro/status and feed
             // peer heights into the PeerStatusTracker so eth_syncing /
             // tenzro_syncing can report a real network-tip estimate.
             //
@@ -3281,7 +3701,7 @@ impl TenzroNode {
                     .map(|g| g.chain_id)
                     .unwrap_or(1337);
                 tokio::spawn(async move {
-                    let mut rx = match net_status.subscribe("tenzro/status/1.0.0").await {
+                    let mut rx = match net_status.subscribe("tenzro/status").await {
                         Ok(rx) => rx,
                         Err(e) => {
                             tracing::warn!(
@@ -3291,7 +3711,7 @@ impl TenzroNode {
                             return;
                         }
                     };
-                    tracing::info!("Status sync: subscribed to tenzro/status/1.0.0");
+                    tracing::info!("Status sync: subscribed to tenzro/status");
                     while let Some(msg) = rx.recv().await {
                         if let tenzro_network::MessagePayload::Status(status) = msg.payload {
                             // Drop messages from a different chain — defense
@@ -3321,7 +3741,7 @@ impl TenzroNode {
                         }
                     }
                 });
-                info!("Status sync wired to gossipsub (tenzro/status/1.0.0)");
+                info!("Status sync wired to gossipsub (tenzro/status)");
             }
 
             // Outbound status broadcast tick: every 10s, broadcast our own
@@ -3373,7 +3793,7 @@ impl TenzroNode {
                         let msg = tenzro_network::NetworkMessage::new(
                             tenzro_network::MessagePayload::Status(status),
                         );
-                        if let Err(e) = net_out.broadcast("tenzro/status/1.0.0", msg).await {
+                        if let Err(e) = net_out.broadcast("tenzro/status", msg).await {
                             tracing::debug!(
                                 error = %e,
                                 "Status broadcast failed (likely no mesh peers yet)"
@@ -3381,7 +3801,7 @@ impl TenzroNode {
                         }
                     }
                 });
-                info!("Status broadcast wired (every 10s on tenzro/status/1.0.0)");
+                info!("Status broadcast wired (every 10s on tenzro/status)");
             }
 
             // Wire inbound consensus: subscribe to gossipsub consensus topic and dispatch
@@ -3403,7 +3823,7 @@ impl TenzroNode {
             {
                 let net_consensus = network.clone();
                 tokio::spawn(async move {
-                    let mut rx = match net_consensus.subscribe("tenzro/consensus/1.0.0").await {
+                    let mut rx = match net_consensus.subscribe("tenzro/consensus").await {
                         Ok(rx) => rx,
                         Err(e) => {
                             tracing::warn!(
@@ -3415,7 +3835,7 @@ impl TenzroNode {
                     };
                     tracing::info!(
                         local = %hex::encode(local_addr.as_bytes()),
-                        "Consensus inbound: subscribed to tenzro/consensus/1.0.0"
+                        "Consensus inbound: subscribed to tenzro/consensus"
                     );
                     while let Some(msg) = rx.recv().await {
                         let consensus_msg = match msg.payload {
@@ -3655,7 +4075,7 @@ impl TenzroNode {
                         }
                     }
                 });
-                info!("Consensus inbound wired to gossipsub (tenzro/consensus/1.0.0)");
+                info!("Consensus inbound wired to gossipsub (tenzro/consensus)");
             } else {
                 // Non-validator nodes (LightClient, ModelProvider without consensus)
                 // skip this wiring entirely — they have nothing to vote with.
@@ -3669,16 +4089,15 @@ impl TenzroNode {
             let event_tx_models = event_loop.event_sender();
             let net_models = network.clone();
             tokio::spawn(async move {
-                match net_models.subscribe("tenzro/models/1.0.0").await {
+                match net_models.subscribe("tenzro/models").await {
                     Ok(mut rx) => {
-                        tracing::info!("Model discovery: subscribed to tenzro/models/1.0.0");
+                        tracing::info!("Model discovery: subscribed to tenzro/models");
                         while let Some(msg) = rx.recv().await {
-                            if let tenzro_network::MessagePayload::ModelRegistration(reg) = msg.payload {
-                                if let Err(e) = event_tx_models.send(NodeEvent::ModelAnnouncement(reg)).await {
+                            if let tenzro_network::MessagePayload::ModelRegistration(reg) = msg.payload
+                                && let Err(e) = event_tx_models.send(NodeEvent::ModelAnnouncement(reg)).await {
                                     tracing::error!("Failed to forward model announcement to event loop: {}", e);
                                     break;
                                 }
-                            }
                         }
                     }
                     Err(e) => {
@@ -3686,7 +4105,7 @@ impl TenzroNode {
                     }
                 }
             });
-            info!("Model discovery wired to gossipsub (tenzro/models/1.0.0)");
+            info!("Model discovery wired to gossipsub (tenzro/models)");
 
             // Wire agent discovery: subscribe to gossipsub agents topic and forward to event loop.
             // This enables decentralized P2P agent discovery — every node learns about every agent
@@ -3694,16 +4113,15 @@ impl TenzroNode {
             let event_tx_agents = event_loop.event_sender();
             let net_agents = network.clone();
             tokio::spawn(async move {
-                match net_agents.subscribe("tenzro/agents/1.0.0").await {
+                match net_agents.subscribe("tenzro/agents").await {
                     Ok(mut rx) => {
-                        tracing::info!("Agent discovery: subscribed to tenzro/agents/1.0.0");
+                        tracing::info!("Agent discovery: subscribed to tenzro/agents");
                         while let Some(msg) = rx.recv().await {
-                            if let tenzro_network::MessagePayload::AgentAnnouncement(ann) = msg.payload {
-                                if let Err(e) = event_tx_agents.send(NodeEvent::AgentAnnouncement(ann)).await {
+                            if let tenzro_network::MessagePayload::AgentAnnouncement(ann) = msg.payload
+                                && let Err(e) = event_tx_agents.send(NodeEvent::AgentAnnouncement(ann)).await {
                                     tracing::error!("Failed to forward agent announcement to event loop: {}", e);
                                     break;
                                 }
-                            }
                         }
                     }
                     Err(e) => {
@@ -3711,7 +4129,7 @@ impl TenzroNode {
                     }
                 }
             });
-            info!("Agent discovery wired to gossipsub (tenzro/agents/1.0.0)");
+            info!("Agent discovery wired to gossipsub (tenzro/agents)");
 
             // Wire provider discovery: subscribe to gossipsub providers topic and forward to event loop.
             // This enables decentralized P2P provider discovery — every node learns about every provider
@@ -3719,16 +4137,15 @@ impl TenzroNode {
             let event_tx_providers = event_loop.event_sender();
             let net_providers = network.clone();
             tokio::spawn(async move {
-                match net_providers.subscribe("tenzro/providers/1.0.0").await {
+                match net_providers.subscribe("tenzro/providers").await {
                     Ok(mut rx) => {
-                        tracing::info!("Provider discovery: subscribed to tenzro/providers/1.0.0");
+                        tracing::info!("Provider discovery: subscribed to tenzro/providers");
                         while let Some(msg) = rx.recv().await {
-                            if let tenzro_network::MessagePayload::ProviderAnnouncement(ann) = msg.payload {
-                                if let Err(e) = event_tx_providers.send(NodeEvent::ProviderAnnouncement(ann)).await {
+                            if let tenzro_network::MessagePayload::ProviderAnnouncement(ann) = msg.payload
+                                && let Err(e) = event_tx_providers.send(NodeEvent::ProviderAnnouncement(ann)).await {
                                     tracing::error!("Failed to forward provider announcement to event loop: {}", e);
                                     break;
                                 }
-                            }
                         }
                     }
                     Err(e) => {
@@ -3736,7 +4153,7 @@ impl TenzroNode {
                     }
                 }
             });
-            info!("Provider discovery wired to gossipsub (tenzro/providers/1.0.0)");
+            info!("Provider discovery wired to gossipsub (tenzro/providers)");
 
             // Wire cortex advertisement discovery: subscribe to gossipsub cortex topic
             // and forward opaque payloads to the event loop for signature verification
@@ -3804,6 +4221,59 @@ impl TenzroNode {
         self.identity_registry.as_ref()
     }
 
+    /// Returns the validator-owned hybrid signer (Ed25519 + ML-DSA-65)
+    /// constructed in [`init_consensus`]. Webhook-sourced TDIP revocation
+    /// paths (Stripe SPT `granted_token.deactivated`, future PSP-side
+    /// signal cascades) consume this to sign a `SignedRevocationEntry`
+    /// before the `RevocationBroadcaster` fans it out to the mesh.
+    /// Returns `None` on non-validator roles.
+    pub fn validator_hybrid_signer(
+        &self,
+    ) -> Option<&Arc<dyn tenzro_crypto::composite::HybridSigner>> {
+        self.validator_hybrid_signer.as_ref()
+    }
+
+    /// Returns the Stripe SPT ceiling-resolver cache adapter if Stripe
+    /// integration is configured. Used by the SPT revocation dispatcher
+    /// to invalidate cached snapshots in lockstep with the TDIP cascade.
+    pub fn spt_ceiling_cache(
+        &self,
+    ) -> Option<Arc<crate::spt_ceiling_bridge::SptCeilingResolverAdapter>> {
+        self.spt_ceiling_cache.clone()
+    }
+
+    /// Returns the native ERC-8004 [`ReputationRegistry`] handle (precompile
+    /// `0x101b`). Stripe SPT settlement-outcome dispatchers use this to
+    /// cross-write `submitFeedback(agentId, rating, contextUri)` rows that
+    /// surface payment reliability on-chain. Returns `None` when the EVM
+    /// runtime has not yet wired the precompile (pre-init or non-EVM
+    /// configurations).
+    pub fn erc8004_reputation(&self) -> Option<&Arc<tenzro_vm::Erc8004ReputationRegistry>> {
+        self.erc8004_reputation.as_ref()
+    }
+
+    /// Returns the validator address this node uses as block proposer
+    /// and consensus voter — set once in [`init_consensus`] from the
+    /// loaded validator keypair. The Stripe SPT settlement-outcome
+    /// dispatcher reads this to populate the `rater` field on the
+    /// ERC-8004 `FeedbackEntry` row, anchoring the cross-write to the
+    /// validator that observed the webhook. Returns `None` on
+    /// non-validator roles.
+    pub fn local_validator_address(&self) -> Option<&Address> {
+        self.local_validator_address.as_ref()
+    }
+
+    /// Wires the Stripe SPT ceiling-resolver cache adapter onto this
+    /// node. Called once from `main.rs` when constructing the payment
+    /// binder so the same adapter instance is shared between the binder
+    /// (read path) and the revocation dispatcher (invalidate path).
+    pub fn set_spt_ceiling_cache(
+        &mut self,
+        cache: Arc<crate::spt_ceiling_bridge::SptCeilingResolverAdapter>,
+    ) {
+        self.spt_ceiling_cache = Some(cache);
+    }
+
     /// Returns the payment gateway if initialized
     pub fn payment_gateway(&self) -> Option<&Arc<TenzroPaymentGateway>> {
         self.payment_gateway.as_ref()
@@ -3819,18 +4289,27 @@ impl TenzroNode {
         self.model_registry.as_ref()
     }
 
-    /// Returns the provider manager if initialized
-    /// Public API method for external use
-    #[allow(dead_code)]
+    /// Returns the provider manager if initialized. Consumed by RPC handlers
+    /// (`handle_provider_status`, `handle_register_provider`) to look up
+    /// per-provider health, reputation, and circuit-breaker state.
     pub fn provider_manager(&self) -> Option<&Arc<ProviderManager>> {
         self.provider_manager.as_ref()
     }
 
-    /// Returns the inference router if initialized
-    /// Public API method for external use
-    #[allow(dead_code)]
+    /// Returns the inference router if initialized. Wired into the web
+    /// API's `/chat` handler in `main.rs` so OpenAI-compatible chat
+    /// completion requests can be dispatched to the correct serving
+    /// provider.
     pub fn inference_router(&self) -> Option<&Arc<InferenceRouter>> {
         self.inference_router.as_ref()
+    }
+
+    /// Returns the local TEE hardware provider if one was detected at
+    /// startup. Used by the RPC `tenzro_getAttestation` handler and the
+    /// MCP `attest` tool to generate attestations against the local
+    /// enclave without re-running TEE auto-detection on every request.
+    pub fn tee_provider(&self) -> Option<&dyn TeeProvider> {
+        self.tee_provider.as_deref()
     }
 
     /// Returns the durable usage tracker, the producer-side recipient of
@@ -3873,6 +4352,12 @@ impl TenzroNode {
         self.staking.as_ref()
     }
 
+    /// Returns the Spec-2 admission controller if initialized. Wired
+    /// during startup once consensus, identity, and staking are all up.
+    pub fn admission(&self) -> Option<&Arc<tenzro_consensus::admission::AdmissionController>> {
+        self.admission.as_ref()
+    }
+
     /// Returns the token if initialized
     pub fn token(&self) -> Option<&Arc<TnzoToken>> {
         self.token.as_ref()
@@ -3908,6 +4393,37 @@ impl TenzroNode {
 
     pub fn escrow_manager(&self) -> Option<&Arc<EscrowManager>> {
         self.escrow_manager.as_ref()
+    }
+
+    /// Returns the kill-switch receipt store if initialized.
+    pub fn kill_switch_store(&self) -> Option<&Arc<tenzro_settlement::KillSwitchStore>> {
+        self.kill_switch_store.as_ref()
+    }
+
+    /// Returns the AgentBond surety manager if initialized (Agent-Swarm Spec 9).
+    pub fn bond_manager(&self) -> Option<&Arc<tenzro_token::bond::BondManager>> {
+        self.bond_manager.as_ref()
+    }
+
+    /// Returns the BurnQuota manager if initialized (Agent-Swarm Spec 3 wave 1).
+    pub fn burn_quota_manager(
+        &self,
+    ) -> Option<&Arc<tenzro_token::burn_quota::BurnQuotaManager>> {
+        self.burn_quota_manager.as_ref()
+    }
+
+    /// Returns the adaptive burn governance dial manager (Agent-Swarm Spec 8).
+    pub fn burn_rate_manager(
+        &self,
+    ) -> Option<&Arc<tenzro_token::adaptive_burn::BurnRateConfigManager>> {
+        self.burn_rate_manager.as_ref()
+    }
+
+    /// Returns the SeedAgent treasury earmark manager (Agent-Swarm Spec 10).
+    pub fn seed_agent_manager(
+        &self,
+    ) -> Option<&Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>> {
+        self.seed_agent_manager.as_ref()
     }
 
     /// Returns the OAuth 2.1 + DPoP + RAR auth engine if initialized.
@@ -4001,13 +4517,11 @@ impl TenzroNode {
         self.model_services.insert(instance_id.clone(), instance.clone());
 
         // Persist to RocksDB
-        if let Some(ref storage) = self.storage {
-            if let Ok(data) = serde_json::to_vec(&instance) {
-                if let Err(e) = storage.put(CF_MODEL_SERVICES, instance_id.as_bytes(), &data) {
+        if let Some(ref storage) = self.storage
+            && let Ok(data) = serde_json::to_vec(&instance)
+                && let Err(e) = storage.put(CF_MODEL_SERVICES, instance_id.as_bytes(), &data) {
                     warn!("Failed to persist model service {} to RocksDB: {}", instance_id, e);
                 }
-            }
-        }
 
         info!("Registered model service: {} ({}) [{}]", model_id, instance_id, location);
         instance_id
@@ -4092,8 +4606,8 @@ impl TenzroNode {
 
         // 3. CLI subdirectory layout: ~/.tenzro/models/<model_id>/*.gguf
         let sub = home_models.join(model_id);
-        if sub.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&sub) {
+        if sub.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&sub) {
                 for e in entries.flatten() {
                     let path = e.path();
                     if path.extension().map(|ext| ext == "gguf").unwrap_or(false) {
@@ -4101,7 +4615,6 @@ impl TenzroNode {
                     }
                 }
             }
-        }
 
         None
     }
@@ -4114,8 +4627,13 @@ impl TenzroNode {
     /// (treated as liveness heartbeat). Otherwise, if it has been silent for
     /// more than 1 hour, the entry is removed from CF_MODEL_SERVICES and the
     /// served_models flag in CF_MODELS is cleared as well.
-    #[allow(dead_code)]
-    pub fn cleanup_idle_local_model_services(&self) {
+    ///
+    /// Returns `(evicted_instance_count, cleared_served_models_count)` so
+    /// callers (including the `tenzro_cleanupIdleLocalModelServices` RPC
+    /// handler) can report how much state was reclaimed. The periodic
+    /// EventLoop heartbeat also exercises this same logic inline; this
+    /// method is the operator-callable on-demand entry point.
+    pub fn cleanup_idle_local_model_services(&self) -> (usize, usize) {
         const IDLE_TTL_SECS: u64 = 3600; // 1 hour
 
         let now = std::time::SystemTime::now()
@@ -4142,20 +4660,18 @@ impl TenzroNode {
             if runtime_loaded {
                 // Live — refresh last_seen as a heartbeat so idle timer is bound
                 // to the most recent successful liveness check, not registration.
-                if let Some(mut svc) = self.model_services.get_mut(&instance_id) {
-                    if svc.last_seen < now {
+                if let Some(mut svc) = self.model_services.get_mut(&instance_id)
+                    && svc.last_seen < now {
                         svc.last_seen = now;
-                        if let Some(ref storage) = self.storage {
-                            if let Ok(data) = serde_json::to_vec(svc.value()) {
+                        if let Some(ref storage) = self.storage
+                            && let Ok(data) = serde_json::to_vec(svc.value()) {
                                 let _ = storage.put(
                                     CF_MODEL_SERVICES,
                                     instance_id.as_bytes(),
                                     &data,
                                 );
                             }
-                        }
                     }
-                }
                 continue;
             }
 
@@ -4199,6 +4715,7 @@ impl TenzroNode {
                 cleared_served.len(),
             );
         }
+        (evicted_instances.len(), cleared_served.len())
     }
 
     /// Run a full reconciliation of the model registry against on-disk state
@@ -4248,7 +4765,6 @@ impl TenzroNode {
                                 .load_model_with_context(
                                     model_id,
                                     &path,
-                                    entry.architecture,
                                     Some(entry.context_length),
                                 )
                                 .await
@@ -4418,11 +4934,10 @@ impl TenzroNode {
         for id in ids {
             if let Some(mut svc) = self.model_services.get_mut(&id) {
                 svc.last_seen = now;
-                if let Some(ref storage) = self.storage {
-                    if let Ok(data) = serde_json::to_vec(svc.value()) {
+                if let Some(ref storage) = self.storage
+                    && let Ok(data) = serde_json::to_vec(svc.value()) {
                         let _ = storage.put(CF_MODEL_SERVICES, id.as_bytes(), &data);
                     }
-                }
             }
         }
     }
@@ -4559,9 +5074,9 @@ pub fn reconcile_task_registry_storage(
             task.status,
             TaskStatus::Open | TaskStatus::Assigned | TaskStatus::InProgress
         );
-        if non_terminal {
-            if let Some(deadline) = task.deadline {
-                if (deadline as i64) < now {
+        if non_terminal
+            && let Some(deadline) = task.deadline
+                && (deadline as i64) < now {
                     task.status = TaskStatus::Expired;
                     if let Ok(updated) = serde_json::to_vec(&task) {
                         let _ = storage.put(CF_TASKS, &key, &updated);
@@ -4574,8 +5089,6 @@ pub fn reconcile_task_registry_storage(
                     );
                     continue;
                 }
-            }
-        }
 
         // 2. Purge old terminal tasks (Completed / Cancelled / Expired).
         //    Disputed is retained until manually resolved.
@@ -4815,11 +5328,10 @@ async fn detect_gpus(os: &str) -> Vec<GpuInfo> {
                 .args(["SPDisplaysDataType", "-json"])
                 .output()
                 .await
-            {
-                if output.status.success() {
-                    if let Ok(json_str) = String::from_utf8(output.stdout) {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                            if let Some(displays) = json.get("SPDisplaysDataType").and_then(|v| v.as_array()) {
+                && output.status.success()
+                    && let Ok(json_str) = String::from_utf8(output.stdout)
+                        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str)
+                            && let Some(displays) = json.get("SPDisplaysDataType").and_then(|v| v.as_array()) {
                                 for display in displays {
                                     if let Some(chipset) = display.get("sppci_model").and_then(|v| v.as_str()) {
                                         // Try to extract VRAM
@@ -4833,10 +5345,6 @@ async fn detect_gpus(os: &str) -> Vec<GpuInfo> {
                                     }
                                 }
                             }
-                        }
-                    }
-                }
-            }
         }
         "linux" => {
             // Try nvidia-smi first
@@ -4844,9 +5352,8 @@ async fn detect_gpus(os: &str) -> Vec<GpuInfo> {
                 .args(["--query-gpu=name,memory.total", "--format=csv,noheader"])
                 .output()
                 .await
-            {
-                if output.status.success() {
-                    if let Ok(stdout) = String::from_utf8(output.stdout) {
+                && output.status.success()
+                    && let Ok(stdout) = String::from_utf8(output.stdout) {
                         for line in stdout.lines() {
                             let parts: Vec<&str> = line.split(',').collect();
                             if parts.len() >= 2 {
@@ -4858,12 +5365,10 @@ async fn detect_gpus(os: &str) -> Vec<GpuInfo> {
                             }
                         }
                     }
-                }
-            }
 
             // If no NVIDIA GPUs found, check /proc for other info
-            if gpus.is_empty() {
-                if let Ok(entries) = std::fs::read_dir("/proc/driver") {
+            if gpus.is_empty()
+                && let Ok(entries) = std::fs::read_dir("/proc/driver") {
                     for entry in entries.flatten() {
                         if entry.file_name() == "nvidia" {
                             // NVIDIA driver exists but nvidia-smi failed
@@ -4874,7 +5379,6 @@ async fn detect_gpus(os: &str) -> Vec<GpuInfo> {
                         }
                     }
                 }
-            }
         }
         _ => {
             // Windows or other platforms - not implemented

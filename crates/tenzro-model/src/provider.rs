@@ -213,24 +213,24 @@ impl ProviderManager {
         let providers = Arc::new(DashMap::new());
 
         // Hydrate from storage: scan CF_PROVIDERS for all provider entries
-        if let Ok(Some(index_data)) = storage.get(CF_PROVIDERS, b"__index__") {
-            if let Ok(keys) = serde_json::from_slice::<Vec<String>>(&index_data) {
-                for key_hex in &keys {
-                    let storage_key = [PROVIDER_KEY_PREFIX, key_hex.as_bytes()].concat();
-                    if let Ok(Some(data)) = storage.get(CF_PROVIDERS, &storage_key) {
-                        match serde_json::from_slice::<ProviderWithMetrics>(&data) {
-                            Ok(pwm) => {
-                                info!("Hydrated provider {} from storage", pwm.provider.address);
-                                providers.insert(pwm.provider.address, pwm);
-                            }
-                            Err(e) => {
-                                warn!("Failed to deserialize provider {}: {}", key_hex, e);
-                            }
+        if let Ok(Some(index_data)) = storage.get(CF_PROVIDERS, b"__index__")
+            && let Ok(keys) = serde_json::from_slice::<Vec<String>>(&index_data)
+        {
+            for key_hex in &keys {
+                let storage_key = [PROVIDER_KEY_PREFIX, key_hex.as_bytes()].concat();
+                if let Ok(Some(data)) = storage.get(CF_PROVIDERS, &storage_key) {
+                    match serde_json::from_slice::<ProviderWithMetrics>(&data) {
+                        Ok(pwm) => {
+                            info!("Hydrated provider {} from storage", pwm.provider.address);
+                            providers.insert(pwm.provider.address, pwm);
+                        }
+                        Err(e) => {
+                            warn!("Failed to deserialize provider {}: {}", key_hex, e);
                         }
                     }
                 }
-                info!("Hydrated {} providers from storage", providers.len());
             }
+            info!("Hydrated {} providers from storage", providers.len());
         }
 
         Self {
@@ -694,19 +694,17 @@ impl ProviderManager {
 
                     // Deactivate providers that have exceeded max consecutive failures
                     for (address, is_healthy) in &results {
-                        if !is_healthy {
-                            if let Some(entry) = manager.providers.get(address) {
-                                if entry.metrics.health.consecutive_failures
-                                    >= manager.max_consecutive_failures
-                                {
-                                    info!(
-                                        "Deactivating unhealthy provider {} ({} consecutive failures)",
-                                        address, entry.metrics.health.consecutive_failures
-                                    );
-                                    drop(entry); // Release read guard before write
-                                    let _ = manager.deactivate_provider(address);
-                                }
-                            }
+                        if !is_healthy
+                            && let Some(entry) = manager.providers.get(address)
+                            && entry.metrics.health.consecutive_failures
+                                >= manager.max_consecutive_failures
+                        {
+                            info!(
+                                "Deactivating unhealthy provider {} ({} consecutive failures)",
+                                address, entry.metrics.health.consecutive_failures
+                            );
+                            drop(entry); // Release read guard before write
+                            let _ = manager.deactivate_provider(address);
                         }
                     }
                 } else if total > 0 {

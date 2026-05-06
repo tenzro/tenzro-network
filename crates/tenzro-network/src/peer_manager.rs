@@ -52,6 +52,17 @@ pub trait ValidatorRegistry: Send + Sync {
     /// attestations) don't cause mutual peer-score decay & gossipsub bans
     /// when a new validator joins after the boot set has been wired.
     fn try_add_validator(&self, _peer_id: &PeerId) {}
+
+    /// Remove a peer from the validator set.
+    ///
+    /// Called by the peer manager when a peer is banned for misbehavior —
+    /// a banned peer must not continue to be authorized for validator-only
+    /// gossipsub topics (consensus, attestations). This is the symmetric
+    /// counterpart to `try_add_validator` and ensures the validator set
+    /// stays consistent with the connected/admissible peer set.
+    ///
+    /// Default implementation: no-op. The node-level registry overrides this.
+    fn try_remove_validator(&self, _peer_id: &PeerId) {}
 }
 
 /// Topics that require validator authorization for message publishing.
@@ -324,15 +335,15 @@ impl PeerManager {
         // banned" class of outage on the live testnet.
         self.add_protected_peer(*peer_id);
 
-        if let Some(registry) = &self.validator_registry {
-            if !registry.is_validator(peer_id) {
-                tracing::info!(
-                    peer = %peer_id,
-                    protocol = protocol_version,
-                    "Dynamically admitting peer as validator via identify handshake"
-                );
-                registry.try_add_validator(peer_id);
-            }
+        if let Some(registry) = &self.validator_registry
+            && !registry.is_validator(peer_id)
+        {
+            tracing::info!(
+                peer = %peer_id,
+                protocol = protocol_version,
+                "Dynamically admitting peer as validator via identify handshake"
+            );
+            registry.try_add_validator(peer_id);
         }
     }
 
@@ -459,6 +470,16 @@ impl PeerManager {
         peer.status = PeerStatus::Banned;
         peer.ban_until = Some(Instant::now() + self.ban_duration);
         tracing::warn!("Banned peer {} for {} seconds", peer.peer_id, self.ban_duration.as_secs());
+
+        // A banned peer must also be removed from the validator set so it
+        // cannot continue to be authorized for validator-only gossipsub topics
+        // (consensus, attestations). This keeps validator authorization
+        // consistent with peer admission state.
+        if let Some(registry) = &self.validator_registry
+            && registry.is_validator(&peer.peer_id)
+        {
+            registry.try_remove_validator(&peer.peer_id);
+        }
     }
 
     /// Unbans a peer
@@ -478,15 +499,15 @@ impl PeerManager {
         // Clear the ban_until stamp on first read to keep downstream paths
         // (ban duration metrics, reconnect logic) consistent.
         if self.protected_peers.contains(peer_id) {
-            if let Some(mut peer) = self.peers.get_mut(peer_id) {
-                if peer.is_banned() {
-                    tracing::info!(
-                        peer = %peer_id,
-                        "Clearing lingering ban on now-protected peer"
-                    );
-                    peer.ban_until = None;
-                    peer.reputation = peer.reputation.max(0);
-                }
+            if let Some(mut peer) = self.peers.get_mut(peer_id)
+                && peer.is_banned()
+            {
+                tracing::info!(
+                    peer = %peer_id,
+                    "Clearing lingering ban on now-protected peer"
+                );
+                peer.ban_until = None;
+                peer.reputation = peer.reputation.max(0);
             }
             return false;
         }
@@ -622,13 +643,13 @@ impl PeerManager {
     pub fn cleanup_expired_bans(&self) {
         let now = Instant::now();
         for mut entry in self.peers.iter_mut() {
-            if let Some(until) = entry.ban_until {
-                if now >= until {
-                    entry.ban_until = None;
-                    entry.status = PeerStatus::Disconnected;
-                    entry.reputation = 0;
-                    tracing::info!("Ban expired for peer {}", entry.peer_id);
-                }
+            if let Some(until) = entry.ban_until
+                && now >= until
+            {
+                entry.ban_until = None;
+                entry.status = PeerStatus::Disconnected;
+                entry.reputation = 0;
+                tracing::info!("Ban expired for peer {}", entry.peer_id);
             }
         }
     }
@@ -759,9 +780,9 @@ mod tests {
         let manager = PeerManager::new(10);
         let peer_id = PeerId::random();
 
-        assert!(manager.authorize_peer_for_topic(&peer_id, "tenzro/blocks/1.0.0"));
-        assert!(manager.authorize_peer_for_topic(&peer_id, "tenzro/consensus/1.0.0"));
-        assert!(manager.authorize_peer_for_topic(&peer_id, "tenzro/transactions/1.0.0"));
+        assert!(manager.authorize_peer_for_topic(&peer_id, "tenzro/blocks"));
+        assert!(manager.authorize_peer_for_topic(&peer_id, "tenzro/consensus"));
+        assert!(manager.authorize_peer_for_topic(&peer_id, "tenzro/transactions"));
     }
 
     #[test]
@@ -775,23 +796,23 @@ mod tests {
         manager.set_validator_registry(registry);
 
         // Validator should be allowed on all topics
-        assert!(manager.authorize_peer_for_topic(&validator, "tenzro/blocks/1.0.0"));
-        assert!(manager.authorize_peer_for_topic(&validator, "tenzro/consensus/1.0.0"));
-        assert!(manager.authorize_peer_for_topic(&validator, "tenzro/attestations/1.0.0"));
-        assert!(manager.authorize_peer_for_topic(&validator, "tenzro/transactions/1.0.0"));
+        assert!(manager.authorize_peer_for_topic(&validator, "tenzro/blocks"));
+        assert!(manager.authorize_peer_for_topic(&validator, "tenzro/consensus"));
+        assert!(manager.authorize_peer_for_topic(&validator, "tenzro/attestations"));
+        assert!(manager.authorize_peer_for_topic(&validator, "tenzro/transactions"));
 
         // Non-validator should be blocked on validator-only topics (consensus, attestations)
-        // NOTE: "tenzro/blocks/1.0.0" is intentionally open to all peers so that
+        // NOTE: "tenzro/blocks" is intentionally open to all peers so that
         // RPC nodes and model providers can receive block gossip for chain sync.
-        assert!(manager.authorize_peer_for_topic(&non_validator, "tenzro/blocks/1.0.0"));
-        assert!(!manager.authorize_peer_for_topic(&non_validator, "tenzro/consensus/1.0.0"));
-        assert!(!manager.authorize_peer_for_topic(&non_validator, "tenzro/attestations/1.0.0"));
+        assert!(manager.authorize_peer_for_topic(&non_validator, "tenzro/blocks"));
+        assert!(!manager.authorize_peer_for_topic(&non_validator, "tenzro/consensus"));
+        assert!(!manager.authorize_peer_for_topic(&non_validator, "tenzro/attestations"));
 
         // Non-validator should be allowed on open topics
-        assert!(manager.authorize_peer_for_topic(&non_validator, "tenzro/transactions/1.0.0"));
-        assert!(manager.authorize_peer_for_topic(&non_validator, "tenzro/status/1.0.0"));
-        assert!(manager.authorize_peer_for_topic(&non_validator, "tenzro/inference/1.0.0"));
-        assert!(manager.authorize_peer_for_topic(&non_validator, "tenzro/models/1.0.0"));
+        assert!(manager.authorize_peer_for_topic(&non_validator, "tenzro/transactions"));
+        assert!(manager.authorize_peer_for_topic(&non_validator, "tenzro/status"));
+        assert!(manager.authorize_peer_for_topic(&non_validator, "tenzro/inference"));
+        assert!(manager.authorize_peer_for_topic(&non_validator, "tenzro/models"));
     }
 
     #[test]

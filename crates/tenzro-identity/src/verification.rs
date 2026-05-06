@@ -475,10 +475,10 @@ impl IdentityVerifier {
                 if !delegation_scope.is_operation_allowed(operation) {
                     return Ok(false);
                 }
-                if let Some(v) = value {
-                    if !delegation_scope.is_value_allowed(v) {
-                        return Ok(false);
-                    }
+                if let Some(v) = value
+                    && !delegation_scope.is_value_allowed(v)
+                {
+                    return Ok(false);
                 }
                 Ok(true)
             }

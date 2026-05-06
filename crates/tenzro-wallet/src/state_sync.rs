@@ -441,7 +441,7 @@ mod tests {
         )
         .with_chain_provider(provider);
 
-        sync.sync_address(&addr, &[asset.clone()]).await.unwrap();
+        sync.sync_address(&addr, std::slice::from_ref(&asset)).await.unwrap();
 
         let balance = balances.get_balance(&addr, &asset);
         assert_eq!(balance.available, 5000);

@@ -73,11 +73,14 @@ pub mod commission_policy;
 pub mod config;
 pub mod cortex_gossip;
 pub mod erc8004_mirror;
+pub mod erc8004_reputation_dispatcher;
 pub mod error;
+pub mod escrow_resolver_bridge;
 pub mod eu_ai_disclosure;
 pub mod event_loop;
 pub mod genesis;
 pub mod health;
+pub mod lane_resolver;
 pub mod liveness;
 pub mod mcp;
 pub mod metrics;
@@ -85,6 +88,8 @@ pub mod node;
 pub mod rpc;
 pub mod rpc_integrations;
 pub mod spending_policy_bridge;
+pub mod spt_ceiling_bridge;
+pub mod spt_revocation_dispatcher;
 pub mod web;
 
 // Re-export commonly used types

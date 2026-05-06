@@ -51,6 +51,7 @@ pub mod merkle;
 pub mod block_store;
 pub mod account_store;
 pub mod snapshot;
+pub mod da;
 
 // Re-export commonly used types
 pub use config::StorageConfig;
@@ -61,6 +62,10 @@ pub use merkle::{MerklePatriciaTrie, MerkleProof, ProofNode};
 pub use block_store::BlockStoreImpl;
 pub use account_store::{AccountStoreImpl, StateStoreImpl};
 pub use snapshot::{Snapshot, SnapshotManager, SnapshotMetadata, CompressionType, SnapshotRestorer, RestoredState, SnapshotEntry, serialize_snapshot_entries};
+pub use da::{
+    compute_commitment, DaBackend, DaBackendId, DaBackendStatus, DaPointer, InlineFallbackBackend,
+    ReceiptEnvelope, ReceiptKind, ReceiptStorageMode, ReceiptSummary,
+};
 
 /// Storage version for compatibility tracking
 pub const STORAGE_VERSION: u32 = 1;

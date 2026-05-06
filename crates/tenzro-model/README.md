@@ -103,6 +103,10 @@ The score is read by:
 - `tenzro_getProviderReputation { provider }` RPC
 - `tenzro reputation get --provider <addr>` CLI
 
+### Usage Tracking
+
+`InferenceRouter::with_usage_tracker(Arc<UsageTracker>)` attaches a usage tracker; on every successful inference the router calls `tracker.record_usage(UsageRecord::new(model_id, provider, input_tokens, output_tokens, cost, latency_ms))`. The tracker maintains per-model, per-provider, and global aggregates plus a bounded ring of recent records, all persisted to CF_MODELS under the `usage:` prefix when constructed via `with_storage()`. Surfaced through `tenzro_listInferenceUsage`.
+
 ### Streaming Inference with Per-Token Billing
 
 `InferenceRouter` supports streamed token emission via `tenzro_chatStream`.
@@ -365,7 +369,7 @@ This crate integrates with:
 
 ## Testing
 
-The crate includes 66 unit tests covering registry, routing, pricing, downloads, and persistence.
+The crate includes 109 unit tests covering registry, routing, pricing, downloads, multi-modal runtimes, license-tier gating, usage tracking, and persistence.
 
 ```bash
 cargo test -p tenzro-model

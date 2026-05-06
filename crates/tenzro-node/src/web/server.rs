@@ -36,8 +36,13 @@ impl PaymentGateSetup {
         }
     }
 
-    /// Reuses the gate's `PaymentGateConfig` (test/inspection helper)
-    #[allow(dead_code)]
+    /// Returns the gate's [`PaymentGateConfig`].
+    ///
+    /// Read by [`WebServer::start_with_shutdown`] when emitting the
+    /// "payment gate enabled" startup log, so operators see the active
+    /// default amount/asset/recipient/protocol without having to grep
+    /// the running config. Also used in `PaymentGateSetup` test
+    /// helpers.
     pub fn config(&self) -> &PaymentGateConfig {
         &self.middleware.config
     }
@@ -73,13 +78,6 @@ impl WebServer {
         self
     }
 
-    /// Start the web server (no shutdown signal — for backwards compat)
-    /// Public API method for external use without shutdown signal
-    #[allow(dead_code)]
-    pub async fn start(self) -> Result<()> {
-        self.start_with_shutdown(tokio::sync::broadcast::channel::<()>(1).1).await
-    }
-
     /// Start the web server with graceful shutdown support
     pub async fn start_with_shutdown(
         self,
@@ -97,9 +95,15 @@ impl WebServer {
             .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024));
 
         let listener = tokio::net::TcpListener::bind(&self.listen_addr).await?;
-        if let Some(_gate) = self.payment_gate.as_ref() {
+        if let Some(gate) = self.payment_gate.as_ref() {
+            let cfg = gate.config();
             tracing::info!(
                 addr = %self.listen_addr,
+                default_amount = %cfg.default_amount,
+                default_asset = %cfg.default_asset,
+                default_protocol = %cfg.default_protocol,
+                recipient = %cfg.recipient,
+                paid_routes = ?gate.paid_routes,
                 "Web API listening (HTTP 402 payment gate enabled)"
             );
         } else {
@@ -165,6 +169,12 @@ impl WebServer {
                 "/.well-known/openid-configuration",
                 get(oauth::as_metadata_handler),
             )
+            // RFC 7517 / RFC 7518 JWK Set — public signing keys for every
+            // active Tenzro identity. External RFC 9421 verifiers (Visa
+            // TAP, Mastercard Agent Pay, Stripe MPP, AP2 facilitators,
+            // x402 settlement nodes) resolve `keyid` parameters here.
+            .route("/.well-known/jwks.json", get(handlers::jwks))
+            .route("/.well-known/jwks.json/:keyid", get(handlers::jwks_get))
             // ML-DSA-65 (FIPS 204) wallet signing surface — `tee-only`
             // mode for testnet. Threshold endpoints await NIST IR 8214B
             // and are intentionally unmounted (no dead routes).
@@ -375,6 +385,10 @@ mod tests {
                 settlement_tx: verification.settlement_ref.clone(),
                 chain: "tenzro".to_string(),
                 settled_at: Utc::now(),
+                principal_chain: tenzro_types::principal_chain::anonymous_chain_for_did(
+                    verification.payer_did.clone(),
+                    tenzro_types::primitives::BlockHeight::new(0),
+                ),
                 extra: HashMap::new(),
             })
         }

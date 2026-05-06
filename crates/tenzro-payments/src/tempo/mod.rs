@@ -8,7 +8,7 @@ pub mod adapter;
 pub mod stablecoin;
 pub mod participant;
 
-pub use config::TempoConfig;
+pub use config::{TempoConfig, TEMPO_CHAIN_ID, TEMPO_MAINNET_RPC, TEMPO_TESTNET_RPC};
 pub use adapter::TempoBridgeAdapter;
 pub use stablecoin::{Tip20Token, Tip20Balance};
 pub use participant::TempoParticipant;

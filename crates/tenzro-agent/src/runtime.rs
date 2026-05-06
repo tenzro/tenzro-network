@@ -30,6 +30,36 @@ const AGENT_KEY_PREFIX: &[u8] = b"agent:";
 const LIFECYCLE_KEY_PREFIX: &[u8] = b"lifecycle:";
 /// Storage key prefix for persisted parent → children mappings in CF_AGENTS.
 const CHILDREN_KEY_PREFIX: &[u8] = b"children:";
+/// Storage key prefix for persisted `AgentTransactionRecord`s in CF_AGENTS.
+///
+/// Layout: `agenttx:<machine_did>:<seq_be_u64>` where `seq_be_u64` is a
+/// big-endian-encoded monotonically-increasing per-DID counter so prefix
+/// scans return records in chronological order. The 8-byte BE encoding
+/// keeps the iterator lexicographic-ordered without padding the DID.
+const AGENT_TX_KEY_PREFIX: &[u8] = b"agenttx:";
+
+/// Per-agent record of a successful service payment. Persisted under
+/// `agenttx:<machine_did>:<seq_be_u64>` in CF_AGENTS so the wallet kernel
+/// can render audit history across restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTransactionRecord {
+    /// Machine DID that initiated the payment (canonical
+    /// `did:tenzro:machine:...` form, matches `payer_did` on the payment gate).
+    pub agent_did: String,
+    /// Provider counterparty (provider DID, hex address, or service URL —
+    /// whatever the caller passed; the runtime is opaque).
+    pub provider: String,
+    /// Service category label (e.g. "inference", "tee", "settlement",
+    /// "model-download"). Free-form so callers can categorize as needed.
+    pub service_type: String,
+    /// Settled amount in smallest TNZO unit.
+    pub amount: u64,
+    /// Unix-seconds timestamp when the payment cleared.
+    pub timestamp: i64,
+    /// Receipt or session identifier returned by the payment gateway.
+    /// Empty string for protocols that don't surface one.
+    pub receipt_id: String,
+}
 
 /// Configuration for the agent runtime
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,8 +95,12 @@ pub struct RuntimeStatistics {
     pub total_agents: usize,
     /// Number of active agents
     pub active_agents: usize,
-    /// Number of suspended agents
+    /// Number of operationally suspended agents (heartbeat / idle TTL)
     pub suspended_agents: usize,
+    /// Number of agents paused via the kill-switch precompile
+    pub paused_agents: usize,
+    /// Number of agents quarantined via the kill-switch precompile
+    pub quarantined_agents: usize,
     /// Number of terminated agents
     pub terminated_agents: usize,
     /// Total messages processed
@@ -108,6 +142,12 @@ pub struct AgentRuntime {
     /// `tenzro-agent-kit::AgentSpawner` populates the entry at spawn time
     /// from the template's `DelegationSpec`.
     spending_policies: Arc<DashMap<String, SpendingPolicy>>,
+    /// Per-machine-DID monotonic transaction sequence counter. Used to mint
+    /// the BE-encoded suffix in `agenttx:<machine_did>:<seq_be_u64>` keys
+    /// so prefix scans return records in insertion order. Hydrated on
+    /// `with_storage` from the highest existing seq per DID, so post-restart
+    /// keys never collide with persisted ones.
+    agent_tx_counters: Arc<DashMap<String, u64>>,
     /// Optional durable backing store (RocksDB via CF_AGENTS) for
     /// agent identity, lifecycle, and spawn-tree persistence across restarts.
     ///
@@ -141,6 +181,8 @@ impl AgentRuntime {
             total_agents: 0,
             active_agents: 0,
             suspended_agents: 0,
+            paused_agents: 0,
+            quarantined_agents: 0,
             terminated_agents: 0,
             messages_processed: 0,
             tasks_delegated: 0,
@@ -156,6 +198,7 @@ impl AgentRuntime {
             statistics,
             child_agents: Arc::new(DashMap::new()),
             spending_policies: Arc::new(DashMap::new()),
+            agent_tx_counters: Arc::new(DashMap::new()),
             storage: None,
         })
     }
@@ -185,6 +228,8 @@ impl AgentRuntime {
             total_agents: 0,
             active_agents: 0,
             suspended_agents: 0,
+            paused_agents: 0,
+            quarantined_agents: 0,
             terminated_agents: 0,
             messages_processed: 0,
             tasks_delegated: 0,
@@ -200,6 +245,7 @@ impl AgentRuntime {
             statistics,
             child_agents: Arc::new(DashMap::new()),
             spending_policies: Arc::new(DashMap::new()),
+            agent_tx_counters: Arc::new(DashMap::new()),
             storage: None,
         })
     }
@@ -376,12 +422,11 @@ impl AgentRuntime {
                     match serde_json::from_slice::<Vec<String>>(&bytes) {
                         Ok(children) => {
                             // Parent id is the suffix after CHILDREN_KEY_PREFIX.
-                            if let Some(parent_bytes) = key.strip_prefix(CHILDREN_KEY_PREFIX) {
-                                if let Ok(parent_id) =
+                            if let Some(parent_bytes) = key.strip_prefix(CHILDREN_KEY_PREFIX)
+                                && let Ok(parent_id) =
                                     std::str::from_utf8(parent_bytes).map(|s| s.to_string())
-                                {
-                                    child_agents.insert(parent_id, children);
-                                }
+                            {
+                                child_agents.insert(parent_id, children);
                             }
                         }
                         Err(e) => warn!(
@@ -398,6 +443,53 @@ impl AgentRuntime {
                     e
                 ),
             }
+        }
+
+        // Step 5b: rehydrate per-DID transaction sequence counters from
+        // existing `agenttx:<did>:<seq>` keys so newly-minted keys after
+        // restart never collide with persisted ones. We track only the max
+        // seq per DID — record contents are read on-demand by
+        // `list_agent_transactions`.
+        let agent_tx_counters: Arc<DashMap<String, u64>> = Arc::new(DashMap::new());
+        let tx_keys = storage
+            .get_keys_with_prefix(CF_AGENTS, AGENT_TX_KEY_PREFIX)
+            .map_err(|e| AgentError::StorageError(format!(
+                "Failed to scan agent transaction keys: {}", e
+            )))?;
+        for key in tx_keys {
+            // Key layout: `agenttx:<did>:<seq_be_u64>`. The DID itself can
+            // contain `:` so we slice off the trailing 8 bytes (BE seq) and
+            // the single ':' separator just before it; whatever remains
+            // between `agenttx:` and that boundary is the DID.
+            let Some(rest) = key.strip_prefix(AGENT_TX_KEY_PREFIX) else {
+                continue;
+            };
+            if rest.len() < 9 {
+                // Need at least ':' + 8 bytes of BE seq.
+                continue;
+            }
+            let split = rest.len() - 9;
+            // The byte before the trailing 8 bytes must be ':' for a
+            // well-formed key. Anything else is corrupt and skipped.
+            if rest[split] != b':' {
+                continue;
+            }
+            let did_bytes = &rest[..split];
+            let seq_bytes = &rest[split + 1..];
+            let Ok(did) = std::str::from_utf8(did_bytes).map(|s| s.to_string()) else {
+                continue;
+            };
+            let mut seq_arr = [0u8; 8];
+            seq_arr.copy_from_slice(seq_bytes);
+            let seq = u64::from_be_bytes(seq_arr);
+            agent_tx_counters
+                .entry(did)
+                .and_modify(|cur| {
+                    if seq > *cur {
+                        *cur = seq;
+                    }
+                })
+                .or_insert(seq);
         }
 
         // Step 6: register hydrated agents with the message router.
@@ -420,6 +512,12 @@ impl AgentRuntime {
         let suspended = lifecycle_manager
             .get_agents_in_state(AgentState::Suspended)
             .len();
+        let paused = lifecycle_manager
+            .get_agents_in_state(AgentState::Paused)
+            .len();
+        let quarantined = lifecycle_manager
+            .get_agents_in_state(AgentState::Quarantined)
+            .len();
         let terminated = lifecycle_manager
             .get_agents_in_state(AgentState::Terminated)
             .len();
@@ -427,14 +525,16 @@ impl AgentRuntime {
             total_agents: total,
             active_agents: active,
             suspended_agents: suspended,
+            paused_agents: paused,
+            quarantined_agents: quarantined,
             terminated_agents: terminated,
             messages_processed: 0,
             tasks_delegated: 0,
         }));
 
         info!(
-            "AgentRuntime hydrated from CF_AGENTS: {} agents ({} active, {} suspended, {} terminated)",
-            total, active, suspended, terminated
+            "AgentRuntime hydrated from CF_AGENTS: {} agents ({} active, {} suspended, {} paused, {} quarantined, {} terminated)",
+            total, active, suspended, paused, quarantined, terminated
         );
 
         Ok(Self {
@@ -447,6 +547,7 @@ impl AgentRuntime {
             statistics,
             child_agents,
             spending_policies: Arc::new(DashMap::new()),
+            agent_tx_counters,
             storage: Some(storage),
         })
     }
@@ -644,6 +745,73 @@ impl AgentRuntime {
         // Update statistics
         self.update_statistics().await;
 
+        Ok(())
+    }
+
+    /// Pauses an agent via the kill-switch primitive.
+    ///
+    /// Drives the lifecycle Active → Paused. Identity-level status is
+    /// **not** flipped to Suspended (operational `suspend_agent` already
+    /// owns that field) — pause is its own axis. Persists the lifecycle
+    /// transition to CF_AGENTS for restart safety.
+    pub async fn pause_agent(
+        &self,
+        agent_id: &str,
+        controller_did: String,
+        reason_code: u32,
+        reason_text: Option<String>,
+    ) -> Result<()> {
+        self.lifecycle_manager
+            .pause(agent_id, controller_did, reason_code, reason_text)?;
+        self.persist_lifecycle(agent_id)?;
+        self.update_statistics().await;
+        Ok(())
+    }
+
+    /// Resumes a paused agent back to Active.
+    pub async fn resume_paused_agent(
+        &self,
+        agent_id: &str,
+        controller_did: String,
+    ) -> Result<()> {
+        self.lifecycle_manager
+            .resume_from_pause(agent_id, controller_did)?;
+        self.persist_lifecycle(agent_id)?;
+        self.update_statistics().await;
+        Ok(())
+    }
+
+    /// Quarantines an agent via the kill-switch primitive.
+    ///
+    /// Drives the lifecycle Active → Quarantined (or Paused → Quarantined
+    /// for escalation). The payment binder + staking manager treat
+    /// `Quarantined` as a freeze — no settlements, no reward distribution,
+    /// no stake withdrawals — but stake remains intact pending the
+    /// resume-or-terminate decision.
+    pub async fn quarantine_agent(
+        &self,
+        agent_id: &str,
+        controller_did: String,
+        reason_code: u32,
+        reason_text: Option<String>,
+    ) -> Result<()> {
+        self.lifecycle_manager
+            .quarantine(agent_id, controller_did, reason_code, reason_text)?;
+        self.persist_lifecycle(agent_id)?;
+        self.update_statistics().await;
+        Ok(())
+    }
+
+    /// Returns a quarantined agent to Active after investigation.
+    pub async fn resume_quarantined_agent(
+        &self,
+        agent_id: &str,
+        controller_did: String,
+    ) -> Result<()> {
+        self.lifecycle_manager
+            .resume_from_quarantine(agent_id, controller_did)?;
+        self.persist_lifecycle(agent_id)?;
+        self.update_statistics().await;
         Ok(())
     }
 
@@ -862,6 +1030,14 @@ impl AgentRuntime {
         self.lifecycle_manager.clone()
     }
 
+    /// Returns a handle to the capability registry. Used by the node RPC,
+    /// MCP, and A2A surfaces to enumerate registered capabilities, fetch
+    /// per-capability attestation lists, and resolve per-agent attestations
+    /// for capability discovery and trust scoring.
+    pub fn capability_registry(&self) -> Arc<CapabilityRegistry> {
+        self.capability_registry.clone()
+    }
+
     // ---- SpendingPolicy registry (Phase C) ---------------------------------
 
     /// Installs or replaces the runtime [`SpendingPolicy`] for a machine
@@ -902,6 +1078,132 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// Builds the CF_AGENTS storage key for an `AgentTransactionRecord`.
+    /// Layout: `agenttx:<machine_did>:<seq_be_u64>` — the BE-encoded seq
+    /// keeps lex-order aligned with insertion order.
+    fn agent_tx_key(machine_did: &str, seq: u64) -> Vec<u8> {
+        let mut k = Vec::with_capacity(
+            AGENT_TX_KEY_PREFIX.len() + machine_did.len() + 1 + 8,
+        );
+        k.extend_from_slice(AGENT_TX_KEY_PREFIX);
+        k.extend_from_slice(machine_did.as_bytes());
+        k.push(b':');
+        k.extend_from_slice(&seq.to_be_bytes());
+        k
+    }
+
+    /// Records a successful service payment for a machine agent. Persists
+    /// the record under `agenttx:<machine_did>:<seq_be_u64>` in CF_AGENTS
+    /// when storage is configured; otherwise the call is a no-op (in-memory
+    /// callers can still rely on the `record_spend` daily counter for
+    /// rate-limit enforcement).
+    ///
+    /// Note: this is the *audit trail* writer. The *runtime ceiling*
+    /// enforcement happens in `record_spend`, which checks per-tx and
+    /// daily caps. The wallet-kernel-facing RPC `tenzro_agentPayForService`
+    /// calls both — first `record_spend` (gate), then settles, then this
+    /// (history).
+    pub fn record_agent_transaction(
+        &self,
+        record: AgentTransactionRecord,
+    ) -> Result<()> {
+        let Some(ref storage) = self.storage else {
+            return Ok(());
+        };
+        let did = record.agent_did.clone();
+        let seq = self
+            .agent_tx_counters
+            .entry(did.clone())
+            .and_modify(|cur| *cur = cur.saturating_add(1))
+            .or_insert(1);
+        let seq_val: u64 = *seq;
+        // Drop the entry guard before any storage call to avoid holding a
+        // DashMap shard lock across IO.
+        drop(seq);
+        let key = Self::agent_tx_key(&did, seq_val);
+        let bytes = serde_json::to_vec(&record).map_err(|e| {
+            AgentError::StorageError(format!(
+                "Failed to serialize agent transaction: {}",
+                e
+            ))
+        })?;
+        storage
+            .put(CF_AGENTS, &key, &bytes)
+            .map_err(|e| AgentError::StorageError(format!(
+                "Failed to persist agent transaction: {}", e
+            )))?;
+        Ok(())
+    }
+
+    /// Lists transaction history for a machine agent in chronological
+    /// order (oldest first). When `limit` is `Some(n)`, only the most
+    /// recent `n` records are returned (still in chronological order).
+    /// Returns an empty vec when storage is not configured or no records
+    /// exist for the DID.
+    pub fn list_agent_transactions(
+        &self,
+        machine_did: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<AgentTransactionRecord>> {
+        let Some(ref storage) = self.storage else {
+            return Ok(Vec::new());
+        };
+        // Prefix scan over `agenttx:<did>:` — note the trailing ':' so we
+        // don't pick up sibling DIDs that share a string prefix.
+        let mut prefix = Vec::with_capacity(
+            AGENT_TX_KEY_PREFIX.len() + machine_did.len() + 1,
+        );
+        prefix.extend_from_slice(AGENT_TX_KEY_PREFIX);
+        prefix.extend_from_slice(machine_did.as_bytes());
+        prefix.push(b':');
+
+        let mut keys = storage
+            .get_keys_with_prefix(CF_AGENTS, &prefix)
+            .map_err(|e| AgentError::StorageError(format!(
+                "Failed to scan agent transaction keys: {}", e
+            )))?;
+        // RocksDB iterators return lex-ordered keys; in-memory backends
+        // (e.g. `MemoryStore` for tests) use a HashMap whose iteration
+        // order is non-deterministic. Sort here so chronology is
+        // backend-agnostic — BE-seq encoding makes lex order = insertion
+        // order regardless of DID length.
+        keys.sort_unstable();
+
+        let mut records: Vec<AgentTransactionRecord> = Vec::with_capacity(keys.len());
+        for key in keys {
+            match storage.get(CF_AGENTS, &key) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<AgentTransactionRecord>(&bytes) {
+                        Ok(rec) => records.push(rec),
+                        Err(e) => warn!(
+                            "Corrupt agent transaction record at key {:?}: {}",
+                            String::from_utf8_lossy(&key),
+                            e
+                        ),
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warn!(
+                    "Failed to read agent transaction key {:?}: {}",
+                    String::from_utf8_lossy(&key),
+                    e
+                ),
+            }
+        }
+
+        // Keys are returned in lex order which matches BE-seq order which
+        // matches insertion order, so `records` is already chronological.
+        // If a limit is given, take the *tail* (most recent), preserving
+        // chronological order for the returned slice.
+        if let Some(n) = limit
+            && records.len() > n
+        {
+            let drop_count = records.len() - n;
+            records.drain(..drop_count);
+        }
+        Ok(records)
+    }
+
     /// Lists all agents
     pub fn list_agents(&self, status_filter: Option<AgentStatus>) -> Vec<RegisteredAgent> {
         self.identity_manager.list_agents(status_filter)
@@ -923,6 +1225,14 @@ impl AgentRuntime {
         stats.suspended_agents = self
             .lifecycle_manager
             .get_agents_in_state(AgentState::Suspended)
+            .len();
+        stats.paused_agents = self
+            .lifecycle_manager
+            .get_agents_in_state(AgentState::Paused)
+            .len();
+        stats.quarantined_agents = self
+            .lifecycle_manager
+            .get_agents_in_state(AgentState::Quarantined)
             .len();
         stats.terminated_agents = self
             .lifecycle_manager
@@ -1132,5 +1442,95 @@ mod tests {
 
         let agents = runtime.find_agents_with_capability(&capability);
         assert_eq!(agents.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_agent_transaction_history_roundtrip() {
+        use tenzro_storage::kv::MemoryStore;
+
+        let storage: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+        let runtime = AgentRuntime::with_storage(storage.clone(), None).unwrap();
+
+        let did = "did:tenzro:machine:abc123";
+
+        // Insert three records in order; their seq counters should preserve
+        // chronological order across the prefix scan.
+        for i in 0..3u64 {
+            runtime
+                .record_agent_transaction(AgentTransactionRecord {
+                    agent_did: did.to_string(),
+                    provider: format!("provider-{}", i),
+                    service_type: "inference".to_string(),
+                    amount: 100 + i,
+                    timestamp: 1_700_000_000 + i as i64,
+                    receipt_id: format!("receipt-{}", i),
+                })
+                .unwrap();
+        }
+
+        // Sibling DID — must not leak into the other DID's prefix scan.
+        runtime
+            .record_agent_transaction(AgentTransactionRecord {
+                agent_did: "did:tenzro:machine:other".to_string(),
+                provider: "other-provider".to_string(),
+                service_type: "tee".to_string(),
+                amount: 9999,
+                timestamp: 1_700_000_000,
+                receipt_id: "other-receipt".to_string(),
+            })
+            .unwrap();
+
+        let all = runtime.list_agent_transactions(did, None).unwrap();
+        assert_eq!(all.len(), 3, "expected 3 records for {}", did);
+        assert_eq!(all[0].provider, "provider-0");
+        assert_eq!(all[1].provider, "provider-1");
+        assert_eq!(all[2].provider, "provider-2");
+
+        // limit=2 returns the *most recent* 2 in chronological order.
+        let tail = runtime.list_agent_transactions(did, Some(2)).unwrap();
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].provider, "provider-1");
+        assert_eq!(tail[1].provider, "provider-2");
+
+        // Rehydrate from the same backing store: the per-DID seq counter
+        // must be recovered so a subsequent write doesn't collide with the
+        // pre-existing seq=3 entry.
+        drop(runtime);
+        let runtime2 = AgentRuntime::with_storage(storage.clone(), None).unwrap();
+        runtime2
+            .record_agent_transaction(AgentTransactionRecord {
+                agent_did: did.to_string(),
+                provider: "provider-3".to_string(),
+                service_type: "inference".to_string(),
+                amount: 103,
+                timestamp: 1_700_000_010,
+                receipt_id: "receipt-3".to_string(),
+            })
+            .unwrap();
+
+        let after = runtime2.list_agent_transactions(did, None).unwrap();
+        assert_eq!(after.len(), 4, "post-restart write should append, not collide");
+        assert_eq!(after[3].provider, "provider-3");
+    }
+
+    #[tokio::test]
+    async fn test_agent_transaction_history_no_storage() {
+        // Without a storage backend, the tx history methods are no-ops
+        // and reads return empty rather than erroring.
+        let runtime = AgentRuntime::new().unwrap();
+        runtime
+            .record_agent_transaction(AgentTransactionRecord {
+                agent_did: "did:tenzro:machine:nostore".to_string(),
+                provider: "p".to_string(),
+                service_type: "x".to_string(),
+                amount: 1,
+                timestamp: 0,
+                receipt_id: "r".to_string(),
+            })
+            .unwrap();
+        let recs = runtime
+            .list_agent_transactions("did:tenzro:machine:nostore", None)
+            .unwrap();
+        assert!(recs.is_empty());
     }
 }

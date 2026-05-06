@@ -46,25 +46,28 @@ use crate::traits::TeeProvider;
 // ============================================================================
 
 /// Size of TDREPORT data (REPORTMACSTRUCT + TEE_TCB_INFO + TDINFO)
-#[allow(dead_code)]
+#[cfg(target_os = "linux")]
 const TDX_REPORT_LEN: usize = 1024;
 
 /// Size of user-provided report data
-#[allow(dead_code)]
+#[cfg(target_os = "linux")]
 const TDX_REPORTDATA_LEN: usize = 64;
 
 /// TDX ioctl magic number (character 'T')
-#[allow(dead_code)]
+#[cfg(target_os = "linux")]
 const TDX_IOCTL_MAGIC: u8 = b'T';
 
 /// TDX_CMD_GET_REPORT0 ioctl number (sequence 1)
 /// _IOWR('T', 1, struct tdx_report_req) = direction(3) | size | type | nr
-#[allow(dead_code)]
+#[cfg(target_os = "linux")]
 const TDX_CMD_GET_REPORT0_NR: u8 = 1;
 
-/// TDREPORT structure offsets (from Intel TDX spec)
-#[allow(dead_code)]
-mod tdreport_offsets {
+/// TDREPORT structure offsets (from Intel TDX spec).
+///
+/// Documented byte offsets into the 1024-byte TDREPORT structure as defined
+/// by the Intel TDX Module ABI. Public so downstream verifiers, audit tooling,
+/// and integration tests can reference the same canonical layout.
+pub mod tdreport_offsets {
     // REPORTMACSTRUCT (256 bytes at offset 0)
     pub const REPORT_TYPE: usize = 0;           // 4 bytes
     pub const CPU_SVN: usize = 48;              // 16 bytes
@@ -92,9 +95,12 @@ mod tdreport_offsets {
     pub const RTMR3: usize = 864;               // 48 bytes
 }
 
-/// TDX Quote v4 header offsets
-#[allow(dead_code)]
-mod quote_offsets {
+/// TDX Quote v4 header offsets.
+///
+/// Documented byte offsets into the DCAP v4 Quote wire format. Public so
+/// downstream verifiers and audit tooling can reference the same canonical
+/// layout when parsing or constructing TDX Quotes off-path.
+pub mod quote_offsets {
     pub const VERSION: usize = 0;               // 2 bytes (should be 4)
     pub const ATT_KEY_TYPE: usize = 2;          // 2 bytes (2=ECDSA-256, 3=ECDSA-384)
     pub const TEE_TYPE: usize = 4;              // 4 bytes (0x81=TDX)
@@ -139,8 +145,10 @@ struct TdxQuote {
     mr_td: Vec<u8>,
     /// RTMRs (4 × 48 bytes)
     rtmrs: [Vec<u8>; 4],
-    /// Report data (64 bytes)
-    #[allow(dead_code)]
+    /// Report data (64 bytes) — caller-supplied nonce / binding data
+    /// (e.g. SHA-384(TLS pubkey || timestamp)) that proves quote freshness.
+    /// Surfaced into `AttestationResult.details["report_data"]` so verifiers
+    /// can match against the nonce they handed the enclave.
     report_data: Vec<u8>,
     /// Raw quote bytes
     raw: Vec<u8>,
@@ -410,8 +418,11 @@ impl IntelTdxProvider {
     ///
     /// NOTE: Requires `reqwest` dependency (enabled via intel-tdx feature).
     /// Falls back gracefully when reqwest is not available.
+    ///
+    /// Wired into [`Self::verify_td_quote`] as the **fallback** when neither
+    /// caller-supplied certificates nor Quote-embedded certificates produce a
+    /// chain. PCS is the canonical Intel-published collateral source.
     #[cfg(feature = "intel-tdx")]
-    #[allow(dead_code)]
     async fn fetch_pcs_certificates(&self, _qe_vendor_id: &[u8]) -> Result<Vec<Vec<u8>>> {
         // QE Identity endpoint
         let qe_identity_url = "https://api.trustedservices.intel.com/sgx/certification/v4/qe/identity";
@@ -562,10 +573,10 @@ impl IntelTdxProvider {
     /// Parses a TDX Quote (real binary or simulated JSON).
     fn parse_quote(&self, data: &[u8]) -> Result<TdxQuote> {
         // Try JSON first (simulated)
-        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(data) {
-            if json.get("simulated").and_then(|v| v.as_bool()).unwrap_or(false) {
-                return self.parse_simulated_quote(&json, data);
-            }
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(data)
+            && json.get("simulated").and_then(|v| v.as_bool()).unwrap_or(false)
+        {
+            return self.parse_simulated_quote(&json, data);
         }
 
         // Parse binary Quote v4
@@ -674,6 +685,9 @@ impl IntelTdxProvider {
         details.insert("tee_type".to_string(), format!("0x{:X}", quote.tee_type));
         details.insert("att_key_type".to_string(), quote.att_key_type.to_string());
         details.insert("mr_td".to_string(), hex::encode(&quote.mr_td));
+        // Surface caller-supplied report_data (nonce / freshness binding) so the
+        // verifier can match against the value it handed the enclave.
+        details.insert("report_data".to_string(), hex::encode(&quote.report_data));
 
         let mut cert_chain_valid = false;
 
@@ -686,7 +700,7 @@ impl IntelTdxProvider {
             tracing::info!("Verifying real Intel TDX quote");
 
             // If certificates not provided but quote has signature data, extract embedded certs
-            let certs_to_verify = if certificates.is_empty() && quote.raw.len() > quote_offsets::SIGNATURE_DATA {
+            let mut certs_to_verify = if certificates.is_empty() && quote.raw.len() > quote_offsets::SIGNATURE_DATA {
                 tracing::debug!("Attempting to extract QE certificate chain from Quote signature section");
                 match Self::extract_qe_cert_chain_from_quote(&quote.raw) {
                     Ok(extracted_certs) if !extracted_certs.is_empty() => {
@@ -705,6 +719,30 @@ impl IntelTdxProvider {
             } else {
                 certificates.to_vec()
             };
+
+            // PCS fallback: if no caller-supplied AND no embedded certs, fetch from
+            // Intel Provisioning Certification Service (the canonical collateral source).
+            if certs_to_verify.is_empty() {
+                // QE vendor ID is at offset 12 of the Quote header (16 bytes).
+                let qe_vendor_id: &[u8] = if quote.raw.len() >= 28 {
+                    &quote.raw[12..28]
+                } else {
+                    &[]
+                };
+                match self.fetch_pcs_certificates(qe_vendor_id).await {
+                    Ok(pcs_certs) if !pcs_certs.is_empty() => {
+                        tracing::info!("Using {} certificates from Intel PCS fallback", pcs_certs.len());
+                        details.insert("cert_source".to_string(), "intel_pcs".to_string());
+                        certs_to_verify = pcs_certs;
+                    }
+                    Ok(_) => {
+                        tracing::debug!("Intel PCS returned no certificates; chain verification will be skipped");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Intel PCS fetch failed: {}", e);
+                    }
+                }
+            }
 
             // Verify certificate chain against pinned Intel SGX Root CA
             if !certs_to_verify.is_empty() {

@@ -106,6 +106,52 @@ impl NonceCache {
         removed
     }
 
+    /// Replay-check a nonce while binding its freshness to the signature's
+    /// `created` parameter (RFC 9421 §7.2.2).
+    ///
+    /// Rejects the request if the signature was created more than `ttl_secs`
+    /// ago, more than `clock_skew_secs` (default: 60s) in the future, or if
+    /// the nonce has already been seen.
+    ///
+    /// # Arguments
+    ///
+    /// * `nonce` — The nonce string from the `Signature-Input` `nonce=` parameter.
+    /// * `created_unix_secs` — Unix-seconds value from the `created=` parameter.
+    ///
+    /// # Errors
+    ///
+    /// * `PaymentError::Rfc9421Error` if the signature is older than the TTL
+    ///   or further than 60 seconds in the future.
+    /// * `PaymentError::ReplayDetected` if the nonce was already used inside
+    ///   the TTL window.
+    pub fn check_with_created(&self, nonce: &str, created_unix_secs: i64) -> Result<()> {
+        const CLOCK_SKEW_SECS: i64 = 60;
+
+        let created = DateTime::<Utc>::from_timestamp(created_unix_secs, 0).ok_or_else(|| {
+            PaymentError::Rfc9421Error(format!(
+                "invalid `created` timestamp: {}",
+                created_unix_secs
+            ))
+        })?;
+        let now = Utc::now();
+        let age = now.signed_duration_since(created).num_seconds();
+
+        if age > self.ttl_secs as i64 {
+            return Err(PaymentError::Rfc9421Error(format!(
+                "signature too old: created {}s ago, ttl {}s",
+                age, self.ttl_secs
+            )));
+        }
+        if age < -CLOCK_SKEW_SECS {
+            return Err(PaymentError::Rfc9421Error(format!(
+                "signature created in the future: {}s ahead of now",
+                -age
+            )));
+        }
+
+        self.check_and_store(nonce)
+    }
+
     /// Get the number of nonces currently cached
     pub fn len(&self) -> usize {
         self.nonces.len()
@@ -223,6 +269,49 @@ mod tests {
         let cache = NonceCache::default();
         assert_eq!(cache.ttl_secs, 480);
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn test_check_with_created_fresh_signature_succeeds() {
+        let cache = NonceCache::new();
+        let now = Utc::now().timestamp();
+        // Created 5 seconds ago — well within 480s TTL
+        assert!(cache.check_with_created("nonce-fresh", now - 5).is_ok());
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_check_with_created_expired_signature_rejected() {
+        let cache = NonceCache::with_ttl(60);
+        let now = Utc::now().timestamp();
+        // Created 120 seconds ago — beyond 60s TTL
+        let result = cache.check_with_created("nonce-old", now - 120);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too old"));
+        // Nonce was NOT stored (replay-store only happens after freshness passes)
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_check_with_created_future_signature_rejected_beyond_skew() {
+        let cache = NonceCache::new();
+        let now = Utc::now().timestamp();
+        // Created 120 seconds in the future — beyond 60s skew tolerance
+        let result = cache.check_with_created("nonce-future", now + 120);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("future"));
+    }
+
+    #[test]
+    fn test_check_with_created_replay_detected() {
+        let cache = NonceCache::new();
+        let now = Utc::now().timestamp();
+        // First use within window
+        assert!(cache.check_with_created("nonce-replay", now - 1).is_ok());
+        // Replay
+        let result = cache.check_with_created("nonce-replay", now - 1);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(PaymentError::ReplayDetected(_))));
     }
 
     #[test]

@@ -35,6 +35,9 @@ Following Cosmos EVM's `0x0800+` precompile pattern, we place Tenzro system prec
 | `0x...1005` | GOVERNANCE | Vote on proposals from EVM contracts |
 | `0x...1006` | NFT_FACTORY | ERC-721 deployment with VRF-based mintRandom |
 | `0x...1007` | VRF_VERIFY | RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI verifiable random function |
+| `0x...101a` | ERC8004_IDENTITY | ERC-8004 Trustless Agents — `registerAgent` / `getAgent` (selectors byte-identical to Ethereum mirror) |
+| `0x...101b` | ERC8004_REPUTATION | ERC-8004 — `submitFeedback` / `getFeedback` / `getFeedbackCount` |
+| `0x...101c` | ERC8004_VALIDATION | ERC-8004 — `validationRequest` / `validationResponse` / `getValidation` |
 
 ### 3. Deterministic Addresses via CREATE2
 
@@ -87,7 +90,8 @@ DAML token operations follow the CIP-56 standard with two-step transfer (sender 
     │ (ERC-1167 clones)   │ │              │ │                     │
     │                     │ │ ATA accounts │ │ DvP settlement      │
     │ System Precompiles  │ │ 9-decimal    │ │                     │
-    │ 0x1001-0x1007       │ │ truncation   │ │                     │
+    │ 0x1001-0x1007 +     │ │ truncation   │ │                     │
+    │ 0x101a-0x101c       │ │              │ │                     │
     └─────────────────────┘ └──────────────┘ └─────────────────────┘
               │                    │                    │
               └────────────────────┼────────────────────┘

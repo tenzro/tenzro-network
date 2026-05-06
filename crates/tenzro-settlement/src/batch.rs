@@ -402,31 +402,31 @@ impl BatchProcessor {
 
         // Persist atomically to durable storage ONLY on success.
         // On failure we intentionally skip this so no partial state leaks.
-        if failed == 0 {
-            if let Err(e) = self.persist_batch_result(&batch_snapshot, &result) {
-                // Storage write failed — rollback in-memory state too so the
-                // caller sees a consistent failure rather than an in-memory
-                // success that never hit disk.
-                self.restore_balances(&balance_snapshot);
-                {
-                    let mut batch_entry = self.batches.get_mut(batch_id).unwrap();
-                    let batch = batch_entry.value_mut();
-                    batch.status = BatchStatus::Failed;
-                    batch.error = Some(format!("Storage persistence failed: {}", e));
-                    batch.completed_at = Some(Timestamp::now());
-                }
-
-                let failed_result = BatchSettlementResult {
-                    batch_id: batch_id.to_string(),
-                    status: BatchStatus::Failed,
-                    receipts: Vec::new(),
-                    successful: 0,
-                    failed: 1,
-                    duration_ms,
-                };
-                self.results.insert(batch_id.to_string(), failed_result.clone());
-                return Err(e);
+        if failed == 0
+            && let Err(e) = self.persist_batch_result(&batch_snapshot, &result)
+        {
+            // Storage write failed — rollback in-memory state too so the
+            // caller sees a consistent failure rather than an in-memory
+            // success that never hit disk.
+            self.restore_balances(&balance_snapshot);
+            {
+                let mut batch_entry = self.batches.get_mut(batch_id).unwrap();
+                let batch = batch_entry.value_mut();
+                batch.status = BatchStatus::Failed;
+                batch.error = Some(format!("Storage persistence failed: {}", e));
+                batch.completed_at = Some(Timestamp::now());
             }
+
+            let failed_result = BatchSettlementResult {
+                batch_id: batch_id.to_string(),
+                status: BatchStatus::Failed,
+                receipts: Vec::new(),
+                successful: 0,
+                failed: 1,
+                duration_ms,
+            };
+            self.results.insert(batch_id.to_string(), failed_result.clone());
+            return Err(e);
         }
 
         // Store result in the in-memory index
@@ -591,7 +591,16 @@ pub struct BatchStats {
 mod tests {
     use super::*;
     use tenzro_storage::MemoryStore;
+    use tenzro_types::principal_chain::anonymous_chain_for_address;
     use tenzro_types::settlement::{ProofType, ServiceProof, ServiceType};
+
+    /// Test helper: synthesize an anonymous principal chain for a payer
+    /// address. Used to satisfy the `SettlementReceipt::new` signature
+    /// (Agent-Swarm Spec 5) in batch tests where identity wiring is not
+    /// the unit under test.
+    fn test_chain(payer: &Address) -> tenzro_types::principal_chain::PrincipalChain {
+        anonymous_chain_for_address(payer, 0)
+    }
 
     #[tokio::test]
     async fn test_batch_creation() {
@@ -736,6 +745,7 @@ mod tests {
                             req.service_type.clone(),
                             req.amount,
                             SettlementStatus::Completed,
+                            test_chain(&req.customer),
                         ))
                     }
                 }
@@ -804,6 +814,7 @@ mod tests {
                     req.service_type.clone(),
                     req.amount,
                     SettlementStatus::Completed,
+                    test_chain(&req.customer),
                 ))
             })
             .await
@@ -903,6 +914,7 @@ mod tests {
                             req.service_type.clone(),
                             req.amount,
                             SettlementStatus::Completed,
+                            test_chain(&req.customer),
                         ))
                     }
                 }
@@ -973,6 +985,7 @@ mod tests {
                     req.service_type.clone(),
                     req.amount,
                     SettlementStatus::Completed,
+                    test_chain(&req.customer),
                 ))
             })
             .await

@@ -353,13 +353,13 @@ pub fn build_credential_preimage(credential: &PaymentCredential) -> Vec<u8> {
 }
 
 fn extract_classical_public_key(credential: &PaymentCredential) -> Result<PublicKey> {
-    if let Some(pk_value) = credential.extra.get("public_key") {
-        if let Some(pk_hex) = pk_value.as_str() {
-            let pk_bytes = hex::decode(pk_hex).map_err(|e| {
-                PaymentError::CredentialError(format!("Invalid public key hex: {}", e))
-            })?;
-            return Ok(PublicKey::new(KeyType::Ed25519, pk_bytes));
-        }
+    if let Some(pk_value) = credential.extra.get("public_key")
+        && let Some(pk_hex) = pk_value.as_str()
+    {
+        let pk_bytes = hex::decode(pk_hex).map_err(|e| {
+            PaymentError::CredentialError(format!("Invalid public key hex: {}", e))
+        })?;
+        return Ok(PublicKey::new(KeyType::Ed25519, pk_bytes));
     }
     if !credential.payer_address.is_empty() {
         let pk_bytes = hex::decode(&credential.payer_address).map_err(|_| {

@@ -8,7 +8,7 @@ The official [OpenClaw](https://github.com/anthropics/openclaw) skill for intera
 
 ## Overview
 
-TenzroClaw gives AI agents direct access to the Tenzro blockchain and 5 ecosystem chains (Solana, Ethereum, LayerZero, Chainlink, Canton) through a single Python script. Agents can create wallets, send transactions, manage identities, trade on marketplaces, deploy contracts, bridge tokens, swap on Jupiter, read Chainlink price feeds, and more.
+TenzroClaw gives AI agents direct access to the Tenzro blockchain and the ecosystem MCP servers (Solana, Ethereum, Canton, LayerZero, Chainlink, Li.Fi, plus external deBridge and 1inch) through a single Python script. Agents can create wallets, send transactions, manage identities, trade on marketplaces, deploy contracts, bridge tokens, swap on Jupiter, read Chainlink price feeds, run multi-modal AI inference, post AgentBonds, and more.
 
 **Live testnet:** `https://rpc.tenzro.network`
 
@@ -71,6 +71,7 @@ export ETHEREUM_MCP_URL=https://ethereum-mcp.tenzro.network/mcp
 export LAYERZERO_MCP_URL=https://layerzero-mcp.tenzro.network/mcp
 export CHAINLINK_MCP_URL=https://chainlink-mcp.tenzro.network/mcp
 export CANTON_MCP_URL=https://canton-mcp.tenzro.network/mcp
+export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 ```
 
 ## Capabilities
@@ -104,6 +105,10 @@ export CANTON_MCP_URL=https://canton-mcp.tenzro.network/mcp
 
 **Bridge & Cross-Chain:** `bridge_tokens`, `bridge_quote`, `get_bridge_routes`, `list_bridge_adapters`
 
+**AgentBond & Insurance (Spec 9):** `post_agent_bond`, `increase_agent_bond`, `withdraw_agent_bond`, `get_agent_bond`, `list_agent_bonds`, `file_insurance_claim`, `get_insurance_claim`, `list_insurance_claims`, `get_insurance_pool`
+
+**ERC-8004 Trustless Agents:** `register_8004_agent`, `lookup_8004_agent`, `submit_8004_feedback`, `request_8004_validation`, `submit_8004_validation`
+
 **Network & Node:** `node_status`, `node_info`, `get_block_number`, `get_block`, `peer_count`, `syncing`
 
 **Cryptography:** `sign_message`, `verify_signature`, `encrypt_data`, `decrypt_data`, `derive_key`, `generate_keypair`, `hash_sha256`, `hash_keccak256`, `x25519_key_exchange`
@@ -121,6 +126,8 @@ export CANTON_MCP_URL=https://canton-mcp.tenzro.network/mcp
 **Chainlink (20 tools):** `ccip_get_fee`, `ccip_send_message`, `ccip_track_message`, `ccip_get_supported_chains`, `ccip_get_supported_tokens`, `ccip_get_lanes`, `ccip_get_token_pool`, `ccip_get_rate_limits`, `chainlink_get_price`, `chainlink_list_feeds`, `ds_get_report`, `ds_list_feeds`, `vrf_request_random`, `vrf_get_subscription`, `por_get_reserve`, `por_list_feeds`, `chainlink_check_upkeep`, `chainlink_get_upkeep_info`, `chainlink_estimate_functions_cost`, `chainlink_get_subscription`
 
 **Canton (14 tools):** `canton_submit_command`, `canton_list_contracts`, `canton_get_events`, `canton_get_transaction`, `canton_allocate_party`, `canton_list_parties`, `canton_list_domains_ext`, `canton_get_health`, `canton_get_balance_ext`, `canton_transfer`, `canton_create_asset`, `canton_dvp_settle`, `canton_upload_dar`, `canton_get_fee_schedule`
+
+**Li.Fi (9 tools):** `lifi_get_quote`, `lifi_get_routes`, `lifi_get_status`, `lifi_get_chains`, `lifi_get_tokens`, `lifi_get_connections`, `lifi_get_tools`, `lifi_get_token_balance`, `lifi_execute_route`
 
 See [SKILL.md](SKILL.md) for the complete reference with all commands and curl examples.
 
@@ -156,9 +163,10 @@ tenzro_rpc.py
     |-- HTTP POST/GET ---------> api.tenzro.network    (verification, faucet)
     |-- MCP Streamable HTTP ---> solana-mcp.tenzro.network   (Solana)
     |                         -> ethereum-mcp.tenzro.network (Ethereum)
+    |                         -> canton-mcp.tenzro.network   (Canton)
     |                         -> layerzero-mcp.tenzro.network (LayerZero)
     |                         -> chainlink-mcp.tenzro.network (Chainlink)
-    |                         -> canton-mcp.tenzro.network   (Canton)
+    |                         -> lifi-mcp.tenzro.network     (Li.Fi)
     |
     v
 Tenzro Network (decentralized) + External Chains

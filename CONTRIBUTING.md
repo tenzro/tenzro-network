@@ -621,12 +621,7 @@ Any other relevant information, logs, or screenshots.
 
 ## License
 
-By contributing to Tenzro Network, you agree that your contributions will be licensed under either:
-
-- MIT License
-- Apache License 2.0
-
-You may choose either license at your option.
+By contributing to Tenzro Network, you agree that your contributions will be licensed under the Apache License 2.0 (the project's single license — see [LICENSE](LICENSE)).
 
 ### Contributor License Agreement
 

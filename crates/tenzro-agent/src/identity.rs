@@ -54,7 +54,12 @@ use std::sync::Arc;
 use std::path::{Path, PathBuf};
 use tenzro_crypto::hash::sha256;
 use tenzro_identity::registry::IdentityRegistry;
-use tenzro_types::{agent::Capability, primitives::Address, AgentIdentity};
+use tenzro_types::{
+    agent::Capability,
+    primitives::{Address, BlockHeight},
+    principal_chain::{anonymous_chain_for_did, PrincipalChain},
+    AgentIdentity,
+};
 use tenzro_wallet::WalletProvisioner;
 use tracing::{debug, info, warn};
 
@@ -162,6 +167,24 @@ pub struct RegisteredAgent {
     /// callers can surface the cost and collect it.
     #[serde(default)]
     pub registration_fee: u128,
+    /// Principal chain frozen at registration time (Agent-Swarm Spec 5).
+    ///
+    /// For blockchain-bound agents, this is the controller-DID chain walked
+    /// via `IdentityRegistry::resolve_principal_chain` at registration; for
+    /// local-only agents, this is a tombstoned anonymous chain rooted at the
+    /// agent's `agent_id`. Either way the chain is **frozen** — later
+    /// revocations of intermediate links do not invalidate this record's
+    /// chain. Downstream auditors correlate against `frozen_at_block`.
+    #[serde(default = "default_principal_chain")]
+    pub principal_chain: PrincipalChain,
+}
+
+/// Serde default for `RegisteredAgent::principal_chain` so historical records
+/// without the field deserialize cleanly. Returns a tombstoned anonymous chain
+/// rooted at the empty-DID, frozen at block 0 — callers should overwrite this
+/// when they have an actual identity to chain from.
+fn default_principal_chain() -> PrincipalChain {
+    anonymous_chain_for_did(String::new(), BlockHeight::new(0))
 }
 
 /// Maps a typed `Capability` enum to a stable string label suitable for the
@@ -203,6 +226,13 @@ impl RegisteredAgent {
         capabilities: Vec<Capability>,
         tee_backed: bool,
     ) -> Self {
+        // Default to a tombstoned anonymous chain rooted at the agent_id —
+        // callers that bind to TDIP overwrite this via `set_principal_chain`
+        // once the controller chain is resolvable.
+        let principal_chain = anonymous_chain_for_did(
+            identity.agent_id.clone(),
+            BlockHeight::new(0),
+        );
         Self {
             identity,
             wallet_address,
@@ -214,7 +244,20 @@ impl RegisteredAgent {
             reputation_score: 50, // Start with neutral reputation
             tenzro_did: None,
             registration_fee: 0,
+            principal_chain,
         }
+    }
+
+    /// Overwrites the frozen principal chain. Used by the registration path
+    /// once the agent has been bound to TDIP and the controller-DID chain has
+    /// been walked via `IdentityRegistry::resolve_principal_chain`.
+    pub fn set_principal_chain(&mut self, chain: PrincipalChain) {
+        self.principal_chain = chain;
+    }
+
+    /// Returns the frozen principal chain recorded at registration time.
+    pub fn principal_chain(&self) -> &PrincipalChain {
+        &self.principal_chain
     }
 
     /// Returns the canonical TDIP DID for this agent, if one was registered.
@@ -530,6 +573,17 @@ impl AgentIdentityManager {
 
             agent.tenzro_did = Some(machine_did.clone());
             agent.registration_fee = fee_required;
+
+            // Spec 5: freeze the principal chain at registration time. The
+            // registry walks controller DIDs and snapshots the controller's
+            // KYC tier; from this point onward the receipt's chain is
+            // immutable, even if intermediate links are revoked later.
+            let frozen_chain = registry.resolve_principal_chain(
+                &machine_did,
+                BlockHeight::new(0),
+            );
+            agent.set_principal_chain(frozen_chain);
+
             info!(
                 "Agent {} bound to TDIP DID {} (wallet {}, fee {} smallest TNZO)",
                 agent_id, machine_did, wallet_id, fee_required
@@ -748,10 +802,10 @@ impl AgentIdentityManager {
             let entry = entry.map_err(|e| AgentError::StorageError(format!("Failed to read entry: {}", e)))?;
             let path = entry.path();
 
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    identities.push(stem.to_string());
-                }
+            if path.extension().and_then(|s| s.to_str()) == Some("json")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                identities.push(stem.to_string());
             }
         }
 

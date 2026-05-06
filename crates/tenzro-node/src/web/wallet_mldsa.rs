@@ -38,7 +38,7 @@
 //! ## Key material
 //!
 //! `(did, surface_key)` deterministically maps to an ML-DSA-65 seed via
-//! `seed = SHA-256("tenzro/wallet/mldsa/v1" || did || surface_key)`.
+//! `seed = SHA-256("tenzro/wallet/mldsa" || did || surface_key)`.
 //! This is the **testnet stub** — it gives reproducible test
 //! signatures without a live TEE keystore. The production
 //! implementation will replace [`derive_signing_key`] with a TEE-sealed
@@ -65,6 +65,7 @@ use sha2::{Digest, Sha256};
 
 use tenzro_crypto::pq::{MlDsaSigningKey, ML_DSA_65_SEED_LEN, ML_DSA_65_SIG_LEN};
 
+use super::error::WalletApiError;
 use super::handlers::WebState;
 use super::oauth::{full_request_uri, validate_wallet_auth};
 
@@ -74,7 +75,7 @@ const REQUIRED_ACTION: &str = "wallet.mldsa.sign";
 /// Domain-separation tag for the deterministic seed-derivation stub.
 /// Distinct from any other Tenzro HKDF/SHA tag so a `(did, surface_key)`
 /// pair never collides with another protocol's secret-derivation.
-const SEED_DOMAIN_TAG: &[u8] = b"tenzro/wallet/mldsa/v1";
+const SEED_DOMAIN_TAG: &[u8] = b"tenzro/wallet/mldsa";
 
 // ---------------------------------------------------------------------------
 // GET /wallet/mldsa/capabilities
@@ -149,21 +150,8 @@ pub struct MlDsaSignResponse {
 /// caller is already authenticated; what failed was the request body
 /// itself (e.g., malformed base64). 4xx with a stable `error` code +
 /// human description.
-#[derive(Debug, Serialize)]
-struct WalletError {
-    error: &'static str,
-    error_description: String,
-}
-
-fn wallet_error(status: StatusCode, code: &'static str, description: &str) -> Response {
-    (
-        status,
-        Json(WalletError {
-            error: code,
-            error_description: description.to_string(),
-        }),
-    )
-        .into_response()
+fn wallet_error(status: StatusCode, code: &'static str, description: &str) -> WalletApiError {
+    WalletApiError::new(status, code, description.to_string())
 }
 
 /// `POST /wallet/mldsa/sign`
@@ -189,7 +177,8 @@ pub async fn sign_handler(
                 StatusCode::BAD_REQUEST,
                 "invalid_preimage_b64",
                 &format!("preimage_b64 must be base64url no-pad: {}", e),
-            );
+            )
+            .into_response();
         }
     };
 
@@ -198,7 +187,7 @@ pub async fn sign_handler(
     // (controller_did, surface_key).
     let signing_key = match derive_signing_key(&body.did, &body.surface_key) {
         Ok(k) => k,
-        Err(resp) => return resp,
+        Err(e) => return e.into_response(),
     };
 
     // Sign — `MlDsaSigningKey::sign` re-derives the expanded key from
@@ -241,7 +230,7 @@ pub async fn sign_handler(
 ///
 /// **This is a stub.** Production replaces it with a TEE-sealed
 /// keystore lookup; the wire shape stays identical.
-fn derive_signing_key(did: &str, surface_key: &str) -> Result<MlDsaSigningKey, Response> {
+fn derive_signing_key(did: &str, surface_key: &str) -> Result<MlDsaSigningKey, WalletApiError> {
     let mut hasher = Sha256::new();
     hasher.update(SEED_DOMAIN_TAG);
     hasher.update(did.as_bytes());

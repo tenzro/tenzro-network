@@ -4,7 +4,7 @@
 //! core cortex crate does not depend on any particular networking stack. This
 //! module wires that trait to the node's real libp2p-backed
 //! [`NetworkService`] so signed [`tenzro_cortex::CortexAdvertisement`]
-//! payloads broadcast over the `tenzro/cortex/1.0.0` gossipsub topic reach
+//! payloads broadcast over the `tenzro/cortex` gossipsub topic reach
 //! every peer in the mesh.
 //!
 //! The wire format mirrors the existing direct-message channel: the raw

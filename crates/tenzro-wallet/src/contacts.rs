@@ -240,10 +240,10 @@ impl AddressBook {
                 .map_err(|e| WalletError::SerializationError(e.to_string()))?;
 
             // Ensure parent directory exists
-            if let Some(parent) = path.parent() {
-                if !parent.exists() {
-                    std::fs::create_dir_all(parent)?;
-                }
+            if let Some(parent) = path.parent()
+                && !parent.exists()
+            {
+                std::fs::create_dir_all(parent)?;
             }
 
             std::fs::write(path, json)?;
@@ -253,17 +253,17 @@ impl AddressBook {
 
     /// Load contacts from persistent storage.
     fn load(&self) -> Result<()> {
-        if let Some(ref path) = self.storage_path {
-            if path.exists() {
-                let json = std::fs::read_to_string(path)?;
-                let contacts: Vec<Contact> = serde_json::from_str(&json)
-                    .map_err(|e| WalletError::SerializationError(e.to_string()))?;
+        if let Some(ref path) = self.storage_path
+            && path.exists()
+        {
+            let json = std::fs::read_to_string(path)?;
+            let contacts: Vec<Contact> = serde_json::from_str(&json)
+                .map_err(|e| WalletError::SerializationError(e.to_string()))?;
 
-                for contact in contacts {
-                    self.name_index
-                        .insert(contact.name.clone(), contact.address);
-                    self.contacts.insert(contact.address, contact);
-                }
+            for contact in contacts {
+                self.name_index
+                    .insert(contact.name.clone(), contact.address);
+                self.contacts.insert(contact.address, contact);
             }
         }
         Ok(())

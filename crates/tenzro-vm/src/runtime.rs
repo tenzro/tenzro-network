@@ -129,10 +129,10 @@ impl MultiVmRuntime {
     #[cfg(test)]
     fn detect_vm_type(&self, address: &[u8]) -> Result<VmType> {
         // Try to detect from address length
-        if let Some(vm_type) = VmType::from_address(address) {
-            if self.config.is_vm_enabled(vm_type) {
-                return Ok(vm_type);
-            }
+        if let Some(vm_type) = VmType::from_address(address)
+            && self.config.is_vm_enabled(vm_type)
+        {
+            return Ok(vm_type);
         }
 
         // Try to detect from address prefix

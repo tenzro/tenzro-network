@@ -151,7 +151,7 @@ pub async fn token_exchange_handler(
 ) -> Response {
     let engine = match auth_engine(&state) {
         Ok(e) => e,
-        Err(resp) => return resp,
+        Err(e) => return e.into_response(),
     };
 
     if body.grant_type != GRANT_TYPE_TOKEN_EXCHANGE {
@@ -230,7 +230,7 @@ pub async fn introspect_handler(
 ) -> Response {
     let engine = match auth_engine(&state) {
         Ok(e) => e,
-        Err(resp) => return resp,
+        Err(e) => return e.into_response(),
     };
 
     // The hint is advisory — log at trace level so operators can
@@ -438,17 +438,21 @@ pub async fn as_metadata_handler(
 // ---------------------------------------------------------------------------
 
 /// Extract a cloned `Arc<AuthEngine>` from the WebState. Returns a
-/// 503 response if the auth engine isn't initialized (e.g., the node
+/// 503 error if the auth engine isn't initialized (e.g., the node
 /// is starting up or the role doesn't include auth).
+///
+/// Returns a small [`WalletApiError`] rather than a full `Response` so
+/// the `Result` Err variant stays under clippy's `result_large_err`
+/// threshold; callers materialize the response via `.into_response()`.
 fn auth_engine(
     state: &Arc<WebState>,
-) -> std::result::Result<Arc<tenzro_auth::AuthEngine>, Response> {
+) -> std::result::Result<Arc<tenzro_auth::AuthEngine>, super::error::WalletApiError> {
     state
         .node
         .as_ref()
         .and_then(|n| n.auth_engine().cloned())
         .ok_or_else(|| {
-            oauth_error(
+            super::error::WalletApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "service_unavailable",
                 "auth engine not initialized on this node",
@@ -566,7 +570,7 @@ pub(super) async fn validate_wallet_auth(
             )
         })?;
 
-    let engine = auth_engine(state)?;
+    let engine = auth_engine(state).map_err(|e| e.into_response())?;
 
     // 3. Parse DPoP proof + run JWT validation with DPoP context.
     let (dpop_proof, signed_input, signature) =

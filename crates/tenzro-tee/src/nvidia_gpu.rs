@@ -16,10 +16,21 @@
 //!
 //! # Supported GPUs
 //!
+//! Confidential-Computing-capable (full TEE attestation):
 //! - NVIDIA H100 (Hopper architecture, CC 1.0)
 //! - NVIDIA H200 (Hopper architecture, CC 1.0, extended HBM)
-//! - NVIDIA B100/B200/GB200 (Blackwell architecture, CC 2.0)
-//! - NVIDIA L40S (Ada Lovelace, limited CC support)
+//! - NVIDIA H800 / H20 (Hopper architecture, China-region SKUs)
+//! - NVIDIA B100 / B200 / GB200 (Blackwell architecture, CC 2.0)
+//! - NVIDIA L40S (Ada Lovelace datacenter, limited CC support)
+//!
+//! Detected and serviced for inference (no CC, no attestation):
+//! - NVIDIA L40 / L4 (Ada Lovelace datacenter)
+//! - NVIDIA RTX 4090 / 4080 / 4070 / 4060 series (Ada Lovelace consumer)
+//! - NVIDIA A100 / A40 / A30 / A10 / A16 / A2 (Ampere datacenter)
+//! - NVIDIA RTX 3090 / 3080 / 3070 / 3060 / 3050 series (Ampere consumer)
+//! - NVIDIA Tesla T4 (Turing datacenter inference)
+//! - NVIDIA RTX 2080 / 2070 / 2060 series (Turing consumer)
+//! - NVIDIA V100 (Volta datacenter)
 //!
 //! # Attestation Flow
 //!
@@ -75,11 +86,13 @@ pub struct NvidiaGpuProvider {
     config: NvidiaGpuConfig,
     /// Cached GPU info (populated on first availability check)
     gpu_info: RwLock<Option<GpuDeviceInfo>>,
+    /// Cached availability state. `None` until first probe; `Some(true)` if a
+    /// CC-capable GPU was detected and CC is enabled; `Some(false)` if probing
+    /// failed or CC is disabled. Used by `is_available()` and the attestation
+    /// path to short-circuit repeated `nvidia-smi` invocations.
+    available: RwLock<Option<bool>>,
     /// Whether we're running in simulation mode
     simulate: bool,
-    /// Whether GPU CC has been detected as available
-    #[allow(dead_code)]
-    available: bool,
     /// Enclave keys (in-memory, keyed by UUID)
     keys: Arc<RwLock<HashMap<uuid::Uuid, EnclaveKeyHandle>>>,
     /// Secret key material for simulation mode (in production, keys stay in GPU CC memory)
@@ -120,14 +133,36 @@ impl Default for NvidiaGpuConfig {
 }
 
 /// GPU architecture identifier.
+///
+/// Includes both CC-capable architectures (Hopper, Blackwell, Ada Lovelace)
+/// and older non-CC architectures (Ampere, Turing, Volta). Consumer-tier and
+/// older datacenter cards are recognized so that inference providers without
+/// CC-capable hardware can still register and serve models — they just don't
+/// get TEE attestation weighting in consensus or escrow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GpuArchitecture {
-    /// NVIDIA Hopper (H100, H200) — CC 1.0
+    /// NVIDIA Hopper (H100, H200, H800, H20) — CC 1.0
     Hopper,
     /// NVIDIA Blackwell (B100, B200, GB200) — CC 2.0
     Blackwell,
-    /// NVIDIA Ada Lovelace (L40S) — limited CC
+    /// NVIDIA Ada Lovelace (L40S, L40, L4, RTX 40-series) — limited CC on L40S only
     AdaLovelace,
+    /// NVIDIA Ampere (A100, A40, A30, A10, A16, A2, RTX 30-series) — no CC
+    Ampere,
+    /// NVIDIA Turing (Tesla T4, RTX 20-series) — no CC
+    Turing,
+    /// NVIDIA Volta (V100) — no CC
+    Volta,
+}
+
+impl GpuArchitecture {
+    /// Whether this architecture has any CC-capable SKUs.
+    ///
+    /// Note that this is architecture-level — within Ada Lovelace, only L40S
+    /// supports CC. Use [`known_gpus::cc_capable`] for per-device truth.
+    pub fn supports_cc(&self) -> bool {
+        matches!(self, GpuArchitecture::Hopper | GpuArchitecture::Blackwell | GpuArchitecture::AdaLovelace)
+    }
 }
 
 impl std::fmt::Display for GpuArchitecture {
@@ -136,6 +171,9 @@ impl std::fmt::Display for GpuArchitecture {
             GpuArchitecture::Hopper => write!(f, "Hopper"),
             GpuArchitecture::Blackwell => write!(f, "Blackwell"),
             GpuArchitecture::AdaLovelace => write!(f, "Ada Lovelace"),
+            GpuArchitecture::Ampere => write!(f, "Ampere"),
+            GpuArchitecture::Turing => write!(f, "Turing"),
+            GpuArchitecture::Volta => write!(f, "Volta"),
         }
     }
 }
@@ -211,7 +249,6 @@ pub enum CcAttestationStatus {
 }
 
 /// NRAS attestation request body.
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 struct NrasAttestationRequest {
     /// Base64-encoded GPU evidence (SPDM measurements)
@@ -223,7 +260,6 @@ struct NrasAttestationRequest {
 }
 
 /// NRAS attestation response.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct NrasAttestationResponse {
     /// JWT attestation token
@@ -238,7 +274,6 @@ struct NrasAttestationResponse {
 }
 
 /// NRAS JWT token claims (subset of fields we care about).
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct NrasTokenClaims {
     /// Whether the GPU passed attestation
@@ -270,42 +305,6 @@ struct NrasTokenClaims {
     nonce: String,
 }
 
-/// Known CC-capable GPU PCI device IDs for detection.
-#[allow(dead_code)]
-mod known_gpus {
-    /// NVIDIA H100 SXM5 80GB
-    pub const H100_SXM5: &str = "2330";
-    /// NVIDIA H100 PCIe 80GB
-    #[allow(dead_code)]
-    pub const H100_PCIE: &str = "2331";
-    /// NVIDIA H200 SXM
-    #[allow(dead_code)]
-    pub const H200_SXM: &str = "2335";
-    /// NVIDIA B100
-    #[allow(dead_code)]
-    pub const B100: &str = "2900";
-    /// NVIDIA B200
-    #[allow(dead_code)]
-    pub const B200: &str = "2901";
-    /// NVIDIA GB200
-    #[allow(dead_code)]
-    pub const GB200: &str = "2902";
-    /// NVIDIA L40S
-    #[allow(dead_code)]
-    pub const L40S: &str = "26B9";
-
-    /// Returns architecture for a known PCI device ID (hex, uppercase).
-    #[allow(dead_code)]
-    pub fn architecture_for_pci_id(pci_id: &str) -> Option<super::GpuArchitecture> {
-        match pci_id.to_uppercase().as_str() {
-            "2330" | "2331" | "2335" => Some(super::GpuArchitecture::Hopper),
-            "2900" | "2901" | "2902" => Some(super::GpuArchitecture::Blackwell),
-            "26B9" => Some(super::GpuArchitecture::AdaLovelace),
-            _ => None,
-        }
-    }
-}
-
 impl NvidiaGpuProvider {
     /// Create a new NVIDIA GPU TEE provider.
     pub fn new(config: NvidiaGpuConfig) -> Self {
@@ -322,8 +321,8 @@ impl NvidiaGpuProvider {
         Self {
             config,
             gpu_info: RwLock::new(None),
+            available: RwLock::new(None),
             simulate,
-            available: false,
             keys: Arc::new(RwLock::new(HashMap::new())),
             secret_keys: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -371,7 +370,11 @@ impl NvidiaGpuProvider {
     /// Queries GPU properties using nvidia-smi CSV output format.
     /// Fields: name, pci.device_id, driver_version, compute_cap, memory.total,
     ///         cc_mode (confidential compute mode).
-    #[cfg(target_os = "linux")]
+    ///
+    /// On hosts without nvidia-smi installed (non-Linux, or Linux without the
+    /// NVIDIA driver), the spawn fails with NotFound and we surface a
+    /// `TeeError::NotAvailable` — callers should fall back to simulation mode
+    /// or skip GPU TEE registration.
     async fn detect_gpu_real(&self) -> Result<GpuDeviceInfo> {
         // Query basic GPU info
         let output = tokio::process::Command::new("nvidia-smi")
@@ -410,9 +413,25 @@ impl NvidiaGpuProvider {
         let architecture = known_gpus::architecture_for_pci_id(&pci_device_id)
             .unwrap_or(self.config.expected_architecture);
 
-        // Check if CC mode is supported/enabled
-        // On supported GPUs, query CC status via nvidia-smi
-        let cc_enabled = self.check_cc_status().await;
+        // Check if CC mode is supported/enabled.
+        // Skip the nvidia-smi conf-compute probe for GPUs known not to support
+        // CC (Ampere, Turing, Volta, RTX consumer cards) — `nvidia-smi
+        // conf-compute -gsc` would fail anyway, but the explicit early-return
+        // makes the path's intent clear and surfaces a useful log line.
+        let cc_enabled = if known_gpus::cc_capable(&pci_device_id) {
+            self.check_cc_status().await
+        } else if known_gpus::architecture_for_pci_id(&pci_device_id).is_some() {
+            tracing::info!(
+                "GPU {} ({}) is recognized but not CC-capable — serving inference without TEE attestation",
+                name, pci_device_id
+            );
+            false
+        } else {
+            // Unknown PCI ID — try the CC probe optimistically (operator may
+            // have set the right `expected_architecture` even for an SKU we
+            // don't know about yet).
+            self.check_cc_status().await
+        };
         let cc_firmware_version = if cc_enabled {
             self.query_cc_firmware_version().await
         } else {
@@ -438,19 +457,11 @@ impl NvidiaGpuProvider {
         Ok(info)
     }
 
-    /// Non-Linux fallback — GPU detection not supported.
-    #[cfg(not(target_os = "linux"))]
-    async fn detect_gpu_real(&self) -> Result<GpuDeviceInfo> {
-        Err(TeeError::not_available(
-            "NVIDIA GPU CC requires Linux with nvidia-smi and NVML"
-        ))
-    }
-
     /// Check if Confidential Computing mode is enabled on the GPU.
     ///
     /// Uses `nvidia-smi conf-compute -gsc` to query CC status.
-    /// On older drivers without CC support, this returns false.
-    #[cfg(target_os = "linux")]
+    /// On older drivers without CC support, or on non-Linux hosts where
+    /// nvidia-smi is absent, the spawn fails and we return false.
     async fn check_cc_status(&self) -> bool {
         let output = tokio::process::Command::new("nvidia-smi")
             .args(["conf-compute", "-gsc"])
@@ -470,14 +481,10 @@ impl NvidiaGpuProvider {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
-    #[allow(dead_code)]
-    async fn check_cc_status(&self) -> bool {
-        false
-    }
-
     /// Query CC firmware version from nvidia-smi.
-    #[cfg(target_os = "linux")]
+    ///
+    /// Returns None if nvidia-smi is missing (non-Linux hosts) or the GPU
+    /// reports no firmware version.
     async fn query_cc_firmware_version(&self) -> Option<String> {
         let output = tokio::process::Command::new("nvidia-smi")
             .args([
@@ -501,14 +508,9 @@ impl NvidiaGpuProvider {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
-    #[allow(dead_code)]
-    async fn query_cc_firmware_version(&self) -> Option<String> {
-        None
-    }
-
     /// Query GPU serial number and return its hash.
-    #[cfg(target_os = "linux")]
+    ///
+    /// Returns "unknown" when nvidia-smi is missing or the query fails.
     async fn query_serial_hash(&self) -> String {
         let output = tokio::process::Command::new("nvidia-smi")
             .args([
@@ -526,12 +528,6 @@ impl NvidiaGpuProvider {
             }
             _ => "unknown".to_string(),
         }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    #[allow(dead_code)]
-    async fn query_serial_hash(&self) -> String {
-        "unknown".to_string()
     }
 
     /// Collect GPU evidence for attestation.
@@ -736,7 +732,6 @@ impl NvidiaGpuProvider {
     ///
     /// Returns a JWT token with attestation claims on success.
     #[cfg(feature = "nvidia-gpu")]
-    #[allow(dead_code)]
     async fn verify_via_nras(
         &self,
         gpu_report: &GpuAttestationReport,
@@ -748,6 +743,17 @@ impl NvidiaGpuProvider {
             GpuArchitecture::Hopper => "HOPPER",
             GpuArchitecture::Blackwell => "BLACKWELL",
             GpuArchitecture::AdaLovelace => "ADA_LOVELACE",
+            // NRAS does not accept non-CC architectures — short-circuit here.
+            // The caller should have gated on `cc_capable()` before reaching
+            // verify_via_nras; this branch is a defensive fallback that
+            // returns a clear error rather than sending an invalid arch
+            // string upstream.
+            GpuArchitecture::Ampere | GpuArchitecture::Turing | GpuArchitecture::Volta => {
+                return Err(TeeError::AttestationVerificationFailed(format!(
+                    "GPU architecture {} is not Confidential-Computing capable; NRAS verification is not applicable",
+                    gpu_report.device_info.architecture
+                )));
+            }
         };
 
         let request = NrasAttestationRequest {
@@ -825,9 +831,83 @@ impl NvidiaGpuProvider {
                 )));
             }
 
+            // Top-level NRAS verdict — must be true even if no `error` field is
+            // populated (some failure modes return `attestation_result=false`
+            // with a structured token but no top-level error string).
+            if !nras_response.attestation_result {
+                return Err(TeeError::AttestationVerificationFailed(
+                    "NRAS returned attestation_result=false".to_string()
+                ));
+            }
+
             // Parse the JWT token claims (without full signature verification —
             // the token comes over TLS from nras.attestation.nvidia.com)
             let claims = parse_jwt_claims(&nras_response.token)?;
+
+            // Replay protection: the JWT nonce must match what we sent.
+            // Skip when claims.nonce is empty (older NRAS responses didn't
+            // echo the nonce; the TLS channel still binds the response).
+            let expected_nonce = hex::encode(&gpu_report.nonce);
+            if !claims.nonce.is_empty() && claims.nonce != expected_nonce {
+                return Err(TeeError::AttestationVerificationFailed(format!(
+                    "NRAS JWT nonce mismatch: expected {}, got {}",
+                    &expected_nonce[..16.min(expected_nonce.len())],
+                    &claims.nonce[..16.min(claims.nonce.len())]
+                )));
+            }
+
+            // Token expiry check — `exp` is a Unix timestamp; reject expired
+            // tokens. `iat` (issued-at) sanity-checked: not from the future
+            // (allow 5 minutes of clock skew).
+            let now_secs = chrono::Utc::now().timestamp();
+            if claims.exp != 0 && now_secs >= claims.exp {
+                return Err(TeeError::AttestationVerificationFailed(format!(
+                    "NRAS JWT expired: exp={}, now={}", claims.exp, now_secs
+                )));
+            }
+            if claims.iat != 0 && claims.iat > now_secs + 300 {
+                return Err(TeeError::AttestationVerificationFailed(format!(
+                    "NRAS JWT issued in the future: iat={}, now={}",
+                    claims.iat, now_secs
+                )));
+            }
+
+            // Cross-check measurement claims against what we sent. NRAS
+            // re-validates measurements against NVIDIA's golden RIMs, so the
+            // returned values may be canonicalized/normalized. We log a
+            // warning on mismatch but don't fail — NRAS's `attestation_result`
+            // is the authoritative verdict. An empty measurement claim means
+            // NRAS didn't expose it in this token version.
+            let local_vbios = hex::encode(&gpu_report.measurements.vbios_hash);
+            if !claims.vbios_measurement.is_empty()
+                && !claims.vbios_measurement.eq_ignore_ascii_case(&local_vbios)
+            {
+                tracing::warn!(
+                    "NRAS VBIOS measurement differs from local: nras={}..., local={}...",
+                    &claims.vbios_measurement[..16.min(claims.vbios_measurement.len())],
+                    &local_vbios[..16.min(local_vbios.len())]
+                );
+            }
+            let local_driver = hex::encode(&gpu_report.measurements.driver_hash);
+            if !claims.driver_measurement.is_empty()
+                && !claims.driver_measurement.eq_ignore_ascii_case(&local_driver)
+            {
+                tracing::warn!(
+                    "NRAS driver measurement differs from local: nras={}..., local={}...",
+                    &claims.driver_measurement[..16.min(claims.driver_measurement.len())],
+                    &local_driver[..16.min(local_driver.len())]
+                );
+            }
+            let local_cc = hex::encode(&gpu_report.measurements.cc_firmware_hash);
+            if !claims.cc_fw_measurement.is_empty()
+                && !claims.cc_fw_measurement.eq_ignore_ascii_case(&local_cc)
+            {
+                tracing::warn!(
+                    "NRAS CC firmware measurement differs from local: nras={}..., local={}...",
+                    &claims.cc_fw_measurement[..16.min(claims.cc_fw_measurement.len())],
+                    &local_cc[..16.min(local_cc.len())]
+                );
+            }
 
             Ok(NrasVerificationResult {
                 verified: claims.gpu_attestation_result,
@@ -889,13 +969,13 @@ impl NvidiaGpuProvider {
         }
 
         // Step 5: Check CC firmware version
-        if let Some(cc_fw) = &report.device_info.cc_firmware_version {
-            if !version_gte(cc_fw, &self.config.min_cc_firmware_version) {
-                return Err(TeeError::attestation_failed(format!(
-                    "CC firmware version {} below minimum {}",
-                    cc_fw, self.config.min_cc_firmware_version
-                )));
-            }
+        if let Some(cc_fw) = &report.device_info.cc_firmware_version
+            && !version_gte(cc_fw, &self.config.min_cc_firmware_version)
+        {
+            return Err(TeeError::attestation_failed(format!(
+                "CC firmware version {} below minimum {}",
+                cc_fw, self.config.min_cc_firmware_version
+            )));
         }
 
         // Step 6: Verify measurements are non-empty
@@ -960,10 +1040,16 @@ impl TeeProvider for NvidiaGpuProvider {
     }
 
     async fn is_available(&self) -> Result<bool> {
-        match self.detect_gpu().await {
-            Ok(info) => Ok(info.cc_enabled),
-            Err(_) => Ok(false),
+        // Return cached probe result if we've already determined availability.
+        if let Some(cached) = *self.available.read() {
+            return Ok(cached);
         }
+        let result = match self.detect_gpu().await {
+            Ok(info) => info.cc_enabled,
+            Err(_) => false,
+        };
+        *self.available.write() = Some(result);
+        Ok(result)
     }
 
     async fn generate_attestation(&self, user_data: &[u8]) -> Result<AttestationReport> {
@@ -1002,7 +1088,51 @@ impl TeeProvider for NvidiaGpuProvider {
             )))?;
 
         // Verify locally first (age, CC status, architecture, driver version, measurements)
-        let valid = self.verify_gpu_attestation_local(&gpu_report).await?;
+        let mut valid = self.verify_gpu_attestation_local(&gpu_report).await?;
+
+        // When remote attestation is configured, additionally verify via NRAS.
+        // NRAS validates against NVIDIA's golden RIMs and the GPU's manufacturing
+        // device certificate chain — local verification cannot do either, so
+        // remote attestation is required for production-grade trust.
+        #[allow(unused_mut, unused_assignments)]
+        let mut nras_token: Option<String> = None;
+        #[allow(unused_mut, unused_assignments)]
+        let mut nras_attested: bool = false;
+        #[allow(unused_mut, unused_assignments)]
+        let mut nras_claims: Option<NrasTokenClaims> = None;
+        #[cfg(feature = "nvidia-gpu")]
+        if valid && self.config.use_remote_attestation {
+            // Re-serialize the report as evidence bytes (canonical JSON).
+            // This mirrors what `collect_gpu_evidence` produced on the prover side.
+            let evidence_bytes = serde_json::to_vec(&gpu_report)
+                .map_err(|e| TeeError::AttestationVerificationFailed(format!(
+                    "Failed to serialize GPU report for NRAS: {}", e
+                )))?;
+            match self.verify_via_nras(&gpu_report, &evidence_bytes).await {
+                Ok(nras_result) => {
+                    nras_attested = nras_result.verified;
+                    nras_token = Some(nras_result.token);
+                    if !nras_result.verified {
+                        tracing::warn!(
+                            "NRAS rejected GPU attestation despite local pass: arch={}",
+                            nras_result.claims.gpu_arch
+                        );
+                        valid = false;
+                    } else {
+                        tracing::info!(
+                            "NRAS attested GPU: arch={}, model={}",
+                            nras_result.claims.gpu_arch,
+                            nras_result.claims.gpu_model
+                        );
+                    }
+                    nras_claims = Some(nras_result.claims);
+                }
+                Err(e) => {
+                    tracing::error!("NRAS verification failed: {}", e);
+                    valid = false;
+                }
+            }
+        }
 
         let tcb_ver = gpu_report.device_info.cc_firmware_version
             .clone()
@@ -1048,6 +1178,36 @@ impl TeeProvider for NvidiaGpuProvider {
             result.details.insert("gpu_architecture".to_string(),
                 format!("{}", gpu_report.device_info.architecture)
             );
+            if let Some(token) = nras_token {
+                result.details.insert("nras_token".to_string(), token);
+                result.details.insert("nras_attested".to_string(), nras_attested.to_string());
+            }
+            if let Some(claims) = nras_claims {
+                if !claims.gpu_arch.is_empty() {
+                    result.details.insert("nras_gpu_arch".to_string(), claims.gpu_arch);
+                }
+                if !claims.gpu_model.is_empty() {
+                    result.details.insert("nras_gpu_model".to_string(), claims.gpu_model);
+                }
+                if !claims.vbios_measurement.is_empty() {
+                    result.details.insert("nras_vbios_measurement".to_string(), claims.vbios_measurement);
+                }
+                if !claims.driver_measurement.is_empty() {
+                    result.details.insert("nras_driver_measurement".to_string(), claims.driver_measurement);
+                }
+                if !claims.cc_fw_measurement.is_empty() {
+                    result.details.insert("nras_cc_fw_measurement".to_string(), claims.cc_fw_measurement);
+                }
+                if claims.iat != 0 {
+                    result.details.insert("nras_token_iat".to_string(), claims.iat.to_string());
+                }
+                if claims.exp != 0 {
+                    result.details.insert("nras_token_exp".to_string(), claims.exp.to_string());
+                }
+                if !claims.nonce.is_empty() {
+                    result.details.insert("nras_token_nonce".to_string(), claims.nonce);
+                }
+            }
 
             Ok(result)
         } else {
@@ -1223,8 +1383,204 @@ impl TeeProvider for NvidiaGpuProvider {
 // Helper types and functions
 // ============================================================================
 
+/// Known NVIDIA GPU PCI device IDs.
+///
+/// Used by `detect_gpu_real()` to map a GPU's PCI device ID (queried from
+/// `nvidia-smi --query-gpu=pci.device_id`) to the correct `GpuArchitecture`
+/// without trusting the operator-supplied `expected_architecture` config.
+/// The architecture decides which firmware-measurement format NRAS expects
+/// and which evidence-collection path to use.
+///
+/// Coverage spans the broader NVIDIA lineup, not just SOTA datacenter parts:
+/// datacenter Hopper/Blackwell/Ada/Ampere/Turing/Volta, RTX 40/30/20 series
+/// consumer cards, and Tesla T4/V100. CC support is a separate predicate
+/// (`cc_capable`) — a GPU may be recognized but not Confidential-Computing
+/// capable, in which case the provider serves model inference without TEE
+/// attestation guarantees.
+///
+/// Sources:
+/// - PCI ID database (https://pci-ids.ucw.cz/)
+/// - NVIDIA datasheets per product line
+/// - NVIDIA Confidential Computing support matrix
+pub mod known_gpus {
+    use super::GpuArchitecture;
+
+    // -- Hopper (CC 1.0 capable) --
+    /// H100 SXM5 (Hopper, CC 1.0)
+    pub const H100_SXM5: &str = "2330";
+    /// H100 PCIe (Hopper, CC 1.0)
+    pub const H100_PCIE: &str = "2331";
+    /// H100 NVL (Hopper, CC 1.0)
+    pub const H100_NVL: &str = "2321";
+    /// H200 SXM (Hopper, CC 1.0, extended HBM)
+    pub const H200_SXM: &str = "2335";
+    /// H200 NVL (Hopper, CC 1.0)
+    pub const H200_NVL: &str = "2336";
+    /// H800 SXM (Hopper, China-region SKU)
+    pub const H800_SXM: &str = "2322";
+    /// H20 (Hopper, China-region SKU)
+    pub const H20: &str = "232C";
+
+    // -- Blackwell (CC 2.0 capable) --
+    /// B100 (Blackwell, CC 2.0)
+    pub const B100: &str = "2900";
+    /// B200 (Blackwell, CC 2.0)
+    pub const B200: &str = "2901";
+    /// GB200 (Blackwell, CC 2.0)
+    pub const GB200: &str = "2902";
+
+    // -- Ada Lovelace (datacenter, limited CC) --
+    /// L40S (Ada Lovelace, limited CC)
+    pub const L40S: &str = "26B9";
+    /// L40 (Ada Lovelace)
+    pub const L40: &str = "26B5";
+    /// L4 (Ada Lovelace, low-power inference)
+    pub const L4: &str = "27B8";
+
+    // -- Ada Lovelace (consumer RTX 40-series) --
+    /// RTX 4090 (Ada)
+    pub const RTX_4090: &str = "2684";
+    /// RTX 4080 SUPER (Ada)
+    pub const RTX_4080_SUPER: &str = "2702";
+    /// RTX 4080 (Ada)
+    pub const RTX_4080: &str = "2704";
+    /// RTX 4070 Ti SUPER (Ada)
+    pub const RTX_4070_TI_SUPER: &str = "2705";
+    /// RTX 4070 Ti (Ada)
+    pub const RTX_4070_TI: &str = "2782";
+    /// RTX 4070 SUPER (Ada)
+    pub const RTX_4070_SUPER: &str = "2783";
+    /// RTX 4070 (Ada)
+    pub const RTX_4070: &str = "2786";
+    /// RTX 4060 Ti (Ada)
+    pub const RTX_4060_TI: &str = "2803";
+    /// RTX 4060 (Ada)
+    pub const RTX_4060: &str = "2882";
+
+    // -- Ampere (datacenter A-series, CC not supported) --
+    /// A100 SXM4 80GB (Ampere)
+    pub const A100_SXM4_80: &str = "20B2";
+    /// A100 PCIe 80GB (Ampere)
+    pub const A100_PCIE_80: &str = "20B5";
+    /// A100 SXM4 40GB (Ampere)
+    pub const A100_SXM4_40: &str = "20B0";
+    /// A100 PCIe 40GB (Ampere)
+    pub const A100_PCIE_40: &str = "20F1";
+    /// A40 (Ampere)
+    pub const A40: &str = "2235";
+    /// A30 (Ampere)
+    pub const A30: &str = "20B7";
+    /// A10 (Ampere)
+    pub const A10: &str = "2236";
+    /// A16 (Ampere)
+    pub const A16: &str = "20F3";
+    /// A2 (Ampere)
+    pub const A2: &str = "25B6";
+
+    // -- Ampere (consumer RTX 30-series) --
+    /// RTX 3090 Ti (Ampere)
+    pub const RTX_3090_TI: &str = "2203";
+    /// RTX 3090 (Ampere)
+    pub const RTX_3090: &str = "2204";
+    /// RTX 3080 Ti (Ampere)
+    pub const RTX_3080_TI: &str = "2208";
+    /// RTX 3080 (Ampere)
+    pub const RTX_3080: &str = "2206";
+    /// RTX 3070 Ti (Ampere)
+    pub const RTX_3070_TI: &str = "2482";
+    /// RTX 3070 (Ampere)
+    pub const RTX_3070: &str = "2484";
+    /// RTX 3060 Ti (Ampere)
+    pub const RTX_3060_TI: &str = "2486";
+    /// RTX 3060 (Ampere)
+    pub const RTX_3060: &str = "2503";
+    /// RTX 3050 (Ampere)
+    pub const RTX_3050: &str = "2507";
+
+    // -- Turing (Tesla T4 + RTX 20-series) --
+    /// Tesla T4 (Turing, common cloud inference)
+    pub const T4: &str = "1EB8";
+    /// RTX 2080 Ti (Turing)
+    pub const RTX_2080_TI: &str = "1E07";
+    /// RTX 2080 SUPER (Turing)
+    pub const RTX_2080_SUPER: &str = "1E81";
+    /// RTX 2080 (Turing)
+    pub const RTX_2080: &str = "1E87";
+    /// RTX 2070 SUPER (Turing)
+    pub const RTX_2070_SUPER: &str = "1E84";
+    /// RTX 2070 (Turing)
+    pub const RTX_2070: &str = "1F02";
+    /// RTX 2060 SUPER (Turing)
+    pub const RTX_2060_SUPER: &str = "1F06";
+    /// RTX 2060 (Turing)
+    pub const RTX_2060: &str = "1F08";
+
+    // -- Volta (Tesla V100) --
+    /// V100 SXM2 32GB (Volta)
+    pub const V100_SXM2_32: &str = "1DB5";
+    /// V100 PCIe 32GB (Volta)
+    pub const V100_PCIE_32: &str = "1DB6";
+    /// V100 SXM2 16GB (Volta)
+    pub const V100_SXM2_16: &str = "1DB1";
+    /// V100 PCIe 16GB (Volta)
+    pub const V100_PCIE_16: &str = "1DB4";
+
+    /// Resolve a GPU's PCI device ID (uppercase hex, no `0x` prefix) to its
+    /// architecture. Returns `None` for unknown devices so the caller can
+    /// fall back to the operator-supplied expected architecture.
+    pub fn architecture_for_pci_id(pci_device_id: &str) -> Option<GpuArchitecture> {
+        match pci_device_id {
+            // Hopper datacenter
+            H100_SXM5 | H100_PCIE | H100_NVL | H200_SXM | H200_NVL | H800_SXM | H20 => {
+                Some(GpuArchitecture::Hopper)
+            }
+            // Blackwell datacenter
+            B100 | B200 | GB200 => Some(GpuArchitecture::Blackwell),
+            // Ada Lovelace (datacenter + RTX 40-series)
+            L40S | L40 | L4
+            | RTX_4090 | RTX_4080_SUPER | RTX_4080
+            | RTX_4070_TI_SUPER | RTX_4070_TI | RTX_4070_SUPER | RTX_4070
+            | RTX_4060_TI | RTX_4060 => Some(GpuArchitecture::AdaLovelace),
+            // Ampere (datacenter + RTX 30-series)
+            A100_SXM4_80 | A100_PCIE_80 | A100_SXM4_40 | A100_PCIE_40
+            | A40 | A30 | A10 | A16 | A2
+            | RTX_3090_TI | RTX_3090 | RTX_3080_TI | RTX_3080
+            | RTX_3070_TI | RTX_3070 | RTX_3060_TI | RTX_3060 | RTX_3050 => {
+                Some(GpuArchitecture::Ampere)
+            }
+            // Turing (Tesla T4 + RTX 20-series)
+            T4 | RTX_2080_TI | RTX_2080_SUPER | RTX_2080
+            | RTX_2070_SUPER | RTX_2070 | RTX_2060_SUPER | RTX_2060 => {
+                Some(GpuArchitecture::Turing)
+            }
+            // Volta (V100)
+            V100_SXM2_32 | V100_PCIE_32 | V100_SXM2_16 | V100_PCIE_16 => {
+                Some(GpuArchitecture::Volta)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a given PCI device ID is Confidential-Computing capable.
+    ///
+    /// Only Hopper datacenter SKUs (H100/H200/H800/H20), Blackwell datacenter
+    /// SKUs (B100/B200/GB200), and select Ada Lovelace datacenter SKUs (L40S)
+    /// support NVIDIA CC. Consumer cards and older datacenter parts (A100,
+    /// V100, T4, RTX series) do not — they can still serve model inference,
+    /// but without TEE attestation guarantees.
+    pub fn cc_capable(pci_device_id: &str) -> bool {
+        matches!(
+            pci_device_id,
+            H100_SXM5 | H100_PCIE | H100_NVL
+            | H200_SXM | H200_NVL
+            | H800_SXM | H20
+            | B100 | B200 | GB200
+            | L40S
+        )
+    }
+}
+
 /// NRAS verification result.
-#[allow(dead_code)]
 struct NrasVerificationResult {
     verified: bool,
     token: String,
@@ -1497,6 +1853,7 @@ mod tests {
 
     #[test]
     fn test_known_gpu_architectures() {
+        // Hopper datacenter
         assert_eq!(
             known_gpus::architecture_for_pci_id("2330"),
             Some(GpuArchitecture::Hopper)
@@ -1505,18 +1862,84 @@ mod tests {
             known_gpus::architecture_for_pci_id("2335"),
             Some(GpuArchitecture::Hopper)
         );
+        // Blackwell datacenter
         assert_eq!(
             known_gpus::architecture_for_pci_id("2900"),
             Some(GpuArchitecture::Blackwell)
         );
+        // Ada Lovelace (datacenter)
         assert_eq!(
             known_gpus::architecture_for_pci_id("26B9"),
             Some(GpuArchitecture::AdaLovelace)
+        );
+        // Ada Lovelace (consumer RTX 4090)
+        assert_eq!(
+            known_gpus::architecture_for_pci_id("2684"),
+            Some(GpuArchitecture::AdaLovelace)
+        );
+        // Ampere (datacenter A100)
+        assert_eq!(
+            known_gpus::architecture_for_pci_id("20B2"),
+            Some(GpuArchitecture::Ampere)
+        );
+        // Ampere (consumer RTX 3090)
+        assert_eq!(
+            known_gpus::architecture_for_pci_id("2204"),
+            Some(GpuArchitecture::Ampere)
+        );
+        // Turing (Tesla T4)
+        assert_eq!(
+            known_gpus::architecture_for_pci_id("1EB8"),
+            Some(GpuArchitecture::Turing)
+        );
+        // Turing (consumer RTX 2080 Ti)
+        assert_eq!(
+            known_gpus::architecture_for_pci_id("1E07"),
+            Some(GpuArchitecture::Turing)
+        );
+        // Volta (V100)
+        assert_eq!(
+            known_gpus::architecture_for_pci_id("1DB5"),
+            Some(GpuArchitecture::Volta)
         );
         assert_eq!(
             known_gpus::architecture_for_pci_id("XXXX"),
             None
         );
+    }
+
+    #[test]
+    fn test_cc_capable_predicate() {
+        // CC-capable
+        assert!(known_gpus::cc_capable("2330")); // H100 SXM5
+        assert!(known_gpus::cc_capable("2335")); // H200 SXM
+        assert!(known_gpus::cc_capable("2900")); // B100
+        assert!(known_gpus::cc_capable("26B9")); // L40S
+        // Recognized but NOT CC-capable
+        assert!(!known_gpus::cc_capable("2684")); // RTX 4090
+        assert!(!known_gpus::cc_capable("20B2")); // A100
+        assert!(!known_gpus::cc_capable("2204")); // RTX 3090
+        assert!(!known_gpus::cc_capable("1EB8")); // T4
+        assert!(!known_gpus::cc_capable("1DB5")); // V100
+        // Unknown
+        assert!(!known_gpus::cc_capable("XXXX"));
+    }
+
+    #[test]
+    fn test_architecture_supports_cc() {
+        assert!(GpuArchitecture::Hopper.supports_cc());
+        assert!(GpuArchitecture::Blackwell.supports_cc());
+        assert!(GpuArchitecture::AdaLovelace.supports_cc());
+        assert!(!GpuArchitecture::Ampere.supports_cc());
+        assert!(!GpuArchitecture::Turing.supports_cc());
+        assert!(!GpuArchitecture::Volta.supports_cc());
+    }
+
+    #[test]
+    fn test_architecture_display_full() {
+        assert_eq!(GpuArchitecture::Ampere.to_string(), "Ampere");
+        assert_eq!(GpuArchitecture::Turing.to_string(), "Turing");
+        assert_eq!(GpuArchitecture::Volta.to_string(), "Volta");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! Reproduces the exact topology that fails on testnet: multiple
 //! TenzroNetworkService instances, real TCP/QUIC, dialed via discovered
-//! listen addresses, joining gossipsub mesh on `tenzro/consensus/1.0.0`,
+//! listen addresses, joining gossipsub mesh on `tenzro/consensus`,
 //! and exchanging real `NetworkMessage::Ping` payloads.
 //!
 //! These tests exist because every prior `tests/integration_test.rs` test
@@ -25,7 +25,7 @@ use tenzro_network::{
 };
 use tokio::time::timeout;
 
-const CONSENSUS_TOPIC: &str = "tenzro/consensus/1.0.0";
+const CONSENSUS_TOPIC: &str = "tenzro/consensus";
 const MESH_WAIT: Duration = Duration::from_secs(30);
 const RECV_TIMEOUT: Duration = Duration::from_secs(10);
 

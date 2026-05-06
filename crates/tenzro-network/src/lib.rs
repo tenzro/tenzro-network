@@ -29,11 +29,11 @@
 //! let network = TenzroNetworkService::new(config).await?;
 //!
 //! // Subscribe to blocks
-//! let mut blocks_rx = network.subscribe("tenzro/blocks/1.0.0").await?;
+//! let mut blocks_rx = network.subscribe("tenzro/blocks").await?;
 //!
 //! // Broadcast a message
 //! let message = NetworkMessage::new(MessagePayload::Ping);
-//! network.broadcast("tenzro/status/1.0.0", message).await?;
+//! network.broadcast("tenzro/status", message).await?;
 //!
 //! // Receive messages
 //! tokio::spawn(async move {
@@ -50,13 +50,13 @@
 //!
 //! The network uses gossipsub topics for different message types:
 //!
-//! - `tenzro/blocks/1.0.0` - Block propagation
-//! - `tenzro/transactions/1.0.0` - Transaction propagation
-//! - `tenzro/consensus/1.0.0` - Consensus messages
-//! - `tenzro/attestations/1.0.0` - TEE attestations
-//! - `tenzro/models/1.0.0` - Model registrations
-//! - `tenzro/inference/1.0.0` - Inference requests/responses
-//! - `tenzro/status/1.0.0` - Status and discovery messages
+//! - `tenzro/blocks` - Block propagation
+//! - `tenzro/transactions` - Transaction propagation
+//! - `tenzro/consensus` - Consensus messages
+//! - `tenzro/attestations` - TEE attestations
+//! - `tenzro/models` - Model registrations
+//! - `tenzro/inference` - Inference requests/responses
+//! - `tenzro/status` - Status and discovery messages
 //!
 //! For testnet and mainnet, topics are prefixed accordingly:
 //! - Testnet: `tenzro/testnet/blocks/1.0.0`

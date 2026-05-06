@@ -205,6 +205,37 @@ impl ForkChoice {
         }
     }
 
+    /// Records a QC for an already-known block. Idempotent: if the incoming
+    /// QC has a strictly higher view than what we already have, replace;
+    /// otherwise no-op. Returns true if the index was updated.
+    ///
+    /// HotStuff-2 observes blocks (via `on_proposal`) before the votes
+    /// they collect aggregate into a QC. Fork choice needs to learn the
+    /// QC at QC-formation time, separate from the block insertion path.
+    pub fn record_qc(&self, qc: QuorumCertificate) -> bool {
+        if !self.blocks.contains_key(&qc.block_hash) {
+            return false;
+        }
+        let incoming_view = qc.view;
+        // Read the existing QC's view in a tight scope so the DashMap
+        // read guard is dropped before we re-acquire as a writer below.
+        // Holding a `Ref` across `insert()` on the same map deadlocks.
+        let existing_view = self.qcs.get(&qc.block_hash).map(|r| r.view);
+        match existing_view {
+            Some(v) if v >= incoming_view => false,
+            _ => {
+                self.qcs.insert(qc.block_hash, qc);
+                true
+            }
+        }
+    }
+
+    /// Returns the number of blocks tracked by fork choice. Test-only
+    /// observability hook.
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
     /// Selects the best block at the given height
     ///
     /// Uses the "follow highest QC" rule - select the block with the
@@ -345,6 +376,113 @@ mod tests {
         let retrieved = fork_choice.select_best_block(BlockHeight::from(1));
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().height(), block.height());
+    }
+
+    /// Distinct blocks at the same height — exercises the highest-QC-view
+    /// selection rule. Use different proposer addresses to force distinct
+    /// content hashes (BlockHeader::hash includes the proposer field).
+    fn create_test_block_with_proposer(height: u64, proposer_seed: u8) -> Block {
+        let mut proposer_bytes = [0u8; 32];
+        proposer_bytes[0] = proposer_seed;
+        Block::new(
+            BlockHeader::new(
+                BlockHeight::from(height),
+                Hash::default(),
+                Hash::default(),
+                Hash::default(),
+                Address::new(proposer_bytes),
+                ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
+            ),
+            vec![],
+        )
+    }
+
+    #[test]
+    fn test_fork_choice_picks_highest_qc_view() {
+        // Two distinct blocks at height 5; the one with the higher QC
+        // view must win.
+        let fork_choice = ForkChoice::new(Arc::new(FinalityTracker::new()));
+
+        let block_a = create_test_block_with_proposer(5, 0xAA);
+        let block_b = create_test_block_with_proposer(5, 0xBB);
+        assert_ne!(
+            block_a.hash(),
+            block_b.hash(),
+            "test setup: distinct proposers must yield distinct block hashes"
+        );
+
+        // block_a has a QC at view 7, block_b at view 12 → block_b wins
+        fork_choice.add_block(block_a.clone(), Some(create_test_qc(7, 5)));
+        fork_choice.add_block(block_b.clone(), Some(create_test_qc(12, 5)));
+
+        let best = fork_choice.select_best_block(BlockHeight::from(5)).unwrap();
+        assert_eq!(best.hash(), block_b.hash());
+    }
+
+    #[test]
+    fn test_fork_choice_record_qc_monotonic() {
+        // record_qc is monotonic by view — a higher-view QC supersedes a
+        // lower-view QC for the same block; a lower-view QC is a no-op.
+        let fork_choice = ForkChoice::new(Arc::new(FinalityTracker::new()));
+
+        let block = create_test_block(3);
+        fork_choice.add_block(block.clone(), None);
+
+        // First QC at view 5
+        let qc_v5 = QuorumCertificate::new(
+            5,
+            BlockHeight::from(3),
+            block.hash(),
+            VoteType::Prepare,
+            vec![],
+            0,
+        );
+        assert!(fork_choice.record_qc(qc_v5));
+
+        // Higher-view QC for the same block — supersedes
+        let qc_v9 = QuorumCertificate::new(
+            9,
+            BlockHeight::from(3),
+            block.hash(),
+            VoteType::Commit,
+            vec![],
+            0,
+        );
+        assert!(fork_choice.record_qc(qc_v9));
+        assert_eq!(fork_choice.get_qc(&block.hash()).unwrap().view, 9);
+
+        // Re-recording the lower view is a no-op
+        let qc_v5_again = QuorumCertificate::new(
+            5,
+            BlockHeight::from(3),
+            block.hash(),
+            VoteType::Prepare,
+            vec![],
+            0,
+        );
+        assert!(!fork_choice.record_qc(qc_v5_again));
+        assert_eq!(fork_choice.get_qc(&block.hash()).unwrap().view, 9);
+    }
+
+    #[test]
+    fn test_fork_choice_record_qc_requires_known_block() {
+        // record_qc must refuse to index a QC for a block we haven't
+        // observed locally — otherwise we'd accumulate dangling QCs.
+        let fork_choice = ForkChoice::new(Arc::new(FinalityTracker::new()));
+
+        let block = create_test_block(1);
+        let qc = QuorumCertificate::new(
+            1,
+            BlockHeight::from(1),
+            block.hash(),
+            VoteType::Prepare,
+            vec![],
+            0,
+        );
+
+        // Block is not added — record_qc must return false
+        assert!(!fork_choice.record_qc(qc));
+        assert_eq!(fork_choice.block_count(), 0);
     }
 
     #[test]

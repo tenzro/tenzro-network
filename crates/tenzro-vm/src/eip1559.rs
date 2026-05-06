@@ -198,6 +198,16 @@ impl FeeMarket {
         self.total_burned
     }
 
+    /// Account additional burn from an out-of-band source (e.g. the
+    /// hot-state local fee market surcharge — Spec 6). The base fee and
+    /// block window are not affected; only the cumulative `total_burned`
+    /// counter advances. This keeps `eth_feeHistory` reporting one
+    /// authoritative burn figure even though local-fee surcharges are
+    /// computed off the EIP-1559 path.
+    pub fn add_external_burn(&mut self, amount: u128) {
+        self.total_burned = self.total_burned.saturating_add(amount);
+    }
+
     /// Get the current block number
     pub fn block_number(&self) -> u64 {
         self.block_number

@@ -72,6 +72,79 @@ impl TenzroAgentRegistry {
     pub fn new(identity_registry: Arc<IdentityRegistry>) -> Self {
         Self { identity_registry }
     }
+
+    /// Enumerate every RFC-9421-compatible public key across all registered
+    /// identities, formatted as [`AgentPublicKeyInfo`] records. Keys whose
+    /// `key_type` is not a supported signing algorithm (e.g. `Secp256k1`,
+    /// `X25519`) are silently skipped — they exist for other purposes
+    /// (block signing, key agreement) and must not appear in the JWKS.
+    ///
+    /// The `key_id` on each record is encoded as `<agent_did>#<fragment>` so
+    /// downstream consumers can resolve a specific key with
+    /// [`AgentRegistryClient::get_public_key`].
+    pub fn list_all_agents(&self) -> Vec<AgentPublicKeyInfo> {
+        let mut out = Vec::new();
+        for (_did_str, identity) in self.identity_registry.list_all() {
+            let did = identity.did.to_string();
+            let is_active = matches!(identity.status, IdentityStatus::Active);
+            for pk in &identity.public_keys {
+                let Ok(algorithm) = key_type_to_algorithm(&pk.key_type) else {
+                    continue;
+                };
+                out.push(AgentPublicKeyInfo {
+                    key_id: format!("{}#{}", did, pk.key_id),
+                    algorithm,
+                    public_key_bytes: pk.public_key.clone(),
+                    agent_did: Some(did.clone()),
+                    is_active,
+                });
+            }
+        }
+        out
+    }
+}
+
+/// Map a `tenzro_identity::PublicKeyInfo.key_type` string to a
+/// [`SignatureAlgorithm`].
+///
+/// Identities currently store `"Ed25519"`, `"Secp256k1"`, `"P256"`, `"P384"`,
+/// or `"Rsa"`. Returns `Err` for unrecognized values rather than silently
+/// defaulting — callers must surface the unsupported algorithm to the verifier.
+pub(crate) fn key_type_to_algorithm(key_type: &str) -> Result<SignatureAlgorithm> {
+    match key_type {
+        "Ed25519" => Ok(SignatureAlgorithm::Ed25519),
+        "P256" | "EcdsaP256" | "ecdsa-p256" => Ok(SignatureAlgorithm::EcdsaP256Sha256),
+        "P384" | "EcdsaP384" | "ecdsa-p384" => Ok(SignatureAlgorithm::EcdsaP384Sha384),
+        "RsaPss" | "rsa-pss-sha256" => Ok(SignatureAlgorithm::RsaPssSha256),
+        "RsaPssSha512" | "rsa-pss-sha512" => Ok(SignatureAlgorithm::RsaPssSha512),
+        "Rsa" | "RsaPkcs1v15" | "rsa-v1_5-sha256" => Ok(SignatureAlgorithm::RsaV15Sha256),
+        // Tenzro identities can carry Secp256k1 keys for chain-bound signing,
+        // but RFC 9421 §3.3 has no Secp256k1 algorithm — reject explicitly.
+        "Secp256k1" => Err(PaymentError::AgentRegistryError(
+            "Secp256k1 keys are not RFC 9421 algorithms; use Ed25519 / ECDSA P-256/P-384"
+                .to_string(),
+        )),
+        // X25519 is a key-exchange key, not a signing key — reject explicitly.
+        "X25519" => Err(PaymentError::AgentRegistryError(
+            "X25519 is a key-exchange key, not a signing algorithm".to_string(),
+        )),
+        other => Err(PaymentError::AgentRegistryError(format!(
+            "unsupported key_type for RFC 9421: {}",
+            other
+        ))),
+    }
+}
+
+/// Parse an RFC 9421 `keyid` parameter into `(did, optional_fragment)`.
+///
+/// The Tenzro convention is `did:tenzro:machine:<id>` (whole identity, first
+/// matching key) or `did:tenzro:machine:<id>#<key_fragment>` (selects the
+/// `PublicKeyInfo` whose `key_id` matches the fragment).
+fn split_keyid(key_id: &str) -> (&str, Option<&str>) {
+    match key_id.split_once('#') {
+        Some((did, frag)) => (did, Some(frag)),
+        None => (key_id, None),
+    }
 }
 
 #[async_trait]
@@ -79,30 +152,63 @@ impl AgentRegistryClient for TenzroAgentRegistry {
     async fn get_public_key(&self, key_id: &str) -> Result<AgentPublicKeyInfo> {
         debug!("Looking up public key for key_id: {}", key_id);
 
-        // Try to resolve key_id as a DID
+        let (did, fragment) = split_keyid(key_id);
+
         let identity = self
             .identity_registry
-            .resolve(key_id)
-            .map_err(|_| PaymentError::AgentRegistryError(format!("agent {} not found", key_id)))?;
+            .resolve(did)
+            .map_err(|_| PaymentError::AgentRegistryError(format!("agent {} not found", did)))?;
 
-        // Check if identity is active
         let is_active = matches!(identity.status, IdentityStatus::Active);
-
         if !is_active {
-            debug!("Agent {} is not active (status: {:?})", key_id, identity.status);
+            debug!("Agent {} is not active (status: {:?})", did, identity.status);
         }
 
-        // Extract public key bytes from the identity
-        // Get the first public key from the identity's public_keys list
-        let public_key_info = identity.public_keys.first().ok_or_else(|| {
-            PaymentError::AgentRegistryError(format!("agent {} has no public keys", key_id))
-        })?;
+        if identity.public_keys.is_empty() {
+            return Err(PaymentError::AgentRegistryError(format!(
+                "agent {} has no public keys",
+                did
+            )));
+        }
 
-        let public_key_bytes = public_key_info.public_key.clone();
+        // Selection: if a fragment is provided, find the matching key. Otherwise,
+        // pick the first key whose key_type maps to a supported RFC 9421 algorithm.
+        let pk = if let Some(frag) = fragment {
+            identity
+                .public_keys
+                .iter()
+                .find(|k| k.key_id == frag)
+                .ok_or_else(|| {
+                    PaymentError::AgentRegistryError(format!(
+                        "agent {} has no key with id #{}",
+                        did, frag
+                    ))
+                })?
+        } else {
+            identity
+                .public_keys
+                .iter()
+                .find(|k| key_type_to_algorithm(&k.key_type).is_ok())
+                .ok_or_else(|| {
+                    PaymentError::AgentRegistryError(format!(
+                        "agent {} has no RFC 9421-compatible key (only {})",
+                        did,
+                        identity
+                            .public_keys
+                            .iter()
+                            .map(|k| k.key_type.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                })?
+        };
+
+        let algorithm = key_type_to_algorithm(&pk.key_type)?;
+        let public_key_bytes = pk.public_key.clone();
 
         Ok(AgentPublicKeyInfo {
             key_id: key_id.to_string(),
-            algorithm: SignatureAlgorithm::Ed25519,
+            algorithm,
             public_key_bytes,
             agent_did: Some(identity.did.to_string()),
             is_active,
@@ -111,11 +217,12 @@ impl AgentRegistryClient for TenzroAgentRegistry {
 
     async fn verify_agent(&self, key_id: &str) -> Result<bool> {
         debug!("Verifying agent: {}", key_id);
+        let (did, _fragment) = split_keyid(key_id);
 
         let identity = self
             .identity_registry
-            .resolve(key_id)
-            .map_err(|_| PaymentError::AgentRegistryError(format!("agent {} not found", key_id)))?;
+            .resolve(did)
+            .map_err(|_| PaymentError::AgentRegistryError(format!("agent {} not found", did)))?;
 
         // Agent is verified if status is Active
         Ok(matches!(identity.status, IdentityStatus::Active))
@@ -298,4 +405,53 @@ mod tests {
     // Note: test_get_public_key_no_keys is not feasible with the current tenzro_identity API
     // because register_machine_with_fee always requires a non-empty public_key parameter.
     // The API prevents creating identities without public keys, so this edge case cannot be tested.
+
+    #[test]
+    fn test_key_type_to_algorithm_mapping() {
+        assert!(matches!(
+            key_type_to_algorithm("Ed25519").unwrap(),
+            SignatureAlgorithm::Ed25519
+        ));
+        assert!(matches!(
+            key_type_to_algorithm("P256").unwrap(),
+            SignatureAlgorithm::EcdsaP256Sha256
+        ));
+        assert!(matches!(
+            key_type_to_algorithm("P384").unwrap(),
+            SignatureAlgorithm::EcdsaP384Sha384
+        ));
+        assert!(matches!(
+            key_type_to_algorithm("RsaPss").unwrap(),
+            SignatureAlgorithm::RsaPssSha256
+        ));
+        assert!(matches!(
+            key_type_to_algorithm("RsaPssSha512").unwrap(),
+            SignatureAlgorithm::RsaPssSha512
+        ));
+        assert!(matches!(
+            key_type_to_algorithm("Rsa").unwrap(),
+            SignatureAlgorithm::RsaV15Sha256
+        ));
+
+        // Secp256k1 explicitly rejected — not an RFC 9421 algorithm
+        assert!(key_type_to_algorithm("Secp256k1").is_err());
+        // X25519 is key-exchange, not signing
+        assert!(key_type_to_algorithm("X25519").is_err());
+        // Unknown algorithms rejected
+        assert!(key_type_to_algorithm("Garbage").is_err());
+    }
+
+    #[test]
+    fn test_split_keyid_with_fragment() {
+        let (did, frag) = split_keyid("did:tenzro:machine:abc#key-1");
+        assert_eq!(did, "did:tenzro:machine:abc");
+        assert_eq!(frag, Some("key-1"));
+    }
+
+    #[test]
+    fn test_split_keyid_without_fragment() {
+        let (did, frag) = split_keyid("did:tenzro:machine:abc");
+        assert_eq!(did, "did:tenzro:machine:abc");
+        assert_eq!(frag, None);
+    }
 }

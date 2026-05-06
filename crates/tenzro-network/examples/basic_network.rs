@@ -25,11 +25,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Local peer ID: {}", peer_id);
 
     // Subscribe to blocks topic
-    let mut blocks_rx = network.subscribe("tenzro/blocks/1.0.0").await?;
+    let mut blocks_rx = network.subscribe("tenzro/blocks").await?;
     println!("Subscribed to blocks topic");
 
     // Subscribe to transactions topic
-    let mut txs_rx = network.subscribe("tenzro/transactions/1.0.0").await?;
+    let mut txs_rx = network.subscribe("tenzro/transactions").await?;
     println!("Subscribed to transactions topic");
 
     // Spawn a task to handle incoming blocks
@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Broadcast a ping message
     let ping_message = NetworkMessage::new(MessagePayload::Ping);
-    network.broadcast("tenzro/status/1.0.0", ping_message).await?;
+    network.broadcast("tenzro/status", ping_message).await?;
     println!("Broadcasted ping message");
 
     // Get connected peers

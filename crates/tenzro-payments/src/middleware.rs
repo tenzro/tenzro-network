@@ -89,11 +89,15 @@ impl PaymentGateMiddleware {
 /// Axum middleware handler for payment verification
 ///
 /// Checks for payment credentials in headers:
-/// - `Payment-Credential` (base64-encoded JSON)
-/// - `Authorization: mpp <base64>` (MPP protocol)
+/// - `Authorization: Payment <base64url>` (IETF `draft-ryan-httpauth-payment-01`)
+/// - `Authorization: mpp <base64>` (legacy MPP shape)
 /// - `Authorization: x402 <base64>` (x402 protocol)
+/// - `Authorization: visa-tap <base64>` (Visa TAP)
+/// - `Authorization: mastercard-agent-pay <base64>` (Mastercard Agent Pay)
+/// - `Payment-Credential: <base64>` (raw fallback)
 ///
-/// If no credential is found, returns HTTP 402 with a JSON challenge.
+/// If no credential is found, returns HTTP 402 with a `WWW-Authenticate: Payment` header
+/// (per IETF draft) and a JSON challenge body for clients that need richer context.
 /// If credential is present, verifies it and forwards request on success.
 pub async fn payment_gate_handler(
     State(middleware): State<PaymentGateMiddleware>,
@@ -124,26 +128,26 @@ pub async fn payment_gate_handler(
                 // and delegation scope BEFORE verifying the payment itself.
                 // This prevents suspended/revoked identities from making payments
                 // and enforces delegation limits for machine identities.
-                if let Some(ref binder) = middleware.identity_binder {
-                    if !credential.payer_did.is_empty() {
-                        if let Err(e) = binder.validate_payer_for_protocol(
-                            &credential.payer_did,
-                            credential.amount,
-                            "payment",
-                            Some(&credential.protocol),
-                            credential.extra.get("chain").and_then(|v| v.as_str()),
-                        ) {
-                            warn!(
-                                "Payer identity validation failed for {}: {}",
-                                credential.payer_did, e
-                            );
-                            return Err(PaymentGateError::VerificationFailed(format!(
-                                "payer identity rejected: {}",
-                                e
-                            )));
-                        }
-                        debug!("Payer identity {} validated", credential.payer_did);
+                if let Some(ref binder) = middleware.identity_binder
+                    && !credential.payer_did.is_empty()
+                {
+                    if let Err(e) = binder.validate_payer_for_protocol(
+                        &credential.payer_did,
+                        credential.amount,
+                        "payment",
+                        Some(&credential.protocol),
+                        credential.extra.get("chain").and_then(|v| v.as_str()),
+                    ) {
+                        warn!(
+                            "Payer identity validation failed for {}: {}",
+                            credential.payer_did, e
+                        );
+                        return Err(PaymentGateError::VerificationFailed(format!(
+                            "payer identity rejected: {}",
+                            e
+                        )));
                     }
+                    debug!("Payer identity {} validated", credential.payer_did);
                 }
 
                 match middleware.gateway.verify_and_settle(&credential).await {
@@ -194,38 +198,72 @@ pub async fn payment_gate_handler(
     }
 }
 
+/// Escapes backslashes and double-quotes for inclusion inside an RFC 7230 quoted-string.
+/// Used when building the `WWW-Authenticate: Payment ...` header per
+/// `draft-ryan-httpauth-payment-01` ABNF: `auth-param = token BWS "=" BWS ( token / quoted-string )`.
+fn escape_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Parses a payment credential from a header value
 ///
 /// Supports:
-/// - `Payment-Credential: <base64-json>`
-/// - `Authorization: mpp <base64-json>`
+/// - `Authorization: Payment <base64url>` (IETF `draft-ryan-httpauth-payment-01`, MPP-canonical)
+/// - `Authorization: mpp <base64-json>` (legacy MPP shape)
 /// - `Authorization: x402 <base64-json>`
 /// - `Authorization: visa-tap <base64-json>`
 /// - `Authorization: mastercard-agent-pay <base64-json>`
+/// - `Payment-Credential: <base64-json>` (raw fallback)
+///
+/// The `Payment` prefix triggers base64url-nopad decoding (per IETF draft);
+/// other prefixes use legacy base64 STANDARD encoding.
 fn parse_credential(header_value: &str) -> crate::error::Result<PaymentCredential> {
     use base64::{engine::general_purpose, Engine as _};
 
-    // Check if it's an Authorization header with protocol prefix
-    let base64_data = if header_value.starts_with("mpp ")
-        || header_value.starts_with("x402 ")
-        || header_value.starts_with("visa-tap ")
-        || header_value.starts_with("mastercard-agent-pay ")
-    {
-        // Extract base64 part after protocol prefix
-        header_value.split_whitespace().nth(1).ok_or_else(|| {
-            crate::error::PaymentError::CredentialError(
-                "Invalid Authorization header format, expected 'protocol base64-data'".to_string(),
-            )
-        })?
+    // IETF Payment scheme uses base64url-nopad; everything else uses STANDARD
+    let (base64_data, is_url_safe) = if let Some(rest) = header_value.strip_prefix("Payment ") {
+        (rest, true)
+    } else if let Some(rest) = header_value.strip_prefix("mpp ") {
+        (rest, false)
+    } else if let Some(rest) = header_value.strip_prefix("x402 ") {
+        (rest, false)
+    } else if let Some(rest) = header_value.strip_prefix("visa-tap ") {
+        (rest, false)
+    } else if let Some(rest) = header_value.strip_prefix("mastercard-agent-pay ") {
+        (rest, false)
     } else {
         // Assume it's a raw base64 value from Payment-Credential
-        header_value
+        (header_value, false)
     };
 
-    // Decode base64
-    let json_bytes = general_purpose::STANDARD
-        .decode(base64_data)
-        .map_err(|e| crate::error::PaymentError::CredentialError(format!("Failed to decode base64 credential: {}", e)))?;
+    // Decode base64 (IETF draft mandates base64url-nopad for Payment scheme)
+    let json_bytes = if is_url_safe {
+        general_purpose::URL_SAFE_NO_PAD
+            .decode(base64_data.trim())
+            .map_err(|e| {
+                crate::error::PaymentError::CredentialError(format!(
+                    "Failed to decode base64url credential: {}",
+                    e
+                ))
+            })?
+    } else {
+        general_purpose::STANDARD.decode(base64_data).map_err(|e| {
+            crate::error::PaymentError::CredentialError(format!(
+                "Failed to decode base64 credential: {}",
+                e
+            ))
+        })?
+    };
 
     // Parse JSON
     let credential: PaymentCredential = serde_json::from_slice(&json_bytes)?;
@@ -252,10 +290,33 @@ impl IntoResponse for PaymentGateError {
             PaymentGateError::PaymentRequired(challenge) => {
                 let body = serde_json::to_string(&challenge).unwrap_or_else(|_| "{}".to_string());
 
+                // Build IETF-compliant WWW-Authenticate per draft-ryan-httpauth-payment-01.
+                // ABNF: challenge = "Payment" 1*SP auth-params
+                // Required params: id, realm, method, intent, request
+                // Optional: expires, digest, description, opaque
+                let request_b64 = {
+                    use base64::{engine::general_purpose, Engine as _};
+                    // Embed the JSON challenge body as base64url-nopad-encoded request param
+                    general_purpose::URL_SAFE_NO_PAD.encode(body.as_bytes())
+                };
+                let www_auth = format!(
+                    "Payment id=\"{}\", realm=\"{}\", method=\"{}\", intent=\"charge\", \
+                     request=\"{}\", expires=\"{}\"",
+                    escape_quoted(&challenge.challenge_id),
+                    escape_quoted(&challenge.resource),
+                    escape_quoted(&challenge.protocol),
+                    request_b64,
+                    challenge.expires_at.to_rfc3339(),
+                );
+
                 Response::builder()
                     .status(StatusCode::PAYMENT_REQUIRED)
-                    .header("Payment-Required", "true")
+                    .header(header::WWW_AUTHENTICATE, www_auth)
                     .header(header::CONTENT_TYPE, "application/json")
+                    // Simple boolean signal alongside the IETF WWW-Authenticate header.
+                    // Lets clients that don't parse the auth-params still detect that
+                    // the route is gated. Asserted by the web-server 402 unit tests.
+                    .header("Payment-Required", "true")
                     .body(Body::from(body))
                     .unwrap()
             }
@@ -354,6 +415,10 @@ mod tests {
                 settlement_tx: verification.settlement_ref.clone(),
                 chain: "tenzro".to_string(),
                 settled_at: Utc::now(),
+                principal_chain: tenzro_types::principal_chain::anonymous_chain_for_did(
+                    verification.payer_did.clone(),
+                    tenzro_types::primitives::BlockHeight::new(0),
+                ),
                 extra: HashMap::new(),
             })
         }
@@ -416,10 +481,18 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
-        assert_eq!(
-            response.headers().get("Payment-Required").unwrap(),
-            "true"
+        let www_auth = response
+            .headers()
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .expect("WWW-Authenticate header must be set on 402 response")
+            .to_str()
+            .unwrap();
+        assert!(
+            www_auth.starts_with("Payment "),
+            "WWW-Authenticate must use Payment scheme (RFC 7235), got: {www_auth}"
         );
+        assert!(www_auth.contains("realm="));
+        assert!(www_auth.contains("method=\"test\""));
     }
 
     #[tokio::test]

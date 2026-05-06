@@ -29,8 +29,7 @@ use serde::Deserialize;
 pub struct EthGetPriceParams {
     #[schemars(description = "Chainlink AggregatorV3Interface data feed address (default: ETH/USD 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419)")]
     pub feed_address: Option<String>,
-    #[schemars(description = "Chain ID — 1 for mainnet (default), used to select RPC endpoint")]
-    #[allow(dead_code)]
+    #[schemars(description = "Chain ID — 1 for mainnet (default), 8453 for Base, 42161 for Arbitrum. Selects the dRPC chain-specific URL for the feed read.")]
     pub chain_id: Option<u64>,
 }
 
@@ -159,6 +158,12 @@ pub struct EthGetAttestationParams {
     pub uid: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct EthSendRawTransactionParams {
+    #[schemars(description = "Signed RLP-encoded transaction as hex (0x-prefixed). Build with the tenzro_signTransaction helper or any EIP-1559/legacy signer.")]
+    pub raw_tx: String,
+}
+
 // ─── Helper functions ───
 
 fn err_internal(msg: impl Into<String>) -> ErrorData {
@@ -179,7 +184,10 @@ fn json_result(value: serde_json::Value) -> std::result::Result<CallToolResult, 
     )]))
 }
 
-#[allow(dead_code)]
+/// Wrap a plain-text status string as a successful tool result.
+///
+/// Used by tools that return a single textual value (e.g. transaction hash,
+/// confirmation message) rather than a structured JSON envelope.
 fn text_result(text: impl Into<String>) -> std::result::Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(text.into())]))
 }
@@ -198,6 +206,38 @@ fn strip_0x(s: &str) -> &str {
     s.strip_prefix("0x")
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s)
+}
+
+/// Resolve a chain ID to a dRPC HTTPS URL for Chainlink data-feed reads.
+///
+/// Used by `eth_get_price` when the caller passes a non-default `chain_id`.
+/// Falls back to the public LlamaRPC endpoint for that chain when
+/// `DRPC_API_KEY` is not set. Unknown chain IDs fall back to mainnet.
+fn chainlink_chain_rpc_url(chain_id: u64) -> String {
+    let key = std::env::var("DRPC_API_KEY").unwrap_or_default();
+    let chain_slug = match chain_id {
+        1 => "ethereum",
+        8453 => "base",
+        42161 => "arbitrum",
+        10 => "optimism",
+        137 => "polygon",
+        43114 => "avalanche",
+        56 => "bsc",
+        _ => "ethereum",
+    };
+    if key.is_empty() {
+        match chain_slug {
+            "base" => "https://base.llamarpc.com".to_string(),
+            "arbitrum" => "https://arbitrum.llamarpc.com".to_string(),
+            "optimism" => "https://optimism.llamarpc.com".to_string(),
+            "polygon" => "https://polygon.llamarpc.com".to_string(),
+            "avalanche" => "https://avalanche.llamarpc.com".to_string(),
+            "bsc" => "https://binance.llamarpc.com".to_string(),
+            _ => "https://eth.llamarpc.com".to_string(),
+        }
+    } else {
+        format!("https://lb.drpc.live/{}/{}", chain_slug, key)
+    }
 }
 
 /// Left-pad a hex value (without 0x) to 32 bytes (64 hex chars).
@@ -375,19 +415,19 @@ fn extract_string_from_resolver(hex_str: &str) -> Option<String> {
         }
         let slot = &hex_str[start..start + 64];
         let trimmed = slot.trim_start_matches('0');
-        if let Ok(len) = usize::from_str_radix(if trimmed.is_empty() { "0" } else { trimmed }, 16) {
-            if len > 0 && len <= 253 {
-                let data_start = (i + 1) * 64;
-                let data_end = data_start + len * 2;
-                if data_end <= hex_str.len() {
-                    if let Ok(bytes) = hex::decode(&hex_str[data_start..data_end]) {
-                        if let Ok(s) = String::from_utf8(bytes) {
-                            if s.contains('.') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
-                                return Some(s);
-                            }
-                        }
-                    }
-                }
+        if let Ok(len) = usize::from_str_radix(if trimmed.is_empty() { "0" } else { trimmed }, 16)
+            && len > 0
+            && len <= 253
+        {
+            let data_start = (i + 1) * 64;
+            let data_end = data_start + len * 2;
+            if data_end <= hex_str.len()
+                && let Ok(bytes) = hex::decode(&hex_str[data_start..data_end])
+                && let Ok(s) = String::from_utf8(bytes)
+                && s.contains('.')
+                && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            {
+                return Some(s);
             }
         }
     }
@@ -452,13 +492,18 @@ impl EthereumMcpServer {
     }
 
     /// Create with the default public RPC endpoint (Ethereum mainnet).
-    #[allow(dead_code)]
+    ///
+    /// Used by `start_ethereum_mcp_server` when no `ETHEREUM_RPC_URL` env var
+    /// is set — equivalent to `Self::new(String::new())` but reads as intent.
     pub fn default_mainnet() -> Self {
         Self::new(String::new())
     }
 
     /// Set a custom RPC URL.
-    #[allow(dead_code)]
+    ///
+    /// Used by `eth_get_price` to scope a single price-feed read to a
+    /// non-mainnet chain (Base, Arbitrum, etc.) without mutating the
+    /// long-lived server's default RPC.
     pub fn with_rpc_url(mut self, url: impl Into<String>) -> Self {
         self.rpc_url = url.into();
         self
@@ -554,10 +599,23 @@ impl EthereumMcpServer {
             .unwrap_or_else(|| CHAINLINK_ETH_USD.to_string());
         let feed_address = normalize_hex(&feed_address);
 
-        // latestRoundData() selector: 0xfeaf968c
-        let result = self
-            .eth_call_raw(&feed_address, "0xfeaf968c", "latest")
-            .await?;
+        // Honor explicit chain_id by dispatching the price read against the
+        // per-chain dRPC URL via a transient `with_rpc_url` clone — keeps the
+        // read scoped to that chain without mutating the long-lived server
+        // (the next tool call falls back to the default RPC).
+        let result = match params.chain_id {
+            Some(chain_id) if chain_id != 1 => {
+                let chain_rpc = chainlink_chain_rpc_url(chain_id);
+                let scoped = self.clone().with_rpc_url(chain_rpc);
+                scoped
+                    .eth_call_raw(&feed_address, "0xfeaf968c", "latest")
+                    .await?
+            }
+            _ => {
+                self.eth_call_raw(&feed_address, "0xfeaf968c", "latest")
+                    .await?
+            }
+        };
 
         // Decode ABI return: (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)
         // Each slot is 32 bytes = 64 hex chars. Result starts with 0x.
@@ -859,28 +917,22 @@ impl EthereumMcpServer {
             &name
         );
 
-        if let Ok(resp) = self.http.get(&api_url).send().await {
-            if resp.status().is_success() {
-                if let Ok(body) = resp.text().await {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                        if let Some(address) = json
-                            .get("address")
-                            .or_else(|| json.get("addr"))
-                            .and_then(|v| v.as_str())
-                        {
-                            if !address.is_empty()
-                                && address != "0x0000000000000000000000000000000000000000"
-                            {
-                                return json_result(serde_json::json!({
-                                    "name": name,
-                                    "address": address,
-                                    "source": "onchainkit-ens-api",
-                                }));
-                            }
-                        }
-                    }
-                }
-            }
+        if let Ok(resp) = self.http.get(&api_url).send().await
+            && resp.status().is_success()
+            && let Ok(body) = resp.text().await
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+            && let Some(address) = json
+                .get("address")
+                .or_else(|| json.get("addr"))
+                .and_then(|v| v.as_str())
+            && !address.is_empty()
+            && address != "0x0000000000000000000000000000000000000000"
+        {
+            return json_result(serde_json::json!({
+                "name": name,
+                "address": address,
+                "source": "onchainkit-ens-api",
+            }));
         }
 
         json_result(serde_json::json!({
@@ -934,11 +986,11 @@ impl EthereumMcpServer {
             &address
         );
 
-        if let Ok(resp) = self.http.get(&api_url).send().await {
-            if resp.status().is_success() {
-                if let Ok(body) = resp.text().await {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                        if let Some(ens_name) = json
+        if let Ok(resp) = self.http.get(&api_url).send().await
+            && resp.status().is_success()
+                && let Ok(body) = resp.text().await
+                    && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+                        && let Some(ens_name) = json
                             .get("name")
                             .or_else(|| json.get("ens"))
                             .and_then(|v| v.as_str())
@@ -950,10 +1002,6 @@ impl EthereumMcpServer {
                                 "source": "onchainkit-ens-api",
                             }));
                         }
-                    }
-                }
-            }
-        }
 
         json_result(serde_json::json!({
             "address": address,
@@ -1219,6 +1267,32 @@ impl EthereumMcpServer {
             }))
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  7. Transaction submission
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tool(description = "Broadcast a pre-signed Ethereum transaction via eth_sendRawTransaction. Params: raw_tx (hex-encoded RLP-signed transaction, with or without 0x prefix). Returns the resulting transaction hash as plain text. Use eth_encode_function + eth_estimate_gas + an external signer (or tenzro_signTransaction with chain_id matching the target EVM chain) to build the raw_tx.")]
+    async fn eth_send_raw_transaction(
+        &self,
+        Parameters(params): Parameters<EthSendRawTransactionParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let raw = normalize_hex(&params.raw_tx);
+        let resp_value = self
+            .rpc_call("eth_sendRawTransaction", serde_json::json!([raw]))
+            .await
+            .map_err(|e| err_internal(format!("eth_sendRawTransaction failed: {}", e)))?;
+
+        let tx_hash = resp_value
+            .as_str()
+            .ok_or_else(|| err_internal(format!(
+                "eth_sendRawTransaction returned non-string result: {}",
+                resp_value
+            )))?
+            .to_string();
+
+        text_result(tx_hash)
+    }
 }
 
 // ─── ServerHandler ───
@@ -1263,7 +1337,9 @@ impl ServerHandler for EthereumMcpServer {
              - eth_register_agent_8004 — Build registerAgent() calldata for ERC-8004\n\
              - eth_lookup_agent_8004 — Build getAgent()/getAgentsByOwner() calldata for ERC-8004\n\n\
              EAS (Ethereum Attestation Service):\n\
-             - eth_get_attestation — Query attestation by UID from easscan.org GraphQL"
+             - eth_get_attestation — Query attestation by UID from easscan.org GraphQL\n\n\
+             Transaction Submission:\n\
+             - eth_send_raw_transaction — Broadcast a pre-signed RLP transaction; returns the tx hash"
                 .to_string(),
         );
         info
@@ -1278,15 +1354,11 @@ pub async fn start_ethereum_mcp_server(listen_addr: String) -> crate::error::Res
         session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
     };
 
-    let rpc_url = std::env::var("ETHEREUM_RPC_URL")
-        .unwrap_or_else(|_| {
-            let key = std::env::var("DRPC_API_KEY").unwrap_or_default();
-            if key.is_empty() {
-                "https://eth.llamarpc.com".to_string()
-            } else {
-                format!("https://lb.drpc.live/ethereum/{}", key)
-            }
-        });
+    // If `ETHEREUM_RPC_URL` is set, scope the per-session server to it via
+    // `with_rpc_url`. Otherwise fall back to `default_mainnet()`, which
+    // resolves the dRPC/LlamaRPC mainnet URL via the same logic
+    // `EthereumMcpServer::new("")` uses internally.
+    let rpc_url_override = std::env::var("ETHEREUM_RPC_URL").ok();
 
     let config = StreamableHttpServerConfig::default()
         .with_stateful_mode(false)
@@ -1300,7 +1372,13 @@ pub async fn start_ethereum_mcp_server(listen_addr: String) -> crate::error::Res
         ]);
 
     let service = StreamableHttpService::new(
-        move || Ok(EthereumMcpServer::new(rpc_url.clone())),
+        move || {
+            let server = match rpc_url_override.clone() {
+                Some(url) => EthereumMcpServer::default_mainnet().with_rpc_url(url),
+                None => EthereumMcpServer::default_mainnet(),
+            };
+            Ok(server)
+        },
         Arc::new(LocalSessionManager::default()),
         config,
     );

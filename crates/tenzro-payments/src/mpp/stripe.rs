@@ -546,6 +546,24 @@ impl StripeClient {
             "***".to_string()
         }
     }
+
+    /// Internal accessor used by the sibling `stripe_spt` module to share
+    /// the same authenticated transport. Not part of the public API.
+    pub(crate) fn http(&self) -> &reqwest::Client {
+        &self.http_client
+    }
+
+    /// Internal accessor for the configured API base. Not public.
+    pub(crate) fn api_base(&self) -> &str {
+        &self.api_base
+    }
+
+    /// Internal accessor for the secret key. Not public — used only by
+    /// sibling modules that need to construct authenticated requests
+    /// against the same Stripe account.
+    pub(crate) fn api_key(&self) -> &str {
+        &self.api_key
+    }
 }
 
 /// HMAC-SHA256 implementation per RFC 2104

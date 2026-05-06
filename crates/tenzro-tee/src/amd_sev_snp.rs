@@ -57,22 +57,25 @@ use crate::traits::TeeProvider;
 // ============================================================================
 
 /// SNP_GET_REPORT ioctl: _IOWR('S', 0x0, struct snp_guest_request_ioctl)
-#[allow(dead_code)]
+#[cfg(target_os = "linux")]
 const SEV_IOCTL_MAGIC: u8 = b'S';
-#[allow(dead_code)]
+#[cfg(target_os = "linux")]
 const SNP_GET_REPORT_NR: u8 = 0;
 
 /// Size of user-provided report data
-#[allow(dead_code)]
+#[cfg(target_os = "linux")]
 const SNP_REPORT_USER_DATA_SIZE: usize = 64;
 
 /// Size of the raw attestation report returned by the PSP
-#[allow(dead_code)]
 const SNP_REPORT_SIZE: usize = 1184;
 
-/// SNP attestation report offsets (from AMD SEV-SNP ABI spec)
-#[allow(dead_code)]
-mod report_offsets {
+/// SNP attestation report offsets (from AMD SEV-SNP ABI spec).
+///
+/// Documented byte offsets into the 1184-byte SNP attestation report as
+/// defined by the AMD SEV-SNP ABI specification. Public so downstream
+/// verifiers, audit tooling, and integration tests can reference the same
+/// canonical layout.
+pub mod report_offsets {
     pub const VERSION: usize = 0x000;           // 4 bytes (should be 2)
     pub const GUEST_SVN: usize = 0x004;         // 4 bytes
     pub const POLICY: usize = 0x008;            // 8 bytes
@@ -104,7 +107,6 @@ mod report_offsets {
 }
 
 /// Parsed SNP attestation report
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct SnpReport {
     /// Report version (should be 2)
@@ -202,11 +204,11 @@ impl AmdSevSnpProvider {
         // configfs-tsm (kernel 6.7+) also supports SEV-SNP
         if std::path::Path::new("/sys/kernel/config/tsm/report").exists() {
             // Check if provider is sev_guest
-            if let Ok(provider) = std::fs::read_to_string("/sys/kernel/config/tsm/report/provider") {
-                if provider.trim() == "sev_guest" {
-                    tracing::info!("AMD SEV-SNP detected via configfs-tsm");
-                    return true;
-                }
+            if let Ok(provider) = std::fs::read_to_string("/sys/kernel/config/tsm/report/provider")
+                && provider.trim() == "sev_guest"
+            {
+                tracing::info!("AMD SEV-SNP detected via configfs-tsm");
+                return true;
             }
         }
 
@@ -357,10 +359,10 @@ impl AmdSevSnpProvider {
     /// Parses an SNP attestation report (real binary or simulated JSON).
     fn parse_report(&self, data: &[u8]) -> Result<SnpReport> {
         // Try JSON first (simulated)
-        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(data) {
-            if json.get("simulated").and_then(|v| v.as_bool()).unwrap_or(false) {
-                return self.parse_simulated_report(&json, data);
-            }
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(data)
+            && json.get("simulated").and_then(|v| v.as_bool()).unwrap_or(false)
+        {
+            return self.parse_simulated_report(&json, data);
         }
 
         // Parse binary report
@@ -644,6 +646,15 @@ impl AmdSevSnpProvider {
             ("vmpl".to_string(), report.vmpl.to_string()),
             ("guest_svn".to_string(), report.guest_svn.to_string()),
             ("version".to_string(), report.version.to_string()),
+            // AMD SEV-SNP ABI fields surfaced for downstream policy checks
+            // (e.g. callers binding nonce in report_data, gating on platform_version,
+            // matching host_data against expected VMM config, correlating report_id).
+            ("policy".to_string(), format!("0x{:016X}", report.policy)),
+            ("platform_version".to_string(), format!("0x{:016X}", report.platform_version)),
+            ("committed_tcb".to_string(), format!("0x{:016X}", report.committed_tcb)),
+            ("report_data".to_string(), hex::encode(&report.report_data)),
+            ("host_data".to_string(), hex::encode(&report.host_data)),
+            ("report_id".to_string(), hex::encode(&report.report_id)),
         ]);
 
         let mut cert_chain_valid = false;

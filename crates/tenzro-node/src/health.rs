@@ -29,23 +29,80 @@ impl HealthMonitor {
         }
     }
 
-    /// Update health status for a subsystem
+    /// Update health status for a subsystem.
+    ///
+    /// When a subsystem transitions into `Degraded` or `Unhealthy`, a
+    /// tracing event is emitted at the appropriate severity so operators
+    /// don't have to poll `/health` to see incidents. The
+    /// [`SubsystemHealth::name`] field is the source of truth for the
+    /// log target (the HashMap key is borrowed for storage but the
+    /// owned field survives independently in the entry's `Debug` output
+    /// and any future per-entry iteration).
     pub fn update_subsystem(&self, name: impl Into<String>, status: SubsystemStatus) {
-        let mut inner = self.inner.write();
         let name = name.into();
 
-        let status_clone = status.clone();
-        inner.subsystem_status
-            .entry(name.clone())
-            .and_modify(|h| {
-                h.status = status_clone;
-                h.last_updated = Instant::now();
-            })
-            .or_insert_with(|| SubsystemHealth {
-                name,
-                status,
-                last_updated: Instant::now(),
-            });
+        // Detect transitions for log emission, then update — both under
+        // a single write lock so concurrent updaters can't interleave.
+        let (prev_status, new_status) = {
+            let mut inner = self.inner.write();
+            let prev_status = inner
+                .subsystem_status
+                .get(&name)
+                .map(|h| h.status.clone());
+
+            let status_clone = status.clone();
+            let entry_name = name.clone();
+            inner.subsystem_status
+                .entry(name.clone())
+                .and_modify(|h| {
+                    h.status = status_clone;
+                    h.last_updated = Instant::now();
+                })
+                .or_insert_with(|| SubsystemHealth {
+                    name: entry_name,
+                    status,
+                    last_updated: Instant::now(),
+                });
+            let new_status = inner
+                .subsystem_status
+                .get(&name)
+                .map(|h| h.status.clone());
+            (prev_status, new_status)
+        };
+
+        // Emit transition logs after releasing the write lock so the
+        // tracing layer can't deadlock against any reader.
+        let Some(new_status) = new_status else { return };
+        match (&prev_status, &new_status) {
+            (Some(SubsystemStatus::Healthy), SubsystemStatus::Degraded { reason })
+            | (None, SubsystemStatus::Degraded { reason }) => {
+                tracing::warn!(
+                    target: "tenzro_node::health",
+                    subsystem = %name,
+                    reason = %reason,
+                    "subsystem degraded"
+                );
+            }
+            (_, SubsystemStatus::Unhealthy { reason })
+                if !matches!(prev_status, Some(SubsystemStatus::Unhealthy { .. })) =>
+            {
+                tracing::error!(
+                    target: "tenzro_node::health",
+                    subsystem = %name,
+                    reason = %reason,
+                    "subsystem unhealthy"
+                );
+            }
+            (Some(SubsystemStatus::Degraded { .. }) | Some(SubsystemStatus::Unhealthy { .. }),
+                SubsystemStatus::Healthy) => {
+                tracing::info!(
+                    target: "tenzro_node::health",
+                    subsystem = %name,
+                    "subsystem recovered to healthy"
+                );
+            }
+            _ => {}
+        }
     }
 
     /// Mark a subsystem as healthy
@@ -123,6 +180,32 @@ impl HealthMonitor {
             None => true,
         }
     }
+
+    /// Returns a snapshot of (name, status, age_secs) tuples for every
+    /// registered subsystem.
+    ///
+    /// The `name` field on each [`SubsystemHealth`] entry is the
+    /// authoritative subsystem identifier (the HashMap key duplicates
+    /// it as a borrow-free index); this method surfaces it explicitly
+    /// for operators who want a sorted, age-aware listing without
+    /// walking the HashMap iterator themselves. Used by the `/debug`
+    /// admin endpoint and by RPC `tenzro_listSubsystemHealth`.
+    pub fn list_subsystems(&self) -> Vec<(String, SubsystemStatus, u64)> {
+        let inner = self.inner.read();
+        let mut out: Vec<(String, SubsystemStatus, u64)> = inner
+            .subsystem_status
+            .values()
+            .map(|h| {
+                (
+                    h.name.clone(),
+                    h.status.clone(),
+                    h.last_updated.elapsed().as_secs(),
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
 }
 
 impl Default for HealthMonitor {
@@ -147,11 +230,16 @@ pub enum OverallHealth {
     Unknown,
 }
 
-/// Health status for an individual subsystem
+/// Health status for an individual subsystem.
+///
+/// `name` duplicates the HashMap key but is the authoritative
+/// subsystem identifier surfaced via [`HealthMonitor::list_subsystems`]
+/// and the per-transition tracing logs in
+/// [`HealthMonitor::update_subsystem`]. Keep both — the key gives O(1)
+/// lookup, the field gives identity to entries pulled out of the map
+/// by value.
 #[derive(Debug, Clone)]
 struct SubsystemHealth {
-    /// Subsystem name (duplicates HashMap key but useful for Debug output)
-    #[allow(dead_code)]
     name: String,
     status: SubsystemStatus,
     last_updated: Instant,

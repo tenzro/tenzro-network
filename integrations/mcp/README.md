@@ -10,7 +10,7 @@ The official [Model Context Protocol](https://modelcontextprotocol.io) server fo
 
 The Tenzro MCP server is an installable Python package that exposes blockchain and multi-modal AI tools across 19+ categories to any MCP-compatible AI agent (Claude, GPT, Cursor, Windsurf, etc.) via **stdio** or **Streamable HTTP** transport. Install with `pip install tenzro-mcp-server` and run locally, or connect directly to the live testnet endpoint. Agents can query balances, send transactions, mint NFTs, bridge tokens, check compliance, subscribe to events, run timeseries forecasts, embed images and text, segment and detect objects, transcribe audio, and interact with AI models — all through the standard MCP tool interface.
 
-The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **193 tools** (169 base + 24 multi-modal AI) including the multi-modal AI tools described below.
+The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **200+ tools** (base + 24 multi-modal AI + 3 AgentBond/insurance) and is the authoritative tool inventory; this Python distributable exposes a comparable subset over stdio + Streamable HTTP.
 
 **Testnet endpoint:** `https://mcp.tenzro.network/mcp`
 **Local:** `http://localhost:3001/mcp`
@@ -104,9 +104,9 @@ Or with Streamable HTTP transport:
 - **URL:** `http://localhost:3001/mcp`
 - Start the server first: `tenzro-mcp-server --transport http --port 3001`
 
-## Available Tools (146)
+## Available Tools
 
-The server provides **153 tools** across 18+ categories (count verified against `@mcp.tool` decorators in `tenzro_mcp_server/server.py`):
+The server exposes a Python subset across the categories below. The authoritative tool inventory lives on the Rust server (`crates/tenzro-node/src/mcp/server.rs`); consult that source for the complete list.
 
 ### Authentication (OAuth 2.1 + DPoP + AAP)
 
@@ -162,11 +162,31 @@ Pass `dpop_jkt` (RFC 7638 thumbprint of the holder's Ed25519 public key) to bind
 - `open_payment_channel` — Open micropayment channel
 - `close_payment_channel` — Close payment channel with final balance
 
-### AP2 (Agent Payments Protocol)
+### AP2 v0.2 (Agent Payments Protocol)
 
+- `ap2_sign_mandate` — Sign a `checkout` or `payment` mandate. The wallet bound to `signer_did` signs the canonical preimage with its Ed25519 key. Only AP2 v0.2 `"ed25519"` alg is supported.
 - `ap2_verify_mandate` — Verify a single Verifiable Digital Credential (VDC) envelope (intent or cart mandate)
 - `ap2_validate_mandate_pair` — Three-axis validation of an intent → cart mandate pair: AP2 mandate-level constraints + TDIP `DelegationScope` (`enforce_operation`) + runtime `SpendingPolicy` (`SpendingPolicySnapshot::check`)
 - `ap2_protocol_info` — AP2 protocol metadata and supported features
+
+### Stripe SPT (SharedPaymentToken)
+
+- `spt_issue` — Issue a SharedPaymentToken bound to a principal/agent DID pair. The node-side `SptCeilingResolver` cross-checks the requested cap against the principal's `DelegationScope` and runtime `SpendingPolicy` before signing.
+- `spt_verify` — Verify SPT signature, principal/agent DID activity, and remaining cap.
+
+### ERC-8004 v0.6+ Trustless Agents Registry (22 tools)
+
+IdentityRegistry (10): `erc8004_derive_agent_id`, `erc8004_encode_register`, `erc8004_encode_get_agent`, `erc8004_decode_get_agent`, `erc8004_encode_set_agent_uri`, `erc8004_encode_set_agent_wallet`, `erc8004_encode_set_metadata`, `erc8004_encode_get_metadata`, `erc8004_decode_get_metadata`, `erc8004_encode_get_agent_uri`, `erc8004_encode_get_agent_wallet`.
+
+ReputationRegistry (9): `erc8004_encode_feedback`, `erc8004_encode_get_feedback`, `erc8004_encode_get_feedback_count`, `erc8004_encode_revoke_feedback`, `erc8004_encode_is_feedback_revoked`, `erc8004_encode_append_response`, `erc8004_encode_get_feedback_responses`.
+
+ValidationRegistry (3): `erc8004_encode_validation_request`, `erc8004_encode_validation_response`, `erc8004_encode_get_validation`.
+
+Calldata is byte-identical to the native EVM precompiles `0x101a` / `0x101b` / `0x101c` (`agentId = keccak256(utf8(did_string))`).
+
+### Identity (right-to-erasure)
+
+- `forget_identity` — GDPR Article 17 right-to-erasure. Hard-deletes a `Revoked` DID from the registry and persistent storage. The DID must already be in `Revoked` status; call `revoke_identity` first and allow the cascading broadcaster to propagate.
 
 ### AI Models (10 tools)
 
@@ -370,6 +390,12 @@ Per-modality `list_*_catalog`, `list_*_models`, `load_*_model`, `unload_*_model`
 - `chat_stream` — Stream chat completion token by token
 - `subscribe_events_stream` — Subscribe to events via streaming
 
+### AgentBond & Insurance (3 tools)
+
+- `post_agent_bond` — Bond TNZO collateral against an autonomous agent DID (Spec 9)
+- `get_agent_bond` — Look up the current bond and any open insurance claims
+- `file_insurance_claim` — File a claim against an agent's bond
+
 ### deBridge Cross-Chain (5 tools)
 
 - `debridge_search_tokens` — Search tokens on deBridge DLN
@@ -384,12 +410,13 @@ In addition to the main Tenzro MCP server, the node runs specialized servers for
 
 | Server | Port | Endpoint | Description |
 |--------|------|----------|-------------|
-| **Tenzro** | 3001 | `/mcp` | 191 tools for Tenzro Ledger + multi-modal AI operations |
-| **Solana** | 3003 | `/mcp` | Jupiter swaps, SPL tokens, Metaplex NFTs, staking |
-| **Ethereum** | 3004 | `/mcp` | Gas prices, ENS, ERC-20, EAS attestations, ERC-8004 |
-| **Canton** | 3005 | `/mcp` | DAML contracts, CIP-56 tokens, DvP settlement |
-| **LayerZero** | 3006 | `/mcp` | V2 messaging, OFT transfers, DVN configuration |
-| **Chainlink** | 3007 | `/mcp` | CCIP, data feeds, VRF, automation, Functions |
+| **Tenzro** | 3001 | `/mcp` | 196 tools for Tenzro Ledger + multi-modal AI + AgentBond/insurance |
+| **Solana** | 3003 | `/mcp` | 14 tools — Jupiter swaps, SPL tokens, Metaplex NFTs, SNS, staking |
+| **Ethereum** | 3004 | `/mcp` | 16 tools — Chainlink feeds, ENS, ERC-20, EAS, ERC-8004 |
+| **Canton** | 3005 | `/mcp` | 14 tools — DAML contracts, CIP-56 tokens, DvP settlement |
+| **LayerZero** | 3006 | `/mcp` | 20 tools — V2 messaging, OFT, Stargate V2, Value Transfer API |
+| **Chainlink** | 3007 | `/mcp` | 20 tools — CCIP, data feeds, Data Streams, VRF v2.5, PoR, automation, Functions |
+| **Li.Fi** | 3008 | `/mcp` | 9 tools — cross-chain aggregation, quotes, routes, status |
 
 ## Programmatic Usage
 

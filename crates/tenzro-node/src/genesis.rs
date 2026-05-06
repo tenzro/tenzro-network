@@ -124,8 +124,9 @@ pub async fn initialize_genesis(
     }
 
     // Pre-fund faucet account if configured
-    if let Some(faucet) = &genesis_config.faucet {
-        if faucet.enabled {
+    if let Some(faucet) = &genesis_config.faucet
+        && faucet.enabled
+    {
             let address = parse_hex_address(&faucet.address)?;
             // Also persist the faucet address under CF_METADATA so later code
             // (e.g., the RPC faucet handler, the key provisioner) can look it
@@ -174,7 +175,6 @@ pub async fn initialize_genesis(
                 "Pre-funded faucet account with 1B TNZO (dispenses {} TNZO per request)",
                 faucet.amount_per_request
             );
-        }
     }
 
     // Write state entries to CF_STATE
@@ -360,13 +360,13 @@ fn compute_genesis_state_root(genesis: &GenesisConfig) -> Hash {
     }
 
     // Hash faucet if enabled
-    if let Some(faucet) = &genesis.faucet {
-        if faucet.enabled {
-            hasher.update(faucet.address.as_bytes());
-            hasher.update(1_000_000_000u64.to_le_bytes()); // 1B TNZO total balance
-            hasher.update(faucet.amount_per_request.to_le_bytes());
-            hasher.update(faucet.cooldown_seconds.to_le_bytes());
-        }
+    if let Some(faucet) = &genesis.faucet
+        && faucet.enabled
+    {
+        hasher.update(faucet.address.as_bytes());
+        hasher.update(1_000_000_000u64.to_le_bytes()); // 1B TNZO total balance
+        hasher.update(faucet.amount_per_request.to_le_bytes());
+        hasher.update(faucet.cooldown_seconds.to_le_bytes());
     }
 
     let result = hasher.finalize();

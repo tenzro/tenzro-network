@@ -445,20 +445,20 @@ impl PdisRegistry {
             Ok(keys) => {
                 let mut loaded = 0usize;
                 for key in &keys {
-                    if let Ok(Some(data)) = storage.get(CF_IDENTITIES, key) {
-                        if let Ok(guardian) = bincode::deserialize::<GuardianIdentity>(&data) {
-                            let did = guardian.did.clone();
-                            if guardian.status == IdentityStatus::Revoked {
-                                revocations.insert(did.clone(), RevocationEntry {
-                                    did: did.clone(),
-                                    revoked_at: guardian.updated_at,
-                                    reason: "loaded as revoked".to_string(),
-                                    revoked_by: "storage".to_string(),
-                                });
-                            }
-                            guardians.insert(did, guardian);
-                            loaded += 1;
+                    if let Ok(Some(data)) = storage.get(CF_IDENTITIES, key)
+                        && let Ok(guardian) = bincode::deserialize::<GuardianIdentity>(&data)
+                    {
+                        let did = guardian.did.clone();
+                        if guardian.status == IdentityStatus::Revoked {
+                            revocations.insert(did.clone(), RevocationEntry {
+                                did: did.clone(),
+                                revoked_at: guardian.updated_at,
+                                reason: "loaded as revoked".to_string(),
+                                revoked_by: "storage".to_string(),
+                            });
                         }
+                        guardians.insert(did, guardian);
+                        loaded += 1;
                     }
                 }
                 info!("Loaded {} PDIS guardians from persistent storage", loaded);
@@ -471,20 +471,20 @@ impl PdisRegistry {
             Ok(keys) => {
                 let mut loaded = 0usize;
                 for key in &keys {
-                    if let Ok(Some(data)) = storage.get(CF_IDENTITIES, key) {
-                        if let Ok(agent) = bincode::deserialize::<PdisAgentIdentity>(&data) {
-                            let did = agent.did.clone();
-                            if agent.status == IdentityStatus::Revoked {
-                                revocations.insert(did.clone(), RevocationEntry {
-                                    did: did.clone(),
-                                    revoked_at: agent.created_at,
-                                    reason: "loaded as revoked".to_string(),
-                                    revoked_by: "storage".to_string(),
-                                });
-                            }
-                            agents.insert(did, agent);
-                            loaded += 1;
+                    if let Ok(Some(data)) = storage.get(CF_IDENTITIES, key)
+                        && let Ok(agent) = bincode::deserialize::<PdisAgentIdentity>(&data)
+                    {
+                        let did = agent.did.clone();
+                        if agent.status == IdentityStatus::Revoked {
+                            revocations.insert(did.clone(), RevocationEntry {
+                                did: did.clone(),
+                                revoked_at: agent.created_at,
+                                reason: "loaded as revoked".to_string(),
+                                revoked_by: "storage".to_string(),
+                            });
                         }
+                        agents.insert(did, agent);
+                        loaded += 1;
                     }
                 }
                 info!("Loaded {} PDIS agents from persistent storage", loaded);
@@ -497,11 +497,11 @@ impl PdisRegistry {
             Ok(keys) => {
                 let mut loaded = 0usize;
                 for key in &keys {
-                    if let Ok(Some(data)) = storage.get(CF_IDENTITIES, key) {
-                        if let Ok(entry) = bincode::deserialize::<RevocationEntry>(&data) {
-                            revocations.insert(entry.did.clone(), entry);
-                            loaded += 1;
-                        }
+                    if let Ok(Some(data)) = storage.get(CF_IDENTITIES, key)
+                        && let Ok(entry) = bincode::deserialize::<RevocationEntry>(&data)
+                    {
+                        revocations.insert(entry.did.clone(), entry);
+                        loaded += 1;
                     }
                 }
                 if loaded > 0 {
@@ -1126,10 +1126,10 @@ impl PdisRegistry {
         self.persist_revocation(&revocation);
 
         // Broadcast to peers if a broadcaster is configured (CRITICAL #53)
-        if let Some(ref broadcaster) = self.revocation_broadcaster {
-            if let Err(e) = broadcaster.broadcast_revocation(&revocation) {
-                warn!("Failed to broadcast PDIS revocation for {}: {}", did, e);
-            }
+        if let Some(ref broadcaster) = self.revocation_broadcaster
+            && let Err(e) = broadcaster.broadcast_revocation(&revocation)
+        {
+            warn!("Failed to broadcast PDIS revocation for {}: {}", did, e);
         }
 
         self.revocations.insert(did.to_string(), revocation);

@@ -628,10 +628,10 @@ impl McpClient {
             .map_err(|e| AgentError::ProtocolError(format!("MCP initialize failed: {}", e)))?;
 
         // Extract session ID from response header
-        if let Some(session_id) = response.headers().get("Mcp-Session-Id") {
-            if let Ok(sid) = session_id.to_str() {
-                self.session_id = Some(sid.to_string());
-            }
+        if let Some(session_id) = response.headers().get("Mcp-Session-Id")
+            && let Ok(sid) = session_id.to_str()
+        {
+            self.session_id = Some(sid.to_string());
         }
 
         let status = response.status();
@@ -734,9 +734,6 @@ impl McpClient {
 
 /// Bridge between A2A and MCP protocols with optional remote MCP transport.
 pub struct McpBridge {
-    /// A2A protocol handler (reserved for future bidirectional bridging)
-    #[allow(dead_code)]
-    a2a_protocol: A2aProtocol,
     /// Optional MCP client for remote server communication
     mcp_client: Option<McpClient>,
 }
@@ -745,7 +742,6 @@ impl McpBridge {
     /// Creates a new MCP bridge (local format conversion only)
     pub fn new() -> Self {
         Self {
-            a2a_protocol: A2aProtocol::new(),
             mcp_client: None,
         }
     }
@@ -753,7 +749,6 @@ impl McpBridge {
     /// Creates a new MCP bridge connected to a remote MCP server.
     pub fn with_remote(endpoint: impl Into<String>) -> Self {
         Self {
-            a2a_protocol: A2aProtocol::new(),
             mcp_client: Some(McpClient::new(endpoint)),
         }
     }
@@ -866,25 +861,25 @@ impl McpBridge {
         let mcp_message = self.a2a_to_mcp_tool_call(message)?;
 
         // If we have a remote MCP client, forward the call
-        if let Some(ref client) = self.mcp_client {
-            if client.is_initialized() {
-                let tool_call: ToolCall = serde_json::from_value(mcp_message.payload.clone())?;
-                let result = client.call_tool(
-                    &tool_call.tool_name,
-                    serde_json::to_value(&tool_call.arguments)?,
-                ).await?;
+        if let Some(ref client) = self.mcp_client
+            && client.is_initialized()
+        {
+            let tool_call: ToolCall = serde_json::from_value(mcp_message.payload.clone())?;
+            let result = client.call_tool(
+                &tool_call.tool_name,
+                serde_json::to_value(&tool_call.arguments)?,
+            ).await?;
 
-                let tool_result = ToolResult {
-                    success: true,
-                    result: Some(result),
-                    error: None,
-                };
+            let tool_result = ToolResult {
+                success: true,
+                result: Some(result),
+                error: None,
+            };
 
-                return Ok(McpMessage::new(
-                    McpMessageType::ToolResult,
-                    serde_json::to_value(tool_result)?,
-                ).with_correlation_id(mcp_message.message_id));
-            }
+            return Ok(McpMessage::new(
+                McpMessageType::ToolResult,
+                serde_json::to_value(tool_result)?,
+            ).with_correlation_id(mcp_message.message_id));
         }
 
         // No remote client — return the local conversion only

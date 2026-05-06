@@ -82,10 +82,10 @@ impl SwarmManager {
                 Ok(Some(bytes)) => {
                     match serde_json::from_slice::<SwarmState>(&bytes) {
                         Ok(state) => {
-                            if let Some(id_bytes) = key.strip_prefix(SWARM_KEY_PREFIX) {
-                                if let Ok(swarm_id) = std::str::from_utf8(id_bytes) {
-                                    swarms.insert(swarm_id.to_string(), state);
-                                }
+                            if let Some(id_bytes) = key.strip_prefix(SWARM_KEY_PREFIX)
+                                && let Ok(swarm_id) = std::str::from_utf8(id_bytes)
+                            {
+                                swarms.insert(swarm_id.to_string(), state);
                             }
                         }
                         Err(e) => warn!(

@@ -42,6 +42,12 @@ def route_message(text: str) -> str:
         return "agent_spawning"
     if any(k in t for k in ["swarm", "orchestrat"]):
         return "swarm_orchestration"
+    if any(k in t for k in [
+        "kill-switch", "kill switch", "killswitch",
+        "pause agent", "quarantine agent", "terminate agent",
+        "agent lifecycle", "lifecycle receipt",
+    ]):
+        return "lifecycle"
 
     # ------------------------------------------------------------------
     # Tier 2: Token sub-commands

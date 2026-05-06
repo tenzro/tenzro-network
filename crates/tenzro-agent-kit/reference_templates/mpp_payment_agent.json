@@ -47,8 +47,8 @@
       }
     },
     "delegation": {
-      "max_transaction_value": 10000000000000000000,
-      "max_daily_spend": 100000000000000000000,
+      "max_transaction_value": "10000000000000000000",
+      "max_daily_spend": "100000000000000000000",
       "allowed_operations": ["mpp_pay"],
       "allowed_chains": [],
       "time_bound_days": 7,
@@ -66,8 +66,8 @@
       }
     ],
     "hard_caps": {
-      "per_operation_value": 10000000000000000000,
-      "per_day_value": 100000000000000000000
+      "per_operation_value": "10000000000000000000",
+      "per_day_value": "100000000000000000000"
     }
   }
 }

@@ -49,6 +49,10 @@ pub mod cross_vm;
 pub mod registry;
 pub mod erc7802;
 pub mod erc3643;
+pub mod bond;
+pub mod burn_quota;
+pub mod adaptive_burn;
+pub mod seed_agent;
 
 // Re-export commonly used types
 pub use error::{TokenError, Result};
@@ -74,4 +78,32 @@ pub use erc3643::{
     ComplianceRegistry, ComplianceRules, ComplianceCheckResult, ComplianceViolation,
     IdentityClaim, TrustedIssuer, FreezeInfo, RecoveryEvent, TransferRestrictions, SupplyLimits,
     CLAIM_TOPIC_KYC, CLAIM_TOPIC_ACCREDITED_INVESTOR, CLAIM_TOPIC_COUNTRY, CLAIM_TOPIC_QUALIFIED_PURCHASER,
+};
+pub use bond::{
+    BondManager, AgentBondState, BondLifecycle, BondEvent,
+    ClaimRecord, ClaimStatus, InsurancePoolState,
+    derive_bond_vault_address, derive_insurance_pool_address, derive_claim_id,
+    DEFAULT_COOLDOWN_MS, DEFAULT_MIN_RESIDUAL, DEFAULT_MAX_SINGLE_SLASH_BPS,
+};
+pub use burn_quota::{
+    BurnQuota, BurnQuotaManager, RefillReceipt,
+    BURN_QUOTA_KEY, DEFAULT_DAILY_REFILL_TARGET, DEFAULT_CAP, DEFAULT_MIN_RESERVE_BPS,
+};
+pub use adaptive_burn::{
+    compute_recommendation, BurnBreakdown, BurnRateConfig, BurnRateConfigManager,
+    BurnRateRecommendation, EmissionBreakdown, RecommendationAction, SupplyMetricsSnapshot,
+    SupplyTargets, BURN_RATE_CONFIG_KEY, DEFAULT_ALARM_FAST_TRACK_ENABLED,
+    DEFAULT_ALARM_TIMELOCK_HOURS, DEFAULT_AUTO_PROPOSAL_MIN_MAGNITUDE_BPS,
+    DEFAULT_BASE_FEE_BURN_BPS, DEFAULT_DEFLATION_ALARM_BPS, DEFAULT_GAIN_BPS_PER_PCT,
+    DEFAULT_INFLATION_ALARM_BPS, DEFAULT_LOCAL_FEE_BURN_BPS,
+    DEFAULT_MAGNITUDE_CAP_ALARM_BPS, DEFAULT_MAGNITUDE_CAP_NORMAL_BPS,
+    DEFAULT_NEUTRAL_BAND_BPS, DEFAULT_PAYMASTER_BURN_BPS, DEFAULT_ROLLING_WINDOW_EPOCHS,
+    DEFAULT_TARGET_ANNUAL_SUPPLY_BPS, SUPPLY_METRICS_KEY, SUPPLY_TARGETS_KEY,
+};
+pub use seed_agent::{
+    Charter, CounterpartyFilter, DecayPoint, DecaySchedule, OperationKind,
+    SeedAgentEarmarkManager, SeedAgentRecord, SeedAgentStatus, SpendCaps,
+    TargetThroughput, TreasuryEarmark, DEFAULT_BOOTSTRAP_MONTHS,
+    DEFAULT_SURPLUS_BURN_BPS, SEED_AGENT_PREFIX, SEED_CHARTER_PREFIX,
+    SEED_EARMARK_KEY,
 };

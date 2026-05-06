@@ -274,6 +274,14 @@ pub struct CcipGetRateLimitsParams {
     pub chain: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ChainlinkBroadcastTxParams {
+    #[schemars(description = "Source chain to broadcast on: 'ethereum', 'base', 'arbitrum'")]
+    pub chain: String,
+    #[schemars(description = "Pre-signed RLP-encoded transaction as hex (0x-prefixed). Build via ccip_send_message → external signer, or vrf_request_random → external signer.")]
+    pub signed_tx_hex: String,
+}
+
 // ─── Helper types ───
 
 /// Configuration for a chain's RPC and contracts.
@@ -323,7 +331,10 @@ fn json_result(value: serde_json::Value) -> std::result::Result<CallToolResult, 
     )]))
 }
 
-#[allow(dead_code)]
+/// Wrap a plain-text status string as a successful tool result.
+///
+/// Used by tools that return a single textual value such as a transaction
+/// hash from a CCIP / VRF broadcast.
 fn text_result(text: impl Into<String>) -> std::result::Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(text.into())]))
 }
@@ -529,7 +540,10 @@ async fn eth_call(
 }
 
 /// Perform an eth_sendRawTransaction JSON-RPC request.
-#[allow(dead_code)]
+///
+/// Used by `chainlink_broadcast_signed_tx` to submit operator-signed CCIP
+/// `Router.ccipSend()` and VRF `requestRandomWords()` transactions to the
+/// destination EVM chain. Returns the resulting transaction hash.
 async fn eth_send_raw_tx(
     client: &reqwest::Client,
     rpc_url: &str,
@@ -2010,6 +2024,21 @@ impl ChainlinkMcpServer {
             "consumers": consumers,
             "consumer_count": consumers.len(),
         }))
+    }
+
+    #[tool(description = "Broadcast a pre-signed Ethereum transaction (CCIP Router.ccipSend, VRF requestRandomWords, Functions request, etc.) to the chosen chain via eth_sendRawTransaction. Returns the resulting transaction hash as plain text. Sign the tx externally — typically built via ccip_send_message or vrf_request_random and signed with the operator key.")]
+    async fn chainlink_broadcast_signed_tx(
+        &self,
+        Parameters(params): Parameters<ChainlinkBroadcastTxParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let chain = resolve_chain(&params.chain)?;
+        let tx_hash = eth_send_raw_tx(
+            &self.http_client,
+            &chain.rpc_url,
+            &params.signed_tx_hex,
+        )
+        .await?;
+        text_result(tx_hash)
     }
 }
 

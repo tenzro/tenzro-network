@@ -57,14 +57,6 @@ pub const TIMEOUT_MSG_FORMAT_VERSION: u8 = 2;
 /// signature can never be replayed as a TimeoutMsg signature or vice versa.
 const TIMEOUT_SIGNING_DOMAIN: &[u8] = b"TENZRO_TIMEOUT:";
 
-/// Domain-separation tag for [`TimeoutCertificate`]. The TC is a digest
-/// over the aggregated timeouts and is used (currently) only to verify the
-/// embedded signatures one-by-one — the tag is reserved for a future
-/// aggregate-signature scheme (BLS) where the per-signer payload would be
-/// the same `(view, high_qc_view)` pair the individual TimeoutMsgs sign.
-#[allow(dead_code)]
-const TC_AGGREGATE_DOMAIN: &[u8] = b"TENZRO_TC:";
-
 /// A pacemaker timeout broadcast.
 ///
 /// Sent by a replica when its local view timer expires. Receivers of a

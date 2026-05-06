@@ -16,8 +16,10 @@ use tenzro_node::{NodeConfig, TenzroNode, RpcServer};
 /// Create a NodeConfig backed by a unique temp directory.
 fn test_config() -> (NodeConfig, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("create temp dir");
-    let mut config = NodeConfig::default();
-    config.data_dir = tmp.path().to_path_buf();
+    let config = NodeConfig {
+        data_dir: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
     (config, tmp)
 }
 

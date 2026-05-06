@@ -40,7 +40,7 @@ For the full ecosystem context — what AP2, x402, ERC-8004, and CIP-56 are doin
                                    | JSON-RPC + HTTP
                     +--------------v----------------------+
                     |           tenzro-node               |
-                    |  RPC (264+) + MCP (191) + A2A (30)  |
+                    |  RPC (350+) + MCP (200+) + A2A (33) |
                     +--------------+----------------------+
                                    |
         +----------+---------------+---------------+----------+
@@ -74,8 +74,8 @@ For the full ecosystem context — what AP2, x402, ERC-8004, and CIP-56 are doin
 | **tenzro-consensus** | HotStuff-2 BFT: two-phase commit, TEE-weighted leader selection, equivocation detection + slashing |
 | **tenzro-vm** | Multi-VM: EVM (revm) + SVM (solana_rbpf) + DAML, Block-STM parallel execution, EIP-1559, ERC-4337 AA, 17 precompiles (incl. VRF at 0x1007) |
 | **tenzro-token** | TNZO token economics: treasury, staking, governance, epoch rewards, liquid staking (stTNZO) |
-| **tenzro-identity** | TDIP: unified human/machine identity, W3C DID documents, verifiable credentials, delegation scopes |
-| **tenzro-payments** | Agentic payment protocols. **Crypto rails (settle on-chain):** AP2 (Google/FIDO) mandate validation, MPP (Stripe + Tempo) sessions, x402 (Coinbase) HTTP 402, Tempo (EIP-155 signing). **Card rails (Tenzro provides identity + delegation + audit; card networks settle fiat):** Visa TAP (Trusted Agent Protocol), Mastercard Agent Pay. HTTP 402 middleware, RFC 9421 HTTP message signatures. |
+| **tenzro-identity** | TDIP: unified human/machine identity, W3C DID documents, verifiable credentials, delegation scopes, GDPR Article 17 right-to-erasure (`tenzro_forgetIdentity`) |
+| **tenzro-payments** | Agentic payment protocols. **Crypto rails (settle on-chain):** AP2 v0.2 (Google/FIDO) mandate sign + verify + validate-pair, MPP (Stripe + Tempo) sessions, x402 v1 (Coinbase) HTTP 402, Stripe SPT (SharedPaymentToken) issuance + verify with TDIP cap-resolver + ERC-8004 ReputationRegistry cross-write, Tempo (EIP-155 signing), ERC-8004 v0.6+ Trustless Agents Registry (Identity / Reputation / Validation, 22 surfaces). **Card rails (Tenzro provides identity + delegation + audit; card networks settle fiat):** Visa TAP (Trusted Agent Protocol), Mastercard Agent Pay. HTTP 402 middleware, RFC 9421 HTTP message signatures. |
 | **tenzro-agent** | AI agent infrastructure: A2A protocol, MCP bridge, capability attestation, durable persistence |
 | **tenzro-agent-kit** | High-level agent SDK: compose agents from skills, tools, and payment protocols |
 | **tenzro-model** | Model registry, modality-aware inference routing (price/latency/reputation), HuggingFace downloads (`HfArtifactDownloader` single-file + bundle), durable catalog. Multi-modal ONNX runtimes: forecast (Chronos-2, Chronos-Bolt, TimesFM 2.5, Granite-TTM-r2), vision (CLIP, SigLIP2, DINOv3, DINOv2), text-embedding (Qwen3-Embedding, EmbeddingGemma, BGE-M3, Snowflake Arctic), segmentation (SAM 3 / 3.1, SAM 2, EdgeSAM, MobileSAM), detection (RF-DETR, D-FINE), audio ASR (Moonshine v2, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT, Canary-1B-Flash), video (encoder scaffold). License-tier gating: Permissive / Attribution / CommercialCustom / NonCommercial. |
@@ -84,7 +84,7 @@ For the full ecosystem context — what AP2, x402, ERC-8004, and CIP-56 are doin
 | **tenzro-settlement** | Escrow, micropayment channels, batch settlement, dispute resolution |
 | **tenzro-bridge** | Cross-chain: Wormhole NTT, LayerZero V2, Chainlink CCIP, deBridge DLN, Li.Fi, Canton DAML |
 | **tenzro-events** | Event sourcing and subscription system with replay, webhooks, websockets |
-| **tenzro-node** | Full node binary: JSON-RPC (264+ methods), MCP (193 tools), A2A (31 skills), Web API |
+| **tenzro-node** | Full node binary: JSON-RPC (264+ methods), MCP (196 tools), A2A (24 skills), Web API |
 | **tenzro-cli** | CLI tool: 48 command modules with interactive mode and full RPC coverage |
 
 ## Quick Start
@@ -165,8 +165,8 @@ The node exposes 4 protocol servers, plus 6 ecosystem MCP servers:
 |--------|------|----------|-----------|
 | **JSON-RPC** | 8545 | HTTP | 264+ methods across 26+ namespaces (EVM-compatible + Tenzro extensions, incl. multi-modal AI: forecast, vision, text-embed, segmentation, detection, audio, video) |
 | **Web API** | 8080 | REST | Verification, status, faucet, health |
-| **MCP** | 3001 | Streamable HTTP | 193 tools + OAuth 2.1 |
-| **A2A** | 3002 | JSON-RPC + SSE | Agent Card with 31 skills, task streaming |
+| **MCP** | 3001 | Streamable HTTP | 196 tools + OAuth 2.1 |
+| **A2A** | 3002 | JSON-RPC + SSE | Agent Card with 24 skills, task streaming |
 
 ### Ecosystem MCP Servers
 
@@ -246,7 +246,7 @@ This means a single agent identity can compose a card-rail TAP payment, an x402 
 - **Canton**: Enterprise DAML interoperability
 
 ### Agent Interoperability
-- **ERC-8004**: Trustless Agents Registry on Ethereum — mirror Tenzro machine DIDs to the `registerAgent`/`getAgent`/`submitFeedback`/`requestValidation`/`submitValidation` interface for cross-ecosystem agent reputation. CLI exposes both `tenzro erc8004` and the canonical EIP-8004 short-name alias `tenzro 8004`.
+- **ERC-8004**: Trustless Agents Registry on Ethereum — mirror Tenzro machine DIDs to the `registerAgent`/`getAgent`/`submitFeedback`/`validationRequest`/`validationResponse` interface for cross-ecosystem agent reputation. CLI exposes both `tenzro erc8004` and the canonical EIP-8004 short-name alias `tenzro 8004`.
 - **AP2**: Agent Payments Protocol with intent/cart/payment VDC mandates, session lifecycle, and mandate-pair validation
 - **AAP** (Agent Access Protocol): OAuth 2.1 + DPoP + RAR layering for agent-issued bearer tokens. The CLI exposes both `tenzro auth` and the alias `tenzro aap` — both names hit the same `tenzro_*Token*` and wallet-link RPCs.
 
@@ -345,6 +345,7 @@ kubectl apply -f deploy/kubernetes/
 
 | Document | Purpose |
 |----------|---------|
+| [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) | Tenzro Network whitepaper — vision, architecture, agent economy, settlement layer |
 | [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) | Protocol specification — architecture, consensus, multi-VM execution, identity, payments, settlement, agents, training, and the concrete Rust implementation |
 | [`docs/FOUNDATION.md`](docs/FOUNDATION.md) | Tenzro Foundation: governance structure, treasury, grant programs, ecosystem stewardship |
 | [`docs/TOKENOMICS.md`](docs/TOKENOMICS.md) | TNZO token economics: supply, fee model, staking, rewards (testnet phase) |

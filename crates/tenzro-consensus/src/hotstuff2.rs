@@ -14,7 +14,7 @@
 use crate::config::ConsensusConfig;
 use crate::epoch_manager::EpochManager;
 use crate::error::{ConsensusError, Result};
-use crate::finality::{FinalityNotification, FinalityTracker};
+use crate::finality::{FinalityNotification, FinalityTracker, ForkChoice};
 use crate::mempool::Mempool;
 use crate::proposer::BlockProposer;
 use crate::traits::{ConsensusEngine, SlashingCallback};
@@ -283,6 +283,16 @@ pub struct HotStuff2Engine {
     /// Proposed blocks by hash
     blocks: Arc<DashMap<Hash, Block>>,
 
+    /// Fork choice: indexes proposed blocks alongside their QCs (when known)
+    /// and resolves "best block at height" via the highest-Prepare-QC-view
+    /// rule. Mirrors `self.blocks` for insert/evict and is updated with QCs
+    /// at QC-formation time (driven from `try_form_qc_and_drive_phase`).
+    /// Block production reads `select_best_block(parent_height)` to pick
+    /// a non-finalized parent on the canonical fork; falls back to the
+    /// finality tracker's last finalized hash when fork choice has no
+    /// candidate (cold start, post-restart pre-warmup).
+    fork_choice: Arc<ForkChoice>,
+
     /// Running state
     is_running: Arc<RwLock<bool>>,
 
@@ -363,6 +373,7 @@ impl HotStuff2Engine {
         let mempool = Arc::new(Mempool::new(config.clone()));
         let proposer = Arc::new(BlockProposer::new(mempool.clone(), config.clone()));
         let finality_tracker = Arc::new(FinalityTracker::new());
+        let fork_choice = Arc::new(ForkChoice::new(finality_tracker.clone()));
 
         let initial_height = finality_tracker.finalized_height() + 1u64;
         let view_state = ViewState::new(0, initial_height);
@@ -391,6 +402,7 @@ impl HotStuff2Engine {
             view_state: Arc::new(RwLock::new(view_state)),
             view_timer: Arc::new(RwLock::new(view_timer)),
             blocks: Arc::new(DashMap::new()),
+            fork_choice,
             is_running: Arc::new(RwLock::new(false)),
             shutdown_tx: Arc::new(RwLock::new(None)),
             slashing_callback: None,
@@ -445,6 +457,30 @@ impl HotStuff2Engine {
     pub fn with_vote_state_store(mut self, store: Arc<dyn VoteStateStore>) -> Self {
         self.vote_state_store = store;
         self
+    }
+
+    /// Wires the Spec-2 per-DID admission controller into the engine's
+    /// mempool. Forwards to [`Mempool::set_admission`]. May be called at
+    /// most once per engine instance (the underlying `OnceLock` rejects
+    /// double-wiring with `ConsensusError::AlreadyStarted`).
+    ///
+    /// Must be called **after** `HotStuff2Engine::new` (which constructs
+    /// the mempool) but **before** the engine starts admitting traffic in
+    /// production. Until this is called, the mempool falls back to the
+    /// legacy size/count-only path — fine for tests and the very first
+    /// genesis tick, not fine for a public-facing node.
+    pub fn set_admission(
+        &self,
+        admission: Arc<crate::admission::AdmissionController>,
+    ) -> crate::Result<()> {
+        self.mempool.set_admission(admission)
+    }
+
+    /// Read-only access to the mempool — exposed so node startup can hand
+    /// the same `Arc<Mempool>` to RPC handlers (`tenzro_getMempoolStats`,
+    /// `tenzro_getMempoolLane`) without going through this engine.
+    pub fn mempool(&self) -> &Arc<Mempool> {
+        &self.mempool
     }
 
     /// Sends a message to the outbound gossipsub channel.
@@ -563,11 +599,6 @@ impl HotStuff2Engine {
         self.mempool.add_transaction(tx)
     }
 
-    /// Returns a reference to the mempool for querying stats (size, pending count).
-    pub fn mempool(&self) -> &Arc<Mempool> {
-        &self.mempool
-    }
-
     /// Subscribe to finality notifications.
     ///
     /// Returns a broadcast receiver that emits `FinalityNotification` each time
@@ -580,6 +611,25 @@ impl HotStuff2Engine {
     /// Returns the current finalized block height.
     pub fn current_finalized_height(&self) -> BlockHeight {
         self.finality_tracker.finalized_height()
+    }
+
+    /// Returns a clone of the shared epoch manager handle.
+    ///
+    /// Used by the staking lifecycle in `tenzro-node` to enqueue / dequeue
+    /// validators for the next epoch (`add_pending_validator` /
+    /// `remove_pending_validator`) when stake/unstake RPCs land or when
+    /// slashing drops a validator below the minimum stake.
+    pub fn epoch_manager(&self) -> Arc<EpochManager> {
+        Arc::clone(&self.epoch_manager)
+    }
+
+    /// Returns a clone of the shared fork-choice handle.
+    ///
+    /// Block production reads `select_best_block(parent_height)` to pick
+    /// the canonical parent on a non-finalized fork; tests can inspect
+    /// the index via `block_count` / `get_block` / `get_qc`.
+    pub fn fork_choice(&self) -> Arc<ForkChoice> {
+        Arc::clone(&self.fork_choice)
     }
 
     /// Returns the current validator set
@@ -655,6 +705,12 @@ impl HotStuff2Engine {
             );
         }
 
+        // Mirror the eviction into the fork-choice index so it doesn't
+        // hold references to blocks below the safe-to-evict watermark.
+        // ForkChoice's `prune_below_finalized` reads finalized_height
+        // from the FinalityTracker we share with it, so the prune
+        // boundary stays consistent across the two structures.
+        self.fork_choice.prune_below_finalized();
         self.finality_tracker.prune_blocks_below(min_height);
 
         if let Some(collector) = self.vote_collector.read().as_ref() {
@@ -675,10 +731,10 @@ impl HotStuff2Engine {
         // it if it's at-or-above the new view so the next leader has it.
         {
             let mut maybe_tc = self.last_round_tc.write();
-            if let Some(tc) = maybe_tc.as_ref() {
-                if tc.view + 1 < new_view {
-                    *maybe_tc = None;
-                }
+            if let Some(tc) = maybe_tc.as_ref()
+                && tc.view + 1 < new_view
+            {
+                *maybe_tc = None;
             }
         }
 
@@ -1340,10 +1396,10 @@ impl HotStuff2Engine {
                 }
                 _ = sleep(check_interval) => {
                     // Check for view timeout
-                    if self.check_view_timeout() {
-                        if let Err(e) = self.on_view_timeout().await {
-                            tracing::error!(error = %e, "View timeout handling failed");
-                        }
+                    if self.check_view_timeout()
+                        && let Err(e) = self.on_view_timeout().await
+                    {
+                        tracing::error!(error = %e, "View timeout handling failed");
                     }
 
                     // Run consensus step
@@ -1401,11 +1457,9 @@ impl HotStuff2Engine {
                 }
             }
             Phase::Commit => {
-                if is_leader {
-                    if let Some(block) = state.proposed_block.clone() {
-                        drop(state);
-                        let _ = self.handle_commit_phase(&block).await?;
-                    }
+                if is_leader && let Some(block) = state.proposed_block.clone() {
+                    drop(state);
+                    let _ = self.handle_commit_phase(&block).await?;
                 }
             }
             Phase::Decide => {
@@ -1425,8 +1479,16 @@ impl HotStuff2Engine {
             (state.height, state.view)
         };
 
-        let prev_hash = self.finality_tracker
-            .get_finalized_hash(height - 1u64)
+        // Parent selection: prefer the fork-choice "highest QC view at
+        // parent height" rule. Falls back to the last finalized hash if
+        // fork choice has no candidate yet (cold start, post-restart pre-
+        // warmup), preserving the previous behaviour as a safety net.
+        let parent_height = height - 1u64;
+        let prev_hash = self
+            .fork_choice
+            .select_best_block(parent_height)
+            .map(|b| b.hash())
+            .or_else(|| self.finality_tracker.get_finalized_hash(parent_height))
             .unwrap_or_default();
 
         let state_root = self.state_root_provider
@@ -1440,7 +1502,6 @@ impl HotStuff2Engine {
         // For the genesis-child case (height=1, parent height=0) this
         // resolves to the genesis block; if not found anywhere we fall
         // back to genesis-edge values which trigger `initial_base_fee`.
-        let parent_height = height - 1u64;
         let parent_block = self
             .finality_tracker
             .get_finalized_block(parent_height)
@@ -1479,6 +1540,9 @@ impl HotStuff2Engine {
         self.proposer.validate_block_size(&block)?;
 
         self.blocks.insert(block.hash(), block.clone());
+        // Mirror into fork choice (no QC yet — it'll be recorded by
+        // `try_form_qc_and_drive_phase` once 2f+1 votes aggregate).
+        self.fork_choice.add_block(block.clone(), None);
 
         tracing::info!(
             height = %height,
@@ -1804,6 +1868,10 @@ impl ConsensusEngine for HotStuff2Engine {
         // this, only the leader (which inserts in `propose_block_internal`) can
         // advance past Prepare — the bug that wedged height=1 indefinitely.
         self.blocks.insert(block.hash(), block.clone());
+        // Mirror into fork choice — receivers learn about new blocks here
+        // before any local QC observation; the QC is recorded later in
+        // `try_form_qc_and_drive_phase` once votes aggregate locally.
+        self.fork_choice.add_block(block.clone(), None);
 
         // Advance local view to match the proposer's view.
         if proposal_view > local_view {
@@ -1944,10 +2012,10 @@ impl ConsensusEngine for HotStuff2Engine {
                     );
 
                     // Invoke the slashing callback to slash the validator's stake
-                    if let Some(ref callback) = self.slashing_callback {
-                        if let Some(evidence) = collector.get_evidence_for(&vote.voter, view) {
-                            callback.report_equivocation(&vote.voter, view, &evidence);
-                        }
+                    if let Some(ref callback) = self.slashing_callback
+                        && let Some(evidence) = collector.get_evidence_for(&vote.voter, view)
+                    {
+                        callback.report_equivocation(&vote.voter, view, &evidence);
                     }
 
                     return Err(ConsensusError::Equivocation {
@@ -1963,6 +2031,13 @@ impl ConsensusEngine for HotStuff2Engine {
             Some(qc) => qc,
             None => return Ok(()), // not a quorum yet, just collected
         };
+
+        // Record the QC into fork choice. `record_qc` is idempotent + monotonic
+        // by view, so re-observing a QC for a block we already know is a
+        // no-op, and a higher-view QC for the same block hash supersedes
+        // a lower-view one. No-ops if the block isn't known locally yet
+        // (the same warn path below catches that case).
+        self.fork_choice.record_qc(qc.clone());
 
         // Look up the block this QC commits to. Available locally because
         // `on_proposal` (and `propose_block_internal`) insert into self.blocks.
@@ -2035,10 +2110,10 @@ impl ConsensusEngine for HotStuff2Engine {
                     // If our self-Commit vote completed the Commit quorum
                     // (e.g. we were the last vote needed), recurse into
                     // finalization immediately.
-                    if let Some(commit_qc) = collector_qc {
-                        if commit_qc.vote_type == VoteType::Commit {
-                            self.finalize_with_commit_qc(&block, commit_qc).await?;
-                        }
+                    if let Some(commit_qc) = collector_qc
+                        && commit_qc.vote_type == VoteType::Commit
+                    {
+                        self.finalize_with_commit_qc(&block, commit_qc).await?;
                     }
                 }
             }
@@ -2076,6 +2151,7 @@ impl Clone for HotStuff2Engine {
             view_state: self.view_state.clone(),
             view_timer: self.view_timer.clone(),
             blocks: self.blocks.clone(),
+            fork_choice: self.fork_choice.clone(),
             is_running: self.is_running.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
             slashing_callback: self.slashing_callback.clone(),

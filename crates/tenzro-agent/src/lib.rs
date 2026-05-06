@@ -162,7 +162,7 @@ pub use pdis::{
     InheritedCredential, KycTier, PdisAgentIdentity, PdisRegistry, TimeBound,
 };
 
-pub use runtime::{AgentRuntime, AgentRuntimeConfig, RuntimeStatistics};
+pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentTransactionRecord, RuntimeStatistics};
 pub use transactions::{
     AgentTransaction, AgentTransactionExecutor, AgentTransactionResult, TransactionSubmitter,
 };

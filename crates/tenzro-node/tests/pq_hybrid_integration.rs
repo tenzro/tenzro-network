@@ -127,7 +127,7 @@ fn legacy_classical_only_tx_rejected() {
             "from": zero_addr,
             "to": one_addr,
             "nonce": 0u64,
-            "tx_type": { "type": "Transfer", "data": { "amount": 1000u128 } },
+            "tx_type": { "Transfer": { "amount": 1000u128 } },
             "gas_limit": 21000u64,
             "gas_price": 1_000_000_000u64,
             "timestamp": 0i64,
@@ -157,7 +157,7 @@ fn legacy_classical_only_tx_rejected() {
             "from": zero_addr2,
             "to": one_addr2,
             "nonce": 0u64,
-            "tx_type": { "type": "Transfer", "data": { "amount": 1000u128 } },
+            "tx_type": { "Transfer": { "amount": 1000u128 } },
             "gas_limit": 21000u64,
             "gas_price": 1_000_000_000u64,
             "timestamp": 0i64,
@@ -188,7 +188,7 @@ fn legacy_classical_only_tx_rejected() {
             "from": zero_addr3,
             "to": one_addr3,
             "nonce": 0u64,
-            "tx_type": { "type": "Transfer", "data": { "amount": 1000u128 } },
+            "tx_type": { "Transfer": { "amount": 1000u128 } },
             "gas_limit": 21000u64,
             "gas_price": 1_000_000_000u64,
             "timestamp": 0i64,
@@ -227,11 +227,13 @@ async fn restart_survives_pq_genesis() {
     use tenzro_types::primitives::BlockHeight;
 
     let tmp = tempfile::tempdir().expect("create temp dir");
-    let mut config = NodeConfig::default();
-    config.data_dir = tmp.path().to_path_buf();
     // Genesis is only initialized if the config asks for it. The default-user
     // config sets `genesis = None`; we must opt in explicitly.
-    config.genesis = Some(GenesisConfig::default_testnet());
+    let config = NodeConfig {
+        data_dir: tmp.path().to_path_buf(),
+        genesis: Some(GenesisConfig::default_testnet()),
+        ..Default::default()
+    };
 
     let mut node = TenzroNode::new(config).await.expect("node creation");
     node.start().await.expect("node start");

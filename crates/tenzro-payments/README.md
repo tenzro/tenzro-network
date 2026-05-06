@@ -10,10 +10,12 @@ All payment protocols follow the HTTP 402 Payment Required pattern with challeng
 
 ## Key Features
 
-- **AP2 (Agent Payments Protocol)** — Google-backed protocol for verifiable agent payments using Verifiable Digital Credentials (VDC) for intent, cart, and payment mandates; session lifecycle (create → authorize → execute → cancel)
+- **AP2 v0.2 (Agent Payments Protocol)** — Google/FIDO-backed protocol for verifiable agent payments using Verifiable Digital Credentials (VDC) for intent, cart, and payment mandates. Three RPC surfaces: `tenzro_ap2SignMandate` (Ed25519 signing of the canonical preimage by the wallet bound to `signer_did`), `tenzro_ap2VerifyMandate`, `tenzro_ap2ValidateMandatePair` (enforces three nested ceilings: AP2 IntentMandate, TDIP `DelegationScope`, runtime `SpendingPolicy`). Session lifecycle (create → authorize → execute → cancel)
 - **MPP (Machine Payments Protocol)** — Co-authored by Stripe and Tempo; implements HTTP 402 challenge/credential/receipt flow with session management
 - **Stripe Integration** — StripeClient for Payment Intents API (create/confirm/cancel/verify); HMAC-SHA256 webhook verification (RFC 2104)
-- **x402** — Coinbase's HTTP 402 payment protocol with facilitator-based settlement
+- **Stripe SPT (SharedPaymentToken)** — Token primitive that pairs with the MPP wire and Tempo settlement layers. `tenzro_sptIssue` signs an SPT bound to a principal/agent DID pair after `SptCeilingResolver` cross-checks the requested cap against the principal's `DelegationScope` and runtime `SpendingPolicy`. `tenzro_sptVerify` checks the SPT signature, principal/agent DID activity, and remaining cap. AP2 cart-mandate validation cross-checks `usage_limits ≥ cart_total`. ERC-8004 `ReputationRegistry` cross-write on every settled outcome. `granted_token.deactivated` webhook cascades into TDIP `apply_remote_revocation`.
+- **ERC-8004 v0.6+ Trustless Agents Registry** — 22 surfaces across IdentityRegistry (10), ReputationRegistry (9), and ValidationRegistry (3). `agentId = keccak256(utf8(did_string))` is byte-identical to `derive_agent_id`; calldata works against either the native Tenzro precompiles (`0x101a` / `0x101b` / `0x101c`) or an Ethereum mirror.
+- **x402 v1** — Coinbase's HTTP 402 payment protocol with facilitator-based settlement
 - **Coinbase CDP Facilitator** — CdpFacilitatorClient for x402 verify/settle endpoints; EIP-3009 `transferWithAuthorization` calldata encoding; EIP-712 typed data; CAIP-2 chain identifiers; well-known USDC addresses
 - **Tempo Integration** — Direct participation in the Tempo network for stablecoin payments (TIP-20 tokens) with EIP-155 transaction signing
 - **Visa TAP** — RFC 9421 HTTP Message Signatures for agent verification in agentic commerce
@@ -76,6 +78,9 @@ All payment protocols follow the HTTP 402 Payment Required pattern with challeng
 ### Identity Integration
 - **IdentityBoundPayment** — Payment with TDIP identity binding
 - **PaymentDelegationValidator** — Validates payments against delegation scopes
+- **IdentityPaymentBinder** — Two-axis ceiling enforcer: (1) protocol-level `DelegationScope` via `IdentityRegistry::enforce_operation` (max_transaction_value, allowed_operations, time_bound, etc.) and (2) runtime `SpendingPolicy` via the `SpendingPolicyResolver` trait (max_per_transaction, max_daily_spend, current_daily_spend, enabled). Both ceilings must pass for a payment to settle. The resolver is wired in node startup via `IdentityPaymentBinder::with_spending_policy_resolver()`; absent a resolver or registry entry, the binder falls back to DelegationScope-only.
+- **SpendingPolicyResolver** — Trait that resolves a payer DID to an optional `SpendingPolicySnapshot { max_per_transaction, max_daily_spend, current_daily_spend, enabled }`. Implemented in `tenzro-node` against the `AgentRuntime` runtime spending-policy registry.
+- **Ap2Validator::validate_with_delegation_and_policy** — Three-layer ceiling for AP2 v0.2 PaymentMandates: AP2 CheckoutMandate constraints (item set, max_amount), TDIP DelegationScope (`enforce_operation`), and runtime SpendingPolicy (`SpendingPolicySnapshot::check`). Wired into `tenzro_validateMandatePair` RPC.
 
 ### RFC 9421 Foundation
 - **Rfc9421SignatureBuilder** — HTTP Message Signature generation per RFC 9421

@@ -23,6 +23,8 @@ pub enum TokenCommand {
     Transfer(TokenTransferCmd),
     /// Swap tokens via DEX
     Swap(TokenSwapCmd),
+    /// Inspect the dual-rail gas burn quota (Agent-Swarm Spec 3 wave 1)
+    BurnQuota(TokenBurnQuotaCmd),
 }
 
 impl TokenCommand {
@@ -35,6 +37,7 @@ impl TokenCommand {
             Self::Wrap(cmd) => cmd.execute().await,
             Self::Transfer(cmd) => cmd.execute().await,
             Self::Swap(cmd) => cmd.execute().await,
+            Self::BurnQuota(cmd) => cmd.execute().await,
         }
     }
 }
@@ -391,6 +394,73 @@ impl TokenSwapCmd {
         output::print_field("From", &format!("{} {}", self.amount, self.from_token));
         output::print_field("To", &format!("{} {}", result.get("received_amount").and_then(|v| v.as_str()).unwrap_or("?"), self.to_token));
         if let Some(v) = result.get("tx_hash").and_then(|v| v.as_str()) { output::print_field("Tx Hash", v); }
+        Ok(())
+    }
+}
+
+/// Inspect the dual-rail gas burn quota singleton.
+///
+/// In wave 1 the quota is read-only over RPC. Once the StablecoinPaymaster
+/// and QuotaReplenisher land, this command will gain refill / drain
+/// inspection subcommands; for now it prints the current state only.
+#[derive(Debug, Parser)]
+pub struct TokenBurnQuotaCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl TokenBurnQuotaCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Burn Quota (Dual-Rail Gas)");
+        let spinner = output::create_spinner("Querying quota state...");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value =
+            rpc.call("tenzro_getBurnQuota", serde_json::Value::Null).await?;
+        spinner.finish_and_clear();
+
+        let pick = |k: &str| -> String {
+            result
+                .get(k)
+                .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| Some(v.to_string())))
+                .unwrap_or_else(|| "—".into())
+        };
+        output::print_field("Balance (1e18)", &pick("balance"));
+        output::print_field("Cap (1e18)", &pick("cap"));
+        output::print_field("Daily target (1e18)", &pick("daily_target"));
+        output::print_field("Min reserve (1e18)", &pick("min_reserve"));
+        output::print_field(
+            "Min reserve bps",
+            &result
+                .get("min_reserve_bps")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "—".into()),
+        );
+        output::print_field(
+            "Last refill (ms)",
+            &result
+                .get("last_refill")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "—".into()),
+        );
+        output::print_field("Total drained (1e18)", &pick("total_drained"));
+        output::print_field("Total refilled (1e18)", &pick("total_refilled"));
+        output::print_field(
+            "Deficit",
+            &result
+                .get("deficit")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "—".into()),
+        );
+        output::print_field(
+            "Can drain ≥ 1?",
+            &result
+                .get("can_drain_one")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "—".into()),
+        );
         Ok(())
     }
 }

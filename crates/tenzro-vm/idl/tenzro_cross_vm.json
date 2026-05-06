@@ -1,9 +1,9 @@
 {
   "version": "0.1.0",
   "name": "tenzro_cross_vm",
-  "address": "AoD3kebB2bYjLKyJtaqkyXqwJy4oQ949SnVhMwEYzGXR",
-  "address_hex": "918f858b6b0dd134e9a1fcb73002428c5197093e76e536badc60382bb9f8ac78",
-  "address_derivation": "SHA-256(\"tenzro/svm/program/cross_vm/v1\")",
+  "address": "7CBvjJtsMxYFsxYkpcXYoTDZpC8PhMVy1DVVQBopvWCC",
+  "address_hex": "5c03dd6cf580ecafb5ca11a9e1d6448176bb1dfa9d4886c65d9024df77542695",
+  "address_derivation": "SHA-256(\"tenzro/svm/program/cross_vm\")",
   "metadata": {
     "name": "tenzro_cross_vm",
     "description": "Canonical SVM-side program for initiating cross-VM token transfers from Solana-flavored transactions into the Tenzro EVM cross_vm_bridge precompile at 0x1003. Native program: no stored ELF, dispatched directly by the SVM executor.",
@@ -13,7 +13,7 @@
     "execution_model": "decoder-and-intent-emitter",
     "consensus_authority": "EVM precompile 0x1003 (cross_vm_bridge) — this program emits a structured Log; the actual cross-VM balance transition is consensus-mediated by the EVM-side handler.",
     "log_format": {
-      "address": "918f858b6b0dd134e9a1fcb73002428c5197093e76e536badc60382bb9f8ac78",
+      "address": "5c03dd6cf580ecafb5ca11a9e1d6448176bb1dfa9d4886c65d9024df77542695",
       "topics": [
         "b\"tenzro_cross_vm\"  (event family)",
         "instruction_name (UTF-8: bridge_to_evm | bridge_from_evm | register_token_pointer | transfer_cross_vm)",
@@ -231,7 +231,7 @@
     {
       "name": "PROGRAM_ID_DERIVATION_DOMAIN",
       "type": "string",
-      "value": "tenzro/svm/program/cross_vm/v1"
+      "value": "tenzro/svm/program/cross_vm"
     }
   ]
 }

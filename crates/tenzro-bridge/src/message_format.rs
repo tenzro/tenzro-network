@@ -114,6 +114,17 @@ impl TenzroMessage {
         self
     }
 
+    /// Returns the message hash as a typed [`Hash`].
+    ///
+    /// The raw `message_hash: [u8; 32]` field is kept on the wire format for
+    /// cross-chain compatibility (external chains see raw bytes), but Tenzro
+    /// callers should use this accessor when comparing against other
+    /// Tenzro-typed hashes (block hashes, settlement hashes, etc.) so the
+    /// type system catches confusion across hash domains.
+    pub fn typed_hash(&self) -> Hash {
+        Hash::new(self.message_hash)
+    }
+
     /// Signs the message using a tenzro-crypto keypair.
     ///
     /// Creates an Ed25519 or Secp256k1 signature over the `message_hash` field
@@ -159,30 +170,6 @@ impl TenzroMessage {
     /// Decodes a message from bytes
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         serde_json::from_slice(bytes).map_err(|e| BridgeError::SerializationError(e.to_string()))
-    }
-
-    /// Computes the message hash (legacy XOR-based, use message_hash field instead)
-    #[deprecated(note = "Use message_hash field directly for proper SHA-256 integrity verification")]
-    pub fn hash(&self) -> Hash {
-        let mut hasher = [0u8; 32];
-
-        // Hash version, nonce, timestamp
-        hasher[0] = self.version;
-        let nonce_bytes = self.nonce.to_le_bytes();
-        hasher[1..9].copy_from_slice(&nonce_bytes);
-
-        // XOR in sender, receiver, and payload
-        for (i, byte) in self.sender.as_bytes().iter().enumerate().take(32) {
-            hasher[i % 32] ^= byte;
-        }
-        for (i, byte) in self.receiver.as_bytes().iter().enumerate().take(32) {
-            hasher[i % 32] ^= byte;
-        }
-        for (i, byte) in self.payload.iter().enumerate().take(32) {
-            hasher[i % 32] ^= byte;
-        }
-
-        Hash::new(hasher)
     }
 
     /// Verifies the message hash integrity

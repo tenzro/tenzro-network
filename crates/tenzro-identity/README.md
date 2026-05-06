@@ -11,8 +11,9 @@ The protocol uses the `did:tenzro:` namespace (TDIP primary standard); parsers a
 ## Key Types
 
 - **TenzroIdentity** — Unified identity type for both human and machine identities with JSON serialization (`to_bytes()`/`from_bytes()`)
-- **TenzroDid** — DID parser/formatter supporting `did:tenzro:human:{uuid}`, `did:tenzro:machine:{controller}:{uuid}`, `did:tenzro:machine:{uuid}` (autonomous), and `did:pdis:` formats
-- **IdentityData** — Enum distinguishing Human (display_name, KYC tier, controlled_machines) from Machine (capabilities, delegation_scope, controller_did, reputation, tenzro_agent_id)
+- **TenzroDid** — DID parser/formatter supporting `did:tenzro:human:{uuid}`, `did:tenzro:machine:{controller}:{uuid}`, `did:tenzro:machine:{uuid}` (autonomous), and `did:pdis:guardian:{uuid}` / `did:pdis:agent:{controller}:{uuid}` formats
+- **IdentityData** — Enum distinguishing Human (display_name, KYC tier, controlled_machines) from Machine (capabilities, delegation_scope, controller_did, reputation, tenzro_agent_id, `is_seed_agent`)
+- **`is_seed_agent`** — Immutable boolean on `IdentityData::Machine` set at registration, exposed via `TenzroIdentity::is_seed_agent()`. Drives the SeedAgent counterparty filter (`CounterpartyFilter::deny_other_seed_agents`) and lets organic-activity metrics exclude protocol-owned bootstrap traffic during the 12-month earmark window.
 - **IdentityRegistry** — Thread-safe central store using DashMap with cascading revocation, pluggable `DidResolutionBackend` and `RevocationBroadcaster`, username registry, and RocksDB write-through persistence via `KvStore`
 - **IdentityVerifier** — Trust chain verifier with recursive `verify_credential_chain()`, cycle detection, configurable depth bound (default 10), and trust-root anchoring
 - **VerifiableCredential** — W3C VC-compatible credential issuance, inheritance via `inherit_credential()`, and cryptographic proof verification
@@ -32,13 +33,14 @@ The protocol uses the `did:tenzro:` namespace (TDIP primary standard); parsers a
 - **Credential Inheritance:** Machine agents inherit credentials from controllers via `inherit_credential()`
 - **Recursive Trust Chain Verification:** `IdentityVerifier::verify_credential_chain()` with cycle detection, depth bound, and trust-root anchoring
 - **Cascading Revocation:** Revoking a human identity automatically revokes all controlled machines via `apply_remote_revocation()`
+- **Right to Erasure (GDPR Article 17):** Two-phase flow — `revoke_identity` propagates the status change, then `forget_identity` hard-deletes from `CF_IDENTITIES` and the in-memory registry. The DID must already be in `Revoked` status. Surfaced as `tenzro_forgetIdentity` RPC, MCP `forget_identity` tool, and CLI `tenzro identity forget <did>`.
 - **Pluggable Backends:** `DidResolutionBackend` for RPC fallback, `RevocationBroadcaster` for cross-node propagation
 - **Credential-Gated KYC:** `update_kyc_tier_with_credential()` requires valid KYC credential to upgrade tier
 - **Username Registry:** Unique lowercase alphanumeric + underscore names (3-20 chars) with `register_username()` / `resolve_username()`
 - **Auto-Provisioned Wallets:** Every identity gets a 2-of-3 MPC threshold wallet via `WalletBinder`
 - **Write-Through Persistence:** RocksDB storage via `KvStore` trait with `CF_IDENTITIES` column family
 - **PDIS Format Support:** Parses `did:pdis:guardian:{uuid}` and `did:pdis:agent:{controller}:{uuid}` (PDIS secondary standard)
-- **ERC-8004 Trustless Agents Registry:** Interoperability with Ethereum's ERC-8004 standard — deterministic agent ID derivation (`owner + salt` → `bytes32 agentId`), calldata encoders for `registerAgent`/`getAgent`/`submitFeedback`/`requestValidation`/`submitValidation`, plus ABI decoders for on-chain lookups. Lets Tenzro machine identities mirror their DID to Ethereum-based trustless agent registries.
+- **ERC-8004 Trustless Agents Registry:** Interoperability with Ethereum's ERC-8004 standard — `agentId = keccak256(utf8(did_string))` matching `derive_agent_id`, calldata encoders for `registerAgent`/`getAgent`/`submitFeedback`/`validationRequest`/`validationResponse`, plus ABI decoders for on-chain lookups. Selectors are byte-identical to the Tenzro VM precompiles `0x101a` (identity) / `0x101b` (reputation) / `0x101c` (validation), so the same calldata works against either the native Tenzro registry or an Ethereum mirror.
 - **85 Tests:** Comprehensive unit and integration tests covering all features
 
 ## Usage

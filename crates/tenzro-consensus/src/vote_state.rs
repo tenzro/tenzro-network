@@ -176,10 +176,9 @@ pub trait VoteStateStore: Send + Sync {
             && last.height == height
             && last.step == step
             && last.block_hash.as_ref() == Some(block_hash)
+            && let Some(sig) = last.signature.clone()
         {
-            if let Some(sig) = last.signature.clone() {
-                return Ok(VrsDecision::Reuse { signature: sig });
-            }
+            return Ok(VrsDecision::Reuse { signature: sig });
         }
 
         // Anything else is a refusal.

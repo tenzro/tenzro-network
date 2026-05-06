@@ -8,7 +8,7 @@ Protocol-only Rust crate for **Tenzro Train** — decentralized, verifiable, mul
 
 - **Aggregation rules** (`aggregation` module) — `Mean`, `TrimmedMean`, `CoordinateMedian`, `Krum`. All four are implemented and unit-tested. Phase 1 only exposes `Mean` via tier policy; the rest light up in Phase 2.
 - **Outer optimizer** (`outer_optimizer` module) — Nesterov SGD state used between outer rounds.
-- **On-chain commitments** (`commitments` module) — per-round `state_root`, per-run `run_root`, and the canonical signing bytes for `SyncRound` messages. Run roots are SHA-256 Merkle commitments domain-prefixed with `tenzro/train/run-root/v1`.
+- **On-chain commitments** (`commitments` module) — per-round `state_root`, per-run `run_root`, and the canonical signing bytes for `SyncRound` messages. Run roots are SHA-256 Merkle commitments domain-prefixed with `tenzro/train/run-root`.
 - **Syncer runtime** (`runtime` module) — `TrainingRuntime`, `FragmentBuffer`, `SyncerState`. Owns the K-of-M acceptance window, grace-period (τ) handling, and write-through persistence to `CF_TRAINING_RUNS` / `CF_TRAINING_RECEIPTS`.
 - **Protocol types** (re-exported from `tenzro_types::training`) — `TrainingTaskSpec`, `OuterGradient`, `SyncRound`, `TrainingReceipt`, `TrainingTier`, `AggregationRule`, `ArchitectureSpec`, `TrainingModality`.
 
@@ -18,7 +18,7 @@ Protocol-only Rust crate for **Tenzro Train** — decentralized, verifiable, mul
 
 The inner training loop — forward/backward, optimizer step, FSDP sharding — is the responsibility of the **Python reference trainer** at `integrations/trainer/` (PyTorch FSDP2 + Hivemind + safetensors). The two layers communicate over JSON-RPC (`tenzro_training_*` namespace exposed by `tenzro-node`) plus the gossip topics:
 
-- `tenzro/training/1.0.0` — outer gradient submissions, fragment payloads
+- `tenzro/training` — outer gradient submissions, fragment payloads
 - `tenzro/training/syncer/1.0.0` — syncer status, round transitions, finality
 
 This split mirrors how every production decentralized training run in 2026 (Prime Intellect's INTELLECT-1/2/3, Nous Research's Hermes 4.3 on Psyche/DisTrO, OpenDiLoCo) structures its stack: Python + PyTorch for the inner loop, a typed protocol crate for orchestration. See `TRAIN.md` §7.1 for the full rationale.

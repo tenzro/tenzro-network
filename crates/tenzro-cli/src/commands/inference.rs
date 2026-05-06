@@ -170,8 +170,8 @@ impl InferenceRequestCmd {
             output::print_field("Actual Price", price);
         }
 
-        if self.require_tee {
-            if let Some(attestation) = result.get("attestation") {
+        if self.require_tee
+            && let Some(attestation) = result.get("attestation") {
                 println!();
                 output::print_success("TEE Attestation verified");
                 if let Some(vendor) = attestation.get("vendor").and_then(|v| v.as_str()) {
@@ -181,16 +181,14 @@ impl InferenceRequestCmd {
                     output::print_field("Enclave ID", enclave_id);
                 }
             }
-        }
 
         // Save to file if requested
-        if let Some(output_file) = &self.output_file {
-            if let Some(response_text) = result.get("response").and_then(|v| v.as_str()) {
+        if let Some(output_file) = &self.output_file
+            && let Some(response_text) = result.get("response").and_then(|v| v.as_str()) {
                 std::fs::write(output_file, response_text)?;
                 println!();
                 output::print_success(&format!("Response saved to: {}", output_file));
             }
-        }
 
         Ok(())
     }

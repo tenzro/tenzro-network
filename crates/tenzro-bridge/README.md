@@ -56,6 +56,12 @@ The `tenzro-bridge` crate provides a unified interface for cross-chain interoper
 - **Best for**: Token issuers deploying natively cross-chain assets without custom bridge code
 - **Client API**: `cct_list_pools()` returns all TNZO pools registered in the CCT registry; `cct_get_pool(chain)` returns the pool address, type, and rate limits for a specific chain
 
+### Li.Fi Aggregator
+- **Type**: Cross-chain DEX and bridge aggregator
+- **Security**: Aggregates execution across underlying liquidity venues
+- **Patterns**: Quote / route / execute via Li.Fi public API
+- **Best for**: Optimal-route asset swaps across heterogeneous bridges
+
 ## Architecture
 
 ```

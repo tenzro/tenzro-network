@@ -412,7 +412,7 @@ Models in the catalog are tagged by capability. The chat handler maps the on-wir
 
 A model becomes universally available when its `ModelInfo` declares its template. Catalog entries lacking a recognized template fall back to the simple shape only.
 
-The Cortex (recurrent-depth) path uses a separate gossipsub topic (`tenzro/cortex/1.0.0`) and its own RPCs — `tenzro_cortexInference`, `tenzro_registerCortexWorker`. Cortex models that also expose a standard chat template can be invoked through `tenzro_chat`; pure recurrent-depth workloads stay on the Cortex RPCs.
+The Cortex (recurrent-depth) path uses a separate gossipsub topic (`tenzro/cortex`) and its own RPCs — `tenzro_cortexInference`, `tenzro_registerCortexWorker`. Cortex models that also expose a standard chat template can be invoked through `tenzro_chat`; pure recurrent-depth workloads stay on the Cortex RPCs.
 
 ---
 

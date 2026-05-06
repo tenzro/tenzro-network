@@ -25,6 +25,7 @@ use commands::{
     DetectCommand, EmbedTextCommand, EmbedVideoCommand, SegmentCommand, TranscribeCommand,
     AuthCommand,
     X402Command, ReputationCommand, ApprovalCommand, DisputeCommand, ProvenanceCommand,
+    BondCommand, InsuranceCommand, CapabilityCommand,
 };
 
 /// Tenzro Network CLI — node operation, wallet management, provider tools
@@ -257,6 +258,18 @@ enum Command {
     #[command(subcommand)]
     Provenance(ProvenanceCommand),
 
+    /// AgentBond surety primitive (Spec 9): post, increase, withdraw, get, list
+    #[command(subcommand)]
+    Bond(BondCommand),
+
+    /// Insurance claims (Spec 9): file, list, get, pool
+    #[command(subcommand)]
+    Insurance(InsuranceCommand),
+
+    /// Agent capability registry: list, attestations, agent-attestations, best-agent
+    #[command(subcommand)]
+    Capability(CapabilityCommand),
+
     /// Interactive chat with AI models
     Chat(ChatCmd),
 
@@ -405,6 +418,9 @@ async fn main() -> Result<()> {
         Command::Approval(cmd) => cmd.execute().await?,
         Command::Dispute(cmd) => cmd.execute().await?,
         Command::Provenance(cmd) => cmd.execute().await?,
+        Command::Bond(cmd) => cmd.execute().await?,
+        Command::Insurance(cmd) => cmd.execute().await?,
+        Command::Capability(cmd) => cmd.execute().await?,
         Command::Faucet(cmd) => execute_faucet(cmd).await?,
         Command::Chat(cmd) => execute_chat(cmd).await?,
         Command::Hardware(cmd) => commands::hardware::execute(&cmd.format).await?,
@@ -499,7 +515,7 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
             // Auto-load model if downloaded but not yet loaded
             if !runtime.is_loaded(&cmd.model_id) {
                 let spinner = output::create_spinner(&format!("Loading {} into memory...", entry.name));
-                match runtime.load_model_with_context(&cmd.model_id, &gguf_path, entry.architecture, Some(entry.context_length)).await {
+                match runtime.load_model_with_context(&cmd.model_id, &gguf_path, Some(entry.context_length)).await {
                     Ok(()) => {
                         spinner.finish_and_clear();
                         output::print_success(&format!("Model {} loaded", entry.name));

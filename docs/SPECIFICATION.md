@@ -191,7 +191,7 @@ The system is implemented as a Rust workspace of 23 crates plus SDKs, organized 
 | Settlement | `tenzro-settlement` | Escrow, micropayments, batch settlement, fee collection |
 | Events | `tenzro-events` | Event sourcing and subscription system with replay, webhooks, websockets |
 | Bridge | `tenzro-bridge` | LayerZero, Chainlink CCIP, deBridge, Wormhole adapters; Canton enterprise integration |
-| Node | `tenzro-node` | Full node binary, RPC server (242 methods, 26 namespaces), MCP (167 tools), A2A (23 skills), web API |
+| Node | `tenzro-node` | Full node binary, RPC server (350+ methods, 30+ namespaces), MCP (200+ tools), A2A (33 skills), web API |
 | CLI | `tenzro-cli` | Command-line interface (48 command modules) |
 | SDK | `tenzro-sdk` | Rust SDK with builder-pattern configuration |
 | TypeScript SDK | `tenzro-ts-sdk` | TypeScript SDK for browser and Node.js integration |
@@ -240,7 +240,7 @@ Transaction submission goes through `tenzro_signAndSendTransaction` (server-side
 | `POST /faucet` | Request testnet TNZO tokens |
 
 **MCP Server** (default `0.0.0.0:3001`):
-Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport. Exposes 167 tools spanning wallet, identity, payments, inference, staking, tokens, NFTs, bridges, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, and event subscriptions, that any AI agent (Claude, GPT, etc.) can invoke. Representative groups:
+Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport. Exposes 200+ tools spanning wallet, identity, payments (AP2 sign + verify, ERC-8004 v0.6+, Stripe SPT), inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), staking, tokens, NFTs, bridges, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, and event subscriptions, that any AI agent (Claude, GPT, etc.) can invoke. Representative groups:
 
 | Group | Example Tools |
 |-------|---------------|
@@ -798,10 +798,10 @@ funds to the payee or refund them to themselves.
 
 ```
 EscrowAccount {
-    escrow_id:          [u8; 32],          // SHA-256("tenzro/escrow/id/v1" || payer || nonce_le)
+    escrow_id:          [u8; 32],          // SHA-256("tenzro/escrow/id" || payer || nonce_le)
     payer:              Address,
     payee:              Address,
-    vault:              Address,           // Address(SHA-256("tenzro/escrow/vault/v1" || escrow_id))
+    vault:              Address,           // Address(SHA-256("tenzro/escrow/vault" || escrow_id))
     amount:             u128,
     asset_id:           AssetId,
     created_at:         Timestamp,
@@ -1093,7 +1093,7 @@ Each Tenzro node runs a Model Context Protocol (MCP) server (default port 3001) 
 - Capabilities: Tools
 - Server name: `tenzro`
 
-**Available tools (167)** spanning wallet & ledger, network & blocks, identity & delegation, payments, AI models & inference, cross-chain bridge, verification (ZK, VRF, attestations), staking & providers, tokens & contracts, NFTs, agents (spawning, swarms, marketplace), tasks (marketplace, quotes, completion), skills, tools, compliance & KYC, TEE, and event subscriptions. Representative samples:
+**Available tools (200+)** spanning wallet & ledger, network & blocks, identity & delegation (including right-to-erasure via `forget_identity`), payments (AP2 sign + verify, ERC-8004 v0.6+ Trustless Agents Registry, MPP, x402, Stripe SPT, Visa TAP, Mastercard Agent Pay), AI models & inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), cross-chain bridge, verification (ZK, VRF, attestations), staking & providers, tokens & contracts, NFTs, agents (spawning, swarms, marketplace), tasks (marketplace, quotes, completion), skills, tools, compliance & KYC, TEE, and event subscriptions. Representative samples:
 
 | Group | Example Tools |
 |-------|---------------|
@@ -1277,6 +1277,15 @@ Every TDIP identity can be exported as a standard W3C DID Document for interoper
 }
 ```
 
+### 12.9 Right to Erasure (`tenzro_forgetIdentity`)
+
+TDIP supports GDPR Article 17 right-to-erasure as a two-phase flow that respects the cascading-revocation invariant from §12.7:
+
+1. **Revoke** — Call `tenzro_revokeIdentity` to mark the identity `Revoked`. The cascading revocation broadcaster propagates the status change to peers (cascading-revoke any controlled machines) and to dependent payment binders (Stripe SPT `granted_token.deactivated`, AP2 mandate cache).
+2. **Forget** — Once propagation has settled, call `tenzro_forgetIdentity { did }` to hard-delete the identity from `CF_IDENTITIES` and the in-memory `IdentityRegistry`. The DID must already be in `Revoked` status; calling forget on an `Active` identity returns an error.
+
+Forget is irreversible. The DID becomes unresolvable on this node; bound credentials and delegation scopes are dropped. Audit-trail receipts that referenced the DID remain — only the live identity record is erased. CLI: `tenzro identity forget <did>`. MCP tool: `forget_identity`.
+
 ---
 
 ## 13. Payment Protocols
@@ -1293,7 +1302,9 @@ The `tenzro-payments` crate implements all five with a unified `PaymentProtocol`
 
 | Protocol | Origin | Use Case |
 |----------|--------|----------|
-| **AP2** (Agent Payments Protocol) | Google / FIDO Alliance | Intent / cart / payment VDC mandate validation; on-chain settlement via `tenzro_validateMandatePair` |
+| **AP2** (Agent Payments Protocol) | Google / FIDO Alliance | Intent / cart / payment VDC mandate sign + verify + validate-pair via `tenzro_ap2SignMandate`, `tenzro_ap2VerifyMandate`, `tenzro_ap2ValidateMandatePair` |
+| **Stripe SPT** (SharedPaymentToken) | Stripe | Token-issuance / verify / cap-check via `tenzro_sptIssue`, `tenzro_sptVerify`, with `granted_token.deactivated` webhook cascade into TDIP `apply_remote_revocation` |
+| **ERC-8004** (Trustless Agents Registry) | Ethereum | Identity / Reputation / Validation registry surfaces — see §13.10 |
 | **MPP** (Machine Payments Protocol) | Stripe / Tempo | Session-based machine payments with HTTP 402 |
 | **x402** | Coinbase | Stateless HTTP 402 payments with EIP-3009 authorization |
 | **Tempo** | Tempo Network | Stablecoin settlement via Tempo blockchain |
@@ -1302,7 +1313,7 @@ The `tenzro-payments` crate implements all five with a unified `PaymentProtocol`
 
 #### Card rails — Tenzro provides identity + delegation + audit; card networks settle fiat
 
-For Visa Trusted Agent Protocol (TAP) and Mastercard Agent Pay, the money moves over the card network. The chain leg is not the money leg. Tenzro contributes the substrate that card networks do not provide at the protocol level: a verifiable agent DID, a signed delegation scope (max value, daily cap, allowed merchants/MCCs, time-bound), AP2 IntentMandate + CartMandate validation before authorization, and an on-chain receipt for the agent's action. The agent presents the Tenzro-issued mandate envelope to the card-rail authorization API; the card network settles the fiat leg; Tenzro records the receipt. This means a single agent identity can compose a card-rail TAP payment, an x402 USDC micropayment, and a Canton DvP leg in one task with one delegation envelope and one audit trail.
+For Visa Trusted Agent Protocol (TAP) and Mastercard Agent Pay, the money moves over the card network. The chain leg is not the money leg. Tenzro contributes the substrate that card networks do not provide at the protocol level: a verifiable agent DID, a signed delegation scope (max value, daily cap, allowed merchants/MCCs, time-bound), AP2 v0.2 CheckoutMandate + PaymentMandate validation before authorization, and an on-chain receipt for the agent's action. The agent presents the Tenzro-issued mandate envelope to the card-rail authorization API; the card network settles the fiat leg; Tenzro records the receipt. This means a single agent identity can compose a card-rail TAP payment, an x402 USDC micropayment, and a Canton DvP leg in one task with one delegation envelope and one audit trail.
 
 | Protocol | Origin | Tenzro's Role |
 |----------|--------|---------------|
@@ -1324,7 +1335,21 @@ Client                          Server
   |  <-- 200 + PaymentReceipt --   |
 ```
 
-### 13.4 MPP (Machine Payments Protocol)
+### 13.4 AP2 (Agent Payments Protocol)
+
+AP2 v0.2 (Google / FIDO Alliance) defines three nested mandates carried as VDC-wrapped envelopes signed by the principal's wallet:
+
+- **IntentMandate** — what the user authorized (item set, max amount, time bound)
+- **CheckoutMandate** — child of an intent, narrows to a specific cart total + merchant
+- **PaymentMandate** — child of a checkout, ties a payment instrument and rail
+
+Tenzro provides three RPC surfaces:
+
+- **`tenzro_ap2SignMandate { mandate_kind, mandate, signer_did }`** — wallet bound to `signer_did` signs the canonical preimage with its Ed25519 key. Only AP2 v0.2 `"ed25519"` alg is supported.
+- **`tenzro_ap2VerifyMandate { vdc }`** — verifies the Ed25519 signature against the signer DID's resolved verification method.
+- **`tenzro_ap2ValidateMandatePair { intent_vdc, cart_vdc }`** — verifies both signatures, checks the cart's `parent_id` matches the intent, and enforces the **three nested ceilings** on the cart total: (1) AP2 IntentMandate constraints (item set, max_amount), (2) TDIP `DelegationScope::enforce_operation` (max_transaction_value, allowed_operations, time_bound), and (3) runtime `SpendingPolicy` (max_per_transaction, daily-spend window) resolved through `SpendingPolicyResolver`.
+
+### 13.5 MPP (Machine Payments Protocol)
 
 MPP, co-authored by Stripe and Tempo, provides session-based HTTP 402 payments:
 
@@ -1336,7 +1361,7 @@ MPP, co-authored by Stripe and Tempo, provides session-based HTTP 402 payments:
 - **MppPaymentServer** — HTTP handler that issues 402 responses
 - **MppClient** — Client-side credential creation and submission
 
-### 13.5 x402 (Coinbase)
+### 13.6 x402 (Coinbase)
 
 x402 provides stateless HTTP 402 payments:
 
@@ -1346,7 +1371,17 @@ x402 provides stateless HTTP 402 payments:
 - **X402PaymentServer** — HTTP handler for x402 flow
 - **X402Client** — Client-side payment creation
 
-### 13.6 Tempo Integration
+### 13.7 Stripe SPT (SharedPaymentToken)
+
+Stripe's SharedPaymentToken (SPT) is the token primitive that pairs with the MPP wire and Tempo settlement layers (the three layers of the Stripe agentic stack). Tenzro participates as a token issuer with TDIP-anchored cap enforcement:
+
+- **`tenzro_sptIssue { principal_did, agent_did, amount, currency, usage_limits }`** — issues an SPT bound to a principal/agent DID pair, with usage caps. The node-side `SptCeilingResolver` adapter cross-checks the requested cap against the principal's `DelegationScope` and runtime `SpendingPolicy` before signing.
+- **`tenzro_sptVerify { token }`** — verifies the SPT signature, checks the principal/agent DIDs are still active in TDIP, and returns the remaining cap.
+- **AP2 cart-mandate cross-check** — when a cart mandate references an SPT, validation enforces `usage_limits ≥ cart_total`.
+- **ERC-8004 ReputationRegistry cross-write** — on SPT outcome (paid / refunded / disputed), the node writes a feedback entry to the ERC-8004 ReputationRegistry keyed on the agent DID.
+- **Webhook cascade** — Stripe's `granted_token.deactivated` webhook is dispatched into TDIP `apply_remote_revocation`, which propagates the revocation to peers via the cascading-revocation broadcaster (§12.7).
+
+### 13.8 Tempo Integration
 
 Direct integration with the Tempo blockchain for stablecoin settlement:
 
@@ -1355,7 +1390,7 @@ Direct integration with the Tempo blockchain for stablecoin settlement:
 - **Tip20Token** / **Tip20Balance** — TIP-20 stablecoin abstractions (USDC, USDT on Tempo)
 - **TempoParticipant** — Direct participation in the Tempo network
 
-### 13.7 Identity-Bound Payments
+### 13.9 Identity-Bound Payments
 
 Payments are bound to TDIP identities through the `identity_binding` module. When a machine identity makes a payment, its delegation scope is enforced:
 
@@ -1364,18 +1399,57 @@ Payments are bound to TDIP identities through the `identity_binding` module. Whe
 - Target chain checked against `allowed_chains`
 - Daily spend accumulated and checked against `max_daily_spend`
 
-### 13.8 HTTP Middleware
+### 13.10 ERC-8004 Trustless Agents Registry
+
+ERC-8004 v0.6+ defines three on-chain registries (Identity, Reputation, Validation) for discovering and trusting agents across heterogeneous principal chains. Tenzro implements byte-identical selectors so the same calldata works against either the native Tenzro registry (precompiles `0x101a` / `0x101b` / `0x101c`) or the Ethereum mirror. `agentId = keccak256(utf8(did_string))` matches `derive_agent_id` exactly.
+
+**IdentityRegistry (10 surfaces):**
+
+| RPC | Purpose |
+|-----|---------|
+| `tenzro_erc8004DeriveAgentId { did }` | Compute `keccak256(utf8(did))` |
+| `tenzro_erc8004EncodeRegister { agent_address, metadata_uri }` | Encode `register` calldata |
+| `tenzro_erc8004EncodeGetAgent { agent_id }` / `tenzro_erc8004DecodeGetAgent { return_data }` | Read agent record |
+| `tenzro_erc8004EncodeSetAgentURI { agent_id, metadata_uri }` | Update metadata URI |
+| `tenzro_erc8004EncodeSetAgentWallet { agent_id, new_wallet, deadline, signature }` | Wallet rotation with EIP-712 signature |
+| `tenzro_erc8004EncodeSetMetadata { agent_id, metadata_key, metadata_value }` | Per-key metadata write |
+| `tenzro_erc8004EncodeGetMetadata { agent_id, metadata_key }` / `tenzro_erc8004DecodeGetMetadata { return_data }` | Per-key metadata read |
+| `tenzro_erc8004EncodeGetAgentURI { agent_id }` / `tenzro_erc8004EncodeGetAgentWallet { agent_id }` | Convenience reads |
+
+**ReputationRegistry (9 surfaces):**
+
+| RPC | Purpose |
+|-----|---------|
+| `tenzro_erc8004EncodeFeedback { subject_agent_id, rating, context_uri, tag }` | Submit feedback (rating ∈ i8) |
+| `tenzro_erc8004EncodeGetFeedback { feedback_id }` / `tenzro_erc8004EncodeGetFeedbackCount { subject_agent_id }` | Read feedback |
+| `tenzro_erc8004EncodeRevokeFeedback { feedback_id }` / `tenzro_erc8004EncodeIsFeedbackRevoked { feedback_id }` | Revoke / check |
+| `tenzro_erc8004EncodeAppendResponse { feedback_id, response_uri, response_hash }` / `tenzro_erc8004EncodeGetFeedbackResponses { feedback_id }` | Append + read responses |
+
+**ValidationRegistry (3 surfaces):**
+
+| RPC | Purpose |
+|-----|---------|
+| `tenzro_erc8004EncodeValidationRequest { validator_address, agent_id, request_uri, request_hash }` | Request validation |
+| `tenzro_erc8004EncodeValidationResponse { agent_id, response_uri, response_hash }` | Submit validation result |
+| `tenzro_erc8004EncodeGetValidation { validator_address, agent_id }` | Read validation record |
+
+The Stripe SPT pipeline writes feedback entries into the ReputationRegistry on every settled outcome (paid / refunded / disputed), giving every Stripe-issued agent token a corresponding on-chain reputation footprint.
+
+### 13.11 HTTP Middleware
 
 The `tenzro-payments` crate provides axum middleware for automatic payment handling:
 - Servers wrap their routes with payment middleware to auto-issue 402 challenges
 - Clients use payment-aware HTTP clients that auto-create credentials
 
-### 13.9 Feature Flags
+### 13.12 Feature Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `mpp` | Enabled | Machine Payments Protocol support |
 | `x402` | Enabled | Coinbase x402 protocol support |
+| `ap2` | Enabled | AP2 v0.2 sign + verify + validate-pair |
+| `stripe-spt` | Enabled | Stripe SharedPaymentToken issuance + verify + cap-check |
+| `erc8004` | Enabled | ERC-8004 v0.6+ Trustless Agents Registry encode/decode |
 | `visa-tap` | Enabled | Visa Trusted Agent Protocol (TAP) — identity + delegation + audit layer for card-rail settlement |
 | `mastercard-agent-pay` | Enabled | Mastercard Agent Pay SDK support |
 | `tempo-bridge` | Disabled | Direct Tempo network settlement |
@@ -1578,14 +1652,14 @@ The networking layer is built on libp2p with the following protocols:
 
 | Topic | Content |
 |-------|---------|
-| `tenzro/blocks/1.0.0` | Block propagation |
-| `tenzro/transactions/1.0.0` | Transaction propagation |
-| `tenzro/consensus/1.0.0` | Consensus messages (votes, proposals) |
-| `tenzro/attestations/1.0.0` | TEE attestation reports |
-| `tenzro/models/1.0.0` | Model registry updates |
-| `tenzro/inference/1.0.0` | Inference requests and responses |
-| `tenzro/status/1.0.0` | Node status and peer discovery |
-| `tenzro/agents/1.0.0` | Agent-to-agent messages and task coordination |
+| `tenzro/blocks` | Block propagation |
+| `tenzro/transactions` | Transaction propagation |
+| `tenzro/consensus` | Consensus messages (votes, proposals) |
+| `tenzro/attestations` | TEE attestation reports |
+| `tenzro/models` | Model registry updates |
+| `tenzro/inference` | Inference requests and responses |
+| `tenzro/status` | Node status and peer discovery |
+| `tenzro/agents` | Agent-to-agent messages and task coordination |
 
 ### 16.3 Peer Management
 
@@ -1785,7 +1859,7 @@ Tenzro Train is split across two layers, each owning what it does best:
 - Byzantine-robust aggregation rules over `ndarray` views of safetensors-decoded payloads
 - Nesterov-momentum outer optimizer
 - Syncer state machine, RocksDB write-through persistence (`CF_TRAINING_RUNS`, `CF_TRAINING_RECEIPTS`)
-- libp2p gossip topics: `tenzro/training/1.0.0` (trainer → syncer outer gradients) and `tenzro/training/syncer/1.0.0` (syncer → trainers post-step weights)
+- libp2p gossip topics: `tenzro/training` (trainer → syncer outer gradients) and `tenzro/training/syncer/1.0.0` (syncer → trainers post-step weights)
 - VM precompile `0x1008` (`TRAINING_VERIFY`) for on-chain receipt verification
 - JSON-RPC namespace `tenzro_training_*` (post / list / get / enroll / submit / finalize)
 - TNZO escrow, per-trainer reward distribution, network commission (5%), receipt-as-NFT minting
@@ -1808,7 +1882,7 @@ A training run has the following lifecycle (`TrainingRunStatus` transitions in p
 3. **Enroll trainers.** Trainers call `tenzro_training_enrollTrainer`. Once `K` (the quorum) have enrolled, the run advances to `Training`.
 4. **Per-round loop** for each `round ∈ 0..max_rounds`:
    1. Each trainer fetches its assigned shard, snapshots the current parameters `θ⁽⁰⁾`, runs `inner_steps` (`H`) SGD steps locally, computes `Δθ = θ⁽ᴴ⁾ − θ⁽⁰⁾`, and partitions the delta into `fragment_count` contiguous name-sorted buckets.
-   2. Each fragment is safetensors-encoded and SHA-256'd. The trainer signs an `OuterGradient` over `tenzro/train/outer-gradient/v1 || task_id || round || fragment || trainer_did || sha256 || payload_bytes || inner_step_count || submitted_at` and submits via `tenzro_training_submitOuterGradient`.
+   2. Each fragment is safetensors-encoded and SHA-256'd. The trainer signs an `OuterGradient` over `tenzro/train/outer-gradient || task_id || round || fragment || trainer_did || sha256 || payload_bytes || inner_step_count || submitted_at` and submits via `tenzro_training_submitOuterGradient`.
    3. The syncer buffers submissions per `(round, fragment)`. Once a fragment reaches `K`-of-`M` accepted submissions (or the grace window `τ` elapses), it is eligible for aggregation.
    4. The Python syncer-side helper aggregates accepted fragment payloads via `AggregationRule::Mean` (Phase 1), applies a Nesterov outer step, computes the post-step parameter SHA-256 per fragment, and calls `tenzro_training_finalizeRound` with `{fragment → post_step_hash}`.
    5. The Rust syncer builds a `SyncRound` containing per-fragment `FragmentQuorumStatus` and the round's `state_root`, signs it, broadcasts on `tenzro/training/syncer/1.0.0`, and persists the new state root in `CF_TRAINING_RUNS`.
@@ -1821,7 +1895,7 @@ Every round seals a 32-byte `state_root` on-chain. Every run seals a 32-byte `ru
 - **`state_root`** (`crates/tenzro-training/src/commitments.rs::compute_state_root`):
   ```
   sha256(
-    "tenzro/train/state-root/v1"
+    "tenzro/train/state-root"
     ‖ task_id_bytes
     ‖ round_be_u32
     ‖ for each fragment in sorted-by-id order:
@@ -1830,7 +1904,7 @@ Every round seals a 32-byte `state_root` on-chain. Every run seals a 32-byte `ru
         ‖ post_step_hash_bytes
   )
   ```
-- **`run_root`** (`compute_run_root`): a SHA-256 Merkle tree over the sequence of per-round `state_root`s, with Bitcoin-style duplicate-last for unbalanced layers and the per-node prefix `tenzro/train/run-root/v1`. Length-1 returns the leaf directly; length-0 returns `Hash::zero()`.
+- **`run_root`** (`compute_run_root`): a SHA-256 Merkle tree over the sequence of per-round `state_root`s, with Bitcoin-style duplicate-last for unbalanced layers and the per-node prefix `tenzro/train/run-root`. Length-1 returns the leaf directly; length-0 returns `Hash::zero()`.
 
 The `run_root` is the single hash that anchors an entire training run, and it is what the receipt-NFT and any downstream verifier (e.g. the `0x1008` `TRAINING_VERIFY` precompile) check.
 
@@ -1954,7 +2028,7 @@ The Python `OuterGradient.to_json()` produces the *exact* JSON shape the Rust sy
 - Connect payment protocols to live settlement rails (Stripe MPP, Coinbase x402, Tempo network)
 
 ### Phase 3: Agent & Protocol Integration
-- ~~Implement MCP server~~ — **DONE**: rmcp-based server on port 3001, Streamable HTTP transport, 167 tools
+- ~~Implement MCP server~~ — **DONE**: rmcp-based server on port 3001, Streamable HTTP transport, 200+ tools
 - ~~Implement A2A protocol server~~ — **DONE**: JSON-RPC 2.0 on port 3002, Agent Card discovery, SSE streaming, 23 skills
 - ~~Implement ecosystem MCP servers~~ — **DONE**: Solana (3003), Ethereum (3004), Canton (3005), LayerZero (3006), Chainlink (3007), Li.Fi (3008)
 - ~~Implement challenge store for payment protocols~~ — **DONE**: persistent challenge lookup for MPP and x402
@@ -2022,14 +2096,14 @@ The network defines 120+ message types and 40+ RPC methods across 13 protobuf se
 
 | Topic | Version | Direction |
 |-------|---------|-----------|
-| `tenzro/blocks/1.0.0` | 1.0.0 | Validators -> All |
-| `tenzro/transactions/1.0.0` | 1.0.0 | Any -> Validators |
-| `tenzro/consensus/1.0.0` | 1.0.0 | Validators <-> Validators |
-| `tenzro/attestations/1.0.0` | 1.0.0 | TEE Providers -> All |
-| `tenzro/models/1.0.0` | 1.0.0 | Model Providers -> All |
-| `tenzro/inference/1.0.0` | 1.0.0 | Users <-> Providers |
-| `tenzro/status/1.0.0` | 1.0.0 | All <-> All |
-| `tenzro/agents/1.0.0` | 1.0.0 | Agents <-> Agents |
+| `tenzro/blocks` | 1.0.0 | Validators -> All |
+| `tenzro/transactions` | 1.0.0 | Any -> Validators |
+| `tenzro/consensus` | 1.0.0 | Validators <-> Validators |
+| `tenzro/attestations` | 1.0.0 | TEE Providers -> All |
+| `tenzro/models` | 1.0.0 | Model Providers -> All |
+| `tenzro/inference` | 1.0.0 | Users <-> Providers |
+| `tenzro/status` | 1.0.0 | All <-> All |
+| `tenzro/agents` | 1.0.0 | Agents <-> Agents |
 
 ## Appendix D: Live Testnet Endpoints
 

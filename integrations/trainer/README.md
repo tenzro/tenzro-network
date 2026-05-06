@@ -78,13 +78,20 @@ The Rust protocol layer in `tenzro-training` owns aggregation, commitments,
 signatures, persistence, and the syncer state machine — all bandwidth- and
 correctness-sensitive concerns where the broader Tenzro stack already
 provides hardened primitives (BLS signatures, Merkle commitments, RocksDB
-write-through, libp2p gossip, JSON-RPC).
+write-through, libp2p gossip, JSON-RPC). **No tensor library lives in the
+Rust workspace** — no Candle, no Burn, no tch-rs, no llama.cpp.
 
 The Python trainer owns the part that needs PyTorch: model definition,
-forward / backward, optimizer steps, and shard ingestion. Hivemind
-(when installed) provides the all-reduce primitives for in-fragment data
-parallelism among co-located trainers; the cross-fragment outer-gradient
-exchange is *not* Hivemind, it goes over the Rust syncer.
+forward / backward, optimizer steps, FSDP2 sharding, and shard ingestion.
+Hivemind (when installed) provides the all-reduce primitives for in-fragment
+data parallelism among co-located trainers; the cross-fragment outer-gradient
+exchange is *not* Hivemind, it goes over the Rust syncer + the
+`tenzro/training/*` gossipsub topics.
+
+Per-modality inner loops use the SOTA Python library for the modality:
+`transformers` / native PyTorch for language, `gluonts` / native PyTorch for
+timeseries, `timm` for vision. Outer gradients are packaged as safetensors
+fragments with SHA-256 hashes and Ed25519 signatures.
 
 See `TRAIN.md` §7.1 and `crates/tenzro-training/src/lib.rs` for the full split
 rationale.

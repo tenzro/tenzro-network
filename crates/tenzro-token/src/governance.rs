@@ -192,32 +192,32 @@ impl GovernanceEngine {
         // Load proposals
         let proposal_keys = storage.get_keys_with_prefix(CF_GOVERNANCE, GOVERNANCE_PROPOSAL_PREFIX)?;
         for key in &proposal_keys {
-            if let Ok(Some(data)) = storage.get(CF_GOVERNANCE, key) {
-                if let Ok(proposal) = bincode::deserialize::<GovernanceProposal>(&data) {
-                    let id = proposal.proposal_id.clone();
-                    self.proposals.insert(id, proposal);
-                }
+            if let Ok(Some(data)) = storage.get(CF_GOVERNANCE, key)
+                && let Ok(proposal) = bincode::deserialize::<GovernanceProposal>(&data)
+            {
+                let id = proposal.proposal_id.clone();
+                self.proposals.insert(id, proposal);
             }
         }
 
         // Load votes
         let vote_keys = storage.get_keys_with_prefix(CF_GOVERNANCE, GOVERNANCE_VOTE_PREFIX)?;
         for key in &vote_keys {
-            if let Ok(Some(data)) = storage.get(CF_GOVERNANCE, key) {
-                if let Ok(votes) = bincode::deserialize::<Vec<GovernanceVote>>(&data) {
-                    let proposal_id = String::from_utf8_lossy(&key[GOVERNANCE_VOTE_PREFIX.len()..]).to_string();
-                    self.votes.insert(proposal_id, votes);
-                }
+            if let Ok(Some(data)) = storage.get(CF_GOVERNANCE, key)
+                && let Ok(votes) = bincode::deserialize::<Vec<GovernanceVote>>(&data)
+            {
+                let proposal_id = String::from_utf8_lossy(&key[GOVERNANCE_VOTE_PREFIX.len()..]).to_string();
+                self.votes.insert(proposal_id, votes);
             }
         }
 
         // Load delegations
         let delegation_keys = storage.get_keys_with_prefix(CF_GOVERNANCE, GOVERNANCE_DELEGATION_PREFIX)?;
         for key in &delegation_keys {
-            if let Ok(Some(data)) = storage.get(CF_GOVERNANCE, key) {
-                if let Ok(delegation) = bincode::deserialize::<VotingDelegation>(&data) {
-                    self.delegations.insert(delegation.delegator, delegation);
-                }
+            if let Ok(Some(data)) = storage.get(CF_GOVERNANCE, key)
+                && let Ok(delegation) = bincode::deserialize::<VotingDelegation>(&data)
+            {
+                self.delegations.insert(delegation.delegator, delegation);
             }
         }
 

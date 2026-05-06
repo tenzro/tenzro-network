@@ -82,9 +82,9 @@ client → TransactionBuilder → sign(payer key) → tenzro_sendRawTransaction
 
 #### Deterministic identifiers
 
-- **`escrow_id`**: `SHA-256("tenzro/escrow/id/v1" || payer || nonce_le)` — derived
+- **`escrow_id`**: `SHA-256("tenzro/escrow/id" || payer || nonce_le)` — derived
   by the VM, observable via the receipt log emitted on `CreateEscrow`.
-- **Vault address**: `Address(SHA-256("tenzro/escrow/vault/v1" || escrow_id))` —
+- **Vault address**: `Address(SHA-256("tenzro/escrow/vault" || escrow_id))` —
   has no private key. Release/refund payouts are a privileged VM operation
   that calls `state.set_balance` directly via a single auditable helper, never
   via normal `TnzoToken::transfer`.

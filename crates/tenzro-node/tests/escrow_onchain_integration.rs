@@ -43,8 +43,10 @@ use tenzro_types::transaction::{Transaction, TransactionType};
 
 fn test_config() -> (NodeConfig, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("create temp dir");
-    let mut config = NodeConfig::default();
-    config.data_dir = tmp.path().to_path_buf();
+    let config = NodeConfig {
+        data_dir: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
     (config, tmp)
 }
 
@@ -154,10 +156,10 @@ fn build_signed_eth_send_params(
 /// Surfaces a useful diagnostic if it's an error so a wire-format regression
 /// is easy to triage from CI output.
 fn assert_admission_succeeded(resp: &Value, label: &str) {
-    if let Some(err) = resp.get("error") {
-        if !err.is_null() {
-            panic!("{label}: eth_sendRawTransaction returned error: {err}");
-        }
+    if let Some(err) = resp.get("error")
+        && !err.is_null()
+    {
+        panic!("{label}: eth_sendRawTransaction returned error: {err}");
     }
     let result = resp.get("result").expect("missing `result` field");
     let s = result

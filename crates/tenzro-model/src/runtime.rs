@@ -21,7 +21,7 @@
 //! (Llama, Qwen, Gemma, Mistral, Phi, etc.).
 
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -32,7 +32,6 @@ use tracing::{info, warn};
 /// Global singleton for the llama.cpp backend — can only be initialized once per process.
 static LLAMA_BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
 
-use crate::catalog::ModelArchitecture;
 use crate::error::{ModelError, Result};
 
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -208,12 +207,6 @@ const DEFAULT_CONTEXT_LENGTH: u32 = 8192;
 struct LoadedModel {
     model: LlamaModel,
     backend: Arc<LlamaBackend>,
-    /// Model architecture (stored for future introspection APIs)
-    #[allow(dead_code)]
-    architecture: ModelArchitecture,
-    /// Path to GGUF file (stored for model provenance tracking)
-    #[allow(dead_code)]
-    gguf_path: PathBuf,
     /// Configured context length from catalog (capped at MAX_CONTEXT_LENGTH)
     context_length: u32,
 }
@@ -279,9 +272,8 @@ impl ModelRuntime {
 
     /// Load a GGUF model into memory.
     ///
-    /// llama.cpp auto-detects the model architecture from GGUF metadata,
-    /// so the `architecture` parameter is informational only. GPU layers
-    /// are offloaded automatically when Metal/CUDA is available.
+    /// llama.cpp auto-detects the model architecture from GGUF metadata.
+    /// GPU layers are offloaded automatically when Metal/CUDA is available.
     ///
     /// Convenience overload: uses the model's trained context length capped
     /// at [`DEFAULT_CONTEXT_LENGTH`]. To use the full catalog context length,
@@ -290,9 +282,8 @@ impl ModelRuntime {
         &self,
         model_id: &str,
         gguf_path: &Path,
-        architecture: ModelArchitecture,
     ) -> Result<()> {
-        self.load_model_with_context(model_id, gguf_path, architecture, None)
+        self.load_model_with_context(model_id, gguf_path, None)
             .await
     }
 
@@ -309,7 +300,6 @@ impl ModelRuntime {
         &self,
         model_id: &str,
         gguf_path: &Path,
-        architecture: ModelArchitecture,
         context_length: Option<u32>,
     ) -> Result<()> {
         if self.is_loaded(model_id) {
@@ -363,8 +353,6 @@ impl ModelRuntime {
             Ok::<LoadedModel, ModelError>(LoadedModel {
                 model,
                 backend,
-                architecture,
-                gguf_path: gguf_path_owned,
                 context_length: effective_ctx,
             })
         })
@@ -922,12 +910,12 @@ pub(crate) fn extract_tool_calls(raw: &str) -> (String, Vec<ToolCall>) {
         let array_start_abs = after + trimmed_offset;
         if let Some(end_abs) = find_balanced_close(&text, array_start_abs, '[', ']') {
             let body = &text[array_start_abs..=end_abs];
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-                if let Some(arr) = v.as_array() {
-                    for item in arr {
-                        if let Some(call) = parse_tool_call_value(item) {
-                            calls.push(call);
-                        }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+                && let Some(arr) = v.as_array()
+            {
+                for item in arr {
+                    if let Some(call) = parse_tool_call_value(item) {
+                        calls.push(call);
                     }
                 }
             }
@@ -941,11 +929,12 @@ pub(crate) fn extract_tool_calls(raw: &str) -> (String, Vec<ToolCall>) {
     // avoids stealing free-text replies that just happen to contain `{`.
     if calls.is_empty() {
         let trimmed = text.trim();
-        if trimmed.starts_with('{') && trimmed.ends_with('}') {
-            if let Some(call) = parse_tool_call_json(trimmed) {
-                calls.push(call);
-                text.clear();
-            }
+        if trimmed.starts_with('{')
+            && trimmed.ends_with('}')
+            && let Some(call) = parse_tool_call_json(trimmed)
+        {
+            calls.push(call);
+            text.clear();
         }
     }
 

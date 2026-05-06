@@ -184,8 +184,8 @@ impl IntrospectionResponse {
 
     /// Build an `active: true` response from a validated
     /// [`AuthClaims`]. The caller is responsible for having
-    /// already validated the token (signature + controller chain
-    /// + DPoP if applicable) — this constructor does not check
+    /// already validated the token (signature, controller chain,
+    /// and DPoP if applicable) — this constructor does not check
     /// anything; it only formats.
     pub fn from_claims(claims: &AuthClaims) -> Self {
         Self {
@@ -288,7 +288,7 @@ mod tests {
         let r = IntrospectionResponse::from_claims(&claims);
         let json = serde_json::to_string(&r).unwrap();
         let back: IntrospectionResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.active, true);
+        assert!(back.active);
         assert_eq!(back.sub, r.sub);
         assert_eq!(back.jti, r.jti);
         assert_eq!(back.exp, r.exp);

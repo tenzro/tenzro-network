@@ -56,11 +56,12 @@
 //!   3. Verify the Ed25519 signature against the credential's stored
 //!      public key (deterministically derived from `credential_id` for
 //!      the testnet stub).
+//!
 //!   The stub does not enforce RP ID, origin, attestation, or
 //!   counter-monotonicity — those are deferred to the production
 //!   passkey registry. The wire shape (request + response) is identical
 //!   to what the production verifier consumes.
-//! - **Pepper KDF:** `pepper = SHA-256("tenzro/wallet/share/pepper/v1"
+//! - **Pepper KDF:** `pepper = SHA-256("tenzro/wallet/share/pepper"
 //!   || nonce || assertion_signature)`. Production replaces this with
 //!   HKDF-SHA256 with the same inputs; the wallet's `derive_unwrap_key`
 //!   does the matching swap.
@@ -92,6 +93,7 @@ use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::error::WalletApiError;
 use super::handlers::WebState;
 use super::oauth::{full_request_uri, validate_wallet_auth};
 
@@ -101,20 +103,20 @@ const REQUIRED_ACTION: &str = "wallet.share.unwrap";
 /// Domain-separation tag for the deterministic AES-256-GCM wrapping
 /// key (testnet stub). Distinct from every other `tenzro/wallet/*` tag
 /// so the wrapping key cannot collide with an FROST/ML-DSA seed.
-const WRAP_KEY_DOMAIN_TAG: &[u8] = b"tenzro/wallet/share/wrap-key/v1";
+const WRAP_KEY_DOMAIN_TAG: &[u8] = b"tenzro/wallet/share/wrap-key";
 
 /// Domain-separation tag for the deterministic plaintext share
 /// (testnet stub). Distinct from the wrapping-key tag so the share
 /// material itself never equals its own wrapping key.
-const SHARE_PLAINTEXT_DOMAIN_TAG: &[u8] = b"tenzro/wallet/share/plaintext/v1";
+const SHARE_PLAINTEXT_DOMAIN_TAG: &[u8] = b"tenzro/wallet/share/plaintext";
 
 /// Domain-separation tag for the deterministic credential public key
 /// (testnet stub). Production passkey registry replaces this with a
 /// real lookup keyed by `credential_id`.
-const CREDENTIAL_KEY_DOMAIN_TAG: &[u8] = b"tenzro/wallet/share/cred-key/v1";
+const CREDENTIAL_KEY_DOMAIN_TAG: &[u8] = b"tenzro/wallet/share/cred-key";
 
 /// Domain-separation tag for the per-assertion pepper KDF.
-const PEPPER_DOMAIN_TAG: &[u8] = b"tenzro/wallet/share/pepper/v1";
+const PEPPER_DOMAIN_TAG: &[u8] = b"tenzro/wallet/share/pepper";
 
 /// AES-GCM nonce — 12 bytes constant for the testnet wrapping stub.
 /// Safe because each `(credential_id, surface_key)` pair has its own
@@ -128,9 +130,9 @@ const WRAP_NONCE: [u8; 12] = [
 /// `(credential_id, surface_key)` pair.
 fn wrap_aad(credential_id: &str, surface_key: &str) -> Vec<u8> {
     let mut aad = Vec::with_capacity(
-        b"tenzro/wallet/share/aad/v1".len() + credential_id.len() + surface_key.len() + 2,
+        b"tenzro/wallet/share/aad".len() + credential_id.len() + surface_key.len() + 2,
     );
-    aad.extend_from_slice(b"tenzro/wallet/share/aad/v1");
+    aad.extend_from_slice(b"tenzro/wallet/share/aad");
     aad.push(0x00);
     aad.extend_from_slice(credential_id.as_bytes());
     aad.push(0x00);
@@ -291,25 +293,11 @@ pub struct UnwrapResponse {
     pub pepper_b64: String,
 }
 
-/// Generic JSON error body.
-#[derive(Debug, Serialize)]
-struct WalletError {
-    error: &'static str,
-    error_description: String,
+fn wallet_error(status: StatusCode, code: &'static str, description: &str) -> WalletApiError {
+    WalletApiError::new(status, code, description.to_string())
 }
 
-fn wallet_error(status: StatusCode, code: &'static str, description: &str) -> Response {
-    (
-        status,
-        Json(WalletError {
-            error: code,
-            error_description: description.to_string(),
-        }),
-    )
-        .into_response()
-}
-
-fn parse_b64(field: &'static str, value: &str) -> Result<Vec<u8>, Response> {
+fn parse_b64(field: &'static str, value: &str) -> Result<Vec<u8>, WalletApiError> {
     URL_SAFE_NO_PAD.decode(value.as_bytes()).map_err(|e| {
         wallet_error(
             StatusCode::BAD_REQUEST,
@@ -355,7 +343,7 @@ fn derive_plaintext_share(credential_id: &str, surface_key: &str) -> Vec<u8> {
 /// secrecy.
 fn derive_salt(credential_id: &str, surface_key: &str) -> Vec<u8> {
     let mut hasher = Sha256::new();
-    hasher.update(b"tenzro/wallet/share/salt/v1");
+    hasher.update(b"tenzro/wallet/share/salt");
     hasher.update(credential_id.as_bytes());
     hasher.update([0x00]);
     hasher.update(surface_key.as_bytes());
@@ -365,7 +353,7 @@ fn derive_salt(credential_id: &str, surface_key: &str) -> Vec<u8> {
 /// Encrypts the plaintext share under the deterministic wrap key.
 /// Returns `nonce(12) || ciphertext || tag(16)` per the project's
 /// AES-GCM convention.
-fn wrap_share(credential_id: &str, surface_key: &str) -> Result<Vec<u8>, Response> {
+fn wrap_share(credential_id: &str, surface_key: &str) -> Result<Vec<u8>, WalletApiError> {
     let key_bytes = derive_wrap_key(credential_id, surface_key);
     let plaintext = derive_plaintext_share(credential_id, surface_key);
     let aad = wrap_aad(credential_id, surface_key);
@@ -396,7 +384,7 @@ fn wrap_share(credential_id: &str, surface_key: &str) -> Result<Vec<u8>, Respons
 
 /// Deterministic Ed25519 verifying key for the testnet `credential_id`
 /// stub. Production swaps this for a passkey-registry lookup.
-fn derive_credential_verifying_key(credential_id: &str) -> Result<VerifyingKey, Response> {
+fn derive_credential_verifying_key(credential_id: &str) -> Result<VerifyingKey, WalletApiError> {
     let mut hasher = Sha256::new();
     hasher.update(CREDENTIAL_KEY_DOMAIN_TAG);
     hasher.update(credential_id.as_bytes());
@@ -429,7 +417,7 @@ fn verify_assertion(
     credential_id: &str,
     expected_nonce_b64: &str,
     assertion: &PasskeyAssertion,
-) -> Result<Vec<u8>, Response> {
+) -> Result<Vec<u8>, WalletApiError> {
     let auth_data = parse_b64("authenticator_data_b64", &assertion.authenticator_data_b64)?;
     let client_data = parse_b64("client_data_json_b64", &assertion.client_data_json_b64)?;
     let signature_bytes = parse_b64("signature_b64", &assertion.signature_b64)?;
@@ -520,7 +508,7 @@ pub async fn envelope_handler(
 
     let wrapped = match wrap_share(&q.credential_id, &q.surface_key) {
         Ok(w) => w,
-        Err(resp) => return resp,
+        Err(e) => return e.into_response(),
     };
     let salt = derive_salt(&q.credential_id, &q.surface_key);
 
@@ -592,7 +580,8 @@ pub async fn unwrap_handler(
                 StatusCode::UNAUTHORIZED,
                 "escrow_nonce_not_found",
                 "no outstanding nonce for (credential_id, surface_key, nonce) — already consumed, expired, or never issued",
-            );
+            )
+            .into_response();
         }
     };
     if entry.expires_at_ms <= now {
@@ -600,25 +589,26 @@ pub async fn unwrap_handler(
             StatusCode::UNAUTHORIZED,
             "escrow_nonce_expired",
             "nonce has expired (30s TTL); request a fresh challenge",
-        );
+        )
+        .into_response();
     }
 
     // Verify the WebAuthn assertion.
     let signature_bytes =
         match verify_assertion(&body.credential_id, &body.nonce_b64, &body.assertion) {
             Ok(s) => s,
-            Err(resp) => return resp,
+            Err(e) => return e.into_response(),
         };
 
     let nonce_bytes = match parse_b64("nonce_b64", &body.nonce_b64) {
         Ok(b) => b,
-        Err(resp) => return resp,
+        Err(e) => return e.into_response(),
     };
     let pepper = derive_pepper(&nonce_bytes, &signature_bytes);
 
     let wrapped = match wrap_share(&body.credential_id, &body.surface_key) {
         Ok(w) => w,
-        Err(resp) => return resp,
+        Err(e) => return e.into_response(),
     };
 
     Json(UnwrapResponse {

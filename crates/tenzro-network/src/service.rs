@@ -4,7 +4,7 @@ use crate::{
     behaviour::{TenzroBehaviour, TenzroBehaviourEvent},
     config::NetworkConfig,
     error::{NetworkError, Result},
-    gossip::{GossipTopics, MessageDeduplicator, MessageValidation, validate_gossip_message},
+    gossip::{MessageDeduplicator, MessageValidation, validate_gossip_message},
     message::{NetworkMessage, MessagePayload},
     metrics::NetworkMetrics,
     peer_manager::{PeerManager, ManagedPeer},
@@ -67,11 +67,11 @@ fn load_or_generate_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::identi
     let keypair = libp2p::identity::Keypair::generate_ed25519();
 
     // Ensure parent directory exists
-    if let Some(parent) = key_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!("Failed to create directory {}: {} — keypair will be ephemeral", parent.display(), e);
-            return Ok(keypair);
-        }
+    if let Some(parent) = key_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!("Failed to create directory {}: {} — keypair will be ephemeral", parent.display(), e);
+        return Ok(keypair);
     }
 
     match keypair.to_protobuf_encoding() {
@@ -512,7 +512,7 @@ impl NetworkService for TenzroNetworkService {
 
     async fn send_to(&self, peer_id: PeerId, message: NetworkMessage) -> Result<()> {
         // Route direct peer messages through gossipsub by wrapping the message in a
-        // Custom payload on the tenzro/direct/1.0.0 topic. The payload encodes both
+        // Custom payload on the tenzro/direct topic. The payload encodes both
         // the target peer ID and the inner message so that subscribers can filter
         // messages intended for them. This reuses the already-established gossipsub
         // mesh without requiring a separate request-response protocol.
@@ -529,12 +529,12 @@ impl NetworkService for TenzroNetworkService {
         payload.extend_from_slice(&inner_bytes);
 
         let direct_message = NetworkMessage::new(MessagePayload::Custom {
-            topic: "tenzro/direct/1.0.0".to_string(),
+            topic: "tenzro/direct".to_string(),
             data: payload,
         });
 
         self.send_command(|response| NetworkCommand::Broadcast {
-            topic: "tenzro/direct/1.0.0".to_string(),
+            topic: "tenzro/direct".to_string(),
             message: direct_message,
             response,
         })
@@ -603,9 +603,6 @@ impl NetworkService for TenzroNetworkService {
 struct EventLoopState {
     swarm: Swarm<TenzroBehaviour>,
     peer_manager: PeerManager,
-    /// Gossip topics (stored for potential future introspection/unsubscribe APIs)
-    #[allow(dead_code)]
-    topics: GossipTopics,
     subscribers: HashMap<TopicHash, Vec<mpsc::UnboundedSender<NetworkMessage>>>,
     /// Application-level message deduplicator (defense-in-depth over gossipsub's built-in dedup)
     deduplicator: MessageDeduplicator,
@@ -685,9 +682,6 @@ async fn run_event_loop(
         }
     }
 
-    // Create topics
-    let topics = GossipTopics::new();
-
     // Subscribe to initial topics
     for topic_str in &config.gossip_topics {
         let topic = IdentTopic::new(topic_str.as_str());
@@ -732,7 +726,6 @@ async fn run_event_loop(
     let mut state = EventLoopState {
         swarm,
         peer_manager,
-        topics,
         subscribers: HashMap::new(),
         deduplicator: MessageDeduplicator::default(),
         metrics,
@@ -1035,11 +1028,11 @@ async fn handle_swarm_event(
             // is a notification; actual denial must flow through the connection_limits
             // behaviour (configured in TenzroBehaviour::new) or a future deny-list hook.
             // Here we record the rate-limit decision for observability.
-            if let Some(ip) = extract_ip(&send_back_addr) {
-                if !state.peer_manager.check_dial_rate_limit(ip) {
-                    tracing::warn!("Dial rate-limit exceeded for IP {}", ip);
-                    state.metrics.dials_rejected_per_ip.inc();
-                }
+            if let Some(ip) = extract_ip(&send_back_addr)
+                && !state.peer_manager.check_dial_rate_limit(ip)
+            {
+                tracing::warn!("Dial rate-limit exceeded for IP {}", ip);
+                state.metrics.dials_rejected_per_ip.inc();
             }
         }
         SwarmEvent::IncomingConnectionError { send_back_addr, error, .. } => {
