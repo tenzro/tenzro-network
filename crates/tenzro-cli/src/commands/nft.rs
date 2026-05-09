@@ -200,7 +200,7 @@ impl NftMintBatchCmd {
 pub struct NftTransferCmd {
     /// Collection ID (hex)
     #[arg(long)]
-    collection: String,
+    collection_id: String,
     /// Sender address (hex)
     #[arg(long)]
     from: String,
@@ -209,7 +209,7 @@ pub struct NftTransferCmd {
     to: String,
     /// Token ID
     #[arg(long)]
-    token_id: u64,
+    token_id: String,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -224,7 +224,7 @@ impl NftTransferCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let result: serde_json::Value = rpc.call("tenzro_transferNft", serde_json::json!({
-            "collection": self.collection,
+            "collection_id": self.collection_id,
             "from": self.from,
             "to": self.to,
             "token_id": self.token_id,
@@ -235,7 +235,7 @@ impl NftTransferCmd {
         output::print_success("NFT transferred successfully!");
         output::print_field("From", result.get("from").and_then(|v| v.as_str()).unwrap_or(""));
         output::print_field("To", result.get("to").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Token ID", &result.get("token_id").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
+        output::print_field("Token ID", result.get("token_id").and_then(|v| v.as_str()).unwrap_or(""));
         output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or(""));
 
         Ok(())
