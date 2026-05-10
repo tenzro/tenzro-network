@@ -16,13 +16,13 @@ pub struct ProviderSchedule {
     pub days_of_week: [bool; 7],
 }
 
-/// Provider pricing configuration.
+/// Provider pricing configuration. All fields are wei per token (decimal strings).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderPricing {
-    pub input_price_per_token: f64,
-    pub output_price_per_token: f64,
-    pub network_max_input: f64,
-    pub network_max_output: f64,
+    pub input_price_per_token_wei: String,
+    pub output_price_per_token_wei: String,
+    pub network_max_input_wei: String,
+    pub network_max_output_wei: String,
 }
 
 /// Persisted configuration saved to `~/.tenzro/config.json`.

@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::block_sync_proto::{self, BlockSyncBehaviour};
 use crate::gossip::{validate_gossip_message, MessageDeduplicator, MessageValidation};
 
 /// Topics on which ONLY validators may publish. Enforced in the gossip validation
@@ -53,6 +54,11 @@ pub struct TenzroBehaviour {
     pub connection_limits: connection_limits::Behaviour,
     /// Block list for permanently banning byzantine peers (P4 + P6 + P7 policy violators).
     pub allow_block_list: allow_block_list::Behaviour<allow_block_list::BlockedPeers>,
+    /// Block-sync request/response protocol (`/tenzro/block-sync/1.0.0`).
+    /// Used by lagging nodes to catch up to the network tip without relying on
+    /// gossipsub backfill. Modeled on Sui's `state_sync` and Aptos'
+    /// `storage-service` — see `block_sync_proto.rs` for the wire types.
+    pub block_sync: BlockSyncBehaviour,
 }
 
 /// Wrapper providing application-level message deduplication on top of TenzroBehaviour
@@ -199,6 +205,10 @@ impl TenzroBehaviour {
         // (behavioural penalties).
         let allow_block_list = allow_block_list::Behaviour::default();
 
+        // Block-sync protocol: single request/response Behaviour over CBOR
+        // with the production-tuned config from `block_sync_proto::new_behaviour`.
+        let block_sync = block_sync_proto::new_behaviour();
+
         Ok(Self {
             gossipsub,
             kademlia,
@@ -206,6 +216,7 @@ impl TenzroBehaviour {
             ping,
             connection_limits,
             allow_block_list,
+            block_sync,
         })
     }
 

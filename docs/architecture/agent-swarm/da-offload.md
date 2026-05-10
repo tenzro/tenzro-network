@@ -52,7 +52,7 @@ ReceiptSummary {
     receipt_id:         Hash,
     payer:              Option<String>,
     payee:              Option<String>,
-    amount_tnzo:        Option<u128>,
+    amount_wei:         Option<u128>,
     timestamp:          Timestamp,
     principal_chain_summary: Option<{controller_did, controller_kyc_tier, depth}>,
 }
@@ -165,7 +165,7 @@ tenzro_getDaBackends
     → [{ backend, status, last_submission_ms, last_fetch_ms, error_rate }]
 
 tenzro_estimateOffloadCost { payload_size_bytes, backend? }
-    → { cost_native, cost_tnzo_equiv, eta_ms }
+    → { cost_native, cost_wei_equiv, eta_ms }
 ```
 
 CLI: `tenzro receipt payload <id>`, `tenzro node da-backends`.

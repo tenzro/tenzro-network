@@ -192,9 +192,9 @@ pub struct ClaimRecord {
 /// at `CF_AGENTS/insurance_pool:singleton`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InsurancePoolState {
-    pub balance_tnzo: u128,
+    pub balance_wei: u128,
     pub paid_claims: u64,
-    pub total_paid_tnzo: u128,
+    pub total_paid_wei: u128,
     pub open_claim_count: u64,
 }
 
@@ -362,7 +362,7 @@ impl BondManager {
         info!(
             bond_count,
             claim_count,
-            pool_balance = self.pool.read().balance_tnzo,
+            pool_balance = self.pool.read().balance_wei,
             "BondManager hydrated from storage"
         );
         Ok(())
@@ -711,7 +711,7 @@ impl BondManager {
         // Credit the InsurancePool aggregate.
         {
             let mut pool = self.pool.write();
-            pool.balance_tnzo = pool.balance_tnzo.saturating_add(final_slashed);
+            pool.balance_wei = pool.balance_wei.saturating_add(final_slashed);
             self.persist_pool(&pool)?;
         }
 
@@ -911,15 +911,15 @@ impl BondManager {
             TokenError::InvalidParameter("approved claim missing paid_amount".to_string())
         })?;
         let mut pool = self.pool.write();
-        if pool.balance_tnzo < amount {
+        if pool.balance_wei < amount {
             return Err(TokenError::InsufficientBalance {
                 required: amount,
-                available: pool.balance_tnzo,
+                available: pool.balance_wei,
             });
         }
-        pool.balance_tnzo = pool.balance_tnzo.saturating_sub(amount);
+        pool.balance_wei = pool.balance_wei.saturating_sub(amount);
         pool.paid_claims = pool.paid_claims.saturating_add(1);
-        pool.total_paid_tnzo = pool.total_paid_tnzo.saturating_add(amount);
+        pool.total_paid_wei = pool.total_paid_wei.saturating_add(amount);
         pool.open_claim_count = pool.open_claim_count.saturating_sub(1);
         self.persist_pool(&pool)?;
         drop(pool);
@@ -1042,7 +1042,7 @@ mod tests {
         // 25% of 1000 = 250
         assert_eq!(slashed, 250_000_000_000_000_000_000u128);
         assert_eq!(bond.amount, 750_000_000_000_000_000_000u128);
-        assert_eq!(m.pool_state().balance_tnzo, 250_000_000_000_000_000_000u128);
+        assert_eq!(m.pool_state().balance_wei, 250_000_000_000_000_000_000u128);
         assert_eq!(bond.state, BondLifecycle::Active);
     }
 
@@ -1080,7 +1080,7 @@ mod tests {
         // Seed pool via slashing.
         m.post("a", "c", 100_000_000_000_000_000_000_000u128, 1).unwrap(); // 100k
         m.slash("a", 5000, None, "terminate", 2).unwrap();
-        let pool_before = m.pool_state().balance_tnzo;
+        let pool_before = m.pool_state().balance_wei;
         assert!(pool_before >= 50_000_000_000_000_000_000_000u128);
 
         let claim = m
@@ -1099,9 +1099,9 @@ mod tests {
         let paid = m.pay_claim(&claim.claim_id).unwrap();
         assert_eq!(paid.status, ClaimStatus::Paid);
         assert_eq!(paid.paid_amount, Some(5_000_000_000_000_000_000u128));
-        assert_eq!(m.pool_state().total_paid_tnzo, 5_000_000_000_000_000_000u128);
+        assert_eq!(m.pool_state().total_paid_wei, 5_000_000_000_000_000_000u128);
         assert_eq!(
-            m.pool_state().balance_tnzo,
+            m.pool_state().balance_wei,
             pool_before - 5_000_000_000_000_000_000u128
         );
     }

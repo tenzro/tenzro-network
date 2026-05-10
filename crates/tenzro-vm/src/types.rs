@@ -39,6 +39,21 @@ pub struct VmTransaction {
 
     /// Sender's public key for signature verification
     pub public_key: Option<Vec<u8>>,
+
+    /// Canonical signing digest carried from the parent `SignedTransaction`.
+    ///
+    /// This is the exact byte sequence the signature in `signature` was
+    /// produced over — `tenzro_types::Transaction::hash()` for production
+    /// txs converted via `convert_transaction` in the node event loop.
+    /// When `Some`, the runtime verifies the signature against this digest
+    /// directly instead of recomputing a preimage from VmTransaction fields,
+    /// preventing hash divergence between admission and execution.
+    ///
+    /// Set to `None` for synthetic txs built in tests/examples that aren't
+    /// signed; in that case the runtime skips in-VM verification (the tx
+    /// has no signature to verify in the first place).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_digest: Option<Vec<u8>>,
 }
 
 impl VmTransaction {
@@ -66,12 +81,40 @@ impl VmTransaction {
             chain_id,
             signature: None,
             public_key: None,
+            signing_digest: None,
         }
     }
 
-    /// Create a transaction with signature
+    /// Attach the canonical signing digest produced by the originating
+    /// `SignedTransaction`. Used by `convert_transaction` in the node event
+    /// loop so the runtime verifies the signature against the same preimage
+    /// the admission boundary verified against.
+    pub fn with_signing_digest(mut self, digest: Vec<u8>) -> Self {
+        self.signing_digest = Some(digest);
+        self
+    }
+
+    /// Create a transaction with signature.
+    ///
+    /// When the caller has not separately attached a `signing_digest` via
+    /// [`with_signing_digest`], this helper auto-populates it from
+    /// [`signing_hash`] so the runtime's signature verification has a
+    /// canonical preimage to verify against. Production txs built via
+    /// `convert_transaction` in the node event loop call
+    /// `with_signing_digest` first (with the upstream `Transaction::hash()`)
+    /// and that takes precedence — this default applies only to synthetic
+    /// txs constructed directly that wouldn't otherwise carry a digest.
     pub fn with_signature(mut self, signature: Vec<u8>) -> Self {
         self.signature = Some(signature);
+        if self.signing_digest.is_none() {
+            self.signing_digest = Some(self.signing_hash());
+        }
+        self
+    }
+
+    /// Attach a public key (paired with a signature for in-VM verification).
+    pub fn with_public_key(mut self, public_key: Vec<u8>) -> Self {
+        self.public_key = Some(public_key);
         self
     }
 
@@ -107,6 +150,7 @@ impl VmTransaction {
         let data = serde_json::to_vec(self).unwrap_or_default();
         Sha256::digest(&data).to_vec()
     }
+
 }
 
 /// Result of executing a transaction

@@ -1,0 +1,23 @@
+{
+  "_comment": "DAML codegen mapping for supply_chain_dpp.json. Pure attestation chain — no token movement, no external Token interface. Each Attest discharge anchors a Verifiable Credential hash on Canton via the DppCustody anchor template.",
+
+  "module": "Tenzro.Workflow.SupplyChainDpp",
+  "template_name": "SupplyChainDpp",
+  "obligation_spec_type": "ObligationSpec",
+
+  "obligation_choices": [
+    {
+      "kind_tag": "Attest",
+      "choice_name": "DischargeAttest",
+      "choice_args": [
+        { "name": "credential_type", "daml_type": "Text" },
+        { "name": "subject_did", "daml_type": "Text" },
+        { "name": "credential_hash", "daml_type": "Text" },
+        { "name": "issuer_did", "daml_type": "Text" },
+        { "name": "issued_at", "daml_type": "Time" }
+      ]
+    }
+  ],
+
+  "external_interface": null
+}

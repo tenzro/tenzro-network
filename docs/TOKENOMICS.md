@@ -290,7 +290,7 @@ Liquid staking allows staked TNZO to remain economically productive. The stTNZO 
 stTNZO uses a rebasing model where the exchange rate increases as staking rewards accrue:
 
 ```
-exchange_rate = (total_underlying_tnzo * 10^18) / total_sttnzo_supply
+exchange_rate = (total_underlying_wei * 10^18) / total_sttnzo_supply
 
 // Overflow-safe calculation (u128):
 quotient = underlying / supply
@@ -304,7 +304,7 @@ When rewards arrive:
 protocol_fee = reward_amount * 1,000 / 10,000    // 10%
 staker_share = reward_amount - protocol_fee       // 90%
 
-total_underlying_tnzo += staker_share
+total_underlying_wei += staker_share
 // stTNZO supply unchanged --> exchange rate increases
 // Each stTNZO now redeemable for more TNZO
 ```

@@ -145,7 +145,9 @@ impl IdentityResolveCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_resolveIdentity", serde_json::json!([self.did])).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_resolveIdentity", serde_json::json!({"did": self.did}))
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -280,7 +282,9 @@ impl IdentityDocumentCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         // First resolve the identity to get its data
-        let identity: serde_json::Value = rpc.call("tenzro_resolveIdentity", serde_json::json!([self.did])).await?;
+        let identity: serde_json::Value = rpc
+            .call("tenzro_resolveIdentity", serde_json::json!({"did": self.did}))
+            .await?;
 
         spinner.finish_and_clear();
 
@@ -457,7 +461,9 @@ impl IdentityResolveDocumentCmd {
         output::print_header("Resolve DID Document");
         let spinner = output::create_spinner("Resolving...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc.call("tenzro_resolveDidDocument", serde_json::json!([self.did])).await?;
+        let result: serde_json::Value = rpc
+            .call("tenzro_resolveDidDocument", serde_json::json!({"did": self.did}))
+            .await?;
         spinner.finish_and_clear();
         println!();
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -470,10 +476,10 @@ impl IdentityResolveDocumentCmd {
 pub struct IdentitySetDelegationCmd {
     /// Machine DID
     did: String,
-    /// Max transaction value (TNZO)
+    /// Max transaction value, in whole TNZO (e.g. "1.5"). Converted to wei.
     #[arg(long)]
     max_tx_value: Option<String>,
-    /// Max daily spend (TNZO)
+    /// Max daily spend, in whole TNZO (e.g. "10"). Converted to wei.
     #[arg(long)]
     max_daily_spend: Option<String>,
     /// Allowed operations (comma-separated)
@@ -494,8 +500,14 @@ impl IdentitySetDelegationCmd {
         let spinner = output::create_spinner("Setting delegation...");
         let rpc = RpcClient::new(&self.rpc);
         let mut params = serde_json::json!({ "did": self.did });
-        if let Some(ref v) = self.max_tx_value { params["max_transaction_value"] = serde_json::json!(v); }
-        if let Some(ref v) = self.max_daily_spend { params["max_daily_spend"] = serde_json::json!(v); }
+        if let Some(ref v) = self.max_tx_value {
+            let wei = crate::units::tnzo_to_wei_string(v)?;
+            params["max_transaction_value"] = serde_json::json!(wei);
+        }
+        if let Some(ref v) = self.max_daily_spend {
+            let wei = crate::units::tnzo_to_wei_string(v)?;
+            params["max_daily_spend"] = serde_json::json!(wei);
+        }
         if let Some(ref v) = self.allowed_ops {
             let ops: Vec<&str> = v.split(',').map(|s| s.trim()).collect();
             params["allowed_operations"] = serde_json::json!(ops);

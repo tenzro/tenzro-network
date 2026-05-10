@@ -28,6 +28,7 @@ use dashmap::DashMap;
 use libp2p::PeerId;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tenzro_types::tee::TeeVendor;
 
 /// Default freshness window — entries older than this are ignored by `network_tip()`.
 pub const DEFAULT_FRESHNESS: Duration = Duration::from_secs(60);
@@ -42,6 +43,11 @@ pub struct PeerStatus {
     pub chain_id: u64,
     /// When the status was last received.
     pub last_seen: Instant,
+    /// Whether the peer advertises TEE capability — routing hint for
+    /// confidential-compute / custodial workloads.
+    pub tee_capable: bool,
+    /// Peer's TEE vendor, if any. `None` on commodity hardware.
+    pub tee_vendor: Option<TeeVendor>,
 }
 
 /// Tracks the latest `StatusMessage` height per peer.
@@ -75,11 +81,18 @@ impl PeerStatusTracker {
         })
     }
 
-    /// Records the latest status for a peer.
+    /// Records the latest status for a peer, including TEE capability.
     ///
     /// Drops the message silently if `chain_id` does not match the local
     /// chain — a status from another chain is meaningless for sync detection.
-    pub fn record(&self, peer_id: PeerId, height: u64, chain_id: u64) {
+    pub fn record(
+        &self,
+        peer_id: PeerId,
+        height: u64,
+        chain_id: u64,
+        tee_capable: bool,
+        tee_vendor: Option<TeeVendor>,
+    ) {
         if chain_id != self.chain_id {
             tracing::debug!(
                 peer = %peer_id,
@@ -95,8 +108,33 @@ impl PeerStatusTracker {
                 height,
                 chain_id,
                 last_seen: Instant::now(),
+                tee_capable,
+                tee_vendor,
             },
         );
+    }
+
+    /// Returns all fresh peers that advertise TEE capability.
+    ///
+    /// If `vendor` is `Some`, only peers reporting that exact vendor are
+    /// returned; if `None`, any TEE-capable peer matches. Used by routing
+    /// logic that needs to dispatch confidential-compute / custodial
+    /// workloads to a TEE-equipped peer.
+    pub fn find_tee_peers(&self, vendor: Option<TeeVendor>) -> Vec<(PeerId, PeerStatus)> {
+        let now = Instant::now();
+        self.statuses
+            .iter()
+            .filter(|entry| {
+                let s = entry.value();
+                s.tee_capable
+                    && vendor.map_or(true, |v| s.tee_vendor == Some(v))
+                    && now
+                        .checked_duration_since(s.last_seen)
+                        .map(|d| d <= self.freshness)
+                        .unwrap_or(true)
+            })
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect()
     }
 
     /// Returns the maximum fresh peer height, or `None` if no fresh status
@@ -170,9 +208,9 @@ mod tests {
         let p2 = PeerId::random();
         let p3 = PeerId::random();
 
-        tracker.record(p1, 100, 1337);
-        tracker.record(p2, 250, 1337);
-        tracker.record(p3, 175, 1337);
+        tracker.record(p1, 100, 1337, false, None);
+        tracker.record(p2, 250, 1337, false, None);
+        tracker.record(p3, 175, 1337, false, None);
 
         assert_eq!(tracker.network_tip(), Some(250));
         assert_eq!(tracker.fresh_peer_count(), 3);
@@ -183,7 +221,7 @@ mod tests {
         let tracker = PeerStatusTracker::new(1337);
         let p1 = PeerId::random();
 
-        tracker.record(p1, 9999, 9999);
+        tracker.record(p1, 9999, 9999, false, None);
         assert_eq!(tracker.network_tip(), None);
     }
 
@@ -192,9 +230,9 @@ mod tests {
         let tracker = PeerStatusTracker::new(1337);
         let p1 = PeerId::random();
 
-        tracker.record(p1, 100, 1337);
-        tracker.record(p1, 200, 1337);
-        tracker.record(p1, 150, 1337);
+        tracker.record(p1, 100, 1337, false, None);
+        tracker.record(p1, 200, 1337, false, None);
+        tracker.record(p1, 150, 1337, false, None);
 
         // Latest write wins, even if not the maximum.
         assert_eq!(tracker.network_tip(), Some(150));
@@ -207,9 +245,9 @@ mod tests {
         let p1 = PeerId::random();
         let p2 = PeerId::random();
 
-        tracker.record(p1, 100, 1337);
+        tracker.record(p1, 100, 1337, false, None);
         std::thread::sleep(Duration::from_millis(80));
-        tracker.record(p2, 200, 1337);
+        tracker.record(p2, 200, 1337, false, None);
 
         // p1 is now stale; only p2 counts.
         assert_eq!(tracker.network_tip(), Some(200));
@@ -218,5 +256,42 @@ mod tests {
         tracker.prune_stale();
         // After pruning, p1's entry is gone; p2 still present.
         assert_eq!(tracker.network_tip(), Some(200));
+    }
+
+    #[test]
+    fn finds_tee_capable_peers() {
+        let tracker = PeerStatusTracker::new(1337);
+        let p_sev = PeerId::random();
+        let p_tdx = PeerId::random();
+        let p_none = PeerId::random();
+
+        tracker.record(p_sev, 100, 1337, true, Some(TeeVendor::AmdSevSnp));
+        tracker.record(p_tdx, 100, 1337, true, Some(TeeVendor::IntelTdx));
+        tracker.record(p_none, 100, 1337, false, None);
+
+        // Any TEE-capable peer.
+        let any = tracker.find_tee_peers(None);
+        assert_eq!(any.len(), 2);
+        assert!(any.iter().all(|(_, s)| s.tee_capable));
+
+        // Vendor-specific filter.
+        let sev = tracker.find_tee_peers(Some(TeeVendor::AmdSevSnp));
+        assert_eq!(sev.len(), 1);
+        assert_eq!(sev[0].0, p_sev);
+
+        // No match for vendor not present.
+        let nitro = tracker.find_tee_peers(Some(TeeVendor::AwsNitro));
+        assert_eq!(nitro.len(), 0);
+    }
+
+    #[test]
+    fn stale_tee_peers_excluded_from_find() {
+        let tracker = PeerStatusTracker::with_freshness(1337, Duration::from_millis(50));
+        let p_sev = PeerId::random();
+
+        tracker.record(p_sev, 100, 1337, true, Some(TeeVendor::AmdSevSnp));
+        std::thread::sleep(Duration::from_millis(80));
+
+        assert_eq!(tracker.find_tee_peers(None).len(), 0);
     }
 }

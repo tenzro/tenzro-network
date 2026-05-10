@@ -1005,6 +1005,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
+name = "cbor4ii"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "472931dd4dfcc785075b09be910147f9c6258883fc4591d0dac6116392b2daa6"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3784,12 +3793,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9f1cca83488b90102abac7b67d5c36fc65bc02ed47620228af7ed002e6a1478"
 dependencies = [
  "async-trait",
+ "cbor4ii",
  "futures",
  "futures-bounded",
  "libp2p-core",
  "libp2p-identity",
  "libp2p-swarm",
  "rand 0.8.5",
+ "serde",
  "smallvec 1.15.1",
  "tracing",
 ]
@@ -6867,6 +6878,7 @@ dependencies = [
  "tenzro-crypto",
  "tenzro-token",
  "tenzro-types",
+ "tenzro-workflow",
  "thiserror 2.0.18",
  "tokio",
  "tonic",
@@ -6912,6 +6924,7 @@ name = "tenzro-consensus"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bincode",
  "bytes",
  "chrono",
  "criterion",
@@ -7149,6 +7162,7 @@ dependencies = [
  "tenzro-types",
  "tenzro-vm",
  "tenzro-wallet",
+ "tenzro-workflow",
  "tenzro-zk",
  "thiserror 2.0.18",
  "tokio",
@@ -7302,6 +7316,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tenzro-crypto",
  "tenzro-storage",
  "tenzro-types",
  "thiserror 2.0.18",
@@ -7419,6 +7434,28 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "tenzro-workflow"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bincode",
+ "chrono",
+ "dashmap",
+ "hex",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tenzro-crypto",
+ "tenzro-identity",
+ "tenzro-storage",
+ "tenzro-types",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

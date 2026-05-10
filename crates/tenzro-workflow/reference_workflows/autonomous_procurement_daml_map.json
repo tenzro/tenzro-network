@@ -1,0 +1,30 @@
+{
+  "_comment": "DAML codegen mapping for autonomous_procurement.json. Loaded by tenzro_workflow::WorkflowDamlCodegen::emit alongside the workflow spec. The emitted .daml binds Active<Template>::ActiveAutonomousProcurement to the CIP-56 Token.TransferInstruction interface so the buyer-agent's discharge can settle through the Canton Coin token standard.",
+
+  "module": "Tenzro.Workflow.AutonomousProcurement",
+  "template_name": "AutonomousProcurement",
+  "obligation_spec_type": "ObligationSpec",
+
+  "obligation_choices": [
+    {
+      "kind_tag": "Pay",
+      "choice_name": "DischargePay",
+      "choice_args": [
+        { "name": "amount", "daml_type": "Decimal" },
+        { "name": "asset_symbol", "daml_type": "Text" },
+        { "name": "payment_receipt_hash", "daml_type": "Text" }
+      ]
+    },
+    {
+      "kind_tag": "Deliver",
+      "choice_name": "DischargeDeliver",
+      "choice_args": [
+        { "name": "resource_did", "daml_type": "Text" },
+        { "name": "qty", "daml_type": "Int" },
+        { "name": "delivery_credential_hash", "daml_type": "Text" }
+      ]
+    }
+  ],
+
+  "external_interface": "Token.TransferInstruction"
+}

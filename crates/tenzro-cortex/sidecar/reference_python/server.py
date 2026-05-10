@@ -43,7 +43,7 @@ Receipt contract (Rust side, do not replicate here):
       - weights_hash / runtime_hash reported by this sidecar
       - input_commitment  = SHA-256( canonicalize_input(request) )
       - output_commitment = SHA-256( output_bytes )
-      - price_tnzo        = CortexPricing.compute(...)
+      - price_wei         = CortexPricing.compute(...)
       - worker_did / worker_address from the worker
       - Ed25519 signature over signing_preimage() of the full receipt
 

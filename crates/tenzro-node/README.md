@@ -133,7 +133,8 @@ The node orchestrates subsystems in the following startup order:
 7. **Consensus** - HotStuff-2 consensus (validators only)
 8. **Settlement** - Payment settlement engine
 9. **AI Infrastructure** - Model registry, provider management, agent runtime, and swarm manager (durable persistence via `init_ai_infrastructure()`; restored model, agent, and swarm counts logged at startup)
-10. **Bridge** - Cross-chain bridge router
+10. **Workflow Runtime** - Multi-party workflow engine (`WorkflowRuntime` = `WorkflowManager` + `PrivacyDomainRegistry` + `FeeRouteRegistry`); hash-chained `WorkflowReceipt` log, Canton mirror via `Tenzro.Workflow.Receipt`, kill switch, policy DSL, operational metrics — see `crates/tenzro-workflow/`
+11. **Bridge** - Cross-chain bridge router
 
 Shutdown occurs in reverse order to ensure clean resource cleanup.
 
@@ -176,6 +177,7 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0
 - **EU AI Act §50 Provenance**: getProvenance — C2PA-style `ProvenanceManifest` keyed by `SHA-256(content_bytes)`, signed by validator block-signing keys (§50(1) chatbot disclosure via `aap_agent` claim, §50(2) provenance manifest, §50(4) deepfake labeling)
 - **Staking**: stake, unstake, registerProvider, providerStats
 - **Canton**: listCantonDomains, listDamlContracts, submitDamlCommand
+- **Multi-Party Workflows**: getWorkflow, getWorkflowLifecycle, listWorkflowsByCreator, listWorkflowsByParticipant, listWorkflowsByStatus, getWorkflowReceipt, listWorkflowReceipts, getFeeRoute, listFeeRoutes, computeFeeRoutePayouts, getPrivacyDomain, listPrivacyDomainsForDid, getWorkflowOperationalMetrics — Canton-native workflow lifecycle, privileged-VM selectors `0x01000040`–`0x0100004B`, hash-chained receipts (`Inline` or `OffloadedDA`), kill-switch suspend/cancel, policy DSL combinators
 - **TaskMarketplace**: postTask, listTasks, getTask, cancelTask, submitQuote
 - **AgentMarketplace**: listAgentTemplates, registerAgentTemplate, getAgentTemplate, updateAgentTemplate, spawnAgentFromTemplate, runAgentTemplate, rateAgentTemplate, searchAgentTemplates, getAgentTemplateStats
 - **TokenRegistry**: createToken, getToken, listTokens, crossVmTransfer, wrapTnzo, getTokenBalance, deployContract

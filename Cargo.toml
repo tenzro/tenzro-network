@@ -20,6 +20,7 @@ members = [
     "crates/tenzro-agent-kit",
     "crates/tenzro-auth",
     "crates/tenzro-events",
+    "crates/tenzro-workflow",
     "crates/tenzro-cortex",
     "crates/tenzro-training",
     "crates/tenzro-node",
@@ -63,6 +64,7 @@ tenzro-identity = { path = "crates/tenzro-identity" }
 tenzro-payments = { path = "crates/tenzro-payments" }
 tenzro-agent-kit = { path = "crates/tenzro-agent-kit" }
 tenzro-auth = { path = "crates/tenzro-auth" }
+tenzro-workflow = { path = "crates/tenzro-workflow" }
 tenzro-node = { path = "crates/tenzro-node" }
 tenzro-cli = { path = "crates/tenzro-cli" }
 tenzro-sdk = { path = "sdk/tenzro-sdk" }
@@ -123,7 +125,7 @@ aws-lc-rs = { version = "1.16.3", features = ["bindgen"] }
 libp2p = { version = "0.56", features = [
     "gossipsub", "kad", "identify", "tls", "yamux",
     "tcp", "quic", "dns", "ping", "relay", "rendezvous",
-    "autonat", "dcutr", "request-response",
+    "autonat", "dcutr", "request-response", "cbor",
     "macros", "tokio", "metrics",
 ] }
 libp2p-metrics = "0.17"

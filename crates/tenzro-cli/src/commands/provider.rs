@@ -121,10 +121,16 @@ impl ProviderRegisterCmd {
 
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
 
+        // The RPC takes the stake amount in **wei** (10^-18 TNZO).
+        let stake_wei = if stake_val > 0.0 {
+            crate::units::tnzo_to_wei_string(&self.stake)?
+        } else {
+            "0".to_string()
+        };
         let result: serde_json::Value = rpc.call("tenzro_registerProvider", serde_json::json!([{
             "provider_type": self.r#type,
             "name": self.name.as_deref(),
-            "stake": self.stake,
+            "stake": stake_wei,
             "max_concurrent": self.max_concurrent,
         }])).await?;
 
@@ -329,16 +335,24 @@ impl ProviderModelsCmd {
     }
 }
 
-/// Set provider pricing
+/// Set provider pricing (wei per token; 1 TNZO = 10^18 wei)
 #[derive(Debug, Parser)]
 pub struct PricingSetCmd {
-    /// Price per input token (in TNZO)
-    #[arg(long)]
-    pub input_price: f64,
+    /// Wei per input token (decimal string)
+    #[arg(long = "input-price-wei")]
+    pub input_price_wei: String,
 
-    /// Price per output token (in TNZO)
-    #[arg(long)]
-    pub output_price: f64,
+    /// Wei per output token (decimal string)
+    #[arg(long = "output-price-wei")]
+    pub output_price_wei: String,
+
+    /// Network ceiling for input price in wei (decimal string)
+    #[arg(long = "network-max-input-wei", default_value = "1000000000000000")]
+    pub network_max_input_wei: String,
+
+    /// Network ceiling for output price in wei (decimal string)
+    #[arg(long = "network-max-output-wei", default_value = "2000000000000000")]
+    pub network_max_output_wei: String,
 
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
@@ -352,44 +366,50 @@ impl PricingSetCmd {
 
         #[derive(Serialize)]
         struct ProviderPricing {
-            input_price_per_token: f64,
-            output_price_per_token: f64,
-            network_max_input: f64,
-            network_max_output: f64,
+            input_price_per_token_wei: String,
+            output_price_per_token_wei: String,
+            network_max_input_wei: String,
+            network_max_output_wei: String,
         }
+
+        // Parse-validate: each field must be a non-negative u128 decimal string.
+        let input_wei: u128 = self
+            .input_price_wei
+            .parse()
+            .map_err(|_| anyhow::anyhow!("--input-price-wei must be a non-negative integer"))?;
+        let output_wei: u128 = self
+            .output_price_wei
+            .parse()
+            .map_err(|_| anyhow::anyhow!("--output-price-wei must be a non-negative integer"))?;
+        let max_in_wei: u128 = self
+            .network_max_input_wei
+            .parse()
+            .map_err(|_| anyhow::anyhow!("--network-max-input-wei must be a non-negative integer"))?;
+        let max_out_wei: u128 = self.network_max_output_wei.parse().map_err(|_| {
+            anyhow::anyhow!("--network-max-output-wei must be a non-negative integer")
+        })?;
 
         output::print_header("Set Provider Pricing");
-
-        // Validate pricing
-        if self.input_price < 0.0 || self.output_price < 0.0 {
-            return Err(anyhow::anyhow!("Prices must be non-negative"));
-        }
-
         println!();
-        output::print_field("Input Price", &format!("{:.6} TNZO/token", self.input_price));
-        output::print_field("Output Price", &format!("{:.6} TNZO/token", self.output_price));
+        output::print_field("Input Price", &format!("{} wei/token", input_wei));
+        output::print_field("Output Price", &format!("{} wei/token", output_wei));
         println!();
 
         let spinner = output::create_spinner("Updating pricing...");
 
-        let rpc = RpcClient::new(&self.rpc);
-
-        // Get current network max prices
-        let network_max_input = 0.001; // Default max
-        let network_max_output = 0.001;
-
         let pricing = ProviderPricing {
-            input_price_per_token: self.input_price,
-            output_price_per_token: self.output_price,
-            network_max_input,
-            network_max_output,
+            input_price_per_token_wei: input_wei.to_string(),
+            output_price_per_token_wei: output_wei.to_string(),
+            network_max_input_wei: max_in_wei.to_string(),
+            network_max_output_wei: max_out_wei.to_string(),
         };
 
-        let _: serde_json::Value = rpc.call("tenzro_setProviderPricing", serde_json::json!([pricing]))
+        let rpc = RpcClient::new(&self.rpc);
+        let _: serde_json::Value = rpc
+            .call("tenzro_setProviderPricing", serde_json::json!([pricing]))
             .await?;
 
         spinner.finish_and_clear();
-
         output::print_success("Provider pricing updated successfully!");
 
         Ok(())
@@ -411,10 +431,10 @@ impl PricingShowCmd {
 
         #[derive(Deserialize)]
         struct ProviderPricing {
-            input_price_per_token: f64,
-            output_price_per_token: f64,
-            network_max_input: f64,
-            network_max_output: f64,
+            input_price_per_token_wei: String,
+            output_price_per_token_wei: String,
+            network_max_input_wei: String,
+            network_max_output_wei: String,
         }
 
         output::print_header("Provider Pricing");
@@ -428,11 +448,23 @@ impl PricingShowCmd {
         spinner.finish_and_clear();
 
         println!();
-        output::print_field("Input Price", &format!("{:.6} TNZO/token", pricing.input_price_per_token));
-        output::print_field("Output Price", &format!("{:.6} TNZO/token", pricing.output_price_per_token));
+        output::print_field(
+            "Input Price",
+            &format!("{} wei/token", pricing.input_price_per_token_wei),
+        );
+        output::print_field(
+            "Output Price",
+            &format!("{} wei/token", pricing.output_price_per_token_wei),
+        );
         println!();
-        output::print_field("Network Max Input", &format!("{:.6} TNZO/token", pricing.network_max_input));
-        output::print_field("Network Max Output", &format!("{:.6} TNZO/token", pricing.network_max_output));
+        output::print_field(
+            "Network Max Input",
+            &format!("{} wei/token", pricing.network_max_input_wei),
+        );
+        output::print_field(
+            "Network Max Output",
+            &format!("{} wei/token", pricing.network_max_output_wei),
+        );
 
         Ok(())
     }

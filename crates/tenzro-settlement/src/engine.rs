@@ -792,7 +792,7 @@ impl SettlementEngine {
         tenzro_types::principal_chain::ControllerActivitySummary {
             controller_did: controller_did.to_string(),
             receipt_count: count,
-            total_value_tnzo: total_value,
+            total_value_wei: total_value,
             agents_acted_under: agents.into_iter().collect(),
             kill_switch_events: 0, // wired in once Spec 1 lands
             kyc_tier_at_oldest: tier_oldest,

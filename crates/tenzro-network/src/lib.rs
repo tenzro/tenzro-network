@@ -63,6 +63,7 @@
 //! - Mainnet: `tenzro/mainnet/blocks/1.0.0`
 
 pub mod behaviour;
+pub mod block_sync_proto;
 pub mod config;
 pub mod discovery;
 pub mod error;
@@ -76,6 +77,11 @@ pub mod transport;
 
 // Re-export commonly used types
 pub use behaviour::{TenzroBehaviour, TenzroNetwork};
+pub use block_sync_proto::{
+    BlockSyncBehaviour, BlockSyncError, BlockSyncRequest, BlockSyncResponse,
+    BLOCK_SYNC_PROTOCOL, MAX_BLOCKS_PER_RANGE, MAX_BLOCK_HASHES_PER_REQUEST,
+    MAX_INBOUND_STREAMS_PER_PEER, MAX_INFLIGHT_REQUESTS_PER_PEER,
+};
 pub use config::NetworkConfig;
 pub use discovery::{BootstrapConfig, DiscoveryConfig, ProviderType};
 pub use error::{NetworkError, Result};
@@ -89,9 +95,13 @@ pub use message::{
 };
 pub use peer_manager::{ManagedPeer, PeerManager, PeerManagerStats, ValidatorRegistry, VALIDATOR_ONLY_TOPICS};
 pub use peer_status::{PeerStatus as PeerChainStatus, PeerStatusTracker, DEFAULT_FRESHNESS};
-pub use service::{NetworkService, TenzroNetworkService};
+pub use service::{
+    BlockSyncOutboundError, InboundBlockSync, NetworkService, OutboundBlockSyncResult,
+    PeerEvent, TenzroNetworkService,
+};
 
 // Re-export libp2p types that are commonly used
+pub use libp2p::request_response::{InboundRequestId, OutboundRequestId};
 pub use libp2p::{Multiaddr, PeerId};
 
 #[cfg(test)]

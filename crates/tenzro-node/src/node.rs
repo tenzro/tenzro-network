@@ -63,17 +63,32 @@ pub struct StakingSlashingCallback {
     /// from the next epoch's pending-validator queue so that a punished node
     /// cannot be promoted in the rotation that immediately follows the slash.
     epoch_manager: Option<Arc<EpochManager>>,
+    /// Permissionless validator registry. When wired, slashed validators are
+    /// also `jail()`ed in the registry so their status flips to `Jailed` and
+    /// they cannot be re-promoted by the next epoch transition until the
+    /// jail period elapses.
+    validator_registry: Option<Arc<tenzro_token::validator_registry::ValidatorRegistry>>,
 }
 
 impl StakingSlashingCallback {
     pub fn new(staking: Arc<StakingManager>) -> Self {
-        Self { staking, epoch_manager: None }
+        Self { staking, epoch_manager: None, validator_registry: None }
     }
 
     /// Attach an epoch manager so slashed validators are dropped from the
     /// next epoch's pending-validator queue.
     pub fn with_epoch_manager(mut self, epoch_manager: Arc<EpochManager>) -> Self {
         self.epoch_manager = Some(epoch_manager);
+        self
+    }
+
+    /// Attach the permissionless validator registry so slashed validators are
+    /// also flipped to `Jailed` status in the registry.
+    pub fn with_validator_registry(
+        mut self,
+        registry: Arc<tenzro_token::validator_registry::ValidatorRegistry>,
+    ) -> Self {
+        self.validator_registry = Some(registry);
         self
     }
 }
@@ -125,6 +140,36 @@ impl SlashingCallback for StakingSlashingCallback {
                         view = view,
                         "Removed slashed validator from next-epoch pending queue"
                     );
+
+                    // Flip the registry entry to `Jailed` so the next epoch
+                    // transition refuses to re-promote them. The current epoch
+                    // number drives the jail-until window inside the registry.
+                    if let Some(registry) = self.validator_registry.as_ref() {
+                        let current_epoch = em.current_epoch().number;
+                        match registry.jail(validator, current_epoch) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    validator = %validator,
+                                    view = view,
+                                    epoch = current_epoch,
+                                    "Jailed slashed validator in permissionless registry"
+                                );
+                            }
+                            Err(e) => {
+                                // Not fatal: the validator may not be in the
+                                // permissionless registry (e.g. genesis-only
+                                // validators on early testnet). Slashing already
+                                // succeeded; log and move on.
+                                tracing::debug!(
+                                    validator = %validator,
+                                    view = view,
+                                    error = %e,
+                                    "Could not jail validator in permissionless registry \
+                                     (likely genesis-only entry, not registry-tracked)"
+                                );
+                            }
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -134,6 +179,169 @@ impl SlashingCallback for StakingSlashingCallback {
                     error = %e,
                     "Failed to slash validator for equivocation"
                 );
+            }
+        }
+    }
+}
+
+/// Bridges the token layer's `ProposalExecutor` trait to the node's actual
+/// subsystems. Mirrors `StakingSlashingCallback`: the trait lives in
+/// `tenzro-token` so the engine stays free of node-level cross-crate refs;
+/// the node-side bridge is the only place that holds the manager handles.
+///
+/// `GovernanceEngine::execute_proposal` calls `apply_proposal` exactly once
+/// after a passed proposal has cleared status checks. The bridge dispatches
+/// on `ProposalType` and routes to:
+///
+/// - `AdaptiveBurnConfigUpdate` → `BurnRateConfigManager::apply_config`
+/// - `SupplyTargetsUpdate`      → `BurnRateConfigManager::apply_targets`
+/// - `TreasuryGrant`            → `NetworkTreasury::withdraw` (TNZO asset)
+/// - `ParameterChange` / `ProtocolUpgrade` / `Custom` → log + accept (these
+///   are recorded on-chain but applied externally; e.g. `ProtocolUpgrade`
+///   triggers an operator-coordinated rolling restart).
+///
+/// Returning `Err` from `apply_proposal` leaves the proposal in `Passed` so
+/// it can be retried after the operator fixes the underlying cause.
+pub struct TenzroProposalExecutor {
+    burn_rate: Arc<tenzro_token::adaptive_burn::BurnRateConfigManager>,
+    treasury: Arc<NetworkTreasury>,
+    /// Caller address used when the executor invokes `NetworkTreasury::withdraw`.
+    /// Set to the treasury's own address so the authorization check (which
+    /// allows `caller == treasury_address`) passes for governance-driven
+    /// transfers. The treasury already enforces its own multisig threshold
+    /// internally and rejects withdrawals when `threshold > 1`, so wiring
+    /// the executor here doesn't bypass multisig — it just supplies the
+    /// authorized caller for the threshold-1 governance path.
+    treasury_caller: Address,
+}
+
+impl TenzroProposalExecutor {
+    pub fn new(
+        burn_rate: Arc<tenzro_token::adaptive_burn::BurnRateConfigManager>,
+        treasury: Arc<NetworkTreasury>,
+        treasury_caller: Address,
+    ) -> Self {
+        Self { burn_rate, treasury, treasury_caller }
+    }
+}
+
+impl tenzro_token::governance::ProposalExecutor for TenzroProposalExecutor {
+    fn apply_proposal(
+        &self,
+        proposal: &tenzro_types::token::GovernanceProposal,
+    ) -> tenzro_token::error::Result<()> {
+        use tenzro_types::token::ProposalType;
+
+        match &proposal.proposal_type {
+            ProposalType::AdaptiveBurnConfigUpdate {
+                base_fee_burn_bps,
+                local_fee_burn_bps,
+                paymaster_burn_bps,
+            } => {
+                let new_config = tenzro_token::adaptive_burn::BurnRateConfig {
+                    base_fee_burn_bps: *base_fee_burn_bps,
+                    local_fee_burn_bps: *local_fee_burn_bps,
+                    paymaster_burn_bps: *paymaster_burn_bps,
+                };
+                self.burn_rate.apply_config(new_config)?;
+                info!(
+                    proposal_id = %proposal.proposal_id,
+                    "Applied AdaptiveBurnConfigUpdate via governance"
+                );
+                Ok(())
+            }
+            ProposalType::SupplyTargetsUpdate {
+                epoch_neutral_band_bps,
+                rolling_window_epochs,
+                inflation_alarm_bps,
+                deflation_alarm_bps,
+                target_annual_supply_bps,
+                gain_bps_per_pct,
+                magnitude_cap_normal_bps,
+                magnitude_cap_alarm_bps,
+                auto_proposal_min_magnitude_bps,
+                alarm_fast_track_enabled,
+                alarm_timelock_hours,
+            } => {
+                // Preserve the existing `enabled` flag — it's a separate
+                // governance-controlled kill switch with its own proposal
+                // shape (or operator override). `SupplyTargetsUpdate`
+                // proposals only adjust the parametric knobs.
+                let current = self.burn_rate.targets();
+                let new_targets = tenzro_token::adaptive_burn::SupplyTargets {
+                    enabled: current.enabled,
+                    epoch_neutral_band_bps: *epoch_neutral_band_bps,
+                    rolling_window_epochs: *rolling_window_epochs,
+                    inflation_alarm_bps: *inflation_alarm_bps,
+                    deflation_alarm_bps: *deflation_alarm_bps,
+                    target_annual_supply_bps: *target_annual_supply_bps,
+                    gain_bps_per_pct: *gain_bps_per_pct,
+                    magnitude_cap_normal_bps: *magnitude_cap_normal_bps,
+                    magnitude_cap_alarm_bps: *magnitude_cap_alarm_bps,
+                    auto_proposal_min_magnitude_bps: *auto_proposal_min_magnitude_bps,
+                    alarm_fast_track_enabled: *alarm_fast_track_enabled,
+                    alarm_timelock_hours: *alarm_timelock_hours,
+                };
+                self.burn_rate.apply_targets(new_targets)?;
+                info!(
+                    proposal_id = %proposal.proposal_id,
+                    "Applied SupplyTargetsUpdate via governance"
+                );
+                Ok(())
+            }
+            ProposalType::TreasuryGrant { recipient, amount } => {
+                // Withdraw from the treasury under the authorized governance
+                // caller. The recipient receives funds via a follow-up
+                // settlement transaction emitted by the treasury's withdraw
+                // path; for now we record the grant by debiting the treasury
+                // balance. The recipient field is logged for downstream
+                // payout reconciliation.
+                let asset_id = tenzro_types::AssetId::tnzo();
+                self.treasury
+                    .withdraw(&asset_id, *amount, &self.treasury_caller)?;
+                info!(
+                    proposal_id = %proposal.proposal_id,
+                    recipient = %recipient,
+                    amount = amount,
+                    "Applied TreasuryGrant via governance"
+                );
+                Ok(())
+            }
+            ProposalType::ParameterChange { parameter, new_value } => {
+                // Generic parameter changes are recorded on-chain but the
+                // actual subsystem applying them must subscribe to the
+                // governance event stream (e.g. fee market params, mempool
+                // limits). The status flip to `Executed` here makes the
+                // change canonical.
+                info!(
+                    proposal_id = %proposal.proposal_id,
+                    parameter = %parameter,
+                    new_value = %new_value,
+                    "Applied ParameterChange via governance (consumer-side dispatch)"
+                );
+                Ok(())
+            }
+            ProposalType::ProtocolUpgrade { version, code_hash } => {
+                // Protocol upgrades are operator-coordinated: the proposal
+                // status flip to `Executed` is the on-chain signal; the
+                // actual binary swap happens via a rolling restart on the
+                // K8s side. Log the version + hash for the operator audit
+                // trail.
+                info!(
+                    proposal_id = %proposal.proposal_id,
+                    version = %version,
+                    code_hash = ?code_hash,
+                    "Applied ProtocolUpgrade via governance (operator rollout follows)"
+                );
+                Ok(())
+            }
+            ProposalType::Custom { proposal_data } => {
+                info!(
+                    proposal_id = %proposal.proposal_id,
+                    payload_len = proposal_data.len(),
+                    "Applied Custom proposal via governance (opaque payload recorded)"
+                );
+                Ok(())
             }
         }
     }
@@ -318,9 +526,10 @@ fn bytes_to_address(bytes: &[u8]) -> Address {
 
 /// Build a `ModelInfo` record describing a Cortex recurrent-depth worker so
 /// it can be published in the shared `ModelRegistry` catalog. Pricing is
-/// mapped from the worker's `CortexPricing` (per-input/per-output tokens)
-/// and Cortex-specific parameters (`price_per_loop`, `base_request_fee`,
-/// tiers, max_loops) are stashed in `metadata` for discovery clients.
+/// mapped from the worker's `CortexPricing` (per-input/per-output tokens, all
+/// in wei) and Cortex-specific parameters (`price_per_loop_wei`,
+/// `base_request_fee_wei`, tiers, max_loops) are stashed in `metadata` for
+/// discovery clients.
 pub(crate) fn cortex_model_info(
     model_id: &str,
     worker: &Arc<tenzro_cortex::CortexWorker>,
@@ -345,15 +554,15 @@ pub(crate) fn cortex_model_info(
     );
     metadata.insert("attn_type".to_string(), family.attn_type.clone());
     metadata.insert(
-        "price_per_loop".to_string(),
-        pricing.price_per_loop.to_string(),
+        "price_per_loop_wei".to_string(),
+        pricing.price_per_loop_wei.to_string(),
     );
     metadata.insert(
-        "base_request_fee".to_string(),
-        pricing.base_request_fee.to_string(),
+        "base_request_fee_wei".to_string(),
+        pricing.base_request_fee_wei.to_string(),
     );
-    metadata.insert("tee_premium".to_string(), pricing.tee_premium.to_string());
-    metadata.insert("zk_premium".to_string(), pricing.zk_premium.to_string());
+    metadata.insert("tee_premium_wei".to_string(), pricing.tee_premium_wei.to_string());
+    metadata.insert("zk_premium_wei".to_string(), pricing.zk_premium_wei.to_string());
     metadata.insert(
         "worker_did".to_string(),
         worker.worker_did().to_string(),
@@ -384,9 +593,9 @@ pub(crate) fn cortex_model_info(
         ],
     };
     info.pricing = PricingConfig {
-        price_per_input_token: pricing.price_per_input_token,
-        price_per_output_token: pricing.price_per_output_token,
-        minimum_price: pricing.base_request_fee,
+        price_per_input_token: pricing.price_per_input_token_wei,
+        price_per_output_token: pricing.price_per_output_token_wei,
+        minimum_price: pricing.base_request_fee_wei,
         pricing_model: PricingModel::PerToken,
     };
     info.status = ModelStatus::Active;
@@ -450,22 +659,32 @@ impl Default for ProviderSchedule {
     }
 }
 
-/// Provider pricing configuration
+/// Provider pricing configuration. All prices are wei per token (1 TNZO = 10^18 wei).
+/// Wire format: u128 decimal strings (matches the rest of the wei-base-unit RPC contract).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderPricing {
-    pub input_price_per_token: f64,  // TNZO
-    pub output_price_per_token: f64, // TNZO
-    pub network_max_input: f64,      // enforced max
-    pub network_max_output: f64,     // enforced max
+    /// Wei per input token (decimal string)
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
+    pub input_price_per_token_wei: u128,
+    /// Wei per output token (decimal string)
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
+    pub output_price_per_token_wei: u128,
+    /// Network-enforced ceiling on input price (decimal string)
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
+    pub network_max_input_wei: u128,
+    /// Network-enforced ceiling on output price (decimal string)
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
+    pub network_max_output_wei: u128,
 }
 
 impl Default for ProviderPricing {
     fn default() -> Self {
+        // Defaults: 0.0001 / 0.0002 TNZO per token, max 0.001 / 0.002 TNZO per token.
         Self {
-            input_price_per_token: 0.0001,
-            output_price_per_token: 0.0002,
-            network_max_input: 0.001,
-            network_max_output: 0.002,
+            input_price_per_token_wei: 100_000_000_000_000,        // 1e14 wei = 0.0001 TNZO
+            output_price_per_token_wei: 200_000_000_000_000,       // 2e14 wei = 0.0002 TNZO
+            network_max_input_wei: 1_000_000_000_000_000,          // 1e15 wei = 0.001 TNZO
+            network_max_output_wei: 2_000_000_000_000_000,         // 2e15 wei = 0.002 TNZO
         }
     }
 }
@@ -577,6 +796,25 @@ pub struct TenzroNode {
     /// post-block scan dispatch from VM-emitted bond logs. Persists to
     /// CF_AGENTS via `BondManager::with_storage`.
     bond_manager: Option<Arc<tenzro_token::bond::BondManager>>,
+    /// Workflow runtime — typed mirror of the privileged-VM workflow
+    /// selectors (`0x01000040`–`0x0100004B`). Bundles `WorkflowManager`
+    /// (workflows / obligations / approvals / lifecycle) and
+    /// `PrivacyDomainRegistry`, both hydrated from RocksDB
+    /// (CF_SETTLEMENTS + CF_APPROVALS). The post-block scan in
+    /// `EventLoop::process_workflow_logs` decodes the 12 typed
+    /// `Workflow*` log topics and dispatches into this runtime; RPC /
+    /// MCP / A2A read accessors consult it directly.
+    workflow_runtime: Option<Arc<crate::workflow_runtime::WorkflowRuntime>>,
+    /// Permissionless ValidatorRegistry (Spec — dynamic validator set).
+    /// Holds Candidate / PendingActive / Active / PendingExit / Exited /
+    /// Jailed entries with EIP-8061-style churn budgeting. The post-block
+    /// scan in `EventLoop::process_validator_logs` mirrors VM-emitted
+    /// `ValidatorRegister` / `ValidatorExit` / `ValidatorMetadataUpdate`
+    /// logs into this registry; the periodic epoch hook in the event
+    /// loop calls `compute_epoch_transition()` and feeds the resulting
+    /// plan into the consensus `EpochManager`'s pending queues.
+    /// Persists to CF_TOKENS via `ValidatorRegistry::with_storage`.
+    validator_registry: Option<Arc<tenzro_token::validator_registry::ValidatorRegistry>>,
     /// BurnQuota singleton (Agent-Swarm Spec 3 — wave 1). Tracks the
     /// protocol-side TNZO budget the stablecoin paymaster will draw from
     /// once the dual-rail-gas paymaster + oracle + AMM swap loop lands.
@@ -602,6 +840,11 @@ pub struct TenzroNode {
     /// paths land in a later wave. Persists to CF_TOKENS via
     /// `SeedAgentEarmarkManager::with_storage`.
     seed_agent_manager: Option<Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>>,
+    /// Liquid staking pool (stTNZO). Persists holder balances, validator
+    /// delegations, withdrawal requests, and aggregate totals to CF_TOKENS
+    /// via `LiquidStakingPool::with_storage`. Surfaced through
+    /// `tenzro_liquidStaking*` RPCs and CLI commands.
+    liquid_staking_pool: Option<Arc<tenzro_token::LiquidStakingPool>>,
     governance: Option<Arc<GovernanceEngine>>,
     treasury: Option<Arc<NetworkTreasury>>,
     settlement: Option<Arc<SettlementEngine>>,
@@ -683,6 +926,17 @@ pub struct TenzroNode {
 
     // Interoperability
     bridge_router: Option<Arc<BridgeRouter>>,
+
+    /// Canton bridge adapter — exposes the Workflow / Obligation / Approval /
+    /// Lifecycle DAML mirror methods used by `tenzro_mirror*` RPCs and the
+    /// `consume_daml_events` polling path. Constructed in `init_bridge` from
+    /// the node's `CantonConfig` when the Canton subsystem is enabled.
+    /// Held here so RPC handlers can reach it directly (the canton mirror
+    /// surface is intentionally caller-driven, not hooked into the
+    /// post-execute log scan — the choice of which workflows mirror to
+    /// which synchronizer is per-workflow operator policy, not a global
+    /// node default).
+    canton_adapter: Option<Arc<tenzro_bridge::canton::CantonAdapter>>,
 
     // TEE (optional). The local hardware provider is retained so attestation
     // requests routed to this node (RPC `tenzro_attest`, MCP `attest`, agent
@@ -926,9 +1180,12 @@ impl TenzroNode {
             token: None,
             staking: None,
             bond_manager: None,
+            workflow_runtime: None,
+            validator_registry: None,
             burn_quota_manager: None,
             burn_rate_manager: None,
             seed_agent_manager: None,
+            liquid_staking_pool: None,
             governance: None,
             treasury: None,
             settlement: None,
@@ -963,6 +1220,7 @@ impl TenzroNode {
             agent_kit: None,
             token_registry: None,
             bridge_router: None,
+            canton_adapter: None,
             tee_provider: None,
             tee_registry: None,
             zk_commitment_registry: Arc::new(tenzro_vm::precompiles::ZkCommitmentRegistry::new()),
@@ -1369,6 +1627,8 @@ impl TenzroNode {
             block_height: self.chain_tip_height(),
             peer_count: metrics.peer_count,
             data_dir: self.config.data_dir.clone(),
+            tee_capable: self.tee_provider.is_some(),
+            tee_vendor: self.tee_provider.as_ref().map(|p| p.vendor()),
         }
     }
 
@@ -1433,11 +1693,26 @@ impl TenzroNode {
     }
 
     async fn init_tee(&mut self) -> Result<()> {
-        info!("Initializing TEE...");
+        info!("Detecting TEE capability...");
 
+        // TEE is an OPTIONAL capability — every node participates in
+        // consensus regardless of whether it has a TEE. TEE-capable nodes
+        // additionally serve confidential-compute and custodial-key
+        // workloads on behalf of non-TEE peers.
+        //
+        // Treating TEE absence as a health "degradation" is wrong: a
+        // commodity x86 box with no SEV/TDX is not malfunctioning — it
+        // simply can't host the optional confidential-compute capability.
+        // We therefore only register the "tee" subsystem in the health
+        // monitor when a provider is actually present; absence is logged
+        // and surfaces through the capability API instead of /health.
         match detect_tee().await {
             Some(provider) => {
-                info!("Detected TEE vendor: {:?}", provider.vendor());
+                let vendor = provider.vendor();
+                info!(
+                    tee_vendor = ?vendor,
+                    "TEE capability available — node will advertise confidential-compute"
+                );
                 let registry = Arc::new(TeeRegistry::new(300));
                 self.tee_registry = Some(registry);
                 // Retain the local hardware provider so the attestation
@@ -1448,12 +1723,34 @@ impl TenzroNode {
                 self.health_monitor.mark_healthy("tee");
             }
             None => {
-                warn!("No TEE detected, continuing without TEE support");
-                self.health_monitor.mark_degraded("tee", "No TEE hardware detected".to_string());
+                info!(
+                    "No TEE hardware on this node — participating in consensus only; \
+                     confidential-compute workloads will route to TEE-capable peers"
+                );
+                // Deliberately do NOT register a "tee" subsystem in the
+                // health monitor. `subsystem_is_ok` treats absence as OK,
+                // so /health stays Healthy on commodity hardware and the
+                // capability is reported via the dedicated TEE API.
             }
         }
 
         Ok(())
+    }
+
+    /// Returns true if this node has a TEE provider available and can
+    /// serve confidential-compute / custodial-key workloads.
+    ///
+    /// All nodes participate in consensus; TEE-capable nodes additionally
+    /// advertise this capability so peers can route TEE-gated workloads
+    /// (confidential AI inference, custodial key management, attestation
+    /// issuance) to them.
+    pub fn has_tee_capability(&self) -> bool {
+        self.tee_provider.is_some()
+    }
+
+    /// Returns the TEE vendor for this node, if any.
+    pub fn tee_vendor(&self) -> Option<tenzro_types::tee::TeeVendor> {
+        self.tee_provider.as_ref().map(|p| p.vendor())
     }
 
     async fn init_vm(&mut self) -> Result<()> {
@@ -1517,6 +1814,39 @@ impl TenzroNode {
         };
         self.staking = Some(staking);
 
+        // Initialize liquid staking pool (stTNZO). Wave 1 ships the pool
+        // with default config (10% protocol fee, 7-day unbonding, 0.1 TNZO
+        // min deposit). Persists holder balances + withdrawal requests +
+        // aggregate totals to CF_TOKENS so the pool survives restarts.
+        let liquid_pool = if let Some(storage) = &self.storage {
+            match tenzro_token::LiquidStakingPool::with_storage(
+                tenzro_token::LiquidStakingConfig::default(),
+                storage.clone() as Arc<dyn KvStore>,
+            ) {
+                Ok(p) => Arc::new(p),
+                Err(e) => {
+                    warn!(
+                        "LiquidStakingPool hydration failed ({}), falling back to in-memory",
+                        e
+                    );
+                    Arc::new(
+                        tenzro_token::LiquidStakingPool::new(
+                            tenzro_token::LiquidStakingConfig::default(),
+                        )
+                        .expect("default liquid staking config is valid"),
+                    )
+                }
+            }
+        } else {
+            Arc::new(
+                tenzro_token::LiquidStakingPool::new(
+                    tenzro_token::LiquidStakingConfig::default(),
+                )
+                .expect("default liquid staking config is valid"),
+            )
+        };
+        self.liquid_staking_pool = Some(liquid_pool);
+
         // Initialize AgentBond manager (Spec 9). Uses CF_AGENTS for bond /
         // claim / pool persistence; no manager-level wallet, just a write-
         // through cache. The VM is the source of truth for bond *funds*
@@ -1540,6 +1870,21 @@ impl TenzroNode {
             Arc::new(tenzro_token::bond::BondManager::new())
         };
         self.bond_manager = Some(bond_manager);
+
+        // Initialize permissionless ValidatorRegistry. Persists to
+        // CF_TOKENS so candidate / active / pending-exit / jailed state
+        // survives restarts. The post-block scan in EventLoop drives the
+        // registry from VM-emitted logs; the epoch boundary hook calls
+        // compute_epoch_transition() and feeds the resulting plan into
+        // the consensus EpochManager.
+        let validator_registry = if let Some(storage) = &self.storage {
+            Arc::new(tenzro_token::validator_registry::ValidatorRegistry::with_storage(
+                storage.clone() as Arc<dyn KvStore>,
+            ))
+        } else {
+            Arc::new(tenzro_token::validator_registry::ValidatorRegistry::new())
+        };
+        self.validator_registry = Some(validator_registry);
 
         // Initialize BurnQuota singleton (Agent-Swarm Spec 3 — wave 1).
         // The full dual-rail-gas paymaster ships in a later wave once the
@@ -1639,6 +1984,29 @@ impl TenzroNode {
             Arc::new(NetworkTreasury::new(treasury_addr))
         };
         self.treasury = Some(treasury);
+
+        // Wire the governance executor now that all subsystems it depends on
+        // are constructed. The executor mutates `BurnRateConfigManager` and
+        // `NetworkTreasury` when proposals pass; without it `execute_proposal`
+        // only flips status with no side effects.
+        if let (Some(governance), Some(burn_rate), Some(treasury)) = (
+            self.governance.as_ref(),
+            self.burn_rate_manager.as_ref(),
+            self.treasury.as_ref(),
+        ) {
+            let executor = Arc::new(TenzroProposalExecutor::new(
+                burn_rate.clone(),
+                treasury.clone(),
+                treasury_addr,
+            ));
+            governance.attach_executor(executor);
+            info!("ProposalExecutor wired into GovernanceEngine");
+        } else {
+            warn!(
+                "ProposalExecutor not wired: governance / burn_rate / treasury \
+                 missing; passed proposals will only flip status"
+            );
+        }
 
         // Initialize unified token registry (cross-VM token tracking)
         let token_registry = if let Some(storage) = &self.storage {
@@ -1829,6 +2197,46 @@ impl TenzroNode {
             }
         };
 
+        // Seed permissionless ValidatorRegistry with the genesis validator
+        // set as `Active` entries. This is restart-safe and idempotent:
+        // `seed_genesis_active` skips any address that already has a registry
+        // entry (e.g. on warm restarts where the entries hydrated from
+        // CF_TOKENS, or where a validator has since exited and re-registered).
+        // Without this, genesis validators would have no registry entry and
+        // therefore couldn't be `jail()`ed on equivocation, nor surfaced via
+        // `tenzro_listValidators`.
+        if let Some(ref registry) = self.validator_registry {
+            for v in &validators {
+                match registry.seed_genesis_active(
+                    v.address,
+                    v.public_key.as_bytes().to_vec(),
+                    v.pq_public_key.clone(),
+                    v.address, // withdrawal == operator address by default at genesis
+                    v.stake,
+                    String::new(),
+                ) {
+                    Ok(true) => {
+                        info!(
+                            validator = %v.address,
+                            stake = v.stake,
+                            "Seeded genesis validator into permissionless registry"
+                        );
+                    }
+                    Ok(false) => {
+                        // Already present (warm restart or prior re-registration).
+                    }
+                    Err(e) => {
+                        warn!(
+                            validator = %v.address,
+                            error = %e,
+                            "Failed to seed genesis validator into registry — \
+                             slashing/jail integration will not apply to this validator"
+                        );
+                    }
+                }
+            }
+        }
+
         // Create epoch manager
         let epoch_manager = EpochManager::new(validators, 10000)?;
 
@@ -1846,10 +2254,12 @@ impl TenzroNode {
         // Also pass the engine's epoch-manager handle so slashed validators are
         // dropped from the next epoch's pending-validator queue.
         if let Some(ref staking) = self.staking {
-            let callback = Arc::new(
-                StakingSlashingCallback::new(staking.clone())
-                    .with_epoch_manager(engine.epoch_manager()),
-            );
+            let mut cb = StakingSlashingCallback::new(staking.clone())
+                .with_epoch_manager(engine.epoch_manager());
+            if let Some(ref vr) = self.validator_registry {
+                cb = cb.with_validator_registry(vr.clone());
+            }
+            let callback = Arc::new(cb);
             engine = engine.with_slashing_callback(callback);
             info!("Slashing callback wired to consensus engine (with epoch-manager handle)");
         }
@@ -2070,6 +2480,26 @@ impl TenzroNode {
             Arc::new(FeeCollector::new(treasury.clone()))
         };
         self.fee_collector = Some(fee_collector);
+
+        // WorkflowRuntime — typed mirror of the privileged-VM workflow
+        // selectors `0x01000040`–`0x0100004B`. Bundles `WorkflowManager`
+        // (workflows / obligations / approvals / lifecycle, persisted to
+        // `CF_SETTLEMENTS` + `CF_APPROVALS`) and `PrivacyDomainRegistry`
+        // (persisted to `CF_SETTLEMENTS` under `wf_pd:`). Both hydrate from
+        // RocksDB on construction. Wired into the event loop in
+        // `init_event_loop` so post-block scans can dispatch the 12
+        // `Workflow*` log topics.
+        let workflow_runtime = if let Some(ref storage) = self.storage {
+            let rt = crate::workflow_runtime::WorkflowRuntime::with_storage(
+                storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+            )
+            .map_err(|e| NodeError::Internal(format!("workflow runtime init: {}", e)))?;
+            info!("WorkflowRuntime initialized with persistent storage (CF_SETTLEMENTS + CF_APPROVALS)");
+            Arc::new(rt)
+        } else {
+            Arc::new(crate::workflow_runtime::WorkflowRuntime::new())
+        };
+        self.workflow_runtime = Some(workflow_runtime);
 
         self.health_monitor.mark_healthy("settlement");
 
@@ -3134,6 +3564,33 @@ impl TenzroNode {
                 info!("Registered deBridge DLN bridge adapter");
             }
 
+        // Canton adapter — constructed independently of the per-protocol
+        // bridge adapters because Canton mirroring uses a different surface
+        // (typed `mirror_*` / `consume_daml_events` methods on the adapter
+        // directly, not the unified `BridgeAdapter` trait). Operators
+        // configure Canton via the top-level `[canton]` config section,
+        // not under `[bridge.*]`.
+        if self.config.canton.enabled {
+            let canton_cfg = tenzro_bridge::canton::CantonConfig::new(
+                self.config.canton.host.clone(),
+                self.config.canton.port,
+                Vec::<String>::new(),
+                String::new(),
+                "tenzro-node-workflow-mirror",
+            );
+            let canton_adapter = Arc::new(
+                tenzro_bridge::canton::CantonAdapter::new(canton_cfg),
+            );
+            info!(
+                host = %self.config.canton.host,
+                port = self.config.canton.port,
+                "Canton adapter initialized for workflow mirroring"
+            );
+            self.canton_adapter = Some(canton_adapter);
+        } else {
+            info!("Canton subsystem disabled — workflow mirror surface inactive");
+        }
+
         self.bridge_router = Some(bridge_router);
         self.health_monitor.mark_healthy("bridge");
 
@@ -3631,6 +4088,42 @@ impl TenzroNode {
             event_loop
         };
 
+        // Wire permissionless ValidatorRegistry. The event loop's
+        // post-block scan mirrors VM-emitted ValidatorRegister /
+        // ValidatorExit / ValidatorMetadataUpdate logs into this
+        // registry, and the epoch boundary hook drives the resulting
+        // EpochTransitionPlan into the consensus EpochManager queues.
+        let event_loop = if let Some(ref vr) = self.validator_registry {
+            event_loop.with_validator_registry(vr.clone())
+        } else {
+            event_loop
+        };
+
+        // Wire the WorkflowRuntime (Canton-native workflow stack). The
+        // post-execute scan in `EventLoop::process_workflow_logs` decodes
+        // the 12 typed `Workflow*` log topics emitted by the privileged-VM
+        // workflow selectors (`0x01000040`–`0x0100004B`) and dispatches
+        // them into `WorkflowManager` / `PrivacyDomainRegistry`.
+        let event_loop = if let Some(ref rt) = self.workflow_runtime {
+            event_loop.with_workflow_runtime(rt.clone())
+        } else {
+            event_loop
+        };
+
+        // Wire the adaptive-burn manager + canonical TNZO token so the
+        // event loop's per-epoch supply observer feeds
+        // `BurnRateConfigManager::record_metrics` at every epoch boundary.
+        // Without this, `record_metrics` is dead code and the burn-rate
+        // recommendation engine scores against a default snapshot —
+        // governance would never see real network signal.
+        let event_loop = if let (Some(burn_rate), Some(token)) =
+            (self.burn_rate_manager.as_ref(), self.token.as_ref())
+        {
+            event_loop.with_burn_rate_manager(burn_rate.clone(), token.clone())
+        } else {
+            event_loop
+        };
+
         // Wire the shared RemoteWorkerRegistry so the event loop can ingest verified
         // Cortex advertisements received over the tenzro/cortex gossipsub topic.
         let event_loop = event_loop.with_cortex_registry(self.remote_cortex_workers.clone());
@@ -3681,6 +4174,60 @@ impl TenzroNode {
                 }
             });
             info!("Block sync wired to gossipsub (tenzro/blocks)");
+
+            // Wire transaction gossip: subscribe to tenzro/transactions and
+            // forward each inbound `MessagePayload::Transaction(tx)` into
+            // `NodeEvent::NewTransaction`, which runs signature verification
+            // and admits the tx to the local consensus mempool.
+            //
+            // Without this subscriber, RPC pods publish transactions to the
+            // gossipsub mesh but no validator's mempool ever receives them,
+            // so every block proposer ships an empty block. That was the
+            // root cause of the testnet wedge where `eth_blockNumber`
+            // advanced normally but every finalized block had `tx_count=0`
+            // and no transaction (faucet, transfer, contract call) ever
+            // settled despite the JSON-RPC layer reporting `submitted:queued`.
+            //
+            // Note: gossipsub deduplicates by `message_id`, so even though
+            // `handle_new_transaction` re-broadcasts on receive, this does
+            // not produce a storm — duplicate publications collapse to a
+            // single mesh propagation cycle.
+            {
+                let event_tx = event_loop.event_sender();
+                let net_in = network.clone();
+                tokio::spawn(async move {
+                    match net_in.subscribe("tenzro/transactions").await {
+                        Ok(mut rx) => {
+                            tracing::info!("Transaction sync: subscribed to tenzro/transactions");
+                            while let Some(msg) = rx.recv().await {
+                                if let tenzro_network::MessagePayload::Transaction(mut tx) = msg.payload {
+                                    let tx_hash = tx.hash();
+                                    tracing::debug!(
+                                        hash = %tx_hash,
+                                        "Received transaction from gossipsub"
+                                    );
+                                    if let Err(e) =
+                                        event_tx.send(NodeEvent::NewTransaction(tx)).await
+                                    {
+                                        tracing::error!(
+                                            error = %e,
+                                            "Failed to forward gossiped transaction to event loop"
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to subscribe to transactions gossipsub topic"
+                            );
+                        }
+                    }
+                });
+                info!("Transaction sync wired to gossipsub (tenzro/transactions)");
+            }
 
             // Wire status gossip: subscribe to tenzro/status and feed
             // peer heights into the PeerStatusTracker so eth_syncing /
@@ -3735,9 +4282,17 @@ impl TenzroNode {
                             tracing::trace!(
                                 peer = %peer_id,
                                 height = status.height,
+                                tee_capable = status.tee_capable,
+                                tee_vendor = ?status.tee_vendor,
                                 "Recorded peer status"
                             );
-                            peer_status_tracker.record(peer_id, status.height, status.chain_id);
+                            peer_status_tracker.record(
+                                peer_id,
+                                status.height,
+                                status.chain_id,
+                                status.tee_capable,
+                                status.tee_vendor,
+                            );
                         }
                     }
                 });
@@ -3757,6 +4312,13 @@ impl TenzroNode {
                     .map(|g| g.chain_id)
                     .unwrap_or(1337);
                 let protocol_version = format!("tenzro/{}", env!("CARGO_PKG_VERSION"));
+                // TEE capability is fixed at startup (no hot-attach
+                // path), so we snapshot it once here and embed it in
+                // every status broadcast. Peers consult these fields to
+                // discover routing targets for confidential-compute /
+                // custodial workloads.
+                let local_tee_capable = self.tee_provider.is_some();
+                let local_tee_vendor = self.tee_provider.as_ref().map(|p| p.vendor());
                 tokio::spawn(async move {
                     // Resolve our local PeerId once (the network service spawns
                     // its own swarm task, so the PeerId is stable for the
@@ -3789,6 +4351,8 @@ impl TenzroNode {
                             height,
                             chain_id: local_chain_id,
                             protocol_version: protocol_version.clone(),
+                            tee_capable: local_tee_capable,
+                            tee_vendor: local_tee_vendor,
                         };
                         let msg = tenzro_network::NetworkMessage::new(
                             tenzro_network::MessagePayload::Status(status),
@@ -4426,6 +4990,13 @@ impl TenzroNode {
         self.staking.as_ref()
     }
 
+    /// Returns the liquid staking pool (stTNZO) if initialized.
+    pub fn liquid_staking_pool(
+        &self,
+    ) -> Option<&Arc<tenzro_token::LiquidStakingPool>> {
+        self.liquid_staking_pool.as_ref()
+    }
+
     /// Returns the Spec-2 admission controller if initialized. Wired
     /// during startup once consensus, identity, and staking are all up.
     pub fn admission(&self) -> Option<&Arc<tenzro_consensus::admission::AdmissionController>> {
@@ -4477,6 +5048,19 @@ impl TenzroNode {
     /// Returns the AgentBond surety manager if initialized (Agent-Swarm Spec 9).
     pub fn bond_manager(&self) -> Option<&Arc<tenzro_token::bond::BondManager>> {
         self.bond_manager.as_ref()
+    }
+
+    /// Returns the WorkflowRuntime if initialized — typed mirror of the
+    /// privileged-VM workflow selectors (`0x01000040`–`0x0100004B`).
+    pub fn workflow_runtime(&self) -> Option<&Arc<crate::workflow_runtime::WorkflowRuntime>> {
+        self.workflow_runtime.as_ref()
+    }
+
+    /// Returns the permissionless ValidatorRegistry if initialized.
+    pub fn validator_registry(
+        &self,
+    ) -> Option<&Arc<tenzro_token::validator_registry::ValidatorRegistry>> {
+        self.validator_registry.as_ref()
     }
 
     /// Returns the BurnQuota manager if initialized (Agent-Swarm Spec 3 wave 1).
@@ -4532,6 +5116,12 @@ impl TenzroNode {
         self.bridge_router.as_ref()
     }
 
+    /// Returns the Canton bridge adapter if Canton is enabled in config.
+    /// Used by `tenzro_mirror*` / `tenzro_consumeDamlEvents` RPC handlers.
+    pub fn canton_adapter(&self) -> Option<&Arc<tenzro_bridge::canton::CantonAdapter>> {
+        self.canton_adapter.as_ref()
+    }
+
     /// Returns the node config
     pub fn config(&self) -> &NodeConfig {
         &self.config
@@ -4573,8 +5163,10 @@ impl TenzroNode {
             status: ServiceStatus::Online,
             parameters: parameters.to_string(),
             pricing: PricingConfig {
-                price_per_input_token: (pricing.input_price_per_token * 1_000_000.0) as u64,
-                price_per_output_token: (pricing.output_price_per_token * 1_000_000.0) as u64,
+                // PricingConfig is u64-wei. Cap at u64::MAX (would still be ~1.8e19 wei,
+                // i.e. ~18 TNZO per token — far above any realistic per-token rate).
+                price_per_input_token: pricing.input_price_per_token_wei.min(u64::MAX as u128) as u64,
+                price_per_output_token: pricing.output_price_per_token_wei.min(u64::MAX as u128) as u64,
                 ..PricingConfig::default()
             },
             created_at: std::time::SystemTime::now()
@@ -5497,4 +6089,13 @@ pub struct NodeStatus {
     pub block_height: u64,
     pub peer_count: u64,
     pub data_dir: PathBuf,
+    /// Whether this node has a TEE provider available.
+    ///
+    /// All nodes participate in consensus regardless. TEE-capable nodes
+    /// additionally serve confidential-compute and custodial-key
+    /// workloads on behalf of non-TEE peers — peers consult this field
+    /// to discover routing targets for TEE-gated requests.
+    pub tee_capable: bool,
+    /// TEE vendor for this node, if any (`None` on commodity hardware).
+    pub tee_vendor: Option<tenzro_types::tee::TeeVendor>,
 }

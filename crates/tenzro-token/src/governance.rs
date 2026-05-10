@@ -34,6 +34,21 @@ pub struct VotingRecord {
     pub vote: GovernanceVote,
 }
 
+/// Trait the node implements to dispatch a passed proposal to the right
+/// subsystem (treasury, adaptive burn dial, supply targets, etc.).
+///
+/// Mirrors the `SlashingCallback` pattern in `tenzro-consensus`: the engine
+/// calls `apply_proposal` once it has decided a proposal is `Passed` and the
+/// executor is responsible for the side-effecting application. Keeps
+/// `tenzro-token` free of node-level cross-crate references.
+pub trait ProposalExecutor: Send + Sync {
+    /// Apply a passed proposal. Called from `execute_proposal` exactly once
+    /// before the proposal status flips to `Executed`. Returning `Err`
+    /// surfaces as a `TokenError::ProposalExecutionFailed` and the proposal
+    /// stays in `Passed` state for retry.
+    fn apply_proposal(&self, proposal: &GovernanceProposal) -> Result<()>;
+}
+
 /// Governance engine
 ///
 /// Manages governance proposals, voting, and execution.
@@ -54,6 +69,15 @@ pub struct GovernanceEngine {
     staking_manager: Option<Arc<StakingManager>>,
     /// Optional persistent storage backend
     storage: Option<Arc<dyn KvStore>>,
+    /// Optional executor that applies a passed proposal to the right
+    /// subsystem (e.g. `BurnRateConfigManager`, `NetworkTreasury`). When
+    /// `None` `execute_proposal` only flips status — wired in production
+    /// via `with_executor` or `attach_executor` after construction.
+    ///
+    /// Held behind `RwLock` so it can be installed after the engine is
+    /// already wrapped in `Arc` (the node initializes governance before
+    /// some of the subsystems the executor depends on).
+    executor: parking_lot::RwLock<Option<Arc<dyn ProposalExecutor>>>,
 }
 
 impl std::fmt::Debug for GovernanceEngine {
@@ -64,6 +88,7 @@ impl std::fmt::Debug for GovernanceEngine {
             .field("delegations_count", &self.delegations.len())
             .field("has_staking_manager", &self.staking_manager.is_some())
             .field("has_storage", &self.storage.is_some())
+            .field("has_executor", &self.executor.read().is_some())
             .finish()
     }
 }
@@ -79,6 +104,7 @@ impl GovernanceEngine {
             min_proposal_stake: parking_lot::RwLock::new(10_000 * 1_000_000_000_000_000_000), // 10k TNZO
             staking_manager: None,
             storage: None,
+            executor: parking_lot::RwLock::new(None),
         }
     }
 
@@ -92,6 +118,7 @@ impl GovernanceEngine {
             min_proposal_stake: parking_lot::RwLock::new(10_000 * 1_000_000_000_000_000_000), // 10k TNZO
             staking_manager: Some(staking_manager),
             storage: None,
+            executor: parking_lot::RwLock::new(None),
         }
     }
 
@@ -105,6 +132,7 @@ impl GovernanceEngine {
             min_proposal_stake: parking_lot::RwLock::new(10_000 * 1_000_000_000_000_000_000),
             staking_manager: None,
             storage: Some(storage),
+            executor: parking_lot::RwLock::new(None),
         };
 
         // Load existing state from storage
@@ -128,6 +156,7 @@ impl GovernanceEngine {
             min_proposal_stake: parking_lot::RwLock::new(10_000 * 1_000_000_000_000_000_000),
             staking_manager: Some(staking_manager),
             storage: Some(storage),
+            executor: parking_lot::RwLock::new(None),
         };
 
         if let Err(e) = engine.load_from_storage() {
@@ -135,6 +164,26 @@ impl GovernanceEngine {
         }
 
         engine
+    }
+
+    /// Attach a `ProposalExecutor` so passed proposals get applied to the
+    /// node's actual subsystems (burn-rate dial, supply targets, treasury,
+    /// upgrade coordinator, etc.) when `execute_proposal` runs.
+    pub fn with_executor(self, executor: Arc<dyn ProposalExecutor>) -> Self {
+        *self.executor.write() = Some(executor);
+        self
+    }
+
+    /// Install a `ProposalExecutor` after the engine is already wrapped in
+    /// `Arc`. The node uses this because governance is initialized before
+    /// `NetworkTreasury` and the per-subsystem managers the executor wires.
+    pub fn attach_executor(&self, executor: Arc<dyn ProposalExecutor>) {
+        *self.executor.write() = Some(executor);
+    }
+
+    /// True when a `ProposalExecutor` is currently installed.
+    pub fn has_executor(&self) -> bool {
+        self.executor.read().is_some()
     }
 
     /// Persists a proposal to storage
@@ -482,28 +531,55 @@ impl GovernanceEngine {
     /// Note: This is a simplified version. In production, you'd have
     /// specific execution logic for each proposal type.
     pub fn execute_proposal(&self, proposal_id: &str) -> Result<()> {
-        let mut proposal = self.proposals.get_mut(proposal_id)
-            .ok_or_else(|| TokenError::ProposalNotFound {
-                proposal_id: proposal_id.to_string(),
-            })?;
+        // Snapshot the proposal under a short-lived lock and drop the
+        // `RefMut` before invoking the executor — keeping the dashmap
+        // shard locked across the executor call risks deadlock if the
+        // executor (or any path it calls) reads back into governance
+        // state.
+        let snapshot = {
+            let proposal_ref = self.proposals.get(proposal_id)
+                .ok_or_else(|| TokenError::ProposalNotFound {
+                    proposal_id: proposal_id.to_string(),
+                })?;
 
-        // Check if proposal passed
-        if proposal.status != ProposalStatus::Passed {
-            return Err(TokenError::InvalidProposalType);
+            if proposal_ref.status == ProposalStatus::Executed {
+                return Err(TokenError::ProposalAlreadyExecuted {
+                    proposal_id: proposal_id.to_string(),
+                });
+            }
+            if proposal_ref.status != ProposalStatus::Passed {
+                return Err(TokenError::InvalidProposalType);
+            }
+            proposal_ref.clone()
+        };
+
+        // Dispatch to the node-supplied executor if one is wired. The
+        // executor is responsible for the side effects (e.g. flipping the
+        // burn-rate dial, transferring treasury funds). Returning Err here
+        // leaves the proposal in `Passed` so it can be retried after the
+        // operator fixes whatever blocked the apply.
+        let executor_handle = self.executor.read().clone();
+        if let Some(executor) = executor_handle {
+            executor
+                .apply_proposal(&snapshot)
+                .map_err(|e| TokenError::ProposalExecutionFailed {
+                    proposal_id: proposal_id.to_string(),
+                    reason: e.to_string(),
+                })?;
+        } else {
+            warn!(
+                "execute_proposal({}): no ProposalExecutor wired; status \
+                 will flip to Executed but no side-effects applied",
+                proposal_id
+            );
         }
 
-        // Check if already executed
-        if proposal.status == ProposalStatus::Executed {
-            return Err(TokenError::ProposalAlreadyExecuted {
-                proposal_id: proposal_id.to_string(),
-            });
+        // Mark as executed only after successful apply. Re-acquire the
+        // shard lock just for the status flip.
+        if let Some(mut proposal) = self.proposals.get_mut(proposal_id) {
+            proposal.status = ProposalStatus::Executed;
+            self.persist_proposal(&proposal);
         }
-
-        // Mark as executed
-        proposal.status = ProposalStatus::Executed;
-
-        // Persist updated status
-        self.persist_proposal(&proposal);
 
         info!("Executed proposal: {}", proposal_id);
         Ok(())

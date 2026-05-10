@@ -369,12 +369,11 @@ def create_wallet(key_type: str = "ed25519") -> dict:
 
 
 def get_balance(address: str) -> dict:
-    """Get TNZO balance for an address (returns hex wei)."""
+    """Get TNZO balance for an address. Returns balance in wei (1 TNZO = 10^18 wei) as a decimal string."""
     result = _rpc("tenzro_getBalance", {"address": address})
     if isinstance(result, str):
         wei = int(result, 16)
-        tnzo = wei / 1e18
-        return {"address": address, "balance_wei": result, "balance_tnzo": f"{tnzo:.6f}"}
+        return {"address": address, "balance_wei": str(wei)}
     return result
 
 
@@ -442,7 +441,7 @@ def sign_transaction(from_addr: str, to_addr: str, value: int,
 
 
 def sign_and_send(from_addr: str, to_addr: str,
-                  amount_tnzo: float) -> dict:
+                  amount_wei: int) -> dict:
     """Sign and send a TNZO transfer in one call.
 
     Uses ambient OAuth/DPoP auth (TENZRO_BEARER_JWT + TENZRO_DPOP_PROOF
@@ -451,16 +450,15 @@ def sign_and_send(from_addr: str, to_addr: str,
     Args:
         from_addr: Sender hex address (must match the bearer's wallet)
         to_addr: Recipient hex address
-        amount_tnzo: Amount in TNZO (e.g., 1.5 for 1.5 TNZO)
+        amount_wei: Amount in wei base units (1 TNZO = 10**18 wei)
 
     Returns:
         Transaction result with tx_hash
     """
-    value_wei = int(amount_tnzo * 1_000_000_000_000_000_000)
     return send_transaction(
         from_addr=from_addr,
         to_addr=to_addr,
-        value=value_wei,
+        value=int(amount_wei),
     )
 
 
@@ -537,14 +535,76 @@ def node_info() -> dict:
 # ── Identity ──────────────────────────────────────────────────────
 
 
-def register_identity(display_name: str, public_key: str = None,
+def register_identity(display_name: str = None,
+                      identity_type: str = "human",
+                      controller_did: str = None,
+                      capabilities: list = None,
+                      delegation_scope: dict = None,
+                      public_key: str = None,
                       key_type: str = "ed25519") -> dict:
-    """Register a human identity and get a DID."""
-    params = {"display_name": display_name}
+    """Register a TDIP identity. Returns the new DID and (when keypair is
+    auto-generated) the private key.
+
+    identity_type:
+      - 'human' (default): only `display_name` is meaningful.
+      - 'machine': requires `controller_did` and `capabilities`. Optional
+        `delegation_scope` constrains spending and operations the machine
+        may perform on behalf of the controller.
+      - 'autonomous': requires `capabilities`. No human controller; the
+        machine acts purely on its own MPC-bound key.
+
+    delegation_scope shape (all keys optional):
+      {
+        "max_transaction_value": "1000000000000000000",  # decimal-string or number
+        "max_daily_spend":       "5000000000000000000",
+        "allowed_operations":    ["transfer", "inference"],
+        "allowed_payment_protocols": ["mpp", "x402"],
+        "allowed_chains":        ["tenzro"],
+      }
+    """
+    params = {"identity_type": identity_type}
+    if display_name:
+        params["display_name"] = display_name
+    if controller_did:
+        params["controller_did"] = controller_did
+    if capabilities:
+        params["capabilities"] = capabilities
+    if delegation_scope:
+        params["delegation_scope"] = delegation_scope
     if public_key:
         params["public_key"] = public_key
         params["key_type"] = key_type
     return _rpc("tenzro_registerIdentity", params)
+
+
+def register_machine_identity(controller_did: str,
+                              capabilities: list,
+                              delegation_scope: dict = None,
+                              public_key: str = None,
+                              key_type: str = "ed25519") -> dict:
+    """Register a machine identity bound to a human controller. Convenience
+    wrapper around register_identity(identity_type='machine')."""
+    return register_identity(
+        identity_type="machine",
+        controller_did=controller_did,
+        capabilities=capabilities,
+        delegation_scope=delegation_scope,
+        public_key=public_key,
+        key_type=key_type,
+    )
+
+
+def register_autonomous_identity(capabilities: list,
+                                 public_key: str = None,
+                                 key_type: str = "ed25519") -> dict:
+    """Register an autonomous machine identity (no human controller).
+    Convenience wrapper around register_identity(identity_type='autonomous')."""
+    return register_identity(
+        identity_type="autonomous",
+        capabilities=capabilities,
+        public_key=public_key,
+        key_type=key_type,
+    )
 
 
 def resolve_did(did: str) -> dict:
@@ -816,11 +876,15 @@ def set_delegation_scope(machine_did: str, max_transaction_value: int,
                          max_daily_spend: int,
                          allowed_operations: list = None,
                          allowed_chains: list = None) -> dict:
-    """Set delegation scope for a machine DID."""
+    """Set delegation scope for a machine DID.
+
+    max_transaction_value, max_daily_spend: amounts in wei (10^-18 TNZO),
+    sent as decimal strings to preserve full u128 precision over JSON.
+    """
     params = {
         "machine_did": machine_did,
-        "max_transaction_value": max_transaction_value,
-        "max_daily_spend": max_daily_spend,
+        "max_transaction_value": str(max_transaction_value),
+        "max_daily_spend": str(max_daily_spend),
     }
     if allowed_operations:
         params["allowed_operations"] = allowed_operations
@@ -833,21 +897,36 @@ def set_delegation_scope(machine_did: str, max_transaction_value: int,
 
 
 def post_task(title: str, description: str, task_type: str,
-              budget_wei: int, required_capabilities: list = None) -> dict:
+              budget_wei: int, poster: str,
+              required_capabilities: list = None,
+              required_model: str = None,
+              preferred_model_id: str = None,
+              deadline: int = None,
+              input_text: str = "") -> dict:
     """Post a task to the decentralized AI task marketplace.
 
     task_type: inference | code_review | data_analysis | content_generation |
                agent_execution | translation | research | custom:<name>
-    budget_wei: maximum budget in wei
+    budget_wei: maximum budget in wei (10^-18 TNZO), sent as decimal string
+                to preserve full u128 precision over JSON.
+    poster: hex address of the account posting the task (required by server).
     """
     params = {
         "title": title,
         "description": description,
         "task_type": task_type,
-        "budget": budget_wei,
+        "max_price": str(budget_wei),
+        "poster": poster,
+        "input": input_text,
     }
     if required_capabilities:
         params["required_capabilities"] = required_capabilities
+    if required_model:
+        params["required_model"] = required_model
+    if preferred_model_id:
+        params["preferred_model_id"] = preferred_model_id
+    if deadline is not None:
+        params["deadline"] = deadline
     return _rpc("tenzro_postTask", params)
 
 
@@ -873,10 +952,14 @@ def cancel_task(task_id: str) -> dict:
 
 def submit_quote(task_id: str, price_wei: int, model_id: str = None,
                  estimated_time_secs: int = None) -> dict:
-    """Submit a quote for a task as a provider/agent."""
+    """Submit a quote for a task as a provider/agent.
+
+    price_wei: amount in wei (10^-18 TNZO), sent as decimal string
+    to preserve full u128 precision over JSON.
+    """
     params = {
         "task_id": task_id,
-        "price": price_wei,
+        "price": str(price_wei),
     }
     if model_id:
         params["model_id"] = model_id
@@ -993,14 +1076,18 @@ def get_agent_template_stats(template_id: str) -> dict:
 def list_skills(tag: str = None, creator_did: str = None,
                 max_price: int = None, active_only: bool = True,
                 limit: int = 50, offset: int = 0) -> dict:
-    """List skills in the decentralized Skills Registry."""
+    """List skills in the decentralized Skills Registry.
+
+    max_price: optional filter in wei (10^-18 TNZO), sent as decimal string
+    to preserve full u128 precision over JSON.
+    """
     params = {"active_only": active_only}
     if tag:
         params["tag"] = tag
     if creator_did:
         params["creator_did"] = creator_did
     if max_price is not None:
-        params["max_price"] = max_price
+        params["max_price"] = str(max_price)
     if limit != 50:
         params["limit"] = limit
     if offset > 0:
@@ -1013,13 +1100,17 @@ def register_skill(name: str, version: str, creator_did: str,
                    tags: list = None, required_capabilities: list = None,
                    endpoint: str = None, input_schema: dict = None,
                    output_schema: dict = None) -> dict:
-    """Register a new skill in the Skills Registry."""
+    """Register a new skill in the Skills Registry.
+
+    price_per_call: amount in wei (10^-18 TNZO), sent as decimal string
+    to preserve full u128 precision over JSON.
+    """
     params = {
         "name": name,
         "version": version,
         "creator_did": creator_did,
         "description": description,
-        "price_per_call": price_per_call,
+        "price_per_call": str(price_per_call),
     }
     if tags:
         params["tags"] = tags
@@ -1036,12 +1127,16 @@ def register_skill(name: str, version: str, creator_did: str,
 
 def search_skills(query: str, tag: str = None, max_price: int = None,
                   limit: int = 20) -> dict:
-    """Search skills by free-text query."""
+    """Search skills by free-text query.
+
+    max_price: optional filter in wei (10^-18 TNZO), sent as decimal string
+    to preserve full u128 precision over JSON.
+    """
     params = {"query": query, "active_only": True}
     if tag:
         params["tag"] = tag
     if max_price is not None:
-        params["max_price"] = max_price
+        params["max_price"] = str(max_price)
     if limit != 20:
         params["limit"] = limit
     return _rpc("tenzro_searchSkills", params)
@@ -1087,15 +1182,31 @@ def spawn_agent_with_skill(parent_id: str, name: str, skill_id: str,
 # ── Agent Spawning & Swarm ───────────────────────────────────────
 
 
-def register_agent(name: str, address: str,
-                   capabilities: list = None) -> dict:
-    """Register a new AI agent with identity and wallet."""
+def register_agent(name: str, creator: str,
+                   capabilities: list = None,
+                   tenzro_did: str = None,
+                   kind: str = None) -> dict:
+    """Register a new AI agent with identity and wallet.
+
+    Parameters:
+        name: human-readable agent name
+        creator: creator address (Solana-base58 or 0x-hex EVM); the runtime
+                 binds an MPC wallet under this owner
+        capabilities: optional list of capability strings
+        tenzro_did: optional TDIP machine DID to bind this agent to (must have
+                    been registered via `register_identity(identity_type='machine')`)
+        kind: optional agent kind, e.g. 'autonomous'
+    """
     params = {
         "name": name,
-        "address": address,
+        "creator": creator,
     }
     if capabilities:
         params["capabilities"] = capabilities
+    if tenzro_did:
+        params["tenzro_did"] = tenzro_did
+    if kind:
+        params["kind"] = kind
     return _rpc("tenzro_registerAgent", params)
 
 
@@ -1166,12 +1277,14 @@ def bridge_tokens(source_chain: str, dest_chain: str, asset: str,
 
     source_chain/dest_chain: tenzro | ethereum | solana | base
     asset: TNZO, USDC, etc.
+    amount_wei: amount in wei (10^-18 TNZO), sent as decimal string
+    to preserve full u128 precision over JSON.
     """
     return _rpc("tenzro_bridgeTokens", {
         "source_chain": source_chain,
         "destination_chain": dest_chain,
         "asset": asset,
-        "amount": amount_wei,
+        "amount": str(amount_wei),
         "sender": sender,
         "recipient": recipient,
     })
@@ -1181,20 +1294,25 @@ def bridge_tokens(source_chain: str, dest_chain: str, asset: str,
 
 
 def stake_tokens(amount_wei: int,
-                 role: str = "Validator") -> dict:
+                 provider_type: str = "validator") -> dict:
     """Stake TNZO tokens.
 
-    role: Validator | ModelProvider | TeeProvider
+    amount_wei: amount in wei (10^-18 TNZO). Sent as decimal string
+    to preserve full u128 precision over JSON.
+    provider_type: validator | model_provider | tee_provider | storage_provider
     """
     return _rpc("tenzro_stake", {
-        "amount": amount_wei,
-        "role": role,
+        "amount": str(amount_wei),
+        "provider_type": provider_type,
     })
 
 
 def unstake_tokens(amount_wei: int) -> dict:
-    """Unstake TNZO tokens (initiates unbonding period)."""
-    return _rpc("tenzro_unstake", {"amount": amount_wei})
+    """Unstake TNZO tokens (initiates unbonding period).
+
+    amount_wei is sent as a decimal string to preserve full u128 precision.
+    """
+    return _rpc("tenzro_unstake", {"amount": str(amount_wei)})
 
 
 def register_provider(provider_type: str) -> dict:
@@ -1855,7 +1973,7 @@ def update_skill(skill_id: str, description: str = None,
     if version:
         params["version"] = version
     if price_per_call is not None:
-        params["price_per_call"] = price_per_call
+        params["price_per_call"] = str(price_per_call)
     if tags:
         params["tags"] = tags
     if endpoint:
@@ -2036,11 +2154,12 @@ def fund_agent(agent_id: str, amount_wei: int) -> dict:
     """Fund an agent's wallet with TNZO.
 
     agent_id: agent to fund
-    amount_wei: amount in wei to transfer
+    amount_wei: amount in wei (10^-18 TNZO), sent as decimal string
+    to preserve full u128 precision over JSON.
     """
     return _rpc("tenzro_fundAgent", {
         "agent_id": agent_id,
-        "amount": amount_wei,
+        "amount": str(amount_wei),
     })
 
 

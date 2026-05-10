@@ -26,6 +26,7 @@ use commands::{
     AuthCommand,
     X402Command, ReputationCommand, ApprovalCommand, DisputeCommand, ProvenanceCommand,
     BondCommand, InsuranceCommand, CapabilityCommand,
+    ValidatorCommand,
 };
 
 /// Tenzro Network CLI — node operation, wallet management, provider tools
@@ -270,6 +271,10 @@ enum Command {
     #[command(subcommand)]
     Capability(CapabilityCommand),
 
+    /// Validator set (Dynamic Validator Set): register, exit, update-metadata, get, list
+    #[command(subcommand)]
+    Validator(ValidatorCommand),
+
     /// Interactive chat with AI models
     Chat(ChatCmd),
 
@@ -421,6 +426,7 @@ async fn main() -> Result<()> {
         Command::Bond(cmd) => cmd.execute().await?,
         Command::Insurance(cmd) => cmd.execute().await?,
         Command::Capability(cmd) => cmd.execute().await?,
+        Command::Validator(cmd) => cmd.execute().await?,
         Command::Faucet(cmd) => execute_faucet(cmd).await?,
         Command::Chat(cmd) => execute_chat(cmd).await?,
         Command::Hardware(cmd) => commands::hardware::execute(&cmd.format).await?,
@@ -1295,7 +1301,9 @@ async fn identity_menu(rpc: &rpc::RpcClient) -> Result<()> {
         }
         1 => {
             let did: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("DID to resolve").interact_text()?;
-            let result: serde_json::Value = rpc.call("tenzro_resolveIdentity", serde_json::json!([did])).await?;
+            let result: serde_json::Value = rpc
+                .call("tenzro_resolveIdentity", serde_json::json!({"did": did}))
+                .await?;
             if let Some(name) = result.get("display_name").and_then(|v| v.as_str()) { output::print_field("Name", name); }
             if let Some(t) = result.get("identity_type").and_then(|v| v.as_str()) { output::print_field("Type", t); }
             if let Some(s) = result.get("status").and_then(|v| v.as_str()) { output::print_field("Status", s); }

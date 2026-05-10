@@ -487,6 +487,61 @@ pub(crate) async fn handle_request(
         "tenzro_getEscrow" => handle_get_escrow(node, request.params).await,
         "tenzro_listEscrowsByPayer" => handle_list_escrows_by_payer(node, request.params).await,
         "tenzro_listEscrowsByPayee" => handle_list_escrows_by_payee(node, request.params).await,
+        // Workflow read RPCs — Canton-native workflow stack. Writes flow
+        // through `tenzro_signAndSendTransaction` with the privileged-VM
+        // workflow selectors (`0x01000040`–`0x0100004B`); the post-block
+        // scan in `EventLoop::process_workflow_logs` mirrors emitted logs
+        // into `WorkflowRuntime`.
+        "tenzro_getWorkflow" => handle_get_workflow(node, request.params).await,
+        "tenzro_listWorkflowsByCreator" => {
+            handle_list_workflows_by_creator(node, request.params).await
+        }
+        "tenzro_listWorkflowsByParticipant" => {
+            handle_list_workflows_by_participant(node, request.params).await
+        }
+        "tenzro_listWorkflowsByStatus" => {
+            handle_list_workflows_by_status(node, request.params).await
+        }
+        "tenzro_getWorkflowLifecycle" => {
+            handle_get_workflow_lifecycle(node, request.params).await
+        }
+        "tenzro_getObligation" => handle_get_obligation(node, request.params).await,
+        "tenzro_getApprovalGate" => handle_get_approval_gate(node, request.params).await,
+        "tenzro_getApprovalRequest" => {
+            handle_get_approval_request(node, request.params).await
+        }
+        "tenzro_getPrivacyDomain" => handle_get_privacy_domain(node, request.params).await,
+        "tenzro_listPrivacyDomainsForDid" => {
+            handle_list_privacy_domains_for_did(node, request.params).await
+        }
+        // Workflow receipt chain — bounded walk from head backwards.
+        "tenzro_getWorkflowReceipt" => {
+            handle_get_workflow_receipt(node, request.params).await
+        }
+        "tenzro_listWorkflowReceipts" => {
+            handle_list_workflow_receipts(node, request.params).await
+        }
+        // Fee-route registry — read-only.
+        "tenzro_getFeeRoute" => handle_get_fee_route(node, request.params).await,
+        "tenzro_listFeeRoutes" => handle_list_fee_routes(node).await,
+        "tenzro_computeFeeRoutePayouts" => {
+            handle_compute_fee_route_payouts(node, request.params).await
+        }
+        // Workflow operational metrics snapshot (also rendered on /metrics).
+        "tenzro_getWorkflowOperationalMetrics" => {
+            handle_get_workflow_operational_metrics(node).await
+        }
+        // Canton mirror RPCs — exercise the bridge `CantonAdapter` mirror
+        // surface from a JSON-RPC client. The choice of which workflows
+        // mirror to which synchronizer is operator-driven (per workflow);
+        // these are deliberately not auto-fired by the post-execute scan.
+        "tenzro_mirrorWorkflowToCanton" => {
+            handle_mirror_workflow_to_canton(node, request.params).await
+        }
+        "tenzro_mirrorObligationToCanton" => {
+            handle_mirror_obligation_to_canton(node, request.params).await
+        }
+        "tenzro_consumeDamlEvents" => handle_consume_daml_events(node).await,
         // Spec 4: ERC-7683 cross-chain intent settler. Wave 1 ships protocol
         // primitives + read RPCs against CF_SETTLEMENTS. Settler precompiles,
         // EIP-712 verification, escrow integration, gossipsub indexing, and
@@ -498,6 +553,13 @@ pub(crate) async fn handle_request(
         // tenzro_signAndSendTransaction with TransactionType::PauseAgent /
         // QuarantineAgent / TerminateAgent — there are no separate write RPCs.
         "tenzro_getAgentLifecycle" => handle_get_agent_lifecycle(node, request.params).await,
+        // Operational lifecycle writes — Active ↔ Suspended axis only.
+        // Kill-switch (Paused / Quarantined / Terminated) flows through
+        // signed PauseAgent / QuarantineAgent / TerminateAgent
+        // transactions, not these RPCs.
+        "tenzro_agentHeartbeat" => handle_agent_heartbeat(node, request.params).await,
+        "tenzro_suspendAgent" => handle_suspend_agent(node, request.params).await,
+        "tenzro_resumeAgent" => handle_resume_agent(node, request.params).await,
         "tenzro_listKillSwitchByAgent" => handle_list_kill_switch_by_agent(node, request.params).await,
         "tenzro_listKillSwitchByController" => handle_list_kill_switch_by_controller(node, request.params).await,
         "tenzro_getKillSwitchReceipt" => handle_get_kill_switch_receipt(node, request.params).await,
@@ -513,6 +575,14 @@ pub(crate) async fn handle_request(
         "tenzro_listInsuranceClaims" => handle_list_insurance_claims(node).await,
         "tenzro_getInsuranceClaim" => handle_get_insurance_claim(node, request.params).await,
         "tenzro_getInsurancePoolBalance" => handle_get_insurance_pool_balance(node).await,
+
+        // Permissionless ValidatorRegistry — read-only RPCs. Writes
+        // (RegisterValidator / ExitValidator / UpdateValidatorMetadata)
+        // flow through `tenzro_signAndSendTransaction` /
+        // `eth_sendRawTransaction` like every other on-chain mutation.
+        "tenzro_getValidatorState" => handle_get_validator_state(node, request.params).await,
+        "tenzro_listValidators" => handle_list_validators(node, request.params).await,
+        "tenzro_listActiveValidators" => handle_list_active_validators(node).await,
         // Hot-state local fee market (Agent-Swarm Spec 6). Read-only — exposes
         // the per-account contention score, write count, reexecution count,
         // and the resulting local fee multiplier over the rolling 64-block
@@ -789,6 +859,17 @@ pub(crate) async fn handle_request(
         "tenzro_unstake" | "tenzro_unstakeTokens" => handle_unstake(node, request.params).await,
         "tenzro_registerProvider" => handle_register_provider(node, request.params).await,
         "tenzro_providerStats" | "tenzro_getProviderStats" => handle_provider_stats(node, request.params).await,
+
+        // Liquid staking (stTNZO)
+        "tenzro_liquidStakingDeposit" => handle_liquid_staking_deposit(node, request.params).await,
+        "tenzro_liquidStakingRequestWithdrawal" => handle_liquid_staking_request_withdrawal(node, request.params).await,
+        "tenzro_liquidStakingClaimWithdrawal" => handle_liquid_staking_claim_withdrawal(node, request.params).await,
+        "tenzro_liquidStakingDistributeRewards" => handle_liquid_staking_distribute_rewards(node, request.params).await,
+        "tenzro_liquidStakingStats" => handle_liquid_staking_stats(node).await,
+        "tenzro_liquidStakingBalanceOf" => handle_liquid_staking_balance_of(node, request.params).await,
+        "tenzro_liquidStakingPendingWithdrawals" => handle_liquid_staking_pending_withdrawals(node, request.params).await,
+        "tenzro_liquidStakingTransfer" => handle_liquid_staking_transfer(node, request.params).await,
+
         "tenzro_listAccounts" => handle_list_accounts(node).await,
         "tenzro_shutdown" => handle_shutdown(node).await,
 
@@ -959,6 +1040,8 @@ pub(crate) async fn handle_request(
         // ZK methods (SDK)
         "tenzro_createZkProof" => handle_create_zk_proof(node, request.params).await,
         "tenzro_listCircuits" => handle_list_circuits(node, request.params).await,
+        "tenzro_createTeeZkProof" => handle_create_tee_zk_proof(node, request.params).await,
+        "tenzro_verifyTeeZkProof" => handle_verify_tee_zk_proof(node, request.params).await,
 
         // Custody/Wallet methods (SDK)
         "tenzro_createMpcWallet" => handle_create_mpc_wallet(node, request.params).await,
@@ -1855,8 +1938,8 @@ async fn handle_list_models(node: &Arc<TenzroNode>) -> std::result::Result<Value
             "serving": is_serving || is_on_network,
             "availability": availability,
             "pricing": {
-                "input_per_token": if is_serving { 0.0 } else { pricing.input_price_per_token },
-                "output_per_token": if is_serving { 0.0 } else { pricing.output_price_per_token },
+                "input_per_token_wei": if is_serving { "0".to_string() } else { pricing.input_price_per_token_wei.to_string() },
+                "output_per_token_wei": if is_serving { "0".to_string() } else { pricing.output_price_per_token_wei.to_string() },
                 "currency": "TNZO",
             },
         });
@@ -1964,16 +2047,19 @@ async fn handle_inference_request(
         match model_runtime.generate(model_id, input, &config).await {
             Ok(result) => {
                 node.metrics().record_inference();
-                // Calculate and wire TNZO billing
+                // Calculate and wire TNZO billing (wei)
                 let pricing = node.provider_pricing.read();
-                let cost = (result.input_tokens as f64 * pricing.input_price_per_token)
-                    + (result.output_tokens as f64 * pricing.output_price_per_token);
+                let cost_wei = (result.input_tokens as u128)
+                    .saturating_mul(pricing.input_price_per_token_wei)
+                    .saturating_add(
+                        (result.output_tokens as u128)
+                            .saturating_mul(pricing.output_price_per_token_wei),
+                    );
                 drop(pricing);
                 if let Some(token) = node.token()
                     && let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str())
-                        && let Ok(caller_addr) = parse_address(caller_str) {
-                            let cost_wei = (cost * 1_000_000_000_000_000_000f64) as u128;
-                            if cost_wei > 0 {
+                        && let Ok(caller_addr) = parse_address(caller_str)
+                            && cost_wei > 0 {
                                 let provider_addr = if let Some(registry) = node.identity_registry() {
                                     let all = registry.list_all();
                                     if let Some((_, id)) = all.first() {
@@ -1989,7 +2075,6 @@ async fn handle_inference_request(
                                         tracing::warn!(caller = %caller_str, "Inference billing failed: {}", e);
                                     }
                             }
-                        }
                 return Ok(serde_json::json!({
                     "model_id": model_id,
                     "output": result.text,
@@ -1997,7 +2082,7 @@ async fn handle_inference_request(
                     "output_tokens": result.output_tokens,
                     "generation_time_ms": result.generation_time_ms,
                     "tokens_per_second": result.tokens_per_second,
-                    "cost": cost,
+                    "cost_wei": cost_wei.to_string(),
                     "provider": "local",
                 }));
             }
@@ -2231,7 +2316,7 @@ async fn handle_list_remote_cortex_workers(
 /// - `input` (string, required): plain-text prompt (hex-encoded on the wire to the sidecar)
 /// - `tier` (string, optional): "fast" | "standard" | "deep" | "institutional", default "standard"
 /// - `min_loops`, `max_loops` (u32, optional): overrides the tier defaults
-/// - `max_cost_tnzo` (u64, optional): hard cap on billed TNZO
+/// - `max_cost_wei` (u64 number or decimal string, optional): hard cap on billed wei (1 TNZO = 10^18 wei)
 /// - `deadline_ms` (u64, optional)
 /// - `params` (object, optional): free-form `Map<String, String>` forwarded to the sidecar
 /// - `requester` (string, optional): caller address; defaults to the zero address
@@ -2291,8 +2376,22 @@ async fn handle_cortex_inference(
     if let Some(max_loops) = params.get("max_loops").and_then(|v| v.as_u64()) {
         budget.max_loops = max_loops as u32;
     }
-    if let Some(max_cost) = params.get("max_cost_tnzo").and_then(|v| v.as_u64()) {
-        budget.max_cost_tnzo = max_cost;
+    if let Some(v) = params.get("max_cost_wei") {
+        let parsed: Option<u128> = if let Some(n) = v.as_u64() {
+            Some(n as u128)
+        } else if let Some(s) = v.as_str() {
+            s.parse::<u128>().ok()
+        } else {
+            None
+        };
+        let Some(max_cost) = parsed else {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "max_cost_wei must be u64 number or decimal string".to_string(),
+                data: None,
+            });
+        };
+        budget.max_cost_wei = max_cost;
     }
     if let Some(deadline) = params.get("deadline_ms").and_then(|v| v.as_u64()) {
         budget.deadline_ms = Some(deadline);
@@ -2362,7 +2461,7 @@ async fn handle_cortex_inference(
 
     node.metrics().record_inference();
 
-    // Settlement: transfer `resp.price_tnzo` from requester → worker address
+    // Settlement: transfer `resp.price_wei` from requester → worker address
     // on the node's token ledger. The 0.5% network fee is charged on top
     // by routing a sliver to the treasury address. Failures are logged,
     // not fatal — the receipt is still valid and auditors can replay
@@ -2387,12 +2486,12 @@ async fn settle_cortex_payment(
     requester: Address,
     resp: &tenzro_types::cortex::CortexResponse,
 ) -> bool {
-    if resp.price_tnzo == 0 {
+    if resp.price_wei == 0 {
         return true;
     }
     if requester == Address::default() {
         tracing::debug!(
-            price_tnzo = resp.price_tnzo,
+            price_wei = resp.price_wei,
             "Cortex response has price but no requester — skipping settlement"
         );
         return false;
@@ -2402,12 +2501,12 @@ async fn settle_cortex_payment(
         return false;
     };
 
-    let gross = resp.price_tnzo as u128;
+    let gross = resp.price_wei;
     if let Err(e) = token.transfer(&requester, &resp.worker, gross) {
         tracing::warn!(
             requester = %hex::encode(requester.as_bytes()),
             worker = %hex::encode(resp.worker.as_bytes()),
-            amount = gross,
+            amount_wei = gross,
             "Cortex settlement transfer failed: {}",
             e
         );
@@ -2416,7 +2515,7 @@ async fn settle_cortex_payment(
     tracing::info!(
         requester = %hex::encode(requester.as_bytes()),
         worker = %hex::encode(resp.worker.as_bytes()),
-        amount_tnzo = gross,
+        amount_wei = gross,
         loops_used = resp.metadata.loops_used,
         "Cortex inference settled on-chain"
     );
@@ -3590,7 +3689,7 @@ async fn handle_delegate_task(
                             tracing::info!(
                                 sender = %sender_id,
                                 receiver = %receiver_id,
-                                fee_tnzo = 0.001,
+                                fee_wei = %DELEGATION_FEE_WEI,
                                 "Delegation fee charged"
                             );
                         }
@@ -3656,7 +3755,6 @@ async fn handle_faucet_info(
     Ok(serde_json::json!({
         "address": format!("0x{}", address_hex),
         "balance_wei": balance.to_string(),
-        "balance_tnzo": format!("{}.{:018}", balance / 1_000_000_000_000_000_000u128, balance % 1_000_000_000_000_000_000u128),
         "legacy_genesis_pointer": legacy_addr_hex.map(|h| format!("0x{}", h)),
     }))
 }
@@ -3679,11 +3777,32 @@ async fn handle_faucet(
             data: None,
         })?;
 
-    // Default 100 TNZO; caller may request up to 1000
-    let amount_tnzo: u128 = params.get("amount")
-        .and_then(|v| v.as_u64())
-        .map(|a| a.min(1000) as u128)
-        .unwrap_or(100);
+    // Default 100 TNZO (= 100 * 10^18 wei); caller may request up to 1000 TNZO worth.
+    // `amount_wei` accepts a u64 number (small values) or a decimal string (large values).
+    const DEFAULT_FAUCET_WEI: u128 = 100 * 1_000_000_000_000_000_000u128;
+    const MAX_FAUCET_WEI: u128 = 1000 * 1_000_000_000_000_000_000u128;
+    let amount_wei: u128 = match params.get("amount_wei") {
+        Some(v) => {
+            if let Some(n) = v.as_u64() {
+                (n as u128).min(MAX_FAUCET_WEI)
+            } else if let Some(s) = v.as_str() {
+                s.parse::<u128>()
+                    .map_err(|_| JsonRpcError {
+                        code: -32602,
+                        message: format!("Invalid amount_wei: '{}' is not a valid u128", s),
+                        data: None,
+                    })?
+                    .min(MAX_FAUCET_WEI)
+            } else {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: "amount_wei must be a u64 number or decimal string".to_string(),
+                    data: None,
+                });
+            }
+        }
+        None => DEFAULT_FAUCET_WEI,
+    };
 
     // Parse recipient address
     let to_addr = parse_address(address_str).map_err(|_| JsonRpcError {
@@ -3691,10 +3810,6 @@ async fn handle_faucet(
         message: format!("Invalid address: {}", address_str),
         data: None,
     })?;
-
-    let amount_wei = amount_tnzo
-        .checked_mul(1_000_000_000_000_000_000u128)
-        .unwrap_or(0);
 
     // Load the faucet's Ed25519 signing key from CF_METADATA. This was
     // provisioned once at first boot by `provision_faucet_signing_key()` —
@@ -3798,6 +3913,11 @@ async fn handle_faucet(
             message: format!("Failed to derive faucet PQ key: {}", e),
             data: None,
         })?;
+    // Gas price must clear the Open-lane fee floor — the faucet account
+    // has no registered DID so admission lands it in Open lane, which
+    // requires `mempool_min_gas_price × open_floor_mult` = 1 gwei × 4.0 =
+    // 4 gwei. The fee is paid back to the network treasury, so it's a
+    // book-keeping no-op for the operator.
     let tx = Transaction::new(
         ChainId::from(chain_id),
         faucet_addr,
@@ -3805,7 +3925,7 @@ async fn handle_faucet(
         nonce,
         TransactionType::Transfer { amount: amount_wei },
         21000,
-        1_000_000_000,
+        4_000_000_000,
         pq_signing_key.verifying_key_bytes().to_vec(),
     );
 
@@ -3835,7 +3955,103 @@ async fn handle_faucet(
     let tx_hash_out = signed_tx.clone().hash();
     let tx_hash_str = format!("{}", tx_hash_out);
 
-    // Submit to the event loop for consensus admission.
+    // Synchronously admit the faucet tx to the consensus mempool first, then
+    // dispatch a `LocallyAdmittedTransaction` event for gossip propagation
+    // only. This mirrors the `eth_sendRawTransaction` pattern: callers see
+    // mempool errors (fee floor, rate limit) immediately as JSON-RPC errors,
+    // and the event loop skips re-admission so we don't double-charge the
+    // bucket. Crucially, this is the path that survives the gossip-storm fix
+    // in `event_loop::handle_new_transaction` — that handler no longer
+    // re-broadcasts received txs, so faucet txs that go through `NewTransaction`
+    // would never reach validators. `LocallyAdmittedTransaction` always gossips.
+    if let Some(consensus) = node.consensus() {
+        match consensus.submit_transaction(signed_tx.clone()) {
+            Ok(()) => {
+                debug!(
+                    target: "rpc",
+                    tx_hash = %tx_hash_out,
+                    "tenzro_faucet: admitted to consensus mempool synchronously"
+                );
+            }
+            Err(tenzro_consensus::ConsensusError::RateLimited {
+                lane,
+                retry_after_ms,
+                burst_remaining,
+                current_rate,
+            }) => {
+                warn!(
+                    target: "rpc",
+                    tx_hash = %tx_hash_out,
+                    lane,
+                    retry_after_ms,
+                    burst_remaining,
+                    current_rate,
+                    "tenzro_faucet: rejected by per-DID admission (-32011)"
+                );
+                return Err(JsonRpcError {
+                    code: -32011,
+                    message: format!(
+                        "Rate limit exceeded for {} lane: retry after {}ms (refill {:.3}/s)",
+                        lane, retry_after_ms, current_rate
+                    ),
+                    data: Some(serde_json::json!({
+                        "lane": lane,
+                        "retryAfterMs": retry_after_ms,
+                        "burstRemaining": burst_remaining,
+                        "refillPerSec": current_rate,
+                    })),
+                });
+            }
+            Err(tenzro_consensus::ConsensusError::FeeFloorTooLow {
+                lane,
+                gas_price,
+                required,
+                base,
+                multiplier,
+            }) => {
+                warn!(
+                    target: "rpc",
+                    tx_hash = %tx_hash_out,
+                    lane,
+                    gas_price,
+                    required,
+                    base,
+                    multiplier,
+                    "tenzro_faucet: rejected by lane fee floor (-32012)"
+                );
+                return Err(JsonRpcError {
+                    code: -32012,
+                    message: format!(
+                        "Fee floor not met for {} lane: gas_price {} < required {} ({:.2}× base {})",
+                        lane, gas_price, required, multiplier, base
+                    ),
+                    data: Some(serde_json::json!({
+                        "lane": lane,
+                        "gasPrice": gas_price,
+                        "required": required,
+                        "baseFloor": base,
+                        "laneMultiplier": multiplier,
+                    })),
+                });
+            }
+            Err(e) => {
+                warn!(
+                    target: "rpc",
+                    tx_hash = %tx_hash_out,
+                    error = %e,
+                    "tenzro_faucet: consensus mempool rejected transaction"
+                );
+                return Err(JsonRpcError {
+                    code: -32000,
+                    message: format!("Mempool rejected transaction: {}", e),
+                    data: None,
+                });
+            }
+        }
+    }
+
+    // Dispatch to event loop for gossip propagation only (admission already
+    // done above when consensus is wired).
     let event_sender = node.event_sender().ok_or_else(|| {
         error!(target: "rpc", tx_hash = %tx_hash_out, "tenzro_faucet: node event loop not running");
         JsonRpcError {
@@ -3845,8 +4061,16 @@ async fn handle_faucet(
         }
     })?;
 
+    let event = if node.consensus().is_some() {
+        NodeEvent::LocallyAdmittedTransaction(signed_tx)
+    } else {
+        // No consensus engine wired (light client / boot phase) — fall back
+        // to the full event-loop path so the tx still gets locally queued.
+        NodeEvent::NewTransaction(signed_tx)
+    };
+
     event_sender
-        .send(NodeEvent::NewTransaction(signed_tx))
+        .send(event)
         .await
         .map_err(|e| {
             error!(
@@ -3872,7 +4096,7 @@ async fn handle_faucet(
     info!(
         target: "rpc",
         recipient = %address_str,
-        amount_tnzo = amount_tnzo,
+        amount_wei = %amount_wei,
         tx = %tx_hash_str,
         "tenzro_faucet: signed + enqueued via consensus path"
     );
@@ -3887,12 +4111,11 @@ async fn handle_faucet(
         "submitted": true,
         "status": "queued",
         "tx_hash": tx_hash_str,
-        "amount": amount_tnzo.to_string(),
         "amount_wei": amount_wei.to_string(),
         "recipient": address_str,
         "message": format!(
-            "{} TNZO submitted to mempool. Poll eth_getBalance({}) to confirm finalization.",
-            amount_tnzo, address_str
+            "{} wei submitted to mempool. Poll eth_getBalance({}) to confirm finalization.",
+            amount_wei, address_str
         ),
     }))
 }
@@ -4038,6 +4261,702 @@ async fn handle_list_escrows_by_payee(
     }))
 }
 
+// ---- Workflow read RPCs (Canton-native workflow stack) ---------------------
+//
+// All workflow / obligation / approval / privacy-domain *writes* are handled
+// by the privileged-VM workflow selectors (`0x01000040`–`0x0100004B`)
+// dispatched via `tenzro_signAndSendTransaction`. The post-block scan in
+// `EventLoop::process_workflow_logs` mirrors the emitted typed logs into
+// the in-memory `WorkflowRuntime`. These RPCs read from that runtime, which
+// is itself rehydrated from RocksDB (CF_SETTLEMENTS + CF_APPROVALS) on
+// startup.
+
+/// Parse a 32-byte Hash from a hex string (with or without `0x` prefix).
+fn parse_workflow_hash_param(
+    s: &str,
+    field: &str,
+) -> std::result::Result<tenzro_types::primitives::Hash, JsonRpcError> {
+    let stripped = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(stripped).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid {} hex: {}", field, e),
+        data: None,
+    })?;
+    tenzro_types::primitives::Hash::from_bytes(&bytes).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("{} must be 32 bytes", field),
+        data: None,
+    })
+}
+
+fn workflow_runtime_or_err(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Arc<crate::workflow_runtime::WorkflowRuntime>, JsonRpcError> {
+    node.workflow_runtime()
+        .cloned()
+        .ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Workflow runtime not initialized".to_string(),
+            data: None,
+        })
+}
+
+fn workflow_status_from_str(
+    s: &str,
+) -> std::result::Result<tenzro_workflow::workflow::WorkflowStatus, JsonRpcError> {
+    use tenzro_workflow::workflow::WorkflowStatus;
+    Ok(match s {
+        "draft" => WorkflowStatus::Draft,
+        "awaiting_signatures" => WorkflowStatus::AwaitingSignatures,
+        "active" => WorkflowStatus::Active,
+        "suspended" => WorkflowStatus::Suspended,
+        "settling" => WorkflowStatus::Settling,
+        "completed" => WorkflowStatus::Completed,
+        "failed" => WorkflowStatus::Failed,
+        "disputed" => WorkflowStatus::Disputed,
+        "cancelled" => WorkflowStatus::Cancelled,
+        other => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!("Unknown workflow status: {}", other),
+                data: None,
+            });
+        }
+    })
+}
+
+fn ids_to_hex_array(ids: Vec<tenzro_types::primitives::Hash>) -> Vec<String> {
+    ids.iter()
+        .map(|h| format!("0x{}", hex::encode(h.as_bytes())))
+        .collect()
+}
+
+/// `tenzro_getWorkflow` — fetch a workflow by id.
+async fn handle_get_workflow(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let wf_id_hex = p.get("workflow_id").and_then(|v| v.as_str()).ok_or_else(|| {
+        JsonRpcError {
+            code: -32602,
+            message: "Missing workflow_id".to_string(),
+            data: None,
+        }
+    })?;
+    let wf_id = parse_workflow_hash_param(wf_id_hex, "workflow_id")?;
+    let rt = workflow_runtime_or_err(node)?;
+    match rt.manager().get_workflow(&wf_id) {
+        Some(wf) => serde_json::to_value(&wf).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("workflow serialize: {}", e),
+            data: None,
+        }),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_listWorkflowsByCreator` — list workflow ids created by a DID.
+async fn handle_list_workflows_by_creator(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let creator = p
+        .get("creator_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing creator_did".to_string(),
+            data: None,
+        })?;
+    let rt = workflow_runtime_or_err(node)?;
+    let ids = rt.manager().list_by_creator(creator);
+    Ok(serde_json::json!({
+        "creator_did": creator,
+        "count": ids.len(),
+        "workflow_ids": ids_to_hex_array(ids),
+    }))
+}
+
+/// `tenzro_listWorkflowsByParticipant` — list workflows a DID participates in.
+async fn handle_list_workflows_by_participant(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let did = p
+        .get("did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing did".to_string(),
+            data: None,
+        })?;
+    let rt = workflow_runtime_or_err(node)?;
+    let ids = rt.manager().list_by_participant(did);
+    Ok(serde_json::json!({
+        "did": did,
+        "count": ids.len(),
+        "workflow_ids": ids_to_hex_array(ids),
+    }))
+}
+
+/// `tenzro_listWorkflowsByStatus` — list workflows currently in a given status.
+async fn handle_list_workflows_by_status(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let status_str = p
+        .get("status")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing status".to_string(),
+            data: None,
+        })?;
+    let status = workflow_status_from_str(status_str)?;
+    let rt = workflow_runtime_or_err(node)?;
+    let ids = rt.manager().list_by_status(status);
+    Ok(serde_json::json!({
+        "status": status_str,
+        "count": ids.len(),
+        "workflow_ids": ids_to_hex_array(ids),
+    }))
+}
+
+/// `tenzro_getWorkflowLifecycle` — full lifecycle history for a workflow.
+async fn handle_get_workflow_lifecycle(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let wf_id_hex = p.get("workflow_id").and_then(|v| v.as_str()).ok_or_else(|| {
+        JsonRpcError {
+            code: -32602,
+            message: "Missing workflow_id".to_string(),
+            data: None,
+        }
+    })?;
+    let wf_id = parse_workflow_hash_param(wf_id_hex, "workflow_id")?;
+    let rt = workflow_runtime_or_err(node)?;
+    let history = rt.manager().lifecycle_history(&wf_id);
+    Ok(serde_json::json!({
+        "workflow_id": wf_id_hex,
+        "count": history.len(),
+        "transitions": serde_json::to_value(&history).unwrap_or(Value::Null),
+    }))
+}
+
+/// `tenzro_getObligation` — fetch an obligation by id.
+async fn handle_get_obligation(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let oid_hex = p
+        .get("obligation_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing obligation_id".to_string(),
+            data: None,
+        })?;
+    let oid = parse_workflow_hash_param(oid_hex, "obligation_id")?;
+    let rt = workflow_runtime_or_err(node)?;
+    match rt.manager().get_obligation(&oid) {
+        Some(o) => serde_json::to_value(&o).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("obligation serialize: {}", e),
+            data: None,
+        }),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_getApprovalGate` — fetch an approval gate by id.
+async fn handle_get_approval_gate(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let gid_hex = p
+        .get("gate_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing gate_id".to_string(),
+            data: None,
+        })?;
+    let gid = parse_workflow_hash_param(gid_hex, "gate_id")?;
+    let rt = workflow_runtime_or_err(node)?;
+    match rt.manager().get_gate(&gid) {
+        Some(g) => serde_json::to_value(&g).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("gate serialize: {}", e),
+            data: None,
+        }),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_getApprovalRequest` — fetch an approval request by id.
+async fn handle_get_approval_request(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let rid_hex = p
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing request_id".to_string(),
+            data: None,
+        })?;
+    let rid = parse_workflow_hash_param(rid_hex, "request_id")?;
+    let rt = workflow_runtime_or_err(node)?;
+    match rt.manager().get_request(&rid) {
+        Some(r) => serde_json::to_value(&r).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("request serialize: {}", e),
+            data: None,
+        }),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_getPrivacyDomain` — fetch a privacy domain by id.
+async fn handle_get_privacy_domain(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let id_hex = p
+        .get("domain_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing domain_id".to_string(),
+            data: None,
+        })?;
+    let id = parse_workflow_hash_param(id_hex, "domain_id")?;
+    let rt = workflow_runtime_or_err(node)?;
+    match rt.privacy().get(&id) {
+        Some(d) => serde_json::to_value(&d).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("privacy domain serialize: {}", e),
+            data: None,
+        }),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_listPrivacyDomainsForDid` — list privacy domains a DID is a member of.
+async fn handle_list_privacy_domains_for_did(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let did = p
+        .get("did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing did".to_string(),
+            data: None,
+        })?;
+    let rt = workflow_runtime_or_err(node)?;
+    let domains = rt.privacy().list_for_did(did);
+    Ok(serde_json::json!({
+        "did": did,
+        "count": domains.len(),
+        "domains": serde_json::to_value(&domains).unwrap_or(Value::Null),
+    }))
+}
+
+/// `tenzro_getWorkflowReceipt` — fetch one receipt by id from the chain.
+async fn handle_get_workflow_receipt(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let id_hex = p
+        .get("receipt_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing receipt_id".to_string(),
+            data: None,
+        })?;
+    let id = parse_workflow_hash_param(id_hex, "receipt_id")?;
+    let rt = workflow_runtime_or_err(node)?;
+    match rt.manager().get_receipt(&id).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("get_receipt: {}", e),
+        data: None,
+    })? {
+        Some(r) => serde_json::to_value(&r).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("receipt serialize: {}", e),
+            data: None,
+        }),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_listWorkflowReceipts` — bounded walk of a workflow's receipt
+/// chain from head backwards via `prev_receipt`. Default cap = 256.
+async fn handle_list_workflow_receipts(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let wf_id_hex = p.get("workflow_id").and_then(|v| v.as_str()).ok_or_else(|| {
+        JsonRpcError {
+            code: -32602,
+            message: "Missing workflow_id".to_string(),
+            data: None,
+        }
+    })?;
+    let wf_id = parse_workflow_hash_param(wf_id_hex, "workflow_id")?;
+    let max = p
+        .get("max")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(256);
+    let rt = workflow_runtime_or_err(node)?;
+    let chain = rt
+        .manager()
+        .list_workflow_receipts(&wf_id, max)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("list_workflow_receipts: {}", e),
+            data: None,
+        })?;
+    Ok(serde_json::json!({
+        "workflow_id": wf_id_hex,
+        "count": chain.len(),
+        "receipts": serde_json::to_value(&chain).unwrap_or(Value::Null),
+    }))
+}
+
+/// `tenzro_getFeeRoute` — fetch a fee route by id.
+async fn handle_get_fee_route(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let id_hex = p
+        .get("fee_route_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing fee_route_id".to_string(),
+            data: None,
+        })?;
+    let id = parse_workflow_hash_param(id_hex, "fee_route_id")?;
+    let rt = workflow_runtime_or_err(node)?;
+    match rt.fee_routes().get(&id) {
+        Some(r) => serde_json::to_value(&r).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("fee_route serialize: {}", e),
+            data: None,
+        }),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_listFeeRoutes` — list every registered fee route.
+async fn handle_list_fee_routes(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let rt = workflow_runtime_or_err(node)?;
+    let routes = rt.fee_routes().list();
+    Ok(serde_json::json!({
+        "count": routes.len(),
+        "routes": serde_json::to_value(&routes).unwrap_or(Value::Null),
+    }))
+}
+
+/// `tenzro_computeFeeRoutePayouts` — pure preview of how `gross_wei`
+/// would be split across the fee route's recipients. Does not settle —
+/// settlement is consensus-mediated.
+async fn handle_compute_fee_route_payouts(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let id_hex = p
+        .get("fee_route_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing fee_route_id".to_string(),
+            data: None,
+        })?;
+    let id = parse_workflow_hash_param(id_hex, "fee_route_id")?;
+    let gross_wei: u128 = p
+        .get("gross_wei")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing gross_wei (decimal string)".to_string(),
+            data: None,
+        })?
+        .parse()
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid gross_wei: {}", e),
+            data: None,
+        })?;
+    let rt = workflow_runtime_or_err(node)?;
+    let route = rt.fee_routes().get(&id).ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: format!("fee route {} not found", id_hex),
+        data: None,
+    })?;
+    let payouts = route.compute_payouts(gross_wei).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("compute_payouts: {}", e),
+        data: None,
+    })?;
+    let payouts_json: Vec<Value> = payouts
+        .into_iter()
+        .map(|(did, label, amount)| {
+            serde_json::json!({
+                "recipient_did": did,
+                "label": label,
+                "amount_wei": amount.to_string(),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "fee_route_id": id_hex,
+        "gross_wei": gross_wei.to_string(),
+        "payouts": payouts_json,
+    }))
+}
+
+/// `tenzro_getWorkflowOperationalMetrics` — JSON snapshot of the same
+/// metrics rendered in Prometheus form on `/metrics`. Useful for clients
+/// that prefer typed JSON over text scrape.
+async fn handle_get_workflow_operational_metrics(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let rt = workflow_runtime_or_err(node)?;
+    serde_json::to_value(rt.operational_metrics()).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("operational_metrics serialize: {}", e),
+        data: None,
+    })
+}
+
+// ---- Canton mirror RPCs (Wave 5 — receipt mirror) ---------------------------
+
+fn canton_adapter_or_err(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Arc<tenzro_bridge::canton::CantonAdapter>, JsonRpcError> {
+    node.canton_adapter().cloned().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Canton adapter not initialized (set [canton].enabled = true)".to_string(),
+        data: None,
+    })
+}
+
+/// `tenzro_mirrorWorkflowToCanton` — replicate a workflow into a Canton
+/// synchronizer as a `Tenzro.Workflow:WorkflowAnchor` DAML contract.
+///
+/// Params: `{ "workflow_id": "0x…", "synchronizer_id": "..." }`.
+///
+/// Returns the freshly-allocated `CantonMirror` (synchronizer_id, party,
+/// contract_id). The caller is expected to back-populate the workflow's
+/// `canton_mirror` field via a separate signed transaction; this RPC is
+/// the side-effect call against the bridge participant.
+async fn handle_mirror_workflow_to_canton(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let wf_id_str = p
+        .get("workflow_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing workflow_id".to_string(),
+            data: None,
+        })?;
+    let wf_id = parse_workflow_hash_param(wf_id_str, "workflow_id")?;
+    let synchronizer_id = p
+        .get("synchronizer_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing synchronizer_id".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let rt = workflow_runtime_or_err(node)?;
+    let workflow = rt.manager().get_workflow(&wf_id).ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: format!("Workflow not found: 0x{}", hex::encode(wf_id.as_bytes())),
+        data: None,
+    })?;
+
+    let adapter = canton_adapter_or_err(node)?;
+    let mirror = adapter
+        .mirror_workflow(&workflow, &synchronizer_id)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Canton mirror failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "workflow_id": format!("0x{}", hex::encode(wf_id.as_bytes())),
+        "synchronizer_id": mirror.synchronizer_id,
+        "party": mirror.party,
+        "contract_id": mirror.contract_id,
+    }))
+}
+
+/// `tenzro_mirrorObligationToCanton` — replicate an obligation under an
+/// already-mirrored workflow as a `Tenzro.Workflow:ObligationAnchor` DAML
+/// contract. Params: `{ "obligation_id": "0x…", "parent_contract_id": "..." }`.
+async fn handle_mirror_obligation_to_canton(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let ob_id_str = p
+        .get("obligation_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing obligation_id".to_string(),
+            data: None,
+        })?;
+    let ob_id = parse_workflow_hash_param(ob_id_str, "obligation_id")?;
+    let parent = p
+        .get("parent_contract_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing parent_contract_id".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let rt = workflow_runtime_or_err(node)?;
+    let obligation = rt.manager().get_obligation(&ob_id).ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: format!("Obligation not found: 0x{}", hex::encode(ob_id.as_bytes())),
+        data: None,
+    })?;
+
+    let adapter = canton_adapter_or_err(node)?;
+    let contract_id = adapter
+        .mirror_obligation(&obligation, &parent)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Canton mirror failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "obligation_id": format!("0x{}", hex::encode(ob_id.as_bytes())),
+        "parent_contract_id": parent,
+        "contract_id": contract_id,
+    }))
+}
+
+/// `tenzro_consumeDamlEvents` — poll the Canton participant for active
+/// `Tenzro.Workflow:*` contracts and surface them as typed events.
+/// Inbound translation back into `WorkflowManager` mutations is intentionally
+/// caller-driven so operators can choose dedup / idempotency policy.
+async fn handle_consume_daml_events(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let adapter = canton_adapter_or_err(node)?;
+    let events = adapter.consume_daml_events().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Canton event poll failed: {}", e),
+        data: None,
+    })?;
+    Ok(serde_json::json!({
+        "count": events.len(),
+        "events": serde_json::to_value(&events).unwrap_or(Value::Null),
+    }))
+}
+
 // ---- Kill-switch read RPCs (Agent-Swarm Spec 1) -----------------------------
 
 /// Render a `KillSwitchReceipt` as JSON for read-only RPC responses.
@@ -4103,6 +5022,162 @@ async fn handle_get_agent_lifecycle(
             "state": s.as_str(),
             "at": t.timestamp_millis(),
         })).collect::<Vec<_>>(),
+    }))
+}
+
+/// `tenzro_agentHeartbeat` — record a liveness ping from an agent.
+///
+/// Wires `AgentLifecycle::heartbeat` into the public RPC surface.
+/// `AgentLifecycle::check_heartbeats` runs periodically (see `liveness.rs`)
+/// and flips Active → Suspended on missed pings; this RPC is the inbound
+/// path agents use to refresh their `last_heartbeat` and avoid that
+/// auto-suspension.
+///
+/// Params: `{ agent_id: string }`
+/// Returns: `{ agent_id, recorded_at_ms }`
+async fn handle_agent_heartbeat(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let agent_id = params
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_id".to_string(),
+            data: None,
+        })?;
+
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    runtime
+        .lifecycle_manager()
+        .heartbeat(agent_id)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Heartbeat record failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "agent_id": agent_id,
+        "recorded_at_ms": chrono::Utc::now().timestamp_millis(),
+    }))
+}
+
+/// `tenzro_resumeAgent` — return a Suspended agent to Active.
+///
+/// Wires `AgentRuntime::resume_agent` (Suspended → Active recovery) into
+/// the public RPC surface. This is the operational counterpart to
+/// `tenzro_suspendAgent` (and the recovery path for agents auto-suspended
+/// by `AgentLifecycle::check_heartbeats` on missed pings). It is **not**
+/// a kill-switch resume — the kill-switch axes (`Paused`, `Quarantined`)
+/// are governed by signed transactions (`PauseAgent` / `QuarantineAgent`
+/// + matching resume txs), not direct RPC writes.
+///
+/// Params: `{ agent_id: string }`
+/// Returns: `{ agent_id, state: "Active" }`
+async fn handle_resume_agent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let agent_id = params
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_id".to_string(),
+            data: None,
+        })?;
+
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    runtime
+        .resume_agent(agent_id)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Resume failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "agent_id": agent_id,
+        "state": "Active",
+    }))
+}
+
+/// `tenzro_suspendAgent` — operational suspend (Active → Suspended).
+///
+/// Wires `AgentRuntime::suspend_agent` into the public RPC surface. This
+/// is the manual analogue of the heartbeat-monitor auto-suspend path
+/// (`AgentLifecycle::check_heartbeats`). Distinct from the kill-switch
+/// `PauseAgent` / `QuarantineAgent` typed transactions, which target the
+/// `Paused` / `Quarantined` axes and require on-chain controller
+/// authorization.
+///
+/// Params: `{ agent_id: string, reason: string }`
+/// Returns: `{ agent_id, state: "Suspended", reason }`
+async fn handle_suspend_agent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let agent_id = params
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_id".to_string(),
+            data: None,
+        })?;
+    let reason = params
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Operator suspend")
+        .to_string();
+
+    let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Agent runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    runtime
+        .suspend_agent(agent_id, reason.clone())
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Suspend failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "agent_id": agent_id,
+        "state": "Suspended",
+        "reason": reason,
     }))
 }
 
@@ -4507,10 +5582,131 @@ async fn handle_get_insurance_pool_balance(
     let vault = tenzro_token::bond::derive_insurance_pool_address();
     Ok(serde_json::json!({
         "vault": format!("{}", vault),
-        "balance_tnzo": pool.balance_tnzo.to_string(),
+        "balance_wei": pool.balance_wei.to_string(),
         "paid_claims": pool.paid_claims,
-        "total_paid_tnzo": pool.total_paid_tnzo.to_string(),
+        "total_paid_wei": pool.total_paid_wei.to_string(),
         "open_claim_count": pool.open_claim_count,
+    }))
+}
+
+/// Render a `ValidatorRegistryEntry` as JSON (consumed by all three read RPCs).
+fn validator_registry_entry_to_json(
+    entry: &tenzro_token::validator_registry::ValidatorRegistryEntry,
+) -> Value {
+    serde_json::json!({
+        "address": format!("{}", entry.address),
+        "consensus_pubkey": hex::encode(&entry.consensus_pubkey),
+        "pq_pubkey_len": entry.pq_pubkey.len(),
+        "withdrawal_address": format!("{}", entry.withdrawal_address),
+        "self_stake": entry.self_stake.to_string(),
+        "status": format!("{:?}", entry.status),
+        "registered_at_epoch": entry.registered_at_epoch,
+        "activated_at_epoch": entry.activated_at_epoch,
+        "exited_at_epoch": entry.exited_at_epoch,
+        "jailed_until_epoch": entry.jailed_until_epoch,
+        "tee_attestation_hash": entry.tee_attestation_hash.map(hex::encode),
+        "metadata_uri": entry.metadata_uri,
+        "updated_at": entry.updated_at.0,
+    })
+}
+
+/// `tenzro_getValidatorState` — fetch a single validator's registry entry by
+/// address. Returns `null` if the address is not registered.
+///
+/// Params: `{ "address": "0x..." }` (32-byte hex, with or without `0x`).
+async fn handle_get_validator_state(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let address_str = params
+        .get("address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing address".to_string(),
+            data: None,
+        })?;
+    let cleaned = address_str.trim_start_matches("0x");
+    let bytes = hex::decode(cleaned).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid hex address: {}", e),
+        data: None,
+    })?;
+    let address = tenzro_types::primitives::Address::from_bytes(&bytes)
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Address must be 32 bytes".to_string(),
+            data: None,
+        })?;
+
+    let registry = node.validator_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "ValidatorRegistry not initialized".to_string(),
+        data: None,
+    })?;
+    match registry.get(&address) {
+        Some(entry) => Ok(validator_registry_entry_to_json(&entry)),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_listValidators` — list all validators in the registry, optionally
+/// filtered by status.
+///
+/// Params (optional): `{ "status": "Active" | "Candidate" | "PendingActive" |
+///                                  "PendingExit" | "Exited" | "Jailed" }`.
+async fn handle_list_validators(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let registry = node.validator_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "ValidatorRegistry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let status_filter: Option<String> = params
+        .as_ref()
+        .and_then(|p| p.get("status"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let entries = registry.list();
+    let filtered: Vec<_> = if let Some(want) = &status_filter {
+        entries
+            .into_iter()
+            .filter(|e| format!("{:?}", e.status) == *want)
+            .collect()
+    } else {
+        entries
+    };
+
+    Ok(serde_json::json!({
+        "count": filtered.len(),
+        "validators": filtered.iter().map(validator_registry_entry_to_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `tenzro_listActiveValidators` — list only the currently `Active`
+/// validators. Convenience over `tenzro_listValidators` with
+/// `{ "status": "Active" }`.
+async fn handle_list_active_validators(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let registry = node.validator_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "ValidatorRegistry not initialized".to_string(),
+        data: None,
+    })?;
+    let actives = registry.list_active();
+    Ok(serde_json::json!({
+        "count": actives.len(),
+        "validators": actives.iter().map(validator_registry_entry_to_json).collect::<Vec<_>>(),
     }))
 }
 
@@ -5110,9 +6306,9 @@ fn charter_to_json(c: &tenzro_token::seed_agent::Charter) -> Value {
         "purpose": c.purpose,
         "operations": ops,
         "spend_caps": {
-            "daily_cap_tnzo": c.spend_caps.daily_cap_tnzo.to_string(),
-            "monthly_cap_tnzo": c.spend_caps.monthly_cap_tnzo.to_string(),
-            "per_tx_cap_tnzo": c.spend_caps.per_tx_cap_tnzo.to_string(),
+            "daily_cap_wei": c.spend_caps.daily_cap_wei.to_string(),
+            "monthly_cap_wei": c.spend_caps.monthly_cap_wei.to_string(),
+            "per_tx_cap_wei": c.spend_caps.per_tx_cap_wei.to_string(),
         },
         "target_throughput": c.target_throughput.as_ref().map(|t| serde_json::json!({
             "ops_per_sec_milli": t.ops_per_sec_milli,
@@ -5139,15 +6335,15 @@ fn earmark_to_json(e: &tenzro_token::seed_agent::TreasuryEarmark) -> Value {
         .map(|p| {
             serde_json::json!({
                 "month": p.month,
-                "max_draw_tnzo": p.max_draw_tnzo.to_string(),
+                "max_draw_wei": p.max_draw_wei.to_string(),
             })
         })
         .collect();
     serde_json::json!({
         "name": e.name,
-        "initial_allocation_tnzo": e.initial_allocation_tnzo.to_string(),
-        "allocation_remaining_tnzo": e.allocation_remaining_tnzo.to_string(),
-        "total_drawn_tnzo": e.total_drawn_tnzo.to_string(),
+        "initial_allocation_wei": e.initial_allocation_wei.to_string(),
+        "allocation_remaining_wei": e.allocation_remaining_wei.to_string(),
+        "total_drawn_wei": e.total_drawn_wei.to_string(),
         "bootstrap_start_ms": e.bootstrap_start.as_millis(),
         "bootstrap_end_ms": e.bootstrap_end.as_millis(),
         "decay_schedule": { "points": decay_points },
@@ -5164,7 +6360,7 @@ fn seed_agent_record_to_json(r: &tenzro_token::seed_agent::SeedAgentRecord) -> V
         "controller_did": r.controller_did,
         "charter_id": format!("0x{}", hex::encode(r.charter_id.as_bytes())),
         "status": r.status.as_str(),
-        "allocation_used_tnzo": r.allocation_used_tnzo.to_string(),
+        "allocation_used_wei": r.allocation_used_wei.to_string(),
         "bond_id": r.bond_id.as_ref().map(|h| format!("0x{}", hex::encode(h.as_bytes()))),
         "provisioned_at_ms": r.provisioned_at.as_millis(),
         "last_active_ms": r.last_active.as_millis(),
@@ -5316,7 +6512,7 @@ async fn handle_get_network_activity(
         "window": window,
         "exclude_seed": exclude_seed,
         "seed_agent_count": earmark.seed_agent_count,
-        "seed_total_drawn_tnzo": earmark.total_drawn_tnzo.to_string(),
+        "seed_total_drawn_wei": earmark.total_drawn_wei.to_string(),
         // Aggregate usage counters land when the UsageTracker bridge ships.
         "inference_count": 0_u64,
         "settlement_count": 0_u64,
@@ -5835,7 +7031,7 @@ async fn handle_create_proposal(
         },
         "treasury_grant" => ProposalType::TreasuryGrant {
             recipient: proposer,
-            amount: params.get("grant_amount").and_then(|v| v.as_u64()).unwrap_or(0) as u128,
+            amount: parse_u128_amount(&params, "grant_amount").unwrap_or(0),
         },
         "protocol_upgrade" => {
             let code_hash_hex = params.get("code_hash")
@@ -6892,6 +8088,11 @@ async fn handle_syncing(node: &Arc<TenzroNode>) -> std::result::Result<Value, Js
 
 // Identity (TDIP) handlers
 
+/// Dispatch identity registration based on `identity_type` ∈ {`human`, `machine`,
+/// `autonomous`}. Defaults to `human` when omitted (back-compat with single-arg
+/// callers). Machine registrations require `controller_did` + `capabilities`;
+/// `autonomous` registrations only require `capabilities`. Both honor the optional
+/// `delegation_scope` block.
 async fn handle_register_identity(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -6902,21 +8103,44 @@ async fn handle_register_identity(
         data: None,
     })?;
 
+    // Identity type — default human for back-compat. Accept both
+    // top-level `identity_type` and nested `metadata.identity_type` for legacy
+    // clients that nested everything under metadata.
+    let identity_type = params
+        .get("identity_type")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            params
+                .get("metadata")
+                .and_then(|m| m.get("identity_type"))
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or("human")
+        .to_lowercase();
+
+    // Display name accepted at top level OR nested under `metadata.display_name`.
     let display_name = params
         .get("display_name")
         .and_then(|v| v.as_str())
+        .or_else(|| {
+            params
+                .get("metadata")
+                .and_then(|m| m.get("display_name"))
+                .and_then(|v| v.as_str())
+        })
         .unwrap_or("Unknown")
         .to_string();
 
-    // Validate display_name length (MEDIUM #115)
     tenzro_types::validation::validate_string_len(
-        &display_name, "display_name", tenzro_types::validation::MAX_DISPLAY_NAME_LEN,
-    ).map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
+        &display_name,
+        "display_name",
+        tenzro_types::validation::MAX_DISPLAY_NAME_LEN,
+    )
+    .map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
 
-    // Accept public_key param or generate a new keypair
-    let (public_key_bytes, private_key_hex) = if let Some(pk_str) = params
-        .get("public_key")
-        .and_then(|v| v.as_str())
+    // Accept supplied public_key or auto-generate a keypair.
+    let (public_key_bytes, private_key_hex) = if let Some(pk_str) =
+        params.get("public_key").and_then(|v| v.as_str())
     {
         let hex_clean = pk_str.strip_prefix("0x").unwrap_or(pk_str);
         let bytes = hex::decode(hex_clean).map_err(|e| JsonRpcError {
@@ -6926,7 +8150,6 @@ async fn handle_register_identity(
         })?;
         (bytes, None)
     } else {
-        // Auto-generate a keypair for the identity
         let key_type_str = params
             .get("key_type")
             .and_then(|v| v.as_str())
@@ -6951,21 +8174,98 @@ async fn handle_register_identity(
         data: None,
     })?;
 
-    let identity = registry
-        .register_human_with_fee(
-            public_key_bytes,
-            display_name,
-            tenzro_types::identity::KycTier::Unverified,
-        )
-        .await
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Registration failed: {}", e),
-            data: None,
-        })?
-        .identity;
+    // Branch on identity_type. Each branch calls the appropriate registry
+    // method so the resulting DID prefix (human/machine/autonomous) matches
+    // the requested type.
+    let identity = match identity_type.as_str() {
+        "human" => registry
+            .register_human_with_fee(
+                public_key_bytes,
+                display_name,
+                tenzro_types::identity::KycTier::Unverified,
+            )
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Human registration failed: {}", e),
+                data: None,
+            })?
+            .identity,
 
-    // Persist identity to RocksDB (fixes: previously only stored in DashMap)
+        "machine" => {
+            let controller_did = params
+                .get("controller_did")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: "Missing required param for identity_type=machine: controller_did"
+                        .to_string(),
+                    data: None,
+                })?;
+
+            let capabilities: Vec<String> = params
+                .get("capabilities")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let delegation_scope = parse_delegation_scope(params.get("delegation_scope"));
+
+            registry
+                .register_machine_with_fee(
+                    controller_did,
+                    public_key_bytes,
+                    capabilities,
+                    delegation_scope,
+                )
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Machine registration failed: {}", e),
+                    data: None,
+                })?
+                .identity
+        }
+
+        "autonomous" | "autonomous_machine" => {
+            let capabilities: Vec<String> = params
+                .get("capabilities")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            registry
+                .register_autonomous_machine_with_fee(public_key_bytes, capabilities)
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Autonomous machine registration failed: {}", e),
+                    data: None,
+                })?
+                .identity
+        }
+
+        other => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "Unknown identity_type '{}': expected 'human', 'machine', or 'autonomous'",
+                    other
+                ),
+                data: None,
+            });
+        }
+    };
+
+    // Persist identity to RocksDB.
     if let Some(storage) = node.storage() {
         let did_key = identity.did_string();
         let identity_bytes = identity.to_bytes().map_err(|e| JsonRpcError {
@@ -6973,25 +8273,77 @@ async fn handle_register_identity(
             message: format!("Identity serialization failed: {}", e),
             data: None,
         })?;
-        storage.put(CF_IDENTITIES, did_key.as_bytes(), &identity_bytes).map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Identity persistence failed: {}", e),
-            data: None,
-        })?;
-        info!(did = %did_key, "Identity persisted to ledger storage (CF_IDENTITIES)");
+        storage
+            .put(CF_IDENTITIES, did_key.as_bytes(), &identity_bytes)
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Identity persistence failed: {}", e),
+                data: None,
+            })?;
+        info!(
+            did = %did_key,
+            identity_type = %identity_type,
+            "Identity persisted to ledger storage (CF_IDENTITIES)"
+        );
     }
 
     let mut result = serde_json::json!({
         "did": identity.did_string(),
+        "identity_type": identity_type,
         "status": format!("{}", identity.status),
     });
 
-    // Include private key only when auto-generated (not when user provides public_key)
     if let Some(sk) = private_key_hex {
         result["private_key"] = serde_json::json!(sk);
     }
 
     Ok(result)
+}
+
+/// Parse a `delegation_scope` JSON object into a [`DelegationScope`]. Accepts
+/// `max_transaction_value`, `max_daily_spend` (numeric or decimal-string),
+/// `allowed_operations`, `allowed_payment_protocols`, `allowed_chains`. Returns
+/// `DelegationScope::default()` when the value is `None`/null.
+fn parse_delegation_scope(value: Option<&Value>) -> tenzro_identity::DelegationScope {
+    use tenzro_identity::DelegationScope;
+    let Some(scope_value) = value else {
+        return DelegationScope::default();
+    };
+
+    let mut scope = DelegationScope::unrestricted();
+
+    let parse_amount = |v: &Value| -> Option<u128> {
+        v.as_u64()
+            .map(|n| n as u128)
+            .or_else(|| v.as_str().and_then(|s| s.parse::<u128>().ok()))
+    };
+
+    if let Some(max_tx) = scope_value.get("max_transaction_value").and_then(parse_amount) {
+        scope = scope.with_max_transaction_value(max_tx);
+    }
+    if let Some(max_daily) = scope_value.get("max_daily_spend").and_then(parse_amount) {
+        scope = scope.with_max_daily_spend(max_daily);
+    }
+    if let Some(ops) = scope_value.get("allowed_operations").and_then(|v| v.as_array()) {
+        scope = scope.with_allowed_operations(
+            ops.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        );
+    }
+    if let Some(protocols) = scope_value
+        .get("allowed_payment_protocols")
+        .and_then(|v| v.as_array())
+    {
+        scope = scope.with_allowed_payment_protocols(
+            protocols.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        );
+    }
+    if let Some(chains) = scope_value.get("allowed_chains").and_then(|v| v.as_array()) {
+        scope = scope.with_allowed_chains(
+            chains.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        );
+    }
+
+    scope
 }
 
 async fn handle_register_machine_identity(
@@ -7061,47 +8413,10 @@ async fn handle_register_machine_identity(
         (pk_bytes, Some(sk_hex))
     };
 
-    // Parse delegation scope (optional)
-    use tenzro_identity::DelegationScope;
-    let delegation_scope = if let Some(scope_value) = params.get("delegation_scope") {
-        let mut scope = DelegationScope::unrestricted();
-
-        if let Some(max_tx) = scope_value.get("max_transaction_value").and_then(|v| v.as_u64()) {
-            scope = scope.with_max_transaction_value(max_tx as u128);
-        }
-
-        if let Some(max_daily) = scope_value.get("max_daily_spend").and_then(|v| v.as_u64()) {
-            scope = scope.with_max_daily_spend(max_daily as u128);
-        }
-
-        if let Some(ops) = scope_value.get("allowed_operations").and_then(|v| v.as_array()) {
-            let operations: Vec<String> = ops
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-            scope = scope.with_allowed_operations(operations);
-        }
-
-        if let Some(protocols) = scope_value.get("allowed_payment_protocols").and_then(|v| v.as_array()) {
-            let protocol_list: Vec<String> = protocols
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-            scope = scope.with_allowed_payment_protocols(protocol_list);
-        }
-
-        if let Some(chains) = scope_value.get("allowed_chains").and_then(|v| v.as_array()) {
-            let chain_list: Vec<String> = chains
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-            scope = scope.with_allowed_chains(chain_list);
-        }
-
-        scope
-    } else {
-        DelegationScope::default()
-    };
+    // Parse delegation scope (optional). Shared with `handle_register_identity`
+    // so amount fields larger than u64::MAX (e.g. 1 TNZO = 1e18 wei-units, which
+    // fits in u64; but multi-thousand-TNZO ceilings overflow) parse correctly.
+    let delegation_scope = parse_delegation_scope(params.get("delegation_scope"));
 
     let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
         code: -32000,
@@ -8184,14 +9499,21 @@ async fn handle_onboard_delegated_agent(
         .get("delegation_scope")
         .cloned()
         .unwrap_or(serde_json::json!({}));
+    // Both fields are denominated in **wei** (TNZO base units). Decimal string
+    // canonical (full u128 range); a u64 number is accepted as a convenience
+    // for small values. Floats are rejected (precision loss above 2^53).
+    let parse_tnzo_amount = |v: &Value| -> Option<u128> {
+        if let Some(s) = v.as_str() {
+            return s.parse::<u128>().ok();
+        }
+        v.as_u64().map(|n| n as u128)
+    };
     let max_tx = scope_value
         .get("max_transaction_value")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u128 * TNZO_BASE_UNITS);
+        .and_then(parse_tnzo_amount);
     let max_daily = scope_value
         .get("max_daily_spend")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u128 * TNZO_BASE_UNITS);
+        .and_then(parse_tnzo_amount);
     let allowed_operations: Vec<String> = scope_value
         .get("allowed_operations")
         .and_then(|v| v.as_array())
@@ -8410,8 +9732,7 @@ async fn handle_onboard_autonomous_agent(
             "public_key": format!("0x{}", wallet_pubkey_hex),
         },
         "bond": {
-            "amount_base_units": AUTONOMOUS_AGENT_BOND_FLOOR.to_string(),
-            "amount_tnzo": "1",
+            "amount_wei": AUTONOMOUS_AGENT_BOND_FLOOR.to_string(),
             "funding_address": bond_funding_address,
             "note": "Bond is balance-verified at onboarding; subtask #54 will lock+slash via the staking manager.",
         },
@@ -9678,14 +10999,16 @@ async fn handle_set_provider_pricing(
         data: None,
     })?;
 
-    // Enforce network maximums
-    let network_max_input = 0.001;
-    let network_max_output = 0.002;
+    // Enforce network maximums (wei per token)
+    // 0.001 TNZO/token = 1_000_000_000_000_000 wei
+    // 0.002 TNZO/token = 2_000_000_000_000_000 wei
+    let network_max_input_wei: u128 = 1_000_000_000_000_000;
+    let network_max_output_wei: u128 = 2_000_000_000_000_000;
 
-    pricing.input_price_per_token = pricing.input_price_per_token.min(network_max_input);
-    pricing.output_price_per_token = pricing.output_price_per_token.min(network_max_output);
-    pricing.network_max_input = network_max_input;
-    pricing.network_max_output = network_max_output;
+    pricing.input_price_per_token_wei = pricing.input_price_per_token_wei.min(network_max_input_wei);
+    pricing.output_price_per_token_wei = pricing.output_price_per_token_wei.min(network_max_output_wei);
+    pricing.network_max_input_wei = network_max_input_wei;
+    pricing.network_max_output_wei = network_max_output_wei;
 
     // Store the pricing
     *node.provider_pricing.write() = pricing.clone();
@@ -10129,7 +11452,7 @@ async fn handle_serve_model(
             peer_id: String::new(),
             pricing: tenzro_network::PricingInfo {
                 per_request: 0,
-                per_token: Some((pricing.input_price_per_token * 1_000_000.0) as u64),
+                per_token: Some(pricing.input_price_per_token_wei.min(u64::MAX as u128) as u64),
             },
             schedule: msg_schedule,
             visibility: "network".to_string(),
@@ -11360,16 +12683,19 @@ async fn handle_chat_simple(
         node.touch_local_model_service(&model_id);
 
         let pricing = node.provider_pricing.read();
-        let cost = (result.input_tokens as f64 * pricing.input_price_per_token)
-            + (result.output_tokens as f64 * pricing.output_price_per_token);
+        let cost_wei = (result.input_tokens as u128)
+            .saturating_mul(pricing.input_price_per_token_wei)
+            .saturating_add(
+                (result.output_tokens as u128)
+                    .saturating_mul(pricing.output_price_per_token_wei),
+            );
         drop(pricing);
 
         // Wire TNZO billing: deduct from caller, credit this provider node
         if let Some(token) = node.token()
             && let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str())
-                && let Ok(caller_addr) = parse_address(caller_str) {
-                    let cost_wei = (cost * 1_000_000_000_000_000_000f64) as u128;
-                    if cost_wei > 0 {
+                && let Ok(caller_addr) = parse_address(caller_str)
+                    && cost_wei > 0 {
                         let provider_addr = if let Some(registry) = node.identity_registry() {
                             let all = registry.list_all();
                             if let Some((_, identity)) = all.first() {
@@ -11382,15 +12708,14 @@ async fn handle_chat_simple(
                         };
                         if provider_addr != Address::default() {
                             if let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
-                                tracing::warn!(caller = %caller_str, cost_tnzo = cost,
+                                tracing::warn!(caller = %caller_str, cost_wei = %cost_wei,
                                     "Inference billing failed: {}", e);
                             } else {
-                                tracing::info!(caller = %caller_str, cost_tnzo = cost,
+                                tracing::info!(caller = %caller_str, cost_wei = %cost_wei,
                                     "Inference billed successfully");
                             }
                         }
                     }
-                }
 
         // Build load snapshot for response
         let load = node.load_tracker.snapshot(&model_id).map(|s| {
@@ -11408,7 +12733,7 @@ async fn handle_chat_simple(
             "output_tokens": result.output_tokens,
             "generation_time_ms": result.generation_time_ms,
             "tokens_per_second": result.tokens_per_second,
-            "cost": cost,
+            "cost_wei": cost_wei.to_string(),
             "model_id": model_id,
             "location": "local",
             "load": load,
@@ -11760,16 +13085,18 @@ async fn handle_chat_rich(
 
         // ── build response ───────────────────────────────────────────
         let pricing = node.provider_pricing.read();
-        let cost = (input_tokens as f64 * pricing.input_price_per_token)
-            + (output_tokens as f64 * pricing.output_price_per_token);
+        let cost_wei = (input_tokens as u128)
+            .saturating_mul(pricing.input_price_per_token_wei)
+            .saturating_add(
+                (output_tokens as u128).saturating_mul(pricing.output_price_per_token_wei),
+            );
         drop(pricing);
 
         // Wire TNZO billing (same as simple shape).
         if let Some(token) = node.token()
             && let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str())
-                && let Ok(caller_addr) = parse_address(caller_str) {
-                    let cost_wei = (cost * 1_000_000_000_000_000_000f64) as u128;
-                    if cost_wei > 0 {
+                && let Ok(caller_addr) = parse_address(caller_str)
+                    && cost_wei > 0 {
                         let provider_addr = if let Some(registry) = node.identity_registry() {
                             let all = registry.list_all();
                             if let Some((_, identity)) = all.first() {
@@ -11782,11 +13109,10 @@ async fn handle_chat_rich(
                         };
                         if provider_addr != Address::default()
                             && let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
-                                tracing::warn!(caller = %caller_str, cost_tnzo = cost,
+                                tracing::warn!(caller = %caller_str, cost_wei = %cost_wei,
                                     "Rich-chat billing failed: {}", e);
                             }
                     }
-                }
 
         // Map the inferred string stop reason onto the typed enum.
         let stop_reason = map_stop_reason(&inferred_stop_reason);
@@ -11835,7 +13161,7 @@ async fn handle_chat_rich(
             "stop_reason": stop_reason,
             "stop_sequence": serde_json::Value::Null,
             "usage": usage,
-            "cost": cost,
+            "cost_wei": cost_wei.to_string(),
             "location": "local",
             "load": node.load_tracker.snapshot(&model_id).map(|s| {
                 serde_json::json!({
@@ -12459,19 +13785,23 @@ async fn handle_openai_chat_completions(
                     let data = format!("data: {}\n\n", serde_json::to_string(&final_chunk).unwrap_or_default());
                     yield Ok::<_, std::convert::Infallible>(Event::default().data(data));
 
-                    // Emit usage event with cost
+                    // Emit usage event with cost (wei)
                     // Scope the RwLock guard so it doesn't live across yield
                     let usage_data = {
                         let pricing = node_clone.provider_pricing.read();
-                        let cost = (result.input_tokens as f64 * pricing.input_price_per_token)
-                            + (result.output_tokens as f64 * pricing.output_price_per_token);
+                        let cost_wei = (result.input_tokens as u128)
+                            .saturating_mul(pricing.input_price_per_token_wei)
+                            .saturating_add(
+                                (result.output_tokens as u128)
+                                    .saturating_mul(pricing.output_price_per_token_wei),
+                            );
                         serde_json::json!({
                             "usage": {
                                 "prompt_tokens": result.input_tokens,
                                 "completion_tokens": result.output_tokens,
                                 "total_tokens": result.input_tokens + result.output_tokens,
                             },
-                            "cost_tnzo": cost,
+                            "cost_wei": cost_wei.to_string(),
                             "generation_time_ms": result.generation_time_ms,
                             "tokens_per_second": result.tokens_per_second,
                         })
@@ -12492,8 +13822,12 @@ async fn handle_openai_chat_completions(
             match model_runtime.generate_chat(&model_id, &chat_messages, &config).await {
                 Ok(result) => {
                     let pricing = node.provider_pricing.read();
-                    let cost = (result.input_tokens as f64 * pricing.input_price_per_token)
-                        + (result.output_tokens as f64 * pricing.output_price_per_token);
+                    let cost_wei = (result.input_tokens as u128)
+                        .saturating_mul(pricing.input_price_per_token_wei)
+                        .saturating_add(
+                            (result.output_tokens as u128)
+                                .saturating_mul(pricing.output_price_per_token_wei),
+                        );
 
                     let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
@@ -12518,7 +13852,7 @@ async fn handle_openai_chat_completions(
                             "completion_tokens": result.output_tokens,
                             "total_tokens": result.input_tokens + result.output_tokens,
                         },
-                        "cost_tnzo": cost,
+                        "cost_wei": cost_wei.to_string(),
                         "generation_time_ms": result.generation_time_ms,
                         "tokens_per_second": result.tokens_per_second,
                     }))
@@ -13076,18 +14410,21 @@ pub async fn handle_chat_stream_rich(
         });
         yield sse_event!("message_delta", delta_payload);
 
-        // ── billing — same flow as the non-streaming rich path ──────
-        let cost = {
+        // ── billing — same flow as the non-streaming rich path (wei) ─
+        let cost_wei: u128 = {
             let pricing = node_for_stream.provider_pricing.read();
-            (result.input_tokens as f64 * pricing.input_price_per_token)
-                + (result.output_tokens as f64 * pricing.output_price_per_token)
+            (result.input_tokens as u128)
+                .saturating_mul(pricing.input_price_per_token_wei)
+                .saturating_add(
+                    (result.output_tokens as u128)
+                        .saturating_mul(pricing.output_price_per_token_wei),
+                )
         };
 
         if let Some(token) = node_for_stream.token()
             && let Some(caller_str) = caller_address.as_deref()
-                && let Ok(caller_addr) = parse_address(caller_str) {
-                    let cost_wei = (cost * 1_000_000_000_000_000_000f64) as u128;
-                    if cost_wei > 0 {
+                && let Ok(caller_addr) = parse_address(caller_str)
+                    && cost_wei > 0 {
                         let provider_addr = if let Some(registry) =
                             node_for_stream.identity_registry()
                         {
@@ -13104,11 +14441,10 @@ pub async fn handle_chat_stream_rich(
                             && let Err(e) =
                                 token.transfer(&caller_addr, &provider_addr, cost_wei)
                             {
-                                tracing::warn!(caller = %caller_str, cost_tnzo = cost,
+                                tracing::warn!(caller = %caller_str, cost_wei = %cost_wei,
                                     "Rich-stream billing failed: {}", e);
                             }
                     }
-                }
 
         node_for_stream.metrics().record_inference();
         node_for_stream.touch_local_model_service(&model_id_for_stream);
@@ -13417,10 +14753,7 @@ async fn handle_vote(
             .map(|s| s.amount)
             .unwrap_or(0)
     } else {
-        params.get("voting_power")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u128)
-            .unwrap_or(1)
+        parse_u128_amount(&params, "voting_power").unwrap_or(1)
     };
 
     let governance = node.governance().ok_or_else(|| JsonRpcError {
@@ -13503,10 +14836,7 @@ async fn handle_create_payment_challenge(
         .and_then(|v| v.as_str())
         .unwrap_or("/api/resource");
 
-    let amount = params.get("amount")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u128)
-        .unwrap_or(0);
+    let amount = parse_u128_amount(&params, "amount").unwrap_or(0);
 
     let asset = params.get("asset")
         .and_then(|v| v.as_str())
@@ -13797,21 +15127,15 @@ async fn handle_stake(
         params
     };
 
-    let amount: u128 = if let Some(n) = params.get("amount").and_then(|v| v.as_u64()) {
-        n as u128 * 1_000_000_000_000_000_000u128 // Convert whole TNZO to 18-decimal units
-    } else if let Some(n) = params.get("amount").and_then(|v| v.as_f64()) {
-        (n * 1_000_000_000_000_000_000f64) as u128
-    } else if let Some(s) = params.get("amount").and_then(|v| v.as_str()) {
-        let f: f64 = s.parse().unwrap_or(0.0);
-        (f * 1_000_000_000_000_000_000f64) as u128
-    } else {
-        0
-    };
+    // Amount is denominated in **wei** (base units, 10^-18 TNZO). Decimal string
+    // is canonical (full u128 range); a u64 number is accepted as a convenience
+    // for small values. Floats are rejected to avoid silent precision loss.
+    let amount: u128 = parse_u128_amount(&params, "amount").unwrap_or(0);
 
     if amount == 0 {
         return Err(JsonRpcError {
             code: -32602,
-            message: "Invalid or zero stake amount".to_string(),
+            message: "Invalid or zero stake amount (wei)".to_string(),
             data: None,
         });
     }
@@ -13912,7 +15236,7 @@ async fn handle_stake(
         "stake_id": stake_id,
         "transaction_hash": tx_hash,
         "status": "Active",
-        "amount": format!("{}", amount / 1_000_000_000_000_000_000u128),
+        "amount": amount.to_string(),
         "provider_type": provider_type_str,
     }))
 }
@@ -13992,7 +15316,7 @@ async fn handle_unstake(
 
     Ok(serde_json::json!({
         "status": "Unbonding",
-        "amount": format!("{}", stake_amount / 1_000_000_000_000_000_000u128),
+        "amount": stake_amount.to_string(),
         "unbonding_period": "7 days",
         "available_after": (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339(),
         "transaction_hash": tx_hash,
@@ -14022,14 +15346,9 @@ async fn handle_register_provider(
     let _name = params.get("name")
         .and_then(|v| v.as_str());
 
-    let stake_amount = if let Some(n) = params.get("stake").and_then(|v| v.as_u64()) {
-        n as u128 * 1_000_000_000_000_000_000u128
-    } else if let Some(s) = params.get("stake").and_then(|v| v.as_str()) {
-        let f: f64 = s.parse().unwrap_or(0.0);
-        (f * 1_000_000_000_000_000_000f64) as u128
-    } else {
-        0
-    };
+    // `stake` is denominated in **wei** (base units). Decimal string canonical;
+    // u64 number accepted as a convenience for small values.
+    let stake_amount = parse_u128_amount(&params, "stake").unwrap_or(0);
 
     let _max_concurrent = params.get("max_concurrent")
         .and_then(|v| v.as_u64())
@@ -14096,16 +15415,406 @@ async fn handle_provider_stats(
         (0u128, 0u128)
     };
 
+    // 5% notional yield on staked principal (placeholder — real yield comes from epoch reward distribution)
+    let projected_earnings_wei = total_staked / 20;
     Ok(serde_json::json!({
         "total_requests": tx_history,
         "successful": tx_history,
         "avg_latency": "45ms",
-        "total_earnings": format!("{:.6} TNZO", total_staked as f64 / 1_000_000_000_000_000_000f64 * 0.05),
-        "total_rewards": format!("{:.6} TNZO", total_rewards as f64 / 1_000_000_000_000_000_000f64),
+        "total_earnings_wei": projected_earnings_wei.to_string(),
+        "total_rewards_wei": total_rewards.to_string(),
         "max_concurrent": 10,
         "current_active": served_models,
         "utilization": if served_models > 0 { "Active" } else { "Idle" },
         "recent_activity": [],
+    }))
+}
+
+// =====================================================================
+// Liquid staking (stTNZO)
+// =====================================================================
+//
+// These handlers expose the durable `LiquidStakingPool` wired into
+// `TenzroNode::liquid_staking_pool` at startup. Every mutation goes
+// through the pool's RocksDB write-through path under `CF_TOKENS`,
+// so deposit / withdraw / reward distributions persist across restarts.
+
+fn liquid_staking_pool(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Arc<tenzro_token::LiquidStakingPool>, JsonRpcError> {
+    node.liquid_staking_pool()
+        .cloned()
+        .ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: "Liquid staking pool not initialized".to_string(),
+            data: None,
+        })
+}
+
+fn primary_wallet_address(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Address, JsonRpcError> {
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+    let all = registry.list_all();
+    let (_, identity) = all.first().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "No identity registered on this node".to_string(),
+        data: None,
+    })?;
+    Ok(identity.wallet_address)
+}
+
+fn parse_address_param(params: &Value, key: &str) -> Option<Address> {
+    let s = params.get(key).and_then(|v| v.as_str())?;
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(s).ok()?;
+    Address::from_bytes(&bytes)
+}
+
+/// Parse a u128 amount field denominated in **base units (wei)**. JSON has no
+/// native u128, so we follow the industry-standard convention used by Aptos /
+/// Sui / Tenzro internals: decimal string is the canonical form, with a u64
+/// number accepted as a convenience for small values.
+///
+/// - Decimal string `"100000000000000000000000"` → u128 (full range)
+/// - JSON integer `1000000` → u128 (capped at u64::MAX = ~1.8e19 wei ≈ 18.4 TNZO)
+/// - Anything else → `None`
+///
+/// Floats are rejected explicitly (precision loss above 2^53). Returns `None`
+/// when the field is absent or unparseable so the caller can decide whether
+/// missing means error or default.
+fn parse_u128_amount(params: &Value, key: &str) -> Option<u128> {
+    let v = params.get(key)?;
+    if let Some(s) = v.as_str() {
+        return s.parse::<u128>().ok();
+    }
+    v.as_u64().map(|n| n as u128)
+}
+
+async fn handle_liquid_staking_deposit(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+
+    // `amount` is denominated in **wei** (TNZO base units). Decimal string
+    // canonical; u64 accepted for small values.
+    let amount = parse_u128_amount(&params, "amount").unwrap_or(0);
+    if amount == 0 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Invalid or zero deposit amount (wei)".to_string(),
+            data: None,
+        });
+    }
+
+    let depositor = parse_address_param(&params, "depositor")
+        .map(Ok)
+        .unwrap_or_else(|| primary_wallet_address(node))?;
+
+    let pool = liquid_staking_pool(node)?;
+
+    // Debit the underlying TNZO from the depositor's account before minting
+    // stTNZO so the liquid-staking pool actually owns the underlying. This is
+    // the same model native staking uses (StakingManager::stake debits the
+    // staker via the token ledger).
+    if let Some(token) = node.token() {
+        token
+            .transfer(&depositor, &Address::default(), amount)
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Underlying TNZO debit failed: {}", e),
+                data: None,
+            })?;
+    }
+
+    let sttnzo_minted = pool.deposit(depositor, amount).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Liquid staking deposit failed: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "depositor": format!("0x{}", hex::encode(depositor.as_bytes())),
+        "tnzo_amount": amount.to_string(),
+        "sttnzo_minted": sttnzo_minted.to_string(),
+        "exchange_rate": pool.exchange_rate().to_string(),
+    }))
+}
+
+async fn handle_liquid_staking_request_withdrawal(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+
+    // `sttnzo_amount` is denominated in **stTNZO base units** (10^-18 stTNZO).
+    // Decimal string canonical; u64 accepted for small values.
+    let sttnzo_amount = parse_u128_amount(&params, "sttnzo_amount").unwrap_or(0);
+    if sttnzo_amount == 0 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Invalid or zero stTNZO amount (base units)".to_string(),
+            data: None,
+        });
+    }
+
+    let requester = parse_address_param(&params, "requester")
+        .map(Ok)
+        .unwrap_or_else(|| primary_wallet_address(node))?;
+
+    let pool = liquid_staking_pool(node)?;
+
+    let request = pool.request_withdrawal(requester, sttnzo_amount).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Liquid staking withdrawal request failed: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "request_id": request.request_id,
+        "requester": format!("0x{}", hex::encode(request.requester.as_bytes())),
+        "sttnzo_amount": request.sttnzo_amount.to_string(),
+        "tnzo_amount": request.tnzo_amount.to_string(),
+        "unbonding_complete_at": request.unbonding_complete_at.0,
+    }))
+}
+
+async fn handle_liquid_staking_claim_withdrawal(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+
+    let request_id = params
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing request_id".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let pool = liquid_staking_pool(node)?;
+
+    let (recipient, tnzo_amount) = pool.claim_withdrawal(&request_id).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Liquid staking claim failed: {}", e),
+        data: None,
+    })?;
+
+    // Credit the underlying TNZO back to the recipient. The pool burned
+    // stTNZO and decremented total_underlying_wei; we mirror that on the
+    // ledger side by minting via the same path the staking manager uses
+    // for unbonding payouts (transfer from null sentinel).
+    if let Some(token) = node.token() {
+        if let Err(e) = token.transfer(&Address::default(), &recipient, tnzo_amount) {
+            warn!(
+                "Liquid claim payout: token.transfer(default→recipient) failed: {} (request_id={}, amount={})",
+                e, request_id, tnzo_amount
+            );
+        }
+    }
+
+    Ok(serde_json::json!({
+        "request_id": request_id,
+        "recipient": format!("0x{}", hex::encode(recipient.as_bytes())),
+        "tnzo_amount": tnzo_amount.to_string(),
+    }))
+}
+
+async fn handle_liquid_staking_distribute_rewards(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+
+    // `reward_amount` is denominated in **wei** (TNZO base units).
+    let reward_amount = parse_u128_amount(&params, "reward_amount").unwrap_or(0);
+    if reward_amount == 0 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Invalid or zero reward amount (wei)".to_string(),
+            data: None,
+        });
+    }
+
+    let pool = liquid_staking_pool(node)?;
+
+    let dist = pool.distribute_rewards(reward_amount).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Liquid staking reward distribution failed: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "total_reward": dist.total_reward.to_string(),
+        "staker_share": dist.staker_share.to_string(),
+        "protocol_fee": dist.protocol_fee.to_string(),
+        "new_exchange_rate": dist.new_exchange_rate.to_string(),
+    }))
+}
+
+async fn handle_liquid_staking_stats(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let pool = liquid_staking_pool(node)?;
+    let stats = pool.stats();
+    Ok(serde_json::json!({
+        "total_sttnzo_supply": stats.total_sttnzo_supply.to_string(),
+        "total_underlying_wei": stats.total_underlying_wei.to_string(),
+        "exchange_rate": stats.exchange_rate.to_string(),
+        "total_protocol_fees": stats.total_protocol_fees.to_string(),
+        "total_rewards_distributed": stats.total_rewards_distributed.to_string(),
+        "holder_count": stats.holder_count,
+        "pending_withdrawals": stats.pending_withdrawals,
+    }))
+}
+
+async fn handle_liquid_staking_balance_of(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.unwrap_or(serde_json::json!({}));
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+
+    let address = parse_address_param(&params, "address")
+        .map(Ok)
+        .unwrap_or_else(|| primary_wallet_address(node))?;
+
+    let pool = liquid_staking_pool(node)?;
+    let bal = pool.balance_of(&address);
+
+    Ok(serde_json::json!({
+        "address": format!("0x{}", hex::encode(address.as_bytes())),
+        "sttnzo_balance": bal.to_string(),
+    }))
+}
+
+async fn handle_liquid_staking_pending_withdrawals(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.unwrap_or(serde_json::json!({}));
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+
+    let holder = parse_address_param(&params, "holder")
+        .map(Ok)
+        .unwrap_or_else(|| primary_wallet_address(node))?;
+
+    let pool = liquid_staking_pool(node)?;
+    let requests = pool.pending_withdrawals_for(&holder);
+
+    let arr: Vec<Value> = requests
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "request_id": r.request_id,
+                "requester": format!("0x{}", hex::encode(r.requester.as_bytes())),
+                "sttnzo_amount": r.sttnzo_amount.to_string(),
+                "tnzo_amount": r.tnzo_amount.to_string(),
+                "unbonding_complete_at": r.unbonding_complete_at.0,
+                "claimed": r.claimed,
+            })
+        })
+        .collect();
+
+    Ok(Value::Array(arr))
+}
+
+async fn handle_liquid_staking_transfer(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+
+    let from = parse_address_param(&params, "from")
+        .map(Ok)
+        .unwrap_or_else(|| primary_wallet_address(node))?;
+    let to = parse_address_param(&params, "to").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing or invalid 'to' address".to_string(),
+        data: None,
+    })?;
+    // `amount` is denominated in **stTNZO base units** (10^-18 stTNZO).
+    let amount = parse_u128_amount(&params, "amount").unwrap_or(0);
+    if amount == 0 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Invalid or zero transfer amount (base units)".to_string(),
+            data: None,
+        });
+    }
+
+    let pool = liquid_staking_pool(node)?;
+    pool.transfer(&from, &to, amount).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("stTNZO transfer failed: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "from": format!("0x{}", hex::encode(from.as_bytes())),
+        "to": format!("0x{}", hex::encode(to.as_bytes())),
+        "amount": amount.to_string(),
     }))
 }
 
@@ -14144,18 +15853,17 @@ async fn handle_list_accounts(
     let accounts: Vec<Value> = identity_info
         .iter()
         .map(|(did, name, wallet_type, address, wallet_addr)| {
-            let balance = if let Some(token) = node.token() {
-                let b = token.balance_of(wallet_addr);
-                format!("{:.6} TNZO", b as f64 / 1_000_000_000_000_000_000f64)
+            let balance_wei = if let Some(token) = node.token() {
+                token.balance_of(wallet_addr)
             } else {
-                "0.000000 TNZO".to_string()
+                0u128
             };
 
             serde_json::json!({
                 "name": name,
                 "address": address,
                 "wallet_type": wallet_type,
-                "balance": balance,
+                "balance_wei": balance_wei.to_string(),
                 "did": did,
             })
         })
@@ -15043,7 +16751,7 @@ async fn handle_post_task(
     })?;
     let poster = parse_address(poster_hex)?;
 
-    let max_price = params.get("max_price").and_then(|v| v.as_u64()).unwrap_or(0) as u128;
+    let max_price = parse_u128_amount(&params, "max_price").unwrap_or(0);
     let input = params.get("input").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
     let task_type = match params.get("task_type").and_then(|v| v.as_str()).unwrap_or("inference") {
@@ -15328,7 +17036,7 @@ async fn handle_quote_task(
         });
     }
 
-    let price = params.get("price").and_then(|v| v.as_u64()).unwrap_or(task.max_price as u64) as u128;
+    let price = parse_u128_amount(&params, "price").unwrap_or(task.max_price);
     let model_id = params.get("model_id").and_then(|v| v.as_str()).unwrap_or("any").to_string();
     let confidence = params.get("confidence").and_then(|v| v.as_u64()).unwrap_or(80) as u8;
     let estimated_duration_secs = params.get("estimated_duration_secs").and_then(|v| v.as_u64()).unwrap_or(60);
@@ -15406,8 +17114,8 @@ async fn handle_assign_task(
 
     task.status = TaskStatus::Assigned;
     task.assignee = Some(provider);
-    if let Some(price) = params.get("quoted_price").and_then(|v| v.as_u64()) {
-        task.quoted_price = Some(price as u128);
+    if let Some(price) = parse_u128_amount(&params, "quoted_price") {
+        task.quoted_price = Some(price);
     }
 
     let updated = serde_json::to_vec(&task).map_err(|e| JsonRpcError {
@@ -16947,10 +18655,9 @@ async fn handle_update_skill(
     if let Some(v) = params.get("description").and_then(|v| v.as_str()) { skill.description = v.to_string(); }
     if let Some(v) = params.get("version").and_then(|v| v.as_str()) { skill.version = v.to_string(); }
     if let Some(v) = params.get("creator_did").and_then(|v| v.as_str()) { skill.creator_did = v.to_string(); }
-    if let Some(v) = params.get("price_per_call")
-        && let Some(price) = v.as_u64() {
-            skill.price_per_call = price as u128;
-        }
+    if let Some(price) = parse_u128_amount(&params, "price_per_call") {
+        skill.price_per_call = price;
+    }
     if let Some(v) = params.get("status").and_then(|v| v.as_str()) {
         skill.status = match v {
             "active" => tenzro_types::SkillStatus::Active,
@@ -17897,24 +19604,39 @@ async fn handle_fund_agent(
             data: None,
         })?;
 
-    // Amount in TNZO (not atto); we convert to atto-TNZO (×10^18)
-    let amount_tnzo: f64 = params.get("amount_tnzo")
-        .and_then(|v| v.as_f64())
-        .ok_or_else(|| JsonRpcError {
+    // Amount in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.
+    let amount_wei: u128 = match params.get("amount_wei") {
+        Some(v) => {
+            if let Some(n) = v.as_u64() {
+                n as u128
+            } else if let Some(s) = v.as_str() {
+                s.parse::<u128>().map_err(|_| JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid amount_wei: '{}' is not a valid u128", s),
+                    data: None,
+                })?
+            } else {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: "amount_wei must be a u64 number or decimal string".to_string(),
+                    data: None,
+                });
+            }
+        }
+        None => return Err(JsonRpcError {
             code: -32602,
-            message: "Missing or invalid amount_tnzo".to_string(),
+            message: "Missing amount_wei".to_string(),
             data: None,
-        })?;
+        }),
+    };
 
-    if amount_tnzo <= 0.0 {
+    if amount_wei == 0 {
         return Err(JsonRpcError {
             code: -32602,
-            message: "amount_tnzo must be positive".to_string(),
+            message: "amount_wei must be positive".to_string(),
             data: None,
         });
     }
-
-    let amount_wei: u128 = (amount_tnzo * 1e18) as u128;
 
     // Look up the agent's wallet address from the runtime
     let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
@@ -17957,8 +19679,7 @@ async fn handle_fund_agent(
     info!(
         agent_id = %agent_id,
         from = %from_address_hex,
-        amount_tnzo = amount_tnzo,
-        amount_wei = amount_wei,
+        amount_wei = %amount_wei,
         "Funded agent wallet"
     );
 
@@ -17966,10 +19687,8 @@ async fn handle_fund_agent(
         "agent_id": agent_id,
         "agent_wallet": agent_wallet,
         "from_address": from_address_hex,
-        "amount_tnzo": amount_tnzo,
         "amount_wei": amount_wei.to_string(),
         "new_balance_wei": new_balance.to_string(),
-        "new_balance_tnzo": new_balance as f64 / 1e18,
         "success": true,
     }))
 }
@@ -18201,7 +19920,7 @@ async fn handle_swap_token(
 ///   message: string — prompt text
 ///   max_tokens: u64 (optional, default 512)
 ///   temperature: f64 (optional, default 0.7)
-///   max_cost_tnzo: f64 (optional, default 10.0) — spending cap for this call
+///   max_cost_wei: decimal string (optional, default "10000000000000000000" = 10 TNZO) — spending cap for this call in wei
 async fn handle_agent_payment_pipeline(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -18245,7 +19964,22 @@ async fn handle_agent_payment_pipeline(
 
     let max_tokens = params.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(512) as u32;
     let temperature = params.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7);
-    let max_cost_tnzo = params.get("max_cost_tnzo").and_then(|v| v.as_f64()).unwrap_or(10.0);
+    // Spending cap in wei. Default 10 TNZO = 10 * 10^18 wei.
+    let max_cost_wei: u128 = match params.get("max_cost_wei") {
+        Some(v) => {
+            let s = v.as_str().ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "'max_cost_wei' must be a decimal string".to_string(),
+                data: None,
+            })?;
+            s.parse().map_err(|_| JsonRpcError {
+                code: -32602,
+                message: "'max_cost_wei' must be a non-negative integer decimal string".to_string(),
+                data: None,
+            })?
+        }
+        None => 10_000_000_000_000_000_000u128, // 10 TNZO
+    };
 
     // --- 2. Resolve agent identity & wallet ---
     let identity_registry = node.identity_registry().ok_or_else(|| JsonRpcError {
@@ -18277,19 +20011,17 @@ async fn handle_agent_payment_pipeline(
     })?;
 
     let agent_balance = token.balance_of(&agent_address);
-    let max_cost_wei = (max_cost_tnzo * 1_000_000_000_000_000_000f64) as u128;
 
     if agent_balance < max_cost_wei {
         return Err(JsonRpcError {
             code: -32000,
             message: format!(
-                "Agent balance insufficient: has {} atto-TNZO, needs at least {} atto-TNZO (max_cost_tnzo={})",
-                agent_balance, max_cost_wei, max_cost_tnzo
+                "Agent balance insufficient: has {} wei, needs at least {} wei",
+                agent_balance, max_cost_wei
             ),
             data: Some(serde_json::json!({
                 "agent_balance_wei": agent_balance.to_string(),
                 "required_wei": max_cost_wei.to_string(),
-                "max_cost_tnzo": max_cost_tnzo,
             })),
         });
     }
@@ -18400,25 +20132,26 @@ async fn handle_agent_payment_pipeline(
         });
     };
 
-    // --- 6. Calculate cost & deduct payment ---
+    // --- 6. Calculate cost & deduct payment (wei) ---
     let pricing = node.provider_pricing.read();
-    let cost_tnzo = (input_tokens as f64 * pricing.input_price_per_token)
-        + (output_tokens as f64 * pricing.output_price_per_token);
+    let cost_wei: u128 = (input_tokens as u128)
+        .saturating_mul(pricing.input_price_per_token_wei)
+        .saturating_add(
+            (output_tokens as u128).saturating_mul(pricing.output_price_per_token_wei),
+        );
     drop(pricing);
-
-    let cost_wei = (cost_tnzo * 1_000_000_000_000_000_000f64) as u128;
 
     // Enforce spending cap
     if cost_wei > max_cost_wei {
         return Err(JsonRpcError {
             code: -32000,
             message: format!(
-                "Inference cost ({} TNZO) exceeds max_cost_tnzo ({})",
-                cost_tnzo, max_cost_tnzo
+                "Inference cost ({} wei) exceeds max_cost_wei ({})",
+                cost_wei, max_cost_wei
             ),
             data: Some(serde_json::json!({
-                "cost_tnzo": cost_tnzo,
-                "max_cost_tnzo": max_cost_tnzo,
+                "cost_wei": cost_wei.to_string(),
+                "max_cost_wei": max_cost_wei.to_string(),
             })),
         });
     }
@@ -18494,7 +20227,7 @@ async fn handle_agent_payment_pipeline(
         model = %model_id,
         input_tokens = input_tokens,
         output_tokens = output_tokens,
-        cost_tnzo = cost_tnzo,
+        cost_wei = %cost_wei,
         payment_success = payment_success,
         "Agent autonomous inference + payment pipeline completed"
     );
@@ -18511,7 +20244,6 @@ async fn handle_agent_payment_pipeline(
             "total_tokens": input_tokens + output_tokens,
         },
         "payment": {
-            "cost_tnzo": cost_tnzo,
             "cost_wei": cost_wei.to_string(),
             "protocol_fee_wei": protocol_fee_wei.to_string(),
             "protocol_fee_bps": protocol_fee_bps,
@@ -18883,14 +20615,13 @@ async fn handle_get_token_balance(
     let address = parse_address(addr_str)?;
     let native_balance = token.balance_of(&address);
     let spl_balance = tenzro_token::native_to_spl(native_balance).unwrap_or(0);
-    let display = native_balance as f64 / 1e18;
 
     Ok(serde_json::json!({
         "address": addr_str,
-        "native": { "balance": native_balance.to_string(), "decimals": 18, "display": format!("{:.6} TNZO", display) },
-        "evm_wtnzo": { "balance": native_balance.to_string(), "decimals": 18 },
-        "svm_wtnzo": { "balance": spl_balance.to_string(), "decimals": 9 },
-        "daml_holding": { "amount": format!("{:.18}", display) }
+        "native": { "balance_wei": native_balance.to_string(), "decimals": 18 },
+        "evm_wtnzo": { "balance_wei": native_balance.to_string(), "decimals": 18 },
+        "svm_wtnzo": { "balance_base_units": spl_balance.to_string(), "decimals": 9 },
+        "daml_holding": { "amount_wei": native_balance.to_string(), "decimals": 18 }
     }))
 }
 
@@ -21040,6 +22771,373 @@ async fn handle_verify_zk_proof(
             }))
         }
     }
+}
+
+// ----------------------------------------------------------------------------
+// Hybrid ZK-in-TEE admission handlers
+// ----------------------------------------------------------------------------
+//
+// `tenzro_createTeeZkProof` and `tenzro_verifyTeeZkProof` expose the full
+// hybrid execution model: a Plonky3 STARK proof is bundled with a TEE
+// attestation report and (optionally) an Ed25519 signature over the
+// commitment hash. Verification runs three independent checks and
+// rejects the proof unless ALL pass:
+//
+//   1. Plonky3 STARK verification against the named AIR
+//      (`verify_tee_zk_proof`)
+//   2. Enclave-key signature over the commitment hash, when present
+//      (`verify_tee_zk_signature`)
+//   3. Hardware attestation chain — vendor cert chain, TCB version,
+//      report age — via `tenzro_tee::AttestationVerifier::verify_report`
+//
+// The pure cryptographic helpers are in `tenzro_zk::tee_integration`;
+// hardware attestation verification is in `tenzro_tee::AttestationVerifier`.
+// This handler is the only place that combines all three layers.
+
+fn parse_tee_vendor(raw: &str) -> std::result::Result<tenzro_types::tee::TeeVendor, JsonRpcError> {
+    use tenzro_types::tee::TeeVendor;
+    match raw.to_lowercase().as_str() {
+        "intel-tdx" | "tdx" | "intel_tdx" => Ok(TeeVendor::IntelTdx),
+        "intel-sgx" | "sgx" | "intel_sgx" => Ok(TeeVendor::IntelSGX),
+        "amd-sev-snp" | "sev-snp" | "amd_sev_snp" | "sev_snp" => Ok(TeeVendor::AmdSevSnp),
+        "amd-sev" | "amd_sev" => Ok(TeeVendor::AMDSEV),
+        "aws-nitro" | "nitro" | "aws_nitro" => Ok(TeeVendor::AWSNitro),
+        "nvidia-gpu" | "nvidia" | "nvidia_gpu" => Ok(TeeVendor::NvidiaGpu),
+        other => Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "Unknown TEE vendor: {other} (expected intel-tdx | amd-sev-snp | aws-nitro | nvidia-gpu)"
+            ),
+            data: None,
+        }),
+    }
+}
+
+/// Generate a hybrid ZK-in-TEE proof bundling a Plonky3 STARK with a TEE
+/// attestation report and (optionally) signing it with an Ed25519 enclave key.
+///
+/// Params (object or `[object]`):
+///   - `circuit_id`: "inference" | "settlement" | "identity"
+///   - `vendor`: TEE vendor string (intel-tdx | amd-sev-snp | aws-nitro | nvidia-gpu)
+///   - witness fields per circuit (same as `tenzro_createZkProof`)
+///   - `signing_seed`: optional 32-byte hex seed; when present the bundle is
+///     signed with the corresponding Ed25519 key. The matching public key
+///     is embedded in the returned `signing_public_key` field.
+///
+/// Returns the serialised `TeeZkProof` plus its commitment hash.
+async fn handle_create_tee_zk_proof(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_zk::{
+        KoalaBear, PrimeCharacteristicRing, TeeZkProof, generate_tee_zk_proof,
+        sign_tee_zk_proof,
+    };
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+
+    let circuit_id = params
+        .get("circuit_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "circuit_id is required (\"inference\", \"settlement\", or \"identity\")"
+                .to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let vendor_str = params
+        .get("vendor")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "vendor is required (intel-tdx | amd-sev-snp | aws-nitro | nvidia-gpu)"
+                .to_string(),
+            data: None,
+        })?;
+    let vendor = parse_tee_vendor(vendor_str)?;
+
+    fn read_u64(v: &Value, key: &str) -> std::result::Result<u64, JsonRpcError> {
+        v.get(key)
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!("Missing or non-numeric field: {key}"),
+                data: None,
+            })
+    }
+
+    let bundle: TeeZkProof = match circuit_id.as_str() {
+        "inference" => {
+            use tenzro_zk::{InferenceAir, generate_inference_trace, inference_public_inputs};
+            let model = KoalaBear::from_u64(read_u64(&params, "model_checksum")?);
+            let input = KoalaBear::from_u64(read_u64(&params, "input_checksum")?);
+            let output = KoalaBear::from_u64(read_u64(&params, "computed_output")?);
+            let trace = generate_inference_trace(model, input, output, 1 << 3);
+            let pis = inference_public_inputs(model, input, output);
+            generate_tee_zk_proof(&InferenceAir, trace, pis, "inference", vendor).map_err(
+                |e| JsonRpcError {
+                    code: -32000,
+                    message: format!("generate_tee_zk_proof failed: {e}"),
+                    data: None,
+                },
+            )?
+        }
+        "settlement" => {
+            use tenzro_zk::{SettlementAir, generate_settlement_trace, settlement_public_inputs};
+            let payer_balance = KoalaBear::from_u64(read_u64(&params, "payer_balance")?);
+            let service_proof = KoalaBear::from_u64(read_u64(&params, "service_proof")?);
+            let nonce = KoalaBear::from_u64(read_u64(&params, "nonce")?);
+            let prev_nonce = KoalaBear::from_u64(read_u64(&params, "prev_nonce")?);
+            let amount = KoalaBear::from_u64(read_u64(&params, "amount")?);
+            let trace = generate_settlement_trace(
+                payer_balance,
+                service_proof,
+                nonce,
+                prev_nonce,
+                amount,
+                1 << 3,
+            );
+            let pis = settlement_public_inputs(service_proof, amount);
+            generate_tee_zk_proof(&SettlementAir, trace, pis, "settlement", vendor).map_err(
+                |e| JsonRpcError {
+                    code: -32000,
+                    message: format!("generate_tee_zk_proof failed: {e}"),
+                    data: None,
+                },
+            )?
+        }
+        "identity" => {
+            use tenzro_zk::{IdentityAir, generate_identity_trace, identity_public_inputs};
+            let private_key = KoalaBear::from_u64(read_u64(&params, "private_key")?);
+            let capabilities = KoalaBear::from_u64(read_u64(&params, "capabilities")?);
+            let capability_blinding = KoalaBear::from_u64(read_u64(&params, "capability_blinding")?);
+            let actual_reputation = KoalaBear::from_u64(read_u64(&params, "actual_reputation")?);
+            let minimum_reputation = KoalaBear::from_u64(read_u64(&params, "minimum_reputation")?);
+            let trace = generate_identity_trace(
+                private_key,
+                capabilities,
+                capability_blinding,
+                actual_reputation,
+                minimum_reputation,
+                1 << 3,
+            );
+            let pis = identity_public_inputs(private_key, capabilities, capability_blinding);
+            generate_tee_zk_proof(&IdentityAir, trace, pis, "identity", vendor).map_err(|e| {
+                JsonRpcError {
+                    code: -32000,
+                    message: format!("generate_tee_zk_proof failed: {e}"),
+                    data: None,
+                }
+            })?
+        }
+        other => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "Unknown circuit_id: {other} (expected \"inference\", \"settlement\", or \"identity\")"
+                ),
+                data: None,
+            });
+        }
+    };
+
+    // Optional Ed25519 signing using a 32-byte hex seed.
+    let signed = match params.get("signing_seed").and_then(|v| v.as_str()) {
+        Some(seed_hex) => {
+            use tenzro_crypto::{
+                keys::{KeyPair, KeyType},
+                signatures::Ed25519SignerImpl,
+            };
+            let seed_bytes = hex::decode(seed_hex.strip_prefix("0x").unwrap_or(seed_hex))
+                .map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid signing_seed hex: {e}"),
+                    data: None,
+                })?;
+            if seed_bytes.len() != 32 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!(
+                        "signing_seed must be 32 bytes, got {}",
+                        seed_bytes.len()
+                    ),
+                    data: None,
+                });
+            }
+            let kp = KeyPair::from_bytes(KeyType::Ed25519, &seed_bytes).map_err(|e| {
+                JsonRpcError {
+                    code: -32000,
+                    message: format!("KeyPair::from_bytes failed: {e}"),
+                    data: None,
+                }
+            })?;
+            let signer = Ed25519SignerImpl::new(kp).map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Ed25519SignerImpl::new failed: {e}"),
+                data: None,
+            })?;
+            sign_tee_zk_proof(bundle, &signer).map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("sign_tee_zk_proof failed: {e}"),
+                data: None,
+            })?
+        }
+        None => bundle,
+    };
+
+    let commitment = signed.commitment_hash();
+
+    Ok(serde_json::json!({
+        "tee_zk_proof": signed,
+        "commitment_hash": format!("0x{}", hex::encode(&commitment)),
+        "circuit_id": circuit_id,
+        "vendor": vendor_str,
+        "signed": !signed.signature.is_empty(),
+    }))
+}
+
+/// Verify a hybrid ZK-in-TEE proof.
+///
+/// Runs three independent checks and reports each separately. The proof is
+/// admitted (`admitted: true`) only when all three pass.
+///
+/// Params (object or `[object]`):
+///   - `tee_zk_proof`: the full serialised `TeeZkProof` JSON
+///     (as returned by `tenzro_createTeeZkProof`)
+///   - `require_signature`: optional bool (default false). When true, the
+///     proof must carry an enclave-key signature that verifies; when
+///     false, signature verification is skipped iff no signature is
+///     present.
+///   - `require_attestation`: optional bool (default true). When true, the
+///     hardware attestation chain must verify; when false, attestation is
+///     skipped (useful only for circuit-level testing).
+async fn handle_verify_tee_zk_proof(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_tee::AttestationVerifier;
+    use tenzro_zk::{
+        IdentityAir, InferenceAir, SettlementAir, TeeZkProof, verify_tee_zk_proof,
+        verify_tee_zk_signature,
+    };
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+
+    let proof_value = params
+        .get("tee_zk_proof")
+        .cloned()
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "tee_zk_proof is required".to_string(),
+            data: None,
+        })?;
+    let bundle: TeeZkProof = serde_json::from_value(proof_value).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid tee_zk_proof JSON: {e}"),
+        data: None,
+    })?;
+
+    let require_signature = params
+        .get("require_signature")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let require_attestation = params
+        .get("require_attestation")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let circuit_id = bundle.zk_proof.circuit_id.clone();
+
+    // 1. Plonky3 STARK verification — dispatch by circuit_id.
+    let plonky3_valid = match circuit_id.as_str() {
+        "inference" => verify_tee_zk_proof(&InferenceAir, &bundle).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("verify_tee_zk_proof failed: {e}"),
+            data: None,
+        })?,
+        "settlement" => verify_tee_zk_proof(&SettlementAir, &bundle).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("verify_tee_zk_proof failed: {e}"),
+            data: None,
+        })?,
+        "identity" => verify_tee_zk_proof(&IdentityAir, &bundle).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("verify_tee_zk_proof failed: {e}"),
+            data: None,
+        })?,
+        other => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "Unknown circuit_id: {other} (expected \"inference\", \"settlement\", or \"identity\")"
+                ),
+                data: None,
+            });
+        }
+    };
+
+    // 2. Signature verification — bound to the commitment hash.
+    let signature_present = !bundle.signature.is_empty();
+    let signature_valid = if signature_present {
+        verify_tee_zk_signature(&bundle).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("verify_tee_zk_signature failed: {e}"),
+            data: None,
+        })?
+    } else if require_signature {
+        false
+    } else {
+        // Signature absent and not required — pass.
+        true
+    };
+
+    // 3. Hardware attestation chain.
+    let (attestation_valid, attestation_error) = if require_attestation {
+        let verifier = AttestationVerifier::new();
+        match verifier.verify_report(&bundle.tee_attestation) {
+            Ok(result) => (result.valid, None),
+            Err(e) => (false, Some(e.to_string())),
+        }
+    } else {
+        (true, None)
+    };
+
+    let admitted = plonky3_valid
+        && signature_valid
+        && attestation_valid
+        && (!require_signature || signature_present);
+
+    Ok(serde_json::json!({
+        "admitted": admitted,
+        "circuit_id": circuit_id,
+        "plonky3_valid": plonky3_valid,
+        "signature_present": signature_present,
+        "signature_valid": signature_valid,
+        "attestation_valid": attestation_valid,
+        "attestation_error": attestation_error,
+        "vendor": format!("{:?}", bundle.tee_attestation.vendor),
+        "commitment_hash": format!("0x{}", hex::encode(bundle.commitment_hash())),
+    }))
 }
 
 /// Verify a VRF proof (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI).

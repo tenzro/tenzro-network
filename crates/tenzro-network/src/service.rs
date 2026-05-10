@@ -2,6 +2,7 @@
 
 use crate::{
     behaviour::{TenzroBehaviour, TenzroBehaviourEvent},
+    block_sync_proto::{BlockSyncRequest, BlockSyncResponse},
     config::NetworkConfig,
     error::{NetworkError, Result},
     gossip::{MessageDeduplicator, MessageValidation, validate_gossip_message},
@@ -17,6 +18,7 @@ use libp2p::{
     identify,
     kad::{self, QueryResult},
     ping,
+    request_response::{self, InboundRequestId, OutboundRequestId, ResponseChannel},
     swarm::SwarmEvent,
     Multiaddr, PeerId, Swarm,
 };
@@ -159,6 +161,87 @@ fn extract_ip(addr: &Multiaddr) -> Option<IpAddr> {
     None
 }
 
+/// An inbound block-sync request received from a peer.
+///
+/// The receiver MUST eventually call
+/// [`TenzroNetworkService::send_block_sync_response`] with the matching
+/// `request_id`, or the inbound stream times out and the peer scores us
+/// down. Dropping the value without responding is acceptable only on
+/// explicit reject paths (the consumer should call `send_block_sync_response`
+/// with a `BlockSyncResponse::Error(_)` variant in that case).
+#[derive(Debug)]
+pub struct InboundBlockSync {
+    pub peer: PeerId,
+    pub request_id: InboundRequestId,
+    pub request: BlockSyncRequest,
+}
+
+/// Outbound block-sync result delivered asynchronously to the issuer of
+/// `request_blocks` / `request_tip_info` / `request_block_by_hash`.
+///
+/// The `request_id` matches the one returned by the request-issuing call.
+/// `result` carries either the decoded response or a typed transport error.
+#[derive(Debug)]
+pub struct OutboundBlockSyncResult {
+    pub peer: PeerId,
+    pub request_id: OutboundRequestId,
+    pub result: std::result::Result<BlockSyncResponse, BlockSyncOutboundError>,
+}
+
+/// Connection lifecycle events surfaced by the swarm to subscribed
+/// consumers (block-sync engine, future peer-aware subsystems).
+///
+/// `Connected` fires on the first physical connection to `peer` (i.e. when
+/// `num_established == 1`), so subscribers see one logical
+/// connect/disconnect pair per peer regardless of how many TCP/QUIC
+/// connections the swarm multiplexes underneath. `Disconnected` fires only
+/// when the last connection drops (`num_established == 0`).
+///
+/// This is the canonical 2026 libp2p pattern (Lighthouse `SyncManager`,
+/// generic `SwarmEvent::ConnectionEstablished`/`ConnectionClosed` routing
+/// via `tokio::sync::mpsc::UnboundedSender`): the network event loop owns
+/// the swarm, fans out lifecycle deltas through unbounded channels, and
+/// subscribers consume them in their own `tokio::select!` loop.
+#[derive(Debug, Clone)]
+pub enum PeerEvent {
+    /// First physical connection to `peer` was established.
+    Connected(PeerId),
+    /// Last physical connection to `peer` was closed.
+    Disconnected(PeerId),
+}
+
+/// Transport-level failure modes for an outbound block-sync request.
+///
+/// These are libp2p-layer errors (timeout, connection closed, codec
+/// failure). Server-side application errors are carried inside the
+/// `BlockSyncResponse::Error` variant on a successful round-trip and do
+/// NOT surface here — callers must inspect `result.ok()` for those.
+#[derive(Debug, thiserror::Error)]
+pub enum BlockSyncOutboundError {
+    #[error("dial failure")]
+    DialFailure,
+    #[error("request timed out")]
+    Timeout,
+    #[error("connection closed")]
+    ConnectionClosed,
+    #[error("remote does not speak the block-sync protocol")]
+    UnsupportedProtocols,
+    #[error("io error: {0}")]
+    Io(String),
+}
+
+impl From<request_response::OutboundFailure> for BlockSyncOutboundError {
+    fn from(e: request_response::OutboundFailure) -> Self {
+        match e {
+            request_response::OutboundFailure::DialFailure => Self::DialFailure,
+            request_response::OutboundFailure::Timeout => Self::Timeout,
+            request_response::OutboundFailure::ConnectionClosed => Self::ConnectionClosed,
+            request_response::OutboundFailure::UnsupportedProtocols => Self::UnsupportedProtocols,
+            request_response::OutboundFailure::Io(io) => Self::Io(io.to_string()),
+        }
+    }
+}
+
 /// Network service trait
 #[async_trait]
 pub trait NetworkService: Send + Sync {
@@ -261,6 +344,47 @@ enum NetworkCommand {
     AdmittedMeshPeers {
         topic: String,
         response: oneshot::Sender<Result<usize>>,
+    },
+    /// Initiates an outbound block-sync request to `peer`. Returns the
+    /// `OutboundRequestId` synchronously; the response (or transport
+    /// failure) is delivered later through the channel registered with
+    /// `SubscribeBlockSyncResults`.
+    SendBlockSyncRequest {
+        peer: PeerId,
+        request: BlockSyncRequest,
+        response: oneshot::Sender<Result<OutboundRequestId>>,
+    },
+    /// Sends a block-sync response back to the peer that issued the
+    /// inbound request identified by `request_id`. The corresponding
+    /// `ResponseChannel` is held inside the event loop; if it has been
+    /// dropped (peer disconnected, stream timed out), the send returns
+    /// `Err(NetworkError::PeerNotFound)`.
+    SendBlockSyncResponse {
+        request_id: InboundRequestId,
+        response_payload: BlockSyncResponse,
+        response: oneshot::Sender<Result<()>>,
+    },
+    /// Subscribes to inbound block-sync requests. Only one subscriber is
+    /// supported at a time — calling twice replaces the previous channel.
+    /// Used by the node-level block-sync server to receive
+    /// `GetTipInfo` / `GetBlockRange` / `GetBlockByHash` from peers.
+    SubscribeBlockSyncRequests {
+        response: oneshot::Sender<Result<mpsc::UnboundedReceiver<InboundBlockSync>>>,
+    },
+    /// Subscribes to outbound block-sync results. Only one subscriber is
+    /// supported at a time. Used by the node-level block-sync engine to
+    /// correlate `OutboundRequestId`s returned by `SendBlockSyncRequest`
+    /// with the eventual peer response or transport error.
+    SubscribeBlockSyncResults {
+        response: oneshot::Sender<Result<mpsc::UnboundedReceiver<OutboundBlockSyncResult>>>,
+    },
+    /// Subscribes to peer connection lifecycle events. Only one subscriber
+    /// is supported at a time — calling twice replaces the previous
+    /// channel. Consumed by the block-sync engine to learn which peers it
+    /// can probe for tip info; future peer-aware subsystems (gossip
+    /// flooders, mesh-warmup gates) attach to the same stream.
+    SubscribePeerEvents {
+        response: oneshot::Sender<Result<mpsc::UnboundedReceiver<PeerEvent>>>,
     },
     Shutdown {
         response: oneshot::Sender<Result<()>>,
@@ -483,6 +607,135 @@ impl TenzroNetworkService {
         }
     }
 
+    // ---------------------------------------------------------------
+    // Block-sync API.
+    //
+    // The wire protocol (`BlockSyncRequest` / `BlockSyncResponse`) is
+    // defined in `crate::block_sync_proto`; see its module docs for the
+    // Sui `state_sync`-derived design rationale.
+    //
+    // Outbound flow:
+    //   1. Caller invokes `request_blocks(peer, start, count)` (or one
+    //      of the sibling helpers). It returns an `OutboundRequestId`.
+    //   2. Caller must have previously subscribed to results via
+    //      `subscribe_block_sync_results()`. The eventual response or
+    //      transport failure arrives on that channel keyed by the same id.
+    //
+    // Inbound flow:
+    //   1. Server-role nodes call `subscribe_block_sync_requests()` once
+    //      at startup.
+    //   2. For each `InboundBlockSync` they receive, they MUST eventually
+    //      call `send_block_sync_response(request_id, response)` — either
+    //      with a real payload or a `BlockSyncResponse::Error(_)`.
+    //      Dropping the request silently causes the peer to time out and
+    //      score us down (Lighthouse `SyncManager` confirms this is the
+    //      right contract).
+    // ---------------------------------------------------------------
+
+    /// Issues an outbound `GetBlockRange` request to `peer`. Returns the
+    /// `OutboundRequestId` synchronously; the response is delivered later
+    /// on the channel from `subscribe_block_sync_results`.
+    pub async fn request_blocks(
+        &self,
+        peer: PeerId,
+        start: tenzro_types::primitives::BlockHeight,
+        count: u32,
+    ) -> Result<OutboundRequestId> {
+        let request = BlockSyncRequest::GetBlockRange { start, count };
+        self.send_command(move |response| NetworkCommand::SendBlockSyncRequest {
+            peer,
+            request,
+            response,
+        })
+        .await
+    }
+
+    /// Issues an outbound `GetTipInfo` probe to `peer`.
+    pub async fn request_tip_info(&self, peer: PeerId) -> Result<OutboundRequestId> {
+        self.send_command(move |response| NetworkCommand::SendBlockSyncRequest {
+            peer,
+            request: BlockSyncRequest::GetTipInfo,
+            response,
+        })
+        .await
+    }
+
+    /// Issues an outbound `GetBlockByHash` request to `peer`. Used during
+    /// fork resolution (parent-lookup walk).
+    pub async fn request_block_by_hash(
+        &self,
+        peer: PeerId,
+        hash: tenzro_types::primitives::Hash,
+    ) -> Result<OutboundRequestId> {
+        self.send_command(move |response| NetworkCommand::SendBlockSyncRequest {
+            peer,
+            request: BlockSyncRequest::GetBlockByHash { hash },
+            response,
+        })
+        .await
+    }
+
+    /// Subscribes to inbound block-sync requests. The server-role node
+    /// reads from this channel, builds the appropriate response, and
+    /// answers via `send_block_sync_response(request_id, …)`.
+    ///
+    /// Calling this twice replaces the previous channel — there is one
+    /// authoritative server consumer per node.
+    pub async fn subscribe_block_sync_requests(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<InboundBlockSync>> {
+        self.send_command(|response| NetworkCommand::SubscribeBlockSyncRequests { response })
+            .await
+    }
+
+    /// Subscribes to outbound block-sync results — one item per
+    /// `OutboundRequestId` previously returned by `request_blocks` /
+    /// `request_tip_info` / `request_block_by_hash`. The result is
+    /// either a decoded `BlockSyncResponse` or a typed transport error.
+    pub async fn subscribe_block_sync_results(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<OutboundBlockSyncResult>> {
+        self.send_command(|response| NetworkCommand::SubscribeBlockSyncResults { response })
+            .await
+    }
+
+    /// Subscribes to peer connection lifecycle events. The block-sync
+    /// engine consumes this stream to populate its candidate-peer table:
+    /// `Connected` adds the peer, `Disconnected` evicts it.
+    ///
+    /// One subscriber at a time — calling twice replaces the previous
+    /// channel. The stream is unbounded; consumers MUST drain it
+    /// continuously or the network event loop will accumulate buffered
+    /// events. In practice, the consumer's own `tokio::select!` arm pulls
+    /// from this receiver alongside its other duties, which is the
+    /// canonical libp2p subscriber pattern.
+    pub async fn subscribe_peer_events(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<PeerEvent>> {
+        self.send_command(|response| NetworkCommand::SubscribePeerEvents { response })
+            .await
+    }
+
+    /// Replies to a previously-received inbound block-sync request.
+    ///
+    /// If the inbound stream has already timed out or the peer has
+    /// disconnected, returns `Err(NetworkError::PeerNotFound)`. Callers
+    /// that want to reject a request should pass
+    /// `BlockSyncResponse::Error(BlockSyncError::*)` rather than dropping
+    /// the request — silent drops cause cascading peer-disconnect spirals.
+    pub async fn send_block_sync_response(
+        &self,
+        request_id: InboundRequestId,
+        response_payload: BlockSyncResponse,
+    ) -> Result<()> {
+        self.send_command(move |response| NetworkCommand::SendBlockSyncResponse {
+            request_id,
+            response_payload,
+            response,
+        })
+        .await
+    }
+
     /// Sends a command and waits for response
     async fn send_command<F, T>(&self, f: F) -> Result<T>
     where
@@ -613,6 +866,24 @@ struct EventLoopState {
     /// Surfaced via `NetworkCommand::ListenAddresses` so callers (especially
     /// tests using port 0) can discover the bound address.
     listen_addresses: Vec<Multiaddr>,
+    /// Pending inbound block-sync response channels keyed by `InboundRequestId`.
+    /// The `ResponseChannel<BlockSyncResponse>` returned by libp2p's
+    /// request-response codec cannot be sent across an mpsc — it is `Send`
+    /// but consuming it requires `&mut self` on the behaviour. We park it
+    /// here until the API caller answers via `SendBlockSyncResponse`.
+    pending_inbound_block_sync: HashMap<InboundRequestId, ResponseChannel<BlockSyncResponse>>,
+    /// Subscriber channel for inbound block-sync requests. `None` until the
+    /// node-level block-sync server attaches via `SubscribeBlockSyncRequests`.
+    block_sync_request_subscriber: Option<mpsc::UnboundedSender<InboundBlockSync>>,
+    /// Subscriber channel for outbound block-sync results. `None` until the
+    /// node-level block-sync engine attaches via `SubscribeBlockSyncResults`.
+    block_sync_result_subscriber: Option<mpsc::UnboundedSender<OutboundBlockSyncResult>>,
+    /// Subscriber channel for peer connection lifecycle events. `None` until
+    /// the block-sync engine (or another peer-aware consumer) attaches via
+    /// `SubscribePeerEvents`. The event loop fans `SwarmEvent::Connection*`
+    /// transitions through this channel — first physical connection emits
+    /// `Connected`, last drop emits `Disconnected`.
+    peer_event_subscriber: Option<mpsc::UnboundedSender<PeerEvent>>,
 }
 
 /// Main event loop for the network service
@@ -730,6 +1001,10 @@ async fn run_event_loop(
         deduplicator: MessageDeduplicator::default(),
         metrics,
         listen_addresses: Vec::new(),
+        pending_inbound_block_sync: HashMap::new(),
+        block_sync_request_subscriber: None,
+        block_sync_result_subscriber: None,
+        peer_event_subscriber: None,
     };
 
     // Create periodic cleanup timer (every 60 seconds)
@@ -778,6 +1053,146 @@ async fn run_event_loop(
     }
 
     Ok(())
+}
+
+/// Translates a libp2p `request_response::Event` for the block-sync codec
+/// into the typed `InboundBlockSync` / `OutboundBlockSyncResult` channels
+/// the API exposes.
+///
+/// The `ResponseChannel<BlockSyncResponse>` cannot cross an mpsc — it is
+/// consumed by `Behaviour::send_response(&mut self, …)`. We park it in
+/// `pending_inbound_block_sync` keyed by `InboundRequestId`; the API caller
+/// later issues `SendBlockSyncResponse { request_id, … }` and the event
+/// loop performs the actual `send_response` call from the swarm context.
+fn handle_block_sync_event(
+    state: &mut EventLoopState,
+    event: request_response::Event<BlockSyncRequest, BlockSyncResponse>,
+) {
+    use request_response::{Event as RrEvent, Message};
+    match event {
+        RrEvent::Message {
+            peer,
+            message: Message::Request {
+                request_id,
+                request,
+                channel,
+            },
+            ..
+        } => {
+            // Park the response channel and notify the subscriber. If no
+            // subscriber is attached yet, reply with a Storage error so
+            // the requester can score us down and retry against another peer
+            // — silent timeouts cause cascading peer-disconnect spirals
+            // (Lighthouse `SyncManager` notes the same anti-pattern).
+            let Some(tx) = state.block_sync_request_subscriber.as_ref() else {
+                tracing::warn!(
+                    %peer,
+                    "Inbound block-sync request received but no subscriber attached — \
+                     replying with Storage error"
+                );
+                let err_resp = BlockSyncResponse::Error(
+                    crate::block_sync_proto::BlockSyncError::Storage(
+                        "no block-sync subscriber attached".to_string(),
+                    ),
+                );
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .block_sync
+                    .send_response(channel, err_resp);
+                return;
+            };
+
+            state
+                .pending_inbound_block_sync
+                .insert(request_id, channel);
+
+            let inbound = InboundBlockSync {
+                peer,
+                request_id,
+                request,
+            };
+            if tx.send(inbound).is_err() {
+                tracing::warn!(
+                    %peer,
+                    "Block-sync request subscriber dropped — discarding inbound request"
+                );
+                state.block_sync_request_subscriber = None;
+                // Reply with a Storage error so the peer doesn't time out.
+                if let Some(channel) = state.pending_inbound_block_sync.remove(&request_id) {
+                    let err_resp = BlockSyncResponse::Error(
+                        crate::block_sync_proto::BlockSyncError::Storage(
+                            "subscriber dropped".to_string(),
+                        ),
+                    );
+                    let _ = state
+                        .swarm
+                        .behaviour_mut()
+                        .block_sync
+                        .send_response(channel, err_resp);
+                }
+            }
+        }
+        RrEvent::Message {
+            peer,
+            message: Message::Response {
+                request_id,
+                response,
+            },
+            ..
+        } => {
+            if let Some(tx) = state.block_sync_result_subscriber.as_ref() {
+                let item = OutboundBlockSyncResult {
+                    peer,
+                    request_id,
+                    result: Ok(response),
+                };
+                if tx.send(item).is_err() {
+                    tracing::warn!("Block-sync result subscriber dropped");
+                    state.block_sync_result_subscriber = None;
+                }
+            } else {
+                tracing::warn!(
+                    %peer,
+                    %request_id,
+                    "Block-sync response received but no result subscriber attached"
+                );
+            }
+        }
+        RrEvent::OutboundFailure {
+            peer,
+            request_id,
+            error,
+            ..
+        } => {
+            tracing::warn!(%peer, %request_id, %error, "Outbound block-sync failure");
+            if let Some(tx) = state.block_sync_result_subscriber.as_ref() {
+                let item = OutboundBlockSyncResult {
+                    peer,
+                    request_id,
+                    result: Err(error.into()),
+                };
+                if tx.send(item).is_err() {
+                    state.block_sync_result_subscriber = None;
+                }
+            }
+        }
+        RrEvent::InboundFailure {
+            peer,
+            request_id,
+            error,
+            ..
+        } => {
+            // Peer dropped the stream or codec failed before we replied.
+            // Drop the parked response channel — sending against it would
+            // be a no-op anyway.
+            tracing::debug!(%peer, %request_id, %error, "Inbound block-sync failure");
+            state.pending_inbound_block_sync.remove(&request_id);
+        }
+        RrEvent::ResponseSent { peer, request_id, .. } => {
+            tracing::trace!(%peer, %request_id, "Block-sync response flushed to wire");
+        }
+    }
 }
 
 /// Handles swarm events
@@ -948,6 +1363,9 @@ async fn handle_swarm_event(
                     }
                 }
             }
+            TenzroBehaviourEvent::BlockSync(rr_event) => {
+                handle_block_sync_event(state, rr_event);
+            }
             _ => {}
         },
         SwarmEvent::ConnectionEstablished {
@@ -985,6 +1403,23 @@ async fn handle_swarm_event(
             state
                 .peer_manager
                 .update_status(&peer_id, PeerStatus::Connected);
+
+            // Fan out a `PeerEvent::Connected` exactly once per peer — only
+            // when this is the first physical connection. Subsequent
+            // multiplexed connections to the same peer don't re-emit. If
+            // the receiver is gone (engine task panicked or stopped),
+            // detach the subscriber so we stop trying.
+            if num_established.get() == 1 {
+                if let Some(tx) = state.peer_event_subscriber.as_ref() {
+                    if tx.send(PeerEvent::Connected(peer_id)).is_err() {
+                        tracing::warn!(
+                            "Peer-event subscriber dropped while sending Connected({}); detaching",
+                            peer_id
+                        );
+                        state.peer_event_subscriber = None;
+                    }
+                }
+            }
         }
         SwarmEvent::ConnectionClosed {
             peer_id,
@@ -1006,6 +1441,19 @@ async fn handle_swarm_event(
                 state
                     .peer_manager
                     .update_status(&peer_id, PeerStatus::Disconnected);
+
+                // Last physical connection dropped — fan out
+                // `PeerEvent::Disconnected` so subscribers can evict this
+                // peer from their candidate sets.
+                if let Some(tx) = state.peer_event_subscriber.as_ref() {
+                    if tx.send(PeerEvent::Disconnected(peer_id)).is_err() {
+                        tracing::warn!(
+                            "Peer-event subscriber dropped while sending Disconnected({}); detaching",
+                            peer_id
+                        );
+                        state.peer_event_subscriber = None;
+                    }
+                }
             }
         }
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -1175,6 +1623,53 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
                 }
             };
             let _ = response.send(Ok(admitted));
+        }
+        NetworkCommand::SendBlockSyncRequest { peer, request, response } => {
+            let request_id = state
+                .swarm
+                .behaviour_mut()
+                .block_sync
+                .send_request(&peer, request);
+            let _ = response.send(Ok(request_id));
+        }
+        NetworkCommand::SendBlockSyncResponse {
+            request_id,
+            response_payload,
+            response,
+        } => {
+            let result = match state.pending_inbound_block_sync.remove(&request_id) {
+                Some(channel) => state
+                    .swarm
+                    .behaviour_mut()
+                    .block_sync
+                    .send_response(channel, response_payload)
+                    .map_err(|_| {
+                        // send_response returns Err(BlockSyncResponse) on a closed
+                        // channel — peer disconnected or the inbound stream timed
+                        // out. The payload is dropped; surface a typed error.
+                        NetworkError::ChannelSend
+                    }),
+                None => Err(NetworkError::PeerNotFound(format!(
+                    "no parked inbound block-sync request for id {}",
+                    request_id
+                ))),
+            };
+            let _ = response.send(result);
+        }
+        NetworkCommand::SubscribeBlockSyncRequests { response } => {
+            let (tx, rx) = mpsc::unbounded_channel();
+            state.block_sync_request_subscriber = Some(tx);
+            let _ = response.send(Ok(rx));
+        }
+        NetworkCommand::SubscribeBlockSyncResults { response } => {
+            let (tx, rx) = mpsc::unbounded_channel();
+            state.block_sync_result_subscriber = Some(tx);
+            let _ = response.send(Ok(rx));
+        }
+        NetworkCommand::SubscribePeerEvents { response } => {
+            let (tx, rx) = mpsc::unbounded_channel();
+            state.peer_event_subscriber = Some(tx);
+            let _ = response.send(Ok(rx));
         }
         NetworkCommand::Shutdown { response } => {
             // Respond before the outer loop observes the Shutdown variant and breaks.

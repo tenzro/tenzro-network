@@ -61,7 +61,7 @@ spec:
               readOnly: true
       containers:
         - name: tenzro-node
-          image: us-central1-docker.pkg.dev/tenzro-operator-project/tenzro/tenzro-node:latest
+          image: us-central1-docker.pkg.dev/tenzro-operator-project/tenzro/tenzro-node:20260507-100757
           imagePullPolicy: Always
           env:
             - name: DRPC_API_KEY

@@ -193,9 +193,9 @@ pub struct CortexReasonCmd {
     /// Maximum recurrent-depth loops
     #[arg(long, default_value = "16")]
     max_loops: u32,
-    /// Max cost budget in smallest TNZO unit
+    /// Max cost budget in wei (1 TNZO = 10^18 wei)
     #[arg(long, default_value = "1000000")]
-    max_cost_tnzo: u64,
+    max_cost_wei: u128,
     /// Attestation requirement: `none`, `tee`, `zk`, `tee+zk`
     #[arg(long, default_value = "none")]
     attestation: String,
@@ -227,7 +227,7 @@ impl CortexReasonCmd {
             "tier": self.tier,
             "min_loops": self.min_loops,
             "max_loops": self.max_loops,
-            "max_cost_tnzo": self.max_cost_tnzo,
+            "max_cost_wei": self.max_cost_wei.to_string(),
             "attestation": self.attestation,
         });
         if let Some(r) = &self.requester {
@@ -249,8 +249,15 @@ impl CortexReasonCmd {
         } else if let Some(hex_out) = result.get("output").and_then(|v| v.as_str()) {
             output::print_field("Output (hex)", hex_out);
         }
-        if let Some(price) = result.get("price_tnzo").and_then(|v| v.as_u64()) {
-            output::print_field("Price (TNZO)", &price.to_string());
+        // price_wei is u128-serialized: u64 number for small values, decimal string for large.
+        if let Some(price_val) = result.get("price_wei") {
+            let price_str = price_val
+                .as_u64()
+                .map(|n| n.to_string())
+                .or_else(|| price_val.as_str().map(|s| s.to_string()));
+            if let Some(s) = price_str {
+                output::print_field("Price (wei)", &s);
+            }
         }
         if let Some(meta) = result.get("metadata") {
             if let Some(loops) = meta.get("loops_used").and_then(|v| v.as_u64()) {

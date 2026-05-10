@@ -84,6 +84,10 @@ pub enum TokenError {
     #[error("Proposal already executed: {proposal_id}")]
     ProposalAlreadyExecuted { proposal_id: String },
 
+    /// Proposal executor returned an error during apply
+    #[error("Proposal execution failed for {proposal_id}: {reason}")]
+    ProposalExecutionFailed { proposal_id: String, reason: String },
+
     /// Invalid voting power
     #[error("Invalid voting power: must have staked TNZO to vote")]
     InvalidVotingPower,

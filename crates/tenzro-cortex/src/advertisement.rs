@@ -301,7 +301,7 @@ mod tests {
         )
         .unwrap();
         // Tamper with price.
-        ad.pricing.price_per_loop = 999_999;
+        ad.pricing.price_per_loop_wei = 999_999;
         assert!(ad.verify().is_err());
     }
 

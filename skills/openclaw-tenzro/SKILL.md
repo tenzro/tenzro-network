@@ -260,7 +260,11 @@ Tenzro uses decentralized identifiers (DIDs) for both humans and machines.
 - Human DID format: `did:tenzro:human:<uuid>`
 - Machine DID format: `did:tenzro:machine:<controller>:<uuid>` or `did:tenzro:machine:<uuid>` (autonomous)
 
-### Register Human Identity
+### Register Identity (human, machine, or autonomous)
+
+`tenzro_registerIdentity` dispatches on the `identity_type` field. Three types are supported and each takes a different parameter shape.
+
+#### Human
 
 ```bash
 curl -X POST https://rpc.tenzro.network \
@@ -269,26 +273,79 @@ curl -X POST https://rpc.tenzro.network \
     "jsonrpc": "2.0",
     "method": "tenzro_registerIdentity",
     "params": {
+      "identity_type": "human",
       "display_name": "Alice"
     },
     "id": 1
   }'
 ```
 
-**Response:**
+`identity_type` defaults to `"human"` when omitted, so older callers passing only `display_name` continue to work. The DID is issued with prefix `did:tenzro:human:<uuid>`.
+
+#### Machine (controlled — bound to a human DID)
+
+Requires the controller's DID and a list of capabilities. An optional `delegation_scope` constrains spending and operations the machine may perform on the controller's behalf.
+
+```bash
+curl -X POST https://rpc.tenzro.network \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tenzro_registerIdentity",
+    "params": {
+      "identity_type": "machine",
+      "controller_did": "did:tenzro:human:<controller-uuid>",
+      "capabilities": ["inference", "trading"],
+      "delegation_scope": {
+        "max_transaction_value": "1000000000000000000",
+        "max_daily_spend":       "5000000000000000000",
+        "allowed_operations":    ["transfer", "inference"],
+        "allowed_payment_protocols": ["mpp", "x402"],
+        "allowed_chains":        ["tenzro"]
+      }
+    },
+    "id": 1
+  }'
+```
+
+The DID is issued with prefix `did:tenzro:machine:<controller-uuid>:<uuid>`. Amount fields accept either decimal strings (recommended for values larger than 2⁶³) or numbers.
+
+#### Autonomous (no controller)
+
+Self-sovereign machine identity with no human owner. Capabilities required.
+
+```bash
+curl -X POST https://rpc.tenzro.network \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tenzro_registerIdentity",
+    "params": {
+      "identity_type": "autonomous",
+      "capabilities": ["inference"]
+    },
+    "id": 1
+  }'
+```
+
+The DID is issued with prefix `did:tenzro:machine:<uuid>` (no controller segment).
+
+#### Response (all types)
+
 ```json
 {
   "jsonrpc": "2.0",
   "result": {
-    "did": "did:tenzro:human:<uuid>",
+    "did": "did:tenzro:<type>:<uuid>",
+    "identity_type": "<type>",
     "status": "registered",
-    "private_key": "<hex>"
+    "private_key": "<hex — only when keypair was auto-generated>"
   },
   "id": 1
 }
 ```
 
-Optionally pass `"public_key": "<hex>"` and `"key_type": "ed25519"` to use an existing keypair.
+For all three types, optionally pass `"public_key": "<hex>"` + `"key_type": "ed25519"` (or `"secp256k1"`) to register an existing keypair instead of having the node generate one. When `public_key` is supplied, no `private_key` is returned.
 
 ### Resolve Identity
 
@@ -1557,6 +1614,11 @@ curl -X POST https://rpc.tenzro.network \
     "id": 1
   }'
 ```
+
+`creator` accepts both Solana-base58 and `0x`-hex EVM addresses; the runtime provisions an MPC wallet bound to that owner. Optional fields:
+
+- `tenzro_did`: bind this agent to a previously registered TDIP machine DID. Use this to combine the kill-switch lifecycle FSM (`tenzro_suspendAgent` / `tenzro_resumeAgent`) with the AAP/RAR delegation scope set during machine identity registration.
+- `kind`: `"autonomous"` for self-acting agents (no human-in-the-loop). Default is interactive.
 
 **Response:**
 ```json

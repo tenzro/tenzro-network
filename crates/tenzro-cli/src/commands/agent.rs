@@ -56,6 +56,16 @@ pub enum AgentCommand {
     /// Terminate an agent via kill-switch (irreversible). Slashes stake by
     /// `slash_bps`, optionally cascades to descendants.
     Terminate(AgentTerminateCmd),
+    /// Operational suspend (Active → Suspended). Manual analogue of the
+    /// heartbeat-monitor auto-suspend. Reversible via `resume`. Distinct
+    /// from kill-switch `pause`/`quarantine` (different axis).
+    Suspend(AgentSuspendCmd),
+    /// Recover a Suspended agent back to Active. Used to recover from
+    /// auto-suspend (missed heartbeats) or manual `suspend`.
+    Resume(AgentResumeCmd),
+    /// Send a liveness heartbeat for an agent. Refreshes `last_heartbeat`
+    /// so the heartbeat monitor does not auto-suspend on the next sweep.
+    Heartbeat(AgentHeartbeatCmd),
 }
 
 impl AgentCommand {
@@ -83,6 +93,9 @@ impl AgentCommand {
             Self::Pause(cmd) => cmd.execute().await,
             Self::Quarantine(cmd) => cmd.execute().await,
             Self::Terminate(cmd) => cmd.execute().await,
+            Self::Suspend(cmd) => cmd.execute().await,
+            Self::Resume(cmd) => cmd.execute().await,
+            Self::Heartbeat(cmd) => cmd.execute().await,
         }
     }
 }
@@ -1341,6 +1354,141 @@ impl AgentTerminateCmd {
         output::print_field("Slash bps", &self.slash_bps.to_string());
         output::print_field("Cascade", &self.cascade.to_string());
         output::print_field("Transaction Hash", tx_hash);
+        Ok(())
+    }
+}
+
+/// Operational suspend (Active → Suspended) — manual counterpart to the
+/// heartbeat-monitor auto-suspend. Reversible via `resume`. Routes through
+/// `tenzro_suspendAgent`.
+#[derive(Debug, Parser)]
+pub struct AgentSuspendCmd {
+    /// Agent ID (from registration; not the DID)
+    #[arg(long)]
+    agent_id: String,
+    /// Reason text (free-form, audit only)
+    #[arg(long, default_value = "Operator suspend")]
+    reason: String,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+impl AgentSuspendCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Suspend Agent");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Suspending agent...");
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_suspendAgent",
+                serde_json::json!({
+                    "agent_id": self.agent_id,
+                    "reason": self.reason,
+                }),
+            )
+            .await?;
+        spinner.finish_and_clear();
+
+        if self.format == "json" {
+            output::print_json(&result)?;
+            return Ok(());
+        }
+
+        output::print_success("Agent suspended");
+        output::print_field("Agent ID", &self.agent_id);
+        output::print_field("Reason", &self.reason);
+        Ok(())
+    }
+}
+
+/// Recover a Suspended agent back to Active. Routes through
+/// `tenzro_resumeAgent`.
+#[derive(Debug, Parser)]
+pub struct AgentResumeCmd {
+    /// Agent ID (from registration; not the DID)
+    #[arg(long)]
+    agent_id: String,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+impl AgentResumeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Resume Agent");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Resuming agent...");
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_resumeAgent",
+                serde_json::json!({ "agent_id": self.agent_id }),
+            )
+            .await?;
+        spinner.finish_and_clear();
+
+        if self.format == "json" {
+            output::print_json(&result)?;
+            return Ok(());
+        }
+
+        output::print_success("Agent resumed");
+        output::print_field("Agent ID", &self.agent_id);
+        Ok(())
+    }
+}
+
+/// Record a liveness heartbeat for an agent. Routes through
+/// `tenzro_agentHeartbeat`. The heartbeat monitor uses `last_heartbeat`
+/// to decide whether to auto-suspend the agent on the next sweep.
+#[derive(Debug, Parser)]
+pub struct AgentHeartbeatCmd {
+    /// Agent ID (from registration; not the DID)
+    #[arg(long)]
+    agent_id: String,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+impl AgentHeartbeatCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Agent Heartbeat");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Recording heartbeat...");
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_agentHeartbeat",
+                serde_json::json!({ "agent_id": self.agent_id }),
+            )
+            .await?;
+        spinner.finish_and_clear();
+
+        if self.format == "json" {
+            output::print_json(&result)?;
+            return Ok(());
+        }
+
+        output::print_success("Heartbeat recorded");
+        output::print_field("Agent ID", &self.agent_id);
+        if let Some(ts) = result.get("recorded_at_ms").and_then(|v| v.as_i64()) {
+            output::print_field("Recorded at (ms)", &ts.to_string());
+        }
         Ok(())
     }
 }

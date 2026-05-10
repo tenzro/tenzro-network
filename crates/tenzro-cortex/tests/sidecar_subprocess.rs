@@ -241,7 +241,7 @@ fn standard_request(request_id: &str, input: Vec<u8>) -> CortexRequest {
         requester: Address::default(),
         input,
         budget: ReasoningBudget {
-            max_cost_tnzo: 10_000_000_000,
+            max_cost_wei: 10_000_000_000,
             ..ReasoningBudget::for_tier(ReasoningTier::Standard)
         },
         params: Default::default(),
@@ -356,19 +356,19 @@ async fn sidecar_subprocess_end_to_end() {
         AttestationRequirement::None,
     );
     assert_eq!(
-        resp.price_tnzo, expected_price,
+        resp.price_wei, expected_price,
         "price matches CortexPricing formula"
     );
     assert_eq!(
-        resp.receipt.price_tnzo, expected_price,
+        resp.receipt.price_wei, expected_price,
         "receipt price matches CortexPricing formula"
     );
     assert!(
-        resp.price_tnzo > 0,
+        resp.price_wei > 0,
         "metered standard-tier inference must have non-zero price"
     );
     assert!(
-        resp.price_tnzo <= req.budget.max_cost_tnzo,
+        resp.price_wei <= req.budget.max_cost_wei,
         "settled price must fit within budget ceiling"
     );
 

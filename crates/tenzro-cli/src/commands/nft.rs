@@ -98,13 +98,13 @@ impl NftCreateCollectionCmd {
 pub struct NftMintCmd {
     /// Collection ID (hex)
     #[arg(long)]
-    collection_id: String,
+    collection: String,
     /// Recipient address (hex)
     #[arg(long)]
     to: String,
     /// Token ID
     #[arg(long)]
-    token_id: String,
+    token_id: u64,
     /// Token URI (metadata URL)
     #[arg(long)]
     uri: String,
@@ -122,7 +122,7 @@ impl NftMintCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let result: serde_json::Value = rpc.call("tenzro_mintNft", serde_json::json!({
-            "collection_id": self.collection_id,
+            "collection": self.collection,
             "to": self.to,
             "token_id": self.token_id,
             "uri": self.uri,
@@ -131,8 +131,8 @@ impl NftMintCmd {
         spinner.finish_and_clear();
 
         output::print_success("NFT minted successfully!");
-        output::print_field("Collection ID", result.get("collection_id").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Token ID", result.get("token_id").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field("Collection", result.get("collection").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field("Token ID", &result.get("token_id").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
         output::print_field("Owner", result.get("owner").and_then(|v| v.as_str()).unwrap_or(""));
         output::print_field("URI", result.get("uri").and_then(|v| v.as_str()).unwrap_or(""));
 
@@ -200,7 +200,7 @@ impl NftMintBatchCmd {
 pub struct NftTransferCmd {
     /// Collection ID (hex)
     #[arg(long)]
-    collection_id: String,
+    collection: String,
     /// Sender address (hex)
     #[arg(long)]
     from: String,
@@ -209,7 +209,7 @@ pub struct NftTransferCmd {
     to: String,
     /// Token ID
     #[arg(long)]
-    token_id: String,
+    token_id: u64,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -224,7 +224,7 @@ impl NftTransferCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let result: serde_json::Value = rpc.call("tenzro_transferNft", serde_json::json!({
-            "collection_id": self.collection_id,
+            "collection": self.collection,
             "from": self.from,
             "to": self.to,
             "token_id": self.token_id,
@@ -235,7 +235,7 @@ impl NftTransferCmd {
         output::print_success("NFT transferred successfully!");
         output::print_field("From", result.get("from").and_then(|v| v.as_str()).unwrap_or(""));
         output::print_field("To", result.get("to").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Token ID", result.get("token_id").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field("Token ID", &result.get("token_id").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
         output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or(""));
 
         Ok(())

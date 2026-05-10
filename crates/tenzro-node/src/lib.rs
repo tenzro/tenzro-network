@@ -69,6 +69,7 @@
 //! See [`NodeConfig`] for available configuration options.
 
 pub mod a2a;
+pub mod block_sync;
 pub mod commission_policy;
 pub mod config;
 pub mod cortex_gossip;
@@ -81,6 +82,7 @@ pub mod event_loop;
 pub mod genesis;
 pub mod health;
 pub mod lane_resolver;
+pub mod lifecycle_state_bridge;
 pub mod liveness;
 pub mod mcp;
 pub mod metrics;
@@ -91,6 +93,7 @@ pub mod spending_policy_bridge;
 pub mod spt_ceiling_bridge;
 pub mod spt_revocation_dispatcher;
 pub mod web;
+pub mod workflow_runtime;
 
 // Re-export commonly used types
 pub use config::NodeConfig;

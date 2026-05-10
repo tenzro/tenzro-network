@@ -11,7 +11,10 @@ use tenzro_node::config::{NodeConfig, GenesisConfig};
 use tenzro_node::error::{self, Result};
 use tenzro_node::node::TenzroNode;
 use tenzro_node::rpc::RpcServer;
-use tenzro_node::{a2a, event_loop, genesis, mcp, spending_policy_bridge, spt_ceiling_bridge, web};
+use tenzro_node::{
+    a2a, event_loop, genesis, lifecycle_state_bridge, mcp, spending_policy_bridge,
+    spt_ceiling_bridge, web,
+};
 use tenzro_storage::KvStore;
 
 /// Tenzro Network Node CLI
@@ -240,6 +243,20 @@ async fn main() -> Result<()> {
                         ),
                     );
                 binder = binder.with_spending_policy_resolver(resolver);
+
+                // Kill-switch lifecycle gate: bridge AgentRuntime's lifecycle
+                // FSM into the payment binder so Paused / Quarantined /
+                // Terminated agents are refused at the payment boundary
+                // (separate axis from DelegationScope + SpendingPolicy; the
+                // operational `Suspended` state stays Operational here).
+                let lifecycle_resolver:
+                    std::sync::Arc<dyn tenzro_payments::LifecycleStateResolver> =
+                    std::sync::Arc::new(
+                        lifecycle_state_bridge::AgentRuntimeLifecycleResolver::new(
+                            agent_runtime.clone(),
+                        ),
+                    );
+                binder = binder.with_lifecycle_resolver(lifecycle_resolver);
             }
             // Phase D (Stripe SPT): consume the shared
             // `spt_ceiling_cache` Arc constructed and registered on the

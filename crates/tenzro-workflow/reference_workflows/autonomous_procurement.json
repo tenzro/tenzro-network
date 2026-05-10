@@ -1,0 +1,146 @@
+{
+  "_comment_layout": "Reference workflow spec — load with serde_json into tenzro_workflow::Workflow. workflow_id, obligation ids, and gate_id are 32-byte hash arrays; placeholders here MUST be re-derived at load time via Workflow::derive_id / Obligation::derive_id / ApprovalGate::derive_id. The accompanying autonomous_procurement_daml_map.json drives DAML codegen.",
+  "_comment_scenario": "Autonomous procurement between a buyer-controlled agent and a seller-controlled agent: buyer agent agrees to pay USDC to seller agent in exchange for delivery of a credentialed resource. Treasurer gates the spend if the cart amount exceeds 50,000 USDC (1-of-1 approval). Auditor receives unredacted receipts via the privacy domain. Mirrored to a Canton synchronizer for enterprise settlement.",
+
+  "workflow_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+  "template_id": null,
+  "creator": "did:tenzro:human:buyer-org:1",
+  "title": "autonomous_procurement",
+  "description": "Two-sided autonomous procurement: buyer-agent pays USDC, seller-agent delivers a credentialed resource. Treasurer-gated for spends > 50k USDC; auditor receives full receipts.",
+
+  "participants": [
+    {
+      "did": "did:tenzro:human:buyer-org:1",
+      "roles": ["Initiator"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:machine:buyer-org:procurement-bot:1",
+      "roles": ["Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:seller-org:1",
+      "roles": ["Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:machine:seller-org:fulfillment-bot:1",
+      "roles": ["Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:buyer-org:treasurer:1",
+      "roles": ["Treasurer", "Approver"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:auditor-firm:1",
+      "roles": ["Auditor"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    }
+  ],
+
+  "obligations": [
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+  ],
+  "_obligation_records": [
+    {
+      "_comment": "Buyer-agent pays seller-agent. amount_wei is in USDC's 6-decimal base units expressed as wei-equivalent — host normalizes against asset.symbol.",
+      "obligor": "did:tenzro:machine:buyer-org:procurement-bot:1",
+      "obligee": "did:tenzro:machine:seller-org:fulfillment-bot:1",
+      "kind": {
+        "Pay": {
+          "amount_wei": 50000000000,
+          "asset": {
+            "chain": "tenzro",
+            "symbol": "USDC",
+            "token_address": null
+          }
+        }
+      },
+      "due_by": null,
+      "status": "Pending",
+      "discharge_proof_required": "PaymentReceipt",
+      "bond_anchor": null
+    },
+    {
+      "_comment": "Seller-agent delivers a credentialed resource. discharge_proof_required = Credential — the seller submits a W3C Verifiable Credential attesting delivery, verified against the obligor's TDIP wallet.",
+      "obligor": "did:tenzro:machine:seller-org:fulfillment-bot:1",
+      "obligee": "did:tenzro:machine:buyer-org:procurement-bot:1",
+      "kind": {
+        "Deliver": {
+          "resource_did": "did:tenzro:resource:widget-batch:2026-q2-001",
+          "qty": 100
+        }
+      },
+      "due_by": null,
+      "status": "Pending",
+      "discharge_proof_required": "Credential",
+      "bond_anchor": null
+    }
+  ],
+
+  "approval_gates": [
+    {
+      "_comment_id": "Derived at load time via ApprovalGate::derive_id(workflow_id, 'high_value_spend').",
+      "gate_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      "workflow_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      "triggers": {
+        "AmountGte": 50000000001
+      },
+      "approvers": {
+        "Single": {
+          "did": "did:tenzro:human:buyer-org:treasurer:1"
+        }
+      },
+      "timeout": null,
+      "on_timeout": "AutoReject"
+    }
+  ],
+
+  "root_policy": {
+    "And": [
+      { "AmountLte": 50000000000 },
+      {
+        "CounterpartyIn": [
+          "did:tenzro:machine:seller-org:fulfillment-bot:1"
+        ]
+      },
+      {
+        "AssetIn": ["USDC"]
+      }
+    ]
+  },
+
+  "privacy_domain": null,
+  "_comment_privacy_domain": "Set at load time via PrivacyDomainRegistry::register with visibility = MembersPlusAuditors so the auditor receives unredacted receipts. Members = the 6 participants above.",
+
+  "fee_route": null,
+  "_comment_fee_route": "Set at load time. Suggested split: 80% seller-agent, 15% buyer-org treasury, 5% Tenzro network fee (per default 0.5% applied to the buyer-side leg, 4.5% protocol margin retained at fee-route level).",
+
+  "signatures": [],
+  "status": "Draft",
+
+  "canton_mirror": {
+    "synchronizer_id": "global-synchronizer",
+    "party": "tenzro::1220deadbeefcafe0000000000000000000000000000000000000000000000",
+    "contract_id": "00aabbccddeeff#0"
+  },
+
+  "created_at": 1700000000,
+  "updated_at": 1700000000
+}

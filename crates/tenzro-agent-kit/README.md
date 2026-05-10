@@ -62,6 +62,8 @@ Free templates bypass the fee-collection path entirely — `fee_paid = 0`, no tr
 
 Located under `reference_templates/`. They are loaded at node startup by `tenzro-agent-kit::bootstrap::load_reference_templates()`.
 
+> **Distinct from workflow templates.** Multi-party Canton workflow specs live under `crates/tenzro-workflow/reference_workflows/` (see `crates/tenzro-workflow/README.md` once published, or `docs/SPECIFICATION.md` §14.7.10). Those describe lifecycle/obligation/approval graphs across multiple parties; the agent templates here describe a single autonomous or specialist agent and its execution pipeline.
+
 | Template | Type | Pricing | Purpose |
 |----------|------|---------|---------|
 | `agentic_inference_marketplace.json` | orchestrator | free | Routes inference requests to the cheapest/fastest provider |

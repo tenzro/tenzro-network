@@ -235,18 +235,27 @@ impl AmdSevSnpProvider {
             // vmpl = 0 (VMPL0, highest privilege) at offset 64
             req[64..68].copy_from_slice(&0u32.to_le_bytes());
 
-            // Response buffer for the attestation report
-            let mut resp = vec![0u8; SNP_REPORT_SIZE + 32]; // Report + response header
+            // Response buffer matches kernel `struct snp_report_resp { __u8 data[4000]; }`
+            // The PSP writes a snp_msg_report_rsp_hdr (32 bytes) followed by the
+            // 1184-byte attestation report into this buffer.
+            const SNP_REPORT_RESP_SIZE: usize = 4000;
+            let mut resp = vec![0u8; SNP_REPORT_RESP_SIZE];
 
-            // Prepare snp_guest_request_ioctl structure:
-            // msg_version: u8, req_data: u64, resp_data: u64, exitinfo2/fw_error/vmm_error
-            // For simplicity, we use a flat buffer approach
-            let mut ioctl_buf = vec![0u8; 64];
+            // Prepare snp_guest_request_ioctl structure (matches kernel uapi):
+            //   __u8  msg_version;        // offset 0,  1 byte  (+7 pad to align u64)
+            //   __u64 req_data;           // offset 8,  8 bytes
+            //   __u64 resp_data;          // offset 16, 8 bytes
+            //   union { __u64 exitinfo2;
+            //           struct { __u32 fw_error; __u32 vmm_error; } };
+            //                             // offset 24, 8 bytes
+            // total = 32 bytes
+            const SNP_GUEST_REQUEST_IOCTL_SIZE: usize = 32;
+            let mut ioctl_buf = vec![0u8; SNP_GUEST_REQUEST_IOCTL_SIZE];
             ioctl_buf[0] = 1; // msg_version = 1
-            // req_data pointer (bytes 8..16)
+            // req_data pointer at offset 8
             let req_ptr = req.as_ptr() as u64;
             ioctl_buf[8..16].copy_from_slice(&req_ptr.to_ne_bytes());
-            // resp_data pointer (bytes 16..24)
+            // resp_data pointer at offset 16
             let resp_ptr = resp.as_mut_ptr() as u64;
             ioctl_buf[16..24].copy_from_slice(&resp_ptr.to_ne_bytes());
 
@@ -259,7 +268,12 @@ impl AmdSevSnpProvider {
                 ))?;
 
             // SNP_GET_REPORT = _IOWR('S', 0x0, struct snp_guest_request_ioctl)
-            let ioctl_nr = build_ioctl_rw(SEV_IOCTL_MAGIC, SNP_GET_REPORT_NR, 64);
+            // Size in the ioctl number MUST match sizeof(struct snp_guest_request_ioctl) = 32.
+            let ioctl_nr = build_ioctl_rw(
+                SEV_IOCTL_MAGIC,
+                SNP_GET_REPORT_NR,
+                SNP_GUEST_REQUEST_IOCTL_SIZE as u32,
+            );
 
             let ret = unsafe {
                 libc::ioctl(file.as_raw_fd(), ioctl_nr as libc::c_ulong, ioctl_buf.as_mut_ptr())
@@ -267,12 +281,16 @@ impl AmdSevSnpProvider {
 
             if ret != 0 {
                 let errno = std::io::Error::last_os_error();
-                // Check firmware error (bytes 24..28)
+                // exitinfo2 at offset 24: low 32 bits = fw_error, high 32 bits = vmm_error
                 let fw_error = u32::from_le_bytes([
                     ioctl_buf[24], ioctl_buf[25], ioctl_buf[26], ioctl_buf[27]
                 ]);
+                let vmm_error = u32::from_le_bytes([
+                    ioctl_buf[28], ioctl_buf[29], ioctl_buf[30], ioctl_buf[31]
+                ]);
                 return Err(TeeError::AttestationGenerationFailed(format!(
-                    "SNP_GET_REPORT ioctl failed: {} (fw_error: 0x{:X})", errno, fw_error
+                    "SNP_GET_REPORT ioctl failed: {} (fw_error: 0x{:X}, vmm_error: 0x{:X})",
+                    errno, fw_error, vmm_error
                 )));
             }
 

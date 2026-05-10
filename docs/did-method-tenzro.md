@@ -65,7 +65,7 @@ did:tenzro:machine:6ba7b810-9dad-11d1-80b4-00c04fd430c8
 
 Resolve via RPC:
 ```json
-{"jsonrpc":"2.0","method":"tenzro_resolveDidDocument","params":["did:tenzro:human:..."],"id":1}
+{"jsonrpc":"2.0","method":"tenzro_resolveDidDocument","params":{"did":"did:tenzro:human:..."},"id":1}
 ```
 
 The node returns a W3C DID Document with `verificationMethod`, `authentication`,

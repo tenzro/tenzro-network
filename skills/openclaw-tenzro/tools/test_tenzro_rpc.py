@@ -71,8 +71,8 @@ class TestWallet(unittest.TestCase):
         mock_post.return_value = _mock_rpc_response("0xde0b6b3a7640000")
         result = tenzro_rpc.get_balance("0x1234")
         self.assertEqual(result["address"], "0x1234")
-        self.assertIn("balance_tnzo", result)
-        self.assertEqual(result["balance_tnzo"], "1.000000")
+        self.assertIn("balance_wei", result)
+        self.assertEqual(result["balance_wei"], "1000000000000000000")
 
     @patch("tenzro_rpc.requests.post")
     def test_send_transaction(self, mock_post):
@@ -304,7 +304,8 @@ class TestTaskMarketplace(unittest.TestCase):
             "status": "open",
         })
         result = tenzro_rpc.post_task(
-            "Review code", "Review this Rust code", "code_review", 50 * 10**18
+            "Review code", "Review this Rust code", "code_review",
+            50 * 10**18, "0x" + "00" * 20,
         )
         self.assertEqual(result["task_id"], "task-123")
 

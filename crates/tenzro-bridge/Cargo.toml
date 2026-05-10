@@ -10,6 +10,7 @@ description = "Cross-chain bridge adapters for Tenzro Network — LayerZero, Cha
 tenzro-types = { workspace = true }
 tenzro-token = { workspace = true }
 tenzro-crypto = { workspace = true }
+tenzro-workflow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

@@ -84,6 +84,11 @@ pub enum EventType {
     BridgeTransferInitiated,
     BridgeTransferCompleted,
     SyncProgress,
+    WorkflowCreated,
+    WorkflowLifecycleTransitioned,
+    WorkflowReceiptEmitted,
+    ApprovalRequested,
+    ApprovalFinalized,
 }
 
 impl fmt::Display for EventType {
@@ -122,6 +127,11 @@ pub fn event_type_static_name(et: EventType) -> &'static str {
         EventType::BridgeTransferInitiated => "BridgeTransferInitiated",
         EventType::BridgeTransferCompleted => "BridgeTransferCompleted",
         EventType::SyncProgress => "SyncProgress",
+        EventType::WorkflowCreated => "WorkflowCreated",
+        EventType::WorkflowLifecycleTransitioned => "WorkflowLifecycleTransitioned",
+        EventType::WorkflowReceiptEmitted => "WorkflowReceiptEmitted",
+        EventType::ApprovalRequested => "ApprovalRequested",
+        EventType::ApprovalFinalized => "ApprovalFinalized",
     }
 }
 
@@ -411,6 +421,62 @@ pub enum TenzroEvent {
         /// Progress percentage 0..100
         percent: u8,
     },
+
+    // -- Workflow ------------------------------------------------------------
+    //
+    // Workflow events carry an optional `privacy_domain` reference. When set,
+    // subscribers are expected to authorize delivery via
+    // `tenzro_workflow::acl_check` before forwarding the event off-node:
+    // `Allow` → deliver, `Deny` → drop silently (no existence leak), `Plaintext`
+    // → deliver as-is. The event itself never carries the encrypted body —
+    // that lives in the corresponding `EncryptedReceipt` in `CF_SETTLEMENTS`.
+
+    /// A new workflow was created (Draft).
+    WorkflowCreated {
+        workflow_id: [u8; 32],
+        creator_did: String,
+        title: String,
+        /// Optional privacy domain — when present, this event is ACL-gated.
+        privacy_domain: Option<[u8; 32]>,
+    },
+
+    /// A workflow underwent a lifecycle transition.
+    WorkflowLifecycleTransitioned {
+        workflow_id: [u8; 32],
+        from_status: String,
+        to_status: String,
+        trigger: String,
+        privacy_domain: Option<[u8; 32]>,
+    },
+
+    /// A workflow receipt was emitted (every receipt-bearing event projects
+    /// here for indexing). `payload_commitment` is the SHA-256 of the receipt
+    /// payload — set when the receipt is privacy-domain-encrypted; for inline
+    /// receipts it equals the canonical commitment from `WorkflowReceipt`.
+    WorkflowReceiptEmitted {
+        workflow_id: [u8; 32],
+        receipt_id: [u8; 32],
+        event_kind: String,
+        privacy_domain: Option<[u8; 32]>,
+        payload_commitment: Option<[u8; 32]>,
+    },
+
+    /// An approval request was opened against an approval gate.
+    ApprovalRequested {
+        workflow_id: [u8; 32],
+        gate_id: [u8; 32],
+        request_id: [u8; 32],
+        privacy_domain: Option<[u8; 32]>,
+    },
+
+    /// An approval request was finalized (approved / rejected / timed out).
+    ApprovalFinalized {
+        workflow_id: [u8; 32],
+        gate_id: [u8; 32],
+        request_id: [u8; 32],
+        outcome: String,
+        privacy_domain: Option<[u8; 32]>,
+    },
 }
 
 impl TenzroEvent {
@@ -444,6 +510,25 @@ impl TenzroEvent {
             TenzroEvent::BridgeTransferInitiated { .. } => EventType::BridgeTransferInitiated,
             TenzroEvent::BridgeTransferCompleted { .. } => EventType::BridgeTransferCompleted,
             TenzroEvent::SyncProgress { .. } => EventType::SyncProgress,
+            TenzroEvent::WorkflowCreated { .. } => EventType::WorkflowCreated,
+            TenzroEvent::WorkflowLifecycleTransitioned { .. } => EventType::WorkflowLifecycleTransitioned,
+            TenzroEvent::WorkflowReceiptEmitted { .. } => EventType::WorkflowReceiptEmitted,
+            TenzroEvent::ApprovalRequested { .. } => EventType::ApprovalRequested,
+            TenzroEvent::ApprovalFinalized { .. } => EventType::ApprovalFinalized,
+        }
+    }
+
+    /// Returns the privacy domain id this event is bound to, if any.
+    /// Subscribers should pass this to `tenzro_workflow::acl_check` to decide
+    /// whether to deliver the event.
+    pub fn privacy_domain(&self) -> Option<[u8; 32]> {
+        match self {
+            TenzroEvent::WorkflowCreated { privacy_domain, .. }
+            | TenzroEvent::WorkflowLifecycleTransitioned { privacy_domain, .. }
+            | TenzroEvent::WorkflowReceiptEmitted { privacy_domain, .. }
+            | TenzroEvent::ApprovalRequested { privacy_domain, .. }
+            | TenzroEvent::ApprovalFinalized { privacy_domain, .. } => *privacy_domain,
+            _ => None,
         }
     }
 }
@@ -565,6 +650,39 @@ impl fmt::Display for TenzroEvent {
                     "SyncProgress {}/{} ({}%)",
                     current_block, highest_block, percent
                 )
+            }
+            TenzroEvent::WorkflowCreated { workflow_id, title, .. } => {
+                write!(f, "WorkflowCreated id={} title={}", hex::encode(workflow_id), title)
+            }
+            TenzroEvent::WorkflowLifecycleTransitioned {
+                workflow_id, from_status, to_status, ..
+            } => {
+                write!(
+                    f,
+                    "WorkflowLifecycle id={} {}→{}",
+                    hex::encode(workflow_id),
+                    from_status,
+                    to_status
+                )
+            }
+            TenzroEvent::WorkflowReceiptEmitted { workflow_id, event_kind, .. } => {
+                write!(
+                    f,
+                    "WorkflowReceipt wf={} kind={}",
+                    hex::encode(workflow_id),
+                    event_kind
+                )
+            }
+            TenzroEvent::ApprovalRequested { workflow_id, gate_id, .. } => {
+                write!(
+                    f,
+                    "ApprovalRequested wf={} gate={}",
+                    hex::encode(workflow_id),
+                    hex::encode(gate_id)
+                )
+            }
+            TenzroEvent::ApprovalFinalized { workflow_id, outcome, .. } => {
+                write!(f, "ApprovalFinalized wf={} outcome={}", hex::encode(workflow_id), outcome)
             }
         }
     }
@@ -913,12 +1031,54 @@ mod tests {
             EventType::BridgeTransferInitiated,
             EventType::BridgeTransferCompleted,
             EventType::SyncProgress,
+            EventType::WorkflowCreated,
+            EventType::WorkflowLifecycleTransitioned,
+            EventType::WorkflowReceiptEmitted,
+            EventType::ApprovalRequested,
+            EventType::ApprovalFinalized,
         ];
         for et in &all {
             let name = event_type_static_name(*et);
             assert!(!name.is_empty(), "Empty name for {:?}", et);
         }
-        assert_eq!(all.len(), 27);
+        assert_eq!(all.len(), 32);
+    }
+
+    #[test]
+    fn workflow_event_carries_privacy_domain() {
+        let wf_id = [9u8; 32];
+        let pd = [7u8; 32];
+        let e = TenzroEvent::WorkflowCreated {
+            workflow_id: wf_id,
+            creator_did: "did:tenzro:human:alice".into(),
+            title: "Trade settlement".into(),
+            privacy_domain: Some(pd),
+        };
+        assert_eq!(e.event_type(), EventType::WorkflowCreated);
+        assert_eq!(e.privacy_domain(), Some(pd));
+
+        let public = TenzroEvent::WorkflowLifecycleTransitioned {
+            workflow_id: wf_id,
+            from_status: "Draft".into(),
+            to_status: "AwaitingSignatures".into(),
+            trigger: "Participant".into(),
+            privacy_domain: None,
+        };
+        assert_eq!(public.privacy_domain(), None);
+    }
+
+    #[test]
+    fn workflow_event_serde_roundtrip() {
+        let e = TenzroEvent::ApprovalFinalized {
+            workflow_id: [1u8; 32],
+            gate_id: [2u8; 32],
+            request_id: [3u8; 32],
+            outcome: "Approved".into(),
+            privacy_domain: Some([4u8; 32]),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: TenzroEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(e, back);
     }
 
     #[test]

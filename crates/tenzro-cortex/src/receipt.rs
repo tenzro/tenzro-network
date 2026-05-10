@@ -65,7 +65,7 @@ pub fn sign_receipt(
     zk_proof: Option<Vec<u8>>,
     tokens_in: u32,
     tokens_out: u32,
-    price_tnzo: u64,
+    price_wei: u128,
 ) -> Result<CortexReceipt> {
     let timestamp: Timestamp = Timestamp::now();
 
@@ -84,7 +84,7 @@ pub fn sign_receipt(
         zk_proof: zk_proof.clone(),
         tokens_in,
         tokens_out,
-        price_tnzo,
+        price_wei,
         timestamp,
         signature: Signature::default(),
     };

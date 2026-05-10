@@ -309,6 +309,54 @@ pub struct EventLoop {
     /// marker; this manager is the authoritative read model that lane
     /// resolution and receipt envelopes consult.
     bond_manager: Option<Arc<BondManager>>,
+    /// Permissionless validator registry (Dynamic Validator Set).
+    ///
+    /// The on-chain source of truth for who is a validator. The post-execute
+    /// scan mirrors VM-emitted `ValidatorRegister` / `ValidatorExit` /
+    /// `ValidatorMetadataUpdate` logs into this registry; the periodic epoch
+    /// hook calls `compute_epoch_transition()` and feeds the resulting plan
+    /// to the consensus `EpochManager`'s `pending_validators` /
+    /// `pending_removals` queues. Persistence is RocksDB-backed under
+    /// `CF_TOKENS / validator:*` so the active set survives restarts.
+    validator_registry: Option<Arc<tenzro_token::ValidatorRegistry>>,
+
+    /// Workflow runtime — typed mirror of the privileged-VM workflow
+    /// selectors (`0x01000040`–`0x0100004B`). The post-execute scan in
+    /// `handle_block_finalized` decodes the 12 typed `Workflow*` log topics
+    /// and dispatches into `WorkflowManager` / `PrivacyDomainRegistry`,
+    /// which write through to RocksDB and emit chained `WorkflowReceipt`s.
+    /// Without this wired, workflow transactions execute on chain (markers
+    /// land under `SYSTEM_ADDRESS`) but the typed read model that RPC /
+    /// MCP / A2A consult never updates.
+    workflow_runtime: Option<Arc<crate::workflow_runtime::WorkflowRuntime>>,
+
+    /// Adaptive burn rate manager — receives `SupplyMetricsSnapshot` records
+    /// at every epoch boundary so the transfer function can score
+    /// inflationary / deflationary deviation and surface a burn-rate
+    /// recommendation through `tenzro_getBurnRateRecommendation`.
+    /// Without this wired, `record_metrics` never gets called and the
+    /// recommendation engine reports against stale/empty metrics.
+    burn_rate_manager: Option<Arc<tenzro_token::adaptive_burn::BurnRateConfigManager>>,
+
+    /// Token reference — used by the epoch observer to read total supply
+    /// for the snapshot, and (with `staking`) compute the staker /
+    /// treasury emission split.
+    token: Option<Arc<tenzro_token::TnzoToken>>,
+
+    /// Circulating supply at the most recent epoch boundary, captured
+    /// after a successful `record_metrics` call. Used to compute the
+    /// `epoch_supply_delta` field of the *next* snapshot. Reset to the
+    /// current supply on first observation, so the very first epoch
+    /// reports a zero delta (no prior reference point).
+    last_observed_epoch_supply: u128,
+    /// Receives `BlockImport` requests from the `BlockSyncEngine`. Each item
+    /// carries a `Block` that has already passed per-block QC verification at
+    /// the engine boundary, plus a oneshot `result` channel that the event
+    /// loop replies on after `handle_block_imported_from_sync` returns.
+    ///
+    /// Initialized lazily inside `run()` once the engine has been spawned;
+    /// `None` on a node with no network service (e.g. light-client mode).
+    block_import_rx: Option<mpsc::Receiver<crate::block_sync::BlockImport>>,
 }
 
 impl EventLoop {
@@ -370,6 +418,12 @@ impl EventLoop {
             staking: None,
             identity_registry: None,
             bond_manager: None,
+            validator_registry: None,
+            workflow_runtime: None,
+            block_import_rx: None,
+            burn_rate_manager: None,
+            token: None,
+            last_observed_epoch_supply: 0,
         }
     }
 
@@ -468,6 +522,61 @@ impl EventLoop {
     /// posted bonds never promote their agents into Bonded lanes.
     pub fn with_bond_manager(mut self, bond_manager: Arc<BondManager>) -> Self {
         self.bond_manager = Some(bond_manager);
+        self
+    }
+
+    /// Wires the permissionless validator registry (Dynamic Validator Set).
+    ///
+    /// The post-execute scan in `handle_block_finalized` consumes the
+    /// VM-emitted `ValidatorRegister` / `ValidatorExit` /
+    /// `ValidatorMetadataUpdate` logs and applies them to this registry; the
+    /// per-block epoch hook calls `compute_epoch_transition()` at every epoch
+    /// boundary and stages the resulting plan into the consensus
+    /// `EpochManager`'s `pending_validators` / `pending_removals` queues.
+    /// Without this manager wired, validator transactions are accepted by
+    /// the VM (logs land in receipts) but the consensus active set never
+    /// rotates.
+    pub fn with_validator_registry(
+        mut self,
+        validator_registry: Arc<tenzro_token::ValidatorRegistry>,
+    ) -> Self {
+        self.validator_registry = Some(validator_registry);
+        self
+    }
+
+    /// Wires the workflow runtime. Required so the post-execute scan in
+    /// `handle_block_finalized` can decode the 12 typed `Workflow*` log
+    /// topics emitted by the privileged-VM workflow selectors and apply
+    /// them to the typed `WorkflowManager` / `PrivacyDomainRegistry`.
+    /// Without this, workflow transactions execute (markers persisted under
+    /// `SYSTEM_ADDRESS`) but the read model surfaced through RPC / MCP /
+    /// A2A never advances.
+    pub fn with_workflow_runtime(
+        mut self,
+        workflow_runtime: Arc<crate::workflow_runtime::WorkflowRuntime>,
+    ) -> Self {
+        self.workflow_runtime = Some(workflow_runtime);
+        self
+    }
+
+    /// Wires the adaptive-burn manager + the canonical TNZO token.
+    ///
+    /// At every epoch transition the event loop computes a
+    /// `SupplyMetricsSnapshot` (current circulating supply, epoch
+    /// supply delta, rolling-window bps) and feeds it into
+    /// `BurnRateConfigManager::record_metrics`. The transfer function
+    /// (`current_recommendation()`) and the
+    /// `tenzro_getBurnRateRecommendation` RPC then read from the
+    /// freshly-persisted snapshot. Without this wire, `record_metrics`
+    /// is dead code and the recommendation engine scores against
+    /// `SupplyMetricsSnapshot::default()`.
+    pub fn with_burn_rate_manager(
+        mut self,
+        burn_rate_manager: Arc<tenzro_token::adaptive_burn::BurnRateConfigManager>,
+        token: Arc<tenzro_token::TnzoToken>,
+    ) -> Self {
+        self.burn_rate_manager = Some(burn_rate_manager);
+        self.token = Some(token);
         self
     }
 
@@ -716,6 +825,52 @@ impl EventLoop {
             }
         }
 
+        // Spawn the block-sync engine.
+        //
+        // Light-client / no-network nodes have no engine — the channel stays
+        // `None` and the corresponding select arm in the main loop is a noop.
+        //
+        // Why here (after mesh warm-up, before finality)? The engine subscribes
+        // to network channels (`subscribe_block_sync_requests` /
+        // `subscribe_block_sync_results`), so the network must be running.
+        // Starting it before consensus finality means an out-of-sync node can
+        // already start fetching blocks while the local consensus engine is
+        // still pinned at the obsolete view it booted with — which is exactly
+        // the wedge `resume_from_synced_height()` was added to unblock.
+        if let Some(network) = self.network.clone() {
+            match (
+                network.subscribe_block_sync_requests().await,
+                network.subscribe_block_sync_results().await,
+                network.subscribe_peer_events().await,
+            ) {
+                (Ok(inbound_rx), Ok(outbound_rx), Ok(peer_events_rx)) => {
+                    let (importer_tx, importer_rx) =
+                        mpsc::channel::<crate::block_sync::BlockImport>(64);
+                    self.block_import_rx = Some(importer_rx);
+
+                    let engine = crate::block_sync::BlockSyncEngine::new(
+                        network,
+                        self.storage.clone(),
+                        self.consensus.clone(),
+                        inbound_rx,
+                        outbound_rx,
+                        peer_events_rx,
+                        importer_tx,
+                    );
+                    let engine_shutdown = self.shutdown_tx.subscribe();
+                    tokio::spawn(engine.run(engine_shutdown));
+                    info!("Block-sync engine spawned");
+                }
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                    warn!(
+                        error = %e,
+                        "Block-sync engine NOT spawned — network subscribe failed; \
+                         node will not catch up if it falls behind"
+                    );
+                }
+            }
+        }
+
         // Subscribe to consensus finality notifications if consensus is available.
         // This is how finalized blocks flow from HotStuff-2 into the execution pipeline.
         let mut finality_rx = self.consensus.as_ref().map(|c| c.subscribe_finality());
@@ -754,6 +909,35 @@ impl EventLoop {
                 _ = shutdown_rx.recv() => {
                     info!("Event loop shutting down");
                     break;
+                }
+                // Block-sync engine has a peer-served block ready to import.
+                // The engine has already extracted and verified the embedded
+                // commit-QC against the active validator set; here we simply
+                // run the block through the same execution pipeline used by
+                // organic finality, with `from_sync = true` so we skip
+                // gossip rebroadcast and per-block epoch-transition hooks
+                // (validators producing the chain handle those).
+                //
+                // Branch is gated by `block_import_rx.is_some()`: nodes
+                // without a network service have no engine and therefore no
+                // channel — the inner future stays pending forever.
+                Some(import) = async {
+                    match self.block_import_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending::<Option<crate::block_sync::BlockImport>>().await,
+                    }
+                } => {
+                    let crate::block_sync::BlockImport { block, serving_peer: _, result } = import;
+                    let height = block.height();
+                    let outcome = self.handle_block_imported_from_sync(block).await;
+                    let reply = match outcome {
+                        Ok(()) => Ok(()),
+                        Err(e) => Err(format!("import height {} failed: {}", height, e)),
+                    };
+                    // The engine drops the receiver if it has lost interest
+                    // (peer disconnected, sync run aborted) — silent send
+                    // failure is not an error here.
+                    let _ = result.send(reply);
                 }
                 // Periodic peer count refresh — independent of block finalization.
                 // Ensures /status always reflects the current P2P connection state.
@@ -903,7 +1087,7 @@ impl EventLoop {
                             let pricing_info = tenzro_network::PricingInfo {
                                 per_request: 0,
                                 per_token: pricing.as_ref().map(|p| {
-                                    (p.input_price_per_token * 1_000_000.0) as u64
+                                    p.input_price_per_token_wei.min(u64::MAX as u128) as u64
                                 }),
                             };
                             let msg_schedule = schedule.as_ref().and_then(|s| {
@@ -1470,7 +1654,28 @@ impl EventLoop {
         // Forward to consensus mempool if consensus engine is available.
         // This is the primary path: validated transactions enter the mempool,
         // where the block proposer selects them for inclusion in new blocks.
-        let mut admitted_locally = false;
+        //
+        // This handler is invoked from two callers:
+        //   (a) the gossipsub `tenzro/transactions` subscriber in `node.rs`
+        //       when a peer publishes a tx onto the mesh, and
+        //   (b) the legacy fallback path on light/boot nodes that have no
+        //       consensus engine wired (the RPC layer dispatches
+        //       `NewTransaction` only when `node.consensus()` is `None`).
+        //
+        // In both cases the tx must NOT be re-broadcast here. libp2p's
+        // gossipsub mesh propagates received messages to other peers
+        // automatically — calling `network.broadcast()` again on receipt
+        // would re-publish under a fresh `NetworkMessage` envelope (which
+        // carries a per-call `Uuid`), defeating gossipsub's content-id
+        // dedup and producing an exponential amplification loop. A
+        // permanently-unadmittable tx (e.g. one that fails the Spec 2 fee
+        // floor) accumulates mass on every relay and pins all validators
+        // on tx replay, starving block production.
+        //
+        // RPC paths that *originate* a tx use the
+        // `LocallyAdmittedTransaction` pattern: admit synchronously via
+        // `consensus.submit_transaction()`, then dispatch the event so
+        // the event loop publishes once into the mesh.
         if let Some(consensus) = &self.consensus {
             match consensus.submit_transaction(tx.clone()) {
                 Ok(()) => {
@@ -1478,42 +1683,29 @@ impl EventLoop {
                         hash = %tx_hash,
                         "Transaction submitted to consensus mempool"
                     );
-                    admitted_locally = true;
                 }
                 Err(e) => {
-                    warn!(
+                    // Drop, don't store. A tx the local mempool refuses
+                    // (fee floor, rate limit, nonce, capacity) cannot be
+                    // rescued by retrying locally and must not be relayed
+                    // further — gossipsub already delivered it once;
+                    // re-publishing under a new envelope is what created
+                    // the storm. The originator is responsible for
+                    // resubmitting with corrected parameters.
+                    debug!(
                         hash = %tx_hash,
                         error = %e,
-                        "Failed to submit to consensus mempool, storing locally"
+                        "Dropping non-admittable transaction received from network"
                     );
-                    self.pending_txs.push(tx.clone());
                 }
             }
-        }
-
-        // Gossip to peers regardless of local consensus admission so other
-        // validators (and follower nodes) can pick up the tx and include it in
-        // blocks they propose. This dual-path admission ensures tx propagation
-        // whether the current node is the next proposer or not, and survives
-        // transient single-node mempool rejection.
-        if let Some(ref network) = self.network {
-            let payload = serde_json::to_vec(&tx).unwrap_or_default();
-            let topic = "tenzro/transactions".to_string();
-            let msg = tenzro_network::NetworkMessage::new(
-                tenzro_network::MessagePayload::Custom { topic: topic.clone(), data: payload },
-            );
-            if let Err(e) = network.broadcast(&topic, msg).await {
-                warn!(hash = %tx_hash, error = %e, "Failed to broadcast transaction to gossipsub");
-                if !admitted_locally {
-                    self.pending_txs.push(tx);
-                }
-            } else {
-                info!(hash = %tx_hash, "Transaction forwarded to peers via gossipsub");
-            }
-        } else if !admitted_locally {
-            // No network and no local consensus admission — store locally as last resort
+        } else {
+            // No consensus engine wired (light/boot node). Hold locally so
+            // the tx isn't lost; once consensus comes up, the next sweep
+            // can flush it. No re-broadcast for the same storm-prevention
+            // reason as above.
             self.pending_txs.push(tx);
-            info!(hash = %tx_hash, "Transaction stored locally (no network)");
+            debug!(hash = %tx_hash, "Transaction queued locally (no consensus engine)");
         }
 
         Ok(())
@@ -1540,13 +1732,12 @@ impl EventLoop {
         let tx_hash = tx.hash();
 
         if let Some(ref network) = self.network {
-            let payload = serde_json::to_vec(&tx).unwrap_or_default();
+            // Same typed-variant rationale as `handle_new_transaction` above:
+            // peers route on `MessagePayload::Transaction(_)`, so wrapping in
+            // `Custom` would silently drop the message on every receiver.
             let topic = "tenzro/transactions".to_string();
             let msg = tenzro_network::NetworkMessage::new(
-                tenzro_network::MessagePayload::Custom {
-                    topic: topic.clone(),
-                    data: payload,
-                },
+                tenzro_network::MessagePayload::Transaction(tx.clone()),
             );
             if let Err(e) = network.broadcast(&topic, msg).await {
                 warn!(
@@ -1579,7 +1770,129 @@ impl EventLoop {
     /// 4. Persist the block to storage
     /// 5. Update local height/hash tracking
     /// 6. Clean up finalized transactions from pending pool
+    /// Process a finalized block — execute its transactions, commit state,
+    /// persist the block + tx index + receipts, and (optionally) drive the
+    /// epoch transition + gossip rebroadcast hooks.
+    ///
+    /// `from_sync` toggles two behaviors that are appropriate for organic
+    /// finality (`false`) but **MUST be skipped** during block-sync catch-up
+    /// (`true`):
+    ///
+    ///   1. **Gossip rebroadcast.** Sync-imported blocks come from a unicast
+    ///      RPC; rebroadcasting them would amplify into the gossipsub mesh
+    ///      with no benefit (the proposer already broadcast at finalization
+    ///      time on the live network) and would interleave historical
+    ///      blocks with live ones, defeating gossipsub's recency dedup.
+    ///   2. **Consensus epoch hook.** During sync we are by definition
+    ///      *behind* the network's current epoch. The epoch transition plan
+    ///      for block N is computed at block N-1; replaying that hook on a
+    ///      historical block would mutate the live `EpochManager` state and
+    ///      potentially queue obsolete pending validators. The epoch state
+    ///      is repaired authoritatively when the sync engine calls
+    ///      `HotStuff2Engine::resume_from_synced_height`.
+    ///
+    /// Both code paths still run: state execution, state-root commit, block
+    /// persistence, transaction-index persistence, kill-switch / bond /
+    /// validator log scans, and `current_height` advancement. State
+    /// divergence between sync and live nodes would be a consensus bug.
     async fn handle_block_finalized(&mut self, block: Block) -> Result<()> {
+        self.handle_block_finalized_inner(block, false).await
+    }
+
+    /// Block-sync entry point. Same as [`Self::handle_block_finalized`] but
+    /// suppresses gossip rebroadcast and epoch-transition setup — see
+    /// `handle_block_finalized` rustdoc for why.
+    ///
+    /// Before delegating to `_inner`, this method **verifies the block's
+    /// embedded commit-QC against the current validator set**:
+    ///
+    /// 1. Extracts the QC from `block.header.consensus_proof.proof_data`
+    ///    via [`tenzro_consensus::QuorumCertificate::extract_from_block`].
+    ///    A block whose proof_data is empty or fails to deserialize is rejected.
+    /// 2. Calls [`tenzro_consensus::QuorumCertificate::verify`] which
+    ///    re-verifies every contained vote (format version, validator
+    ///    membership, key binding, hybrid signature, no duplicate voters)
+    ///    and checks the aggregated voting power meets the quorum threshold.
+    /// 3. Confirms the QC's `block_hash`/`height` match the block being imported.
+    ///
+    /// A block that fails any of these checks is dropped without touching state,
+    /// and the caller (BlockSyncEngine) is expected to score the serving peer
+    /// down. This is the security boundary that lets us trust historical blocks
+    /// from non-validator peers without re-running consensus.
+    ///
+    /// Caveat (cross-epoch sync): we currently verify against
+    /// `consensus.validator_set()` which is the active set at the validator's
+    /// *current* epoch. Cross-epoch verification (using historical validator
+    /// sets) lands when the BlockSyncEngine's epoch boundary handling lands.
+    pub(crate) async fn handle_block_imported_from_sync(&mut self, block: Block) -> Result<()> {
+        // Need a consensus engine to know the validator set we're verifying against.
+        let consensus = self.consensus.as_ref().ok_or_else(|| {
+            crate::error::NodeError::Other(
+                "block-sync import requires a consensus engine".to_string(),
+            )
+        })?;
+
+        // (1) Extract QC.
+        let qc = tenzro_consensus::QuorumCertificate::extract_from_block(&block)
+            .ok_or_else(|| {
+                crate::error::NodeError::Other(format!(
+                    "block-sync rejected block at height {}: no embedded commit-QC \
+                     (consensus_proof.proof_data empty or undeserializable)",
+                    block.height()
+                ))
+            })?;
+
+        // (3) QC must reference the block being imported.
+        let block_hash = block.hash();
+        if qc.block_hash != block_hash || qc.height != block.height() {
+            return Err(crate::error::NodeError::Other(format!(
+                "block-sync rejected block at height {}: embedded QC references \
+                 block_hash={}/height={}, expected block_hash={}/height={}",
+                block.height(),
+                qc.block_hash,
+                qc.height,
+                block_hash,
+                block.height(),
+            )));
+        }
+        if qc.vote_type != tenzro_consensus::VoteType::Commit {
+            return Err(crate::error::NodeError::Other(format!(
+                "block-sync rejected block at height {}: embedded QC is not a Commit-QC \
+                 (got {:?})",
+                block.height(),
+                qc.vote_type,
+            )));
+        }
+
+        // (2) Verify QC: every vote's signature, validator membership, key binding,
+        // no duplicates, voting power meets quorum threshold.
+        let validator_set = consensus.validator_set();
+        qc.verify(&validator_set).map_err(|e| {
+            crate::error::NodeError::Other(format!(
+                "block-sync rejected block at height {} (hash={}): QC verification \
+                 failed: {}",
+                block.height(),
+                block_hash,
+                e
+            ))
+        })?;
+
+        debug!(
+            height = %block.height(),
+            hash = %block_hash,
+            qc_view = qc.view,
+            qc_votes = qc.votes.len(),
+            "Block-sync: commit-QC verified, accepting block"
+        );
+
+        self.handle_block_finalized_inner(block, true).await
+    }
+
+    async fn handle_block_finalized_inner(
+        &mut self,
+        block: Block,
+        from_sync: bool,
+    ) -> Result<()> {
         let block_hash = block.hash();
         let block_height = block.height();
         let tx_count = block.tx_count();
@@ -1724,6 +2037,24 @@ impl EventLoop {
                         // balances and on-chain markers are already
                         // committed by the VM at this point.
                         self.process_bond_logs(&result, block_height).await;
+                        // Same pattern for ValidatorRegister / ValidatorExit /
+                        // ValidatorMetadataUpdate logs — drive the off-chain
+                        // ValidatorRegistry from VM-emitted events. The VM
+                        // has already deducted gas and persisted markers.
+                        self.process_validator_logs(&result, block_height).await;
+
+                        // Workflow scan — same pattern across the 12
+                        // privileged workflow selectors (0x01000040–0x0100004B).
+                        // The VM has already validated payload size, JSON
+                        // well-formedness, charged gas, and persisted the
+                        // `wf:<op>:<id>` marker under SYSTEM_ADDRESS. Here we
+                        // decode the typed JSON and dispatch into the
+                        // off-chain `WorkflowManager` / `PrivacyDomainRegistry`,
+                        // which write through to RocksDB and emit chained
+                        // `WorkflowReceipt`s. Decode failures are warned and
+                        // skipped — divergence is recoverable on restart via
+                        // hydration from CF_SETTLEMENTS / CF_APPROVALS.
+                        self.process_workflow_logs(&result, block_height).await;
                     } else {
                         failed_txs += 1;
                         warn!(
@@ -1974,7 +2305,11 @@ impl EventLoop {
         //   3. It tries to deliver to the block-sync subscriber channel
         //   4. That channel's receiver (this event loop) is blocked in step 1
         //   5. DEADLOCK — with limited CPU (500m), this starves the web server too
-        if self.consensus.is_some()
+        // Skip gossip rebroadcast for sync-imported blocks. Rebroadcasting
+        // historical blocks would amplify into the live mesh and interleave
+        // with current-tip blocks, defeating gossipsub recency dedup.
+        if !from_sync
+            && self.consensus.is_some()
             && let Some(ref network) = self.network {
                 let network_clone = network.clone();
                 let msg = NetworkMessage::new(MessagePayload::Block(block.clone()));
@@ -1996,6 +2331,168 @@ impl EventLoop {
                     }
                 });
             }
+
+        // Epoch boundary hook: every block, ask the consensus EpochManager
+        // whether the next block will trigger an epoch transition. If yes,
+        // compute the registry's transition plan for the *upcoming* epoch
+        // and translate it into pending_validators / pending_removals on
+        // the EpochManager. The HotStuff-2 engine itself drains those
+        // queues during transition_epoch() and rebuilds the validator set.
+        //
+        // This runs strictly *before* HotStuff-2 calls transition_epoch
+        // (which happens on its own block-finalized handler). We rely on
+        // both paths observing the same height threshold; queueing pending
+        // entries is idempotent within an epoch.
+        //
+        // Skip for sync-imported blocks. Replaying historical epoch
+        // transitions would mutate live `EpochManager` state with obsolete
+        // plans (pending_validators / pending_removals from old epochs)
+        // and corrupt the active validator set the live consensus engine
+        // is operating against. The caller (BlockSyncEngine) catches the
+        // engine up to the network's current epoch via
+        // `resume_from_synced_height` once sync completes.
+        if !from_sync
+            && let (Some(consensus), Some(registry)) =
+            (self.consensus.as_ref(), self.validator_registry.as_ref())
+        {
+            let em = consensus.epoch_manager();
+            // Will the *next* block trigger transition? Use block_height + 1
+            // so we set up the plan before HotStuff-2 finalizes its own.
+            let next_height =
+                tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
+            if em.should_transition(next_height) {
+                let next_epoch = em.current_epoch().number + 1;
+                let plan = registry.compute_epoch_transition(next_epoch);
+                debug!(
+                    next_epoch = next_epoch,
+                    activations = plan.effective_activations.len(),
+                    exits = plan.effective_exits.len(),
+                    "Computed registry epoch transition plan"
+                );
+
+                // Effective activations → ValidatorInfo upsert into pending.
+                for addr in &plan.effective_activations {
+                    let entry = match registry.get(addr) {
+                        Some(e) => e,
+                        None => {
+                            warn!(
+                                address = %addr,
+                                "Registry returned activation for unknown entry; skipping"
+                            );
+                            continue;
+                        }
+                    };
+                    if entry.consensus_pubkey.len() != 32 {
+                        warn!(
+                            address = %addr,
+                            len = entry.consensus_pubkey.len(),
+                            "Skipping activation: consensus pubkey not 32 bytes"
+                        );
+                        continue;
+                    }
+                    let pk = tenzro_crypto::PublicKey::new(
+                        tenzro_crypto::KeyType::Ed25519,
+                        entry.consensus_pubkey.clone(),
+                    );
+                    let info = tenzro_consensus::validator::ValidatorInfo::new(
+                        entry.address,
+                        pk,
+                        entry.pq_pubkey.clone(),
+                        entry.self_stake,
+                    );
+                    em.add_pending_validator(info);
+                }
+
+                // Effective exits → drop from active set in next epoch.
+                for addr in &plan.effective_exits {
+                    em.remove_pending_validator(addr);
+                }
+            }
+        }
+
+        // Adaptive-burn supply metrics observation (Spec 8). Runs once per
+        // epoch boundary, immediately after the validator transition plan
+        // is staged but before HotStuff-2 finalizes the rotation. This is
+        // the canonical place to feed `BurnRateConfigManager::record_metrics`
+        // so the recommendation engine has fresh data the moment governance
+        // queries `tenzro_getBurnRateRecommendation`.
+        //
+        // Skip during sync replay (same reasoning as the validator
+        // transition above): the snapshot reflects historical supply that
+        // doesn't represent the live network's current state.
+        if !from_sync
+            && let (Some(consensus), Some(burn_rate), Some(token)) = (
+                self.consensus.as_ref(),
+                self.burn_rate_manager.as_ref(),
+                self.token.as_ref(),
+            )
+        {
+            let em = consensus.epoch_manager();
+            let next_height =
+                tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
+            if em.should_transition(next_height) {
+                use tenzro_token::adaptive_burn::SupplyMetricsSnapshot;
+
+                let circulating = token.circulating_supply();
+                let prior = self.last_observed_epoch_supply;
+                // First observation → zero delta (no prior reference point);
+                // initialize the running anchor.
+                let epoch_delta: i128 = if prior == 0 {
+                    0
+                } else {
+                    (circulating as i128).saturating_sub(prior as i128)
+                };
+
+                // Annualize the current epoch delta to bps of circulating
+                // supply, using the configured rolling-window length as the
+                // averaging horizon. We use the targets snapshot rather than
+                // accumulating a real ring buffer for now — the transfer
+                // function's `compute_recommendation` only consumes the
+                // already-annualized bps, so a per-epoch annualization is
+                // numerically equivalent on a steady-state network. A real
+                // rolling-window aggregator can replace this when the
+                // historical-snapshot ring buffer ships.
+                let rolling_bps: i32 = if circulating == 0 {
+                    0
+                } else {
+                    let window_epochs =
+                        burn_rate.targets().rolling_window_epochs.max(1) as i128;
+                    let annualized = epoch_delta.saturating_mul(window_epochs);
+                    let bps = annualized
+                        .saturating_mul(10_000)
+                        .checked_div(circulating as i128)
+                        .unwrap_or(0);
+                    bps.clamp(i32::MIN as i128, i32::MAX as i128) as i32
+                };
+
+                let snapshot = SupplyMetricsSnapshot {
+                    block_height,
+                    captured_at: tenzro_types::primitives::Timestamp::now(),
+                    circulating_supply: circulating,
+                    epoch_supply_delta: epoch_delta,
+                    rolling_window_supply_delta_bps: rolling_bps,
+                    burn_breakdown: Default::default(),
+                    emission_breakdown: Default::default(),
+                };
+
+                if let Err(e) = burn_rate.record_metrics(snapshot) {
+                    warn!(
+                        error = %e,
+                        height = block_height.0,
+                        "Adaptive-burn record_metrics failed"
+                    );
+                } else {
+                    debug!(
+                        height = block_height.0,
+                        circulating = circulating,
+                        epoch_delta = epoch_delta,
+                        rolling_bps = rolling_bps,
+                        "Recorded adaptive-burn epoch snapshot"
+                    );
+                    self.last_observed_epoch_supply = circulating;
+                }
+            }
+        }
 
         Ok(())
     }
@@ -2394,6 +2891,260 @@ impl EventLoop {
         }
     }
 
+    /// Reflect VM-emitted validator-registry logs into the off-chain
+    /// `ValidatorRegistry` (Dynamic Validator Set).
+    ///
+    /// Decodes `ValidatorRegister` / `ValidatorExit` / `ValidatorMetadataUpdate`
+    /// log payloads matching the wire layouts produced by the native VM
+    /// handlers in `tenzro-vm/src/native/mod.rs` and applies them to the
+    /// registry. The registry is the read model consensus reads from at
+    /// epoch boundaries; the VM is the source of truth for the on-chain
+    /// `validator_register:<hex>` / `validator_exit:<hex>` markers.
+    ///
+    /// Errors are logged but never abort the block — divergence between
+    /// the VM marker and the registry is recoverable on restart via
+    /// `load_from_storage`.
+    async fn process_validator_logs(
+        &self,
+        result: &tenzro_vm::ExecutionResult,
+        block_height: BlockHeight,
+    ) {
+        let any_validator = result.logs.iter().any(|l| {
+            l.topics.first().map(|t| {
+                let s = t.as_slice();
+                s == b"ValidatorRegister"
+                    || s == b"ValidatorExit"
+                    || s == b"ValidatorMetadataUpdate"
+            }).unwrap_or(false)
+        });
+        if !any_validator {
+            return;
+        }
+
+        let registry = match self.validator_registry.as_ref() {
+            Some(r) => r.clone(),
+            None => {
+                debug!(
+                    block_height = block_height.0,
+                    "Validator log observed but ValidatorRegistry not wired; skipping reflection"
+                );
+                return;
+            }
+        };
+
+        // Map block height → epoch via the consensus engine, falling back to
+        // 0 when no consensus is wired (e.g. unit tests). The registry only
+        // uses the epoch number for ordering and cooldown gating, so a
+        // monotonic stand-in is acceptable in degraded mode.
+        // EpochManager::current_epoch() is sync and returns Epoch (with .number).
+        let current_epoch = match self.consensus.as_ref() {
+            Some(c) => c.epoch_manager().current_epoch().number,
+            None => 0,
+        };
+
+        for log in &result.logs {
+            let topic = match log.topics.first() {
+                Some(t) => t.as_slice(),
+                None => continue,
+            };
+
+            match topic {
+                b"ValidatorRegister" => {
+                    let parsed = match decode_validator_register_log(&log.data) {
+                        Some(v) => v,
+                        None => {
+                            warn!(
+                                data_len = log.data.len(),
+                                "Malformed ValidatorRegister log payload, skipping"
+                            );
+                            continue;
+                        }
+                    };
+                    let from_addr = parsed.from;
+                    if let Err(e) = registry.register_candidate(
+                        from_addr,
+                        parsed.consensus_pubkey,
+                        parsed.pq_pubkey,
+                        parsed.withdrawal_address,
+                        parsed.self_stake,
+                        current_epoch,
+                        parsed.metadata_uri,
+                    ) {
+                        warn!(
+                            address = %from_addr,
+                            error = %e,
+                            "ValidatorRegistry rejected register_candidate; \
+                             on-chain marker may have outpaced registry state"
+                        );
+                    } else {
+                        debug!(
+                            address = %from_addr,
+                            self_stake = parsed.self_stake,
+                            epoch = current_epoch,
+                            "ValidatorRegistry reflected ValidatorRegister log"
+                        );
+                    }
+                }
+
+                b"ValidatorExit" => {
+                    let from_addr = match tenzro_types::primitives::Address::from_bytes(&log.data) {
+                        Some(a) => a,
+                        None => {
+                            warn!(
+                                data_len = log.data.len(),
+                                "Malformed ValidatorExit log payload (expected 32 bytes), skipping"
+                            );
+                            continue;
+                        }
+                    };
+                    if let Err(e) = registry.request_exit(&from_addr) {
+                        warn!(
+                            address = %from_addr,
+                            error = %e,
+                            "ValidatorRegistry rejected request_exit"
+                        );
+                    } else {
+                        debug!(
+                            address = %from_addr,
+                            "ValidatorRegistry reflected ValidatorExit log"
+                        );
+                    }
+                }
+
+                b"ValidatorMetadataUpdate" => {
+                    let parsed = match decode_validator_metadata_update_log(&log.data) {
+                        Some(v) => v,
+                        None => {
+                            warn!(
+                                data_len = log.data.len(),
+                                "Malformed ValidatorMetadataUpdate log payload, skipping"
+                            );
+                            continue;
+                        }
+                    };
+                    let from_addr = parsed.from;
+                    let uri = if parsed.metadata_uri.is_empty() {
+                        None
+                    } else {
+                        Some(parsed.metadata_uri)
+                    };
+                    if let Err(e) = registry.update_metadata(
+                        &from_addr,
+                        uri,
+                        parsed.tee_attestation_hash,
+                    ) {
+                        warn!(
+                            address = %from_addr,
+                            error = %e,
+                            "ValidatorRegistry rejected update_metadata"
+                        );
+                    } else {
+                        debug!(
+                            address = %from_addr,
+                            "ValidatorRegistry reflected ValidatorMetadataUpdate log"
+                        );
+                    }
+                }
+
+                _ => {}
+            }
+        }
+    }
+
+    /// Reflect VM-emitted workflow logs into the off-chain `WorkflowManager`
+    /// + `PrivacyDomainRegistry`.
+    ///
+    /// Topics matched (mirror the 12 privileged-VM workflow selectors at
+    /// `0x01000040`–`0x0100004B`):
+    ///
+    /// - `WorkflowCreate`
+    /// - `WorkflowSign`
+    /// - `WorkflowTransition`
+    /// - `WorkflowObligationRegister`
+    /// - `WorkflowObligationDischarge`
+    /// - `WorkflowObligationDefault`
+    /// - `WorkflowGateRegister`
+    /// - `WorkflowApprovalOpen`
+    /// - `WorkflowApprovalDecision`
+    /// - `WorkflowKillSwitch`
+    /// - `WorkflowPrivacyDomainRegister`
+    /// - `WorkflowPrivacyDomainFreeze`
+    ///
+    /// The runtime is the read model RPC / MCP / A2A consult; the VM
+    /// markers under `SYSTEM_ADDRESS` are the on-chain source of truth and
+    /// drive hydration on restart.
+    async fn process_workflow_logs(
+        &self,
+        result: &tenzro_vm::ExecutionResult,
+        block_height: BlockHeight,
+    ) {
+        let any_workflow = result.logs.iter().any(|l| {
+            l.topics.first().map(|t| {
+                let s = t.as_slice();
+                s == b"WorkflowCreate"
+                    || s == b"WorkflowSign"
+                    || s == b"WorkflowTransition"
+                    || s == b"WorkflowObligationRegister"
+                    || s == b"WorkflowObligationDischarge"
+                    || s == b"WorkflowObligationDefault"
+                    || s == b"WorkflowGateRegister"
+                    || s == b"WorkflowApprovalOpen"
+                    || s == b"WorkflowApprovalDecision"
+                    || s == b"WorkflowKillSwitch"
+                    || s == b"WorkflowPrivacyDomainRegister"
+                    || s == b"WorkflowPrivacyDomainFreeze"
+            }).unwrap_or(false)
+        });
+        if !any_workflow {
+            return;
+        }
+
+        let runtime = match self.workflow_runtime.as_ref() {
+            Some(rt) => rt.clone(),
+            None => {
+                debug!(
+                    block_height = block_height.0,
+                    "Workflow log observed but WorkflowRuntime not wired; skipping mirror"
+                );
+                return;
+            }
+        };
+
+        for log in &result.logs {
+            let topic = match log.topics.first() {
+                Some(t) => t.as_slice(),
+                None => continue,
+            };
+            match topic {
+                b"WorkflowCreate" => runtime.apply_create(&log.data, block_height),
+                b"WorkflowSign" => runtime.apply_sign(&log.data, block_height),
+                b"WorkflowTransition" => runtime.apply_transition(&log.data, block_height),
+                b"WorkflowObligationRegister" => {
+                    runtime.apply_register_obligation(&log.data, block_height)
+                }
+                b"WorkflowObligationDischarge" => {
+                    runtime.apply_discharge_obligation(&log.data, block_height)
+                }
+                b"WorkflowObligationDefault" => {
+                    runtime.apply_default_obligation(&log.data, block_height)
+                }
+                b"WorkflowGateRegister" => runtime.apply_register_gate(&log.data, block_height),
+                b"WorkflowApprovalOpen" => runtime.apply_open_approval(&log.data, block_height),
+                b"WorkflowApprovalDecision" => {
+                    runtime.apply_submit_decision(&log.data, block_height)
+                }
+                b"WorkflowKillSwitch" => runtime.apply_kill_switch(&log.data, block_height),
+                b"WorkflowPrivacyDomainRegister" => {
+                    runtime.apply_register_privacy_domain(&log.data, block_height)
+                }
+                b"WorkflowPrivacyDomainFreeze" => {
+                    runtime.apply_freeze_privacy_domain(&log.data, block_height)
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Apply a single (non-cascade) kill-switch action to one agent: drive
     /// the lifecycle FSM and adjust stake. Side-effects are independent —
     /// a failure on one does not block the other.
@@ -2713,6 +3464,112 @@ fn decode_insurance_claim_paid_log(data: &[u8]) -> Option<(String, [u8; 32], u12
     Some((claim_id_hex, claimant, amount))
 }
 
+/// Parsed payload of a `ValidatorRegister` log.
+struct ParsedValidatorRegister {
+    from: tenzro_types::primitives::Address,
+    self_stake: u128,
+    consensus_pubkey: Vec<u8>,
+    pq_pubkey: Vec<u8>,
+    withdrawal_address: tenzro_types::primitives::Address,
+    metadata_uri: String,
+}
+
+/// Decode a `ValidatorRegister` log.
+///
+/// Layout (mirror of the inline emit in
+/// `tenzro_vm::native::execute_validator_register`):
+/// `from(32) || stake_le(16) || consensus_pubkey(32) ||
+///  pq_pubkey_len_le(4) || pq_pubkey || withdrawal(32) ||
+///  metadata_uri_len_le(4) || metadata_uri`.
+fn decode_validator_register_log(data: &[u8]) -> Option<ParsedValidatorRegister> {
+    // 32 from + 16 stake + 32 consensus_pubkey + 4 pq_len = 84 bytes minimum
+    if data.len() < 84 {
+        return None;
+    }
+    let from = tenzro_types::primitives::Address::from_bytes(&data[0..32])?;
+    let self_stake = u128::from_le_bytes(data[32..48].try_into().ok()?);
+    let mut consensus_pubkey = vec![0u8; 32];
+    consensus_pubkey.copy_from_slice(&data[48..80]);
+    let pq_len = u32::from_le_bytes(data[80..84].try_into().ok()?) as usize;
+    let after_pq = 84usize.checked_add(pq_len)?;
+    // Need pq_pubkey + 32 withdrawal + 4 uri_len after that
+    if data.len() < after_pq + 32 + 4 {
+        return None;
+    }
+    let pq_pubkey = data[84..after_pq].to_vec();
+    let withdrawal_address =
+        tenzro_types::primitives::Address::from_bytes(&data[after_pq..after_pq + 32])?;
+    let after_withdrawal = after_pq + 32;
+    let uri_len = u32::from_le_bytes(
+        data[after_withdrawal..after_withdrawal + 4].try_into().ok()?,
+    ) as usize;
+    let after_uri_len = after_withdrawal + 4;
+    if data.len() < after_uri_len + uri_len {
+        return None;
+    }
+    let metadata_uri =
+        std::str::from_utf8(&data[after_uri_len..after_uri_len + uri_len])
+            .ok()?
+            .to_string();
+    Some(ParsedValidatorRegister {
+        from,
+        self_stake,
+        consensus_pubkey,
+        pq_pubkey,
+        withdrawal_address,
+        metadata_uri,
+    })
+}
+
+/// Parsed payload of a `ValidatorMetadataUpdate` log.
+struct ParsedValidatorMetadataUpdate {
+    from: tenzro_types::primitives::Address,
+    metadata_uri: String,
+    tee_attestation_hash: Option<[u8; 32]>,
+}
+
+/// Decode a `ValidatorMetadataUpdate` log.
+///
+/// Layout (mirror of the inline emit in
+/// `tenzro_vm::native::execute_validator_update_metadata`):
+/// `from(32) || metadata_uri_len_le(4) || metadata_uri ||
+///  tee_hash_present(1) || [tee_hash(32)]`.
+fn decode_validator_metadata_update_log(
+    data: &[u8],
+) -> Option<ParsedValidatorMetadataUpdate> {
+    // 32 from + 4 uri_len + 1 tee_present = 37 bytes minimum
+    if data.len() < 37 {
+        return None;
+    }
+    let from = tenzro_types::primitives::Address::from_bytes(&data[0..32])?;
+    let uri_len = u32::from_le_bytes(data[32..36].try_into().ok()?) as usize;
+    let after_uri_len = 36usize;
+    let after_uri = after_uri_len.checked_add(uri_len)?;
+    if data.len() < after_uri + 1 {
+        return None;
+    }
+    let metadata_uri =
+        std::str::from_utf8(&data[after_uri_len..after_uri]).ok()?.to_string();
+    let tee_present = data[after_uri];
+    let tee_attestation_hash = match tee_present {
+        0 => None,
+        1 => {
+            if data.len() < after_uri + 1 + 32 {
+                return None;
+            }
+            let mut h = [0u8; 32];
+            h.copy_from_slice(&data[after_uri + 1..after_uri + 1 + 32]);
+            Some(h)
+        }
+        _ => return None,
+    };
+    Some(ParsedValidatorMetadataUpdate {
+        from,
+        metadata_uri,
+        tee_attestation_hash,
+    })
+}
+
 /// Verifies the hybrid (classical + ML-DSA-65) signature of a transaction.
 ///
 /// Per Wave 3d of the post-quantum migration, every admitted transaction must
@@ -2783,6 +3640,8 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
         SELECTOR_KILLSWITCH_TERMINATE,
         SELECTOR_POST_AGENT_BOND, SELECTOR_INCREASE_AGENT_BOND,
         SELECTOR_WITHDRAW_AGENT_BOND, SELECTOR_PAY_INSURANCE_CLAIM,
+        SELECTOR_VALIDATOR_REGISTER, SELECTOR_VALIDATOR_EXIT,
+        SELECTOR_VALIDATOR_UPDATE_METADATA,
     };
 
     let tx = &signed_tx.transaction;
@@ -3002,6 +3861,63 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             );
             (0, data, VmType::Tenzro)
         }
+        // ---- Dynamic validator set (native VM dispatch) -------------------
+        // Payload field names MUST match `ValidatorRegisterPayload` and
+        // `ValidatorUpdateMetadataPayload` in `tenzro-vm/src/native/mod.rs`.
+        TransactionType::RegisterValidator {
+            consensus_pubkey,
+            pq_pubkey,
+            withdrawal_address,
+            self_stake,
+            metadata_uri,
+        } => {
+            #[derive(serde::Serialize)]
+            struct ValidatorRegisterPayload<'a> {
+                consensus_pubkey: &'a [u8],
+                pq_pubkey: &'a [u8],
+                withdrawal_address: &'a tenzro_types::primitives::Address,
+                self_stake: u128,
+                metadata_uri: &'a str,
+            }
+            let payload = ValidatorRegisterPayload {
+                consensus_pubkey,
+                pq_pubkey,
+                withdrawal_address,
+                self_stake: *self_stake,
+                metadata_uri,
+            };
+            let mut data = SELECTOR_VALIDATOR_REGISTER.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("RegisterValidator payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::ExitValidator => {
+            // No payload — selector alone signals voluntary exit.
+            (0, SELECTOR_VALIDATOR_EXIT.to_vec(), VmType::Tenzro)
+        }
+        TransactionType::UpdateValidatorMetadata { metadata_uri, tee_attestation_hash } => {
+            #[derive(serde::Serialize)]
+            struct ValidatorUpdateMetadataPayload<'a> {
+                #[serde(skip_serializing_if = "Option::is_none")]
+                metadata_uri: Option<&'a str>,
+                /// 32-byte SHA-256 commitment (raw bytes), serialized as a
+                /// JSON array — matches the VM-side `Vec<u8>` field.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                tee_attestation_hash: Option<&'a [u8]>,
+            }
+            let payload = ValidatorUpdateMetadataPayload {
+                metadata_uri: metadata_uri.as_deref(),
+                tee_attestation_hash: tee_attestation_hash.as_ref().map(|h| h.as_slice()),
+            };
+            let mut data = SELECTOR_VALIDATOR_UPDATE_METADATA.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("UpdateValidatorMetadata payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
         // All other Tenzro-native transaction types (agents, models, staking, TEE)
         _ => (0, Vec::new(), VmType::Tenzro),
     };
@@ -3026,6 +3942,12 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
     if !signed_tx.signature.public_key.is_empty() {
         vm_tx.public_key = Some(signed_tx.signature.public_key.clone());
     }
+
+    // Carry the canonical signing digest (Transaction::hash()) so the runtime
+    // verifies against the same preimage the admission boundary verified
+    // against, rather than recomputing a different hash from VmTransaction
+    // fields.
+    vm_tx.signing_digest = Some(signed_tx.transaction.hash().as_bytes().to_vec());
 
     vm_tx
 }

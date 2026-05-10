@@ -269,7 +269,7 @@ pub struct ControllerActivitySummary {
     pub controller_did: String,
     pub receipt_count: u64,
     /// Total settled value across the window, in TNZO smallest unit.
-    pub total_value_tnzo: u128,
+    pub total_value_wei: u128,
     /// Distinct DIDs that acted under the controller during the window.
     pub agents_acted_under: Vec<String>,
     pub kill_switch_events: u32,
