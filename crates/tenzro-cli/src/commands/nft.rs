@@ -408,8 +408,8 @@ impl NftListCmd {
 pub struct NftRegisterPointerCmd {
     /// Collection ID (hex)
     #[arg(long)]
-    collection: String,
-    /// Target VM: evm or svm
+    collection_id: String,
+    /// Target VM: evm, svm, or daml
     #[arg(long)]
     vm: String,
     /// Pointer contract address (EVM) or mint address (SVM)
@@ -429,7 +429,7 @@ impl NftRegisterPointerCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let result: serde_json::Value = rpc.call("tenzro_registerNftPointer", serde_json::json!({
-            "collection": self.collection,
+            "collection_id": self.collection_id,
             "vm": self.vm,
             "address": self.address,
         })).await?;
@@ -437,9 +437,9 @@ impl NftRegisterPointerCmd {
         spinner.finish_and_clear();
 
         output::print_success("NFT pointer registered successfully!");
-        output::print_field("Collection", result.get("collection").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field("Collection ID", result.get("collection_id").and_then(|v| v.as_str()).unwrap_or(""));
         output::print_field("VM", result.get("vm").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Pointer Address", result.get("pointer_address").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field("Address", result.get("address").and_then(|v| v.as_str()).unwrap_or(""));
         output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or(""));
 
         Ok(())
