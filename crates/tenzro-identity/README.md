@@ -4,7 +4,7 @@ Unified identity protocol for humans and machines on the Tenzro Network.
 
 ## Overview
 
-**tenzro-identity** implements the **Tenzro Decentralized Identity Protocol (TDIP)**, providing a comprehensive identity system that treats humans and AI agents as first-class citizens. The crate supports W3C DID Documents, verifiable credentials with recursive trust chain verification, fine-grained delegation scopes, cascading revocation, and automatic MPC wallet provisioning for every identity.
+**tenzro-identity** implements the **Tenzro Decentralized Identity Protocol (TDIP)**, providing a comprehensive identity system that treats humans and AI agents as first-class citizens. The crate supports W3C DID Documents, verifiable credentials with recursive trust chain verification, fine-grained delegation scopes, cascading revocation, and automatic FROST-Ed25519 threshold wallet provisioning for every identity.
 
 The protocol uses the `did:tenzro:` namespace (TDIP primary standard); parsers also accept the `did:pdis:` scheme (PDIS secondary standard).
 
@@ -21,7 +21,7 @@ The protocol uses the `did:tenzro:` namespace (TDIP primary standard); parsers a
 - **DelegationScope** — Fine-grained permissions: max_transaction_value, max_daily_spend, allowed_operations, allowed_contracts, time_bound, allowed_payment_protocols, allowed_chains
 - **DelegationEntry** — Delegation record with grantor, grantee, scope, and revocation status
 - **DidDocument** — W3C DID Document export/import for interoperability via `identity_to_did_document()` and `extract_public_keys_from_document()`
-- **WalletBinder** — Automatic MPC wallet provisioning for every identity (2-of-3 threshold)
+- **WalletBinder** — Automatic FROST-Ed25519 wallet provisioning for every identity (2-of-3 threshold, RFC 9591)
 - **KycTier** — Verification levels: Unverified (0), Basic (1), Enhanced (2), Full (3) — upgradable via `update_kyc_tier_with_credential()`
 
 ## Features
@@ -37,10 +37,10 @@ The protocol uses the `did:tenzro:` namespace (TDIP primary standard); parsers a
 - **Pluggable Backends:** `DidResolutionBackend` for RPC fallback, `RevocationBroadcaster` for cross-node propagation
 - **Credential-Gated KYC:** `update_kyc_tier_with_credential()` requires valid KYC credential to upgrade tier
 - **Username Registry:** Unique lowercase alphanumeric + underscore names (3-20 chars) with `register_username()` / `resolve_username()`
-- **Auto-Provisioned Wallets:** Every identity gets a 2-of-3 MPC threshold wallet via `WalletBinder`
+- **Auto-Provisioned Wallets:** Every identity gets a 2-of-3 FROST-Ed25519 threshold wallet (RFC 9591) via `WalletBinder`
 - **Write-Through Persistence:** RocksDB storage via `KvStore` trait with `CF_IDENTITIES` column family
 - **PDIS Format Support:** Parses `did:pdis:guardian:{uuid}` and `did:pdis:agent:{controller}:{uuid}` (PDIS secondary standard)
-- **ERC-8004 Trustless Agents Registry:** Interoperability with Ethereum's ERC-8004 standard — `agentId = keccak256(utf8(did_string))` matching `derive_agent_id`, calldata encoders for `registerAgent`/`getAgent`/`submitFeedback`/`validationRequest`/`validationResponse`, plus ABI decoders for on-chain lookups. Selectors are byte-identical to the Tenzro VM precompiles `0x101a` (identity) / `0x101b` (reputation) / `0x101c` (validation), so the same calldata works against either the native Tenzro registry or an Ethereum mirror.
+- **ERC-8004 Trustless Agents Registry:** Interoperability with Ethereum's ERC-8004 v0.6+ standard. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — server-allocated, never derivable client-side. The TDIP `IdentityData::Machine.erc8004_agent_id` field captures the allocation; reverse DID → id lookup via `OnChainAgentRegistry::lookup_agent_id_by_did`. Calldata encoders for `register()` / `register(string)` / `register(string,(string,bytes)[])` / `getAgent` / `submitFeedback` / `validationRequest` / `validationResponse`, plus ABI decoders for on-chain lookups. Selectors are byte-identical to the Tenzro VM precompiles `0x101a` (identity) / `0x101b` (reputation) / `0x101c` (validation), so the same calldata works against either the native Tenzro registry or an Ethereum mirror.
 - **85 Tests:** Comprehensive unit and integration tests covering all features
 
 ## Usage
@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - **tenzro-types** — Core types and primitives (KycTier, PaymentProtocolId, IdentityType, Address)
 - **tenzro-crypto** — Cryptographic operations (Ed25519, Secp256k1, signatures::verify)
-- **tenzro-wallet** — MPC wallet provisioning (2-of-3 threshold, Argon2id keystore)
+- **tenzro-wallet** — FROST-Ed25519 threshold wallet provisioning (2-of-3, RFC 9591, Argon2id keystore)
 - **tenzro-storage** — KvStore trait for RocksDB write-through persistence
 
 ## Production Features

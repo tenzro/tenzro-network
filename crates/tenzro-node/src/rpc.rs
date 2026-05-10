@@ -1098,8 +1098,9 @@ pub(crate) async fn handle_request(
         "tenzro_processSptSettlementOutcome" => crate::rpc_integrations::handle_process_spt_settlement_outcome(node, request.params).await,
 
         // ERC-8004 — Trustless Agents Registry
-        "tenzro_erc8004DeriveAgentId" => crate::rpc_integrations::handle_erc8004_derive_agent_id(node, request.params).await,
         "tenzro_erc8004EncodeRegister" => crate::rpc_integrations::handle_erc8004_encode_register(node, request.params).await,
+        "tenzro_erc8004EncodeRegisterWithUri" => crate::rpc_integrations::handle_erc8004_encode_register_with_uri(node, request.params).await,
+        "tenzro_erc8004EncodeRegisterWithMetadata" => crate::rpc_integrations::handle_erc8004_encode_register_with_metadata(node, request.params).await,
         "tenzro_erc8004EncodeGetAgent" => crate::rpc_integrations::handle_erc8004_encode_get_agent(node, request.params).await,
         "tenzro_erc8004DecodeGetAgent" => crate::rpc_integrations::handle_erc8004_decode_get_agent(node, request.params).await,
         "tenzro_erc8004EncodeFeedback" => crate::rpc_integrations::handle_erc8004_encode_feedback(node, request.params).await,
@@ -1818,7 +1819,7 @@ async fn handle_create_wallet(
         "address": hex_address,
         "display_address": format!("{}", wallet.address),
         "public_key": hex_address,
-        "key_type": format!("{:?}", wallet.key_type),
+        "key_type": format!("{:?}", wallet.key_type()),
         "threshold": wallet.threshold,
         "total_shares": wallet.total_shares,
     }))

@@ -60,6 +60,11 @@ pub mod parallel;
 pub mod eip1559;
 pub mod hot_state;
 pub mod account_abstraction;
+pub mod aa_validators;
+pub mod aa_webauthn_validator;
+pub mod aa_delegation_validator;
+pub mod aa_tee_bound_validator;
+pub mod aa_bootstrap_paymaster;
 pub mod cross_vm_bridge;
 
 // Re-export commonly used types
@@ -102,7 +107,27 @@ pub use account_abstraction::{
     Eip7702Authorization, EIP_7702_TX_TYPE, EIP_7702_MAGIC,
     EIP_7702_DESIGNATOR_PREFIX, EIP_7702_DESIGNATOR_LEN,
     build_7702_designator, parse_7702_designator,
-    process_7702_authorizations, cleanup_7702_authorizations,
+    process_7702_authorizations,
+};
+pub use aa_validators::{
+    IValidator, InstalledModule, ModuleAttestation, ModuleAttestationRegistry, ModuleType,
+    NoOpValidator, ValidationData, ValidatorError, ValidatorRegistry,
+    ERC1271_FAILURE_VALUE, ERC1271_MAGIC_VALUE, ERC7484_REGISTRY_ADDRESS,
+    SELECTOR_ATTEST_MODULE, SELECTOR_INSTALL_VALIDATOR, SELECTOR_UNINSTALL_VALIDATOR,
+};
+pub use aa_webauthn_validator::{
+    HybridWebAuthnSignature, WebAuthnAccountKey, WebAuthnValidator,
+};
+pub use aa_delegation_validator::{
+    CallIntent, CallIntentDecoder, DelegationScopeValidator, EnforcedScope,
+    InMemoryScopeOracle, ScopeOracle, StandardExecuteDecoder,
+};
+pub use aa_tee_bound_validator::{
+    EnclaveSignedOp, InMemoryTeeKeyOracle, TeeBoundAccountKey, TeeBoundValidator, TeeKeyOracle,
+    DEFAULT_MAX_ATTESTATION_AGE_SECS,
+};
+pub use aa_bootstrap_paymaster::{
+    AgentRegistryLookup, BootstrapPaymasterError, TnzoBootstrapPaymaster,
 };
 
 /// VM module version

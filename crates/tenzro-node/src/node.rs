@@ -966,6 +966,14 @@ pub struct TenzroNode {
     /// ERC-8004 ValidationRegistry (precompile 0x101c).
     erc8004_validation: Option<Arc<tenzro_vm::Erc8004ValidationRegistry>>,
 
+    /// ERC-8004 on-chain agent-registry mirror (DID → sequential `agentId`).
+    /// Populated when [`Self::erc8004_identity`] is wired during identity init.
+    /// Settlement-outcome dispatchers read this to resolve a TDIP machine DID
+    /// to the `uint256 agentId` allocated at registration time, which keys the
+    /// `submitFeedback` row written into the on-chain `ReputationRegistry`.
+    erc8004_agent_registry:
+        Option<Arc<dyn tenzro_identity::erc8004::OnChainAgentRegistry>>,
+
     // Monitoring
     health_monitor: Arc<HealthMonitor>,
     metrics: Arc<MetricsCollector>,
@@ -1227,6 +1235,7 @@ impl TenzroNode {
             erc8004_identity: None,
             erc8004_reputation: None,
             erc8004_validation: None,
+            erc8004_agent_registry: None,
             health_monitor,
             metrics,
             event_loop_tx: None,
@@ -3634,7 +3643,10 @@ impl TenzroNode {
             let mirror = Arc::new(crate::erc8004_mirror::NativeErc8004Mirror::new(
                 erc8004_identity,
             ));
-            registry = registry.with_on_chain_agent_registry(mirror);
+            registry = registry.with_on_chain_agent_registry(mirror.clone());
+            self.erc8004_agent_registry = Some(
+                mirror as Arc<dyn tenzro_identity::erc8004::OnChainAgentRegistry>,
+            );
             info!("ERC-8004 auto-mirror wired: TDIP machine registrations replicate to 0x101a");
         }
 
@@ -4888,6 +4900,22 @@ impl TenzroNode {
     /// configurations).
     pub fn erc8004_reputation(&self) -> Option<&Arc<tenzro_vm::Erc8004ReputationRegistry>> {
         self.erc8004_reputation.as_ref()
+    }
+
+    /// Returns the [`OnChainAgentRegistry`] mirror that resolves TDIP machine
+    /// DIDs to their sequential `uint256 agentId` allocated by the on-chain
+    /// `Erc8004IdentityRegistry` precompile (`0x101a`). Settlement-outcome
+    /// dispatchers consult this before writing reputation rows so the
+    /// `submitFeedback` subject word matches the `agentId` returned by
+    /// `register(...)` at machine-identity registration time. Returns `None`
+    /// when the EVM precompile registry was not wired (pre-init or non-EVM
+    /// configurations).
+    ///
+    /// [`OnChainAgentRegistry`]: tenzro_identity::erc8004::OnChainAgentRegistry
+    pub fn erc8004_agent_registry(
+        &self,
+    ) -> Option<&Arc<dyn tenzro_identity::erc8004::OnChainAgentRegistry>> {
+        self.erc8004_agent_registry.as_ref()
     }
 
     /// Returns the validator address this node uses as block proposer

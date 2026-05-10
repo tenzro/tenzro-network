@@ -36,7 +36,7 @@ Tenzro is not solely an inference marketplace — it is a general-purpose L1 set
 12. [Tenzro Decentralized Identity Protocol (TDIP)](#12-tenzro-decentralized-identity-protocol-tdip)
 13. [Payment Protocols](#13-payment-protocols)
 14. [Cross-Chain Bridge](#14-cross-chain-bridge)
-15. [Wallet and Key Management](#15-wallet-and-key-management)
+15. [Self-Custody, Wallets, and Key Management](#15-self-custody-wallets-and-key-management)
 16. [Peer-to-Peer Networking](#16-peer-to-peer-networking)
 17. [Storage and State Management](#17-storage-and-state-management)
 18. [Governance](#18-governance)
@@ -651,8 +651,11 @@ Public inputs are encoded as 4-byte little-endian KoalaBear field-element chunks
 
 | Algorithm | Purpose | Key Sizes |
 |-----------|---------|-----------|
-| Ed25519 | Transaction and message signatures | 32-byte public key, 64-byte signature |
+| Ed25519 | Transaction and message signatures, FROST threshold signing | 32-byte public key, 64-byte signature |
 | Secp256k1 | Ethereum-compatible signatures, key derivation | 33-byte compressed public key |
+| Secp256r1 (P-256) | WebAuthn / passkey signatures (Secure Enclave, StrongBox, TPM 2.0, Windows Hello), verified on-chain via the precompile at `0x100` | 64-byte uncompressed public key (`x ‖ y`), 64-byte raw signature (`r ‖ s`) |
+| ML-DSA-65 (FIPS 204) | Post-quantum hybrid signature companion to Ed25519 | 1952-byte public key, 3309-byte signature |
+| ML-KEM-768 (FIPS 203) | Post-quantum hybrid KEM companion to X25519 | 1184-byte public key, 1088-byte ciphertext |
 | AES-256-GCM | Symmetric encryption for keystore and data at rest | 256-bit key, 96-bit nonce, 128-bit tag |
 | X25519 | Elliptic-curve Diffie-Hellman key exchange | 32-byte public key |
 | SHA-256 | General-purpose hashing, Merkle trees | 256-bit digest |
@@ -664,13 +667,17 @@ Addresses are 32-byte values derived from public keys:
 - **Ed25519:** The raw 32-byte public key is truncated to 20 bytes, then zero-padded to 32 bytes.
 - **Secp256k1:** Keccak-256 hash of the uncompressed public key, last 20 bytes, zero-padded to 32 bytes (Ethereum-compatible).
 
-### 7.3 MPC Threshold Signing
+### 7.3 Threshold Signing
 
-The network implements multi-party computation for threshold signatures using Shamir's Secret Sharing over GF(256):
+For threshold signatures over Ed25519, Tenzro uses **FROST** (Flexible Round-Optimized Schnorr Threshold signatures, [RFC 9591](https://datatracker.ietf.org/doc/rfc9591/)):
 
-1. **Key Generation.** A secret key is split into `n` shares with a threshold of `t` (default: 2-of-3). Each share is distributed to a different custodian or device.
-2. **Signing.** Any `t` shareholders produce partial signatures. These are combined using Lagrange interpolation to produce a valid full signature.
-3. **Reconstruction.** The secret can be reconstructed from `t` shares using `reconstruct_secret()`, but this is only used for key recovery — normal operations use partial signature combination.
+1. **Distributed Key Generation (DKG).** Two-round protocol where `n` participants jointly generate a single group public key without any party ever holding the corresponding secret. Each participant retains a key share.
+2. **Threshold Signing.** Any `t`-of-`n` participants run a two-round signing protocol (commitment + response) to produce a single 64-byte Ed25519 signature indistinguishable from a single-key signature. No master key is ever reconstructed.
+3. **Verification.** Resulting signatures verify against the group public key under the standard Ed25519 verifier — no protocol-specific verifier required.
+
+This is a true threshold-MPC protocol: a compromised set of fewer than `t` participants learns nothing about the secret, and no party — including the signer that combines the round-2 outputs — ever sees the master key. The reference implementation is [`frost-ed25519`](https://github.com/ZcashFoundation/frost) maintained by the Zcash Foundation.
+
+Older protocols (GG18, GG20, Lindell17) are explicitly out of scope: the TSSHOCK key-extraction attack (Verichains, 2023) and the BitForge / CVE-2023-33241 Paillier-modulus issue (Trail of Bits, Fireblocks, 2023) make them indefensible to ship in 2026. CGGMP21/24 and DKLs23 are the equivalent picks if Tenzro adds secp256k1 multisig in the future.
 
 ### 7.4 Envelope Encryption
 
@@ -1417,14 +1424,15 @@ Payments are bound to TDIP identities through the `identity_binding` module. Whe
 
 ### 13.10 ERC-8004 Trustless Agents Registry
 
-ERC-8004 v0.6+ defines three on-chain registries (Identity, Reputation, Validation) for discovering and trusting agents across heterogeneous principal chains. Tenzro implements byte-identical selectors so the same calldata works against either the native Tenzro registry (precompiles `0x101a` / `0x101b` / `0x101c`) or the Ethereum mirror. `agentId = keccak256(utf8(did_string))` matches `derive_agent_id` exactly.
+ERC-8004 v0.6+ defines three on-chain registries (Identity, Reputation, Validation) for discovering and trusting agents across heterogeneous principal chains. Tenzro implements byte-identical selectors so the same calldata works against either the native Tenzro registry (precompiles `0x101a` / `0x101b` / `0x101c`) or the Ethereum mirror. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — it is server-allocated, never derivable client-side. The TDIP `IdentityData::Machine.erc8004_agent_id` field captures the allocation for cross-system lookup.
 
-**IdentityRegistry (10 surfaces):**
+**IdentityRegistry (12 surfaces):**
 
 | RPC | Purpose |
 |-----|---------|
-| `tenzro_erc8004DeriveAgentId { did }` | Compute `keccak256(utf8(did))` |
-| `tenzro_erc8004EncodeRegister { agent_address, metadata_uri }` | Encode `register` calldata |
+| `tenzro_erc8004EncodeRegister {}` | Encode `register()` calldata (no-arg overload) |
+| `tenzro_erc8004EncodeRegisterWithUri { agent_uri }` | Encode `register(string agentURI)` calldata |
+| `tenzro_erc8004EncodeRegisterWithMetadata { agent_uri, metadata }` | Encode `register(string,(string,bytes)[])` calldata |
 | `tenzro_erc8004EncodeGetAgent { agent_id }` / `tenzro_erc8004DecodeGetAgent { return_data }` | Read agent record |
 | `tenzro_erc8004EncodeSetAgentURI { agent_id, metadata_uri }` | Update metadata URI |
 | `tenzro_erc8004EncodeSetAgentWallet { agent_id, new_wallet, deadline, signature }` | Wallet rotation with EIP-712 signature |
@@ -1714,98 +1722,285 @@ Each template defines its `WorkflowSpec` (counterparty roles, obligation set, ap
 
 ---
 
-## 15. Wallet and Key Management
+## 15. Self-Custody, Wallets, and Key Management
 
-### 15.1 MPC Wallets
+Tenzro is a self-custodial network across all three identity classes — humans, delegated agents, and autonomous machines. No node, validator, or service provider holds the cryptographic material required to authorize a transaction on a user's behalf. Custody is rooted in hardware-backed keys on the user's own device (passkey in Secure Enclave / StrongBox / TPM 2.0 / Windows Hello), in a TEE-sealed key for autonomous machines (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA H100 CC), and — where threshold signing is desired — in a true MPC protocol (FROST-Ed25519, RFC 9591) where no party ever materializes the master key.
 
-Tenzro eliminates seed phrases through MPC threshold wallets:
+This section specifies the full surface: design principles, the six interlocking pillars (P-256 / WebAuthn, ERC-7579 modular validators, ERC-7484 module registry, ERC-7702 sponsored bootstrap, FROST-Ed25519 threshold signing, TEE-resident agent keys), hybrid post-quantum behavior across each, and the developer experience — both the opinionated "passkey wallet in three lines" SDK and the lower-level `Signer` / `Validator` / `KeyStorage` / `RecoveryGuardian` traits that custom wallet developers extend to ship their own designs.
 
-| Parameter | Default |
-|-----------|---------|
-| Threshold | 2-of-3 |
-| Key shares | 3 |
-| Minimum threshold | 2 |
+### 15.0 Design Principles
 
-**Provisioning.** When a user or agent creates a wallet, the `WalletProvisioner` generates an Ed25519 keypair, splits the secret into 3 shares using Shamir's Secret Sharing, and returns the shares. No single share can reconstruct the key — any 2 of 3 are required.
+**1. Self-custody by default, on every identity class.** A human's wallet, a delegated agent's session key, and an autonomous machine's bootstrap key all derive from material that the user, controller, or TEE — not the node — exclusively holds. Server-custodial flows are not a supported configuration; they are a property of legacy wallets that Tenzro does not ship.
 
-### 15.2 Multi-Asset Support
+**2. Hardware-backed keys, never software keys, never seed phrases.** The default key for a human is a passkey in the platform authenticator (Apple Secure Enclave, Android StrongBox, Microsoft Pluton / Windows Hello, TPM 2.0). The default key for an autonomous machine is generated and sealed inside a remote-attestable TEE. Mnemonic seed phrases are not part of the recovery surface — recovery is performed through a guardian set on a smart account.
 
-Wallets natively track balances across supported assets:
+**3. Custody is enforced at signing time by code the model cannot influence.** For delegated and autonomous agents, every spending or operational ceiling — cap, scope, time-bound, allowed counterparty, allowed payment protocol — must be enforced cryptographically inside an ERC-7579 validator module that the EntryPoint consults during `validateUserOp`. Off-chain admission gates (`SpendingPolicyResolver`, `IdentityPaymentBinder`) remain as defense-in-depth, but a malicious node operator must not be able to accept an out-of-scope `UserOperation` from any agent.
+
+**4. Two parallel developer paths.** The SDK exposes both a fully opinionated high-level surface (passkey wallet, three lines, biometric-gated, automatic cross-device fallback) and a fully unopinionated low-level surface (the `Signer` / `Validator` / `KeyStorage` traits) that custom wallet developers extend to ship their own key-management designs (custom MPC topology, custom HSM integration, air-gapped flows, social-recovery topologies). The high-level API is a default implementation of the trait surface — there is no escape hatch and no internal-only API.
+
+**5. Force biometric-capable authenticator, fall back to phone via QR.** The default UX rejects software-only authenticators. If the current device lacks a platform authenticator (`PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable() === false`), the SDK MUST default to the FIDO **hybrid transport** (caBLE — QR + Bluetooth proximity) so that the desktop solicits the signature from the user's phone passkey without ever holding the key. This mirrors the pattern that converged across Coinbase Smart Wallet, Privy, and Daimo.
+
+**6. Hybrid post-quantum at every layer that the standards permit.** Classical primitives are paired with their NIST FIPS 203/204 post-quantum companions: Ed25519 with ML-DSA-65 for signatures, X25519 with ML-KEM-768 for KEM. Where a standard is single-algorithm (P-256 inside a passkey, secp256k1 inside an EVM EOA), the classical algorithm is used as specified and the PQ companion lives in the on-chain validator metadata rather than in the device key — there is no production threshold ML-DSA in 2026, so threshold-PQ is deferred to a single-key-in-TEE design until the research matures.
+
+**7. Replace, don't migrate.** Tenzro is pre-launch. There is no Shamir-then-reconstruct legacy mode, no `WalletProvisioner` pseudo-MPC, no server-custodial fallback to maintain. The wallet surface is self-custodial from day one.
+
+### 15.1 Identity Classes and Custody Targets
+
+| Class | Signing key | Storage | On-chain validator | Recovery | Bootstrap |
+|---|---|---|---|---|---|
+| **Human** | Hybrid Ed25519 + ML-DSA-65, materialized as 2-of-2: passkey P-256 device share (WebAuthn) + TEE share or guardian-quorum share | Passkey in Secure Enclave / StrongBox / Pluton / TPM 2.0; second share hardware-sealed in a TEE or held by a guardian set | ERC-7579 modular validator with WebAuthn + Ed25519 + (optional) TEE side-by-side, routed per UserOp | ERC-4337 v0.8 smart-account guardian set (3-of-5 default, time-locked) under hybrid PQ | Standard onboarding (`tenzro_participate`) registers the smart account, attaches the WebAuthn validator, and binds the TDIP identity |
+| **Delegated agent** | Ed25519 (Tenzro-native) or P-256 (Coinbase-class) **session key** bound to the controller's primary identity | Same hardware-backed storage as the controller, scoped sub-credential | `DelegationScopeValidator` ERC-7579 module that consumes the TDIP `DelegationScope` on-chain — any `UserOp` outside scope returns ≠ magic value, so no signature is ever valid out-of-scope | Inherits the controller's recovery; revocation via per-DID monotonic epoch counter that invalidates all outstanding session keys | Controller spawns the agent and signs the delegation; agent receives a session key with cryptographically-bounded authority |
+| **Autonomous machine** | Hybrid Ed25519 + ML-DSA-65 generated **inside the TEE** at bootstrap | Hardware-sealed (TDX / SEV-SNP / Nitro / H100 CC), never extractable | `TeeBoundValidator` requiring fresh remote attestation (≤24h freshness) on every `UserOp` | New attestation cycle = key rotation; `AgentBond` stake + insurance pool back accountability | ERC-7702 sponsored first transaction via the TNZO paymaster, gated on a valid TEE attestation — no prefunding required |
+
+### 15.2 Pillar 1 — P-256 (secp256r1) Precompile
+
+Modern platform authenticators use P-256 (secp256r1) exclusively. To verify WebAuthn signatures cheaply on-chain, Tenzro implements the [RIP-7212](https://github.com/ethereum/RIPs/blob/master/RIPS/rip-7212.md) precompile semantics with Ethereum mainnet ([EIP-7951](https://eips.ethereum.org/EIPS/eip-7951), live since the Fusaka activation on 2025-12-03) gas pricing for forward compatibility:
+
+| Property | Value |
+|---|---|
+| Address | `0x0000000000000000000000000000000000000100` |
+| Gas cost | **6,900** (matches EIP-7951 mainnet, not the 3,450 rollup variant) |
+| Input length | 160 bytes — `hash(32) ‖ r(32) ‖ s(32) ‖ x(32) ‖ y(32)` |
+| Output (success) | 32 bytes: `0x000…001` |
+| Output (failure) | empty bytes — the precompile **never reverts** |
+| Curve | secp256r1 (NIST P-256), uncompressed public key encoded as `x ‖ y` |
+
+This is the second on-chain curve Tenzro supports natively (alongside secp256k1 for EVM compatibility) and unlocks every passkey-bound use case downstream — WebAuthn validators, session keys signed by the platform authenticator, and cross-chain delegation receipts that originated on a phone.
+
+### 15.3 Pillar 2 — ERC-7579 Modular Smart Accounts
+
+Every Tenzro smart account is built on the [ERC-7579](https://eips.ethereum.org/EIPS/eip-7579) modular interface so that authorization logic can be added, swapped, or revoked without redeploying the account. The account stores a registry of installed modules; for each `UserOperation`, the EntryPoint calls into the account's selected validator module:
+
+```solidity
+function validateUserOp(
+    PackedUserOperation calldata userOp,
+    bytes32 userOpHash
+) external returns (uint256 validationData);
+```
+
+A `validationData` of `0` signals the signature and any time bounds are valid; non-zero packs an `ERC-4337` aggregator address, validity window, and failure flag. Module types defined by ERC-7579 are: `1 = Validator`, `2 = Executor`, `3 = Fallback`, `4 = Hook`. Tenzro ships four production validator modules:
+
+| Module | Purpose | Identity classes |
+|---|---|---|
+| `WebAuthnValidator` | Verifies a P-256 / WebAuthn signature against a registered passkey credential. Re-derives `clientDataJSON` hash + `authenticatorData` per the WebAuthn L3 spec, then dispatches to the `0x100` precompile. | Human |
+| `Ed25519Validator` | Verifies a native Ed25519 signature against a registered public key. Used for FROST-aggregated signatures (which present as a single Ed25519 signature) and direct Ed25519 session keys. | Human, Delegated agent |
+| `DelegationScopeValidator` | Consumes the TDIP `DelegationScope` and rejects any `UserOp` outside the cap / scope / time / counterparty / payment-protocol envelope **before** signature verification. Backed by a per-DID monotonic epoch counter for revocation. | Delegated agent |
+| `TeeBoundValidator` | Requires a fresh (≤24h) remote-attestation quote (TDX, SEV-SNP, Nitro, or NVIDIA NRAS) signed by the TEE-resident keypair, verified against the pinned vendor root CA chain in `tenzro-tee`. | Autonomous machine |
+
+Multiple validator modules can be installed side-by-side; the calldata of `userOp.signature` selects which validator runs (the first 4 bytes of the signature payload encode the validator selector, mirroring Rhinestone Nexus and Kernel v3 conventions).
+
+### 15.4 Pillar 3 — ERC-7484 Module Registry
+
+Validator modules — particularly third-party modules contributed by wallet developers — are looked up against the [ERC-7484](https://eips.ethereum.org/EIPS/eip-7484) module registry, deployed as a singleton at the same address across all chains:
+
+```
+0x000000000069E2a187AEFFb852bF3cCdC95151B2
+```
+
+Tenzro mirrors this registry as a privileged-VM precompile so that a smart account can verify a module's attestation status without an out-of-VM call. Account installation flows reject modules without an attestation from a configured attester set (default: the account owner's chosen attesters; the network does not impose a global allowlist).
+
+### 15.5 Pillar 4 — ERC-7702 Sponsored Bootstrap
+
+Newly-spawned autonomous machines have a TEE-attested key but no TNZO. To let them act on their first transaction without prefunding, Tenzro implements [ERC-7702](https://eips.ethereum.org/EIPS/eip-7702) (live on Ethereum since the Pectra activation in May 2025):
+
+| Property | Value |
+|---|---|
+| Transaction type | `0x04` |
+| Authorization tuple | `[chain_id, address, nonce, y_parity, r, s]` |
+| `chain_id == 0` | Permitted (per spec) for universal authorization across Tenzro's chains |
+| Code slot value | `0xef0100 ‖ delegate_addr` (3-byte magic prefix `0xef0100`) |
+
+The **TNZO paymaster** sponsors the gas for this first transaction iff the agent presents a valid TEE attestation that resolves to a registered ERC-8004 agent. The 7702-delegated EOA points at a TenzroSmartAccount with a `TeeBoundValidator` installed, so the agent is a smart account from its first action onward.
+
+### 15.6 Pillar 5 — FROST-Ed25519 Threshold Signing
+
+Where threshold signing is required (multi-device wallets, treasury policies, swarm-MPC across N TEE-attested agents), Tenzro uses **FROST** (Flexible Round-Optimized Schnorr Threshold signatures, [RFC 9591](https://datatracker.ietf.org/doc/rfc9591/)) over Ed25519. See §7.3 for the cryptographic specification. The protocol-level guarantees:
+
+- **No party ever holds the master key.** DKG produces a single group public key and `n` shares; the secret behind the group key is never materialized — even at signing time, only round-2 outputs are aggregated.
+- **Output is a standard 64-byte Ed25519 signature.** It verifies under the existing `Ed25519Validator` module with no protocol-specific verifier — every downstream consumer (RPC, MCP, A2A, EntryPoint) treats it as an ordinary signature.
+- **t-of-n is configurable per account.** Default for human multi-device wallets is `2-of-3` (phone + laptop + guardian). Default for swarm-MPC across TEE agents is `(2/3)·n`.
+
+The reference implementation is [`frost-ed25519`](https://github.com/ZcashFoundation/frost) maintained by the Zcash Foundation. Other production-grade FROST variants (`frost-secp256k1-tr` for Bitcoin Taproot) are available behind the same trait but out of scope for the L1.
+
+PQ note: there is **no production threshold ML-DSA** in 2026 — Trilithium and similar constructions remain research (eprint 2025/675). For the PQ companion in a hybrid wallet, the `ML-DSA-65` key is held single-instance inside a TEE or HSM and signed alongside the FROST-Ed25519 aggregate. The hybrid signature thus verifies as `Ed25519(group) ∧ ML-DSA-65(tee)` — a downgrade attack on either layer fails.
+
+### 15.7 Pillar 6 — TEE-Resident Agent Keys
+
+For autonomous machines, the signing keypair is generated and sealed **inside** the TEE at bootstrap. Tenzro extends `tenzro-tee` with three operations:
+
+| Operation | Behavior |
+|---|---|
+| `seal_agent_keypair(tee_session)` | Inside the enclave: generate Ed25519 + ML-DSA-65 hybrid keypair, derive the public key, seal the secret with the TEE's hardware-bound MKTME / VMSA / KMS / CC-memory key. The secret never leaves the TEE. |
+| `attest_agent_key(tee_session, public_key)` | Produce a fresh remote-attestation quote that binds the agent's public key into the report data. Verified against the pinned vendor root CA chain (Intel PCS for TDX, AMD KDS for SEV-SNP, AWS for Nitro, NVIDIA NRAS for H100 CC). |
+| `rotate_agent_key(tee_session)` | Generate a new sealed keypair and emit a fresh attestation; old key is wiped from the sealed store. Rotation is gated by the on-chain `TeeBoundValidator` requiring a ≤24h-fresh attestation. |
+
+Bootstrap ties to ERC-8004: the agent registers in the IdentityRegistry at `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432` (live mainnet 2026-01-29) — note that ERC-8004 assigns a sequential ERC-721 `tokenId` at registration, **not** a `keccak256` of the DID string. Tenzro's native ERC-8004 precompiles (`0x101a` / `0x101b` / `0x101c`) mirror this semantics so cross-registry calldata interop holds.
+
+The closest production reference for TEE-resident agent identity is [Phala dstack](https://github.com/Dstack-TEE/dstack), donated to the Linux Foundation in 2025.
+
+### 15.8 Hybrid Post-Quantum Behavior
+
+| Layer | Classical | PQ companion | Notes |
+|---|---|---|---|
+| Native L1 transaction signing | Ed25519 | ML-DSA-65 (FIPS 204) | Both signatures attached; verifier requires both. Tenzro is ahead of industry — no production wallet has shipped this end-to-end as of mid-2026. |
+| Passkey / WebAuthn | P-256 | (none on device) | Single-curve by spec. PQ companion lives in the on-chain validator metadata rather than the platform authenticator. |
+| FROST threshold | Ed25519 (group sig) | ML-DSA-65 (single key in TEE/HSM) | No production threshold ML-DSA exists in 2026. Hybrid achieved by signing alongside the FROST aggregate, not over it. |
+| TLS / RPC transport | X25519 | ML-KEM-768 (FIPS 203) | Already deployed in Caddy on the testnet. Hybrid by default for RPC, MCP, A2A. |
+
+### 15.9 Recovery and Revocation
+
+Recovery is performed at the smart-account layer, not by reconstructing key material:
+
+- **Human accounts** install a `SocialRecovery` ERC-7579 module backed by a guardian set (default 3-of-5, time-locked 48 hours). Guardians can be other Tenzro identities, hardware tokens (YubiKey FIDO2), or third-party recovery services.
+- **Delegated agent accounts** inherit recovery from the controller. Revocation is instant: the controller increments a per-DID monotonic epoch counter, and the `DelegationScopeValidator` rejects any session-key signature that does not match the current epoch.
+- **Autonomous machine accounts** "rotate" by re-running the TEE attestation cycle; the `TeeBoundValidator`'s freshness window (≤24h) bounds the worst-case window of a stale or compromised key.
+
+Cross-node revocation is broadcast over the existing TDIP `RevocationBroadcaster` channel and applied through `IdentityVerifier::apply_remote_revocation()` (see §12).
+
+### 15.10 Developer Experience
+
+The SDK exposes two parallel surfaces. **Both are first-class.** The high-level surface is a default implementation built on top of the trait surface — there is no internal-only API.
+
+#### 15.10.1 High-Level: Passkey Wallet in Three Lines
+
+```ts
+import { createPasskeyWallet, signWithPasskey } from "@tenzro/sdk";
+
+const wallet = await createPasskeyWallet({ rpId: "keys.tenzro.network" });
+const sig = await signWithPasskey(wallet, userOp);
+```
+
+```rust
+use tenzro_sdk::passkey::{PasskeyWallet, PasskeyConfig};
+
+let wallet = PasskeyWallet::create(PasskeyConfig::production("keys.tenzro.network")).await?;
+let sig = wallet.sign_user_op(user_op).await?;
+```
+
+UX behavior the SDK enforces by default:
+
+1. Calls `PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()`. If `false`, the SDK **must** request a cross-platform authenticator (`authenticatorAttachment: "cross-platform"`, `userVerification: "required"`) and render a QR for the FIDO hybrid transport (caBLE). It never silently falls back to a software key.
+2. The WebAuthn ceremony is hosted on `keys.tenzro.network` so the resulting credential's RP ID is a stable registrable domain that survives URL redesigns and works across every Tenzro frontend.
+3. The resulting P-256 public key is registered as the account's `WebAuthnValidator` module on first use (one transaction, gas-sponsored by the TNZO paymaster via ERC-7702).
+4. Signing always raises a biometric prompt on the device that holds the passkey — Touch ID, Face ID, Windows Hello, Android biometric.
+
+#### 15.10.2 Low-Level: Pluggable Trait Surface
+
+Custom wallet developers extend the following traits to ship their own designs (custom MPC topology, custom HSM integration, air-gapped flows, social-recovery topologies):
+
+```rust
+#[async_trait]
+pub trait Signer: Send + Sync {
+    fn describe(&self) -> SignerKind;
+    async fn sign(&self, hash: [u8; 32], context: &SignContext) -> Result<Signature, SignerError>;
+}
+
+#[async_trait]
+pub trait Validator: Send + Sync {
+    fn module_address(&self) -> Address;
+    fn module_type(&self) -> Erc7579ModuleType;
+    async fn build_validator_data(&self, user_op: &PackedUserOperation) -> Result<Bytes, ValidatorError>;
+}
+
+#[async_trait]
+pub trait KeyStorage: Send + Sync {
+    async fn store(&self, key_id: &KeyId, blob: &[u8], policy: StoragePolicy) -> Result<(), StorageError>;
+    async fn load(&self, key_id: &KeyId) -> Result<Vec<u8>, StorageError>;
+    fn capabilities(&self) -> StorageCapabilities; // HardwareBacked, BiometricGated, Exportable, …
+}
+
+#[async_trait]
+pub trait RecoveryGuardian: Send + Sync {
+    async fn propose_recovery(&self, account: Address, new_owner: PublicKey) -> Result<RecoveryProposal, RecoveryError>;
+    async fn approve_recovery(&self, proposal: &RecoveryProposal) -> Result<GuardianSignature, RecoveryError>;
+    async fn execute_recovery(&self, proposal: RecoveryProposal, sigs: Vec<GuardianSignature>) -> Result<TxHash, RecoveryError>;
+}
+
+pub enum SignerKind {
+    WebAuthn { credential_id: Vec<u8> },
+    Ed25519,
+    Frost { threshold: u16, total: u16 },
+    Tee { backend: TeeBackend },
+    Hsm { vendor: String },
+    Custom(String),
+}
+```
+
+The TypeScript SDK exposes a parallel surface (`Signer`, `Validator`, `KeyStorage`, `RecoveryGuardian`) so JS/TS wallets get the same extension points.
+
+#### 15.10.3 Reference Compositions
+
+The cookbook ships ready-made compositions covering the common topologies, each implementing the same traits:
+
+| Composition | `Signer` | `KeyStorage` | `Validator` |
+|---|---|---|---|
+| `passkey-only` | WebAuthn | Platform authenticator | `WebAuthnValidator` |
+| `passkey + tee` | WebAuthn (1 of 2) + TEE share (1 of 2) | Platform authenticator + TEE | `WebAuthnValidator` + `Ed25519Validator` (2-of-2 routing) |
+| `frost-multi-device` | FROST-Ed25519 (2-of-3) | Per-device hardware-backed | `Ed25519Validator` (single aggregate) |
+| `tee-only-agent` | TEE-resident Ed25519 + ML-DSA-65 | Hardware-sealed TEE | `TeeBoundValidator` |
+| `delegated-session` | Ed25519 (session key) | Inherited from controller's storage | `DelegationScopeValidator` |
+| `air-gapped` | Custom (off-machine signer) | None (key never on this host) | `Ed25519Validator` |
+
+#### 15.10.4 Tauri Desktop Integration
+
+The desktop application stores keys in the OS keychain via Rust-side commands — the Tauri WebView does **not** reliably reach the platform authenticator, so all WebAuthn ceremonies are dispatched from Rust:
+
+| Platform | Backend | Hardware key location |
+|---|---|---|
+| macOS | `security-framework` with `kSecAttrTokenIDSecureEnclave` | Secure Enclave (T2 / Apple Silicon) |
+| iOS | `security-framework` + LAContext biometric prompt | Secure Enclave |
+| Android | JNI to `android.security.keystore.KeyGenParameterSpec` with `setIsStrongBoxBacked(true)` | StrongBox |
+| Windows | `tss-esapi` 7.6 + Windows Hello | Pluton / TPM 2.0 |
+| Linux | `tss-esapi` 7.6 (where TPM present); software-backed fallback rejected by default | TPM 2.0 |
+
+WebAuthn ceremonies use [`webauthn-authenticator-rs`](https://crates.io/crates/webauthn-authenticator-rs); cross-device flows use the FIDO hybrid transport via the same crate's caBLE module. Tauri commands exposed: `device_create_passkey`, `device_sign_with_passkey`, `device_attest_key`, `device_start_cross_device_link`.
+
+### 15.11 Onboarding
+
+Tenzro provides a single onboarding flow that provisions a TDIP identity, a self-custodial smart account, and a hardware profile in one atomic operation.
+
+**One-Click Participation (`tenzro_participate` RPC).** Provisions all three components:
+
+1. The client device runs a WebAuthn passkey ceremony (or a FROST DKG across multiple devices, depending on the chosen composition). The private key material never leaves the device(s).
+2. A TDIP DID is created (`did:tenzro:human:{uuid}`) and registered in the `IdentityRegistry`.
+3. The identity is persisted to RocksDB (`CF_IDENTITIES`).
+4. A TenzroSmartAccount is deployed via the AccountFactory (deterministic CREATE2 address) with the appropriate validator module installed (`WebAuthnValidator` for passkey, `Ed25519Validator` for FROST, `TeeBoundValidator` for TEE-only).
+5. The host machine's hardware profile (CPU, RAM, GPU, TEE availability) is detected and attached to the identity metadata.
+
+The response returns the DID, smart-account address, installed validator modules, and hardware profile.
+
+**Import from Existing Key (`tenzro_importIdentity` RPC).** Users with existing Ed25519 / Secp256k1 / P-256 keys can register them as the initial validator on a freshly-deployed smart account. The legacy key is treated as the seed for the validator module's credential — it is never copied to a server.
+
+**Hardware Profile Detection.**
+
+| Detected Property | Use |
+|---|---|
+| CPU model, cores, threads | Compute capacity for inference workloads |
+| Total RAM | Memory-bound model support |
+| GPU name, VRAM, architecture | GPU-accelerated inference and proving eligibility |
+| TEE availability | TEE-attested validator eligibility (1.5× multiplier on reputation-weighted leader draw); enables `TeeBoundValidator` for autonomous-agent flows |
+| Platform authenticator | Determines whether the client can host a passkey locally or must use cross-device QR (FIDO hybrid transport) |
+
+**Client Interfaces.**
+
+- **CLI:** `tenzro join --name "Alice"` (interactive passkey ceremony) or `tenzro wallet import 0x... --key-type ed25519` (import existing key as initial validator)
+- **Desktop App:** Setup page on first launch with three composition tabs — "Passkey on this device" (default), "Multi-device (FROST)", "Import existing key"
+- **JSON-RPC:** `tenzro_participate` and `tenzro_importIdentity`
+
+The desktop application enforces an onboarding gate — Setup is shown before the Dashboard until a valid identity and smart account exist. On success, the user lands on the Dashboard with their DID, smart-account address, installed validator modules, and hardware profile displayed.
+
+### 15.12 Multi-Asset Support
+
+Smart accounts natively track balances across the supported assets:
 
 | Asset | Symbol | Type |
-|-------|--------|------|
+|---|---|---|
 | Tenzro | TNZO | Native token |
 | USD Coin | USDC | Stablecoin |
 | Tether | USDT | Stablecoin |
 | Ether | ETH | Cryptocurrency |
 | Solana | SOL | Cryptocurrency |
 | Bitcoin | BTC | Cryptocurrency |
-
-### 15.3 Encrypted Keystore
-
-Key shares are stored in an encrypted keystore on disk:
-
-1. A random 32-byte salt is generated.
-2. An encryption key is derived from the user's password using **Argon2id** (memory-hard KDF resistant to GPU and ASIC attacks).
-3. A `SymmetricKey` (AES-256-GCM) encrypts the serialized key shares.
-4. The encrypted blob, salt, and nonce are written to `~/.tenzro/wallets/{wallet_id}.json`.
-5. An in-memory cache (with configurable capacity) avoids repeated disk reads.
-
-Password changes decrypt with the old password and re-encrypt with the new one atomically.
-
-### 15.4 Transaction Signing
-
-The `MessageSigner` coordinates threshold signing:
-
-1. Collect key shares from available custodians (need >= threshold).
-2. Each custodian produces a partial signature.
-3. Partial signatures are combined into a full Ed25519 signature.
-4. The resulting `SignedTransaction` can be submitted to the network.
-
-### 15.5 Onboarding: Identity and Wallet Provisioning
-
-Tenzro provides a unified onboarding flow that provisions a TDIP identity, an MPC wallet, and a hardware profile in a single atomic operation. This eliminates the multi-step setup typical of blockchain networks and ensures every participant has a verifiable on-chain identity from the moment they join.
-
-**One-Click Participation (`tenzro_participate` RPC).**  A single JSON-RPC call provisions all three components:
-
-1. An Ed25519 keypair is generated.
-2. The secret key is split into 3 shares via Shamir's Secret Sharing (2-of-3 threshold).
-3. A TDIP DID is created (`did:tenzro:human:{uuid}`) and registered in the `IdentityRegistry`.
-4. The identity is persisted to RocksDB (`CF_IDENTITIES` column family).
-5. The wallet address is derived from the public key and bound to the identity.
-6. The host machine's hardware profile (CPU model, core count, RAM, GPUs) is detected and attached to the identity metadata.
-7. The wallet key shares are encrypted with AES-256-GCM (key derived via Argon2id) and stored in the local keystore at `~/.tenzro/wallets/`.
-
-The response returns the DID, wallet address, wallet threshold configuration, and hardware profile. The participant is immediately able to send transactions, request inference, and interact with the network.
-
-**Import from Private Key (`tenzro_importIdentity` RPC).**  Users with existing Ed25519 or Secp256k1 private keys can import them instead of generating new ones:
-
-1. The provided private key bytes are used to construct a `KeyPair`.
-2. The public key and wallet address are derived from the imported key.
-3. MPC key shares are generated from the imported key as the master secret.
-4. The identity is registered on-chain with the same TDIP DID format.
-5. Key shares are encrypted using the user-provided password (Argon2id + AES-256-GCM) and stored in the keystore.
-
-This flow supports migration from other networks or key management systems while maintaining the same security guarantees as fresh key generation.
-
-**Hardware Profile Detection.**  During onboarding, the node detects the participant's hardware capabilities:
-
-| Detected Property | Use |
-|-------------------|-----|
-| CPU model, cores, threads | Compute capacity for inference workloads |
-| Total RAM | Memory-bound model support |
-| GPU name, VRAM, architecture | GPU-accelerated inference and proving eligibility |
-| TEE availability | TEE-attested validator eligibility (1.5× multiplier on reputation-weighted leader draw) |
-
-Hardware profiles are stored as identity metadata and used by the `InferenceRouter` to match inference requests to capable providers.
-
-**Client Interfaces.**  Onboarding is accessible through all client interfaces:
-
-- **CLI:** `tenzro join --name "Alice"` (one-click) or `tenzro wallet import 0x... --key-type ed25519` (import)
-- **Desktop App:** Setup page shown on first launch with "Create New" and "Import Existing" tabs
-- **JSON-RPC:** Direct calls to `tenzro_participate` or `tenzro_importIdentity`
-
-The desktop application enforces an onboarding gate — the Setup page is displayed before the Dashboard until a valid identity and wallet exist. On successful onboarding, the user is redirected to the Dashboard with their DID, wallet address, and hardware profile displayed.
 
 ---
 

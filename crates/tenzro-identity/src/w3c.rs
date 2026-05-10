@@ -210,6 +210,7 @@ mod tests {
                 controller_did: Some("did:tenzro:human:ctrl".to_string()),
                 reputation: 0,
                 tenzro_agent_id: None,
+                erc8004_agent_id: None,
                 is_seed_agent: false,
             },
             status: IdentityStatus::Active,

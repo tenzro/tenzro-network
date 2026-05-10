@@ -351,7 +351,7 @@ The VM provides precompiled contracts that expose native platform functionality 
 | `0x1005` | GOVERNANCE | Submit proposals and cast votes from smart contracts |
 | `0x1006` | NFT_FACTORY | NFT creation and minting; `mintRandom()` (selector `0x52517e21`) consumes a verified VRF output to derive token_id and rarity tier |
 | `0x1007` | VRF_VERIFY | RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI verifiable random function — reuses Ed25519 validator keys, low-order-key rejection, canonical-scalar rejection |
-| `0x101a` | ERC8004_IDENTITY | ERC-8004 v0.6+ Trustless Agents — `registerAgent` / `getAgent` / `setAgentURI` / `setAgentWallet` (with EIP-712 signature) / `setMetadata` / `getMetadata` / `getAgentURI` / `getAgentWallet` for native Tenzro agent discovery; `agentId = keccak256(utf8(did_string))` |
+| `0x101a` | ERC8004_IDENTITY | ERC-8004 v0.6+ Trustless Agents — `register()` / `register(string)` / `register(string,(string,bytes)[])` / `getAgent` / `setAgentURI` / `setAgentWallet` (with EIP-712 signature) / `setMetadata` / `getMetadata` / `getAgentURI` / `getAgentWallet` for native Tenzro agent discovery. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — server-allocated, never derivable client-side. |
 | `0x101b` | ERC8004_REPUTATION | ERC-8004 v0.6+ — `submitFeedback` / `getFeedback` / `getFeedbackCount` / `revokeFeedback` / `isFeedbackRevoked` / `appendResponse` / `getFeedbackResponses` for peer-to-peer agent reputation |
 | `0x101c` | ERC8004_VALIDATION | ERC-8004 v0.6+ — `validationRequest` / `validationResponse` / `getValidation` for verifiable agent work attestation |
 

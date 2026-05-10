@@ -4,11 +4,11 @@ Cryptographic primitives for the Tenzro Network.
 
 ## Overview
 
-`tenzro-crypto` provides a comprehensive cryptographic toolkit for the Tenzro Network, including key generation, digital signatures, hashing, symmetric and asymmetric encryption, multi-party computation (MPC) threshold signatures, BLS12-381 signature aggregation, and verifiable random functions (VRF).
+`tenzro-crypto` provides a comprehensive cryptographic toolkit for the Tenzro Network, including key generation, digital signatures, hashing, symmetric and asymmetric encryption, FROST-Ed25519 threshold signatures (RFC 9591), BLS12-381 signature aggregation, and verifiable random functions (VRF).
 
 ## Modules
 
-**9 modules:** bls, encryption, error, hash, keys, mpc, rng, signatures, vrf
+**9 modules:** bls, encryption, error, frost, hash, keys, rng, signatures, vrf
 
 ### Key Generation
 - `KeyPair` - Ed25519 and Secp256k1 key pair generation
@@ -36,11 +36,13 @@ Cryptographic primitives for the Tenzro Network.
 - `x25519_key_exchange()` - Key agreement protocol
 - `envelope_encrypt()`/`envelope_decrypt()` - Hybrid envelope encryption
 
-### Multi-Party Computation (MPC)
-- `ThresholdConfig` - Configure threshold signature schemes (e.g., 2-of-3)
-- `generate_key_shares()` - Distribute key shares to parties using Shamir Secret Sharing
-- `create_partial_signature()` - Generate partial signatures from key shares
-- `combine_signatures_with_message()` - Reconstruct master key from shares and produce a real Ed25519/Secp256k1 signature
+### FROST-Ed25519 Threshold Signatures (RFC 9591)
+- `keygen_with_trusted_dealer(threshold, total)` - Trusted-dealer keygen producing per-signer `SecretShare` + group `PublicKeyPackage`
+- `dkg_part1` / `dkg_part2` / `dkg_part3` - Distributed key generation variant (no trusted dealer)
+- `round1_commit(share)` - Per-signer round-1 nonce + commitment
+- `build_signing_package(message, commitments)` - Coordinator's signing package
+- `round2_sign(signing_pkg, nonces, share)` - Per-signer signature share
+- `aggregate_signature(signing_pkg, sig_shares, group_pkg)` - Aggregate to a single 64-byte standard Ed25519 signature that verifies under the group public key with the standard Ed25519 verifier
 
 ### BLS12-381 Signature Aggregation
 - `BlsKeyPair` - BLS key pair generation on BLS12-381 curve
@@ -106,28 +108,35 @@ let envelope = envelope_encrypt(recipient.public_key(), plaintext)?;
 let decrypted = envelope_decrypt(&recipient, &envelope)?;
 ```
 
-### MPC Threshold Signatures
+### FROST-Ed25519 Threshold Signatures (RFC 9591)
 
 ```rust
-use tenzro_crypto::mpc::{ThresholdConfig, generate_key_shares, create_partial_signature, combine_signatures_with_message, MpcKeyShare};
-use tenzro_crypto::KeyType;
+use tenzro_crypto::frost::{
+    keygen_with_trusted_dealer, round1_commit, build_signing_package,
+    round2_sign, aggregate_signature,
+};
+use tenzro_crypto::signatures;
 
-// Create a 2-of-3 threshold configuration
-let config = ThresholdConfig::new(2, 3)?;
+// 2-of-3 threshold key (trusted dealer; DKG variant in `frost::dkg_part1`).
+let (group_pkg, shares) = keygen_with_trusted_dealer(2, 3)?;
 
-// Generate key shares
-let shares = generate_key_shares(KeyType::Ed25519, config)?;
+// Round 1: each signer commits.
+let (n1, c1) = round1_commit(&shares[0])?;
+let (n2, c2) = round1_commit(&shares[1])?;
 
-// Create partial signatures (need at least 2 of 3)
-let message = b"Tenzro Network MPC transaction";
-let partial_sigs: Vec<_> = shares.iter()
-    .take(2)
-    .map(|share| create_partial_signature(share, message))
-    .collect::<Result<_, _>>()?;
+// Coordinator builds the signing package over the message.
+let message = b"Tenzro Network FROST transaction";
+let signing_pkg = build_signing_package(message, &[c1, c2])?;
 
-// Reconstruct the master key from shares and produce a real Ed25519 signature
-let share_refs: Vec<&MpcKeyShare> = shares.iter().take(2).collect();
-let signature = combine_signatures_with_message(&share_refs, &partial_sigs, message)?;
+// Round 2: each signer produces its signature share.
+let s1 = round2_sign(&signing_pkg, &n1, &shares[0])?;
+let s2 = round2_sign(&signing_pkg, &n2, &shares[1])?;
+
+// Aggregate to a single 64-byte standard Ed25519 signature that verifies
+// under the group public key with the standard Ed25519 verifier.
+let sig = aggregate_signature(&signing_pkg, &[s1, s2], &group_pkg)?;
+let group_pk = group_pkg.group_public_key.as_public_key();
+signatures::verify(&group_pk, message, &sig)?;
 ```
 
 ### VRF (Verifiable Random Function)
@@ -156,7 +165,7 @@ assert_eq!(output, verified_output);
 - `aes-gcm` - AES-GCM encryption
 - `x25519-dalek` - X25519 key exchange
 - `argon2` - Key derivation (used by wallet keystore)
-- `frost-ed25519` - Threshold signatures (MPC)
+- `frost-ed25519` - FROST-Ed25519 threshold signatures (RFC 9591)
 - `blst` - BLS12-381 operations (signature aggregation)
 - `sha2` - SHA-256 / SHA-512 (SHA-512 used by VRF)
 - `sha3` - Keccak-256
@@ -171,7 +180,7 @@ assert_eq!(output, verified_output);
 - Signature creation and verification
 - Hash functions (SHA-256, Keccak-256)
 - Symmetric and asymmetric encryption
-- MPC threshold signatures
+- FROST-Ed25519 threshold signatures (RFC 9591)
 - BLS12-381 aggregation
 - VRF proof generation and verification
 

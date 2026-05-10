@@ -178,7 +178,7 @@ Status legend:
 | `submitFeedback(bytes32,int8,string)` selector + ABI encoder (sign-extended int8) | ✅ | `crates/tenzro-identity/src/erc8004.rs:112, 220-241` |
 | `validationRequest(address,uint256,string,bytes32)` selector `0xaaf400c4` + ABI encoder | ✅ | `crates/tenzro-identity/src/erc8004.rs` |
 | `validationResponse(bytes32,uint8,string,bytes32,string)` selector `0x3d659a96` + ABI encoder | ✅ | `crates/tenzro-identity/src/erc8004.rs` |
-| `agentId = keccak256(utf8(did))` derivation, deterministic across clients | ✅ | `crates/tenzro-identity/src/erc8004.rs:157-159` |
+| `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time; reverse DID → id lookup via `OnChainAgentRegistry::lookup_agent_id_by_did` | ✅ | `crates/tenzro-identity/src/erc8004.rs` |
 | `Erc8004Transport` trait (eth_call + eth_sendRawTransaction) | ✅ | `crates/tenzro-identity/src/erc8004.rs:64-72` |
 | `Erc8004Adapter` high-level client (calldata builders + send_signed) | ✅ | `crates/tenzro-identity/src/erc8004.rs:303-392` |
 | Native Tenzro mirroring via `OnChainAgentRegistry::mirror_register_agent` (best-effort, non-blocking) | ✅ | `crates/tenzro-identity/src/erc8004.rs:88-101` |
@@ -218,7 +218,7 @@ Status legend:
 | **MCP Agent Toolkit tool-call wire** per Mastercard MCP integration | 🔴 | No MCP tool exposes Mastercard endpoints from `crates/tenzro-node/src/mcp/server.rs`. Belongs there. |
 | **Tenzro extension: DID-anchored KYA record** wrapping TDIP machine identity (controller + authenticator + delegation_scope) | 🟢 | `crates/tenzro-identity/src/kya.rs` — `KyaRecord::from_identity` projects `TenzroIdentity` across the three KYA axes. RPC: `tenzro_getKyaRecord`. |
 | **Tenzro extension: federation-pointer service types** (`MastercardKYA`, `VisaTAP`) on W3C DID Document | 🟢 | `crates/tenzro-identity/src/kya.rs` — `SERVICE_TYPE_MASTERCARD_KYA` / `SERVICE_TYPE_VISA_TAP` constants. `tenzro_addService` RPC persists service entries through `IdentityRegistry::add_service_to_identity`. |
-| **Tenzro extension: ERC-8004 Identity precompile mirror** (`0x101a`) auto-invoked on every TDIP machine registration | 🟢 | `crates/tenzro-identity/src/registry.rs` — `OnChainAgentRegistry::mirror_register_agent` hook fires on `register_machine_with_fee` / `register_autonomous_machine_with_fee`. `agentId = keccak256(utf8(did_string))` matches `derive_agent_id`. |
+| **Tenzro extension: ERC-8004 Identity precompile mirror** (`0x101a`) auto-invoked on every TDIP machine registration | 🟢 | `crates/tenzro-identity/src/registry.rs` — `OnChainAgentRegistry::mirror_register_agent` hook fires on `register_machine_with_fee` / `register_autonomous_machine_with_fee` and stores the registry-allocated sequential `uint256 agentId` on `IdentityData::Machine.erc8004_agent_id`. Reverse lookup via `OnChainAgentRegistry::lookup_agent_id_by_did`. |
 | **Tenzro extension: pure-function KYA level computation** | 🟢 | `crates/tenzro-identity/src/kya.rs::compute_kya_level(status, controller_did, delegation_scope)` — four-tier ladder consumed by payments-side `KyaVerifier`. |
 | **Tenzro extension: profile / discovery RPC** | 🟢 | `crates/tenzro-node/src/rpc_integrations.rs::handle_mastercard_kya_protocol_info` — advertises three KYA axes, federation service types, ERC-8004 mirror precompile, four-tier ladder, delegation enforcement entry point. |
 

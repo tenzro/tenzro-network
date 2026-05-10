@@ -60,7 +60,7 @@ class TestWallet(unittest.TestCase):
             "threshold": 2,
             "total_shares": 3,
         })
-        result = tenzro_rpc.create_wallet("ed25519")
+        result = tenzro_rpc.create_wallet()
         self.assertEqual(result["wallet_id"], "w-123")
         self.assertEqual(len(result["address"]), 66)  # 0x + 64 hex chars (32 bytes)
         self.assertEqual(result["threshold"], 2)
@@ -1020,7 +1020,9 @@ class TestCLIDispatch(unittest.TestCase):
             "ap2_cancel_session", "ap2_get_session",
             "ap2_list_agent_sessions",
             # ERC-8004 Trustless Agents (full v0.6+ surface)
-            "erc8004_derive_agent_id", "erc8004_encode_register",
+            "erc8004_encode_register",
+            "erc8004_encode_register_with_uri",
+            "erc8004_encode_register_with_metadata",
             "erc8004_encode_get_agent", "erc8004_decode_get_agent",
             "erc8004_encode_set_agent_uri", "erc8004_encode_set_agent_wallet",
             "erc8004_encode_set_metadata", "erc8004_encode_get_metadata",
@@ -1185,36 +1187,42 @@ class TestErc8004(unittest.TestCase):
     # ---- identity ----
 
     @patch("tenzro_rpc.requests.post")
-    def test_derive_agent_id(self, mock_post):
-        mock_post.return_value = _mock_rpc_response({
-            "did": "did:tenzro:machine:abc",
-            "agent_id": "0xdeadbeef",
-        })
-        result = tenzro_rpc.erc8004_derive_agent_id("did:tenzro:machine:abc")
-        self.assertEqual(result["agent_id"], "0xdeadbeef")
+    def test_encode_register(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xabcdef"})
+        result = tenzro_rpc.erc8004_encode_register()
+        self.assertTrue(result["calldata"].startswith("0x"))
         args, kwargs = mock_post.call_args
         self.assertEqual(
-            kwargs["json"]["method"], "tenzro_erc8004DeriveAgentId"
+            kwargs["json"]["method"], "tenzro_erc8004EncodeRegister"
         )
-        self.assertEqual(
-            kwargs["json"]["params"]["did"], "did:tenzro:machine:abc"
-        )
+        self.assertEqual(kwargs["json"]["params"], {})
 
     @patch("tenzro_rpc.requests.post")
-    def test_encode_register(self, mock_post):
-        mock_post.return_value = _mock_rpc_response({
-            "calldata": "0xabcdef",
-            "agent_id": "0xagent",
-        })
-        result = tenzro_rpc.erc8004_encode_register(
-            "did:tenzro:machine:abc", "0xowner", "ipfs://Qm..."
+    def test_encode_register_with_uri(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xabcdef"})
+        result = tenzro_rpc.erc8004_encode_register_with_uri("ipfs://Qm...")
+        self.assertTrue(result["calldata"].startswith("0x"))
+        args, kwargs = mock_post.call_args
+        self.assertEqual(
+            kwargs["json"]["method"], "tenzro_erc8004EncodeRegisterWithUri"
+        )
+        self.assertEqual(kwargs["json"]["params"]["agent_uri"], "ipfs://Qm...")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_encode_register_with_metadata(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"calldata": "0xabcdef"})
+        metadata = [{"key": "name", "value": "0x6e616d65"}]
+        result = tenzro_rpc.erc8004_encode_register_with_metadata(
+            "ipfs://Qm...", metadata,
         )
         self.assertTrue(result["calldata"].startswith("0x"))
         args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
-        self.assertEqual(params["did"], "did:tenzro:machine:abc")
-        self.assertEqual(params["agent_address"], "0xowner")
-        self.assertEqual(params["metadata_uri"], "ipfs://Qm...")
+        self.assertEqual(
+            kwargs["json"]["method"], "tenzro_erc8004EncodeRegisterWithMetadata"
+        )
+        self.assertEqual(params["agent_uri"], "ipfs://Qm...")
+        self.assertEqual(params["metadata"], metadata)
 
     @patch("tenzro_rpc.requests.post")
     def test_encode_get_agent(self, mock_post):

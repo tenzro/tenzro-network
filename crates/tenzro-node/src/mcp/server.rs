@@ -1713,25 +1713,31 @@ pub struct Ap2ValidateMandatePairParams {
 // ─── ERC-8004 (Trustless Agents Registry) params ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct Erc8004DeriveAgentIdParams {
-    #[schemars(description = "Tenzro DID string (agentId = keccak256(utf8(did)))")]
-    pub did: String,
+pub struct Erc8004EncodeRegisterWithUriParams {
+    #[schemars(description = "Off-chain metadata URI (ipfs:// or https:// link to agent metadata JSON). Pass an empty string to register without a URI.")]
+    pub agent_uri: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct Erc8004EncodeRegisterParams {
-    #[schemars(description = "Tenzro DID string (agentId is derived as keccak256(utf8(did)))")]
-    pub did: String,
-    #[schemars(description = "Agent owner / controller EVM address (0x-prefixed hex)")]
-    pub agent_address: String,
-    #[schemars(description = "Off-chain metadata URI (e.g. ipfs:// or https:// link to agent metadata JSON)")]
-    pub metadata_uri: String,
+pub struct Erc8004MetadataEntryParam {
+    #[schemars(description = "Metadata key string (free-form ASCII identifier)")]
+    pub key: String,
+    #[schemars(description = "Metadata value as 0x-prefixed hex bytes")]
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc8004EncodeRegisterWithMetadataParams {
+    #[schemars(description = "Off-chain metadata URI bound atomically with the agentId allocation")]
+    pub agent_uri: String,
+    #[schemars(description = "Initial metadata batch — array of {key, value} entries written atomically with the agentId allocation")]
+    pub metadata: Vec<Erc8004MetadataEntryParam>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetAgentParams {
-    #[schemars(description = "Agent ID (bytes32 hex, 0x-prefixed)")]
-    pub agent_id: String,
+    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub agent_id: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1742,16 +1748,16 @@ pub struct Erc8004DecodeGetAgentParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeSetAgentUriParams {
-    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
-    pub agent_id: String,
+    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub agent_id: serde_json::Value,
     #[schemars(description = "Updated off-chain metadata URI")]
     pub metadata_uri: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeSetAgentWalletParams {
-    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
-    pub agent_id: String,
+    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub agent_id: serde_json::Value,
     #[schemars(description = "New wallet / controller EVM address (0x-prefixed hex)")]
     pub new_wallet: String,
     #[schemars(description = "Unix-seconds deadline after which the signature is invalid")]
@@ -1762,8 +1768,8 @@ pub struct Erc8004EncodeSetAgentWalletParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeSetMetadataParams {
-    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
-    pub agent_id: String,
+    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub agent_id: serde_json::Value,
     #[schemars(description = "Metadata key string (free-form ASCII identifier)")]
     pub metadata_key: String,
     #[schemars(description = "Metadata value as 0x-prefixed hex bytes")]
@@ -1772,8 +1778,8 @@ pub struct Erc8004EncodeSetMetadataParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetMetadataParams {
-    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
-    pub agent_id: String,
+    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub agent_id: serde_json::Value,
     #[schemars(description = "Metadata key string")]
     pub metadata_key: String,
 }
@@ -1786,20 +1792,20 @@ pub struct Erc8004DecodeGetMetadataParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetAgentUriParams {
-    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
-    pub agent_id: String,
+    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub agent_id: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetAgentWalletParams {
-    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
-    pub agent_id: String,
+    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub agent_id: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeFeedbackParams {
-    #[schemars(description = "Subject agent ID (bytes32 hex, 0x-prefixed) — the agent being rated")]
-    pub subject_agent_id: String,
+    #[schemars(description = "Subject agent ID — uint256 of the agent being rated. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub subject_agent_id: serde_json::Value,
     #[schemars(description = "Rating in the range -100..=100 (Tenzro convention)")]
     pub rating: i8,
     #[schemars(description = "Resolvable URI to feedback context (e.g. ipfs:// or https:// link)")]
@@ -1808,30 +1814,30 @@ pub struct Erc8004EncodeFeedbackParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetFeedbackParams {
-    #[schemars(description = "Subject agent ID (bytes32 hex, 0x-prefixed)")]
-    pub subject_agent_id: String,
+    #[schemars(description = "Subject agent ID — uint256. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub subject_agent_id: serde_json::Value,
     #[schemars(description = "Index into the subject's feedback array")]
     pub index: u64,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetFeedbackCountParams {
-    #[schemars(description = "Subject agent ID (bytes32 hex, 0x-prefixed)")]
-    pub subject_agent_id: String,
+    #[schemars(description = "Subject agent ID — uint256. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub subject_agent_id: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeRevokeFeedbackParams {
-    #[schemars(description = "Agent ID owning the feedback (uint256 hex word, 0x-prefixed)")]
-    pub agent_id: String,
+    #[schemars(description = "Agent ID owning the feedback — uint256. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub agent_id: serde_json::Value,
     #[schemars(description = "Feedback ID to revoke (bytes32 hex, 0x-prefixed)")]
     pub feedback_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeAppendResponseParams {
-    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed) — must own the feedback")]
-    pub agent_id: String,
+    #[schemars(description = "Agent ID (uint256) — must own the feedback. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub agent_id: serde_json::Value,
     #[schemars(description = "Feedback ID being responded to (bytes32 hex, 0x-prefixed)")]
     pub feedback_id: String,
     #[schemars(description = "Resolvable URI to the response payload")]
@@ -1840,16 +1846,16 @@ pub struct Erc8004EncodeAppendResponseParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeIsFeedbackRevokedParams {
-    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
-    pub agent_id: String,
+    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub agent_id: serde_json::Value,
     #[schemars(description = "Feedback ID to check (bytes32 hex, 0x-prefixed)")]
     pub feedback_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Erc8004EncodeGetFeedbackResponsesParams {
-    #[schemars(description = "Agent ID (uint256 hex word, 0x-prefixed)")]
-    pub agent_id: String,
+    #[schemars(description = "Agent ID — uint256 returned by register(...) at registration time. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub agent_id: serde_json::Value,
     #[schemars(description = "Feedback ID (bytes32 hex, 0x-prefixed)")]
     pub feedback_id: String,
 }
@@ -1858,8 +1864,8 @@ pub struct Erc8004EncodeGetFeedbackResponsesParams {
 pub struct Erc8004EncodeValidationRequestParams {
     #[schemars(description = "Validator address (20-byte EVM address, 0x-prefixed)")]
     pub validator_address: String,
-    #[schemars(description = "Agent ID of the subject being validated (bytes32 hex, 0x-prefixed; uint256 word)")]
-    pub agent_id: String,
+    #[schemars(description = "Agent ID of the subject being validated — uint256. Accepts a JSON number, decimal string, or 0x-prefixed hex.")]
+    pub agent_id: serde_json::Value,
     #[schemars(description = "Resolvable URI to the work being validated")]
     pub request_uri: String,
     #[schemars(description = "32-byte commitment over the work (bytes32 hex, 0x-prefixed) — storage key for the matching response")]
@@ -8702,31 +8708,42 @@ impl TenzroMcpServer {
 
     // ─── ERC-8004 (Trustless Agents Registry) Tools ─────────────────────────
 
-    #[tool(description = "Derive the canonical ERC-8004 agentId from a Tenzro DID via keccak256(utf8(did)). Returns { did, agent_id } where agent_id is a 32-byte hex word.")]
-    async fn erc8004_derive_agent_id(
-        &self,
-        Parameters(params): Parameters<Erc8004DeriveAgentIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004DeriveAgentId", serde_json::json!({
-            "did": params.did,
-        })).await.map_err(|e| err_internal(format!("erc8004DeriveAgentId failed: {}", e)))?;
-        json_result(result)
-    }
-
-    #[tool(description = "ABI-encode IdentityRegistry.registerAgent(bytes32 agentId, address agentAddress, string metadataURI). agentId is derived from the supplied DID. Returns hex calldata.")]
+    #[tool(description = "ABI-encode IdentityRegistry.register() (ERC-8004 v0.6+ no-arg overload — caller becomes agent owner; registry allocates a sequential uint256 agentId). Returns hex calldata.")]
     async fn erc8004_encode_register(
         &self,
-        Parameters(params): Parameters<Erc8004EncodeRegisterParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRegister", serde_json::json!({
-            "did": params.did,
-            "agent_address": params.agent_address,
-            "metadata_uri": params.metadata_uri,
-        })).await.map_err(|e| err_internal(format!("erc8004EncodeRegister failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRegister", serde_json::json!({}))
+            .await.map_err(|e| err_internal(format!("erc8004EncodeRegister failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "ABI-encode IdentityRegistry.getAgent(bytes32 agentId). Returns hex calldata for an eth_call lookup.")]
+    #[tool(description = "ABI-encode IdentityRegistry.register(string agentURI) (ERC-8004 v0.6+ overload with agent URI). Returns hex calldata.")]
+    async fn erc8004_encode_register_with_uri(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeRegisterWithUriParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRegisterWithUri", serde_json::json!({
+            "agent_uri": params.agent_uri,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeRegisterWithUri failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode IdentityRegistry.register(string agentURI, (string,bytes)[] metadata) (ERC-8004 v0.6+ overload with metadata entries). Returns hex calldata.")]
+    async fn erc8004_encode_register_with_metadata(
+        &self,
+        Parameters(params): Parameters<Erc8004EncodeRegisterWithMetadataParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let metadata: Vec<serde_json::Value> = params.metadata.iter()
+            .map(|e| serde_json::json!({ "key": e.key, "value": e.value }))
+            .collect();
+        let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRegisterWithMetadata", serde_json::json!({
+            "agent_uri": params.agent_uri,
+            "metadata": metadata,
+        })).await.map_err(|e| err_internal(format!("erc8004EncodeRegisterWithMetadata failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "ABI-encode IdentityRegistry.getAgent(uint256 agentId). Returns hex calldata for an eth_call lookup.")]
     async fn erc8004_encode_get_agent(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetAgentParams>,
@@ -9869,8 +9886,9 @@ impl ServerHandler for TenzroMcpServer {
              • ap2_validate_mandate_pair — Validate Intent+Cart consistency\n\
              • ap2_protocol_info — AP2 protocol metadata (version, supported types)\n\n\
              ERC-8004 (Trustless Agents Registry — v0.6+ surface):\n\
-             • erc8004_derive_agent_id — Derive canonical agentId = keccak256(utf8(did))\n\
-             • erc8004_encode_register — ABI-encode IdentityRegistry.registerAgent()\n\
+             • erc8004_encode_register — ABI-encode IdentityRegistry.register() (no-arg overload)\n\
+             • erc8004_encode_register_with_uri — ABI-encode IdentityRegistry.register(string agentURI)\n\
+             • erc8004_encode_register_with_metadata — ABI-encode IdentityRegistry.register(string,(string,bytes)[])\n\
              • erc8004_encode_get_agent — ABI-encode IdentityRegistry.getAgent()\n\
              • erc8004_decode_get_agent — Decode (address,string) returndata from getAgent()\n\
              • erc8004_encode_set_agent_uri — ABI-encode IdentityRegistry.setAgentURI() (v0.6+)\n\

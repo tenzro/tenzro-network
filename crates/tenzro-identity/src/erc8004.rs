@@ -3,9 +3,10 @@
 //! [ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) defines a three-contract
 //! architecture deployed to Ethereum for cross-vendor trustless agent identity:
 //!
-//! 1. **IdentityRegistry** — maps a `bytes32 agentId` (typically
-//!    `keccak256(did)`) to an on-chain address plus a metadata URI
-//!    (resolvable DID document, AgentCard, etc.).
+//! 1. **IdentityRegistry** — assigns each agent a sequentially-allocated
+//!    `uint256 agentId` (ERC-721 tokenId semantics) and binds it to an
+//!    on-chain controller address plus a metadata URI (resolvable DID
+//!    document, AgentCard, etc.).
 //! 2. **ReputationRegistry** — records cross-agent feedback (rating +
 //!    context URI) so off-chain reputation services can aggregate.
 //! 3. **ValidationRegistry** — lets a requester anchor a work hash and
@@ -21,10 +22,15 @@
 //!
 //! | TDIP | ERC-8004 |
 //! | --- | --- |
-//! | `TenzroIdentity::did_string()` | `agentId = keccak256(did)` |
+//! | `TenzroIdentity::did_string()` | `agentId` (sequential `uint256` allocated on register) |
 //! | Wallet binding address | `agentAddress` |
-//! | DID document URL | `metadataUri` |
+//! | DID document URL | `metadataUri` (returned by `getAgent`/`tokenURI`) |
 //! | `VerifiableCredential` (attestation) | `ValidationRegistry.validationResponse()` |
+//!
+//! The reverse mapping `did → agentId` is held in the on-chain
+//! IdentityRegistry by the [`OnChainAgentRegistry::lookup_agent_id_by_did`]
+//! hook, so callers (settlement, reputation dispatcher, RPC) never need
+//! to compute it themselves.
 //!
 //! # Transport abstraction
 //!
@@ -41,8 +47,6 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-
-use tenzro_crypto::hash::keccak256;
 
 use crate::error::{IdentityError, Result};
 
@@ -80,7 +84,7 @@ pub trait Erc8004Transport: Send + Sync {
 /// on `tenzro-vm`. The TDIP `IdentityRegistry` calls
 /// [`OnChainAgentRegistry::mirror_register_agent`] inside
 /// `register_machine_with_fee` and `register_autonomous_machine_with_fee`
-/// so every machine identity is discoverable via `getAgent(bytes32)` on
+/// so every machine identity is discoverable via `getAgent(uint256)` on
 /// the precompile without an explicit second user step.
 ///
 /// Failures are logged but never block TDIP registration — the on-chain
@@ -88,16 +92,20 @@ pub trait Erc8004Transport: Send + Sync {
 pub trait OnChainAgentRegistry: Send + Sync {
     /// Mirror a TDIP machine registration into the on-chain registry.
     ///
-    /// `agent_id` is `keccak256(did_string)` (see [`derive_agent_id`]),
-    /// `agent_address` is the 20-byte EVM address of the wallet bound to
-    /// the identity, and `metadata_uri` is the resolvable DID document
-    /// or AgentCard URL.
+    /// The registry allocates a fresh sequential `uint256 agentId`, binds
+    /// it to the supplied controller `agent_address` and `metadata_uri`,
+    /// records the reverse `did → agentId` mapping, and returns the new
+    /// id so the caller can persist it on the TDIP identity record.
     fn mirror_register_agent(
         &self,
-        agent_id: &[u8; 32],
+        did: &str,
         agent_address: &EthAddress,
         metadata_uri: &str,
-    ) -> Result<()>;
+    ) -> Result<u64>;
+
+    /// Resolve a TDIP DID string back to its allocated ERC-8004
+    /// `agentId`. Returns `None` if the DID has never been mirrored.
+    fn lookup_agent_id_by_did(&self, did: &str) -> Option<u64>;
 }
 
 /// ERC-8004 canonical function selectors.
@@ -112,10 +120,22 @@ pub trait OnChainAgentRegistry: Send + Sync {
 pub mod selectors {
     // -- IdentityRegistry (0x101a) --
 
-    /// `registerAgent(bytes32,address,string)`
-    pub const REGISTER_AGENT: [u8; 4] = [0xaa, 0xa3, 0x8f, 0x6c];
-    /// `getAgent(bytes32)`
-    pub const GET_AGENT: [u8; 4] = [0xdb, 0x4a, 0x7a, 0x9a];
+    /// `register()` — ERC-8004 register overload that allocates a fresh
+    /// `agentId` for `msg.sender` with no URI and no metadata entries.
+    pub const REGISTER: [u8; 4] = [0x1a, 0xa3, 0xa0, 0x08];
+    /// `register(string)` — ERC-8004 register overload that allocates a
+    /// fresh `agentId` for `msg.sender` and binds the supplied
+    /// `agentURI` (resolvable DID document / AgentCard pointer).
+    pub const REGISTER_WITH_URI: [u8; 4] = [0xf2, 0xc2, 0x98, 0xbe];
+    /// `register(string,(string,bytes)[])` — ERC-8004 register overload
+    /// that allocates a fresh `agentId`, binds the `agentURI`, and
+    /// atomically writes a batch of `(metadataKey, metadataValue)`
+    /// entries. Empty values delete; identical to a sequence of
+    /// `setMetadata` calls but cheaper and atomic.
+    pub const REGISTER_WITH_METADATA: [u8; 4] = [0x8e, 0xa4, 0x22, 0x86];
+    /// `getAgent(uint256)` — ERC-8004 read returning
+    /// `(address controller, string metadataUri)` for an agent id.
+    pub const GET_AGENT: [u8; 4] = [0x2d, 0xe5, 0xaa, 0xf7];
     /// `setAgentURI(uint256,string)` — ERC-8004 v0.6+ selector for
     /// updating an agent's metadata URI in place.
     pub const SET_AGENT_URI: [u8; 4] = [0x0a, 0xf2, 0x8b, 0xd3];
@@ -123,6 +143,10 @@ pub mod selectors {
     /// selector for rebinding an agent's controller wallet, with the
     /// reference contract's `(deadline, signature)` consent pair.
     pub const SET_AGENT_WALLET: [u8; 4] = [0x2d, 0x1e, 0xf5, 0xae];
+    /// `unsetAgentWallet(uint256)` — ERC-8004 v0.6+ selector for
+    /// clearing an agent's controller wallet binding (sets it to the
+    /// zero address). Used when retiring or rotating an agent.
+    pub const UNSET_AGENT_WALLET: [u8; 4] = [0x3f, 0xdd, 0xcf, 0x19];
     /// `setMetadata(uint256,string,bytes)` — ERC-8004 v0.6+ selector for
     /// writing a `(key → value)` metadata entry. Empty `value` deletes.
     pub const SET_METADATA: [u8; 4] = [0x46, 0x66, 0x48, 0xda];
@@ -142,14 +166,16 @@ pub mod selectors {
 
     // -- ReputationRegistry (0x101b) --
 
-    /// `submitFeedback(bytes32,int8,string)`
-    pub const SUBMIT_FEEDBACK: [u8; 4] = [0x3b, 0x2d, 0x6e, 0x41];
-    /// `getFeedback(bytes32,uint256)` — read selector for indexed lookup
+    /// `submitFeedback(uint256,int8,string)` — submit a feedback rating
+    /// against a subject agent identified by its sequential `uint256`
+    /// `agentId`.
+    pub const SUBMIT_FEEDBACK: [u8; 4] = [0xe5, 0x67, 0x9c, 0x29];
+    /// `getFeedback(uint256,uint256)` — read selector for indexed lookup
     /// of a single feedback entry against `(subject_agent_id, index)`.
-    pub const GET_FEEDBACK: [u8; 4] = [0x7c, 0x9d, 0x4f, 0x52];
-    /// `getFeedbackCount(bytes32)` — read selector returning the number
+    pub const GET_FEEDBACK: [u8; 4] = [0x2d, 0x15, 0x04, 0x57];
+    /// `getFeedbackCount(uint256)` — read selector returning the number
     /// of feedback entries recorded against a subject agent.
-    pub const GET_FEEDBACK_COUNT: [u8; 4] = [0x4e, 0x71, 0xa2, 0x18];
+    pub const GET_FEEDBACK_COUNT: [u8; 4] = [0x45, 0x37, 0xb7, 0x64];
     /// `revokeFeedback(uint256,bytes32)` — ERC-8004 v0.6+ mutator. Marks
     /// a previously-submitted feedback entry as withdrawn by its rater.
     /// Idempotent on the wire: a second call against an already-revoked
@@ -198,21 +224,34 @@ pub mod selectors {
     /// Tenzro-side convenience read; the canonical ERC-8004 contract
     /// emits events instead, but our precompile retains a getter for
     /// off-chain indexers.
-    pub const GET_VALIDATION: [u8; 4] = [0x9b, 0x2e, 0x4f, 0x33];
+    pub const GET_VALIDATION: [u8; 4] = [0xa8, 0x09, 0x1f, 0xc3];
 }
 
-/// An ERC-8004 agent record as returned by `getAgent()`.
+/// An ERC-8004 agent record as returned by `getAgent(uint256)`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRecord {
-    pub agent_id: [u8; 32],
+    /// Sequentially-allocated `uint256` agent id (held as a `u64` for
+    /// the in-process registry; widened to a 32-byte big-endian word at
+    /// the EVM precompile boundary).
+    pub agent_id: u64,
     pub agent_address: EthAddress,
     pub metadata_uri: String,
+}
+
+/// A `(metadataKey, metadataValue)` pair as accepted by the
+/// `register(string,(string,bytes)[])` overload and the `setMetadata`
+/// mutator. An empty `metadata_value` deletes any existing entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MetadataEntry {
+    pub metadata_key: String,
+    pub metadata_value: Vec<u8>,
 }
 
 /// Feedback entry submitted via the reputation registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedbackEntry {
-    pub subject_agent_id: [u8; 32],
+    /// Sequential `uint256` agentId of the rated subject.
+    pub subject_agent_id: u64,
     /// -100..=100, higher is better. Clamped on-chain.
     pub rating: i8,
     pub context_uri: String,
@@ -224,10 +263,8 @@ pub struct FeedbackEntry {
 pub struct ValidationRequest {
     /// Validator account expected to respond.
     pub validator_address: EthAddress,
-    /// `agentId` of the subject as a `uint256` (high-byte first when
-    /// projected into 32 bytes; we keep the full word for fidelity with
-    /// the on-chain register).
-    pub agent_id: [u8; 32],
+    /// Sequential `uint256` agentId of the subject.
+    pub agent_id: u64,
     /// Resolvable pointer to the work being validated.
     pub request_uri: String,
     /// 32-byte commitment over the work; used as the storage key for
@@ -253,20 +290,31 @@ pub struct ValidationResult {
     pub tag: String,
 }
 
-/// Derive a canonical ERC-8004 `agentId` from a Tenzro DID.
-///
-/// `agentId = keccak256(utf8(did_string))`. This is collision-resistant
-/// and deterministic across clients.
-pub fn derive_agent_id(did_string: &str) -> [u8; 32] {
-    keccak256(did_string.as_bytes()).to_bytes()
+/// Encode a `u64` Tenzro-internal agent id as a 32-byte big-endian
+/// `uint256` word, matching the ERC-8004 wire shape.
+pub fn agent_id_to_uint256_be(agent_id: u64) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[24..32].copy_from_slice(&agent_id.to_be_bytes());
+    out
+}
+
+/// Decode a 32-byte big-endian `uint256` agentId word back to `u64`.
+/// Returns `None` if the high 192 bits are non-zero — the registry
+/// allocates agentIds sequentially as `u64`, so any wider value is
+/// either silent truncation (a bug) or a foreign id we cannot service.
+pub fn agent_id_from_uint256_be(word: &[u8; 32]) -> Option<u64> {
+    if word[..24].iter().any(|b| *b != 0) {
+        return None;
+    }
+    Some(u64::from_be_bytes(word[24..32].try_into().ok()?))
 }
 
 /// Minimal ABI encoder for the handful of ERC-8004 function shapes we
 /// need. Not a general-purpose ABI encoder — just enough to build
-/// calldata for `registerAgent`, `submitFeedback`, `validationRequest`,
-/// and `validationResponse`.
+/// calldata for the three `register` overloads, `submitFeedback`,
+/// `validationRequest`, and `validationResponse`.
 pub mod abi {
-    use super::EthAddress;
+    use super::{EthAddress, MetadataEntry};
 
     /// Pad `value` to 32 bytes, left-padded with zeros (big-endian).
     fn pad32_left(value: &[u8]) -> [u8; 32] {
@@ -289,46 +337,142 @@ pub mod abi {
         out
     }
 
-    /// `registerAgent(bytes32 agentId, address agentAddress, string metadataUri)`
-    pub fn encode_register_agent(
-        selector: [u8; 4],
-        agent_id: &[u8; 32],
-        agent_address: &EthAddress,
-        metadata_uri: &str,
-    ) -> Vec<u8> {
-        // Head: selector | agent_id | address (padded to 32) | offset-to-string
-        let mut data = Vec::with_capacity(4 + 3 * 32);
+    /// Pack a `u64` agent id into a 32-byte big-endian `uint256` word.
+    fn agent_id_word(agent_id: u64) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out[24..32].copy_from_slice(&agent_id.to_be_bytes());
+        out
+    }
+
+    /// `register()` — ERC-8004 register overload that allocates a fresh
+    /// `agentId` for `msg.sender` with no URI and no metadata. Calldata
+    /// is just the selector — no arguments.
+    pub fn encode_register(selector: [u8; 4]) -> Vec<u8> {
+        selector.to_vec()
+    }
+
+    /// `register(string agentURI)` — ERC-8004 register overload that
+    /// allocates a fresh `agentId` and binds the supplied metadata URI.
+    ///
+    /// Head: `[offset-to-uri (=32)]`, tail: `[length | utf8-padded]`.
+    pub fn encode_register_with_uri(selector: [u8; 4], agent_uri: &str) -> Vec<u8> {
+        let mut data = Vec::with_capacity(4 + 32 + 32 + agent_uri.len().div_ceil(32) * 32);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(agent_id);
-        data.extend_from_slice(&pad32_left(agent_address));
-        // offset-to-string = 3 words after the head (agent_id, address, offset)
-        data.extend_from_slice(&pad32_left(&(96u64).to_be_bytes()));
-        // Tail: length + data
-        data.extend_from_slice(&encode_bytes_tail(metadata_uri.as_bytes()));
+        // offset-to-uri = 32 (single head slot)
+        data.extend_from_slice(&pad32_left(&(32u64).to_be_bytes()));
+        data.extend_from_slice(&encode_bytes_tail(agent_uri.as_bytes()));
         data
     }
 
-    /// `getAgent(bytes32)`
-    pub fn encode_get_agent(selector: [u8; 4], agent_id: &[u8; 32]) -> Vec<u8> {
+    /// `register(string agentURI, (string,bytes)[] metadata)` —
+    /// ERC-8004 register overload that allocates a fresh `agentId`,
+    /// binds the URI, and atomically writes a batch of metadata entries.
+    ///
+    /// Head: `[offset-to-uri (=64) | offset-to-metadata-array]`. The
+    /// metadata-array offset is `64 + (32 + ceil(uri_len/32)*32)`. The
+    /// metadata array itself is encoded as `[length | encoded entries]`
+    /// where the entries form a self-contained dynamic-tuple array
+    /// (each entry is a `(string,bytes)` tuple, both fields dynamic).
+    pub fn encode_register_with_metadata(
+        selector: [u8; 4],
+        agent_uri: &str,
+        metadata: &[MetadataEntry],
+    ) -> Vec<u8> {
+        let uri_block_len = 32 + agent_uri.len().div_ceil(32) * 32;
+        let metadata_offset = 64 + uri_block_len;
+
+        // Encode the metadata array body relative to its own start
+        // (Solidity convention for `T[]` of dynamic tuples: offsets
+        // inside the array body are measured from the body start, i.e.
+        // immediately after the length word).
+        let metadata_body = encode_metadata_array_body(metadata);
+
+        let mut data =
+            Vec::with_capacity(4 + 64 + uri_block_len + 32 + metadata_body.len());
+        data.extend_from_slice(&selector);
+        // offset-to-uri = 64 (two head slots)
+        data.extend_from_slice(&pad32_left(&(64u64).to_be_bytes()));
+        // offset-to-metadata = 64 + uri block
+        data.extend_from_slice(&pad32_left(&(metadata_offset as u64).to_be_bytes()));
+        // URI tail
+        data.extend_from_slice(&encode_bytes_tail(agent_uri.as_bytes()));
+        // Metadata array length word + body
+        data.extend_from_slice(&pad32_left(&(metadata.len() as u64).to_be_bytes()));
+        data.extend_from_slice(&metadata_body);
+        data
+    }
+
+    /// Encode a `(string,bytes)[]` array body (offsets-from-body-start)
+    /// suitable for splicing in after the array length word.
+    ///
+    /// Layout: first `N` words are offsets to each tuple, where
+    /// `offsets[i]` measures bytes from the start of the body to the
+    /// start of tuple `i`. Each tuple is a `(string, bytes)` pair
+    /// encoded as `[offset_string=64 | offset_bytes | string_tail | bytes_tail]`.
+    fn encode_metadata_array_body(metadata: &[MetadataEntry]) -> Vec<u8> {
+        let n = metadata.len();
+        // Encode each tuple to its own buffer first, then assemble
+        // offsets pointing at the concatenation.
+        let tuples: Vec<Vec<u8>> = metadata.iter().map(encode_metadata_tuple).collect();
+        let offsets_block_len = n * 32;
+        let mut offsets = Vec::with_capacity(offsets_block_len);
+        let mut running = offsets_block_len;
+        for tuple in &tuples {
+            offsets.extend_from_slice(&pad32_left(&(running as u64).to_be_bytes()));
+            running += tuple.len();
+        }
+        let mut out = Vec::with_capacity(running);
+        out.extend_from_slice(&offsets);
+        for tuple in &tuples {
+            out.extend_from_slice(tuple);
+        }
+        out
+    }
+
+    /// Encode a single `(string metadataKey, bytes metadataValue)` tuple
+    /// as a self-contained block: head (2 × 32) + key tail + value tail.
+    fn encode_metadata_tuple(entry: &MetadataEntry) -> Vec<u8> {
+        let key_block_len = 32 + entry.metadata_key.len().div_ceil(32) * 32;
+        let value_block_len = 32 + entry.metadata_value.len().div_ceil(32) * 32;
+        let mut out = Vec::with_capacity(64 + key_block_len + value_block_len);
+        // head[0] = offset to string field = 64 (two head slots)
+        out.extend_from_slice(&pad32_left(&(64u64).to_be_bytes()));
+        // head[1] = offset to bytes field = 64 + key_block_len
+        out.extend_from_slice(&pad32_left(&((64 + key_block_len) as u64).to_be_bytes()));
+        out.extend_from_slice(&encode_bytes_tail(entry.metadata_key.as_bytes()));
+        out.extend_from_slice(&encode_bytes_tail(&entry.metadata_value));
+        out
+    }
+
+    /// `getAgent(uint256)`
+    pub fn encode_get_agent(selector: [u8; 4], agent_id: u64) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 32);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(agent_id);
+        data.extend_from_slice(&agent_id_word(agent_id));
         data
     }
 
-    /// `submitFeedback(bytes32 subject, int8 rating, string contextUri)`
+    /// `unsetAgentWallet(uint256)` — clear an agent's controller wallet.
+    pub fn encode_unset_agent_wallet(selector: [u8; 4], agent_id: u64) -> Vec<u8> {
+        let mut data = Vec::with_capacity(4 + 32);
+        data.extend_from_slice(&selector);
+        data.extend_from_slice(&agent_id_word(agent_id));
+        data
+    }
+
+    /// `submitFeedback(uint256 agentId, int8 rating, string contextUri)`
     ///
     /// `int8` encodes as 32-byte two's complement. For the small
     /// negative values (-128..=-1) we sign-extend with 0xff.
     pub fn encode_submit_feedback(
         selector: [u8; 4],
-        subject: &[u8; 32],
+        subject_agent_id: u64,
         rating: i8,
         context_uri: &str,
     ) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 3 * 32);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(subject);
+        data.extend_from_slice(&agent_id_word(subject_agent_id));
 
         let mut rating_word = [0u8; 32];
         let sign_ext = if rating < 0 { 0xffu8 } else { 0u8 };
@@ -351,14 +495,14 @@ pub mod abi {
     pub fn encode_validation_request(
         selector: [u8; 4],
         validator_address: &EthAddress,
-        agent_id: &[u8; 32],
+        agent_id: u64,
         request_uri: &str,
         request_hash: &[u8; 32],
     ) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 4 * 32 + request_uri.len().div_ceil(32) * 32 + 32);
         data.extend_from_slice(&selector);
         data.extend_from_slice(&pad32_left(validator_address));
-        data.extend_from_slice(agent_id);
+        data.extend_from_slice(&agent_id_word(agent_id));
         // offset = 4 head slots × 32 = 128
         data.extend_from_slice(&pad32_left(&(128u64).to_be_bytes()));
         data.extend_from_slice(request_hash);
@@ -403,26 +547,26 @@ pub mod abi {
         data
     }
 
-    /// `getFeedback(bytes32 subject, uint256 index)` — read-only.
+    /// `getFeedback(uint256 agentId, uint256 index)` — read-only.
     pub fn encode_get_feedback(
         selector: [u8; 4],
-        subject: &[u8; 32],
+        subject_agent_id: u64,
         index: u128,
     ) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 2 * 32);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(subject);
+        data.extend_from_slice(&agent_id_word(subject_agent_id));
         let mut idx_word = [0u8; 32];
         idx_word[16..32].copy_from_slice(&index.to_be_bytes());
         data.extend_from_slice(&idx_word);
         data
     }
 
-    /// `getFeedbackCount(bytes32 subject)` — read-only.
-    pub fn encode_get_feedback_count(selector: [u8; 4], subject: &[u8; 32]) -> Vec<u8> {
+    /// `getFeedbackCount(uint256 agentId)` — read-only.
+    pub fn encode_get_feedback_count(selector: [u8; 4], subject_agent_id: u64) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 32);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(subject);
+        data.extend_from_slice(&agent_id_word(subject_agent_id));
         data
     }
 
@@ -431,12 +575,12 @@ pub mod abi {
     /// is a flat `[selector | agent_id | feedback_id]` (4 + 64 bytes).
     pub fn encode_revoke_feedback(
         selector: [u8; 4],
-        agent_id: &[u8; 32],
+        agent_id: u64,
         feedback_id: &[u8; 32],
     ) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 2 * 32);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(agent_id);
+        data.extend_from_slice(&agent_id_word(agent_id));
         data.extend_from_slice(feedback_id);
         data
     }
@@ -448,14 +592,14 @@ pub mod abi {
     /// followed by the standard `(length, utf8-padded-bytes)` tail.
     pub fn encode_append_response(
         selector: [u8; 4],
-        agent_id: &[u8; 32],
+        agent_id: u64,
         feedback_id: &[u8; 32],
         response_uri: &str,
     ) -> Vec<u8> {
         let tail = encode_bytes_tail(response_uri.as_bytes());
         let mut data = Vec::with_capacity(4 + 3 * 32 + tail.len());
         data.extend_from_slice(&selector);
-        data.extend_from_slice(agent_id);
+        data.extend_from_slice(&agent_id_word(agent_id));
         data.extend_from_slice(feedback_id);
         // offset-to-response-uri = 3 head slots × 32 = 96
         data.extend_from_slice(&pad32_left(&(96u64).to_be_bytes()));
@@ -465,19 +609,19 @@ pub mod abi {
 
     /// `getAgentURI(uint256 agentId)` — ERC-8004 v0.6+ read. Static
     /// 32-byte argument, so calldata is `[selector | agent_id]`.
-    pub fn encode_get_agent_uri(selector: [u8; 4], agent_id: &[u8; 32]) -> Vec<u8> {
+    pub fn encode_get_agent_uri(selector: [u8; 4], agent_id: u64) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 32);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(agent_id);
+        data.extend_from_slice(&agent_id_word(agent_id));
         data
     }
 
     /// `getAgentWallet(uint256 agentId)` — ERC-8004 v0.6+ read. Static
     /// 32-byte argument, so calldata is `[selector | agent_id]`.
-    pub fn encode_get_agent_wallet(selector: [u8; 4], agent_id: &[u8; 32]) -> Vec<u8> {
+    pub fn encode_get_agent_wallet(selector: [u8; 4], agent_id: u64) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 32);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(agent_id);
+        data.extend_from_slice(&agent_id_word(agent_id));
         data
     }
 
@@ -486,12 +630,12 @@ pub mod abi {
     /// the calldata is a flat `[selector | agent_id | feedback_id]`.
     pub fn encode_is_feedback_revoked(
         selector: [u8; 4],
-        agent_id: &[u8; 32],
+        agent_id: u64,
         feedback_id: &[u8; 32],
     ) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 2 * 32);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(agent_id);
+        data.extend_from_slice(&agent_id_word(agent_id));
         data.extend_from_slice(feedback_id);
         data
     }
@@ -500,12 +644,12 @@ pub mod abi {
     /// ERC-8004 v0.6+ read. Same shape as `isFeedbackRevoked`.
     pub fn encode_get_feedback_responses(
         selector: [u8; 4],
-        agent_id: &[u8; 32],
+        agent_id: u64,
         feedback_id: &[u8; 32],
     ) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 2 * 32);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(agent_id);
+        data.extend_from_slice(&agent_id_word(agent_id));
         data.extend_from_slice(feedback_id);
         data
     }
@@ -586,12 +730,12 @@ pub mod abi {
     /// string tail.
     pub fn encode_set_agent_uri(
         selector: [u8; 4],
-        agent_id: &[u8; 32],
+        agent_id: u64,
         metadata_uri: &str,
     ) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 64 + 32 + metadata_uri.len().div_ceil(32) * 32);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(agent_id);
+        data.extend_from_slice(&agent_id_word(agent_id));
         // offset-to-uri = 64 (2 head slots × 32)
         data.extend_from_slice(&pad32_left(&(64u64).to_be_bytes()));
         data.extend_from_slice(&encode_bytes_tail(metadata_uri.as_bytes()));
@@ -605,14 +749,14 @@ pub mod abi {
     /// = 4 × 32 = 128. The signature tail follows at offset 128.
     pub fn encode_set_agent_wallet(
         selector: [u8; 4],
-        agent_id: &[u8; 32],
+        agent_id: u64,
         new_wallet: &EthAddress,
         deadline: u128,
         signature: &[u8],
     ) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 4 * 32 + 32 + signature.len().div_ceil(32) * 32);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(agent_id);
+        data.extend_from_slice(&agent_id_word(agent_id));
         data.extend_from_slice(&pad32_left(new_wallet));
         // deadline (uint256, low 128 bits used)
         let mut deadline_word = [0u8; 32];
@@ -631,7 +775,7 @@ pub mod abi {
     /// `value_offset` is `96 + 32 + ceil(key_len/32)*32`.
     pub fn encode_set_metadata(
         selector: [u8; 4],
-        agent_id: &[u8; 32],
+        agent_id: u64,
         metadata_key: &str,
         metadata_value: &[u8],
     ) -> Vec<u8> {
@@ -640,7 +784,7 @@ pub mod abi {
         let value_block = 32 + metadata_value.len().div_ceil(32) * 32;
         let mut data = Vec::with_capacity(4 + 96 + key_block + value_block);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(agent_id);
+        data.extend_from_slice(&agent_id_word(agent_id));
         // key offset = 96 (3 head slots × 32)
         data.extend_from_slice(&pad32_left(&(96u64).to_be_bytes()));
         // value offset
@@ -656,12 +800,12 @@ pub mod abi {
     /// v0.6+ read selector. Head: `[agent_id | key_offset (=64)]`.
     pub fn encode_get_metadata(
         selector: [u8; 4],
-        agent_id: &[u8; 32],
+        agent_id: u64,
         metadata_key: &str,
     ) -> Vec<u8> {
         let mut data = Vec::with_capacity(4 + 64 + 32 + metadata_key.len().div_ceil(32) * 32);
         data.extend_from_slice(&selector);
-        data.extend_from_slice(agent_id);
+        data.extend_from_slice(&agent_id_word(agent_id));
         // offset = 64 (2 head slots × 32)
         data.extend_from_slice(&pad32_left(&(64u64).to_be_bytes()));
         data.extend_from_slice(&encode_bytes_tail(metadata_key.as_bytes()));
@@ -739,8 +883,10 @@ pub mod abi {
     pub struct DecodedValidation {
         /// Validator address that was registered with the request.
         pub validator: EthAddress,
-        /// `agentId` of the subject.
-        pub agent_id: [u8; 32],
+        /// `agentId` of the subject (sequential `uint256` widened from
+        /// the on-wire 32-byte word; `None` if the high 192 bits were
+        /// non-zero, which would indicate a foreign id).
+        pub agent_id: Option<u64>,
         /// `0..=100` quality score; meaningful only when `exists` is
         /// true and the response slot has been filled.
         pub response: u8,
@@ -767,9 +913,10 @@ pub mod abi {
         // Slot 0: validator (last 20 bytes of left-padded address word).
         let mut validator = [0u8; 20];
         validator.copy_from_slice(&data[12..32]);
-        // Slot 1: agent_id (raw 32 bytes).
-        let mut agent_id = [0u8; 32];
-        agent_id.copy_from_slice(&data[32..64]);
+        // Slot 1: agent_id as uint256 — narrow to u64 if it fits.
+        let mut agent_id_word = [0u8; 32];
+        agent_id_word.copy_from_slice(&data[32..64]);
+        let agent_id = super::agent_id_from_uint256_be(&agent_id_word);
         // Slot 2: response (low byte).
         let response = data[95];
         // Slot 3..=5: offsets to dynamic strings.
@@ -808,10 +955,10 @@ pub mod abi {
         String::from_utf8(data[offset + 32..offset + 32 + len].to_vec()).ok()
     }
 
-    /// Decode the return of `getAgent(bytes32)` →
-    /// `(address, string, bytes32?)`. We tolerate both the 3-slot
-    /// (address, string-offset, metadataHash) and 2-slot layouts found
-    /// across published ERC-8004 drafts.
+    /// Decode the return of `getAgent(uint256)` →
+    /// `(address controller, string metadataUri)` per the ERC-8004
+    /// canonical wire shape: head = `[address-padded-32 | offset-to-string]`,
+    /// tail = `[length | utf8 padded]`.
     pub fn decode_get_agent(data: &[u8]) -> Option<(EthAddress, String)> {
         if data.len() < 64 {
             return None;
@@ -848,25 +995,42 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
         &self.addresses
     }
 
-    /// Build the calldata for `registerAgent`. Submission requires a
-    /// signed transaction, which is the caller's responsibility (the
-    /// wallet-binding signer in `tenzro-wallet`).
-    pub fn build_register_agent_calldata(
+    /// Build calldata for `register()` — the no-argument register
+    /// overload. The contract allocates a fresh `agentId` for
+    /// `msg.sender` with no URI and no metadata.
+    pub fn build_register_calldata(&self) -> Vec<u8> {
+        abi::encode_register(selectors::REGISTER)
+    }
+
+    /// Build calldata for `register(string agentURI)` — allocates a
+    /// fresh `agentId` for `msg.sender` and binds the URI in one tx.
+    pub fn build_register_with_uri_calldata(&self, agent_uri: &str) -> Vec<u8> {
+        abi::encode_register_with_uri(selectors::REGISTER_WITH_URI, agent_uri)
+    }
+
+    /// Build calldata for `register(string agentURI, (string,bytes)[] metadata)`
+    /// — allocates a fresh `agentId`, binds the URI, and atomically
+    /// writes a batch of metadata entries.
+    pub fn build_register_with_metadata_calldata(
         &self,
-        agent_id: &[u8; 32],
-        agent_address: &EthAddress,
-        metadata_uri: &str,
+        agent_uri: &str,
+        metadata: &[MetadataEntry],
     ) -> Vec<u8> {
-        abi::encode_register_agent(
-            selectors::REGISTER_AGENT,
-            agent_id,
-            agent_address,
-            metadata_uri,
+        abi::encode_register_with_metadata(
+            selectors::REGISTER_WITH_METADATA,
+            agent_uri,
+            metadata,
         )
     }
 
+    /// Build calldata for `unsetAgentWallet(uint256)` — clear the
+    /// controller wallet binding (sets it to the zero address).
+    pub fn build_unset_agent_wallet_calldata(&self, agent_id: u64) -> Vec<u8> {
+        abi::encode_unset_agent_wallet(selectors::UNSET_AGENT_WALLET, agent_id)
+    }
+
     /// Look up an agent by its `agentId`.
-    pub async fn get_agent(&self, agent_id: &[u8; 32]) -> Result<AgentRecord> {
+    pub async fn get_agent(&self, agent_id: u64) -> Result<AgentRecord> {
         let data = abi::encode_get_agent(selectors::GET_AGENT, agent_id);
         let ret = self
             .transport
@@ -878,7 +1042,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
             )
         })?;
         Ok(AgentRecord {
-            agent_id: *agent_id,
+            agent_id,
             agent_address: addr,
             metadata_uri: uri,
         })
@@ -888,7 +1052,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     pub fn build_submit_feedback_calldata(&self, entry: &FeedbackEntry) -> Vec<u8> {
         abi::encode_submit_feedback(
             selectors::SUBMIT_FEEDBACK,
-            &entry.subject_agent_id,
+            entry.subject_agent_id,
             entry.rating,
             &entry.context_uri,
         )
@@ -900,7 +1064,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     /// Ethereum-side mirror contract.
     pub fn build_revoke_feedback_calldata(
         &self,
-        agent_id: &[u8; 32],
+        agent_id: u64,
         feedback_id: &[u8; 32],
     ) -> Vec<u8> {
         abi::encode_revoke_feedback(selectors::REVOKE_FEEDBACK, agent_id, feedback_id)
@@ -911,7 +1075,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     /// response URI on a feedback entry.
     pub fn build_append_response_calldata(
         &self,
-        agent_id: &[u8; 32],
+        agent_id: u64,
         feedback_id: &[u8; 32],
         response_uri: &str,
     ) -> Vec<u8> {
@@ -929,7 +1093,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
         abi::encode_validation_request(
             selectors::VALIDATION_REQUEST,
             &request.validator_address,
-            &request.agent_id,
+            request.agent_id,
             &request.request_uri,
             &request.request_hash,
         )
@@ -950,13 +1114,13 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
 
     /// Look up a single feedback entry against a subject agent.
     ///
-    /// Wraps the `getFeedback(bytes32,uint256)` read selector at the
+    /// Wraps the `getFeedback(uint256,uint256)` read selector at the
     /// ReputationRegistry. Returns the entry plus its `exists` flag —
     /// callers should treat `exists == false` as "no entry at this
     /// index" rather than a transport failure.
     pub async fn get_feedback(
         &self,
-        subject_agent_id: &[u8; 32],
+        subject_agent_id: u64,
         index: u128,
     ) -> Result<(FeedbackEntry, bool)> {
         let data = abi::encode_get_feedback(selectors::GET_FEEDBACK, subject_agent_id, index);
@@ -971,7 +1135,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
         })?;
         Ok((
             FeedbackEntry {
-                subject_agent_id: *subject_agent_id,
+                subject_agent_id,
                 rating,
                 context_uri,
             },
@@ -981,9 +1145,9 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
 
     /// Return the count of feedback entries against a subject agent.
     ///
-    /// Wraps the `getFeedbackCount(bytes32)` read selector at the
+    /// Wraps the `getFeedbackCount(uint256)` read selector at the
     /// ReputationRegistry.
-    pub async fn get_feedback_count(&self, subject_agent_id: &[u8; 32]) -> Result<u128> {
+    pub async fn get_feedback_count(&self, subject_agent_id: u64) -> Result<u128> {
         let data = abi::encode_get_feedback_count(selectors::GET_FEEDBACK_COUNT, subject_agent_id);
         let ret = self
             .transport
@@ -1023,7 +1187,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     /// owns that step.
     pub fn build_set_agent_uri_calldata(
         &self,
-        agent_id: &[u8; 32],
+        agent_id: u64,
         metadata_uri: &str,
     ) -> Vec<u8> {
         abi::encode_set_agent_uri(selectors::SET_AGENT_URI, agent_id, metadata_uri)
@@ -1036,7 +1200,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     /// `from` for authorization.
     pub fn build_set_agent_wallet_calldata(
         &self,
-        agent_id: &[u8; 32],
+        agent_id: u64,
         new_wallet: &EthAddress,
         deadline: u128,
         signature: &[u8],
@@ -1054,7 +1218,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     /// v0.6+. An empty `metadata_value` deletes the entry.
     pub fn build_set_metadata_calldata(
         &self,
-        agent_id: &[u8; 32],
+        agent_id: u64,
         metadata_key: &str,
         metadata_value: &[u8],
     ) -> Vec<u8> {
@@ -1073,7 +1237,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     /// unset.
     pub async fn get_metadata(
         &self,
-        agent_id: &[u8; 32],
+        agent_id: u64,
         metadata_key: &str,
     ) -> Result<Vec<u8>> {
         let data = abi::encode_get_metadata(selectors::GET_METADATA, agent_id, metadata_key);
@@ -1090,7 +1254,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
 
     /// Read the metadata URI bound to an agent — ERC-8004 v0.6+
     /// `getAgentURI(uint256)`.
-    pub async fn get_agent_uri(&self, agent_id: &[u8; 32]) -> Result<String> {
+    pub async fn get_agent_uri(&self, agent_id: u64) -> Result<String> {
         let data = abi::encode_get_agent_uri(selectors::GET_AGENT_URI, agent_id);
         let ret = self
             .transport
@@ -1105,7 +1269,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
 
     /// Read the controller wallet bound to an agent — ERC-8004 v0.6+
     /// `getAgentWallet(uint256)`.
-    pub async fn get_agent_wallet(&self, agent_id: &[u8; 32]) -> Result<EthAddress> {
+    pub async fn get_agent_wallet(&self, agent_id: u64) -> Result<EthAddress> {
         let data = abi::encode_get_agent_wallet(selectors::GET_AGENT_WALLET, agent_id);
         let ret = self
             .transport
@@ -1123,7 +1287,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     /// `false`.
     pub async fn is_feedback_revoked(
         &self,
-        agent_id: &[u8; 32],
+        agent_id: u64,
         feedback_id: &[u8; 32],
     ) -> Result<bool> {
         let data = abi::encode_is_feedback_revoked(
@@ -1147,7 +1311,7 @@ impl<T: Erc8004Transport> Erc8004Adapter<T> {
     /// the empty string when no response has been attached.
     pub async fn get_feedback_responses(
         &self,
-        agent_id: &[u8; 32],
+        agent_id: u64,
         feedback_id: &[u8; 32],
     ) -> Result<String> {
         let data = abi::encode_get_feedback_responses(
@@ -1198,59 +1362,168 @@ mod tests {
         }
     }
 
+    // -- Sequential agent_id wire roundtrip --
+
     #[test]
-    fn derive_agent_id_is_deterministic() {
-        let a = derive_agent_id("did:tenzro:machine:test");
-        let b = derive_agent_id("did:tenzro:machine:test");
-        assert_eq!(a, b);
-        let c = derive_agent_id("did:tenzro:machine:other");
-        assert_ne!(a, c);
+    fn agent_id_uint256_be_roundtrip() {
+        for id in [0u64, 1, 42, 1_000_000, u64::MAX] {
+            let word = agent_id_to_uint256_be(id);
+            // Low 8 bytes must hold the BE-encoded id; high 24 must be zero.
+            assert_eq!(&word[..24], &[0u8; 24]);
+            assert_eq!(&word[24..], &id.to_be_bytes());
+            assert_eq!(agent_id_from_uint256_be(&word), Some(id));
+        }
     }
 
     #[test]
-    fn encode_register_agent_has_selector_prefix() {
-        let data = abi::encode_register_agent(
-            selectors::REGISTER_AGENT,
-            &[7u8; 32],
-            &[8u8; 20],
-            "ipfs://cid",
-        );
-        assert_eq!(&data[0..4], &selectors::REGISTER_AGENT);
-        // 4 selector + 3 head words (agent_id + address + offset)
-        // + 1 length word + 1 data word (10 chars pad-to-32)
-        assert_eq!(data.len(), 4 + 3 * 32 + 32 + 32);
+    fn agent_id_from_uint256_rejects_high_bits() {
+        let mut word = [0u8; 32];
+        word[0] = 1; // bit set above the u64 range
+        assert_eq!(agent_id_from_uint256_be(&word), None);
+    }
+
+    // -- ERC-8004 register overload selectors (canonical pinning) --
+
+    #[test]
+    fn register_selectors_match_canonical_keccak() {
+        // bytes4(keccak256("register()"))
+        assert_eq!(selectors::REGISTER, [0x1a, 0xa3, 0xa0, 0x08]);
+        // bytes4(keccak256("register(string)"))
+        assert_eq!(selectors::REGISTER_WITH_URI, [0xf2, 0xc2, 0x98, 0xbe]);
+        // bytes4(keccak256("register(string,(string,bytes)[])"))
+        assert_eq!(selectors::REGISTER_WITH_METADATA, [0x8e, 0xa4, 0x22, 0x86]);
+        // bytes4(keccak256("unsetAgentWallet(uint256)"))
+        assert_eq!(selectors::UNSET_AGENT_WALLET, [0x3f, 0xdd, 0xcf, 0x19]);
+        // bytes4(keccak256("getAgent(uint256)"))
+        assert_eq!(selectors::GET_AGENT, [0x2d, 0xe5, 0xaa, 0xf7]);
+        // bytes4(keccak256("submitFeedback(uint256,int8,string)"))
+        assert_eq!(selectors::SUBMIT_FEEDBACK, [0xe5, 0x67, 0x9c, 0x29]);
+        // bytes4(keccak256("getFeedback(uint256,uint256)"))
+        assert_eq!(selectors::GET_FEEDBACK, [0x2d, 0x15, 0x04, 0x57]);
+        // bytes4(keccak256("getFeedbackCount(uint256)"))
+        assert_eq!(selectors::GET_FEEDBACK_COUNT, [0x45, 0x37, 0xb7, 0x64]);
+        // bytes4(keccak256("getValidation(bytes32)"))
+        assert_eq!(selectors::GET_VALIDATION, [0xa8, 0x09, 0x1f, 0xc3]);
+    }
+
+    // -- register encoders --
+
+    #[test]
+    fn encode_register_no_args() {
+        let data = abi::encode_register(selectors::REGISTER);
+        assert_eq!(data, selectors::REGISTER.to_vec());
     }
 
     #[test]
-    fn encode_submit_feedback_sign_extends_negative_rating() {
-        let data = abi::encode_submit_feedback(
-            selectors::SUBMIT_FEEDBACK,
-            &[9u8; 32],
-            -50,
-            "ctx",
-        );
-        // Rating word starts at offset 4 + 32 = 36. Sign-extended
-        // 0xff bytes should precede the int8 byte.
+    fn encode_register_with_uri_layout() {
+        let uri = "ipfs://card";
+        let data = abi::encode_register_with_uri(selectors::REGISTER_WITH_URI, uri);
+        assert_eq!(&data[0..4], &selectors::REGISTER_WITH_URI);
+        // Head: offset = 32 (last byte of slot 0)
+        assert_eq!(data[35], 32);
+        // Length word at [36..68], last byte = uri.len()
+        assert_eq!(data[67] as usize, uri.len());
+        // String bytes at [68..]
+        assert_eq!(&data[68..68 + uri.len()], uri.as_bytes());
+    }
+
+    #[test]
+    fn encode_register_with_metadata_packs_uri_then_array() {
+        let uri = "ipfs://card";
+        let entries = vec![
+            MetadataEntry {
+                metadata_key: "skills".into(),
+                metadata_value: b"forecast".to_vec(),
+            },
+            MetadataEntry {
+                metadata_key: "model".into(),
+                metadata_value: b"chronos".to_vec(),
+            },
+        ];
+        let data =
+            abi::encode_register_with_metadata(selectors::REGISTER_WITH_METADATA, uri, &entries);
+        assert_eq!(&data[0..4], &selectors::REGISTER_WITH_METADATA);
+        // Head[0]: offset-to-uri = 64
+        assert_eq!(data[35], 64);
+        // Head[1]: offset-to-metadata = 64 + 32 + ceil(uri_len/32)*32 = 64 + 32 + 32 = 128
+        assert_eq!(data[67], 128);
+        // URI tail at [4 + 64..]: length word then bytes
+        assert_eq!(data[4 + 64 + 31] as usize, uri.len());
+        assert_eq!(&data[4 + 96..4 + 96 + uri.len()], uri.as_bytes());
+        // Metadata array length word at [4 + 128..4 + 160], last byte = 2
+        assert_eq!(data[4 + 128 + 31], 2);
+    }
+
+    #[test]
+    fn encode_register_with_metadata_empty_array() {
+        let uri = "x";
+        let data =
+            abi::encode_register_with_metadata(selectors::REGISTER_WITH_METADATA, uri, &[]);
+        // Head: 4 + 64 + uri_block (32 + 32) + length_word (32) = 4 + 160
+        assert_eq!(data.len(), 4 + 160);
+        // Length word at [4 + 128..4 + 160] is all zero
+        assert_eq!(&data[4 + 128..4 + 160], &[0u8; 32]);
+    }
+
+    // -- unsetAgentWallet --
+
+    #[test]
+    fn encode_unset_agent_wallet_layout() {
+        let data = abi::encode_unset_agent_wallet(selectors::UNSET_AGENT_WALLET, 42);
+        assert_eq!(data.len(), 4 + 32);
+        assert_eq!(&data[0..4], &selectors::UNSET_AGENT_WALLET);
+        // agent_id = 42 in last byte (BE u64 word)
+        assert_eq!(data[35], 42);
+    }
+
+    // -- get/submit feedback (uint256-keyed) --
+
+    #[test]
+    fn encode_submit_feedback_uses_uint256_subject() {
+        let data = abi::encode_submit_feedback(selectors::SUBMIT_FEEDBACK, 7, -50, "ctx");
+        assert_eq!(&data[0..4], &selectors::SUBMIT_FEEDBACK);
+        // subject_agent_id = 7 in low byte of slot 0
+        assert_eq!(data[35], 7);
+        // rating word starts at offset 4 + 32 = 36
         assert_eq!(data[36..67], [0xff; 31]);
         assert_eq!(data[67], (-50i8) as u8);
     }
 
     #[test]
+    fn encode_get_feedback_uses_uint256_subject_and_index() {
+        let data = abi::encode_get_feedback(selectors::GET_FEEDBACK, 9, 42);
+        assert_eq!(data.len(), 4 + 64);
+        assert_eq!(&data[0..4], &selectors::GET_FEEDBACK);
+        // subject = 9
+        assert_eq!(data[35], 9);
+        // index = 42 (uint256 in second slot)
+        assert_eq!(data[67], 42);
+    }
+
+    #[test]
+    fn encode_get_feedback_count_uses_uint256_subject() {
+        let data = abi::encode_get_feedback_count(selectors::GET_FEEDBACK_COUNT, 11);
+        assert_eq!(data.len(), 4 + 32);
+        assert_eq!(&data[0..4], &selectors::GET_FEEDBACK_COUNT);
+        assert_eq!(data[35], 11);
+    }
+
+    // -- decode getAgent --
+
+    #[test]
     fn decode_get_agent_roundtrip() {
-        // Build a pretend return: (address, offset-to-string, string)
+        // (address, offset-to-string, length, bytes)
         let mut ret = Vec::new();
         ret.extend_from_slice(&[0u8; 12]);
-        ret.extend_from_slice(&[0xab; 20]); // address
-        // offset = 64 (points to length word right after the header)
+        ret.extend_from_slice(&[0xab; 20]);
         let mut offset = [0u8; 32];
         offset[31] = 64;
         ret.extend_from_slice(&offset);
-        // length = 10
         let mut len = [0u8; 32];
         len[31] = 10;
         ret.extend_from_slice(&len);
         ret.extend_from_slice(b"ipfs://abc");
-        ret.extend_from_slice(&[0u8; 22]); // pad to 32
+        ret.extend_from_slice(&[0u8; 22]);
 
         let (addr, uri) = abi::decode_get_agent(&ret).unwrap();
         assert_eq!(addr, [0xab; 20]);
@@ -1271,32 +1544,25 @@ mod tests {
         ret.extend_from_slice(b"hello");
         ret.extend_from_slice(&[0u8; 27]);
 
-        let adapter = Erc8004Adapter::new(
-            MockTransport { agent_return: ret },
-            mk_addresses(),
-        );
-        let record = adapter.get_agent(&[5u8; 32]).await.unwrap();
+        let adapter = Erc8004Adapter::new(MockTransport { agent_return: ret }, mk_addresses());
+        let record = adapter.get_agent(123).await.unwrap();
         assert_eq!(record.agent_address, [0xab; 20]);
         assert_eq!(record.metadata_uri, "hello");
-        assert_eq!(record.agent_id, [5u8; 32]);
+        assert_eq!(record.agent_id, 123);
     }
 
-    // -- read-selector parity with EVM precompile (0x101b / 0x101c) --
+    // -- selector distinctness --
 
     #[test]
     fn read_selectors_are_distinct_from_writes() {
-        // Sanity: the read selectors must not collide with the write
-        // selectors. (Selector collisions would produce silent dispatch
-        // errors in the precompile.) Includes the v0.6+ identity-side
-        // mutators (setAgentURI / setAgentWallet / setMetadata /
-        // getMetadata) and the v0.6+ reputation-side mutators
-        // (revokeFeedback / appendResponse) added alongside the original
-        // ERC-8004 surface.
         let all = [
-            selectors::REGISTER_AGENT,
+            selectors::REGISTER,
+            selectors::REGISTER_WITH_URI,
+            selectors::REGISTER_WITH_METADATA,
             selectors::GET_AGENT,
             selectors::SET_AGENT_URI,
             selectors::SET_AGENT_WALLET,
+            selectors::UNSET_AGENT_WALLET,
             selectors::SET_METADATA,
             selectors::GET_METADATA,
             selectors::GET_AGENT_URI,
@@ -1320,24 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_get_feedback_layout() {
-        let data = abi::encode_get_feedback(selectors::GET_FEEDBACK, &[7u8; 32], 42);
-        // selector + 32 (subject) + 32 (uint256 index)
-        assert_eq!(data.len(), 4 + 64);
-        assert_eq!(&data[0..4], &selectors::GET_FEEDBACK);
-        assert_eq!(&data[4..36], &[7u8; 32]);
-        // index = 42 lives at the very last byte (big-endian uint256)
-        assert_eq!(data[67], 42);
-    }
-
-    #[test]
     fn decode_get_feedback_round_trips_precompile_shape() {
-        // Build the exact wire layout the precompile produces:
-        //   [0..32]   rating (int8 sign-extended)
-        //   [32..64]  offset to string = 96
-        //   [64..96]  exists
-        //   [96..128] string length
-        //   [128..]   string data (zero-padded to 32-byte boundary)
         let rating: i8 = -25;
         let context = "ipfs://feedback-cid";
         let mut ret = Vec::new();
@@ -1371,53 +1620,39 @@ mod tests {
     #[test]
     fn decode_get_feedback_count_extracts_low_uint128() {
         let mut ret = vec![0u8; 32];
-        // u256 = 1234567 in last 16 bytes
         ret[16..32].copy_from_slice(&1_234_567u128.to_be_bytes());
         let count = abi::decode_get_feedback_count(&ret).unwrap();
         assert_eq!(count, 1_234_567);
     }
 
     #[test]
-    fn decode_get_validation_round_trips_precompile_shape() {
-        // Mirror the precompile's `getValidation` 7-slot head layout
-        // matching ERC-8004 `validationRequest` + `validationResponse`.
+    fn decode_get_validation_narrows_agent_id_to_u64() {
         let validator = [0x99u8; 20];
-        let agent_id = [0x42u8; 32];
+        let agent_id_u64: u64 = 0x4242_4242_4242_4242;
         let request_uri = "ipfs://task";
         let response_uri = "ipfs://proof-doc";
         let tag = "valid";
-        let response: u8 = 87; // 0..=100 score
+        let response: u8 = 87;
 
-        // Head = 7 slots × 32 = 224 bytes.
-        // request_uri tail starts at 224.
         let request_padded = request_uri.len().div_ceil(32) * 32;
         let request_block = 32 + request_padded;
-        // response_uri tail starts after request block.
         let response_uri_offset = 224 + request_block;
         let response_padded = response_uri.len().div_ceil(32) * 32;
         let response_block = 32 + response_padded;
-        // tag tail starts after response block.
         let tag_offset = response_uri_offset + response_block;
         let tag_padded = tag.len().div_ceil(32) * 32;
         let total_len = tag_offset + 32 + tag_padded;
 
         let mut ret = vec![0u8; total_len];
-        // Slot 0: validator (left-padded address)
         ret[12..32].copy_from_slice(&validator);
-        // Slot 1: agent_id
-        ret[32..64].copy_from_slice(&agent_id);
-        // Slot 2: response (low byte)
+        // agent_id as uint256 BE
+        ret[56..64].copy_from_slice(&agent_id_u64.to_be_bytes());
         ret[95] = response;
-        // Slot 3: offset to request_uri = 224
         ret[96 + 24..128].copy_from_slice(&224u64.to_be_bytes());
-        // Slot 4: offset to response_uri
         ret[128 + 24..160].copy_from_slice(&(response_uri_offset as u64).to_be_bytes());
-        // Slot 5: offset to tag
         ret[160 + 24..192].copy_from_slice(&(tag_offset as u64).to_be_bytes());
-        // Slot 6: exists = true
         ret[223] = 1;
 
-        // Tails
         ret[224 + 24..256].copy_from_slice(&(request_uri.len() as u64).to_be_bytes());
         ret[256..256 + request_uri.len()].copy_from_slice(request_uri.as_bytes());
 
@@ -1432,7 +1667,7 @@ mod tests {
 
         let decoded = abi::decode_get_validation(&ret).expect("must decode");
         assert_eq!(decoded.validator, validator);
-        assert_eq!(decoded.agent_id, agent_id);
+        assert_eq!(decoded.agent_id, Some(agent_id_u64));
         assert_eq!(decoded.response, response);
         assert_eq!(decoded.request_uri, request_uri);
         assert_eq!(decoded.response_uri, response_uri);
@@ -1440,48 +1675,39 @@ mod tests {
         assert!(decoded.exists);
     }
 
-    // -- ERC-8004 v0.6+ identity-side mutators --
+    // -- v0.6+ identity-side mutators (selectors unchanged) --
 
     #[test]
     fn encode_set_agent_uri_layout() {
-        let agent_id = [0x42u8; 32];
         let uri = "ipfs://updated-cid";
-        let data = abi::encode_set_agent_uri(selectors::SET_AGENT_URI, &agent_id, uri);
-        // selector + agent_id + offset + length + padded data
+        let data = abi::encode_set_agent_uri(selectors::SET_AGENT_URI, 0x42, uri);
         assert_eq!(&data[0..4], &selectors::SET_AGENT_URI);
-        assert_eq!(&data[4..36], &agent_id);
-        // offset = 64 in last byte of word
+        // agent_id = 0x42
+        assert_eq!(data[35], 0x42);
+        // offset = 64
         assert_eq!(data[67], 64);
-        // length lives in [4 + 64 .. 4 + 96]
+        // length and string
         assert_eq!(data[4 + 64 + 31] as usize, uri.len());
-        // string starts at 4 + 96
         assert_eq!(&data[4 + 96..4 + 96 + uri.len()], uri.as_bytes());
     }
 
     #[test]
     fn encode_set_agent_wallet_layout() {
-        let agent_id = [0x11u8; 32];
         let new_wallet = [0x22u8; 20];
-        let signature = vec![0xaa; 65]; // typical secp256k1 sig length
+        let signature = vec![0xaa; 65];
         let data = abi::encode_set_agent_wallet(
             selectors::SET_AGENT_WALLET,
-            &agent_id,
+            0x11,
             &new_wallet,
             42,
             &signature,
         );
         assert_eq!(&data[0..4], &selectors::SET_AGENT_WALLET);
-        assert_eq!(&data[4..36], &agent_id);
-        // new_wallet left-padded into [4 + 32 .. 4 + 64]; address bytes
-        // live at [4 + 32 + 12 .. 4 + 32 + 32]
+        assert_eq!(data[35], 0x11);
         assert_eq!(&data[4 + 32 + 12..4 + 32 + 32], &new_wallet);
-        // deadline = 42 lives at [4 + 64 .. 4 + 96]
         assert_eq!(data[4 + 64 + 31], 42);
-        // sig offset = 128 lives at [4 + 96 .. 4 + 128]
         assert_eq!(data[4 + 96 + 31], 128);
-        // sig length at [4 + 128 .. 4 + 160] last byte
         assert_eq!(data[4 + 128 + 31] as usize, signature.len());
-        // sig data at [4 + 160 ..]
         assert_eq!(
             &data[4 + 160..4 + 160 + signature.len()],
             signature.as_slice(),
@@ -1490,60 +1716,41 @@ mod tests {
 
     #[test]
     fn encode_set_metadata_packs_key_then_value() {
-        let agent_id = [0x33u8; 32];
         let key = "skills";
         let value: &[u8] = b"forecast,vision";
-        let data = abi::encode_set_metadata(selectors::SET_METADATA, &agent_id, key, value);
+        let data = abi::encode_set_metadata(selectors::SET_METADATA, 0x33, key, value);
         assert_eq!(&data[0..4], &selectors::SET_METADATA);
-        assert_eq!(&data[4..36], &agent_id);
-        // key offset = 96
+        assert_eq!(data[35], 0x33);
         assert_eq!(data[4 + 32 + 31], 96);
-        // value offset = 96 + 32 + ceil(key_len/32)*32 = 96 + 32 + 32 = 160
         assert_eq!(data[4 + 64 + 31], 160);
-        // key length at [4 + 96 .. 4 + 128] last byte
         assert_eq!(data[4 + 96 + 31] as usize, key.len());
-        // key data starts at 4 + 128
         assert_eq!(&data[4 + 128..4 + 128 + key.len()], key.as_bytes());
-        // value length at [4 + 160 + 32 .. ] = 4 + 192
         assert_eq!(data[4 + 160 + 31] as usize, value.len());
-        // value data at 4 + 192
         assert_eq!(&data[4 + 192..4 + 192 + value.len()], value);
     }
 
     #[test]
     fn encode_set_metadata_with_empty_value() {
-        let agent_id = [0u8; 32];
         let key = "drop";
-        let data = abi::encode_set_metadata(selectors::SET_METADATA, &agent_id, key, &[]);
-        // key offset = 96, value offset = 160, value length = 0
+        let data = abi::encode_set_metadata(selectors::SET_METADATA, 0, key, &[]);
         assert_eq!(data[4 + 32 + 31], 96);
         assert_eq!(data[4 + 64 + 31], 160);
-        // value length lives at [4 + 160 + 0 .. 4 + 192] last byte (empty
-        // means no data tail past length word)
         assert_eq!(data[4 + 160 + 31], 0);
     }
 
     #[test]
     fn encode_get_metadata_layout() {
-        let agent_id = [0x44u8; 32];
         let key = "skills";
-        let data = abi::encode_get_metadata(selectors::GET_METADATA, &agent_id, key);
+        let data = abi::encode_get_metadata(selectors::GET_METADATA, 0x44, key);
         assert_eq!(&data[0..4], &selectors::GET_METADATA);
-        assert_eq!(&data[4..36], &agent_id);
-        // offset = 64
+        assert_eq!(data[35], 0x44);
         assert_eq!(data[4 + 32 + 31], 64);
-        // key length lives at [4 + 64 .. 4 + 96] last byte
         assert_eq!(data[4 + 64 + 31] as usize, key.len());
-        // key data starts at 4 + 96
         assert_eq!(&data[4 + 96..4 + 96 + key.len()], key.as_bytes());
     }
 
     #[test]
     fn decode_get_metadata_round_trips_precompile_shape() {
-        // Build the wire shape the precompile produces:
-        //   [0..32]   offset = 32
-        //   [32..64]  length
-        //   [64..]    bytes (zero-padded to 32-byte boundary)
         let value: &[u8] = b"hello-world-bytes";
         let mut ret = Vec::new();
         let mut offset = [0u8; 32];
@@ -1562,93 +1769,61 @@ mod tests {
 
     #[test]
     fn decode_get_metadata_unset_returns_empty_vec() {
-        // Wire shape for an unset entry: offset=32, length=0, no tail.
         let mut ret = vec![0u8; 64];
-        ret[31] = 32; // offset
-        // length at [32..64] left at zero
+        ret[31] = 32;
         let decoded = abi::decode_get_metadata(&ret).expect("must decode");
         assert!(decoded.is_empty());
     }
 
     #[test]
     fn encode_revoke_feedback_layout() {
-        let agent_id = [0xa1u8; 32];
         let feedback_id = [0xb2u8; 32];
-        let data = abi::encode_revoke_feedback(
-            selectors::REVOKE_FEEDBACK,
-            &agent_id,
-            &feedback_id,
-        );
-        // selector + agent_id (32) + feedback_id (32) — both static, no tail
+        let data = abi::encode_revoke_feedback(selectors::REVOKE_FEEDBACK, 0xa1, &feedback_id);
         assert_eq!(data.len(), 4 + 64);
         assert_eq!(&data[0..4], &selectors::REVOKE_FEEDBACK);
-        assert_eq!(&data[4..36], &agent_id);
+        assert_eq!(data[35], 0xa1);
         assert_eq!(&data[36..68], &feedback_id);
     }
 
     #[test]
     fn encode_append_response_layout() {
-        let agent_id = [0xc3u8; 32];
         let feedback_id = [0xd4u8; 32];
         let response = "ipfs://defense";
         let data = abi::encode_append_response(
             selectors::APPEND_RESPONSE,
-            &agent_id,
+            0xc3,
             &feedback_id,
             response,
         );
-        // Head: selector + agent_id (32) + feedback_id (32) + offset (32) = 4 + 96
         assert_eq!(&data[0..4], &selectors::APPEND_RESPONSE);
-        assert_eq!(&data[4..36], &agent_id);
+        assert_eq!(data[35], 0xc3);
         assert_eq!(&data[36..68], &feedback_id);
-        // Offset slot: last byte = 96
         assert_eq!(data[99], 96);
-        // Length slot at [100..132]: last byte = response.len()
         assert_eq!(data[131], response.len() as u8);
-        // String bytes start at 132
         assert_eq!(&data[132..132 + response.len()], response.as_bytes());
-        // Total length = 4 + 3*32 + 32 (length) + ceil(len/32)*32
         let pad = response.len().div_ceil(32) * 32;
         assert_eq!(data.len(), 4 + 96 + 32 + pad);
     }
 
     #[test]
     fn encode_append_response_with_empty_uri() {
-        // Empty response URI is allowed at the wire level — the
-        // precompile treats it as "set response to empty string", which
-        // (per v0.6 spec) effectively clears any previously-attached
-        // response. The encoder should still produce the canonical
-        // layout (offset=96, length=0, no tail).
-        let agent_id = [0u8; 32];
         let feedback_id = [0u8; 32];
-        let data = abi::encode_append_response(
-            selectors::APPEND_RESPONSE,
-            &agent_id,
-            &feedback_id,
-            "",
-        );
-        // selector + 3*32 head + 32 length, no tail
+        let data =
+            abi::encode_append_response(selectors::APPEND_RESPONSE, 0, &feedback_id, "");
         assert_eq!(data.len(), 4 + 96 + 32);
-        // length slot at [100..132] is all zero
         assert_eq!(&data[100..132], &[0u8; 32]);
     }
 
     #[test]
     fn revoke_and_append_selectors_match_canonical_keccak() {
-        // Pin the v0.6+ selectors so the adapter↔precompile contract
-        // stays byte-identical. Drift here would silently break the
-        // Tenzro-side ReputationRegistry mutators.
         assert_eq!(selectors::REVOKE_FEEDBACK, [0xa2, 0x83, 0x34, 0xce]);
         assert_eq!(selectors::APPEND_RESPONSE, [0x60, 0x1f, 0x56, 0x76]);
     }
 
-    // -- ERC-8004 v0.6+ read selectors (getAgentURI / getAgentWallet /
-    //    isFeedbackRevoked / getFeedbackResponses) --
+    // -- ERC-8004 v0.6+ read selectors --
 
     #[test]
     fn v06_read_selectors_match_canonical_keccak() {
-        // Byte-identical pinning between adapter and precompile so the
-        // same calldata works against either dispatcher.
         assert_eq!(selectors::GET_AGENT_URI, [0xce, 0x91, 0xae, 0xde]);
         assert_eq!(selectors::GET_AGENT_WALLET, [0x00, 0x33, 0x95, 0x09]);
         assert_eq!(selectors::IS_FEEDBACK_REVOKED, [0xb0, 0x17, 0xcb, 0x04]);
@@ -1657,55 +1832,50 @@ mod tests {
 
     #[test]
     fn encode_get_agent_uri_layout() {
-        let agent_id = [0x55u8; 32];
-        let data = abi::encode_get_agent_uri(selectors::GET_AGENT_URI, &agent_id);
+        let data = abi::encode_get_agent_uri(selectors::GET_AGENT_URI, 0x55);
         assert_eq!(data.len(), 4 + 32);
         assert_eq!(&data[0..4], &selectors::GET_AGENT_URI);
-        assert_eq!(&data[4..36], &agent_id);
+        assert_eq!(data[35], 0x55);
     }
 
     #[test]
     fn encode_get_agent_wallet_layout() {
-        let agent_id = [0x66u8; 32];
-        let data = abi::encode_get_agent_wallet(selectors::GET_AGENT_WALLET, &agent_id);
+        let data = abi::encode_get_agent_wallet(selectors::GET_AGENT_WALLET, 0x66);
         assert_eq!(data.len(), 4 + 32);
         assert_eq!(&data[0..4], &selectors::GET_AGENT_WALLET);
-        assert_eq!(&data[4..36], &agent_id);
+        assert_eq!(data[35], 0x66);
     }
 
     #[test]
     fn encode_is_feedback_revoked_layout() {
-        let agent_id = [0x77u8; 32];
         let feedback_id = [0x88u8; 32];
         let data = abi::encode_is_feedback_revoked(
             selectors::IS_FEEDBACK_REVOKED,
-            &agent_id,
+            0x77,
             &feedback_id,
         );
         assert_eq!(data.len(), 4 + 64);
         assert_eq!(&data[0..4], &selectors::IS_FEEDBACK_REVOKED);
-        assert_eq!(&data[4..36], &agent_id);
+        assert_eq!(data[35], 0x77);
         assert_eq!(&data[36..68], &feedback_id);
     }
 
     #[test]
     fn encode_get_feedback_responses_layout() {
-        let agent_id = [0x99u8; 32];
         let feedback_id = [0xaau8; 32];
         let data = abi::encode_get_feedback_responses(
             selectors::GET_FEEDBACK_RESPONSES,
-            &agent_id,
+            0x99,
             &feedback_id,
         );
         assert_eq!(data.len(), 4 + 64);
         assert_eq!(&data[0..4], &selectors::GET_FEEDBACK_RESPONSES);
-        assert_eq!(&data[4..36], &agent_id);
+        assert_eq!(data[35], 0x99);
         assert_eq!(&data[36..68], &feedback_id);
     }
 
     #[test]
     fn decode_get_agent_uri_round_trips_precompile_shape() {
-        // Wire shape: [offset = 32 | length | utf8 padded].
         let uri = "ipfs://agent-uri-cid";
         let mut ret = Vec::new();
         let mut offset = [0u8; 32];
@@ -1724,7 +1894,6 @@ mod tests {
 
     #[test]
     fn decode_get_agent_uri_unset_returns_empty_string() {
-        // offset=32, length=0
         let mut ret = vec![0u8; 64];
         ret[31] = 32;
         let decoded = abi::decode_get_agent_uri(&ret).expect("must decode");
@@ -1733,7 +1902,6 @@ mod tests {
 
     #[test]
     fn decode_get_agent_wallet_round_trips_precompile_shape() {
-        // Single 32-byte left-padded address word.
         let wallet = [0xefu8; 20];
         let mut ret = vec![0u8; 32];
         ret[12..32].copy_from_slice(&wallet);

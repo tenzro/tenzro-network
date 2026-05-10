@@ -191,7 +191,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "description": (
                     "Dynamically spawn autonomous sub-agents with specific capabilities. "
                     "Parent agents can create up to 50 children, each with its own DID "
-                    "and MPC wallet. Supports hierarchical agent topologies."
+                    "and FROST-Ed25519 threshold wallet. Supports hierarchical agent topologies."
                 ),
                 "tags": ["agents", "spawning", "autonomous", "orchestration"],
                 "examples": [
@@ -406,8 +406,9 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "name": "Authentication (OAuth 2.1 + DPoP)",
                 "description": (
                     "OAuth 2.1 + DPoP auth flows: onboard humans and agents, "
-                    "refresh expired access tokens, and link an existing MPC "
-                    "wallet to a new auth session. Issues HS256 access tokens "
+                    "refresh expired access tokens, and link an existing "
+                    "FROST-Ed25519 threshold wallet to a new auth session. "
+                    "Issues HS256 access tokens "
                     "(1h TTL) and opaque UUID refresh tokens (30-day TTL). "
                     "Pass metadata.dpop_jkt -- the RFC 7638 SHA-256 thumbprint "
                     "of a client-held P-256/Ed25519 public key -- to bind the "
@@ -432,7 +433,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "name": "Join as MicroNode",
                 "description": (
                     "Join the Tenzro Network as a full MicroNode participant -- "
-                    "zero-install. Auto-provisions a TDIP DID, MPC wallet, and "
+                    "zero-install. Auto-provisions a TDIP DID, FROST-Ed25519 threshold wallet, and "
                     "10 network capabilities (inference, payments, agent collaboration, "
                     "MCP tools, task execution, chain queries, smart contracts, "
                     "TEE compute, cross-chain bridge, governance)."

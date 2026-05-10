@@ -26,17 +26,20 @@ async def get_balance(address: str) -> str:
 
 
 @mcp.tool
-async def create_wallet(key_type: str = "ed25519") -> str:
-    """Provision a self-custody Tenzro 2-of-3 MPC wallet.
+async def create_wallet() -> str:
+    """Provision a self-custody Tenzro 2-of-3 FROST-Ed25519 (RFC 9591) threshold wallet.
 
     Returns the canonical Tenzro wallet shape: ``wallet_id``, 32-byte hex
     ``address`` (the form used by ``eth_getBalance``, the faucet, and all
     transaction RPCs), base58 ``display_address``, ``public_key``,
-    ``key_type`` (``ed25519`` or ``secp256k1``), ``threshold`` (2), and
-    ``total_shares`` (3). No seed phrase or private key is ever returned —
-    the keystore holds shares and the node never sees a full key.
+    ``key_type`` (always ``ed25519`` — FROST-Ed25519 is the only scheme),
+    ``threshold`` (2), and ``total_shares`` (3). The wallet additionally
+    carries a mandatory ML-DSA-65 post-quantum signing key for hybrid
+    signatures. No seed phrase or private key is ever returned — the
+    keystore holds FROST secret shares + PQ seed and the node never sees
+    a full key.
     """
-    result = await rpc_call("tenzro_createWallet", [key_type])
+    result = await rpc_call("tenzro_createWallet", [])
     return json.dumps(result)
 
 
@@ -1829,16 +1832,25 @@ async def get_tool_usage(tool_id: str) -> str:
 
 
 @mcp.tool
-async def sign_message(private_key: str, message_hex: str, key_type: str = "ed25519") -> str:
-    """Sign a message with Ed25519 or Secp256k1 private key."""
-    result = await rpc_call("tenzro_signMessage", {"private_key": private_key, "message_hex": message_hex, "key_type": key_type})
+async def sign_message(message_hex: str) -> str:
+    """Sign a message with the auth-bound wallet (FROST-Ed25519 + ML-DSA-65 hybrid).
+
+    The signer is resolved from the bearer DID via OAuth/DPoP; raw private
+    keys never travel over the wire. Returns the hybrid signature (classical
+    leg + post-quantum leg).
+    """
+    result = await rpc_call("tenzro_signMessage", {"message_hex": message_hex})
     return json.dumps(result)
 
 
 @mcp.tool
-async def verify_signature(public_key: str, message_hex: str, signature_hex: str, key_type: str = "ed25519") -> str:
-    """Verify a signature against a message and public key."""
-    result = await rpc_call("tenzro_verifySignature", {"public_key": public_key, "message_hex": message_hex, "signature_hex": signature_hex, "key_type": key_type})
+async def verify_signature(public_key: str, message_hex: str, signature_hex: str) -> str:
+    """Verify a signature against a message and public key.
+
+    Key type (Ed25519 vs Secp256k1) is inferred from the public key length
+    (32 bytes → Ed25519, 33 bytes → Secp256k1).
+    """
+    result = await rpc_call("tenzro_verifySignature", {"public_key": public_key, "message_hex": message_hex, "signature_hex": signature_hex})
     return json.dumps(result)
 
 
@@ -1973,9 +1985,13 @@ async def list_zk_circuits() -> str:
 
 
 @mcp.tool
-async def create_mpc_wallet(threshold: int = 2, total_shares: int = 3, key_type: str = "ed25519") -> str:
-    """Create an MPC threshold wallet with the specified threshold and share count."""
-    result = await rpc_call("tenzro_createMpcWallet", {"threshold": threshold, "total_shares": total_shares, "key_type": key_type})
+async def create_mpc_wallet(threshold: int = 2, total_shares: int = 3) -> str:
+    """Create a FROST-Ed25519 (RFC 9591) threshold wallet with the specified threshold and share count.
+
+    Pairs the FROST-Ed25519 classical leg with a mandatory ML-DSA-65 post-quantum
+    signing key for hybrid signatures.
+    """
+    result = await rpc_call("tenzro_createMpcWallet", {"threshold": threshold, "total_shares": total_shares})
     return json.dumps(result)
 
 
@@ -1995,14 +2011,14 @@ async def import_keystore(keystore_json: str, password: str) -> str:
 
 @mcp.tool
 async def get_key_shares(address: str) -> str:
-    """Get the MPC key share configuration for a wallet (threshold, total, share indices)."""
+    """Get the FROST-Ed25519 secret share configuration for a wallet (threshold, total, share indices)."""
     result = await rpc_call("tenzro_getKeyShares", {"address": address})
     return json.dumps(result)
 
 
 @mcp.tool
 async def rotate_keys(address: str) -> str:
-    """Rotate the MPC key shares for a wallet without changing the address."""
+    """Rotate the FROST-Ed25519 secret shares for a wallet without changing the address."""
     result = await rpc_call("tenzro_rotateKeys", {"address": address})
     return json.dumps(result)
 
@@ -2051,9 +2067,9 @@ async def register_app(name: str, description: str, callback_url: str = None) ->
 
 
 @mcp.tool
-async def create_user_wallet(app_id: str, user_id: str, key_type: str = "ed25519") -> str:
-    """Create a custodial wallet for an app user. The app manages the key shares."""
-    result = await rpc_call("tenzro_createUserWallet", {"app_id": app_id, "user_id": user_id, "key_type": key_type})
+async def create_user_wallet(app_id: str, user_id: str) -> str:
+    """Create a custodial FROST-Ed25519 (RFC 9591) wallet for an app user. The app manages the key shares."""
+    result = await rpc_call("tenzro_createUserWallet", {"app_id": app_id, "user_id": user_id})
     return json.dumps(result)
 
 

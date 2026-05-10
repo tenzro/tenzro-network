@@ -1,8 +1,9 @@
 //! ERC-8004 Trustless Agents Registry commands.
 //!
 //! Builds calldata for the IdentityRegistry, ReputationRegistry, and
-//! ValidationRegistry contracts, and derives canonical `agentId` from
-//! a Tenzro DID.
+//! ValidationRegistry contracts. `agentId` is a sequential `uint256`
+//! (1-indexed) allocated by the registry at `register*()` time —
+//! server-allocated, never derivable client-side.
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
@@ -11,11 +12,13 @@ use crate::output;
 /// ERC-8004 Trustless Agents Registry operations
 #[derive(Debug, Subcommand)]
 pub enum Erc8004Command {
-    /// Derive canonical agentId (keccak256(did)) from a DID
-    DeriveId(DeriveAgentIdCmd),
-    /// Build calldata for registerAgent(bytes32, address, string)
+    /// Build calldata for register() (v0.6+ no-arg overload)
     EncodeRegister(EncodeRegisterCmd),
-    /// Build calldata for getAgent(bytes32)
+    /// Build calldata for register(string agentURI) (v0.6+ overload)
+    EncodeRegisterWithUri(EncodeRegisterWithUriCmd),
+    /// Build calldata for register(string,(string,bytes)[]) (v0.6+ overload)
+    EncodeRegisterWithMetadata(EncodeRegisterWithMetadataCmd),
+    /// Build calldata for getAgent(uint256)
     EncodeGet(EncodeGetAgentCmd),
     /// Decode the ABI return of getAgent()
     DecodeGet(DecodeGetAgentCmd),
@@ -58,8 +61,9 @@ pub enum Erc8004Command {
 impl Erc8004Command {
     pub async fn execute(&self) -> Result<()> {
         match self {
-            Self::DeriveId(cmd) => cmd.execute().await,
             Self::EncodeRegister(cmd) => cmd.execute().await,
+            Self::EncodeRegisterWithUri(cmd) => cmd.execute().await,
+            Self::EncodeRegisterWithMetadata(cmd) => cmd.execute().await,
             Self::EncodeGet(cmd) => cmd.execute().await,
             Self::DecodeGet(cmd) => cmd.execute().await,
             Self::EncodeFeedback(cmd) => cmd.execute().await,
@@ -83,52 +87,9 @@ impl Erc8004Command {
     }
 }
 
-/// Derive agent id from DID
-#[derive(Debug, Parser)]
-pub struct DeriveAgentIdCmd {
-    /// Tenzro DID (e.g. did:tenzro:machine:...)
-    #[arg(long)]
-    did: String,
-    /// RPC endpoint
-    #[arg(long, default_value = "http://127.0.0.1:8545")]
-    rpc: String,
-}
-
-impl DeriveAgentIdCmd {
-    pub async fn execute(&self) -> Result<()> {
-        use crate::rpc::RpcClient;
-        output::print_header("Derive ERC-8004 Agent ID");
-        let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc
-            .call(
-                "tenzro_erc8004DeriveAgentId",
-                serde_json::json!({ "did": self.did }),
-            )
-            .await?;
-        output::print_field(
-            "DID",
-            result.get("did").and_then(|v| v.as_str()).unwrap_or(""),
-        );
-        output::print_field(
-            "Agent ID (bytes32)",
-            result.get("agent_id").and_then(|v| v.as_str()).unwrap_or(""),
-        );
-        Ok(())
-    }
-}
-
-/// Encode registerAgent calldata
+/// Encode register() calldata (v0.6+ no-arg overload)
 #[derive(Debug, Parser)]
 pub struct EncodeRegisterCmd {
-    /// Tenzro DID to register
-    #[arg(long)]
-    did: String,
-    /// 20-byte EVM address of the agent
-    #[arg(long)]
-    agent_address: String,
-    /// Optional metadata URI (e.g. https://...)
-    #[arg(long, default_value = "")]
-    metadata_uri: String,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -137,22 +98,90 @@ pub struct EncodeRegisterCmd {
 impl EncodeRegisterCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
-        output::print_header("Encode ERC-8004 registerAgent");
+        output::print_header("Encode ERC-8004 register()");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_erc8004EncodeRegister", serde_json::json!({}))
+            .await?;
+        output::print_field(
+            "Calldata",
+            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        Ok(())
+    }
+}
+
+/// Encode register(string agentURI) calldata (v0.6+ overload)
+#[derive(Debug, Parser)]
+pub struct EncodeRegisterWithUriCmd {
+    /// Agent URI (e.g. https://agent.example.com or ipfs://...)
+    #[arg(long)]
+    agent_uri: String,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl EncodeRegisterWithUriCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Encode ERC-8004 register(string)");
         let rpc = RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc
             .call(
-                "tenzro_erc8004EncodeRegister",
-                serde_json::json!({
-                    "did": self.did,
-                    "agent_address": self.agent_address,
-                    "metadata_uri": self.metadata_uri,
-                }),
+                "tenzro_erc8004EncodeRegisterWithUri",
+                serde_json::json!({ "agent_uri": self.agent_uri }),
             )
             .await?;
         output::print_field(
-            "Agent ID",
-            result.get("agent_id").and_then(|v| v.as_str()).unwrap_or(""),
+            "Calldata",
+            result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
         );
+        Ok(())
+    }
+}
+
+/// Encode register(string,(string,bytes)[]) calldata (v0.6+ overload)
+#[derive(Debug, Parser)]
+pub struct EncodeRegisterWithMetadataCmd {
+    /// Agent URI
+    #[arg(long)]
+    agent_uri: String,
+    /// Metadata entries as repeated `key=hexvalue` (e.g. `--entry name=0x6e616d65`)
+    #[arg(long = "entry", value_name = "KEY=HEX_VALUE")]
+    entries: Vec<String>,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl EncodeRegisterWithMetadataCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Encode ERC-8004 register(string,(string,bytes)[])");
+        let rpc = RpcClient::new(&self.rpc);
+        let metadata: Vec<serde_json::Value> = self
+            .entries
+            .iter()
+            .map(|kv| {
+                let (key, value) = kv.split_once('=').ok_or_else(|| {
+                    anyhow::anyhow!("--entry must be KEY=HEX_VALUE, got: {}", kv)
+                })?;
+                Ok::<_, anyhow::Error>(serde_json::json!({
+                    "key": key,
+                    "value": value,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_erc8004EncodeRegisterWithMetadata",
+                serde_json::json!({
+                    "agent_uri": self.agent_uri,
+                    "metadata": metadata,
+                }),
+            )
+            .await?;
         output::print_field(
             "Calldata",
             result.get("calldata").and_then(|v| v.as_str()).unwrap_or(""),
@@ -164,7 +193,7 @@ impl EncodeRegisterCmd {
 /// Encode getAgent calldata
 #[derive(Debug, Parser)]
 pub struct EncodeGetAgentCmd {
-    /// Agent id (0x-prefixed bytes32)
+    /// Agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     agent_id: String,
     /// RPC endpoint
@@ -228,7 +257,7 @@ impl DecodeGetAgentCmd {
 /// Encode submitFeedback calldata
 #[derive(Debug, Parser)]
 pub struct EncodeFeedbackCmd {
-    /// Subject agent id (0x-prefixed bytes32)
+    /// Subject agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     subject_agent_id: String,
     /// Rating in range [-128, 127]
@@ -272,7 +301,7 @@ pub struct EncodeValidationRequestCmd {
     /// Validator address (0x-prefixed 20-byte EVM address)
     #[arg(long)]
     validator_address: String,
-    /// Subject agent id (0x-prefixed bytes32, uint256 word)
+    /// Subject agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     agent_id: String,
     /// Resolvable URI to the work being validated
@@ -366,7 +395,7 @@ impl EncodeValidationResponseCmd {
 /// Encode setAgentURI calldata
 #[derive(Debug, Parser)]
 pub struct EncodeSetAgentUriCmd {
-    /// Agent id (0x-prefixed bytes32)
+    /// Agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     agent_id: String,
     /// Updated metadata URI
@@ -402,7 +431,7 @@ impl EncodeSetAgentUriCmd {
 /// Encode setAgentWallet calldata
 #[derive(Debug, Parser)]
 pub struct EncodeSetAgentWalletCmd {
-    /// Agent id (0x-prefixed bytes32)
+    /// Agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     agent_id: String,
     /// New wallet address (0x-prefixed 20-byte EVM address)
@@ -446,7 +475,7 @@ impl EncodeSetAgentWalletCmd {
 /// Encode setMetadata calldata
 #[derive(Debug, Parser)]
 pub struct EncodeSetMetadataCmd {
-    /// Agent id (0x-prefixed bytes32)
+    /// Agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     agent_id: String,
     /// Metadata key string
@@ -490,7 +519,7 @@ impl EncodeSetMetadataCmd {
 /// Encode getMetadata calldata
 #[derive(Debug, Parser)]
 pub struct EncodeGetMetadataCmd {
-    /// Agent id (0x-prefixed bytes32)
+    /// Agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     agent_id: String,
     /// Metadata key string
@@ -556,7 +585,7 @@ impl DecodeGetMetadataCmd {
 /// Encode getAgentURI calldata
 #[derive(Debug, Parser)]
 pub struct EncodeGetAgentUriCmd {
-    /// Agent id (0x-prefixed bytes32)
+    /// Agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     agent_id: String,
     /// RPC endpoint
@@ -586,7 +615,7 @@ impl EncodeGetAgentUriCmd {
 /// Encode getAgentWallet calldata
 #[derive(Debug, Parser)]
 pub struct EncodeGetAgentWalletCmd {
-    /// Agent id (0x-prefixed bytes32)
+    /// Agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     agent_id: String,
     /// RPC endpoint
@@ -620,7 +649,7 @@ impl EncodeGetAgentWalletCmd {
 /// Encode revokeFeedback calldata
 #[derive(Debug, Parser)]
 pub struct EncodeRevokeFeedbackCmd {
-    /// Agent id (0x-prefixed bytes32)
+    /// Agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     agent_id: String,
     /// Feedback id (0x-prefixed bytes32)
@@ -656,7 +685,7 @@ impl EncodeRevokeFeedbackCmd {
 /// Encode appendResponse calldata
 #[derive(Debug, Parser)]
 pub struct EncodeAppendResponseCmd {
-    /// Agent id (0x-prefixed bytes32)
+    /// Agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     agent_id: String,
     /// Feedback id (0x-prefixed bytes32)
@@ -696,7 +725,7 @@ impl EncodeAppendResponseCmd {
 /// Encode isFeedbackRevoked calldata
 #[derive(Debug, Parser)]
 pub struct EncodeIsFeedbackRevokedCmd {
-    /// Agent id (0x-prefixed bytes32)
+    /// Agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     agent_id: String,
     /// Feedback id (0x-prefixed bytes32)
@@ -732,7 +761,7 @@ impl EncodeIsFeedbackRevokedCmd {
 /// Encode getFeedbackResponses calldata
 #[derive(Debug, Parser)]
 pub struct EncodeGetFeedbackResponsesCmd {
-    /// Agent id (0x-prefixed bytes32)
+    /// Agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     agent_id: String,
     /// Feedback id (0x-prefixed bytes32)
@@ -768,7 +797,7 @@ impl EncodeGetFeedbackResponsesCmd {
 /// Encode getFeedback calldata
 #[derive(Debug, Parser)]
 pub struct EncodeGetFeedbackCmd {
-    /// Subject agent id (0x-prefixed bytes32)
+    /// Subject agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     subject_agent_id: String,
     /// Feedback index (uint256)
@@ -804,7 +833,7 @@ impl EncodeGetFeedbackCmd {
 /// Encode getFeedbackCount calldata
 #[derive(Debug, Parser)]
 pub struct EncodeGetFeedbackCountCmd {
-    /// Subject agent id (0x-prefixed bytes32)
+    /// Subject agent id (uint256 — accepts decimal or 0x-prefixed hex)
     #[arg(long)]
     subject_agent_id: String,
     /// RPC endpoint

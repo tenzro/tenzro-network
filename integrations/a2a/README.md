@@ -152,7 +152,7 @@ The Tenzro A2A agent exposes the skills below covering blockchain, AI, identity,
 | **AgentBond & Insurance** | `bond-insurance` | Post/withdraw TNZO collateral against autonomous agent DIDs and file insurance claims (Spec 9) |
 | **Task Marketplace** | `task_marketplace` | Post/browse tasks with TNZO escrow payment |
 | **Agent Marketplace** | `agent_marketplace` | Publish, discover, rate, and spawn agent templates |
-| **ERC-8004 Trustless Agents** (v0.6+) | `erc8004` | 22 surfaces across IdentityRegistry (10: derive, register, getAgent encode/decode, setAgentURI, setAgentWallet, setMetadata, getMetadata encode/decode, getAgentURI, getAgentWallet), ReputationRegistry (9: feedback, getFeedback, getFeedbackCount, revokeFeedback, isFeedbackRevoked, appendResponse, getFeedbackResponses), and ValidationRegistry (3: validationRequest, validationResponse, getValidation). Calldata is byte-identical to native EVM precompiles `0x101a` / `0x101b` / `0x101c` (`agentId = keccak256(utf8(did_string))`) |
+| **ERC-8004 Trustless Agents** (v0.6+) | `erc8004` | Full surface across IdentityRegistry (register / register(string) / register(string,(string,bytes)[]) overloads, getAgent encode/decode, setAgentURI, setAgentWallet, setMetadata, getMetadata encode/decode, getAgentURI, getAgentWallet), ReputationRegistry (feedback, getFeedback, getFeedbackCount, revokeFeedback, isFeedbackRevoked, appendResponse, getFeedbackResponses), and ValidationRegistry (validationRequest, validationResponse, getValidation). Calldata is byte-identical to native EVM precompiles `0x101a` / `0x101b` / `0x101c`. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — server-allocated, never derivable client-side. |
 
 ### Cross-Chain & Compliance
 

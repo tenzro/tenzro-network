@@ -624,7 +624,7 @@ async def handle_join(text: str, metadata: dict = None) -> str:
         f"  Capabilities:\n"
         f"{cap_lines}\n"
         f"\n"
-        f"Your identity and MPC wallet have been provisioned.\n"
+        f"Your identity and FROST-Ed25519 threshold wallet have been provisioned.\n"
         f"Use 'faucet' to request testnet TNZO tokens."
     )
 
@@ -1175,7 +1175,7 @@ async def handle_agent_spawning(text: str, metadata: dict = None) -> str:
             f"\n"
             f"Each spawned agent receives:\n"
             f"  - Its own TDIP DID (did:tenzro:machine:...)\n"
-            f"  - MPC wallet (2-of-3 threshold)\n"
+            f"  - FROST-Ed25519 threshold wallet (2-of-3, RFC 9591)\n"
             f"  - Delegation scope from parent\n"
             f"  - Max 50 child agents per parent\n"
             f"\n"
@@ -1424,8 +1424,8 @@ async def handle_custody(text: str, metadata: dict = None) -> str:
     t = text.lower()
 
     if "create" in t or "new" in t:
-        result = await rpc_call("tenzro_createMpcWallet", {"threshold": 2, "total_shares": 3, "key_type": "ed25519"})
-        return f"MPC wallet created:\n{json.dumps(result, indent=2)}"
+        result = await rpc_call("tenzro_createMpcWallet", {"threshold": 2, "total_shares": 3})
+        return f"FROST-Ed25519 threshold wallet created:\n{json.dumps(result, indent=2)}"
 
     if "export" in t:
         addr = _extract_address(text)
@@ -1442,13 +1442,13 @@ async def handle_custody(text: str, metadata: dict = None) -> str:
             "To import a keystore:\n"
             "  - Provide the encrypted keystore JSON\n"
             "  - Provide the decryption password\n"
-            "  The wallet will be restored with its MPC key shares."
+            "  The wallet will be restored with its FROST-Ed25519 secret shares."
         )
 
     if "rotate" in t:
         addr = _extract_address(text)
         if addr:
-            return f"Key rotation for {addr} refreshes MPC shares without changing the address."
+            return f"Key rotation for {addr} refreshes FROST-Ed25519 secret shares without changing the address."
         return "Provide a wallet address to rotate keys. Example: 'Rotate keys for 0xabc...'"
 
     if "spending" in t or "limit" in t:
@@ -1488,8 +1488,8 @@ async def handle_custody(text: str, metadata: dict = None) -> str:
         return "Provide a wallet address. Example: 'Get key shares for 0xabc...'"
 
     return (
-        "Custody & MPC wallet operations:\n"
-        "  - 'Create a new MPC wallet'\n"
+        "Custody & FROST-Ed25519 threshold wallet operations:\n"
+        "  - 'Create a new FROST-Ed25519 threshold wallet'\n"
         "  - 'Export keystore for 0xabc...'\n"
         "  - 'Import a keystore'\n"
         "  - 'Rotate keys for 0xabc...'\n"
@@ -1701,37 +1701,23 @@ async def handle_erc8004(text: str, metadata: dict = None) -> str:
 
     # ── Identity registry ────────────────────────────────────────────
 
-    if "derive" in t or "agent id" in t or "agentid" in t:
-        did = md.get("did")
-        if did:
-            result = await rpc_call(
-                "tenzro_erc8004DeriveAgentId",
-                [{"did": did}],
-            )
-            return f"ERC-8004 agentId:\n{json.dumps(result, indent=2)}"
-        return (
-            "Derive an ERC-8004 agentId (= keccak256(utf8(did))) with:\n"
-            "  metadata.did (Tenzro DID string)"
-        )
-
     if "register" in t:
-        did = md.get("did")
-        agent_address = md.get("agent_address") or _extract_address(text)
-        metadata_uri = md.get("metadata_uri") or md.get("uri")
-        if did and agent_address and metadata_uri:
+        agent_uri = md.get("agent_uri") or md.get("uri") or md.get("metadata_uri")
+        metadata = md.get("metadata")
+        if agent_uri and isinstance(metadata, list):
             result = await rpc_call(
-                "tenzro_erc8004EncodeRegister",
-                [{
-                    "did": did,
-                    "agent_address": agent_address,
-                    "metadata_uri": metadata_uri,
-                }],
+                "tenzro_erc8004EncodeRegisterWithMetadata",
+                [{"agent_uri": agent_uri, "metadata": metadata}],
             )
-            return f"ERC-8004 registerAgent calldata:\n{json.dumps(result, indent=2)}"
-        return (
-            "Encode IdentityRegistry.registerAgent() with:\n"
-            "  metadata.did, metadata.agent_address, metadata.metadata_uri"
-        )
+            return f"ERC-8004 register(string,(string,bytes)[]) calldata:\n{json.dumps(result, indent=2)}"
+        if agent_uri:
+            result = await rpc_call(
+                "tenzro_erc8004EncodeRegisterWithUri",
+                [{"agent_uri": agent_uri}],
+            )
+            return f"ERC-8004 register(string) calldata:\n{json.dumps(result, indent=2)}"
+        result = await rpc_call("tenzro_erc8004EncodeRegister", [{}])
+        return f"ERC-8004 register() calldata:\n{json.dumps(result, indent=2)}"
 
     if "set agent uri" in t or ("set" in t and "uri" in t):
         agent_id = md.get("agent_id")
@@ -2119,7 +2105,7 @@ async def handle_cct(text: str, metadata: dict = None) -> str:
 
 async def handle_auth(text: str, metadata: dict = None) -> str:
     """OAuth 2.1 + DPoP auth flows: onboard human/agent, refresh access tokens,
-    link an existing MPC wallet to a new auth session.
+    link an existing FROST-Ed25519 threshold wallet to a new auth session.
 
     Token shape: HS256 access tokens (1h TTL) + opaque UUID refresh tokens
     (30-day TTL). DPoP binding via RFC 7638 SHA-256 thumbprint of the
@@ -2301,7 +2287,7 @@ async def handle_help(text: str, metadata: dict = None) -> str:
         "    crypto       - Sign, verify, encrypt, decrypt, hash, keygen\n"
         "    tee          - TEE detection, attestation, seal/unseal data\n"
         "    zk           - ZK proof creation, verification, circuits\n"
-        "    custody      - MPC wallets, keystore, sessions, limits\n"
+        "    custody      - FROST-Ed25519 threshold wallets, keystore, sessions, limits\n"
         "    verification - ZK proofs, TEE attestations\n"
         "    compliance   - ERC-3643 T-REX KYC\n"
         "    crosschain   - ERC-7802 cross-chain tokens\n"

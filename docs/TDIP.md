@@ -692,7 +692,7 @@ TDIP machine identities are addressable through ERC-8004 system contracts on Ten
 | `ERC8004_REPUTATION` | `0x101b` | `submitFeedback` / `getFeedback` / `getFeedbackCount` for peer-to-peer reputation |
 | `ERC8004_VALIDATION` | `0x101c` | `validationRequest` / `validationResponse` / `getValidation` for verifiable work attestation |
 
-Selectors match `tenzro_identity::erc8004::selectors` byte-for-byte, so the same calldata works against either the native Tenzro registry or any Ethereum mirror. `agentId = keccak256(utf8(did_string))` matches `derive_agent_id` exactly. The `tenzro_agent_id` field on machine identity data provides the linking mechanism for off-chain mirroring.
+Selectors match `tenzro_identity::erc8004::selectors` byte-for-byte, so the same calldata works against either the native Tenzro registry or any Ethereum mirror. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — server-allocated, never derivable client-side. The `IdentityData::Machine.erc8004_agent_id` field captures the allocation so the TDIP record carries the canonical id for cross-system lookup, and `OnChainAgentRegistry::lookup_agent_id_by_did` provides reverse DID → agentId resolution.
 
 ### 14.3 Cross-Chain Identity
 

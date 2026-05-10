@@ -129,7 +129,7 @@ The node orchestrates subsystems in the following startup order:
 3. **TEE** - Trusted Execution Environment (if enabled)
 4. **VM Runtime** - Multi-VM execution environment (EVM + SVM + DAML)
 5. **Token Economics** - TNZO token, staking, governance, treasury
-6. **Wallet** - MPC wallet service
+6. **Wallet** - FROST-Ed25519 threshold wallet service
 7. **Consensus** - HotStuff-2 consensus (validators only)
 8. **Settlement** - Payment settlement engine
 9. **AI Infrastructure** - Model registry, provider management, agent runtime, and swarm manager (durable persistence via `init_ai_infrastructure()`; restored model, agent, and swarm counts logged at startup)
@@ -171,7 +171,7 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0
 - **AP2 v0.2 (Agent Payments Protocol)**: createAp2Session, ap2SignMandate (Ed25519 sign-side for `checkout` and `payment` mandates), ap2VerifyMandate, ap2ValidateMandatePair (three-axis validation: mandate constraints + DelegationScope + SpendingPolicy)
 - **Stripe SPT**: sptIssue (TDIP cap-resolver enforces principal `DelegationScope` + runtime `SpendingPolicy`), sptVerify, with `granted_token.deactivated` webhook cascading into TDIP `apply_remote_revocation` and ERC-8004 ReputationRegistry cross-write on every settled outcome
 - **AAP (Agent Access Protocol)**: oauthDiscovery, exchangeToken, introspectToken — OAuth 2.1 + DPoP-bound JWTs (RFC 9449) + RAR (RFC 9396) over `tenzro-auth`
-- **ERC-8004 v0.6+ Trustless Agents** (22 surfaces): IdentityRegistry — deriveAgentId, encodeRegister, encodeGetAgent / decodeGetAgent, encodeSetAgentURI, encodeSetAgentWallet, encodeSetMetadata, encodeGetMetadata / decodeGetMetadata, encodeGetAgentURI, encodeGetAgentWallet. ReputationRegistry — encodeFeedback, encodeGetFeedback, encodeGetFeedbackCount, encodeRevokeFeedback, encodeIsFeedbackRevoked, encodeAppendResponse, encodeGetFeedbackResponses. ValidationRegistry — encodeValidationRequest, encodeValidationResponse, encodeGetValidation. All `tenzro_erc8004*`-prefixed; calldata is byte-identical to the native EVM precompiles `0x101a` / `0x101b` / `0x101c` (`agentId = keccak256(utf8(did_string))`)
+- **ERC-8004 v0.6+ Trustless Agents**: IdentityRegistry — encodeRegister (no-arg overload), encodeRegisterWithUri (`register(string)` overload), encodeRegisterWithMetadata (`register(string,(string,bytes)[])` overload), encodeGetAgent / decodeGetAgent, encodeSetAgentURI, encodeSetAgentWallet, encodeSetMetadata, encodeGetMetadata / decodeGetMetadata, encodeGetAgentURI, encodeGetAgentWallet. ReputationRegistry — encodeFeedback, encodeGetFeedback, encodeGetFeedbackCount, encodeRevokeFeedback, encodeIsFeedbackRevoked, encodeAppendResponse, encodeGetFeedbackResponses. ValidationRegistry — encodeValidationRequest, encodeValidationResponse, encodeGetValidation. All `tenzro_erc8004*`-prefixed; calldata is byte-identical to the native EVM precompiles `0x101a` / `0x101b` / `0x101c`. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — server-allocated, never derivable client-side.
 - **Reputation & Approval**: getProviderReputation (provider score), listPendingApprovals / getApproval / decideApproval (out-of-scope agent operation queue)
 - **Disputes & Streaming**: getDispute, listDisputesByChannel, chatStream (per-token streaming with optional `channel_id` for micropayment-channel billing)
 - **EU AI Act §50 Provenance**: getProvenance — C2PA-style `ProvenanceManifest` keyed by `SHA-256(content_bytes)`, signed by validator block-signing keys (§50(1) chatbot disclosure via `aap_agent` claim, §50(2) provenance manifest, §50(4) deepfake labeling)
@@ -208,7 +208,7 @@ Reference templates under `crates/tenzro-agent-kit/reference_templates/`:
 
 ## Wallet Model
 
-Tenzro wallets are **chain-agnostic by design**. `tenzro_createWallet` provisions a single 2-of-3 Ed25519 MPC wallet that projects into every supported VM (EVM, SVM, Canton/DAML) via the pointer-token model — there is no "Solana wallet" vs "Ethereum wallet" distinction at the protocol layer. One identity, one address, one set of MPC shares.
+Tenzro wallets are **chain-agnostic by design**. `tenzro_createWallet` provisions a single 2-of-3 FROST-Ed25519 (RFC 9591) threshold wallet that projects into every supported VM (EVM, SVM, Canton/DAML) via the pointer-token model — there is no "Solana wallet" vs "Ethereum wallet" distinction at the protocol layer. One identity, one address, one set of FROST secret shares.
 
 ### How apps create wallets
 
@@ -244,7 +244,7 @@ Adding a `chain` field would imply Tenzro keeps separate per-chain key material,
 
 ### Sending and tracking transactions
 
-- `tenzro_signAndSendTransaction` looks up the live nonce and gas price server-side, signs with the wallet's MPC shares, and submits — clients pass `from`, `to`, and `value` (or its alias `amount`).
+- `tenzro_signAndSendTransaction` looks up the live nonce and gas price server-side, runs FROST-Ed25519 signing with the wallet's threshold shares, and submits — clients pass `from`, `to`, and `value` (or its alias `amount`).
 - The server rejects self-sends (`from == to`) with a `cannot transfer to self` validation error; the desktop wallet form pre-empts this with a client-side guard.
 - After submission, `tenzro_getTransaction(hash)` returns the transaction with `status: "pending"` while it sits in the consensus mempool and flips to `status: "finalized"` once it's included in a block. Callers polling immediately after broadcast see `"pending"` rather than `null`, so retry logic can distinguish "not yet finalized" from "unknown hash."
 

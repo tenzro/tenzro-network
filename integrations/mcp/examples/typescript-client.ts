@@ -47,7 +47,7 @@ async function main() {
   console.log("4. Creating wallet:");
   const wallet = await client.callTool({
     name: "create_wallet",
-    arguments: { key_type: "ed25519" },
+    arguments: {},
   });
   console.log(`   ${formatContent(wallet.content)}\n`);
 

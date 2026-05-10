@@ -1,28 +1,39 @@
 //! ERC-8004 System Contracts (Trustless Agents)
 //!
 //! Three native precompile registries that mirror the ERC-8004 reference
-//! contracts on Ethereum, with byte-identical function selectors so the
-//! same calldata works whether a caller targets Tenzro's native registry
-//! or the Ethereum mirror via [`tenzro_identity::erc8004`].
+//! contracts on Ethereum (canonical mainnet deployment at
+//! `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432`), with byte-identical
+//! function selectors so the same calldata works whether a caller targets
+//! Tenzro's native registry or the Ethereum mirror via
+//! [`tenzro_identity::erc8004`].
 //!
-//! - **0x101a — IdentityRegistry**: `registerAgent` / `getAgent` for native
-//!   Tenzro agent discovery.
-//! - **0x101b — ReputationRegistry**: `submitFeedback` / `getFeedback` for
-//!   peer-to-peer agent reputation.
+//! - **0x101a — IdentityRegistry**: three `register` overloads
+//!   (`register()`, `register(string)`, `register(string,(string,bytes)[])`)
+//!   plus `getAgent`, `setAgentURI`, `setAgentWallet`, `unsetAgentWallet`,
+//!   `setMetadata`, `getMetadata`, `getAgentURI`, `getAgentWallet`. Every
+//!   `register` overload allocates a fresh sequential `uint256 agentId`
+//!   and returns it (ERC-721 `tokenId` semantics).
+//! - **0x101b — ReputationRegistry**: `submitFeedback(uint256,int8,string)`,
+//!   `getFeedback(uint256,uint256)`, `getFeedbackCount(uint256)`, plus the
+//!   v0.6+ `revokeFeedback` / `appendResponse` / `isFeedbackRevoked` /
+//!   `getFeedbackResponses` mutators. All selectors are uint256-keyed on
+//!   the subject `agentId`.
 //! - **0x101c — ValidationRegistry**: `validationRequest` / `validationResponse`
-//!   / `getValidation` for verifiable agent work attestation.
+//!   / `getValidation` for verifiable agent work attestation. `agentId` is
+//!   carried as a uint256 word matching the IdentityRegistry's allocation.
 //!
-//! `agentId` is derived deterministically from a Tenzro DID:
-//! `agentId = keccak256(utf8(did_string))`. The same derivation is used by
-//! [`tenzro_identity::erc8004::derive_agent_id`] so an agent registered on
-//! Tenzro is addressable on Ethereum (and vice-versa) without a separate
-//! mapping table.
+//! `agentId` is a sequentially-allocated `u64` (encoded on the EVM wire as
+//! a 32-byte big-endian word). Allocation is owned by the
+//! IdentityRegistry; `did_to_agent_id` provides a reverse map so the TDIP
+//! mirror can look up "what agentId was minted for this DID" without
+//! re-decoding the on-chain stream.
 
 use crate::error::Result;
 use crate::evm::wtnzo::abi;
 use crate::precompiles::PrecompileResult;
 use crate::VmError;
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -30,8 +41,20 @@ use tracing::{debug, info};
 // Gas constants
 // ---------------------------------------------------------------------------
 
-/// Gas cost for registering or updating an agent in IdentityRegistry
-const GAS_REGISTER_AGENT: u64 = 80_000;
+/// Gas cost for the bare `register()` overload — allocates a fresh
+/// `agentId`, leaves wallet zeroed and URI empty.
+const GAS_REGISTER_BARE: u64 = 50_000;
+/// Gas cost for `register(string)` — allocates `agentId` and sets the
+/// metadata URI in one call.
+const GAS_REGISTER_WITH_URI: u64 = 80_000;
+/// Gas cost for `register(string,(string,bytes)[])` — allocates
+/// `agentId`, sets URI, and writes N metadata entries. Per-entry cost is
+/// charged on top of this base via `GAS_SET_METADATA`.
+const GAS_REGISTER_WITH_METADATA: u64 = 80_000;
+/// Gas cost for unsetting an agent's controller wallet
+/// (`unsetAgentWallet(uint256)` per ERC-8004 v0.6+). Cheaper than
+/// `setAgentWallet` because no signature payload is verified.
+const GAS_UNSET_AGENT_WALLET: u64 = 30_000;
 /// Gas cost for updating just the metadata URI on an existing agent.
 const GAS_SET_AGENT_URI: u64 = 30_000;
 /// Gas cost for rebinding an agent's controller wallet — heavier than a
@@ -64,10 +87,24 @@ const GAS_READ: u64 = 2_600;
 // Function selectors (byte-identical to tenzro_identity::erc8004::selectors)
 // ---------------------------------------------------------------------------
 
-/// `registerAgent(bytes32 agentId, address agentAddress, string metadataUri)`
-const SELECTOR_REGISTER_AGENT: [u8; 4] = [0xaa, 0xa3, 0x8f, 0x6c];
-/// `getAgent(bytes32 agentId)`
-const SELECTOR_GET_AGENT: [u8; 4] = [0xdb, 0x4a, 0x7a, 0x9a];
+/// `register()` (no args) — allocates a fresh sequential `agentId`,
+/// leaves URI empty and wallet zeroed. Returns `uint256 agentId`.
+/// Selector = `bytes4(keccak256("register()"))` = `0x1aa3a008`.
+const SELECTOR_REGISTER: [u8; 4] = [0x1a, 0xa3, 0xa0, 0x08];
+/// `register(string tokenURI)` — allocates a fresh `agentId` and sets
+/// the metadata URI. Returns `uint256 agentId`.
+/// Selector = `bytes4(keccak256("register(string)"))` = `0xf2c298be`.
+const SELECTOR_REGISTER_WITH_URI: [u8; 4] = [0xf2, 0xc2, 0x98, 0xbe];
+/// `register(string tokenURI, (string,bytes)[] metadata)` — allocates
+/// a fresh `agentId`, sets the metadata URI, and writes N `(key,value)`
+/// metadata entries. Returns `uint256 agentId`.
+/// Selector = `bytes4(keccak256("register(string,(string,bytes)[])"))`
+/// = `0x8ea42286`.
+const SELECTOR_REGISTER_WITH_METADATA: [u8; 4] = [0x8e, 0xa4, 0x22, 0x86];
+/// `getAgent(uint256 agentId)` — returns `(address agentAddress, string
+/// metadataUri, bool exists)`.
+/// Selector = `bytes4(keccak256("getAgent(uint256)"))` = `0x2de5aaf7`.
+const SELECTOR_GET_AGENT: [u8; 4] = [0x2d, 0xe5, 0xaa, 0xf7];
 /// `setAgentURI(uint256 agentId, string metadataUri)` per ERC-8004 v0.6+.
 /// Selector = `bytes4(keccak256("setAgentURI(uint256,string)"))` =
 /// `0x0af28bd3`. Updates the metadata URI on an already-registered
@@ -83,6 +120,13 @@ const SELECTOR_SET_AGENT_URI: [u8; 4] = [0x0a, 0xf2, 0x8b, 0xd3];
 /// (the outer EVM caller is auditable), but accepts the trailing pair
 /// so callers can emit byte-identical calldata for both targets.
 const SELECTOR_SET_AGENT_WALLET: [u8; 4] = [0x2d, 0x1e, 0xf5, 0xae];
+/// `unsetAgentWallet(uint256 agentId)` per ERC-8004 v0.6+. Selector =
+/// `bytes4(keccak256("unsetAgentWallet(uint256)"))` = `0x3fddcf19`.
+/// Clears the controller wallet (sets to zero address) on an
+/// already-registered agent — used when an operator wants to disable a
+/// compromised key without re-registering. Returns `(bool success)` —
+/// `false` if the agent is unknown.
+const SELECTOR_UNSET_AGENT_WALLET: [u8; 4] = [0x3f, 0xdd, 0xcf, 0x19];
 /// `setMetadata(uint256 agentId, string metadataKey, bytes metadataValue)`
 /// per ERC-8004 v0.6+.
 /// Selector = `bytes4(keccak256("setMetadata(uint256,string,bytes)"))` =
@@ -106,12 +150,19 @@ const SELECTOR_GET_AGENT_URI: [u8; 4] = [0xce, 0x91, 0xae, 0xde];
 /// Returns the controller address bound to an agent, or the zero
 /// address if the agent isn't registered. Pairs with `setAgentWallet`.
 const SELECTOR_GET_AGENT_WALLET: [u8; 4] = [0x00, 0x33, 0x95, 0x09];
-/// `submitFeedback(bytes32 subject, int8 rating, string contextUri)`
-const SELECTOR_SUBMIT_FEEDBACK: [u8; 4] = [0x3b, 0x2d, 0x6e, 0x41];
-/// `getFeedback(bytes32 subject, uint256 index)`
-const SELECTOR_GET_FEEDBACK: [u8; 4] = [0x7c, 0x9d, 0x4f, 0x52];
-/// `getFeedbackCount(bytes32 subject)`
-const SELECTOR_GET_FEEDBACK_COUNT: [u8; 4] = [0x4e, 0x71, 0xa2, 0x18];
+/// `submitFeedback(uint256 subject, int8 rating, string contextUri)` —
+/// ERC-8004 v0.6+ uint256-keyed feedback submission.
+/// Selector = `bytes4(keccak256("submitFeedback(uint256,int8,string)"))`
+/// = `0xe5679c29`.
+const SELECTOR_SUBMIT_FEEDBACK: [u8; 4] = [0xe5, 0x67, 0x9c, 0x29];
+/// `getFeedback(uint256 subject, uint256 index)`.
+/// Selector = `bytes4(keccak256("getFeedback(uint256,uint256)"))`
+/// = `0x2d150457`.
+const SELECTOR_GET_FEEDBACK: [u8; 4] = [0x2d, 0x15, 0x04, 0x57];
+/// `getFeedbackCount(uint256 subject)`.
+/// Selector = `bytes4(keccak256("getFeedbackCount(uint256)"))`
+/// = `0x4537b764`.
+const SELECTOR_GET_FEEDBACK_COUNT: [u8; 4] = [0x45, 0x37, 0xb7, 0x64];
 /// `revokeFeedback(uint256 agentId, bytes32 feedbackId)` per ERC-8004
 /// v0.6+. Selector = `bytes4(keccak256("revokeFeedback(uint256,bytes32)"))`
 /// = `0xa28334ce`. Marks an existing feedback entry as revoked without
@@ -158,11 +209,43 @@ const SELECTOR_GET_VALIDATION: [u8; 4] = [0x9b, 0x2e, 0x4f, 0x33];
 // ---------------------------------------------------------------------------
 
 /// On-chain agent record stored in the IdentityRegistry.
+///
+/// `agent_id` is a sequentially-allocated `u64` (1-indexed, matching
+/// ERC-721 `tokenId` semantics — `0` is the unallocated sentinel and
+/// never appears as a real record). Wire layout on the EVM is a
+/// big-endian 32-byte word; the registry encodes/decodes via
+/// [`agent_id_to_word`] / [`word_to_agent_id`] so storage stays compact.
 #[derive(Debug, Clone)]
 pub struct AgentRecord {
-    pub agent_id: [u8; 32],
+    pub agent_id: u64,
     pub agent_address: [u8; 20],
     pub metadata_uri: String,
+}
+
+/// Encode a `u64` agentId into the 32-byte big-endian word that the EVM
+/// wire format uses for `uint256 agentId` parameters.
+fn agent_id_to_word(agent_id: u64) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[24..32].copy_from_slice(&agent_id.to_be_bytes());
+    out
+}
+
+/// Decode a 32-byte big-endian EVM word into a `u64` agentId. Returns
+/// `None` if any of the upper 24 bytes are non-zero — that means the
+/// caller passed an agentId outside the allocator's `u64` range, which
+/// can only happen by accident or by an attempt to look up an agent we
+/// never minted. Either way the precompile must reject the call rather
+/// than silently truncate.
+fn word_to_agent_id(word: &[u8]) -> Option<u64> {
+    if word.len() < 32 {
+        return None;
+    }
+    if word[..24].iter().any(|b| *b != 0) {
+        return None;
+    }
+    let mut tail = [0u8; 8];
+    tail.copy_from_slice(&word[24..32]);
+    Some(u64::from_be_bytes(tail))
 }
 
 /// One feedback entry on a subject agent.
@@ -226,22 +309,42 @@ pub struct ValidationEntry {
 // Registries
 // ---------------------------------------------------------------------------
 
-/// Native Tenzro IdentityRegistry — maps `agentId -> AgentRecord` plus a
-/// per-agent `(key → value)` metadata KV store covering the
-/// `setMetadata` / `getMetadata` selectors introduced in ERC-8004 v0.6+.
+/// Native Tenzro IdentityRegistry — owns `agentId` allocation, the
+/// `agentId -> AgentRecord` table, and a per-agent `(key → value)`
+/// metadata KV store covering the `setMetadata` / `getMetadata` selectors
+/// introduced in ERC-8004 v0.6+.
+///
+/// `agentId` is allocated sequentially as a `u64` starting at `1`
+/// (mirroring the ERC-721 `tokenId` convention used by the reference
+/// contract — `0` is reserved as the "unallocated" sentinel). A
+/// `did_to_agent_id` reverse map lets the TDIP mirror look up "what
+/// agentId was minted for this DID" without re-decoding the on-chain
+/// stream. The DID reverse map is populated by `register_with_did`,
+/// which is the path the TDIP `OnChainAgentRegistry` mirror uses; the
+/// raw `register` path is kept for handlers that don't have a DID in
+/// hand (the bare `register()` selector).
 pub struct Erc8004IdentityRegistry {
-    agents: DashMap<[u8; 32], AgentRecord>,
+    /// Monotonic `agentId` counter. Initialized to `1` so the first
+    /// allocation hands out id `1` (id `0` is the unallocated sentinel).
+    next_agent_id: AtomicU64,
+    /// Allocated agent records keyed by `u64` agentId.
+    agents: DashMap<u64, AgentRecord>,
+    /// Reverse map from TDIP DID string to allocated `agentId`. Only
+    /// populated when an agent was registered via `register_with_did`.
+    did_to_agent_id: DashMap<String, u64>,
     /// Per-agent metadata KV. Keyed by `(agent_id, metadata_key)` so a
     /// single agent can store many distinct entries. Empty values
     /// (`Vec::new()`) are not stored — callers requesting an empty
     /// write hit the delete path below.
-    metadata: DashMap<([u8; 32], String), Vec<u8>>,
+    metadata: DashMap<(u64, String), Vec<u8>>,
 }
 
 impl Erc8004IdentityRegistry {
     pub fn new() -> Self {
         Self {
+            next_agent_id: AtomicU64::new(1),
             agents: DashMap::new(),
+            did_to_agent_id: DashMap::new(),
             metadata: DashMap::new(),
         }
     }
@@ -250,22 +353,58 @@ impl Erc8004IdentityRegistry {
         self.agents.len()
     }
 
-    /// Register or update an agent. Idempotent: re-registering the same
-    /// `agentId` overwrites the prior record (matches the reference
-    /// contract's "owner-only update" with the simplification that the
-    /// registry trusts the precompile caller).
-    pub fn register(&self, record: AgentRecord) {
-        self.agents.insert(record.agent_id, record);
+    /// Allocate a fresh sequential `agentId` and store the record under
+    /// it. Returns the freshly-allocated id. Used by the spec's three
+    /// `register(...)` overloads.
+    pub fn allocate(&self, agent_address: [u8; 20], metadata_uri: String) -> u64 {
+        let agent_id = self.next_agent_id.fetch_add(1, Ordering::SeqCst);
+        let record = AgentRecord {
+            agent_id,
+            agent_address,
+            metadata_uri,
+        };
+        self.agents.insert(agent_id, record);
+        agent_id
     }
 
-    pub fn get(&self, agent_id: &[u8; 32]) -> Option<AgentRecord> {
-        self.agents.get(agent_id).map(|r| r.clone())
+    /// Allocate an `agentId` for a TDIP-anchored agent. Idempotent on
+    /// the DID: a second call with the same DID returns the previously
+    /// allocated id and updates the wallet/URI fields in place. This is
+    /// the path the [`OnChainAgentRegistry`](crate::erc8004::OnChainAgentRegistry)
+    /// mirror calls during TDIP `register_machine_identity`.
+    pub fn register_with_did(
+        &self,
+        did: String,
+        agent_address: [u8; 20],
+        metadata_uri: String,
+    ) -> u64 {
+        if let Some(existing) = self.did_to_agent_id.get(&did) {
+            let agent_id = *existing;
+            if let Some(mut record) = self.agents.get_mut(&agent_id) {
+                record.agent_address = agent_address;
+                record.metadata_uri = metadata_uri;
+            }
+            return agent_id;
+        }
+        let agent_id = self.allocate(agent_address, metadata_uri);
+        self.did_to_agent_id.insert(did, agent_id);
+        agent_id
+    }
+
+    /// Look up the `agentId` that was minted for a TDIP DID. Returns
+    /// `None` when the DID has never been mirrored on-chain.
+    pub fn lookup_by_did(&self, did: &str) -> Option<u64> {
+        self.did_to_agent_id.get(did).map(|v| *v)
+    }
+
+    pub fn get(&self, agent_id: u64) -> Option<AgentRecord> {
+        self.agents.get(&agent_id).map(|r| r.clone())
     }
 
     /// Update only the `metadata_uri` field on an already-registered
     /// agent. Returns `false` if the agent is unknown.
-    pub fn set_agent_uri(&self, agent_id: &[u8; 32], metadata_uri: String) -> bool {
-        match self.agents.get_mut(agent_id) {
+    pub fn set_agent_uri(&self, agent_id: u64, metadata_uri: String) -> bool {
+        match self.agents.get_mut(&agent_id) {
             Some(mut record) => {
                 record.metadata_uri = metadata_uri;
                 true
@@ -276,8 +415,8 @@ impl Erc8004IdentityRegistry {
 
     /// Update only the `agent_address` field on an already-registered
     /// agent. Returns `false` if the agent is unknown.
-    pub fn set_agent_wallet(&self, agent_id: &[u8; 32], new_wallet: [u8; 20]) -> bool {
-        match self.agents.get_mut(agent_id) {
+    pub fn set_agent_wallet(&self, agent_id: u64, new_wallet: [u8; 20]) -> bool {
+        match self.agents.get_mut(&agent_id) {
             Some(mut record) => {
                 record.agent_address = new_wallet;
                 true
@@ -286,10 +425,16 @@ impl Erc8004IdentityRegistry {
         }
     }
 
+    /// Clear the controller wallet on an already-registered agent (set
+    /// to the zero address). Returns `false` if the agent is unknown.
+    pub fn unset_agent_wallet(&self, agent_id: u64) -> bool {
+        self.set_agent_wallet(agent_id, [0u8; 20])
+    }
+
     /// Write a single `(key → value)` metadata pair against an agent.
     /// An empty `value` deletes the entry. Returns `true` once the
     /// requested mutation has been applied.
-    pub fn set_metadata(&self, agent_id: [u8; 32], key: String, value: Vec<u8>) -> bool {
+    pub fn set_metadata(&self, agent_id: u64, key: String, value: Vec<u8>) -> bool {
         if value.is_empty() {
             self.metadata.remove(&(agent_id, key));
         } else {
@@ -300,9 +445,9 @@ impl Erc8004IdentityRegistry {
 
     /// Read the bytes stored under `(agent_id, key)`; returns `None`
     /// when no value has been set.
-    pub fn get_metadata(&self, agent_id: &[u8; 32], key: &str) -> Option<Vec<u8>> {
+    pub fn get_metadata(&self, agent_id: u64, key: &str) -> Option<Vec<u8>> {
         self.metadata
-            .get(&(*agent_id, key.to_string()))
+            .get(&(agent_id, key.to_string()))
             .map(|v| v.clone())
     }
 }
@@ -577,11 +722,20 @@ fn execute_identity(
     let selector = &input[..4];
     let calldata = &input[4..];
     match selector {
-        s if s == SELECTOR_REGISTER_AGENT => handle_register_agent(registry, calldata, gas_limit),
+        s if s == SELECTOR_REGISTER => handle_register_bare(registry, calldata, gas_limit),
+        s if s == SELECTOR_REGISTER_WITH_URI => {
+            handle_register_with_uri(registry, calldata, gas_limit)
+        }
+        s if s == SELECTOR_REGISTER_WITH_METADATA => {
+            handle_register_with_metadata(registry, calldata, gas_limit)
+        }
         s if s == SELECTOR_GET_AGENT => handle_get_agent(registry, calldata, gas_limit),
         s if s == SELECTOR_SET_AGENT_URI => handle_set_agent_uri(registry, calldata, gas_limit),
         s if s == SELECTOR_SET_AGENT_WALLET => {
             handle_set_agent_wallet(registry, calldata, gas_limit)
+        }
+        s if s == SELECTOR_UNSET_AGENT_WALLET => {
+            handle_unset_agent_wallet(registry, calldata, gas_limit)
         }
         s if s == SELECTOR_SET_METADATA => handle_set_metadata(registry, calldata, gas_limit),
         s if s == SELECTOR_GET_METADATA => handle_get_metadata(registry, calldata, gas_limit),
@@ -593,66 +747,181 @@ fn execute_identity(
     }
 }
 
-/// `registerAgent(bytes32 agentId, address agentAddress, string metadataUri)`
+/// `register()` (no args) — allocate a fresh sequential `agentId` with
+/// the zero wallet address and an empty URI. Per ERC-8004 v0.6+ this
+/// matches the bare `register()` overload on the reference contract,
+/// which mints a new ERC-721 `tokenId` to the caller and lets later
+/// `setAgentURI` / `setAgentWallet` calls populate the record.
+///
+/// The caller of the precompile has no calldata payload — the entire
+/// calldata after the selector is empty (or padding only).
+///
+/// Returns: ABI-encoded `(uint256 agentId)`.
+fn handle_register_bare(
+    registry: &Erc8004IdentityRegistry,
+    _calldata: &[u8],
+    gas_limit: u64,
+) -> Result<PrecompileResult> {
+    if gas_limit < GAS_REGISTER_BARE {
+        return Err(VmError::OutOfGas);
+    }
+    let agent_id = registry.allocate([0u8; 20], String::new());
+    info!(
+        "ERC-8004 IdentityRegistry: register() -> agent_id={}",
+        agent_id
+    );
+    Ok(PrecompileResult::success(
+        agent_id_to_word(agent_id).to_vec(),
+        GAS_REGISTER_BARE,
+    ))
+}
+
+/// `register(string tokenURI)` — allocate a fresh sequential `agentId`
+/// and set the metadata URI in one call. Per ERC-8004 v0.6+.
 ///
 /// Calldata layout (after selector):
-///   [0..32]    agentId
-///   [32..64]   agentAddress (left-padded)
-///   [64..96]   offset to metadataUri
-///   [96..]     metadataUri (length + utf8 bytes, padded)
+///   [0..32]    offset to tokenURI (= 32)
+///   [32..]     tokenURI (length + utf8 bytes, padded)
 ///
-/// Returns: ABI-encoded `(bool success)`.
-fn handle_register_agent(
+/// Returns: ABI-encoded `(uint256 agentId)`.
+fn handle_register_with_uri(
     registry: &Erc8004IdentityRegistry,
     calldata: &[u8],
     gas_limit: u64,
 ) -> Result<PrecompileResult> {
-    if gas_limit < GAS_REGISTER_AGENT {
+    if gas_limit < GAS_REGISTER_WITH_URI {
         return Err(VmError::OutOfGas);
     }
-    if calldata.len() < 96 {
-        return Ok(PrecompileResult::failed(GAS_REGISTER_AGENT));
+    if calldata.len() < 32 {
+        return Ok(PrecompileResult::failed(GAS_REGISTER_WITH_URI));
     }
-
-    let mut agent_id = [0u8; 32];
-    agent_id.copy_from_slice(&calldata[..32]);
-
-    let agent_address = match abi::decode_address_at(calldata, 32) {
-        Some(a) => a,
-        None => return Ok(PrecompileResult::failed(GAS_REGISTER_AGENT)),
+    let metadata_uri = match decode_dynamic_string(calldata, 0) {
+        Some(s) => s,
+        None => return Ok(PrecompileResult::failed(GAS_REGISTER_WITH_URI)),
     };
-
-    let metadata_uri = decode_dynamic_string(calldata, 64).unwrap_or_default();
-
-    let record = AgentRecord {
-        agent_id,
-        agent_address,
-        metadata_uri: metadata_uri.clone(),
-    };
-    registry.register(record);
-
+    let agent_id = registry.allocate([0u8; 20], metadata_uri.clone());
     info!(
-        "ERC-8004 IdentityRegistry: registered agent_id=0x{} address=0x{} uri={}",
-        hex::encode(agent_id),
-        hex::encode(agent_address),
-        metadata_uri,
+        "ERC-8004 IdentityRegistry: register(string) -> agent_id={} uri={}",
+        agent_id, metadata_uri
     );
-
     Ok(PrecompileResult::success(
-        abi::encode_bool(true),
-        GAS_REGISTER_AGENT,
+        agent_id_to_word(agent_id).to_vec(),
+        GAS_REGISTER_WITH_URI,
     ))
 }
 
-/// `getAgent(bytes32 agentId)`
+/// `register(string tokenURI, (string,bytes)[] metadata)` — allocate a
+/// fresh sequential `agentId`, set the metadata URI, and write N
+/// `(key, value)` metadata entries in one transaction. Per ERC-8004
+/// v0.6+.
 ///
-/// Returns ABI-encoded `(address agentAddress, string metadataUri, bool exists)`.
+/// Calldata layout (after selector):
+///   [0..32]    offset to tokenURI
+///   [32..64]   offset to metadata array
+///   [tokenURI tail]
+///   [metadata array tail: length, then N `(string,bytes)` tuples]
+///
+/// Each `(string,bytes)` tuple is encoded as a head pointing into a
+/// trailing region holding `[string head | bytes head | string tail |
+/// bytes tail]`. Tenzro decodes this into a `Vec<(String, Vec<u8>)>`
+/// before persisting.
+///
+/// Returns: ABI-encoded `(uint256 agentId)`.
+fn handle_register_with_metadata(
+    registry: &Erc8004IdentityRegistry,
+    calldata: &[u8],
+    gas_limit: u64,
+) -> Result<PrecompileResult> {
+    if calldata.len() < 64 {
+        return Ok(PrecompileResult::failed(GAS_REGISTER_WITH_METADATA));
+    }
+    let metadata_uri = match decode_dynamic_string(calldata, 0) {
+        Some(s) => s,
+        None => return Ok(PrecompileResult::failed(GAS_REGISTER_WITH_METADATA)),
+    };
+    let entries = match decode_metadata_array(calldata, 32) {
+        Some(e) => e,
+        None => return Ok(PrecompileResult::failed(GAS_REGISTER_WITH_METADATA)),
+    };
+
+    // Compute total gas up front so the call either succeeds atomically
+    // or fails atomically — no half-applied register.
+    let entries_gas = (entries.len() as u64).saturating_mul(GAS_SET_METADATA);
+    let total_gas = GAS_REGISTER_WITH_METADATA.saturating_add(entries_gas);
+    if gas_limit < total_gas {
+        return Err(VmError::OutOfGas);
+    }
+
+    let agent_id = registry.allocate([0u8; 20], metadata_uri.clone());
+    for (key, value) in &entries {
+        registry.set_metadata(agent_id, key.clone(), value.clone());
+    }
+    info!(
+        "ERC-8004 IdentityRegistry: register(string,(string,bytes)[]) -> agent_id={} uri={} entries={}",
+        agent_id,
+        metadata_uri,
+        entries.len()
+    );
+    Ok(PrecompileResult::success(
+        agent_id_to_word(agent_id).to_vec(),
+        total_gas,
+    ))
+}
+
+/// `unsetAgentWallet(uint256 agentId)` — clear the controller wallet on
+/// an already-registered agent (sets it to the zero address). Per
+/// ERC-8004 v0.6+. Used to disable a compromised key without
+/// re-registering.
+///
+/// Calldata layout (after selector):
+///   [0..32]    agentId (uint256 word)
+///
+/// Returns: ABI-encoded `(bool success)` — `false` if the agent is
+/// unknown.
+fn handle_unset_agent_wallet(
+    registry: &Erc8004IdentityRegistry,
+    calldata: &[u8],
+    gas_limit: u64,
+) -> Result<PrecompileResult> {
+    if gas_limit < GAS_UNSET_AGENT_WALLET {
+        return Err(VmError::OutOfGas);
+    }
+    let agent_id = match word_to_agent_id(calldata.get(..32).unwrap_or(&[])) {
+        Some(id) => id,
+        None => return Ok(PrecompileResult::failed(GAS_UNSET_AGENT_WALLET)),
+    };
+    let updated = registry.unset_agent_wallet(agent_id);
+    if updated {
+        info!(
+            "ERC-8004 IdentityRegistry: unsetAgentWallet agent_id={}",
+            agent_id
+        );
+    } else {
+        debug!(
+            "ERC-8004 IdentityRegistry: unsetAgentWallet on unknown agent_id={}",
+            agent_id
+        );
+    }
+    Ok(PrecompileResult::success(
+        abi::encode_bool(updated),
+        GAS_UNSET_AGENT_WALLET,
+    ))
+}
+
+/// `getAgent(uint256 agentId)`
+///
+/// Returns ABI-encoded `(address agentAddress, string metadataUri)`.
 /// Layout:
 ///   [0..32]    agentAddress (left-padded)
-///   [32..64]   offset to metadataUri (always 96)
-///   [64..96]   exists (bool as uint256)
-///   [96..128]  metadataUri length
-///   [128..]    metadataUri data, padded to 32-byte boundary
+///   [32..64]   offset to metadataUri (always 64)
+///   [64..96]   metadataUri length
+///   [96..]     metadataUri data, padded to 32-byte boundary
+///
+/// Reverts (precompile failure) when the `agentId` is unknown — the
+/// reference contract's `_requireOwned` semantics. Callers needing a
+/// "does this exist?" probe can use `getAgentWallet` and inspect for
+/// the zero address, but distinguishing "unallocated" from "allocated
+/// with zero wallet" requires a higher-level lookup.
 fn handle_get_agent(
     registry: &Erc8004IdentityRegistry,
     calldata: &[u8],
@@ -661,41 +930,33 @@ fn handle_get_agent(
     if gas_limit < GAS_READ {
         return Err(VmError::OutOfGas);
     }
-    if calldata.len() < 32 {
-        return Ok(PrecompileResult::failed(GAS_READ));
-    }
-
-    let mut agent_id = [0u8; 32];
-    agent_id.copy_from_slice(&calldata[..32]);
-
-    match registry.get(&agent_id) {
+    let agent_id = match word_to_agent_id(calldata.get(..32).unwrap_or(&[])) {
+        Some(id) => id,
+        None => return Ok(PrecompileResult::failed(GAS_READ)),
+    };
+    match registry.get(agent_id) {
         Some(record) => Ok(PrecompileResult::success(
-            encode_get_agent_result(&record.agent_address, &record.metadata_uri, true),
+            encode_get_agent_result(&record.agent_address, &record.metadata_uri),
             GAS_READ,
         )),
-        None => Ok(PrecompileResult::success(
-            encode_get_agent_result(&[0u8; 20], "", false),
-            GAS_READ,
-        )),
+        None => Ok(PrecompileResult::failed(GAS_READ)),
     }
 }
 
-fn encode_get_agent_result(address: &[u8; 20], metadata_uri: &str, exists: bool) -> Vec<u8> {
+fn encode_get_agent_result(address: &[u8; 20], metadata_uri: &str) -> Vec<u8> {
     let uri_bytes = metadata_uri.as_bytes();
     let uri_padded = uri_bytes.len().div_ceil(32) * 32;
-    let total_len = 96 + 32 + uri_padded;
+    let total_len = 64 + 32 + uri_padded;
     let mut out = vec![0u8; total_len];
 
     // [0..32]: address (left-padded)
     out[12..32].copy_from_slice(address);
-    // [32..64]: offset to string = 96
-    out[32..64].copy_from_slice(&abi::encode_uint256(96));
-    // [64..96]: exists
-    out[64..96].copy_from_slice(&abi::encode_bool(exists));
-    // [96..128]: string length
-    out[96..128].copy_from_slice(&abi::encode_uint256(uri_bytes.len() as u128));
-    // [128..]: string data
-    out[128..128 + uri_bytes.len()].copy_from_slice(uri_bytes);
+    // [32..64]: offset to string = 64
+    out[32..64].copy_from_slice(&abi::encode_uint256(64));
+    // [64..96]: string length
+    out[64..96].copy_from_slice(&abi::encode_uint256(uri_bytes.len() as u128));
+    // [96..]: string data
+    out[96..96 + uri_bytes.len()].copy_from_slice(uri_bytes);
 
     out
 }
@@ -720,29 +981,23 @@ fn handle_set_agent_uri(
     if calldata.len() < 64 {
         return Ok(PrecompileResult::failed(GAS_SET_AGENT_URI));
     }
-
-    let mut agent_id = [0u8; 32];
-    agent_id.copy_from_slice(&calldata[..32]);
-
-    let metadata_uri = decode_dynamic_string(calldata, 32).unwrap_or_default();
-
-    let updated = registry.set_agent_uri(&agent_id, metadata_uri.clone());
-
-    if updated {
-        info!(
-            "ERC-8004 IdentityRegistry: setAgentURI agent_id=0x{} uri={}",
-            hex::encode(agent_id),
-            metadata_uri,
-        );
-    } else {
-        debug!(
-            "ERC-8004 IdentityRegistry: setAgentURI on unknown agent_id=0x{}",
-            hex::encode(agent_id),
-        );
+    let agent_id = match word_to_agent_id(&calldata[..32]) {
+        Some(id) => id,
+        None => return Ok(PrecompileResult::failed(GAS_SET_AGENT_URI)),
+    };
+    let metadata_uri = match decode_dynamic_string(calldata, 32) {
+        Some(s) => s,
+        None => return Ok(PrecompileResult::failed(GAS_SET_AGENT_URI)),
+    };
+    if !registry.set_agent_uri(agent_id, metadata_uri.clone()) {
+        return Ok(PrecompileResult::failed(GAS_SET_AGENT_URI));
     }
-
+    info!(
+        "ERC-8004 IdentityRegistry: setAgentURI agent_id={} uri={}",
+        agent_id, metadata_uri,
+    );
     Ok(PrecompileResult::success(
-        abi::encode_bool(updated),
+        abi::encode_bool(true),
         GAS_SET_AGENT_URI,
     ))
 }
@@ -772,35 +1027,26 @@ fn handle_set_agent_wallet(
     if calldata.len() < 128 {
         return Ok(PrecompileResult::failed(GAS_SET_AGENT_WALLET));
     }
-
-    let mut agent_id = [0u8; 32];
-    agent_id.copy_from_slice(&calldata[..32]);
-
+    let agent_id = match word_to_agent_id(&calldata[..32]) {
+        Some(id) => id,
+        None => return Ok(PrecompileResult::failed(GAS_SET_AGENT_WALLET)),
+    };
     let new_wallet = match abi::decode_address_at(calldata, 32) {
         Some(a) => a,
         None => return Ok(PrecompileResult::failed(GAS_SET_AGENT_WALLET)),
     };
-
     // Slots [64..96] (deadline) and [96..] (signature offset + tail) are
     // present but not consulted here — see the doc comment.
-
-    let updated = registry.set_agent_wallet(&agent_id, new_wallet);
-
-    if updated {
-        info!(
-            "ERC-8004 IdentityRegistry: setAgentWallet agent_id=0x{} new_wallet=0x{}",
-            hex::encode(agent_id),
-            hex::encode(new_wallet),
-        );
-    } else {
-        debug!(
-            "ERC-8004 IdentityRegistry: setAgentWallet on unknown agent_id=0x{}",
-            hex::encode(agent_id),
-        );
+    if !registry.set_agent_wallet(agent_id, new_wallet) {
+        return Ok(PrecompileResult::failed(GAS_SET_AGENT_WALLET));
     }
-
+    info!(
+        "ERC-8004 IdentityRegistry: setAgentWallet agent_id={} new_wallet=0x{}",
+        agent_id,
+        hex::encode(new_wallet),
+    );
     Ok(PrecompileResult::success(
-        abi::encode_bool(updated),
+        abi::encode_bool(true),
         GAS_SET_AGENT_WALLET,
     ))
 }
@@ -826,27 +1072,29 @@ fn handle_set_metadata(
     if calldata.len() < 96 {
         return Ok(PrecompileResult::failed(GAS_SET_METADATA));
     }
-
-    let mut agent_id = [0u8; 32];
-    agent_id.copy_from_slice(&calldata[..32]);
-
+    let agent_id = match word_to_agent_id(&calldata[..32]) {
+        Some(id) => id,
+        None => return Ok(PrecompileResult::failed(GAS_SET_METADATA)),
+    };
+    // Reject writes against unknown agents — the reference contract
+    // requires the agentId to be owned before mutating its KV.
+    if registry.get(agent_id).is_none() {
+        return Ok(PrecompileResult::failed(GAS_SET_METADATA));
+    }
     let metadata_key = match decode_dynamic_string(calldata, 32) {
         Some(k) if !k.is_empty() => k,
         _ => return Ok(PrecompileResult::failed(GAS_SET_METADATA)),
     };
-
-    let metadata_value = decode_dynamic_bytes(calldata, 64).unwrap_or_default();
-
+    let metadata_value = match decode_dynamic_bytes(calldata, 64) {
+        Some(v) => v,
+        None => return Ok(PrecompileResult::failed(GAS_SET_METADATA)),
+    };
     let value_len = metadata_value.len();
     registry.set_metadata(agent_id, metadata_key.clone(), metadata_value);
-
     debug!(
-        "ERC-8004 IdentityRegistry: setMetadata agent_id=0x{} key={} value_len={}",
-        hex::encode(agent_id),
-        metadata_key,
-        value_len,
+        "ERC-8004 IdentityRegistry: setMetadata agent_id={} key={} value_len={}",
+        agent_id, metadata_key, value_len,
     );
-
     Ok(PrecompileResult::success(
         abi::encode_bool(true),
         GAS_SET_METADATA,
@@ -873,16 +1121,21 @@ fn handle_get_metadata(
     if calldata.len() < 64 {
         return Ok(PrecompileResult::failed(GAS_READ));
     }
-
-    let mut agent_id = [0u8; 32];
-    agent_id.copy_from_slice(&calldata[..32]);
-
-    let metadata_key = decode_dynamic_string(calldata, 32).unwrap_or_default();
-
-    let value = registry
-        .get_metadata(&agent_id, &metadata_key)
-        .unwrap_or_default();
-
+    let agent_id = match word_to_agent_id(&calldata[..32]) {
+        Some(id) => id,
+        None => return Ok(PrecompileResult::failed(GAS_READ)),
+    };
+    if registry.get(agent_id).is_none() {
+        return Ok(PrecompileResult::failed(GAS_READ));
+    }
+    let metadata_key = match decode_dynamic_string(calldata, 32) {
+        Some(k) if !k.is_empty() => k,
+        _ => return Ok(PrecompileResult::failed(GAS_READ)),
+    };
+    // An entry that has never been written returns the empty bytestring,
+    // matching the reference contract's "default value" semantics for
+    // mappings — this is a documented value, not a fallback.
+    let value = registry.get_metadata(agent_id, &metadata_key).unwrap_or_default();
     Ok(PrecompileResult::success(
         encode_get_metadata_result(&value),
         GAS_READ,
@@ -913,10 +1166,7 @@ fn encode_get_metadata_result(value: &[u8]) -> Vec<u8> {
 ///   [0..32]    agentId
 ///
 /// Returns ABI-encoded `string` — the metadata URI for a registered
-/// agent, or empty string if the agent doesn't exist. Wire layout:
-///   [0..32]    offset to string = 32
-///   [32..64]   length
-///   [64..]     utf8 bytes (zero-padded to 32-byte boundary)
+/// agent. Reverts when the `agentId` is unknown.
 fn handle_get_agent_uri(
     registry: &Erc8004IdentityRegistry,
     calldata: &[u8],
@@ -925,17 +1175,14 @@ fn handle_get_agent_uri(
     if gas_limit < GAS_READ {
         return Err(VmError::OutOfGas);
     }
-    if calldata.len() < 32 {
-        return Ok(PrecompileResult::failed(GAS_READ));
-    }
-
-    let mut agent_id = [0u8; 32];
-    agent_id.copy_from_slice(&calldata[..32]);
-
-    let uri = registry
-        .get(&agent_id)
-        .map(|r| r.metadata_uri)
-        .unwrap_or_default();
+    let agent_id = match word_to_agent_id(calldata.get(..32).unwrap_or(&[])) {
+        Some(id) => id,
+        None => return Ok(PrecompileResult::failed(GAS_READ)),
+    };
+    let uri = match registry.get(agent_id) {
+        Some(record) => record.metadata_uri,
+        None => return Ok(PrecompileResult::failed(GAS_READ)),
+    };
     Ok(PrecompileResult::success(
         encode_string_return(&uri),
         GAS_READ,
@@ -947,10 +1194,11 @@ fn handle_get_agent_uri(
 /// Calldata layout (after selector):
 ///   [0..32]    agentId
 ///
-/// Returns ABI-encoded `address` (20 bytes left-padded to 32). Returns
-/// the zero address for unknown agents — callers needing to distinguish
-/// "agent not registered" from "agent registered with zero wallet"
-/// should pair this with `getAgent` (which returns `exists`).
+/// Returns ABI-encoded `address` (20 bytes left-padded to 32). Reverts
+/// when the `agentId` is unknown — callers wanting "is this allocated?"
+/// must use this revert as the signal. The zero address is a *valid*
+/// owned-but-unset wallet (set by `unsetAgentWallet`); we never
+/// substitute it for "unknown".
 fn handle_get_agent_wallet(
     registry: &Erc8004IdentityRegistry,
     calldata: &[u8],
@@ -959,18 +1207,14 @@ fn handle_get_agent_wallet(
     if gas_limit < GAS_READ {
         return Err(VmError::OutOfGas);
     }
-    if calldata.len() < 32 {
-        return Ok(PrecompileResult::failed(GAS_READ));
-    }
-
-    let mut agent_id = [0u8; 32];
-    agent_id.copy_from_slice(&calldata[..32]);
-
-    let wallet = registry
-        .get(&agent_id)
-        .map(|r| r.agent_address)
-        .unwrap_or([0u8; 20]);
-
+    let agent_id = match word_to_agent_id(calldata.get(..32).unwrap_or(&[])) {
+        Some(id) => id,
+        None => return Ok(PrecompileResult::failed(GAS_READ)),
+    };
+    let wallet = match registry.get(agent_id) {
+        Some(record) => record.agent_address,
+        None => return Ok(PrecompileResult::failed(GAS_READ)),
+    };
     let mut out = [0u8; 32];
     out[12..32].copy_from_slice(&wallet);
     Ok(PrecompileResult::success(out.to_vec(), GAS_READ))
@@ -1621,6 +1865,84 @@ fn decode_dynamic_bytes(calldata: &[u8], offset_slot: usize) -> Option<Vec<u8>> 
     Some(calldata[offset + 32..offset + 32 + length].to_vec())
 }
 
+/// Decode a `(string,bytes)[]` metadata-entry array at the given
+/// offset slot. Returns the decoded `Vec<(key, value)>`.
+///
+/// Wire layout (Solidity ABI for `(string,bytes)[]`):
+///   - The slot at `offset_slot` carries a uint256 pointing to the
+///     start of the array region inside the calldata buffer.
+///   - At `array_start`: `length` (uint256), then `length` head slots,
+///     each a uint256 offset into the trailing tuple region (offsets
+///     are relative to the *start of the array region*, i.e.
+///     `array_start + 32`).
+///   - Each tuple region is `[key_offset(32) | value_offset(32) |
+///     key_tail | value_tail]` where `key_offset`/`value_offset` are
+///     relative to the tuple region's own start.
+fn decode_metadata_array(calldata: &[u8], offset_slot: usize) -> Option<Vec<(String, Vec<u8>)>> {
+    if calldata.len() < offset_slot + 32 {
+        return None;
+    }
+    let array_start = abi::decode_uint256_at(calldata, offset_slot)? as usize;
+    if calldata.len() < array_start + 32 {
+        return None;
+    }
+    let length = abi::decode_uint256_at(calldata, array_start)? as usize;
+    if length == 0 {
+        return Some(Vec::new());
+    }
+    // The array head sits at `array_start + 32`. Each element offset is
+    // relative to that base.
+    let head_base = array_start + 32;
+    if calldata.len() < head_base + length * 32 {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(length);
+    for i in 0..length {
+        let elem_offset = abi::decode_uint256_at(calldata, head_base + i * 32)? as usize;
+        let tuple_start = head_base + elem_offset;
+        if calldata.len() < tuple_start + 64 {
+            return None;
+        }
+        // Each `(string,bytes)` tuple has a head with two pointers
+        // relative to the tuple's own start.
+        let key_ptr = abi::decode_uint256_at(calldata, tuple_start)? as usize;
+        let value_ptr = abi::decode_uint256_at(calldata, tuple_start + 32)? as usize;
+
+        // Decode the key (string) at `tuple_start + key_ptr`.
+        let key_offset_abs = tuple_start + key_ptr;
+        if calldata.len() < key_offset_abs + 32 {
+            return None;
+        }
+        let key_len = abi::decode_uint256_at(calldata, key_offset_abs)? as usize;
+        if calldata.len() < key_offset_abs + 32 + key_len {
+            return None;
+        }
+        let key = String::from_utf8(
+            calldata[key_offset_abs + 32..key_offset_abs + 32 + key_len].to_vec(),
+        )
+        .ok()?;
+
+        // Decode the value (bytes) at `tuple_start + value_ptr`.
+        let value_offset_abs = tuple_start + value_ptr;
+        if calldata.len() < value_offset_abs + 32 {
+            return None;
+        }
+        let value_len = abi::decode_uint256_at(calldata, value_offset_abs)? as usize;
+        let value = if value_len == 0 {
+            Vec::new()
+        } else {
+            if calldata.len() < value_offset_abs + 32 + value_len {
+                return None;
+            }
+            calldata[value_offset_abs + 32..value_offset_abs + 32 + value_len].to_vec()
+        };
+
+        out.push((key, value));
+    }
+    Some(out)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1639,21 +1961,12 @@ mod tests {
         out
     }
 
-    fn encode_register_calldata(
-        agent_id: &[u8; 32],
-        agent_address: &[u8; 20],
-        metadata_uri: &str,
-    ) -> Vec<u8> {
-        let mut data = Vec::with_capacity(4 + 96 + 32 + metadata_uri.len());
-        data.extend_from_slice(&SELECTOR_REGISTER_AGENT);
-        data.extend_from_slice(agent_id);
-        // address left-padded
-        let mut addr_word = [0u8; 32];
-        addr_word[12..].copy_from_slice(agent_address);
-        data.extend_from_slice(&addr_word);
-        // offset to string = 96 (3 slots in)
-        data.extend_from_slice(&abi::encode_uint256(96));
-        // string length + bytes
+    /// Build calldata for `register(string tokenURI)` per ERC-8004 v0.6+.
+    /// Calldata head: [offset=32], tail: [length, utf8-padded-32].
+    fn encode_register_with_uri_calldata(metadata_uri: &str) -> Vec<u8> {
+        let mut data = Vec::with_capacity(4 + 64 + metadata_uri.len() + 32);
+        data.extend_from_slice(&SELECTOR_REGISTER_WITH_URI);
+        data.extend_from_slice(&abi::encode_uint256(32));
         data.extend_from_slice(&abi::encode_uint256(metadata_uri.len() as u128));
         let pad = (32 - (metadata_uri.len() % 32)) % 32;
         data.extend_from_slice(metadata_uri.as_bytes());
@@ -1661,46 +1974,77 @@ mod tests {
         data
     }
 
+    /// Build calldata for `setAgentWallet(uint256 agentId, address newWallet, uint256 deadline, bytes signature)`.
+    /// Empty signature (length=0) — accepted in tests as the EOA-self path.
+    fn encode_set_agent_wallet_calldata(
+        agent_id: u64,
+        new_wallet: &[u8; 20],
+    ) -> Vec<u8> {
+        let mut data = Vec::with_capacity(4 + 32 * 5);
+        data.extend_from_slice(&SELECTOR_SET_AGENT_WALLET);
+        data.extend_from_slice(&agent_id_to_word(agent_id));
+        let mut wallet_word = [0u8; 32];
+        wallet_word[12..].copy_from_slice(new_wallet);
+        data.extend_from_slice(&wallet_word);
+        data.extend_from_slice(&[0xff; 32]); // deadline = u256 max
+        data.extend_from_slice(&abi::encode_uint256(128)); // sig offset
+        data.extend_from_slice(&abi::encode_uint256(0)); // sig length = 0
+        data
+    }
+
     #[test]
     fn identity_register_then_get_roundtrips() {
         let registry = Arc::new(Erc8004IdentityRegistry::new());
-        let did = "did:tenzro:machine:abc";
-        let agent_id = keccak(did.as_bytes());
         let address: [u8; 20] = [
             0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab,
             0xcd, 0xef, 0x12, 0x34, 0x56, 0x78,
         ];
 
-        // register
-        let reg_input = encode_register_calldata(&agent_id, &address, "ipfs://meta");
+        // register(string) -> uint256 agentId
+        let reg_input = encode_register_with_uri_calldata("ipfs://meta");
         let result = execute_identity(&registry, &reg_input, 200_000).unwrap();
         assert!(result.success);
         assert_eq!(registry.agent_count(), 1);
+        // First-allocated id is 1 (0 is the unallocated sentinel).
+        let agent_id = word_to_agent_id(&result.output[..32]).expect("valid u64 word");
+        assert_eq!(agent_id, 1);
 
-        // getAgent
+        // Bind the wallet via setAgentWallet so getAgent returns the address.
+        let set_input = encode_set_agent_wallet_calldata(agent_id, &address);
+        let res = execute_identity(&registry, &set_input, 100_000).unwrap();
+        assert!(res.success);
+        assert_eq!(res.output[31], 1);
+
+        // getAgent(uint256) -> (address, string)
+        // Output layout: [address(32) | offset=64(32) | uri_len(32) | uri_padded]
         let mut get_input = Vec::with_capacity(36);
         get_input.extend_from_slice(&SELECTOR_GET_AGENT);
-        get_input.extend_from_slice(&agent_id);
+        get_input.extend_from_slice(&agent_id_to_word(agent_id));
         let result = execute_identity(&registry, &get_input, 10_000).unwrap();
         assert!(result.success);
-        // exists slot at [64..96] -> last byte should be 1
-        assert_eq!(result.output[95], 1);
         // address at [12..32]
         assert_eq!(&result.output[12..32], &address);
+        // offset slot
+        assert_eq!(result.output[63], 64);
+        // uri length
+        assert_eq!(result.output[95] as usize, "ipfs://meta".len());
+        // uri data
+        assert_eq!(&result.output[96..96 + "ipfs://meta".len()], b"ipfs://meta");
     }
 
     #[test]
-    fn identity_get_missing_returns_exists_false() {
+    fn identity_get_unknown_agent_reverts() {
+        // ERC-8004 v0.6+ semantics: unknown agentId reverts (no
+        // exists-flag fallback). The precompile signals this by returning
+        // a failed PrecompileResult. Callers must distinguish "allocated
+        // with empty fields" from "never allocated" — that's what the
+        // revert is for.
         let registry = Arc::new(Erc8004IdentityRegistry::new());
-        let agent_id = keccak(b"did:tenzro:machine:nope");
-
         let mut get_input = Vec::with_capacity(36);
         get_input.extend_from_slice(&SELECTOR_GET_AGENT);
-        get_input.extend_from_slice(&agent_id);
+        get_input.extend_from_slice(&agent_id_to_word(99));
         let result = execute_identity(&registry, &get_input, 10_000).unwrap();
-        assert!(result.success);
-        // exists slot at [64..96] -> last byte should be 0
-        assert_eq!(result.output[95], 0);
+        assert!(!result.success);
     }
 
     #[test]
@@ -1918,13 +2262,15 @@ mod tests {
         assert!(!res.success);
     }
 
-    fn register_basic_agent(registry: &Erc8004IdentityRegistry, did: &str) -> [u8; 32] {
-        let agent_id = keccak(did.as_bytes());
+    /// Register an agent via the TDIP mirror path (`register_with_did`)
+    /// with a fixed `[0x11; 20]` wallet and `ipfs://orig` URI. Returns
+    /// the sequentially-allocated `u64` agentId. Tests that need to
+    /// exercise the precompile dispatcher's `register(string)` path
+    /// build calldata directly; this helper is for tests that want a
+    /// pre-populated agent and don't care which selector created it.
+    fn register_basic_agent(registry: &Erc8004IdentityRegistry, did: &str) -> u64 {
         let address: [u8; 20] = [0x11; 20];
-        let reg_input = encode_register_calldata(&agent_id, &address, "ipfs://orig");
-        let res = execute_identity(registry, &reg_input, 200_000).unwrap();
-        assert!(res.success);
-        agent_id
+        registry.register_with_did(did.to_string(), address, "ipfs://orig".to_string())
     }
 
     #[test]
@@ -1936,7 +2282,7 @@ mod tests {
         let new_uri = "ipfs://updated";
         let mut data = Vec::new();
         data.extend_from_slice(&SELECTOR_SET_AGENT_URI);
-        data.extend_from_slice(&agent_id);
+        data.extend_from_slice(&agent_id_to_word(agent_id));
         data.extend_from_slice(&abi::encode_uint256(64)); // offset to string
         data.extend_from_slice(&abi::encode_uint256(new_uri.len() as u128));
         let pad = (32 - (new_uri.len() % 32)) % 32;
@@ -1949,28 +2295,26 @@ mod tests {
         assert_eq!(res.output[31], 1);
 
         // verify via getAgent
-        let stored = registry.get(&agent_id).expect("agent must exist");
+        let stored = registry.get(agent_id).expect("agent must exist");
         assert_eq!(stored.metadata_uri, new_uri);
     }
 
     #[test]
-    fn set_agent_uri_returns_false_for_unknown_agent() {
+    fn set_agent_uri_reverts_for_unknown_agent() {
+        // ERC-8004 v0.6+: unknown agentId reverts (no fallback to
+        // bool-false). Registry stays untouched.
         let registry = Arc::new(Erc8004IdentityRegistry::new());
-        let unknown = keccak(b"did:tenzro:machine:never-registered");
 
         let mut data = Vec::new();
         data.extend_from_slice(&SELECTOR_SET_AGENT_URI);
-        data.extend_from_slice(&unknown);
+        data.extend_from_slice(&agent_id_to_word(99));
         data.extend_from_slice(&abi::encode_uint256(64));
         data.extend_from_slice(&abi::encode_uint256(3));
         data.extend_from_slice(b"abc");
         data.extend(std::iter::repeat_n(0u8, 29));
 
         let res = execute_identity(&registry, &data, 100_000).unwrap();
-        assert!(res.success);
-        // returns bool(false)
-        assert_eq!(res.output[31], 0);
-        // and registry stays untouched
+        assert!(!res.success);
         assert_eq!(registry.agent_count(), 0);
     }
 
@@ -1980,47 +2324,26 @@ mod tests {
         let agent_id = register_basic_agent(&registry, "did:tenzro:machine:wallet-1");
 
         let new_wallet: [u8; 20] = [0x22; 20];
-        // Build calldata: agent_id | new_wallet (padded) | deadline | sig_offset=128 | sig_len=0
-        let mut data = Vec::new();
-        data.extend_from_slice(&SELECTOR_SET_AGENT_WALLET);
-        data.extend_from_slice(&agent_id);
-        let mut wallet_word = [0u8; 32];
-        wallet_word[12..].copy_from_slice(&new_wallet);
-        data.extend_from_slice(&wallet_word);
-        // deadline: u256 max
-        data.extend_from_slice(&[0xff; 32]);
-        // signature offset: 128
-        data.extend_from_slice(&abi::encode_uint256(128));
-        // empty signature tail (length=0)
-        data.extend_from_slice(&abi::encode_uint256(0));
+        let data = encode_set_agent_wallet_calldata(agent_id, &new_wallet);
 
         let res = execute_identity(&registry, &data, 100_000).unwrap();
         assert!(res.success);
         assert_eq!(res.output[31], 1);
 
-        let stored = registry.get(&agent_id).expect("agent must exist");
+        let stored = registry.get(agent_id).expect("agent must exist");
         assert_eq!(stored.agent_address, new_wallet);
     }
 
     #[test]
-    fn set_agent_wallet_returns_false_for_unknown_agent() {
+    fn set_agent_wallet_reverts_for_unknown_agent() {
+        // Mirror of `set_agent_uri_reverts_for_unknown_agent`:
+        // unknown agentId reverts, no bool-false fallback.
         let registry = Arc::new(Erc8004IdentityRegistry::new());
-        let unknown = keccak(b"did:tenzro:machine:no-wallet");
         let new_wallet: [u8; 20] = [0x33; 20];
-
-        let mut data = Vec::new();
-        data.extend_from_slice(&SELECTOR_SET_AGENT_WALLET);
-        data.extend_from_slice(&unknown);
-        let mut wallet_word = [0u8; 32];
-        wallet_word[12..].copy_from_slice(&new_wallet);
-        data.extend_from_slice(&wallet_word);
-        data.extend_from_slice(&[0u8; 32]);
-        data.extend_from_slice(&abi::encode_uint256(128));
-        data.extend_from_slice(&abi::encode_uint256(0));
+        let data = encode_set_agent_wallet_calldata(99, &new_wallet);
 
         let res = execute_identity(&registry, &data, 100_000).unwrap();
-        assert!(res.success);
-        assert_eq!(res.output[31], 0);
+        assert!(!res.success);
     }
 
     #[test]
@@ -2035,7 +2358,7 @@ mod tests {
         // head: [agent_id | key_offset=96 | value_offset=160]
         let mut data = Vec::new();
         data.extend_from_slice(&SELECTOR_SET_METADATA);
-        data.extend_from_slice(&agent_id);
+        data.extend_from_slice(&agent_id_to_word(agent_id));
         data.extend_from_slice(&abi::encode_uint256(96));
         data.extend_from_slice(&abi::encode_uint256(160));
         // key block at offset 96: [len | bytes padded]
@@ -2056,7 +2379,7 @@ mod tests {
         // getMetadata(agent_id, "skills")
         let mut get_data = Vec::new();
         get_data.extend_from_slice(&SELECTOR_GET_METADATA);
-        get_data.extend_from_slice(&agent_id);
+        get_data.extend_from_slice(&agent_id_to_word(agent_id));
         get_data.extend_from_slice(&abi::encode_uint256(64));
         get_data.extend_from_slice(&abi::encode_uint256(key.len() as u128));
         get_data.extend_from_slice(key.as_bytes());
@@ -2083,13 +2406,13 @@ mod tests {
             "endpoint".to_string(),
             b"https://example.com".to_vec(),
         );
-        assert!(registry.get_metadata(&agent_id, "endpoint").is_some());
+        assert!(registry.get_metadata(agent_id, "endpoint").is_some());
 
         // Now setMetadata(agent_id, "endpoint", []) via the precompile
         let key = "endpoint";
         let mut data = Vec::new();
         data.extend_from_slice(&SELECTOR_SET_METADATA);
-        data.extend_from_slice(&agent_id);
+        data.extend_from_slice(&agent_id_to_word(agent_id));
         data.extend_from_slice(&abi::encode_uint256(96)); // key offset
         data.extend_from_slice(&abi::encode_uint256(160)); // value offset
         // key block
@@ -2105,7 +2428,7 @@ mod tests {
         assert_eq!(res.output[31], 1);
 
         // entry is gone
-        assert!(registry.get_metadata(&agent_id, "endpoint").is_none());
+        assert!(registry.get_metadata(agent_id, "endpoint").is_none());
     }
 
     #[test]
@@ -2116,7 +2439,7 @@ mod tests {
         let key = "missing";
         let mut data = Vec::new();
         data.extend_from_slice(&SELECTOR_GET_METADATA);
-        data.extend_from_slice(&agent_id);
+        data.extend_from_slice(&agent_id_to_word(agent_id));
         data.extend_from_slice(&abi::encode_uint256(64));
         data.extend_from_slice(&abi::encode_uint256(key.len() as u128));
         let kpad = (32 - (key.len() % 32)) % 32;

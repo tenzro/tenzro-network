@@ -5,7 +5,7 @@
 
 ## Why this set exists
 
-By mid-2026, AI agents drive 19–30% of on-chain activity industry-wide and 22% of production deployments orchestrate multiple agents. Tenzro is engineered for this — TDIP delegation scopes, MPC wallets, A2A/MCP, multi-VM execution. But the gap between *can host swarms* and *handles swarms gracefully under load and regulatory scrutiny* is the work below.
+By mid-2026, AI agents drive 19–30% of on-chain activity industry-wide and 22% of production deployments orchestrate multiple agents. Tenzro is engineered for this — TDIP delegation scopes, FROST-Ed25519 threshold wallets, A2A/MCP, multi-VM execution. But the gap between *can host swarms* and *handles swarms gracefully under load and regulatory scrutiny* is the work below.
 
 The 10 specs in this directory close that gap. They're listed in the order you'd staff them, not the order they were discovered.
 

@@ -357,15 +357,17 @@ def _mcp_tool_call(mcp_url: str, tool_name: str,
 # ── Wallet & Balance ──────────────────────────────────────────────
 
 
-def create_wallet(key_type: str = "ed25519") -> dict:
-    """Generate a new self-custody Tenzro wallet (2-of-3 MPC, 32-byte address).
+def create_wallet() -> dict:
+    """Generate a new self-custody Tenzro wallet (2-of-3 FROST-Ed25519 (RFC 9591), 32-byte address).
 
     Returns the canonical Tenzro wallet shape: `wallet_id`, 32-byte hex
-    `address`, base58 `display_address`, `public_key`, `key_type`,
-    `threshold`, `total_shares`. The faucet, `eth_getBalance`, and all
+    `address`, base58 `display_address`, `public_key`, `key_type` (always
+    `ed25519` — FROST-Ed25519 is the only scheme), `threshold`, `total_shares`.
+    The wallet additionally carries a mandatory ML-DSA-65 post-quantum signing
+    key for hybrid signatures. The faucet, `eth_getBalance`, and all
     transaction RPCs accept the 32-byte address directly.
     """
-    return _rpc("tenzro_createWallet", {"key_type": key_type})
+    return _rpc("tenzro_createWallet", {})
 
 
 def get_balance(address: str) -> dict:
@@ -551,7 +553,7 @@ def register_identity(display_name: str = None,
         `delegation_scope` constrains spending and operations the machine
         may perform on behalf of the controller.
       - 'autonomous': requires `capabilities`. No human controller; the
-        machine acts purely on its own MPC-bound key.
+        machine acts purely on its own FROST-Ed25519 threshold-bound key.
 
     delegation_scope shape (all keys optional):
       {
@@ -3856,13 +3858,15 @@ def canton_get_fee_schedule(domain: str = None) -> dict:
 # ── Crypto ────────────────────────────────────────────────────────
 
 
-def sign_message(private_key: str, message_hex: str,
-                 key_type: str = "ed25519") -> dict:
-    """Sign a message with a private key (Ed25519 or Secp256k1)."""
+def sign_message(message_hex: str) -> dict:
+    """Sign a message with the auth-bound wallet (FROST-Ed25519 + ML-DSA-65 hybrid).
+
+    The signer is resolved from the bearer DID via OAuth/DPoP; raw private
+    keys never travel over the wire. Returns the hybrid signature (classical
+    leg + post-quantum leg).
+    """
     return _rpc("tenzro_signMessage", {
-        "private_key": private_key,
         "message_hex": message_hex,
-        "key_type": key_type,
     })
 
 
@@ -3986,13 +3990,15 @@ def list_zk_circuits() -> dict:
 
 
 def create_mpc_wallet_advanced(threshold: int = 2,
-                               total_shares: int = 3,
-                               key_type: str = "ed25519") -> dict:
-    """Create an MPC threshold wallet with custom config."""
+                               total_shares: int = 3) -> dict:
+    """Create a FROST-Ed25519 (RFC 9591) threshold wallet with custom config.
+
+    Pairs the FROST-Ed25519 classical leg with a mandatory ML-DSA-65
+    post-quantum signing key for hybrid signatures.
+    """
     return _rpc("tenzro_createMpcWallet", {
         "threshold": threshold,
         "total_shares": total_shares,
-        "key_type": key_type,
     })
 
 
@@ -4388,23 +4394,32 @@ def ap2_list_agent_sessions(agent_did: str) -> dict:
 
 # -- Identity registry --------------------------------------------------
 
-def erc8004_derive_agent_id(did: str) -> dict:
-    """Derive the canonical ERC-8004 agentId = keccak256(utf8(did))."""
-    return _rpc("tenzro_erc8004DeriveAgentId", {"did": did})
+def erc8004_encode_register() -> dict:
+    """Encode calldata for IdentityRegistry.register() (v0.6+ no-arg overload — caller becomes agent owner; registry allocates a sequential uint256 agentId)."""
+    return _rpc("tenzro_erc8004EncodeRegister", {})
 
 
-def erc8004_encode_register(did: str, agent_address: str,
-                            metadata_uri: str) -> dict:
-    """Encode calldata for IdentityRegistry.registerAgent(bytes32 agentId, address agentAddress, string metadataURI)."""
-    return _rpc("tenzro_erc8004EncodeRegister", {
-        "did": did,
-        "agent_address": agent_address,
-        "metadata_uri": metadata_uri,
+def erc8004_encode_register_with_uri(agent_uri: str) -> dict:
+    """Encode calldata for IdentityRegistry.register(string agentURI) (v0.6+ overload with agent URI)."""
+    return _rpc("tenzro_erc8004EncodeRegisterWithUri", {"agent_uri": agent_uri})
+
+
+def erc8004_encode_register_with_metadata(agent_uri: str, metadata: list) -> dict:
+    """Encode calldata for IdentityRegistry.register(string agentURI, (string,bytes)[] metadata) (v0.6+ overload with metadata entries).
+
+    metadata: list of {"key": str, "value": str (hex-encoded bytes)}.
+    """
+    return _rpc("tenzro_erc8004EncodeRegisterWithMetadata", {
+        "agent_uri": agent_uri,
+        "metadata": metadata,
     })
 
 
-def erc8004_encode_get_agent(agent_id: str) -> dict:
-    """Encode calldata for IdentityRegistry.getAgent(bytes32 agentId)."""
+def erc8004_encode_get_agent(agent_id) -> dict:
+    """Encode calldata for IdentityRegistry.getAgent(uint256 agentId).
+
+    agent_id: uint256 — accepts int, decimal string, or 0x-prefixed hex.
+    """
     return _rpc("tenzro_erc8004EncodeGetAgent", {"agent_id": agent_id})
 
 
@@ -5945,9 +5960,10 @@ COMMANDS = {
     "ap2_get_session": lambda args: ap2_get_session(args[0]),
     "ap2_list_agent_sessions": lambda args: ap2_list_agent_sessions(args[0]),
     # ── ERC-8004 (Trustless Agents Registry — full v0.6+ surface) ──
-    "erc8004_derive_agent_id": lambda args: erc8004_derive_agent_id(args[0]),
-    "erc8004_encode_register": lambda args: erc8004_encode_register(
-        args[0], args[1], args[2],
+    "erc8004_encode_register": lambda args: erc8004_encode_register(),
+    "erc8004_encode_register_with_uri": lambda args: erc8004_encode_register_with_uri(args[0]),
+    "erc8004_encode_register_with_metadata": lambda args: erc8004_encode_register_with_metadata(
+        args[0], args[1],
     ),
     "erc8004_encode_get_agent": lambda args: erc8004_encode_get_agent(args[0]),
     "erc8004_decode_get_agent": lambda args: erc8004_decode_get_agent(args[0]),

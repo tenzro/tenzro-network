@@ -128,7 +128,7 @@ against the DPoP-bound bearer JWT) or build + sign locally and submit via
 
 ```rust
 // Ambient auth: caller sets TENZRO_BEARER_JWT + TENZRO_DPOP_PROOF before
-// invoking the SDK; the node resolves the signer from the JWT's MPC wallet.
+// invoking the SDK; the node resolves the signer from the JWT's FROST-Ed25519 threshold wallet.
 let tx_type = serde_json::json!({
     "type": "CreateEscrow",
     "data": {

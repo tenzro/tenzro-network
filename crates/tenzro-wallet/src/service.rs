@@ -199,15 +199,19 @@ impl TenzroWalletService {
         ).with_chain_provider(provider));
     }
 
-    /// Load a wallet from keystore
+    /// Load a wallet from keystore.
+    ///
+    /// The keystore returns the `(PublicKeyPackage, Vec<KeyShare>)` pair
+    /// atomically — the FROST group public key is required for signing and
+    /// is not reconstructible from individual shares, so it is sealed in the
+    /// same Argon2id-derived bundle.
     async fn load_wallet_from_keystore(
         &self,
         wallet_id: &WalletId,
         password: &str,
     ) -> Result<MpcWallet> {
-        // Load key shares from keystore
         let mut keystore = self.keystore.lock().await;
-        let key_shares = keystore.load_shares(wallet_id, password)?;
+        let (pubkey_package, key_shares) = keystore.load_shares(wallet_id, password)?;
 
         if key_shares.is_empty() {
             return Err(WalletError::KeystoreError(
@@ -215,32 +219,24 @@ impl TenzroWalletService {
             ));
         }
 
-        // Reconstruct the wallet from the loaded shares
-        let public_key = key_shares[0].mpc_share.public_key.clone();
-        let key_type = key_shares[0].key_type();
-        let config = key_shares[0].config();
-
-        // Derive address from public key
-        let crypto_addr = public_key.to_address();
+        // Derive address from the FROST group public key.
+        let group_pk = pubkey_package.group_public_key.as_public_key();
+        let crypto_addr = group_pk.to_address();
         let mut addr_bytes = [0u8; 32];
         addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
         let address = Address::new(addr_bytes);
 
         // Load the ML-DSA-65 signing key persisted alongside the classical
-        // shares. We reuse the existing keystore lock guard so we never
+        // bundle. We reuse the existing keystore lock guard so we never
         // double-acquire `self.keystore`.
         let pq_signing_key = keystore.load_pq_seed(wallet_id, password)?;
         drop(keystore);
 
-        // Create the wallet
         let wallet = MpcWallet::new(
             wallet_id.clone(),
             address,
-            config.threshold,
-            config.total_shares,
             key_shares,
-            public_key,
-            key_type,
+            pubkey_package,
             pq_signing_key,
         )?;
 
@@ -252,14 +248,20 @@ impl TenzroWalletService {
         Ok(wallet)
     }
 
-    /// Store a wallet to keystore (classical key shares + PQ signing seed).
+    /// Store a wallet to keystore (FROST bundle + PQ signing seed).
     async fn store_wallet_to_keystore(
         &self,
         wallet: &MpcWallet,
         password: &str,
     ) -> Result<()> {
         let mut keystore = self.keystore.lock().await;
-        keystore.store_shares(&wallet.wallet_id, &wallet.key_shares, password)?;
+        let pubkey_package = wallet.frost_pubkey_package()?;
+        keystore.store_shares(
+            &wallet.wallet_id,
+            pubkey_package,
+            &wallet.key_shares,
+            password,
+        )?;
         // Mandatory PQ leg — persist the 32-byte canonical FIPS 204 seed
         // sealed with the same Argon2id-derived key. `pq_signing_key()`
         // returns an error only when the wallet was never decrypted, which
