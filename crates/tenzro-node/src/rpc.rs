@@ -8673,15 +8673,28 @@ async fn handle_resolve_identity(
     })?;
 
     let identity = match bytes {
-        Some(data) => {
+        Some(data) if !data.is_empty() => {
             use tenzro_identity::TenzroIdentity;
-            TenzroIdentity::from_bytes(&data).map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Identity deserialization failed: {}", e),
-                data: None,
+            TenzroIdentity::from_bytes(&data).map_err(|e| {
+                let preview: String = data
+                    .iter()
+                    .take(16)
+                    .map(|b| format!("{:02x}", b))
+                    .collect();
+                JsonRpcError {
+                    code: -32000,
+                    message: format!(
+                        "Identity record corrupt for {}: {} bytes, first 16=0x{}, parse error: {}",
+                        did,
+                        data.len(),
+                        preview,
+                        e
+                    ),
+                    data: None,
+                }
             })?
         }
-        None => {
+        _ => {
             return Err(JsonRpcError {
                 code: -32000,
                 message: format!("Identity not found on ledger: {}", did),
