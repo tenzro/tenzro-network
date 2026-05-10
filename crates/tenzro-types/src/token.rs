@@ -415,6 +415,32 @@ pub enum ProposalType {
     TreasuryGrant { recipient: Address, amount: u128 },
     /// Protocol upgrade proposal
     ProtocolUpgrade { version: String, code_hash: Vec<u8> },
+    /// Adaptive-burn dial update (Spec 8). Sets the live `BurnRateConfig`
+    /// applied by the EIP-1559 fee market and Spec 6 local-fee router.
+    /// `paymaster_burn_bps` is invariant-locked to 10_000 (100%) — proposals
+    /// that violate this are rejected at execution time.
+    AdaptiveBurnConfigUpdate {
+        base_fee_burn_bps: u16,
+        local_fee_burn_bps: u16,
+        paymaster_burn_bps: u16,
+    },
+    /// Adaptive-burn supply-targets update (Spec 8). Adjusts the rolling
+    /// window, neutral band, alarm thresholds, gain, and magnitude caps
+    /// the auto-proposal generator uses to draft `AdaptiveBurnConfigUpdate`
+    /// proposals.
+    SupplyTargetsUpdate {
+        epoch_neutral_band_bps: u16,
+        rolling_window_epochs: u32,
+        inflation_alarm_bps: u16,
+        deflation_alarm_bps: u16,
+        target_annual_supply_bps: i32,
+        gain_bps_per_pct: u16,
+        magnitude_cap_normal_bps: u16,
+        magnitude_cap_alarm_bps: u16,
+        auto_proposal_min_magnitude_bps: u16,
+        alarm_fast_track_enabled: bool,
+        alarm_timelock_hours: u32,
+    },
     /// Custom proposal
     Custom { proposal_data: Vec<u8> },
 }

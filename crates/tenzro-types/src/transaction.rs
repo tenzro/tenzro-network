@@ -374,6 +374,58 @@ pub enum TransactionType {
         /// Amount to pay from the pool vault, in TNZO base units
         amount: u128,
     },
+    /// Register the signing wallet as a Candidate validator (Dynamic Validator
+    /// Set, 2026-SOTA permissionless join).
+    ///
+    /// On execution the VM emits a `ValidatorRegister` typed log carrying
+    /// `from || stake_le || consensus_pubkey || pq_pubkey || withdrawal_address ||
+    /// metadata_uri`. The node-side `ValidatorRegistry` consumes the log and
+    /// inserts a `Candidate` entry that becomes `PendingActive` at the next
+    /// epoch boundary if `self_stake >= min_self_stake` and the activation
+    /// churn budget admits it; the `EpochManager` then promotes it to `Active`
+    /// `ACTIVATION_EFFECTIVE_DELAY_BLOCKS` after the boundary block.
+    ///
+    /// Authorization: `tx.from` is the validator's stake-owning wallet. The
+    /// classical Ed25519 signature in `SignedTransaction::signature` proves
+    /// control of `consensus_pubkey` and the ML-DSA-65 leg proves control of
+    /// `pq_pubkey`.
+    RegisterValidator {
+        /// 32-byte Ed25519 BFT signing key.
+        consensus_pubkey: Vec<u8>,
+        /// 1952-byte ML-DSA-65 verifying key (FIPS 204). Mandatory hybrid PQ.
+        pq_pubkey: Vec<u8>,
+        /// Address rewards / unbonded principal settle to.
+        withdrawal_address: Address,
+        /// Self-stake committed to the candidate. Must be ≥ the registry's
+        /// `min_self_stake` (default 10,000 TNZO).
+        self_stake: u128,
+        /// Optional ≤256-byte off-chain pointer (moniker / website / contact).
+        metadata_uri: String,
+    },
+    /// Voluntarily exit the active set (Dynamic Validator Set).
+    ///
+    /// The VM emits a `ValidatorExit` log; the registry transitions the entry
+    /// to `PendingExit` and the next epoch boundary stages it for removal —
+    /// effective `ACTIVATION_EFFECTIVE_DELAY_BLOCKS` after that boundary
+    /// block. Re-registration is blocked for `reentry_cooldown_epochs` (default
+    /// 4) following voluntary exit.
+    ///
+    /// Authorization: `tx.from` MUST equal the validator's registry address.
+    ExitValidator,
+    /// Update validator metadata (moniker / TEE attestation commitment).
+    ///
+    /// At least one of `metadata_uri` or `tee_attestation_hash` should be
+    /// `Some`; the registry treats `None` as "no change". `tee_attestation_hash`
+    /// is the 32-byte SHA-256 commitment to a fresh attestation document — the
+    /// active-set boundary applies the TEE multiplier from this commitment.
+    ///
+    /// Authorization: `tx.from` MUST equal the validator's registry address.
+    UpdateValidatorMetadata {
+        /// New off-chain pointer; `None` = no change. ≤256 bytes when present.
+        metadata_uri: Option<String>,
+        /// New 32-byte SHA-256 commitment to the attestation document.
+        tee_attestation_hash: Option<[u8; 32]>,
+    },
 }
 
 /// A signed transaction ready for submission
@@ -541,6 +593,29 @@ impl SignedTransaction {
                 }
                 if *slash_bps > 10_000 {
                     return Err("slash_bps exceeds 100%");
+                }
+            }
+            TransactionType::RegisterValidator {
+                consensus_pubkey,
+                pq_pubkey,
+                metadata_uri,
+                ..
+            } => {
+                if consensus_pubkey.len() != 32 {
+                    return Err("consensus_pubkey must be 32 bytes (Ed25519)");
+                }
+                if pq_pubkey.len() != 1952 {
+                    return Err("pq_pubkey must be 1952 bytes (ML-DSA-65 vk)");
+                }
+                if metadata_uri.len() > 256 {
+                    return Err("metadata_uri exceeds 256 bytes");
+                }
+            }
+            TransactionType::UpdateValidatorMetadata { metadata_uri, .. } => {
+                if let Some(uri) = metadata_uri
+                    && uri.len() > 256
+                {
+                    return Err("metadata_uri exceeds 256 bytes");
                 }
             }
             // Other transaction types have bounded data (strings, primitives)

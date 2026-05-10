@@ -81,6 +81,7 @@ The decentralized protocol enabling AI inference marketplace, TEE services, and 
 - Provider onboarding and marketplace health
 - Payment protocol integrations (MPP, x402, AP2, Tempo)
 - Agent framework and A2A/MCP protocol standards
+- Multi-party workflow engine on Canton (privileged-VM selectors, hash-chained receipts, kill switch, fee routing, privacy domains)
 
 ### 2.2 Tenzro Ledger (L1 Settlement Layer)
 
@@ -552,7 +553,7 @@ The liquid staking protocol allows TNZO holders to stake while retaining liquidi
 ### 10.3 Exchange Rate Mechanics
 
 ```
-exchange_rate = total_underlying_tnzo / total_sttnzo_supply
+exchange_rate = total_underlying_wei / total_sttnzo_supply
 ```
 
 As staking rewards accrue, the underlying TNZO increases while the stTNZO supply remains constant, causing the exchange rate to rise.

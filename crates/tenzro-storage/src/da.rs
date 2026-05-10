@@ -128,7 +128,7 @@ pub struct ReceiptSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payee: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub amount_tnzo: Option<u128>,
+    pub amount_wei: Option<u128>,
     pub timestamp: Timestamp,
     /// Compact view of the principal chain (Spec 5) when applicable. Full
     /// chain (delegation_scope_ids etc.) lives in the offloaded payload.
@@ -350,7 +350,7 @@ mod tests {
             receipt_id: Hash::new([7u8; 32]),
             payer: Some("did:tenzro:human:alice".into()),
             payee: Some("did:tenzro:machine:bob".into()),
-            amount_tnzo: Some(123_456_789),
+            amount_wei: Some(123_456_789),
             timestamp: Timestamp::new(1_700_000_000_000),
             principal_chain_summary: None,
         }

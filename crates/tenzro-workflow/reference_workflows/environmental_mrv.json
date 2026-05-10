@@ -1,0 +1,169 @@
+{
+  "_comment_layout": "Reference workflow spec — load with serde_json into tenzro_workflow::Workflow. workflow_id and gate_id are 32-byte hash arrays; placeholders here MUST be re-derived at load time. Accompanied by environmental_mrv_daml_map.json.",
+  "_comment_scenario": "Environmental MRV (Monitoring / Reporting / Verification) for a carbon-credit issuance: project developer's monitoring agent emits sensor + satellite-derived measurements, an independent verifier signs a TEE attestation that the data pipeline ran inside an attested enclave, the registrar issues the resulting credit batch as a tokenized Pay obligation back to the developer's wallet. Two-of-three governance approval (registrar + verifier + standards-body) before any credits mint.",
+
+  "workflow_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+  "template_id": null,
+  "creator": "did:tenzro:human:project-developer:1",
+  "title": "environmental_mrv",
+  "description": "Verifiable Monitoring/Reporting/Verification flow for carbon-credit issuance. TEE-attested data pipeline + multi-party governance gate.",
+
+  "participants": [
+    {
+      "did": "did:tenzro:human:project-developer:1",
+      "roles": ["Initiator"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:machine:project-developer:monitoring-bot:1",
+      "roles": ["Counterparty", "OracleProvider"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": 50000000000
+    },
+    {
+      "did": "did:tenzro:human:independent-verifier:1",
+      "roles": ["Counterparty", "Approver"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:machine:independent-verifier:tee-pipeline:1",
+      "roles": ["OracleProvider"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": 100000000000
+    },
+    {
+      "did": "did:tenzro:human:carbon-registrar:1",
+      "roles": ["Counterparty", "Approver", "Custodian"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:standards-body-vcs:1",
+      "roles": ["Approver", "Auditor"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:public-registry-mirror:1",
+      "roles": ["Auditor"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    }
+  ],
+
+  "obligations": [
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+  ],
+  "_obligation_records": [
+    {
+      "_comment": "Monitoring leg: project developer's bot publishes the raw measurement bundle as an attestation pointing at the bundle hash.",
+      "obligor": "did:tenzro:machine:project-developer:monitoring-bot:1",
+      "obligee": "did:tenzro:human:independent-verifier:1",
+      "kind": {
+        "Attest": {
+          "credential_type": "MeasurementBundle",
+          "subject": "did:tenzro:resource:carbon-project:reforest-2026-001"
+        }
+      },
+      "due_by": null,
+      "status": "Pending",
+      "discharge_proof_required": "Credential",
+      "bond_anchor": null
+    },
+    {
+      "_comment": "Verification leg: independent verifier's TEE pipeline produces a hardware-attested verification report. Discharge requires a TEE attestation matching the verifier's enclave identity.",
+      "obligor": "did:tenzro:machine:independent-verifier:tee-pipeline:1",
+      "obligee": "did:tenzro:human:carbon-registrar:1",
+      "kind": {
+        "Attest": {
+          "credential_type": "VerificationReport",
+          "subject": "did:tenzro:resource:carbon-project:reforest-2026-001"
+        }
+      },
+      "due_by": null,
+      "status": "Pending",
+      "discharge_proof_required": "TeeAttestation",
+      "bond_anchor": null
+    },
+    {
+      "_comment": "Issuance leg: registrar mints CARBON tokens (1 tCO2e per token) to the developer's wallet.",
+      "obligor": "did:tenzro:human:carbon-registrar:1",
+      "obligee": "did:tenzro:human:project-developer:1",
+      "kind": {
+        "Pay": {
+          "amount_wei": 10000000000000,
+          "asset": {
+            "chain": "tenzro",
+            "symbol": "CARBON",
+            "token_address": null
+          }
+        }
+      },
+      "due_by": null,
+      "status": "Pending",
+      "discharge_proof_required": "PaymentReceipt",
+      "bond_anchor": null
+    }
+  ],
+
+  "approval_gates": [
+    {
+      "_comment_id": "Derived at load time via ApprovalGate::derive_id(workflow_id, 'pre_issuance_governance').",
+      "gate_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      "workflow_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      "triggers": {
+        "InWorkflowStatus": ["settling"]
+      },
+      "approvers": {
+        "Threshold": {
+          "dids": [
+            "did:tenzro:human:carbon-registrar:1",
+            "did:tenzro:human:independent-verifier:1",
+            "did:tenzro:human:standards-body-vcs:1"
+          ],
+          "m": 2,
+          "n": 3
+        }
+      },
+      "timeout": 1209600,
+      "on_timeout": "AutoReject"
+    }
+  ],
+
+  "root_policy": {
+    "And": [
+      { "AssetIn": ["CARBON"] },
+      { "ChainIn": ["tenzro"] },
+      { "CounterpartyKycTierGte": 2 }
+    ]
+  },
+
+  "privacy_domain": null,
+  "_comment_privacy_domain": "Set at load time. Visibility = MembersPlusAuditors so the public-registry-mirror and standards-body receive unredacted measurement + verification bundles for transparency.",
+
+  "fee_route": null,
+  "_comment_fee_route": "Set at load time. Suggested split on the issuance leg: 70% project-developer, 15% independent-verifier (verification fee), 10% carbon-registrar (issuance fee), 5% standards-body (governance fee). Network fee 0.5% applied at base layer.",
+
+  "signatures": [],
+  "status": "Draft",
+
+  "canton_mirror": {
+    "synchronizer_id": "global-synchronizer",
+    "party": "tenzro::1220mrv00000000000000000000000000000000000000000000000000000000",
+    "contract_id": "00mrv#0"
+  },
+
+  "created_at": 1700000000,
+  "updated_at": 1700000000
+}

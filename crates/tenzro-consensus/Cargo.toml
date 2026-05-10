@@ -21,6 +21,7 @@ parking_lot = { workspace = true }
 chrono = { workspace = true }
 rand = { workspace = true }
 bytes = { workspace = true }
+bincode = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

@@ -1231,6 +1231,17 @@ pub async fn prometheus_metrics(
         body.push_str("# HELP tenzro_model_services_count Number of active model service instances\n");
         body.push_str("# TYPE tenzro_model_services_count gauge\n");
         body.push_str(&format!("tenzro_model_services_count {}\n\n", model_count));
+
+        // Workflow-subsystem snapshot (workflows / obligations / approvals
+        // partitioned by status, signature totals, canton-mirror count, fee
+        // routes, privacy domains). The snapshot is computed by walking the
+        // in-memory indices on `WorkflowManager` plus sibling registry sizes
+        // — O(N_workflows + N_obligations + N_requests), sub-millisecond at
+        // testnet scale (≤10k live workflows).
+        if let Some(rt) = node.workflow_runtime() {
+            body.push_str(&rt.operational_metrics().render_prometheus());
+            body.push('\n');
+        }
     }
 
     // Append network-layer metrics (gossipsub, dial rate limits, peer counts, etc.)
@@ -1248,7 +1259,7 @@ pub async fn prometheus_metrics(
     }
 
     // Append cortex worker metrics (cortex_requests_total, cortex_loops_executed_total,
-    // cortex_cost_tnzo_total, per-tier rejection counters, latency histograms, etc.).
+    // cortex_cost_wei_total, per-tier rejection counters, latency histograms, etc.).
     // The `cortex_metrics` registry is shared across every `CortexWorker` spawned
     // on this node via `CortexWorker::with_metrics(node.cortex_metrics.clone())`
     // in `init_cortex_workers`, so this single `encode_prometheus` call captures

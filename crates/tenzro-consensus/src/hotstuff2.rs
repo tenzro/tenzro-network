@@ -39,16 +39,6 @@ use tenzro_types::block::Block;
 use tenzro_types::primitives::{Address, BlockHeight, Hash};
 use tenzro_types::transaction::{Transaction, SignedTransaction};
 
-/// Maximum number of views a peer's timeout/proposal can fast-forward our
-/// local view in a single message. Generous enough to absorb several
-/// minutes of view-timeouts but small enough to ratelimit a malicious
-/// proposer who tries to flood our view counter.
-///
-/// Used by both `on_proposal` (forward sync on higher-view proposal) and
-/// `on_timeout_msg` (DiemBFT-style backward sync from a peer's timeout
-/// broadcast).
-const MAX_VIEW_JUMP: u64 = 1024;
-
 /// Cap on the exponent applied to [`ViewChangeTimer::on_timeout`]. With
 /// `backoff_multiplier = 2.0`, a cap of 4 means the backoff saturates at
 /// `base × 2^4 = 16×` base before being clamped further by `max_timeout`.
@@ -664,6 +654,134 @@ impl HotStuff2Engine {
         );
     }
 
+    /// Resumes the consensus engine after catching up to `height` via the
+    /// block-sync RPC, with the certifying commit-QC view `commit_qc_view`.
+    ///
+    /// This differs from [`Self::resume_from_height`] in two ways:
+    ///
+    /// 1. It is called **mid-life** (after `start()` is already running on
+    ///    other nodes) — the local engine just imported a sequence of
+    ///    finalized blocks and needs to slot back into the live view
+    ///    cadence without proposing or voting at any view ≤ `commit_qc_view`.
+    /// 2. The caller has a verified `QuorumCertificate` for the block at
+    ///    `height`, so we know the network has *already* committed at
+    ///    view `commit_qc_view`. The local view ceiling must be at least
+    ///    `commit_qc_view + 1` — anything lower would let us double-vote
+    ///    in a view that has already produced a 2f+1 commit.
+    ///
+    /// Concretely:
+    ///   * Updates the finality tracker to `height` so transaction
+    ///     execution and RPC `getBlock` queries return correct values.
+    ///   * Advances `view_state.height` to `height + 1` (next height to
+    ///     propose / vote at).
+    ///   * Sets `view_state.view = max(state.view, commit_qc_view + 1)`.
+    ///   * Bumps the persistent `vote_state_store` ceiling so that an
+    ///     immediate crash-and-restart cannot re-vote below
+    ///     `commit_qc_view`.
+    ///   * Updates `high_qc_view` to `commit_qc_view`. NOTE: `high_qc_view`
+    ///     in HotStuff-2 tracks the highest *Prepare-QC* view; a
+    ///     **commit-QC** at view V implies a Prepare-QC at view V (commits
+    ///     are produced one phase after Prepare in the same view), so
+    ///     using `commit_qc_view` here is sound.
+    ///
+    /// Modeled on Lighthouse's `BeaconChain::reset_post_sync` and
+    /// Aptos' `ConsensusObserver::on_synced_to_block`.
+    ///
+    /// **Caller contract:** the QC at `commit_qc_view` MUST already be
+    /// signature-verified against the validator set known at the
+    /// certifying epoch. This method does NOT re-verify — it trusts the
+    /// caller. The block-sync engine in `tenzro-node` is the canonical
+    /// caller and performs verification before invoking this.
+    pub fn resume_from_synced_height(&self, height: BlockHeight, commit_qc_view: u64) {
+        // Tell the finality tracker we're synced to `height`. Mirrors the
+        // genesis path in `resume_from_height`.
+        self.finality_tracker.set_initial_height(height);
+
+        // Compute the next height we'll propose/vote at.
+        let next_height = if height.0 == 0 {
+            BlockHeight(1)
+        } else {
+            height + 1u64
+        };
+
+        // Adopt the QC view as a signing ceiling. View must satisfy:
+        //   view > commit_qc_view  (so we can't re-vote in the certified view)
+        //   view ≥ next_height     (HRS lex order: view is leading dimension)
+        let target_view = commit_qc_view.saturating_add(1).max(next_height.0);
+
+        // Apply the view-state update under one write lock.
+        {
+            let mut state = self.view_state.write();
+            let prev_height = state.height;
+            let prev_view = state.view;
+
+            state.height = next_height;
+            if target_view > state.view {
+                state.view = target_view;
+            }
+            // Reset phase/proposed_block/qc fields — we're crossing a sync
+            // boundary; whatever in-flight state we had for the old view is
+            // stale.
+            state.phase = Phase::Prepare;
+            state.proposed_block = None;
+            state.prepare_qc = None;
+            state.commit_qc = None;
+            state.view_start_time = Instant::now();
+
+            tracing::info!(
+                prev_view,
+                resumed_view = state.view,
+                prev_height = %prev_height,
+                resumed_height = %next_height,
+                synced_height = %height,
+                commit_qc_view,
+                "Consensus engine resuming after block-sync catchup"
+            );
+        }
+
+        // Advance the persisted high_qc_view so future TimeoutMsgs carry
+        // the correct ceiling — without this, a TC built post-catchup
+        // would advertise a stale max_high_qc_view and the next leader
+        // could pick a too-low next-view target.
+        {
+            let mut hqc = self.high_qc_view.write();
+            if commit_qc_view > *hqc {
+                *hqc = commit_qc_view;
+            }
+        }
+
+        // Bump the persistent signing ceiling. We record a synthetic
+        // `LastSignState` at (view = commit_qc_view, height = height,
+        // step = Commit) — this is the strongest legal claim, since the
+        // 2f+1 commit aggregate at that (view, height) is already on
+        // chain. A future `vote_state.is_strictly_after` check will
+        // refuse any vote at (v ≤ commit_qc_view, *) on this height,
+        // closing the post-sync re-vote window.
+        let synthetic = LastSignState {
+            version: 1,
+            view: commit_qc_view,
+            height: height.0,
+            step: VoteStep::Commit,
+            // We don't have the actual signed bytes (sync arrived as a 2f+1
+            // aggregate, not as our own vote), so we leave hash/signature
+            // unset. The is_strictly_after check uses (view, height, step)
+            // tuple ordering and does not require the hash.
+            block_hash: None,
+            signature: None,
+        };
+        if let Err(e) = self.vote_state_store.record(&synthetic) {
+            tracing::warn!(
+                error = %e,
+                synced_height = %height,
+                commit_qc_view,
+                "vote_state_store.record() failed during sync resume — engine \
+                 will still advance its in-memory view, but a crash before the \
+                 next legitimate vote could allow re-signing below the commit \
+                 QC ceiling"
+            );
+        }
+    }
+
     /// Submit a validated transaction to the consensus mempool.
     ///
     /// Called by the event loop after transaction validation (signature, gas, nonce checks).
@@ -706,7 +824,7 @@ impl HotStuff2Engine {
     }
 
     /// Returns the current validator set
-    fn validator_set(&self) -> ValidatorSet {
+    pub fn validator_set(&self) -> ValidatorSet {
         self.epoch_manager.current_validator_set()
     }
 
@@ -1011,9 +1129,13 @@ impl HotStuff2Engine {
     /// Three layered effects:
     ///
     /// 1. **Backward view-counter sync** (DiemBFT v4 §3.5). If
-    ///    `msg.view > local_view` (within [`MAX_VIEW_JUMP`]), advance our
-    ///    local view to match. Prevents permanent view divergence under
-    ///    partial synchrony.
+    ///    `msg.view > local_view`, advance our local view to match. The
+    ///    cryptographic gate is the hybrid signature on `(view,
+    ///    high_qc_view, voter)` — no numeric jump cap is applied, since
+    ///    a stuck replica may legitimately need to sync forward by many
+    ///    thousands of views and the signature itself is the only
+    ///    correctness-relevant authentication. Prevents permanent view
+    ///    divergence under partial synchrony.
     /// 2. **Bracha boost / `f+1` amplification**. The aggregator emits
     ///    `BrachaBoost` when the f+1 threshold is crossed for the timing-out
     ///    view. We respond by firing our local view-timer immediately —
@@ -1030,33 +1152,22 @@ impl HotStuff2Engine {
     pub async fn on_timeout_msg(&self, msg: &crate::timeout::TimeoutMsg) -> Result<()> {
         // Verify signature + validator binding before trusting the view
         // number. Without this, any peer could spoof a TimeoutMsg from a
-        // validator address and drag every replica forward.
+        // validator address and drag every replica forward. After this
+        // returns Ok, the (view, high_qc_view, voter) triple is hybrid-
+        // signature-bound to a registered validator.
+        //
+        // Per DiemBFT v4 §3.5 `process_remote_timeout`, the cryptographic
+        // gate is the signature itself — no numeric jump cap is applied. A
+        // malicious validator's "I timed out at view N" message costs them
+        // a publicly verifiable signature; they cannot drag the protocol
+        // past their own observed state without producing one. Stuck
+        // replicas may legitimately need to sync forward by tens of
+        // thousands of views, and the signature is the only correctness-
+        // relevant authentication needed to do so safely.
         let validator_set = self.validator_set();
         msg.verify(&validator_set)?;
 
         let local_view = self.view_state.read().view;
-
-        // Bound the view jump up-front, before any aggregation work, to
-        // shed work on obvious DoS attempts (a peer claiming view=u64::MAX
-        // would otherwise try to insert into the per-view aggregator and
-        // pin memory).
-        if msg.view > local_view {
-            let jump = msg.view - local_view;
-            if jump > MAX_VIEW_JUMP {
-                tracing::warn!(
-                    msg_view = msg.view,
-                    local_view = local_view,
-                    jump = jump,
-                    max_jump = MAX_VIEW_JUMP,
-                    voter = %msg.voter,
-                    "Refusing to sync to TimeoutMsg view: jump exceeds MAX_VIEW_JUMP"
-                );
-                return Err(ConsensusError::InvalidProposal(format!(
-                    "TimeoutMsg view {} jumps too far from local view {} (max {})",
-                    msg.view, local_view, MAX_VIEW_JUMP
-                )));
-            }
-        }
 
         // Aggregate into the per-view collector. We aggregate timeouts at
         // the local view *and* at views ahead of us — TC formation at a
@@ -1875,6 +1986,43 @@ impl HotStuff2Engine {
             }
         }
 
+        // Embed the Commit QC into the block's `consensus_proof.proof_data` so
+        // it persists alongside the block in storage and is carried over the
+        // wire by the block-sync protocol. Without this, QCs live only in
+        // memory and are lost on restart, and a syncing peer has no way to
+        // verify that a served block was actually finalized.
+        //
+        // Pattern: HotStuff family (Aptos `BlockData::quorum_cert`,
+        // Diem `BlockData::quorum_cert`, libhotstuff `Block::qc`) — each
+        // block carries the QC certifying its parent. Here the block is the
+        // newly-finalized block carrying the Commit QC over itself; the next
+        // block produced will also point back to this block via `prev_hash`,
+        // and the parent's QC chain is reconstructible from each successor's
+        // embedded QC.
+        //
+        // Safety: `BlockHeader::hash()` does NOT cover `consensus_proof`, so
+        // populating `proof_data` here does not change the block's hash.
+        // Existing on-disk blocks (with empty `proof_data`) keep their
+        // identities; new blocks finalized after this point carry verifiable
+        // QCs.
+        let mut block_with_qc = block.clone();
+        match bincode::serialize(&commit_qc) {
+            Ok(qc_bytes) => {
+                block_with_qc.header.consensus_proof.proof_data = qc_bytes;
+            }
+            Err(e) => {
+                // Serialization of an in-memory QC should never fail; if it
+                // somehow does, we still proceed with the empty proof_data
+                // path so finalization is not blocked. The receiving side
+                // will simply be unable to verify this block via block-sync.
+                tracing::error!(
+                    error = %e,
+                    height = %block.header.height,
+                    "Failed to serialize commit QC into block; proceeding without embedded QC"
+                );
+            }
+        }
+
         let transition_height = {
             let mut state = self.view_state.write();
             state.phase = Phase::Decide;
@@ -1883,7 +2031,7 @@ impl HotStuff2Engine {
             tracing::info!(
                 view = state.view,
                 height = %state.height,
-                block_hash = %block.hash(),
+                block_hash = %block_with_qc.hash(),
                 "Commit QC observed — finalizing block"
             );
 
@@ -1892,7 +2040,7 @@ impl HotStuff2Engine {
             // and bail without propagating.
             if let Err(e) = self
                 .finality_tracker
-                .finalize_block(block.clone(), commit_qc.clone())
+                .finalize_block(block_with_qc.clone(), commit_qc.clone())
             {
                 let corrected_height = self.finality_tracker.finalized_height() + 1u64;
                 tracing::warn!(
@@ -2081,9 +2229,11 @@ impl ConsensusEngine for HotStuff2Engine {
         // at drifted views never form a quorum at any single view (the bug
         // that pinned testnet at block_height=0).
         //
-        // [`MAX_VIEW_JUMP`] is the file-level cap shared with
-        // `on_timeout_msg` so a malicious sender can't drag us up to u64::MAX
-        // in one message.
+        // No numeric jump cap is applied here; safe_to_extend (below) is
+        // the cryptographic gate. A proposal that skips views without a
+        // verifiable TC for `proposal_view - 1` is rejected outright; a
+        // proposal that carries one is provably safe to follow regardless
+        // of how large the jump is.
         let proposal_view = block.header.view;
         let proposal_height = block.header.height;
         let (local_view, local_height) = {
@@ -2275,20 +2425,17 @@ impl ConsensusEngine for HotStuff2Engine {
         // `try_form_qc_and_drive_phase` once votes aggregate locally.
         self.fork_choice.add_block(block.clone(), None);
 
-        // Advance local view to match the proposer's view.
+        // Advance local view to match the proposer's view. The
+        // safe_to_extend block above (DiemBFT v4 §3.5) is the cryptographic
+        // gate — by reaching this point the jump has been proven legal:
+        // either `proposal_view == local_view + 1` (happy-path consecutive
+        // view), or a verified TC for view `proposal_view - 1` was
+        // attached, which is itself a 2f+1 cryptographic proof that the
+        // timed-out view was abandoned by an honest super-majority. A
+        // Byzantine proposer cannot forge that proof, so no numeric jump
+        // cap is needed and any cap would simply wedge honest replicas
+        // that have legitimately fallen behind by many thousands of views.
         if proposal_view > local_view {
-            if proposal_view - local_view > MAX_VIEW_JUMP {
-                tracing::warn!(
-                    proposal_view = proposal_view,
-                    local_view = local_view,
-                    max_jump = MAX_VIEW_JUMP,
-                    "Refusing to sync to proposal view: jump exceeds MAX_VIEW_JUMP"
-                );
-                return Err(ConsensusError::InvalidProposal(format!(
-                    "proposal view {} jumps too far from local view {} (max {})",
-                    proposal_view, local_view, MAX_VIEW_JUMP
-                )));
-            }
             let mut state = self.view_state.write();
             // Re-check under the write lock — another task may have advanced
             // us in between.
@@ -2350,46 +2497,6 @@ impl ConsensusEngine for HotStuff2Engine {
             }
         }
 
-        // Pacemaker advance via inbound SyncInfo (Jolteon §3.5 / DiemBFT v4):
-        // a vote whose `high_qc_view = Q` is observable evidence of a 2f+1
-        // Prepare QC at view Q — the QC is itself a 2f+1 aggregate, so a
-        // single piece of evidence suffices to advance the pacemaker. The
-        // next legal proposal will be at view Q+1, so any replica still
-        // sitting at view ≤ Q is provably behind and should fast-forward.
-        //
-        // This is the missing rung that wedged validator-2 in the live
-        // testnet at 2026-04-30: the engine booted at view 29988 (derived
-        // from finalized height), persisted vote_state ceiling was 29999,
-        // and the engine advanced via 700ms timeouts. By the time it caught
-        // up via TimeoutCertificate aggregation, the chain had moved on.
-        // Adopting `vote.high_qc_view + 1` here is the canonical
-        // Aptos/DiemBFT recovery channel — see `aptos-core/consensus/src/
-        // round_manager.rs::process_certificates`.
-        //
-        // Bounded by [`MAX_VIEW_JUMP`] so a Byzantine signer (whose
-        // signature has not yet been verified by `add_vote` below) cannot
-        // drag us up to u64::MAX. Vote signatures are authenticated inside
-        // `add_vote`; until then we treat the field as unverified hint.
-        if vote.high_qc_view > 0 {
-            let target = vote.high_qc_view.saturating_add(1);
-            let mut state = self.view_state.write();
-            if target > state.view && target - state.view <= MAX_VIEW_JUMP {
-                tracing::info!(
-                    from_view = state.view,
-                    to_view = target,
-                    height = %state.height,
-                    voter = %vote.voter,
-                    "Pacemaker: advancing local view via vote SyncInfo high_qc_view+1"
-                );
-                state.view = target;
-                state.phase = Phase::Prepare;
-                state.proposed_block = None;
-                state.prepare_qc = None;
-                state.commit_qc = None;
-                state.reset_timer();
-            }
-        }
-
         // Add the peer vote to the collector. If a QC forms, we must drive
         // phase progression (Prepare→Commit→Decide) here — the run_consensus_step
         // loop only progresses the *leader's* phase via handle_prepare/commit;
@@ -2428,6 +2535,46 @@ impl ConsensusEngine for HotStuff2Engine {
                 Err(e) => return Err(e),
             }
         }; // vote_collector read lock dropped before driving phase progression
+
+        // Pacemaker advance via inbound SyncInfo (Jolteon §3.5 / DiemBFT v4):
+        // a vote whose `high_qc_view = Q` is observable evidence of a 2f+1
+        // Prepare QC at view Q — the QC is itself a 2f+1 aggregate, so a
+        // single piece of evidence suffices to advance the pacemaker. The
+        // next legal proposal will be at view Q+1, so any replica still
+        // sitting at view ≤ Q is provably behind and should fast-forward.
+        //
+        // SECURITY: This adoption runs *after* `add_vote` returned Ok,
+        // which means the vote's hybrid signature has been verified
+        // against the registered validator's keys (voter.rs:454). The
+        // Vote's canonical signing payload binds `(view, voter,
+        // high_qc_view, …)` (voter.rs:106), so a Byzantine signer cannot
+        // forge a `high_qc_view` value without invalidating their
+        // signature. The cryptographic gate is sufficient on its own; no
+        // numeric jump cap is applied, since any cap would wedge honest
+        // replicas that have legitimately fallen behind by many thousands
+        // of views.
+        //
+        // This is the canonical Aptos/DiemBFT recovery channel — see
+        // `aptos-core/consensus/src/round_manager.rs::process_certificates`.
+        if vote.high_qc_view > 0 {
+            let target = vote.high_qc_view.saturating_add(1);
+            let mut state = self.view_state.write();
+            if target > state.view {
+                tracing::info!(
+                    from_view = state.view,
+                    to_view = target,
+                    height = %state.height,
+                    voter = %vote.voter,
+                    "Pacemaker: advancing local view via vote SyncInfo high_qc_view+1"
+                );
+                state.view = target;
+                state.phase = Phase::Prepare;
+                state.proposed_block = None;
+                state.prepare_qc = None;
+                state.commit_qc = None;
+                state.reset_timer();
+            }
+        }
 
         let qc = match qc_opt {
             Some(qc) => qc,
@@ -2977,43 +3124,6 @@ mod tests {
         assert_eq!(engine.view_state.read().view, 20);
     }
 
-    /// Proposals that try to fast-forward more than `MAX_VIEW_JUMP` views must
-    /// be rejected (anti-DoS bound on view counter advancement).
-    #[tokio::test]
-    async fn test_on_proposal_rejects_unbounded_view_jump() {
-        use tenzro_types::block::{Block, BlockHeader, ConsensusAlgorithm, ConsensusProof};
-        use tenzro_types::primitives::{BlockHeight, Hash};
-
-        let (engine, proposer_addr) = build_test_engine(3).await;
-
-        {
-            let mut state = engine.view_state.write();
-            state.view = 0;
-            state.height = BlockHeight::from(1);
-            state.phase = Phase::Prepare;
-        }
-
-        // Way beyond MAX_VIEW_JUMP (1024 in the implementation).
-        let header = BlockHeader::new_at_view(
-            BlockHeight::from(1),
-            10_000_000,
-            Hash::default(),
-            Hash::default(),
-            Hash::default(),
-            proposer_addr,
-            ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
-        );
-        let block = Block::new(header, vec![]);
-
-        let result = engine.on_proposal(&block, None, None, 0).await;
-        assert!(
-            matches!(result, Err(ConsensusError::InvalidProposal(_))),
-            "view jump beyond MAX_VIEW_JUMP must be rejected, got {:?}",
-            result
-        );
-        assert_eq!(engine.view_state.read().view, 0);
-    }
-
     /// Helper: build an engine plus the keypairs and PQ keys for the OTHER
     /// validators (so tests can hybrid-sign a TimeoutMsg "from" a peer).
     /// Returns (engine, peer_keypair, peer_pq_key, peer_address).
@@ -3243,28 +3353,6 @@ mod tests {
         assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
 
         assert_eq!(engine.view_state.read().view, 5, "view unchanged on bad sig");
-    }
-
-    /// A TimeoutMsg jumping more than `MAX_VIEW_JUMP` views beyond the local
-    /// view must be rejected — DoS bound symmetric with `on_proposal`.
-    #[tokio::test]
-    async fn test_on_timeout_msg_rejects_unbounded_view_jump() {
-        let (engine, peer_kp, peer_pq, peer_addr) =
-            build_test_engine_with_peer_signer().await;
-
-        {
-            let mut state = engine.view_state.write();
-            state.view = 0;
-        }
-
-        let msg = peer_sign_timeout(10_000_000, peer_addr, &peer_kp, &peer_pq);
-        let err = engine
-            .on_timeout_msg(&msg)
-            .await
-            .expect_err("massive view jump must be rejected");
-        assert!(matches!(err, ConsensusError::InvalidProposal(_)), "got {err:?}");
-
-        assert_eq!(engine.view_state.read().view, 0, "view unchanged on jump");
     }
 
     /// Builds a 4-validator engine and returns the local engine + each peer's

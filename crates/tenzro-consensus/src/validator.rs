@@ -154,7 +154,14 @@ impl ValidatorInfo {
     }
 }
 
-/// Validator operational status
+/// Validator operational status.
+///
+/// This mirrors the lifecycle in [`tenzro_token::ValidatorRegistryStatus`]
+/// but is the local view consensus uses to decide who participates in the
+/// current round. The token-side registry is the source of truth across
+/// epoch boundaries; consensus only ever sees `Active` / `Inactive` /
+/// `Jailed` / `Unbonding` states reflected from the registry's transition
+/// plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ValidatorStatus {
     /// Active and participating in consensus

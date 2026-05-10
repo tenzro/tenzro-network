@@ -1,0 +1,189 @@
+{
+  "_comment_layout": "Reference workflow spec — load with serde_json into tenzro_workflow::Workflow. workflow_id and gate_id are 32-byte hash arrays; placeholders here MUST be re-derived at load time. Accompanied by supply_chain_dpp_daml_map.json.",
+  "_comment_scenario": "Digital Product Passport (EU EPR / battery-passport pattern): producer → carrier → distributor → retailer chain emits one Attest obligation per hand-off, each carrying a Verifiable Credential of custody transfer. Final attestation closes the passport. Auditor + regulator observe. Mirrored to Canton so the passport is enterprise-resolvable.",
+
+  "workflow_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+  "template_id": null,
+  "creator": "did:tenzro:human:producer-org:1",
+  "title": "supply_chain_dpp",
+  "description": "Multi-hop digital product passport with credentialed custody transfers. Producer issues, carrier + distributor + retailer countersign their leg; regulator + sustainability-auditor observe.",
+
+  "participants": [
+    {
+      "did": "did:tenzro:human:producer-org:1",
+      "roles": ["Initiator", "OracleProvider"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:machine:producer-org:dpp-issuer:1",
+      "roles": ["Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:carrier-org:1",
+      "roles": ["Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:machine:carrier-org:custody-bot:1",
+      "roles": ["Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:distributor-org:1",
+      "roles": ["Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:retailer-org:1",
+      "roles": ["Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:regulator-eu-epr:1",
+      "roles": ["Auditor", "Approver"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:sustainability-auditor:1",
+      "roles": ["Auditor"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    }
+  ],
+
+  "obligations": [
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+  ],
+  "_obligation_records": [
+    {
+      "_comment": "Hand-off 1: producer → carrier custody attestation.",
+      "obligor": "did:tenzro:machine:carrier-org:custody-bot:1",
+      "obligee": "did:tenzro:human:producer-org:1",
+      "kind": {
+        "Attest": {
+          "credential_type": "CustodyTransfer",
+          "subject": "did:tenzro:resource:product-batch:2026-q2-001"
+        }
+      },
+      "due_by": null,
+      "status": "Pending",
+      "discharge_proof_required": "Credential",
+      "bond_anchor": null
+    },
+    {
+      "_comment": "Hand-off 2: carrier → distributor.",
+      "obligor": "did:tenzro:human:distributor-org:1",
+      "obligee": "did:tenzro:machine:carrier-org:custody-bot:1",
+      "kind": {
+        "Attest": {
+          "credential_type": "CustodyTransfer",
+          "subject": "did:tenzro:resource:product-batch:2026-q2-001"
+        }
+      },
+      "due_by": null,
+      "status": "Pending",
+      "discharge_proof_required": "Credential",
+      "bond_anchor": null
+    },
+    {
+      "_comment": "Hand-off 3: distributor → retailer.",
+      "obligor": "did:tenzro:human:retailer-org:1",
+      "obligee": "did:tenzro:human:distributor-org:1",
+      "kind": {
+        "Attest": {
+          "credential_type": "CustodyTransfer",
+          "subject": "did:tenzro:resource:product-batch:2026-q2-001"
+        }
+      },
+      "due_by": null,
+      "status": "Pending",
+      "discharge_proof_required": "Credential",
+      "bond_anchor": null
+    },
+    {
+      "_comment": "Final passport closure: retailer attests sustainability + recycling fields complete.",
+      "obligor": "did:tenzro:human:retailer-org:1",
+      "obligee": "did:tenzro:human:regulator-eu-epr:1",
+      "kind": {
+        "Attest": {
+          "credential_type": "DppFinalClosure",
+          "subject": "did:tenzro:resource:product-batch:2026-q2-001"
+        }
+      },
+      "due_by": null,
+      "status": "Pending",
+      "discharge_proof_required": "Credential",
+      "bond_anchor": null
+    }
+  ],
+
+  "approval_gates": [
+    {
+      "_comment_id": "Derived at load time via ApprovalGate::derive_id(workflow_id, 'regulator_signoff_on_close').",
+      "gate_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      "workflow_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      "triggers": {
+        "InWorkflowStatus": ["settling"]
+      },
+      "approvers": {
+        "Single": {
+          "did": "did:tenzro:human:regulator-eu-epr:1"
+        }
+      },
+      "timeout": 604800,
+      "on_timeout": {
+        "EscalateTo": {
+          "did": "did:tenzro:human:sustainability-auditor:1"
+        }
+      }
+    }
+  ],
+
+  "root_policy": {
+    "And": [
+      {
+        "ParticipantHasRole": "Auditor"
+      },
+      {
+        "ChainIn": ["tenzro", "canton:global-synchronizer"]
+      }
+    ]
+  },
+
+  "privacy_domain": null,
+  "_comment_privacy_domain": "Set at load time. Visibility = MembersPlusAuditors so the regulator and sustainability auditor receive unredacted credentials. Carrier-leg geo-coordinates can be redacted in the consumer-facing passport view via a derived domain.",
+
+  "fee_route": null,
+  "_comment_fee_route": "Set at load time. No external fee leg — passport credentials carry no value transfer. Producer pays the per-attestation gas + 0.5% network fee on the issuance leg only.",
+
+  "signatures": [],
+  "status": "Draft",
+
+  "canton_mirror": {
+    "synchronizer_id": "global-synchronizer",
+    "party": "tenzro::1220dpp00000000000000000000000000000000000000000000000000000000",
+    "contract_id": "00dpp#0"
+  },
+
+  "created_at": 1700000000,
+  "updated_at": 1700000000
+}

@@ -207,9 +207,13 @@ pub enum ConsensusMessage {
     /// Pacemaker timeout broadcast (DiemBFT v4 §3.5).
     ///
     /// Sent on local view-timer expiry. Receivers at a strictly lower view
-    /// adopt `view` (subject to `MAX_VIEW_JUMP` cap in the consensus engine).
-    /// This is the backward-sync channel that prevents two honest replicas
-    /// from drifting apart by N views under partial synchrony.
+    /// adopt `view` after verifying the sender's hybrid signature — the
+    /// signature is the cryptographic gate (DiemBFT v4 §3.5
+    /// `process_remote_timeout`); no numeric jump cap is applied, since
+    /// stuck replicas may legitimately need to sync forward by many
+    /// thousands of views. This is the backward-sync channel that
+    /// prevents two honest replicas from drifting apart under partial
+    /// synchrony.
     ///
     /// The two opaque blobs are bincode-serialized `CompositeSignature` /
     /// `CompositePublicKey` from `tenzro_crypto::composite`, mirroring the
@@ -506,10 +510,20 @@ pub struct PricingInfo {
 /// Status message for peer synchronization.
 ///
 /// Broadcast on `tenzro/status` every 10s by every node and consumed
-/// by `PeerStatusTracker` to compute a network-tip estimate for `eth_syncing`.
+/// by `PeerStatusTracker` to compute a network-tip estimate for `eth_syncing`
+/// and to discover TEE-capable peers for confidential-compute routing.
 /// `peer_id` is embedded so subscribers can attribute the message to a sender —
 /// gossipsub does not surface the originating PeerId to topic subscribers,
 /// only to the swarm event handler.
+///
+/// # TEE capability advertisement
+///
+/// Every node advertises its TEE capability here so peers can route
+/// confidential-compute and custodial-key workloads to TEE-equipped nodes
+/// without requiring out-of-band discovery. All nodes participate in
+/// consensus regardless of `tee_capable`; the field is purely a routing
+/// hint for TEE-gated workloads (confidential AI inference, custodial
+/// key management, attestation issuance).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusMessage {
     /// libp2p PeerId of the sender, base58-encoded. Subscribers parse this
@@ -524,6 +538,13 @@ pub struct StatusMessage {
     pub chain_id: u64,
     /// Protocol version
     pub protocol_version: String,
+    /// Whether this node has a TEE provider available and can serve
+    /// confidential-compute / custodial workloads on behalf of peers.
+    pub tee_capable: bool,
+    /// TEE vendor for this node, if any (`None` on commodity hardware).
+    /// Peers consult this when selecting a TEE provider for a specific
+    /// vendor requirement (e.g. SEV-SNP-only workloads).
+    pub tee_vendor: Option<tenzro_types::tee::TeeVendor>,
 }
 
 /// Message validation

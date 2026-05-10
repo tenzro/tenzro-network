@@ -76,7 +76,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "Tenzro Cortex reasoning-tier inference via signed receipts. "
                     "Dispatch requests to local or remote cortex workers with a "
                     "reasoning budget (Fast/Standard/Deep), MoE (rdt-moe) model "
-                    "family constraints, and per-request max_cost_tnzo cap. "
+                    "family constraints, and per-request max_cost_wei cap. "
                     "Every response carries a verifiable receipt bound to the "
                     "worker DID, loops_used, tokens_in/out, weights_hash, "
                     "runtime_hash, and Ed25519 signature. Discover remote "
@@ -90,8 +90,8 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 ],
                 "examples": [
                     "List remote cortex workers on the network",
-                    "Run Standard-tier reasoning on mythos-3b (metadata.input, max_cost_tnzo)",
-                    "Run Fast-tier cortex inference with budget 1M TNZO",
+                    "Run Standard-tier reasoning on mythos-3b (metadata.input, max_cost_wei)",
+                    "Run Fast-tier cortex inference with budget 1e18 wei (1 TNZO)",
                     "Verify a cortex receipt (metadata.receipt)",
                     "Get cortex worker metrics from /metrics",
                 ],
@@ -656,6 +656,52 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "Embed a base64 video clip with frame_stride=30",
                 ],
                 "inputModes": ["application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "workflow",
+                "name": "Canton-Native Workflows",
+                "description": (
+                    "Multi-party workflows: typed Workflow records with "
+                    "Participants, Obligations (Pay/Deliver/Attest/Settle/"
+                    "Custom), ApprovalGates (Single/Threshold/Role/"
+                    "Delegated approver sets), composite PolicyExpr DSL "
+                    "(amount/counterparty/time/asset/chain/role gates), "
+                    "lifecycle history, fee routes (basis-point splits), "
+                    "and privacy domains (X25519-sealed envelopes). "
+                    "Reads are exposed via tenzro_getWorkflow / "
+                    "list_workflows_by_creator|participant|status, "
+                    "tenzro_getObligation / Approval{Gate,Request}, "
+                    "tenzro_listWorkflowReceipts (chain walk), "
+                    "tenzro_listFeeRoutes / computeFeeRoutePayouts, "
+                    "tenzro_getPrivacyDomain / listPrivacyDomainsForDid, "
+                    "tenzro_getWorkflowOperationalMetrics. Writes flow "
+                    "through signed transactions against the privileged-VM "
+                    "workflow selectors 0x01000040–0x0100004B. Workflows "
+                    "may optionally mirror to a Canton synchronizer via "
+                    "tenzro_mirrorWorkflowToCanton for enterprise "
+                    "interoperability with DAML 3.x."
+                ),
+                "tags": [
+                    "workflow", "canton", "daml", "multi-party",
+                    "obligations", "approvals", "policy", "fee-route",
+                    "privacy-domain", "receipts", "audit",
+                ],
+                "examples": [
+                    "Get workflow 0x… (creator, participants, obligations, status)",
+                    "List workflows where did:tenzro:human:alice is a participant",
+                    "List workflows in status awaiting_signatures",
+                    "Get the lifecycle history for workflow 0x…",
+                    "Get obligation 0x… (kind, amount, status, discharge_proof)",
+                    "Get approval request 0x… (decisions collected, threshold progress)",
+                    "List receipts for workflow 0x… max=100",
+                    "List all fee routes",
+                    "Compute payouts for fee route 0x… given gross_wei=50000000",
+                    "Get privacy domain 0x… (members, frozen, envelope policy)",
+                    "Snapshot of workflow operational metrics (statuses, sigs, mirror count)",
+                    "Mirror workflow 0x… to canton synchronizer canton-mainnet",
+                ],
+                "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],
             },
         ],

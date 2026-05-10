@@ -270,7 +270,7 @@ impl RecurrentDepthModel for SidecarModel {
             None,
             body.input_tokens,
             body.output_tokens,
-            0, // price_tnzo — finalized by worker
+            0, // price_wei — finalized by worker
         )?;
 
         let response_id = uuid::Uuid::new_v4().to_string();
@@ -282,7 +282,7 @@ impl RecurrentDepthModel for SidecarModel {
             worker: self.worker_address,
             output,
             metadata,
-            price_tnzo: 0,
+            price_wei: 0,
             receipt,
             timestamp: tenzro_types::primitives::Timestamp::now(),
         })

@@ -9,6 +9,7 @@ description = "TNZO token, treasury management, staking, and governance for Tenz
 [dependencies]
 tenzro-types = { workspace = true }
 tenzro-storage = { workspace = true }
+tenzro-crypto = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

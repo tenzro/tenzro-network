@@ -43,7 +43,7 @@ After month 12, surplus from the SeedAgent allocation returns to general treasur
 ```
 TreasuryEarmark {
     name:                     "SeedAgent",
-    initial_allocation_tnzo:  X,                     // governance-decided at genesis
+    initial_allocation_wei:   X,                     // governance-decided at genesis (1 TNZO = 10^18 wei)
     allocation_remaining:     u128,
     bootstrap_start:          Timestamp,
     bootstrap_end:            Timestamp,             // typically +12 months
@@ -54,7 +54,7 @@ TreasuryEarmark {
 
 DecayPoint {
     month:           u8,           // 0..12
-    max_draw_tnzo:   u128,         // upper bound on SeedAgent funding this month
+    max_draw_wei:    u128,         // upper bound on SeedAgent funding this month (wei)
 }
 ```
 
@@ -128,7 +128,7 @@ Network-wide metrics carry an `excluding_seed_agents` cut alongside the all-incl
 
 ```
 tenzro_listSeedAgents
-    → [{ agent_did, charter_id, status, allocation_used_tnzo, last_active }]
+    → [{ agent_did, charter_id, status, allocation_used_wei, last_active }]
 
 tenzro_getSeedAgentCharter { charter_id }
     → Charter

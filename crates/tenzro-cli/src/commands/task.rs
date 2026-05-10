@@ -146,7 +146,7 @@ impl ListTasksCmd {
                     output::print_field("Title", title);
                     output::print_field("Type", task_type);
                     output::print_field("Status", status);
-                    output::print_field("Max Price", &format!("{} TNZO-units", max_price));
+                    output::print_field("Max Price", &format!("{} wei", max_price));
                     println!();
                 }
                 if arr.is_empty() {
@@ -171,9 +171,10 @@ pub struct PostTaskCmd {
     /// Task type (inference, code_review, data_analysis, content_generation, translation, research)
     #[arg(long, default_value = "inference")]
     task_type: String,
-    /// Maximum price you will pay (in TNZO micro-units)
+    /// Maximum price you will pay, in whole TNZO (e.g. "1.5"). Converted to
+    /// wei (10^-18 TNZO) before submission.
     #[arg(long)]
-    max_price: u128,
+    max_price: String,
     /// Task input/prompt
     #[arg(long)]
     input: String,
@@ -189,11 +190,12 @@ impl PostTaskCmd {
         let spinner = output::create_spinner("Posting task to marketplace...");
         let rpc = rpc::RpcClient::new(&self.rpc);
 
+        let max_price_wei = crate::units::tnzo_to_wei_string(&self.max_price)?;
         let params = serde_json::json!({
             "title": self.title,
             "description": self.description,
             "task_type": self.task_type,
-            "max_price": self.max_price,
+            "max_price": max_price_wei,
             "input": self.input,
         });
 
@@ -442,9 +444,9 @@ pub struct UpdateTaskCmd {
     /// Updated description
     #[arg(long)]
     description: Option<String>,
-    /// Updated max price
+    /// Updated max price, in whole TNZO (e.g. "1.5"). Converted to wei.
     #[arg(long)]
-    max_price: Option<u128>,
+    max_price: Option<String>,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -458,7 +460,10 @@ impl UpdateTaskCmd {
         let mut params = serde_json::json!({ "task_id": self.task_id });
         if let Some(ref s) = self.status { params["status"] = serde_json::json!(s); }
         if let Some(ref d) = self.description { params["description"] = serde_json::json!(d); }
-        if let Some(p) = self.max_price { params["max_price"] = serde_json::json!(p); }
+        if let Some(ref p) = self.max_price {
+            let wei = crate::units::tnzo_to_wei_string(p)?;
+            params["max_price"] = serde_json::json!(wei);
+        }
         let _result: serde_json::Value = rpc.call("tenzro_updateTask", serde_json::json!([params])).await?;
         spinner.finish_and_clear();
         output::print_success("Task updated!");

@@ -102,7 +102,7 @@ tenzro_listReceiptsByController { controller_did, since?, until?, limit }
 tenzro_summarizeController { controller_did, since?, until? }
     → {
         receipt_count,
-        total_value_tnzo,
+        total_value_wei,
         agents_acted_under: [did_list],
         kill_switch_events: u32,
         kyc_tier_at_oldest: u8,
@@ -126,7 +126,7 @@ MCP: `get_receipt_principal_chain`, `list_receipts_by_controller`, `summarize_co
 {
   "receipt_id": "0xabc...",
   "kind": "Settlement",
-  "amount_tnzo": "5000000000000000000",
+  "amount_wei": "5000000000000000000",
   "payer": "did:tenzro:machine:bot42:uuid",
   "payee": "did:tenzro:machine:provider:uuid",
   "principal_chain": {

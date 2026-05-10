@@ -115,7 +115,7 @@ mod tests {
             requester: Address::default(),
             input: b"hello cortex".to_vec(),
             budget: ReasoningBudget {
-                max_cost_tnzo: 10_000_000_000,
+                max_cost_wei: 10_000_000_000,
                 ..budget
             },
             params: Default::default(),
@@ -123,7 +123,7 @@ mod tests {
         };
         let resp = worker.execute(&req).await.unwrap();
         assert_eq!(resp.metadata.loops_used, 8);
-        assert!(resp.price_tnzo > 0);
+        assert!(resp.price_wei > 0);
         verify_receipt(&resp.receipt).unwrap();
     }
 
@@ -139,7 +139,7 @@ mod tests {
                 min_loops: 50,
                 max_loops: 100,
                 tier: ReasoningTier::Deep,
-                max_cost_tnzo: 10_000_000_000,
+                max_cost_wei: 10_000_000_000,
                 attestation: AttestationRequirement::None,
                 deadline_ms: None,
             },

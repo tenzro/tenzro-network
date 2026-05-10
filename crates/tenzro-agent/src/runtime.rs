@@ -748,6 +748,35 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// Resumes a Suspended agent back to Active.
+    ///
+    /// Companion to [`suspend_agent`] — the recovery path for agents flipped to
+    /// `Suspended` by the heartbeat monitor (`AgentLifecycle::check_heartbeats`)
+    /// or by an operational suspend. Distinct from `resume_paused_agent` /
+    /// `resume_quarantined_agent`, which operate on the kill-switch axes
+    /// (`Paused` and `Quarantined`).
+    ///
+    /// Re-flips the identity status from `Suspended` to `Active`
+    /// (`AgentIdentityManager::reactivate_agent`) and the lifecycle FSM from
+    /// `Suspended` to `Active` (`AgentLifecycle::resume`). Both transitions
+    /// are persisted.
+    pub async fn resume_agent(&self, agent_id: &str) -> Result<()> {
+        // Reactivate in identity manager (Suspended → Active).
+        self.identity_manager.reactivate_agent(agent_id)?;
+
+        // Resume in lifecycle manager (Suspended → Active).
+        self.lifecycle_manager.resume(agent_id)?;
+
+        // Write-through: status + lifecycle both changed.
+        self.resync_agent(agent_id)?;
+        self.persist_lifecycle(agent_id)?;
+
+        // Update statistics
+        self.update_statistics().await;
+
+        Ok(())
+    }
+
     /// Pauses an agent via the kill-switch primitive.
     ///
     /// Drives the lifecycle Active → Paused. Identity-level status is
@@ -1028,6 +1057,13 @@ impl AgentRuntime {
     /// alongside the registry-level TTL passes.
     pub fn lifecycle_manager(&self) -> Arc<AgentLifecycle> {
         self.lifecycle_manager.clone()
+    }
+
+    /// Returns a handle to the identity manager. Used by the node-side
+    /// `LifecycleStateResolver` bridge to resolve `payer_did → agent_id`
+    /// when projecting the kill-switch posture into the payment gate.
+    pub fn identity_manager(&self) -> Arc<AgentIdentityManager> {
+        self.identity_manager.clone()
     }
 
     /// Returns a handle to the capability registry. Used by the node RPC,

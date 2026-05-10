@@ -53,6 +53,7 @@ pub mod provenance;
 pub mod bond;
 pub mod insurance;
 pub mod capability;
+pub mod validator;
 
 // Re-export command types
 pub use node::NodeCommand;
@@ -107,3 +108,4 @@ pub use provenance::ProvenanceCommand;
 pub use bond::BondCommand;
 pub use insurance::InsuranceCommand;
 pub use capability::CapabilityCommand;
+pub use validator::ValidatorCommand;

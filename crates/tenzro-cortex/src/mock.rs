@@ -101,7 +101,7 @@ impl RecurrentDepthModel for MockCortexModel {
             worker: self.worker_address,
             output,
             metadata,
-            price_tnzo: 0,
+            price_wei: 0,
             receipt,
             timestamp: tenzro_types::primitives::Timestamp::now(),
         })

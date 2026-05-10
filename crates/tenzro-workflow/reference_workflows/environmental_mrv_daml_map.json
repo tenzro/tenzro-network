@@ -1,0 +1,33 @@
+{
+  "_comment": "DAML codegen mapping for environmental_mrv.json. Issuance leg binds to the CIP-56 Token.MintInstruction interface so the registrar's discharge_pay choice mints CARBON tokens through the standard token flow. Attest legs anchor measurement + verification credentials.",
+
+  "module": "Tenzro.Workflow.EnvironmentalMrv",
+  "template_name": "EnvironmentalMrv",
+  "obligation_spec_type": "ObligationSpec",
+
+  "obligation_choices": [
+    {
+      "kind_tag": "Attest",
+      "choice_name": "DischargeAttest",
+      "choice_args": [
+        { "name": "credential_type", "daml_type": "Text" },
+        { "name": "subject_did", "daml_type": "Text" },
+        { "name": "credential_hash", "daml_type": "Text" },
+        { "name": "tee_quote_hash", "daml_type": "Optional Text" },
+        { "name": "issued_at", "daml_type": "Time" }
+      ]
+    },
+    {
+      "kind_tag": "Pay",
+      "choice_name": "DischargeMint",
+      "choice_args": [
+        { "name": "amount", "daml_type": "Decimal" },
+        { "name": "asset_symbol", "daml_type": "Text" },
+        { "name": "mint_receipt_hash", "daml_type": "Text" },
+        { "name": "verification_anchor", "daml_type": "Text" }
+      ]
+    }
+  ],
+
+  "external_interface": "Token.MintInstruction"
+}

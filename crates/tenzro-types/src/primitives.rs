@@ -558,6 +558,94 @@ pub mod u128_serde {
     }
 }
 
+/// `Option<u128>` adapter mirroring [`u128_serde`] semantics. Apply via
+/// `#[serde(default, with = "u128_serde_opt")]` on an `Option<u128>` field.
+///
+/// Accepts JSON `null`/missing → `None`, JSON number or decimal string → `Some`.
+/// Serializes `None` as `null`, `Some(v)` as a number when it fits `u64`,
+/// otherwise as a decimal string.
+pub mod u128_serde_opt {
+    use serde::de::{self, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<u128>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            None => serializer.serialize_none(),
+            Some(v) if *v <= u64::MAX as u128 => serializer.serialize_u64(*v as u64),
+            Some(v) => serializer.serialize_str(&v.to_string()),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<u128>, D::Error> {
+        struct OptU128Visitor;
+
+        impl<'de> Visitor<'de> for OptU128Visitor {
+            type Value = Option<u128>;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("null, a non-negative integer, or a decimal string fitting in u128")
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Option<u128>, E> {
+                Ok(None)
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Option<u128>, E> {
+                Ok(None)
+            }
+
+            fn visit_some<D2: Deserializer<'de>>(
+                self,
+                deserializer: D2,
+            ) -> Result<Option<u128>, D2::Error> {
+                super::u128_serde::deserialize(deserializer).map(Some)
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Option<u128>, E> {
+                Ok(Some(v as u128))
+            }
+
+            fn visit_u128<E: de::Error>(self, v: u128) -> Result<Option<u128>, E> {
+                Ok(Some(v))
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Option<u128>, E> {
+                if v < 0 {
+                    Err(E::custom(format!("negative integer {v} is not a valid u128")))
+                } else {
+                    Ok(Some(v as u128))
+                }
+            }
+
+            fn visit_i128<E: de::Error>(self, v: i128) -> Result<Option<u128>, E> {
+                if v < 0 {
+                    Err(E::custom(format!("negative integer {v} is not a valid u128")))
+                } else {
+                    Ok(Some(v as u128))
+                }
+            }
+
+            fn visit_str<E: de::Error>(self, s: &str) -> Result<Option<u128>, E> {
+                s.parse::<u128>()
+                    .map(Some)
+                    .map_err(|e| E::custom(format!("invalid u128 string {s:?}: {e}")))
+            }
+
+            fn visit_string<E: de::Error>(self, s: String) -> Result<Option<u128>, E> {
+                self.visit_str(&s)
+            }
+        }
+
+        deserializer.deserialize_any(OptU128Visitor)
+    }
+}
+
 #[cfg(test)]
 mod u128_serde_tests {
     use serde::{Deserialize, Serialize};

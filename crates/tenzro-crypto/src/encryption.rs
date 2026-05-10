@@ -9,7 +9,8 @@ use aes_gcm::{
 };
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
+pub use x25519_dalek::PublicKey as X25519PublicKey;
+use x25519_dalek::StaticSecret as X25519StaticSecret;
 use zeroize::Zeroize;
 
 /// Size of AES-256 key in bytes

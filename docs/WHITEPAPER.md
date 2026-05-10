@@ -1428,6 +1428,23 @@ Canton topology is managed through topology transactions: `NamespaceDelegation`,
 
 By running Canton validators directly, Tenzro gains the enterprise-grade privacy and composability guarantees of the Canton Network — including sub-transaction privacy, need-to-know data sharing, atomic multi-synchronizer transfers, and regulatory-compliant smart contracts — without requiring users to interact with a separate ledger.
 
+### 14.7 Multi-Party Workflows on Canton
+
+The Canton execution surface from §14.6 is generalized into a Canton-native **multi-party workflow** primitive in `tenzro-workflow`. A workflow has a typed lifecycle (`Draft → Active → AwaitingSignatures → Executing → Completed`, with terminal `Cancelled / Disputed / Failed / Suspended`), a counterparty set, an obligations table, an approvals graph governed by a small policy DSL, an optional fee route, and an optional privacy domain. State changes flow exclusively through privileged-VM selectors `0x01000040`–`0x0100004B` dispatched by signed transactions, so the chain's block history is the canonical workflow log.
+
+Each successful state transition produces a `WorkflowReceipt` carrying `state_before / state_after / signer / block_height / prev_receipt`. Receipts form a per-workflow hash chain anchored at `Hash::default()` and persisted under `wf_receipt:<id>`; the chain head is held in the workflow's `WorkflowMeta`. When a workflow opts into Canton mirroring, the same receipt is projected into a `Tenzro.Workflow.Receipt` Daml template through the co-located participant's Ledger API, with the `ReceiptEnvelope` embedded inline (small payloads) or referenced as a `DaPointer` (large payloads, per §17). Canton's sub-transaction privacy ensures only the workflow's stakeholders observe the mirrored receipt.
+
+Two safety primitives sit on top of this core:
+
+- **Privacy domains.** A `PrivacyDomain` is a named ACL of TDIP DIDs that gates encrypted payloads. Workflows that opt into a domain seal their `payload` and event payloads with a domain key shared among the ACL; AES-256-GCM symmetric envelope encryption (per §7) makes the seal/open round-trip symmetric. Auditors inside the ACL can open payloads they were never explicit recipients of. A frozen domain refuses new sealings while permitting existing payloads to continue being opened.
+- **Kill switch.** Selectors `0x01000048` (suspend) and `0x01000049` (cancel) provide a defined emergency-stop path. The initiator can suspend at any time; suspended workflows reject all writes except cancel and dispute. The pair removes the only condition under which an autonomous agent could be trapped in a non-responsive multi-party flow it initiated.
+
+A snapshot of operational health (workflow / obligation / approval counts by status, signatures collected, Canton mirrors, fee routes, privacy domains) is exposed via `WorkflowRuntime::operational_metrics()` and rendered to the node's `/metrics` Prometheus endpoint with `BTreeMap` ordering for deterministic output. The accompanying Grafana dashboard (`deploy/monitoring/grafana-workflow-dashboard.json`, UID `tenzro-workflow`) graphs all of the above.
+
+Read access to workflows, obligations, approvals, receipts, fee routes, privacy domains, and operational metrics is mirrored across all three external surfaces: JSON-RPC (`tenzro_*` namespace), MCP (port 3001, as `#[tool]`-defined methods), and A2A (port 3002, as the `workflow` skill on the Tenzro Agent Card). Writes never occur through these surfaces — every state-changing operation is a signed privileged-VM selector.
+
+Five reference workflow templates ship under `crates/tenzro-workflow/reference_workflows/` (autonomous procurement, autonomous treasury, DvP settlement, environmental MRV, supply-chain digital product passport), each paired with a `*_daml_map.json` describing the Canton DAML projection and defining its `WorkflowSpec` (counterparty roles, obligations, approvals graph, fee route, privacy domain) for instantiation by the agent-kit spawner.
+
 ---
 
 ## 15. Wallet and Key Management

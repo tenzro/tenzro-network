@@ -271,7 +271,7 @@ async def handle_identity(text: str, metadata: dict = None) -> str:
         )
 
     if did:
-        result = await rpc_call("tenzro_resolveIdentity", [did])
+        result = await rpc_call("tenzro_resolveIdentity", {"did": did})
         return json.dumps(result, indent=2)
 
     if "register" in t:

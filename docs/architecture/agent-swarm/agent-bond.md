@@ -108,10 +108,10 @@ Slashing is bounded:
 
 ```
 InsurancePool {
-    balance_tnzo:        u128,
+    balance_wei:         u128,
     open_claims:         Vec<ClaimId>,
     paid_claims:         u64,
-    total_paid_tnzo:     u128,
+    total_paid_wei:      u128,
 }
 
 ClaimRecord {
@@ -220,7 +220,7 @@ Bonds are state; bond txs are signed by the controller using hybrid Ed25519 + ML
 | `bond_min_for_promotion_verified` | 50,000 TNZO | requires controller KYC Basic+ |
 | `bond_cooldown_days` | 14 | |
 | `max_single_slash_bps` | 5000 (50%) | per dispute |
-| `min_residual_tnzo` | 10 | floor; below, full Slashed |
+| `min_residual_wei` | 10 × 10^18 | floor; below, full Slashed |
 | `terminate_remainder_disposition` | "refund_controller" | or "burn" / "treasury" |
 | `insurance_burn_share_bps` | 0 | % of EIP-1559 burn redirected to insurance pool |
 | `claim_governance_quorum` | simple majority | |

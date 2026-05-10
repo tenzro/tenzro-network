@@ -53,6 +53,7 @@ pub mod bond;
 pub mod burn_quota;
 pub mod adaptive_burn;
 pub mod seed_agent;
+pub mod validator_registry;
 
 // Re-export commonly used types
 pub use error::{TokenError, Result};
@@ -106,4 +107,10 @@ pub use seed_agent::{
     TargetThroughput, TreasuryEarmark, DEFAULT_BOOTSTRAP_MONTHS,
     DEFAULT_SURPLUS_BURN_BPS, SEED_AGENT_PREFIX, SEED_CHARTER_PREFIX,
     SEED_EARMARK_KEY,
+};
+pub use validator_registry::{
+    EpochTransitionPlan, ValidatorRegistry, ValidatorRegistryConfig, ValidatorRegistryEntry,
+    ValidatorRegistryStatus, ACTIVATION_EFFECTIVE_DELAY_BLOCKS, DEFAULT_ACTIVATION_CHURN_BPS,
+    DEFAULT_EXIT_CHURN_BPS, DEFAULT_MIN_VALIDATOR_SELF_STAKE, DEFAULT_REENTRY_COOLDOWN_EPOCHS,
+    MIN_CHURN_PER_EPOCH, VALIDATOR_CONFIG_KEY, VALIDATOR_INDEX_KEY, VALIDATOR_PREFIX,
 };

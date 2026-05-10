@@ -39,6 +39,7 @@ The `tenzro-bridge` crate provides a unified interface for cross-chain interoper
 - **Patterns**: Multi-party workflows, DvP settlements
 - **Best for**: Regulated enterprise use cases (tokenization, trade finance)
 - **Fee Quoting**: Live HTTP call to Canton Admin API `/admin/synchronizer/{id}/fee-schedule` with static fallback
+- **Workflow receipt mirror**: `tenzro-workflow` emits `Tenzro.Workflow.Receipt` Daml contracts through the co-located participant Ledger API for every `WorkflowReceipt` produced by the workflow runtime. See `docs/SPECIFICATION.md` §14.7.3 and `crates/tenzro-workflow/`.
 
 ### Wormhole
 - **Type**: Generic cross-chain message passing and token transfer protocol

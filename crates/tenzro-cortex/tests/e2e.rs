@@ -14,9 +14,9 @@
 //!    canonical preimage; receipt must bind (model_id, weights_hash,
 //!    runtime_hash, loops_used, worker_did, worker_address, commitments,
 //!    price).
-//! 4. SETTLE — final price_tnzo must equal [`CortexPricing::compute`]
+//! 4. SETTLE — final price_wei must equal [`CortexPricing::compute`]
 //!    over the reported tokens/loops/attestation requirement, and must
-//!    fall within the caller's [`ReasoningBudget::max_cost_tnzo`].
+//!    fall within the caller's [`ReasoningBudget::max_cost_wei`].
 //!
 //! The mock backend is deterministic so these assertions are exact, not
 //! probabilistic. For sidecar-backed coverage, run the reference Python
@@ -93,7 +93,7 @@ fn standard_request(request_id: &str, input: Vec<u8>) -> CortexRequest {
         requester: Address::default(),
         input,
         budget: ReasoningBudget {
-            max_cost_tnzo: 10_000_000_000,
+            max_cost_wei: 10_000_000_000,
             ..ReasoningBudget::for_tier(ReasoningTier::Standard)
         },
         params: Default::default(),
@@ -178,26 +178,26 @@ async fn e2e_register_infer_verify_settle() {
         AttestationRequirement::None,
     );
     assert_eq!(
-        resp.price_tnzo, expected_price,
+        resp.price_wei, expected_price,
         "response price matches pricing formula"
     );
     assert_eq!(
-        resp.receipt.price_tnzo, expected_price,
+        resp.receipt.price_wei, expected_price,
         "receipt price matches pricing formula"
     );
     assert!(
-        resp.price_tnzo > 0,
+        resp.price_wei > 0,
         "standard-tier inference must be metered with non-zero cost"
     );
     assert!(
-        resp.price_tnzo <= req.budget.max_cost_tnzo,
+        resp.price_wei <= req.budget.max_cost_wei,
         "settled price must be within requested budget ceiling"
     );
 }
 
 /// Mutating any field of a signed receipt must invalidate the signature.
 /// This guards against a malicious settlement service rewriting
-/// loops_used / price_tnzo / tokens_* after the worker releases the receipt.
+/// loops_used / price_wei / tokens_* after the worker releases the receipt.
 #[tokio::test]
 async fn tampered_receipt_fails_verify() {
     let ctx = build_worker();
@@ -233,7 +233,7 @@ async fn out_of_family_budget_rejected() {
             min_loops: 50,
             max_loops: 100,
             tier: ReasoningTier::Deep,
-            max_cost_tnzo: 10_000_000_000,
+            max_cost_wei: 10_000_000_000,
             attestation: AttestationRequirement::None,
             deadline_ms: None,
         },

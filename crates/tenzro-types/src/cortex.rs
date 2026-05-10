@@ -89,8 +89,8 @@ pub enum AttestationRequirement {
 /// Budget envelope for a single Cortex reasoning request.
 ///
 /// The worker MUST use at least `min_loops` and at most `max_loops`
-/// of the model's recurrent block, MUST not exceed `max_cost_tnzo`
-/// (in the smallest TNZO unit), and MUST satisfy `attestation`.
+/// of the model's recurrent block, MUST not exceed `max_cost_wei`
+/// (TNZO base units, 1 TNZO = 10^18 wei), and MUST satisfy `attestation`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReasoningBudget {
     /// Minimum number of recurrent loops to execute.
@@ -99,8 +99,9 @@ pub struct ReasoningBudget {
     pub max_loops: u32,
     /// Tier hint for routing and pricing.
     pub tier: ReasoningTier,
-    /// Maximum total cost, in smallest TNZO unit.
-    pub max_cost_tnzo: u64,
+    /// Maximum total cost in wei (1 TNZO = 10^18 wei).
+    #[serde(with = "crate::primitives::u128_serde")]
+    pub max_cost_wei: u128,
     /// Attestation requirement.
     pub attestation: AttestationRequirement,
     /// Optional wall-clock deadline in milliseconds.
@@ -133,7 +134,7 @@ impl ReasoningBudget {
             max_loops,
             tier,
             // 1 TNZO ceiling by default; callers should set this explicitly.
-            max_cost_tnzo: 1_000_000_000_000_000_000,
+            max_cost_wei: 1_000_000_000_000_000_000,
             attestation,
             deadline_ms: None,
         }
@@ -188,8 +189,9 @@ pub struct CortexResponse {
     pub output: Vec<u8>,
     /// Reasoning-specific metadata.
     pub metadata: CortexMetadata,
-    /// Final price charged in smallest TNZO unit.
-    pub price_tnzo: u64,
+    /// Final price charged in wei (1 TNZO = 10^18 wei).
+    #[serde(with = "crate::primitives::u128_serde")]
+    pub price_wei: u128,
     /// Receipt binding this response to its inputs, weights, and worker.
     pub receipt: CortexReceipt,
     /// Response creation timestamp.
@@ -261,8 +263,9 @@ pub struct CortexReceipt {
     pub tokens_in: u32,
     /// Output tokens charged.
     pub tokens_out: u32,
-    /// Final settled price in smallest TNZO unit.
-    pub price_tnzo: u64,
+    /// Final settled price in wei (1 TNZO = 10^18 wei).
+    #[serde(with = "crate::primitives::u128_serde")]
+    pub price_wei: u128,
     /// Receipt creation timestamp.
     pub timestamp: Timestamp,
     /// Worker signature over the canonical receipt preimage.
@@ -292,7 +295,7 @@ impl CortexReceipt {
             zk_proof: self.zk_proof.as_deref(),
             tokens_in: self.tokens_in,
             tokens_out: self.tokens_out,
-            price_tnzo: self.price_tnzo,
+            price_wei: self.price_wei,
             timestamp: self.timestamp,
         };
         serde_json::to_vec(&core).unwrap_or_default()
@@ -314,7 +317,7 @@ struct CortexReceiptPreimage<'a> {
     zk_proof: Option<&'a [u8]>,
     tokens_in: u32,
     tokens_out: u32,
-    price_tnzo: u64,
+    price_wei: u128,
     timestamp: Timestamp,
 }
 
@@ -324,70 +327,70 @@ struct CortexReceiptPreimage<'a> {
 
 /// Loop-aware pricing configuration for a Cortex model.
 ///
-/// Total cost formula (all values in smallest TNZO unit):
+/// All amounts are in wei (1 TNZO = 10^18 wei). Total cost formula:
 ///
 /// ```text
-/// cost = base_request_fee
-///      + tokens_in  * price_per_input_token
-///      + tokens_out * price_per_output_token
-///      + loops_used * price_per_loop
-///      + tee_premium  (if attestation includes Tee)
-///      + zk_premium   (if attestation includes Zk)
+/// cost_wei = base_request_fee_wei
+///          + tokens_in  * price_per_input_token_wei
+///          + tokens_out * price_per_output_token_wei
+///          + loops_used * price_per_loop_wei
+///          + tee_premium_wei  (if attestation includes Tee)
+///          + zk_premium_wei   (if attestation includes Zk)
 /// ```
 ///
-/// `price_per_loop` is the key Cortex-specific primitive: reasoning depth
-/// is billed.
+/// `price_per_loop_wei` is the key Cortex-specific primitive: reasoning
+/// depth is billed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CortexPricing {
-    /// Flat fee per request.
-    pub base_request_fee: u64,
-    /// Fee per input token.
-    pub price_per_input_token: u64,
-    /// Fee per output token.
-    pub price_per_output_token: u64,
-    /// Fee per recurrent loop executed.
-    pub price_per_loop: u64,
-    /// Premium for TEE-attested execution.
-    pub tee_premium: u64,
-    /// Premium for Plonky3 STARK inference-verification proof.
-    pub zk_premium: u64,
+    /// Flat fee per request, in wei.
+    pub base_request_fee_wei: u64,
+    /// Fee per input token, in wei.
+    pub price_per_input_token_wei: u64,
+    /// Fee per output token, in wei.
+    pub price_per_output_token_wei: u64,
+    /// Fee per recurrent loop executed, in wei.
+    pub price_per_loop_wei: u64,
+    /// Premium for TEE-attested execution, in wei.
+    pub tee_premium_wei: u64,
+    /// Premium for Plonky3 STARK inference-verification proof, in wei.
+    pub zk_premium_wei: u64,
 }
 
 impl Default for CortexPricing {
     fn default() -> Self {
-        // Conservative defaults in the smallest TNZO unit.
+        // Conservative defaults in wei.
         Self {
-            base_request_fee: 100,
-            price_per_input_token: 10,
-            price_per_output_token: 20,
-            price_per_loop: 1_000,
-            tee_premium: 10_000,
-            zk_premium: 100_000,
+            base_request_fee_wei: 100,
+            price_per_input_token_wei: 10,
+            price_per_output_token_wei: 20,
+            price_per_loop_wei: 1_000,
+            tee_premium_wei: 10_000,
+            zk_premium_wei: 100_000,
         }
     }
 }
 
 impl CortexPricing {
-    /// Compute total price for a settled inference.
+    /// Compute total price for a settled inference, in wei.
     pub fn compute(
         &self,
         tokens_in: u32,
         tokens_out: u32,
         loops_used: u32,
         attestation: AttestationRequirement,
-    ) -> u64 {
-        let mut cost: u64 = self.base_request_fee;
-        cost = cost.saturating_add((tokens_in as u64).saturating_mul(self.price_per_input_token));
-        cost = cost.saturating_add((tokens_out as u64).saturating_mul(self.price_per_output_token));
-        cost = cost.saturating_add((loops_used as u64).saturating_mul(self.price_per_loop));
+    ) -> u128 {
+        let mut cost: u128 = self.base_request_fee_wei as u128;
+        cost = cost.saturating_add((tokens_in as u128).saturating_mul(self.price_per_input_token_wei as u128));
+        cost = cost.saturating_add((tokens_out as u128).saturating_mul(self.price_per_output_token_wei as u128));
+        cost = cost.saturating_add((loops_used as u128).saturating_mul(self.price_per_loop_wei as u128));
         match attestation {
             AttestationRequirement::None => {}
             AttestationRequirement::Tee => {
-                cost = cost.saturating_add(self.tee_premium);
+                cost = cost.saturating_add(self.tee_premium_wei as u128);
             }
             AttestationRequirement::TeeAndZk => {
-                cost = cost.saturating_add(self.tee_premium);
-                cost = cost.saturating_add(self.zk_premium);
+                cost = cost.saturating_add(self.tee_premium_wei as u128);
+                cost = cost.saturating_add(self.zk_premium_wei as u128);
             }
         }
         cost
@@ -507,7 +510,7 @@ mod tests {
             zk_proof: None,
             tokens_in: 10,
             tokens_out: 20,
-            price_tnzo: 12_345,
+            price_wei: 12_345,
             timestamp: Timestamp::default(),
             signature: Signature::default(),
         };

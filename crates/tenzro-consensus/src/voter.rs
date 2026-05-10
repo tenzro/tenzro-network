@@ -188,6 +188,152 @@ impl QuorumCertificate {
     pub fn verify_threshold(&self, _total_voting_power: u128, threshold: usize) -> bool {
         self.votes.len() >= threshold
     }
+
+    /// Extracts a QC that was embedded in a block's `consensus_proof.proof_data`
+    /// at finalization time by `HotStuff2Engine::finalize_with_commit_qc`.
+    ///
+    /// Returns `None` if `proof_data` is empty (pre-finalization blocks, or
+    /// blocks finalized before the QC-embed change landed) or if the bytes
+    /// fail to deserialize as a `QuorumCertificate`.
+    ///
+    /// This is the read-side counterpart to the embed step in `finalize_with_commit_qc`.
+    /// Block-sync uses it to verify that a peer's served block was actually
+    /// finalized by quorum without re-running consensus.
+    pub fn extract_from_block(block: &tenzro_types::block::Block) -> Option<Self> {
+        let bytes = &block.header.consensus_proof.proof_data;
+        if bytes.is_empty() {
+            return None;
+        }
+        bincode::deserialize::<Self>(bytes).ok()
+    }
+
+    /// Verifies this QC against a validator set:
+    /// 1. Every contained vote uses the current wire-format version.
+    /// 2. Every vote's `(view, height, block_hash, vote_type)` matches the QC.
+    /// 3. Every voter is a known active validator in `validator_set`.
+    /// 4. Every vote's embedded composite public key matches the validator's
+    ///    registered classical + ML-DSA-65 keys exactly (key-substitution defence).
+    /// 5. Every vote's hybrid signature validates against `vote.signing_payload()`.
+    /// 6. No duplicate voters within the QC.
+    /// 7. Aggregated voting power of all valid votes meets the validator-set
+    ///    quorum threshold.
+    ///
+    /// This is the verification block-sync runs on every imported block
+    /// (after [`extract_from_block`]). A QC that passes this check was finalized
+    /// by ⅔+ stake of the *given* validator set without re-running consensus.
+    ///
+    /// Note: the validator set passed in must be the one that was active at the
+    /// QC's epoch. Caller (BlockSyncEngine) is responsible for selecting the
+    /// correct historical validator set.
+    pub fn verify(&self, validator_set: &crate::validator::ValidatorSet) -> Result<()> {
+        if self.votes.is_empty() {
+            return Err(ConsensusError::InvalidSignature(
+                "QC contains no votes".to_string(),
+            ));
+        }
+
+        let mut seen_voters: std::collections::HashSet<Address> = std::collections::HashSet::new();
+        let mut total_voting_power: u128 = 0;
+
+        for vote in &self.votes {
+            // (1) Format version pinning.
+            if vote.vote_format_version != VOTE_FORMAT_VERSION {
+                return Err(ConsensusError::InvalidSignature(format!(
+                    "QC vote rejected: unsupported vote_format_version {} (expected {})",
+                    vote.vote_format_version, VOTE_FORMAT_VERSION
+                )));
+            }
+
+            // (2) Vote must agree with QC on what is being voted on.
+            if vote.view != self.view
+                || vote.height != self.height
+                || vote.block_hash != self.block_hash
+                || vote.vote_type != self.vote_type
+            {
+                return Err(ConsensusError::InvalidSignature(format!(
+                    "QC vote at view={}/height={}/hash={}/type={:?} disagrees with QC at view={}/height={}/hash={}/type={:?}",
+                    vote.view, vote.height, vote.block_hash, vote.vote_type,
+                    self.view, self.height, self.block_hash, self.vote_type,
+                )));
+            }
+
+            // (3) Voter must be a known active validator.
+            let validator = validator_set.get_by_address(&vote.voter).ok_or_else(|| {
+                ConsensusError::NonValidator(format!("QC voter not in validator set: {}", vote.voter))
+            })?;
+            if !validator.is_active() {
+                return Err(ConsensusError::NonValidator(format!(
+                    "QC voter {} is not active",
+                    vote.voter
+                )));
+            }
+
+            // (4) Composite public key must match the validator's registered keys.
+            if vote.public_key.classical != validator.public_key {
+                return Err(ConsensusError::InvalidSignature(format!(
+                    "QC vote classical pubkey mismatch for {}",
+                    vote.voter
+                )));
+            }
+            match &vote.public_key.pq {
+                Some(pq_bytes) if pq_bytes == &validator.pq_public_key => {}
+                Some(_) => {
+                    return Err(ConsensusError::InvalidSignature(format!(
+                        "QC vote PQ pubkey mismatch for {}",
+                        vote.voter
+                    )));
+                }
+                None => {
+                    return Err(ConsensusError::InvalidSignature(format!(
+                        "QC vote missing PQ pubkey (hybrid required) for {}",
+                        vote.voter
+                    )));
+                }
+            }
+
+            // (5) Hybrid signature verification.
+            let payload = vote.signing_payload();
+            let verifier = StandardHybridVerifier::new(validator.composite_public_key());
+            verifier.verify(&payload, &vote.signature).map_err(|e| {
+                ConsensusError::InvalidSignature(format!(
+                    "QC vote hybrid signature verification failed for {}: {}",
+                    vote.voter, e
+                ))
+            })?;
+
+            // (6) Duplicate voter check.
+            if !seen_voters.insert(vote.voter) {
+                return Err(ConsensusError::InvalidSignature(format!(
+                    "QC contains duplicate vote from {}",
+                    vote.voter
+                )));
+            }
+
+            total_voting_power = total_voting_power.saturating_add(validator.voting_power());
+        }
+
+        // (7) Aggregated voting power must meet quorum threshold.
+        let threshold = validator_set.quorum_threshold();
+        if seen_voters.len() < threshold {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "QC has {} valid votes, below quorum threshold {}",
+                seen_voters.len(),
+                threshold
+            )));
+        }
+
+        // Sanity check: the QC's claimed voting_power must agree with what we
+        // re-tallied. A mismatch is a data-integrity error, not a signature
+        // forgery, but it indicates the QC was tampered with after formation.
+        if self.voting_power != total_voting_power {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "QC claims voting_power={} but votes total {}",
+                self.voting_power, total_voting_power
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 /// Manages vote collection and QC formation

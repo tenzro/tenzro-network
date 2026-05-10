@@ -5,9 +5,11 @@
 //!
 //! - **Loops executed** — the cumulative recurrent-depth compute a worker
 //!   has performed. This is the fundamental unit Cortex meters.
-//! - **Cost in TNZO** — cumulative settlement value (in smallest TNZO
-//!   units) billed to callers. Useful for operators sizing stake and
-//!   provider revenue dashboards.
+//! - **Cost in wei** — cumulative settlement value (1 TNZO = 10^18 wei)
+//!   billed to callers. Useful for operators sizing stake and provider
+//!   revenue dashboards. Stored in `u64` with saturating-add at the
+//!   boundary; per-request `cost_wei` is `u128`, so a single observation
+//!   that overflows the cumulative counter saturates at `u64::MAX`.
 //! - **Latency** — per-request end-to-end wall-clock duration, recorded
 //!   as a histogram fallback: `sum + count + per-bucket counters` in ms.
 //! - **Rejections** — budget violations, attestation misconfiguration,
@@ -44,7 +46,7 @@ pub const LATENCY_BUCKETS_MS: &[f64] = &[
 pub enum RejectionReason {
     /// Caller's budget was internally inconsistent (min > max, tier unsupported, etc.).
     InvalidBudget,
-    /// Backend reported a cost that exceeded the caller's `max_cost_tnzo`.
+    /// Backend reported a cost that exceeded the caller's `max_cost_wei`.
     CostExceeded,
     /// Request required attestation but the worker has no provider configured
     /// for the requested mode.
@@ -137,7 +139,7 @@ pub struct LatencyHistogramSnapshot {
 struct TierBucket {
     requests: AtomicU64,
     loops_total: AtomicU64,
-    cost_tnzo_total: AtomicU64,
+    cost_wei_total: AtomicU64,
 }
 
 impl TierBucket {
@@ -145,7 +147,29 @@ impl TierBucket {
         Self {
             requests: AtomicU64::new(0),
             loops_total: AtomicU64::new(0),
-            cost_tnzo_total: AtomicU64::new(0),
+            cost_wei_total: AtomicU64::new(0),
+        }
+    }
+}
+
+/// Saturating accumulator: take a `u128` per-request cost (wei) and add
+/// to a `u64` cumulative counter, capping at `u64::MAX` rather than
+/// wrapping. Cumulative wei totals can in principle overflow `u64`; the
+/// cap keeps Prometheus output monotonic without crashing.
+fn saturating_add_u128_into_u64(target: &AtomicU64, add: u128) {
+    let cap = u64::MAX as u128;
+    let bounded = add.min(cap) as u64;
+    let mut current = target.load(Ordering::Relaxed);
+    loop {
+        let next = current.saturating_add(bounded);
+        match target.compare_exchange_weak(
+            current,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
         }
     }
 }
@@ -164,7 +188,7 @@ struct CortexMetricsInner {
     requests_total: AtomicU64,
     requests_success_total: AtomicU64,
     loops_executed_total: AtomicU64,
-    cost_tnzo_total: AtomicU64,
+    cost_wei_total: AtomicU64,
     tokens_in_total: AtomicU64,
     tokens_out_total: AtomicU64,
     tee_attestations_total: AtomicU64,
@@ -191,7 +215,7 @@ impl CortexMetrics {
                 requests_total: AtomicU64::new(0),
                 requests_success_total: AtomicU64::new(0),
                 loops_executed_total: AtomicU64::new(0),
-                cost_tnzo_total: AtomicU64::new(0),
+                cost_wei_total: AtomicU64::new(0),
                 tokens_in_total: AtomicU64::new(0),
                 tokens_out_total: AtomicU64::new(0),
                 tee_attestations_total: AtomicU64::new(0),
@@ -234,7 +258,7 @@ impl CortexMetrics {
         &self,
         tier: ReasoningTier,
         loops_used: u32,
-        cost_tnzo: u64,
+        cost_wei: u128,
         tokens_in: u32,
         tokens_out: u32,
         latency_ms: f64,
@@ -246,9 +270,7 @@ impl CortexMetrics {
         self.inner
             .loops_executed_total
             .fetch_add(loops_used as u64, Ordering::Relaxed);
-        self.inner
-            .cost_tnzo_total
-            .fetch_add(cost_tnzo, Ordering::Relaxed);
+        saturating_add_u128_into_u64(&self.inner.cost_wei_total, cost_wei);
         self.inner
             .tokens_in_total
             .fetch_add(tokens_in as u64, Ordering::Relaxed);
@@ -259,8 +281,7 @@ impl CortexMetrics {
         let b = self.bucket_for(tier);
         b.loops_total
             .fetch_add(loops_used as u64, Ordering::Relaxed);
-        b.cost_tnzo_total
-            .fetch_add(cost_tnzo, Ordering::Relaxed);
+        saturating_add_u128_into_u64(&b.cost_wei_total, cost_wei);
 
         match attestation {
             AttestationRequirement::None => {}
@@ -298,14 +319,14 @@ impl CortexMetrics {
         let mk = |t: &TierBucket| TierSnapshot {
             requests: t.requests.load(Ordering::Relaxed),
             loops_total: t.loops_total.load(Ordering::Relaxed),
-            cost_tnzo_total: t.cost_tnzo_total.load(Ordering::Relaxed),
+            cost_wei_total: t.cost_wei_total.load(Ordering::Relaxed),
         };
 
         CortexMetricsSnapshot {
             requests_total: self.inner.requests_total.load(Ordering::Relaxed),
             requests_success_total: self.inner.requests_success_total.load(Ordering::Relaxed),
             loops_executed_total: self.inner.loops_executed_total.load(Ordering::Relaxed),
-            cost_tnzo_total: self.inner.cost_tnzo_total.load(Ordering::Relaxed),
+            cost_wei_total: self.inner.cost_wei_total.load(Ordering::Relaxed),
             tokens_in_total: self.inner.tokens_in_total.load(Ordering::Relaxed),
             tokens_out_total: self.inner.tokens_out_total.load(Ordering::Relaxed),
             tee_attestations_total: self.inner.tee_attestations_total.load(Ordering::Relaxed),
@@ -352,9 +373,9 @@ impl CortexMetrics {
         );
         push_counter(
             out,
-            "cortex_cost_tnzo_total",
-            "Total billed cost in smallest TNZO unit across all requests",
-            s.cost_tnzo_total,
+            "cortex_cost_wei_total",
+            "Total billed cost in wei (1 TNZO = 10^18 wei) across all requests",
+            s.cost_wei_total,
         );
         push_counter(
             out,
@@ -405,13 +426,13 @@ impl CortexMetrics {
         out.push('\n');
 
         out.push_str(
-            "# HELP cortex_cost_tnzo_by_tier_total Billed TNZO (smallest unit) per reasoning tier\n",
+            "# HELP cortex_cost_wei_by_tier_total Billed wei (1 TNZO = 10^18 wei) per reasoning tier\n",
         );
-        out.push_str("# TYPE cortex_cost_tnzo_by_tier_total counter\n");
+        out.push_str("# TYPE cortex_cost_wei_by_tier_total counter\n");
         for (tier, v) in tier_pairs(&s) {
             out.push_str(&format!(
-                "cortex_cost_tnzo_by_tier_total{{tier=\"{}\"}} {}\n",
-                tier, v.cost_tnzo_total
+                "cortex_cost_wei_by_tier_total{{tier=\"{}\"}} {}\n",
+                tier, v.cost_wei_total
             ));
         }
         out.push('\n');
@@ -477,7 +498,7 @@ pub struct CortexMetricsSnapshot {
     pub requests_total: u64,
     pub requests_success_total: u64,
     pub loops_executed_total: u64,
-    pub cost_tnzo_total: u64,
+    pub cost_wei_total: u64,
     pub tokens_in_total: u64,
     pub tokens_out_total: u64,
     pub tee_attestations_total: u64,
@@ -497,7 +518,7 @@ pub struct CortexMetricsSnapshot {
 pub struct TierSnapshot {
     pub requests: u64,
     pub loops_total: u64,
-    pub cost_tnzo_total: u64,
+    pub cost_wei_total: u64,
 }
 
 fn tier_pairs(s: &CortexMetricsSnapshot) -> [(&'static str, &TierSnapshot); 4] {
@@ -536,12 +557,12 @@ mod tests {
         assert_eq!(s.requests_total, 1);
         assert_eq!(s.requests_success_total, 1);
         assert_eq!(s.loops_executed_total, 8);
-        assert_eq!(s.cost_tnzo_total, 1_000_000);
+        assert_eq!(s.cost_wei_total, 1_000_000);
         assert_eq!(s.tokens_in_total, 12);
         assert_eq!(s.tokens_out_total, 42);
         assert_eq!(s.tier_standard.requests, 1);
         assert_eq!(s.tier_standard.loops_total, 8);
-        assert_eq!(s.tier_standard.cost_tnzo_total, 1_000_000);
+        assert_eq!(s.tier_standard.cost_wei_total, 1_000_000);
         assert_eq!(s.tier_deep.requests, 0);
         assert_eq!(s.latency.count, 1);
         assert_eq!(s.latency.sum_ms, 120);
@@ -620,6 +641,26 @@ mod tests {
     }
 
     #[test]
+    fn cost_wei_saturates_at_u64_max() {
+        let m = CortexMetrics::new();
+        m.record_request_accepted(ReasoningTier::Deep);
+        // A single observation exceeding u64::MAX must saturate, not wrap.
+        let huge: u128 = (u64::MAX as u128) + 100;
+        m.record_success(
+            ReasoningTier::Deep,
+            1,
+            huge,
+            1,
+            1,
+            1.0,
+            AttestationRequirement::None,
+        );
+        let s = m.snapshot();
+        assert_eq!(s.cost_wei_total, u64::MAX);
+        assert_eq!(s.tier_deep.cost_wei_total, u64::MAX);
+    }
+
+    #[test]
     fn prometheus_encoding_includes_core_series() {
         let m = CortexMetrics::new();
         m.record_request_accepted(ReasoningTier::Deep);
@@ -636,7 +677,7 @@ mod tests {
         m.encode_prometheus(&mut out);
         assert!(out.contains("cortex_requests_total 1"));
         assert!(out.contains("cortex_loops_executed_total 16"));
-        assert!(out.contains("cortex_cost_tnzo_total 250000"));
+        assert!(out.contains("cortex_cost_wei_total 250000"));
         assert!(out.contains("cortex_tee_attestations_total 1"));
         assert!(out.contains("cortex_zk_proofs_total 0"));
         assert!(out.contains("cortex_requests_by_tier_total{tier=\"deep\"} 1"));

@@ -1,0 +1,170 @@
+{
+  "_comment_layout": "Reference workflow spec — load with serde_json into tenzro_workflow::Workflow. workflow_id and gate_id are 32-byte hash arrays; placeholders here MUST be re-derived at load time. Accompanied by autonomous_treasury_daml_map.json.",
+  "_comment_scenario": "Treasury rebalancing: a treasury-controlled machine moves stablecoin reserves between two custodians and a hot wallet on a fixed schedule. Treasurer (1-of-1) must approve any single transfer > 250k USDC. Risk-officer (Approver role) must approve any cumulative-daily > 1M USDC (m=1 of n=1). Auditor sees every receipt. Mirrored to Canton for institutional reporting.",
+
+  "workflow_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+  "template_id": null,
+  "creator": "did:tenzro:human:treasury-org:1",
+  "title": "autonomous_treasury",
+  "description": "Scheduled treasury rebalancing across cold-custody, warm-custody, and operational hot wallet. Two-tier approval: per-transfer (>250k) and cumulative-daily (>1M).",
+
+  "participants": [
+    {
+      "did": "did:tenzro:human:treasury-org:1",
+      "roles": ["Initiator"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:machine:treasury-org:rebalancer:1",
+      "roles": ["Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": 100000000000
+    },
+    {
+      "did": "did:tenzro:human:custodian-cold:1",
+      "roles": ["Custodian", "Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:custodian-warm:1",
+      "roles": ["Custodian", "Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:treasury-org:treasurer:1",
+      "roles": ["Treasurer", "Approver"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:treasury-org:risk-officer:1",
+      "roles": ["Approver"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:auditor-firm:1",
+      "roles": ["Auditor"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    }
+  ],
+
+  "obligations": [
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+  ],
+  "_obligation_records": [
+    {
+      "_comment": "Cold → warm sweep: rebalancer settles a transfer-id resolved on-chain, paid in USDC.",
+      "obligor": "did:tenzro:machine:treasury-org:rebalancer:1",
+      "obligee": "did:tenzro:human:custodian-warm:1",
+      "kind": {
+        "Settle": {
+          "settlement_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+        }
+      },
+      "due_by": null,
+      "status": "Pending",
+      "discharge_proof_required": "SettlementReceipt",
+      "bond_anchor": null
+    },
+    {
+      "_comment": "Warm → hot top-up: rebalancer settles a transfer-id resolved on-chain.",
+      "obligor": "did:tenzro:machine:treasury-org:rebalancer:1",
+      "obligee": "did:tenzro:human:treasury-org:1",
+      "kind": {
+        "Settle": {
+          "settlement_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+        }
+      },
+      "due_by": null,
+      "status": "Pending",
+      "discharge_proof_required": "SettlementReceipt",
+      "bond_anchor": null
+    }
+  ],
+
+  "approval_gates": [
+    {
+      "_comment_id": "Derived at load time via ApprovalGate::derive_id(workflow_id, 'per_transfer_high_value').",
+      "gate_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      "workflow_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      "triggers": {
+        "AmountGte": 250000000001
+      },
+      "approvers": {
+        "Single": {
+          "did": "did:tenzro:human:treasury-org:treasurer:1"
+        }
+      },
+      "timeout": null,
+      "on_timeout": "AutoReject"
+    },
+    {
+      "_comment_id": "Derived at load time via ApprovalGate::derive_id(workflow_id, 'cumulative_daily_cap').",
+      "gate_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      "workflow_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      "triggers": {
+        "Not": {
+          "DailyAmountLte": 1000000000000
+        }
+      },
+      "approvers": {
+        "Threshold": {
+          "dids": [
+            "did:tenzro:human:treasury-org:treasurer:1",
+            "did:tenzro:human:treasury-org:risk-officer:1"
+          ],
+          "m": 2,
+          "n": 2
+        }
+      },
+      "timeout": null,
+      "on_timeout": "AutoReject"
+    }
+  ],
+
+  "root_policy": {
+    "And": [
+      { "AssetIn": ["USDC", "USDT"] },
+      { "ChainIn": ["tenzro"] },
+      {
+        "TimeWindow": {
+          "start_hour": 8,
+          "end_hour": 20,
+          "tz_offset_minutes": 0
+        }
+      },
+      { "DayOfWeekIn": [1, 2, 3, 4, 5] }
+    ]
+  },
+
+  "privacy_domain": null,
+  "_comment_privacy_domain": "Set at load time. Visibility = MembersPlusAuditors so the auditor receives unredacted treasury receipts.",
+
+  "fee_route": null,
+  "_comment_fee_route": "Set at load time. Suggested split: 100% remains within treasury (network fee 0.5% applied at base layer; no external fee leg).",
+
+  "signatures": [],
+  "status": "Draft",
+
+  "canton_mirror": {
+    "synchronizer_id": "global-synchronizer",
+    "party": "tenzro::1220treasury0000000000000000000000000000000000000000000000000000",
+    "contract_id": "00treasury#0"
+  },
+
+  "created_at": 1700000000,
+  "updated_at": 1700000000
+}

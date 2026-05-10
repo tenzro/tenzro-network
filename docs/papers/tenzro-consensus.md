@@ -28,13 +28,14 @@ This paper specifies the protocol formally enough to implement from scratch, exp
 
 The BFT literature is mature. HotStuff (Yin et al., 2019), HotStuff-2 (Malkhi & Nayak, 2023), DiemBFT v4 (the Diem authors, 2021), Jolteon/Ditto (Gelashvili et al., 2022), and Aptos LeaderReputation (Aptos Labs, 2021) collectively define the production-grade design space. MonadBFT (Monad Labs, arXiv:2502.20692, Nov 2025) closes the last open structural attack on 2-chain HotStuff. Each of these is documented in academic publications or in production source.
 
-Tenzro is not introducing a new BFT primitive. It is composing four established ones into a single system whose specific combination has not previously been deployed:
+Tenzro is not introducing a new BFT primitive. It is composing five established ones into a single system whose specific combination has not previously been deployed:
 
 | Primitive | Tenzro choice | Production lineage | Tenzro novelty |
 |---|---|---|---|
 | Core protocol | HotStuff-2, two-phase | Aptos, Sui (Mysticeti adapts), Solana TowerBFT (different lineage) | Drop-in |
 | Proposer election | Stake × reputation, seeded draw | Aptos mainnet 2021– | Drop-in, with hybrid PQ signing |
 | View change | TC + NEC (No-Endorsement Certificate) | MonadBFT mainnet Nov 2025 | First combination with reputation election |
+| Active-set membership | Five-state lifecycle with separate activation / exit churn budgets | Ethereum Pectra (EIP-7251 / EIP-7002 / EIP-8061), Sui, Aptos, Cosmos | Permissionless join/exit composed with reputation election and hybrid-PQ identity binding |
 | Signing | Ed25519 + ML-DSA-65 hybrid | Tenzro original | First production BFT with NIST FIPS 204 hybrid |
 
 This document specifies what we built, why we built it, and how it composes. It is intended for protocol implementers, security researchers, and operators who need to verify the protocol's correctness against the running code at `crates/tenzro-consensus/`.
@@ -47,7 +48,7 @@ The validator set comprises *n* registered validators of which up to *f* may be 
 
 We assume:
 
-- A **PKI** in which every validator has registered both an Ed25519 classical public key and an ML-DSA-65 post-quantum public key on-chain via the staking module (`tenzro_token::StakingManager`). This binding is a hard precondition — `NodeValidatorRegistry` rejects any peer presenting an unregistered or mismatched key.
+- A **PKI** in which every validator has registered both an Ed25519 classical public key and an ML-DSA-65 post-quantum public key on-chain through the permissionless validator registry (`tenzro_token::ValidatorRegistry`, §6.4). The registry is the on-chain source of truth for who is a validator: it binds each `Address` to a `(consensus_pubkey, pq_pubkey, withdrawal_address, self_stake)` tuple at registration time. This binding is a hard precondition — `NodeValidatorRegistry` rejects any peer presenting an unregistered or mismatched key. Active-set membership is *dynamic*: validators join, are admitted by the activation churn cap, and exit through the lifecycle state machine described in §6.4. The threat model holds independently for whichever set is active at the start of any given epoch.
 - A **hash function** modelled as a random oracle for the seed-derivation argument in §4.2. We use SHA-256 with explicit domain separation tags.
 - A **signature scheme** secure under EUF-CMA against a quantum adversary, instantiated as `Ed25519 || ML-DSA-65` with both signatures required (`StandardHybridVerifier::verify` AND-composes both branches). Forgery requires breaking both Ed25519 *and* lattice-based ML-DSA-65 — no security degradation against either threat surface.
 - A **stake-weighted validator economy** in which dishonest behaviour can be penalised by burning bonded TNZO. The slashing rate for self-equivocation is fixed at 10% (`crates/tenzro-node/src/node.rs:90`); the equivocation evidence pipeline is wired end-to-end from the consensus equivocation detector (`tenzro_consensus::EquivocationDetector`) to the on-chain staking manager via the `SlashingCallback` trait.
@@ -498,11 +499,103 @@ The slashing pipeline is wired end-to-end: detection in `tenzro-consensus`, call
 Every `epoch_duration` rounds (default 10,000), the consensus engine performs an atomic epoch transition:
 
 1. Snapshot the current validator set, finalized chain tip, and reputation/voter histories.
-2. Read the new validator set from the on-chain `StakingManager`.
+2. Read the new validator set from the on-chain `ValidatorRegistry` (§6.4) — specifically, the validators in `Active` state after the boundary's `EpochTransitionPlan` has been applied.
 3. Reset proposer/voter histories sized for the new *n*.
 4. Resume from the next view with the new set.
 
 Epoch transitions are atomic across the validator set (every honest replica transitions at the same finalized block). The reputation histories are *not* persisted across epochs by design — a validator that joins mid-epoch should not start with a stale history from before it was registered.
+
+### 6.4 Active-set membership: the dynamic validator registry
+
+A validator set is not a fixed list. Operators must be able to register, get admitted, exit, and re-register without forking the chain or coordinating an off-chain ceremony. Tenzro Consensus implements this through a permissionless on-chain registry (`tenzro_token::ValidatorRegistry`, `crates/tenzro-token/src/validator_registry.rs`) that is the on-chain source of truth for who is a validator. The consensus engine's epoch-transition step (§6.3) reads from it; nothing else is authoritative.
+
+#### 6.4.1 The five-state lifecycle
+
+Each registered validator carries a status drawn from a five-state machine plus a `Jailed` quarantine state:
+
+```
+                                register tx
+                                     │
+                                     ▼
+                                ┌─────────┐
+            re-entry cooldown   │Candidate│
+            ────────────────────┤         │
+                                └────┬────┘
+                                     │ activation churn admits
+                                     ▼
+                              ┌──────────────┐
+                              │PendingActive │
+                              └──────┬───────┘
+                                     │ next_epoch + ACTIVATION_EFFECTIVE_DELAY_BLOCKS
+                                     ▼
+                                ┌─────────┐  slash       ┌────────┐
+                                │ Active  │─────────────▶│ Jailed │
+                                └────┬────┘              └────┬───┘
+                                     │ exit tx                 │ governance
+                                     ▼                          ▼
+                              ┌────────────┐              (re-enter Candidate)
+                              │PendingExit │
+                              └─────┬──────┘
+                                    │ next_epoch
+                                    ▼
+                                ┌────────┐
+                                │Exited  │
+                                └────────┘
+```
+
+The two pending states (`PendingActive`, `PendingExit`) exist for the same reason Cosmos has a fixed effective-date delay and Aptos has its `PendingActive` intermediate: HotStuff-2's two-chain finality means a QC observed at view *v* may be relied upon as a parent at view *v* + 1. If the validator set rotates between those two views, the QC's signers may no longer be in the active set — a safety violation. The fix is to hold any new validator in `PendingActive` for one full epoch boundary plus `ACTIVATION_EFFECTIVE_DELAY_BLOCKS = 3` finalised blocks before it counts as a vote-eligible member of the active set. By that point any in-flight high-QC has finalised.
+
+A validator counts toward the active-set total (for churn-cap math) when it is in `Active` *or* `PendingExit`. `PendingExit` validators still vote — their exit only takes effect at the next boundary.
+
+#### 6.4.2 Churn-budget admission
+
+The registry caps how fast the active set can change in either direction. The defaults are:
+
+| Parameter | Default | Source |
+|---|---|---|
+| `min_self_stake` | 10 000 TNZO | Tenzro choice; well above the 1 000 TNZO service-provider floor |
+| `activation_churn_bps` | 400 bps (4%) | Matches EIP-8061 conservative profile |
+| `exit_churn_bps` | 400 bps (4%) | Symmetric with activation; bounds set size drift |
+| `MIN_CHURN_PER_EPOCH` | 1 | Per EIP-8061 §5; allows bootstrap when the percentage rounds to zero |
+| `reentry_cooldown_epochs` | 4 | Prevents thrash from rapid exit-and-rejoin |
+| `ACTIVATION_EFFECTIVE_DELAY_BLOCKS` | 3 | Cosmos-equivalent; safety margin for in-flight QCs |
+
+At each boundary the registry computes an `EpochTransitionPlan { activations, exits, effective_activations, effective_exits }` and the consensus epoch-transition hook applies it to its pending queues. The activation cap is computed against the *current* active-set size: with 100 active validators, at most `max(1, 100 × 400 / 10 000) = 4` candidates are promoted from `Candidate` → `PendingActive` per epoch. The same cap applies to `Active` → `PendingExit` transitions.
+
+Activation and exit budgets are *separate*. A wave of voluntary exits cannot starve new admissions, and vice versa. The two budgets are derived from the same percentage but consumed independently, matching EIP-8061's design.
+
+#### 6.4.3 Registration and exit transactions
+
+Registration and exit are typed transactions:
+
+- `RegisterValidator { stake, consensus_pubkey, pq_pubkey, withdrawal_address, metadata_uri }` — emitted by the operator's wallet. The VM emits a `ValidatorRegister` typed log; the node-side registry consumes the log post-execution (`EventLoop::process_validator_logs`) and inserts a `Candidate` entry. The candidate becomes `PendingActive` at the next epoch boundary if `self_stake ≥ min_self_stake` and the activation churn budget admits it.
+- `ExitValidator { address }` — emitted by the validator (must equal `from`). The registry transitions `Active` → `PendingExit` (or `Candidate`/`PendingActive` → `PendingExit` for short-circuit exits before activation), and the validator becomes `Exited` at the next epoch boundary. Re-registration is allowed after `reentry_cooldown_epochs`.
+- `UpdateValidatorMetadata { address, metadata_uri }` — non-state-changing for consensus; updates the operator's metadata URL.
+
+The registry persists every entry to RocksDB under the `validator:` prefix in `CF_TOKENS`, with a separate `validator:index` listing all addresses, hydrated on node startup. Permissioned-genesis validators populate the registry at genesis time via the same code path; from that point onward the chain has no privileged validator set.
+
+#### 6.4.4 Composition with consensus
+
+The registry composes with the rest of the protocol:
+
+- **Reputation (§4).** `LeaderReputation` reads the active set from the registry every round. A validator in `PendingActive` is *not* in the active set yet and cannot be drawn as leader; one in `PendingExit` is still in the active set and can be drawn (this is by design — exits are not retroactive). When a fresh validator becomes `Active`, its proposer/voter history is empty, so it falls into the genesis-adjacent fallback path (§4.3) with pure stake-weighted draw until `10n + 20` rounds of history accumulate.
+- **NEC (§5).** NEC verification requires `f + 1` signatures from the *current* active set. Because the active set rotates only at epoch boundaries (with the `ACTIVATION_EFFECTIVE_DELAY_BLOCKS` safety margin), there is no possibility of a within-epoch NEC verification failing because some signers were demoted mid-round.
+- **Equivocation slashing (§6.2 step 7).** An equivocating validator is slashed (10% of stake burned) *and* the registry transitions it `Active` → `Jailed`. Jailed validators stay jailed indefinitely until governance reinstates them; the staking callback removes them from the next epoch's pending queue (`epoch_manager.remove_pending_validator`).
+- **TEE attestation (§4.5).** The TEE attestation hash is stored on the registry entry but is *not* used to gate active-set membership — operators can lose TEE attestation without losing validator status, only the 1.5× draw multiplier. Re-attestation is a metadata update, not a re-registration.
+
+#### 6.4.5 Why this specific shape?
+
+The literature and 2026 production deployments suggest five well-formed approaches; we surveyed and chose:
+
+| System | Approach | Why we didn't copy it directly |
+|---|---|---|
+| Ethereum Pectra (EIP-7251 / EIP-7002 / EIP-8061) | Typed transactions for register/exit, per-epoch churn caps split by direction | We adopted the typed-transaction + split-churn pattern verbatim. Ethereum's specific "max effective balance 2048 ETH" parameter is consensus-irrelevant for a stake-weighted system that uses uncapped voting power. |
+| Sui | Explicit `Candidate` state where metadata is published before activation | We adopted the `Candidate` intermediate. Sui's gas-fee mechanism for candidacy doesn't translate to our fee model; we keep candidacy free and rely on `min_self_stake` as the spam-deterrent. |
+| Aptos | Five-state machine with separate `Jailed` quarantine | We adopted the five-state shape exactly. Aptos's `PendingActive` rationale is the same as ours (in-flight QC safety). |
+| Cosmos / CometBFT | `ValidatorUpdates` returned at end-of-block with fixed effective-date delay | We adopted Cosmos's effective-date delay (3 blocks). The end-of-block `ValidatorUpdates` ABCI hook becomes our post-finalize event-log scan. |
+| MonadBFT | Round-robin over a static-per-epoch set, no permissionless registry as of mainnet Nov 2025 | We need permissionless join/exit; MonadBFT's static set is not sufficient. |
+
+The combination — five-state lifecycle with separate activation/exit churn budgets, hybrid-PQ key binding at registration, and a Cosmos-style effective-date delay — is what falls out when each design choice is made for the same reason its upstream production system made it. It is not novel in any single component, but the assembled whole is the operational shape Tenzro Consensus needs.
 
 ---
 
@@ -575,33 +668,38 @@ To our knowledge Tenzro is the first L1 BFT chain to deploy hybrid post-quantum 
 
 ### 8.1 Code map
 
-The implementation lives in `crates/tenzro-consensus/`:
+The bulk of the implementation lives in `crates/tenzro-consensus/`:
 
-| File | Lines | Role |
-|---|---:|---|
-| `lib.rs` | 231 | Public surface, type re-exports |
-| `config.rs` | 211 | `ConsensusConfig`, `ProposerElectionKind` |
-| `hotstuff2.rs` | 3,562 | The HotStuff-2 state machine |
-| `validator.rs` | 736 | `ValidatorSet`, `ProposerElection` trait |
-| `proposer.rs` | 400 | `ReputationProposer`, `RoundRobinProposer` |
-| `leader_reputation.rs` | 855 | `LeaderReputation` engine, weight computation |
-| `timeout.rs` | 1,710 | `TimeoutMsg`, `TimeoutCertificate`, `NoEndorsementMsg`, `NoEndorsementCertificate`, collectors |
-| `vote_state.rs` | 570 | `EquivocationDetector` |
-| `voter.rs` | 724 | `Vote` struct, vote signing/verification |
-| `mempool.rs` | 875 | Transaction admission + ordering |
-| `admission.rs` | 622 | Lane-based fee floor admission |
-| `epoch_manager.rs` | 574 | Atomic epoch transitions |
-| `finality.rs` | 502 | 2-chain finality tracker |
-| `traits.rs` | 123 | `SlashingCallback`, `ConsensusOutMessage` |
-| `error.rs` | 140 | `ConsensusError` |
+| File | Role |
+|---|---|
+| `lib.rs` | Public surface, type re-exports |
+| `config.rs` | `ConsensusConfig`, `ProposerElectionKind` |
+| `hotstuff2.rs` | The HotStuff-2 state machine |
+| `validator.rs` | `ValidatorSet`, `ProposerElection` trait |
+| `proposer.rs` | `ReputationProposer`, `RoundRobinProposer` |
+| `leader_reputation.rs` | `LeaderReputation` engine, weight computation |
+| `timeout.rs` | `TimeoutMsg`, `TimeoutCertificate`, `NoEndorsementMsg`, `NoEndorsementCertificate`, collectors |
+| `vote_state.rs` | `EquivocationDetector` |
+| `voter.rs` | `Vote` struct, vote signing/verification |
+| `mempool.rs` | Transaction admission + ordering |
+| `admission.rs` | Lane-based fee floor admission |
+| `epoch_manager.rs` | Atomic epoch transitions, pending activation/exit queues |
+| `finality.rs` | 2-chain finality tracker |
+| `traits.rs` | `SlashingCallback`, `ConsensusOutMessage` |
+| `error.rs` | `ConsensusError` |
 
-Total: 11,835 lines of Rust.
+The dynamic active-set machinery (§6.4) lives in two adjacent crates:
+
+| File | Role |
+|---|---|
+| `tenzro-token/src/validator_registry.rs` | `ValidatorRegistry`, `ValidatorRegistryEntry`, `ValidatorRegistryStatus`, `EpochTransitionPlan`, churn-budget computation, RocksDB persistence under `validator:` prefix in `CF_TOKENS` |
+| `tenzro-node/src/event_loop.rs` | Post-finalize hook that scans VM `ValidatorRegister` / `ValidatorExit` / `ValidatorMetadataUpdate` typed logs and reconciles the registry with the consensus `EpochManager`'s pending queues |
 
 ### 8.2 Testing
 
-The crate has 39 unit tests covering:
+The `tenzro-consensus` crate's unit tests cover:
 
-- LeaderReputation weight computation (16 tests)
+- LeaderReputation weight computation
 - Anti-grinding seed determinism and domain separation
 - Window edge cases (genesis, post-rollover)
 - Stake-weighted draw distribution
@@ -609,12 +707,11 @@ The crate has 39 unit tests covering:
 - NEC aggregation and verification
 - Cross-message replay rejection (signing payload tag binding)
 - Equivocation detection
-- Epoch transition atomicity
+- Epoch transition atomicity, including pending-activation and pending-exit queues
 
-Beyond the unit tests, the consensus engine is exercised end-to-end in:
+The dynamic active-set state machine is unit-tested in `tenzro-token` (registry transitions, churn-budget admission, re-entry cooldown, jail handling), and integration-tested end-to-end in `crates/tenzro-node/tests/validator_lifecycle_integration.rs` — that suite drives the full `Candidate → PendingActive → Active → PendingExit → Exited` lifecycle through the node's post-finalize bridge between the registry and the consensus `EpochManager`.
 
-- `crates/tenzro-node/tests/multi_modal_integration.rs` (13 integration tests)
-- The 4-pod testnet (3 validators + 1 RPC) deployed at `tenzro-testnet`
+Beyond the unit and integration suites, the consensus engine is exercised end-to-end on the 4-pod testnet (3 validators + 1 RPC) deployed at `tenzro-testnet`.
 
 ### 8.3 What's verified, what isn't
 
@@ -686,6 +783,7 @@ The deployed testnet (3 validators + 1 RPC, all colocated on a single GKE node i
 - The hybrid signing path works end-to-end: every block, every vote, every timeout carries a verified Ed25519 + ML-DSA-65 signature.
 - The reputation election runs: weights are recomputed every round; the leader-selection log shows non-uniform draws as the proposer history populates.
 - The NEC code path is exercised at every view change.
+- The permissionless validator registry (§6.4) is wired end-to-end: typed `RegisterValidator` / `ExitValidator` transactions land in mempool, execute, emit logs, and the post-finalize hook reconciles the registry with the consensus `EpochManager`. The four genesis validators populate via this same code path; the SEV-SNP node added on 2026-05-07 (task #412) is the first non-genesis validator to traverse the full lifecycle on a live network.
 
 It does not demonstrate:
 
@@ -700,11 +798,12 @@ Section 9.4 of the operator guide (`docs/operators/OPERATOR_GUIDE.md`) tracks th
 
 ## 10. Conclusion
 
-Tenzro Consensus is a careful composition of three production-hardened ideas plus one defence-in-depth signing primitive. It is not novel in any single component — every individual mechanism here has shipped in another L1 — but the *combination* is, to our knowledge, unique:
+Tenzro Consensus is a careful composition of four production-hardened ideas plus one defence-in-depth signing primitive. It is not novel in any single component — every individual mechanism here has shipped in another L1 — but the *combination* is, to our knowledge, unique:
 
 - HotStuff-2 with linear communication and 2Δ optimistic finality.
 - Aptos LeaderReputation, with a TEE-attestation multiplier applied multiplicatively rather than as a hard boost.
 - MonadBFT No-Endorsement Certificates, closing the tail-fork attack class.
+- A permissionless five-state validator registry (Ethereum Pectra + Sui + Aptos + Cosmos shapes) with separate activation and exit churn budgets, hybrid-PQ key binding at registration, and a Cosmos-style effective-date delay that preserves HotStuff-2's two-chain safety across reconfigurations.
 - Ed25519 + ML-DSA-65 hybrid signatures across every safety-critical message, ahead of NIST PQC migration deadlines.
 
 We have been careful in this paper to distinguish the formal correctness arguments (which inherit from the upstream literature) from the empirical operational claims (which are inherited from upstream production deployments), and to be explicit about the boundary: the *specific* combination of LeaderReputation + NEC + hybrid PQ has not run at production scale, and our testnet is a smoke test rather than a scale demonstration. The protocol's safety and liveness properties hold by composition; its operational characteristics at scale will be established by the public mainnet deployment.

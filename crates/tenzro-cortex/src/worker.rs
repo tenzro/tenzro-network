@@ -105,13 +105,13 @@ impl CortexWorker {
         &self.pricing
     }
 
-    /// Estimate the maximum possible cost for a request.
+    /// Estimate the maximum possible cost for a request, in wei.
     pub fn estimate_max_cost(
         &self,
         budget: &ReasoningBudget,
         estimated_input_tokens: u32,
         estimated_output_tokens: u32,
-    ) -> u64 {
+    ) -> u128 {
         self.pricing.compute(
             estimated_input_tokens,
             estimated_output_tokens,
@@ -155,19 +155,19 @@ impl CortexWorker {
             request.budget.attestation,
         );
 
-        if cost > request.budget.max_cost_tnzo {
+        if cost > request.budget.max_cost_wei {
             warn!(
                 cost,
-                budget = request.budget.max_cost_tnzo,
+                budget = request.budget.max_cost_wei,
                 "cortex cost exceeded caller budget"
             );
             self.metrics.record_rejection(RejectionReason::CostExceeded);
             return Err(CortexError::CostExceeded {
                 cost,
-                budget: request.budget.max_cost_tnzo,
+                budget: request.budget.max_cost_wei,
             });
         }
-        response.price_tnzo = cost;
+        response.price_wei = cost;
 
         // Generate TEE / ZK attestations as required by the caller's
         // budget. We build an intermediate preimage covering the receipt

@@ -97,11 +97,11 @@ impl OperationKind {
 /// Per-month maximum draw cap, in 18-decimal TNZO base units.
 ///
 /// `month` is 0-indexed from `bootstrap_start`; month 12 (and beyond)
-/// must have `max_draw_tnzo == 0` for the schedule to be valid.
+/// must have `max_draw_wei == 0` for the schedule to be valid.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DecayPoint {
     pub month: u8,
-    pub max_draw_tnzo: u128,
+    pub max_draw_wei: u128,
 }
 
 /// Spend caps applied to agents operating under a charter.
@@ -113,11 +113,11 @@ pub struct DecayPoint {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SpendCaps {
     /// Daily cap per agent (18-decimal base units).
-    pub daily_cap_tnzo: u128,
+    pub daily_cap_wei: u128,
     /// Cumulative monthly cap per agent.
-    pub monthly_cap_tnzo: u128,
+    pub monthly_cap_wei: u128,
     /// Maximum amount that can leave on a single transaction.
-    pub per_tx_cap_tnzo: u128,
+    pub per_tx_cap_wei: u128,
 }
 
 impl SpendCaps {
@@ -125,19 +125,19 @@ impl SpendCaps {
     /// 200 TNZO/month, 1 TNZO/tx. Governance tunes these per charter.
     pub fn default_inference_caps() -> Self {
         Self {
-            daily_cap_tnzo: 10_u128 * 1_000_000_000_000_000_000,
-            monthly_cap_tnzo: 200_u128 * 1_000_000_000_000_000_000,
-            per_tx_cap_tnzo: 1_000_000_000_000_000_000,
+            daily_cap_wei: 10_u128 * 1_000_000_000_000_000_000,
+            monthly_cap_wei: 200_u128 * 1_000_000_000_000_000_000,
+            per_tx_cap_wei: 1_000_000_000_000_000_000,
         }
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.per_tx_cap_tnzo > self.daily_cap_tnzo {
+        if self.per_tx_cap_wei > self.daily_cap_wei {
             return Err(TokenError::InvalidParameter(
                 "per_tx_cap > daily_cap".into(),
             ));
         }
-        if self.daily_cap_tnzo > self.monthly_cap_tnzo {
+        if self.daily_cap_wei > self.monthly_cap_wei {
             return Err(TokenError::InvalidParameter(
                 "daily_cap > monthly_cap".into(),
             ));
@@ -227,28 +227,28 @@ pub struct DecaySchedule {
 
 impl DecaySchedule {
     /// Default 12-month schedule scaled relative to a base monthly draw.
-    /// `base_monthly_draw_tnzo` is the cap for months 1-3 (100% rate).
-    pub fn default_with_base(base_monthly_draw_tnzo: u128) -> Self {
-        let p = base_monthly_draw_tnzo;
+    /// `base_monthly_draw_wei` is the cap for months 1-3 (100% rate).
+    pub fn default_with_base(base_monthly_draw_wei: u128) -> Self {
+        let p = base_monthly_draw_wei;
         let pct = |bps: u32| -> u128 {
             // (p * bps) / 10_000 with u128 safety
             let prod = p.saturating_mul(bps as u128);
             prod / 10_000
         };
         let points = vec![
-            DecayPoint { month: 0, max_draw_tnzo: pct(10_000) },
-            DecayPoint { month: 1, max_draw_tnzo: pct(10_000) },
-            DecayPoint { month: 2, max_draw_tnzo: pct(10_000) },
-            DecayPoint { month: 3, max_draw_tnzo: pct(7_500) },
-            DecayPoint { month: 4, max_draw_tnzo: pct(7_500) },
-            DecayPoint { month: 5, max_draw_tnzo: pct(7_500) },
-            DecayPoint { month: 6, max_draw_tnzo: pct(5_000) },
-            DecayPoint { month: 7, max_draw_tnzo: pct(5_000) },
-            DecayPoint { month: 8, max_draw_tnzo: pct(5_000) },
-            DecayPoint { month: 9, max_draw_tnzo: pct(2_500) },
-            DecayPoint { month: 10, max_draw_tnzo: pct(2_500) },
-            DecayPoint { month: 11, max_draw_tnzo: pct(2_500) },
-            DecayPoint { month: 12, max_draw_tnzo: 0 },
+            DecayPoint { month: 0, max_draw_wei: pct(10_000) },
+            DecayPoint { month: 1, max_draw_wei: pct(10_000) },
+            DecayPoint { month: 2, max_draw_wei: pct(10_000) },
+            DecayPoint { month: 3, max_draw_wei: pct(7_500) },
+            DecayPoint { month: 4, max_draw_wei: pct(7_500) },
+            DecayPoint { month: 5, max_draw_wei: pct(7_500) },
+            DecayPoint { month: 6, max_draw_wei: pct(5_000) },
+            DecayPoint { month: 7, max_draw_wei: pct(5_000) },
+            DecayPoint { month: 8, max_draw_wei: pct(5_000) },
+            DecayPoint { month: 9, max_draw_wei: pct(2_500) },
+            DecayPoint { month: 10, max_draw_wei: pct(2_500) },
+            DecayPoint { month: 11, max_draw_wei: pct(2_500) },
+            DecayPoint { month: 12, max_draw_wei: 0 },
         ];
         Self { points }
     }
@@ -259,7 +259,7 @@ impl DecaySchedule {
         self.points
             .iter()
             .find(|p| p.month == month)
-            .map(|p| p.max_draw_tnzo)
+            .map(|p| p.max_draw_wei)
             .unwrap_or(0)
     }
 
@@ -271,10 +271,10 @@ impl DecaySchedule {
         }
         // Final month must be 0 (hard sunset).
         let last = self.points.last().unwrap();
-        if last.max_draw_tnzo != 0 {
+        if last.max_draw_wei != 0 {
             return Err(TokenError::InvalidParameter(format!(
-                "decay schedule does not sunset (final month {} max_draw_tnzo = {})",
-                last.month, last.max_draw_tnzo
+                "decay schedule does not sunset (final month {} max_draw_wei = {})",
+                last.month, last.max_draw_wei
             )));
         }
         // Months must be strictly ascending, no duplicates.
@@ -294,11 +294,11 @@ impl DecaySchedule {
 pub struct TreasuryEarmark {
     pub name: String,
     /// Genesis-allocated TNZO, in 18-decimal base units.
-    pub initial_allocation_tnzo: u128,
+    pub initial_allocation_wei: u128,
     /// Remaining unspent allocation.
-    pub allocation_remaining_tnzo: u128,
+    pub allocation_remaining_wei: u128,
     /// Cumulative TNZO drawn since bootstrap_start (audit-only).
-    pub total_drawn_tnzo: u128,
+    pub total_drawn_wei: u128,
     pub bootstrap_start: Timestamp,
     pub bootstrap_end: Timestamp,
     pub decay_schedule: DecaySchedule,
@@ -318,9 +318,9 @@ impl Default for TreasuryEarmark {
     fn default() -> Self {
         Self {
             name: "SeedAgent".to_string(),
-            initial_allocation_tnzo: 0,
-            allocation_remaining_tnzo: 0,
-            total_drawn_tnzo: 0,
+            initial_allocation_wei: 0,
+            allocation_remaining_wei: 0,
+            total_drawn_wei: 0,
             bootstrap_start: Timestamp::default(),
             bootstrap_end: Timestamp::default(),
             decay_schedule: DecaySchedule { points: Vec::new() },
@@ -340,7 +340,7 @@ impl TreasuryEarmark {
                 self.surplus_burn_bps
             )));
         }
-        if self.allocation_remaining_tnzo > self.initial_allocation_tnzo {
+        if self.allocation_remaining_wei > self.initial_allocation_wei {
             return Err(TokenError::InvalidParameter(
                 "allocation_remaining > initial_allocation".into(),
             ));
@@ -352,7 +352,7 @@ impl TreasuryEarmark {
         }
         // An empty schedule is permitted only at genesis (when no allocation
         // has been seeded yet).
-        if self.initial_allocation_tnzo > 0 {
+        if self.initial_allocation_wei > 0 {
             self.decay_schedule.validate()?;
         }
         Ok(())
@@ -395,7 +395,7 @@ pub struct SeedAgentRecord {
     pub charter_id: Hash,
     pub status: SeedAgentStatus,
     /// Cumulative TNZO drawn from earmark allocation for this agent.
-    pub allocation_used_tnzo: u128,
+    pub allocation_used_wei: u128,
     /// Posted bond identifier (link to AgentBond Spec 9). May be unset
     /// during provisioning before the bond is posted.
     pub bond_id: Option<Hash>,
@@ -415,7 +415,7 @@ impl SeedAgentRecord {
             controller_did,
             charter_id,
             status: SeedAgentStatus::Active,
-            allocation_used_tnzo: 0,
+            allocation_used_wei: 0,
             bond_id: None,
             provisioned_at,
             last_active: provisioned_at,
@@ -519,7 +519,7 @@ impl SeedAgentEarmarkManager {
         }
         self.persist_earmark(&new)?;
         info!(
-            initial_allocation = new.initial_allocation_tnzo,
+            initial_allocation = new.initial_allocation_wei,
             charters = new.charter_ids.len(),
             "SeedAgent earmark updated"
         );
@@ -724,9 +724,9 @@ mod tests {
     #[test]
     fn spend_caps_validate_ordering() {
         let bad = SpendCaps {
-            daily_cap_tnzo: 5,
-            monthly_cap_tnzo: 100,
-            per_tx_cap_tnzo: 10, // > daily
+            daily_cap_wei: 5,
+            monthly_cap_wei: 100,
+            per_tx_cap_wei: 10, // > daily
         };
         assert!(bad.validate().is_err());
 
@@ -750,8 +750,8 @@ mod tests {
     fn decay_schedule_rejects_non_zero_final() {
         let s = DecaySchedule {
             points: vec![
-                DecayPoint { month: 0, max_draw_tnzo: 1_000 },
-                DecayPoint { month: 1, max_draw_tnzo: 500 }, // doesn't end at zero
+                DecayPoint { month: 0, max_draw_wei: 1_000 },
+                DecayPoint { month: 1, max_draw_wei: 500 }, // doesn't end at zero
             ],
         };
         assert!(s.validate().is_err());
@@ -761,7 +761,7 @@ mod tests {
     fn earmark_default_is_consistent() {
         let e = TreasuryEarmark::default();
         assert_eq!(e.surplus_burn_bps, DEFAULT_SURPLUS_BURN_BPS);
-        assert_eq!(e.initial_allocation_tnzo, 0);
+        assert_eq!(e.initial_allocation_wei, 0);
         assert!(e.enabled);
         // Empty schedule is permitted at genesis.
         assert!(e.validate().is_ok());
@@ -855,13 +855,13 @@ mod tests {
     #[test]
     fn earmark_validates_allocation_invariants() {
         let mut e = TreasuryEarmark {
-            initial_allocation_tnzo: 100,
-            allocation_remaining_tnzo: 200, // > initial
+            initial_allocation_wei: 100,
+            allocation_remaining_wei: 200, // > initial
             ..TreasuryEarmark::default()
         };
         assert!(e.validate().is_err());
 
-        e.allocation_remaining_tnzo = 50;
+        e.allocation_remaining_wei = 50;
         e.surplus_burn_bps = 10_001; // > 100%
         assert!(e.validate().is_err());
 

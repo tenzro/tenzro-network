@@ -18,6 +18,7 @@
 //! - **PauseAgent**: Reversibly pause an agent (selector: 0x1000001d)
 //! - **QuarantineAgent**: Reversibly freeze an agent (selector: 0x1000001e)
 //! - **TerminateAgent**: Irreversibly terminate + slash (selector: 0x1000001f)
+//! - **Workflow* (12)**: Canton-native workflow ops (selectors 0x01000040..=0x0100004B)
 //!
 //! # Function Selectors
 //!
@@ -34,6 +35,18 @@
 //! 0x1000001d - PauseAgent(agent_did, reason_code, reason_text?, until?)
 //! 0x1000001e - QuarantineAgent(agent_did, reason_code, reason_text?, evidence_hash?)
 //! 0x1000001f - TerminateAgent(agent_did, reason_code, slash_bps, cascade)
+//! 0x01000040 - WorkflowCreate(creator_did, title, participants, obligations, gates, policy)
+//! 0x01000041 - WorkflowSign(workflow_id, signature, signed_by_pubkey)
+//! 0x01000042 - WorkflowTransition(workflow_id, next_status, trigger)
+//! 0x01000043 - WorkflowRegisterObligation(workflow_id, obligation)
+//! 0x01000044 - WorkflowDischargeObligation(obligation_id, proof)
+//! 0x01000045 - WorkflowDefaultObligation(obligation_id, reason)
+//! 0x01000046 - WorkflowRegisterGate(workflow_id, gate)
+//! 0x01000047 - WorkflowOpenApproval(gate_id, request)
+//! 0x01000048 - WorkflowSubmitDecision(request_id, decision)
+//! 0x01000049 - WorkflowKillSwitch(workflow_id, scope, reason)
+//! 0x0100004A - WorkflowRegisterPrivacyDomain(domain)
+//! 0x0100004B - WorkflowFreezePrivacyDomain(domain_id)
 //! ```
 //!
 //! # Escrow Vault Semantics
@@ -85,6 +98,40 @@ pub const SELECTOR_POST_AGENT_BOND: [u8; 4] = [0x01, 0x00, 0x00, 0x20];
 pub const SELECTOR_INCREASE_AGENT_BOND: [u8; 4] = [0x01, 0x00, 0x00, 0x21];
 pub const SELECTOR_WITHDRAW_AGENT_BOND: [u8; 4] = [0x01, 0x00, 0x00, 0x22];
 pub const SELECTOR_PAY_INSURANCE_CLAIM: [u8; 4] = [0x01, 0x00, 0x00, 0x23];
+// Dynamic validator-set selectors. Permissionless join / voluntary exit /
+// metadata update. Authorization, churn caps, and state-machine transitions
+// live in `tenzro_token::ValidatorRegistry` (the on-chain source of truth);
+// the VM dispatcher emits a typed Log that the node-side post-execute scan
+// translates into a registry mutation. Stake escrow / slashing piggyback on
+// the existing `StakingManager` flow.
+pub const SELECTOR_VALIDATOR_REGISTER: [u8; 4] = [0x01, 0x00, 0x00, 0x30];
+pub const SELECTOR_VALIDATOR_EXIT: [u8; 4] = [0x01, 0x00, 0x00, 0x31];
+pub const SELECTOR_VALIDATOR_UPDATE_METADATA: [u8; 4] = [0x01, 0x00, 0x00, 0x32];
+
+// Workflow selectors (Canton-native multi-party workflow primitive).
+//
+// VM-side handlers are deliberately thin: they validate the payload, charge
+// gas, persist a replay marker under `SYSTEM_ADDRESS`, and emit a typed Log.
+// The structural mutation (against the in-memory `WorkflowManager` indices,
+// privacy-domain registry, approval state machine, lifecycle clocks) is
+// performed by the node-side `WorkflowRuntime` post-execute scan in Wave 4 —
+// same pattern used by `SELECTOR_VALIDATOR_*` for the dynamic validator set.
+//
+// Selectors `0x01000040..=0x0100004B` are reserved for workflow operations.
+// Exposed `pub` so the node-side encoder in `convert_transaction` can build
+// dispatch payloads from typed `SignedTransaction::Workflow*` variants.
+pub const SELECTOR_WORKFLOW_CREATE: [u8; 4] = [0x01, 0x00, 0x00, 0x40];
+pub const SELECTOR_WORKFLOW_SIGN: [u8; 4] = [0x01, 0x00, 0x00, 0x41];
+pub const SELECTOR_WORKFLOW_TRANSITION: [u8; 4] = [0x01, 0x00, 0x00, 0x42];
+pub const SELECTOR_WORKFLOW_REGISTER_OBLIGATION: [u8; 4] = [0x01, 0x00, 0x00, 0x43];
+pub const SELECTOR_WORKFLOW_DISCHARGE_OBLIGATION: [u8; 4] = [0x01, 0x00, 0x00, 0x44];
+pub const SELECTOR_WORKFLOW_DEFAULT_OBLIGATION: [u8; 4] = [0x01, 0x00, 0x00, 0x45];
+pub const SELECTOR_WORKFLOW_REGISTER_GATE: [u8; 4] = [0x01, 0x00, 0x00, 0x46];
+pub const SELECTOR_WORKFLOW_OPEN_APPROVAL: [u8; 4] = [0x01, 0x00, 0x00, 0x47];
+pub const SELECTOR_WORKFLOW_SUBMIT_DECISION: [u8; 4] = [0x01, 0x00, 0x00, 0x48];
+pub const SELECTOR_WORKFLOW_KILL_SWITCH: [u8; 4] = [0x01, 0x00, 0x00, 0x49];
+pub const SELECTOR_WORKFLOW_REGISTER_PRIVACY_DOMAIN: [u8; 4] = [0x01, 0x00, 0x00, 0x4A];
+pub const SELECTOR_WORKFLOW_FREEZE_PRIVACY_DOMAIN: [u8; 4] = [0x01, 0x00, 0x00, 0x4B];
 
 // Gas costs for native operations
 const GAS_TRANSFER: u64 = 21_000;
@@ -110,6 +157,36 @@ const GAS_BOND_WITHDRAW: u64 = 60_000;
 // bond ops because they cross from singleton pool vault into a user wallet
 // and persist a per-claim marker to make double-pay impossible.
 const GAS_PAY_INSURANCE_CLAIM: u64 = 90_000;
+// Dynamic validator-set gas costs. Register is the most expensive (writes
+// 2 KiB+ of PQ key material to the registry index); update is cheap; exit
+// is mid-tier (state-machine transition + index update).
+const GAS_VALIDATOR_REGISTER: u64 = 150_000;
+const GAS_VALIDATOR_EXIT: u64 = 80_000;
+const GAS_VALIDATOR_UPDATE_METADATA: u64 = 50_000;
+
+// Workflow gas costs. Workflow-create and gate-registration write the
+// largest payloads (full participant + obligation + policy snapshot);
+// signatures, decisions, and lifecycle transitions are cheap state writes;
+// privacy-domain registration is mid-tier (X25519 recipient set + ACL
+// metadata); kill-switch is dearer to discourage spam.
+const GAS_WORKFLOW_CREATE: u64 = 80_000;
+const GAS_WORKFLOW_SIGN: u64 = 40_000;
+const GAS_WORKFLOW_TRANSITION: u64 = 50_000;
+const GAS_WORKFLOW_REGISTER_OBLIGATION: u64 = 60_000;
+const GAS_WORKFLOW_DISCHARGE_OBLIGATION: u64 = 70_000;
+const GAS_WORKFLOW_DEFAULT_OBLIGATION: u64 = 60_000;
+const GAS_WORKFLOW_REGISTER_GATE: u64 = 80_000;
+const GAS_WORKFLOW_OPEN_APPROVAL: u64 = 50_000;
+const GAS_WORKFLOW_SUBMIT_DECISION: u64 = 50_000;
+const GAS_WORKFLOW_KILL_SWITCH: u64 = 100_000;
+const GAS_WORKFLOW_REGISTER_PRIVACY_DOMAIN: u64 = 90_000;
+const GAS_WORKFLOW_FREEZE_PRIVACY_DOMAIN: u64 = 40_000;
+
+// Maximum size of an inline workflow JSON payload. Workflows with payloads
+// larger than this must be referenced by a DA pointer and submitted with the
+// ReceiptEnvelope OffloadedDA mode by the caller; the VM rejects oversize
+// dispatches outright to bound block-witness cost.
+const WORKFLOW_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 
 // Domain-separated hash prefixes for escrow id and vault address derivation
 const ESCROW_ID_DOMAIN: &[u8] = b"tenzro/escrow/id";
@@ -2106,6 +2183,680 @@ impl NativeExecutor {
             state_changes,
         ))
     }
+
+    // ---- Dynamic validator-set handlers ----------------------------------
+    //
+    // These three handlers form the on-chain control surface for the
+    // permissionless validator set. They DO NOT mutate the consensus
+    // ValidatorSet directly — that's the EpochManager's job, driven by
+    // `tenzro_token::ValidatorRegistry::compute_epoch_transition()` at every
+    // epoch boundary. The VM handlers:
+    //
+    //   1. validate the payload + charge gas
+    //   2. emit a typed Log that the node-side post-execute scan
+    //      (`event_loop.rs::handle_block_finalized` → registry mutator)
+    //      consumes to drive the registry state machine
+    //   3. write a marker to SYSTEM_ADDRESS storage for off-line
+    //      reconstructibility (audit / forensics / re-org replay)
+    //
+    // The `from` address is the validator's operator key — the same
+    // address used as the staking address.
+
+    async fn execute_validator_register(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_VALIDATOR_REGISTER)?;
+
+        let payload: ValidatorRegisterPayload =
+            serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+                VmError::InvalidTransaction(format!("Invalid ValidatorRegister payload: {}", e))
+            })?;
+
+        if payload.consensus_pubkey.len() != 32 {
+            return Err(VmError::InvalidTransaction(format!(
+                "consensus_pubkey must be 32 bytes, got {}",
+                payload.consensus_pubkey.len()
+            )));
+        }
+        // ML-DSA-65 verifying key length per FIPS 204.
+        if payload.pq_pubkey.len() != 1952 {
+            return Err(VmError::InvalidTransaction(format!(
+                "pq_pubkey must be 1952 bytes (ML-DSA-65), got {}",
+                payload.pq_pubkey.len()
+            )));
+        }
+        if payload.metadata_uri.len() > 256 {
+            return Err(VmError::InvalidTransaction(format!(
+                "metadata_uri exceeds 256 bytes (got {})",
+                payload.metadata_uri.len()
+            )));
+        }
+
+        // Charge gas.
+        let gas_cost = tx.gas_price.saturating_mul(GAS_VALIDATOR_REGISTER as u128);
+        let bal = state.get_balance(&tx.from);
+        if bal < gas_cost {
+            return Err(VmError::InsufficientBalance {
+                required: gas_cost,
+                available: bal,
+            });
+        }
+        let new_bal = bal.saturating_sub(gas_cost);
+        state.set_balance(&tx.from, new_bal);
+
+        // Persist a marker for re-org replay & audit. Body is the JSON
+        // payload — the registry hydrates from this if it ever needs to.
+        let marker_key = format!("validator_register:{}", hex::encode(&tx.from));
+        let marker_blob = tx.data[4..].to_vec();
+        state.set_storage(&SYSTEM_ADDRESS, marker_key.as_bytes(), marker_blob.clone());
+
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        // Log layout: `from(32) || stake_le(16) || consensus_pubkey(32) ||
+        //              pq_pubkey_len_le(4) || pq_pubkey || withdrawal(32) ||
+        //              metadata_uri_len_le(4) || metadata_uri`
+        let mut log_data = Vec::with_capacity(
+            32 + 16 + 32 + 4 + payload.pq_pubkey.len() + 32 + 4 + payload.metadata_uri.len(),
+        );
+        log_data.extend_from_slice(&tx.from);
+        log_data.extend_from_slice(&payload.self_stake.to_le_bytes());
+        log_data.extend_from_slice(&payload.consensus_pubkey);
+        log_data.extend_from_slice(&(payload.pq_pubkey.len() as u32).to_le_bytes());
+        log_data.extend_from_slice(&payload.pq_pubkey);
+        log_data.extend_from_slice(payload.withdrawal_address.as_bytes());
+        log_data.extend_from_slice(&(payload.metadata_uri.len() as u32).to_le_bytes());
+        log_data.extend_from_slice(payload.metadata_uri.as_bytes());
+
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"ValidatorRegister".to_vec()],
+            log_data,
+        );
+
+        let state_changes = vec![
+            StateChange::new(
+                tx.from.clone(),
+                b"balance".to_vec(),
+                Some(bal.to_le_bytes().to_vec()),
+                Some(new_bal.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                marker_key.as_bytes().to_vec(),
+                None,
+                Some(marker_blob),
+            ),
+            StateChange::new(
+                tx.from.clone(),
+                b"nonce".to_vec(),
+                Some(old_nonce.to_le_bytes().to_vec()),
+                Some((old_nonce + 1).to_le_bytes().to_vec()),
+            ),
+        ];
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            tx.from.to_vec(),
+            vec![log],
+            state_changes,
+        ))
+    }
+
+    async fn execute_validator_exit(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_VALIDATOR_EXIT)?;
+
+        // Exit takes no payload beyond the selector; from-address is the
+        // validator. Reject if any extra bytes were supplied.
+        if tx.data.len() != 4 {
+            return Err(VmError::InvalidTransaction(format!(
+                "ValidatorExit expects no payload, got {} extra bytes",
+                tx.data.len() - 4
+            )));
+        }
+
+        let gas_cost = tx.gas_price.saturating_mul(GAS_VALIDATOR_EXIT as u128);
+        let bal = state.get_balance(&tx.from);
+        if bal < gas_cost {
+            return Err(VmError::InsufficientBalance {
+                required: gas_cost,
+                available: bal,
+            });
+        }
+        let new_bal = bal.saturating_sub(gas_cost);
+        state.set_balance(&tx.from, new_bal);
+
+        let marker_key = format!("validator_exit:{}", hex::encode(&tx.from));
+        let marker_blob = b"requested".to_vec();
+        state.set_storage(&SYSTEM_ADDRESS, marker_key.as_bytes(), marker_blob.clone());
+
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"ValidatorExit".to_vec()],
+            tx.from.to_vec(),
+        );
+
+        let state_changes = vec![
+            StateChange::new(
+                tx.from.clone(),
+                b"balance".to_vec(),
+                Some(bal.to_le_bytes().to_vec()),
+                Some(new_bal.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                marker_key.as_bytes().to_vec(),
+                None,
+                Some(marker_blob),
+            ),
+            StateChange::new(
+                tx.from.clone(),
+                b"nonce".to_vec(),
+                Some(old_nonce.to_le_bytes().to_vec()),
+                Some((old_nonce + 1).to_le_bytes().to_vec()),
+            ),
+        ];
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            tx.from.to_vec(),
+            vec![log],
+            state_changes,
+        ))
+    }
+
+    async fn execute_validator_update_metadata(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_VALIDATOR_UPDATE_METADATA)?;
+
+        let payload: ValidatorUpdateMetadataPayload = serde_json::from_slice(&tx.data[4..])
+            .map_err(|e| {
+                VmError::InvalidTransaction(format!(
+                    "Invalid ValidatorUpdateMetadata payload: {}",
+                    e
+                ))
+            })?;
+
+        if let Some(uri) = &payload.metadata_uri
+            && uri.len() > 256
+        {
+            return Err(VmError::InvalidTransaction(format!(
+                "metadata_uri exceeds 256 bytes (got {})",
+                uri.len()
+            )));
+        }
+        if let Some(h) = &payload.tee_attestation_hash
+            && h.len() != 32
+        {
+            return Err(VmError::InvalidTransaction(format!(
+                "tee_attestation_hash must be 32 bytes (got {})",
+                h.len()
+            )));
+        }
+
+        let gas_cost = tx
+            .gas_price
+            .saturating_mul(GAS_VALIDATOR_UPDATE_METADATA as u128);
+        let bal = state.get_balance(&tx.from);
+        if bal < gas_cost {
+            return Err(VmError::InsufficientBalance {
+                required: gas_cost,
+                available: bal,
+            });
+        }
+        let new_bal = bal.saturating_sub(gas_cost);
+        state.set_balance(&tx.from, new_bal);
+
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        // Log layout: `from(32) || metadata_uri_len_le(4) || metadata_uri ||
+        //              tee_hash_present(1) || [tee_hash(32)]`
+        let uri_str = payload.metadata_uri.unwrap_or_default();
+        let mut log_data =
+            Vec::with_capacity(32 + 4 + uri_str.len() + 1 + 32);
+        log_data.extend_from_slice(&tx.from);
+        log_data.extend_from_slice(&(uri_str.len() as u32).to_le_bytes());
+        log_data.extend_from_slice(uri_str.as_bytes());
+        match payload.tee_attestation_hash {
+            Some(h) => {
+                log_data.push(1);
+                log_data.extend_from_slice(&h);
+            }
+            None => log_data.push(0),
+        }
+
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"ValidatorMetadataUpdate".to_vec()],
+            log_data,
+        );
+
+        let state_changes = vec![
+            StateChange::new(
+                tx.from.clone(),
+                b"balance".to_vec(),
+                Some(bal.to_le_bytes().to_vec()),
+                Some(new_bal.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                tx.from.clone(),
+                b"nonce".to_vec(),
+                Some(old_nonce.to_le_bytes().to_vec()),
+                Some((old_nonce + 1).to_le_bytes().to_vec()),
+            ),
+        ];
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            tx.from.to_vec(),
+            vec![log],
+            state_changes,
+        ))
+    }
+
+    // ---- Workflow handlers (Canton-native multi-party workflow primitive) ----
+    //
+    // Each handler is intentionally thin: validate the JSON payload bounds,
+    // charge gas, persist a replay marker under SYSTEM_ADDRESS keyed by
+    // (op-prefix, op-id), and emit a typed Log carrying the JSON payload
+    // verbatim. The node-side WorkflowRuntime (Wave 4) decodes the log and
+    // drives the in-memory WorkflowManager + privacy-domain registry +
+    // approval state machine. This same split is what SELECTOR_VALIDATOR_*
+    // uses for the dynamic validator set.
+    //
+    // Handlers do NOT couple tenzro-vm to tenzro-workflow at the type level —
+    // payloads are opaque JSON blobs to the VM. The marker keyspace under
+    // SYSTEM_ADDRESS is `wf:<op>:<id>` so the registry can hydrate by
+    // iterating the prefix on startup.
+
+    async fn execute_workflow_op(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+        gas_cost_units: u64,
+        op_topic: &[u8],
+        op_marker_prefix: &str,
+        op_marker_id: &str,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(gas_cost_units)?;
+
+        // Bound the JSON payload size (post-selector) to keep block-witness
+        // cost finite. Larger payloads must be DA-offloaded by the caller.
+        if tx.data.len() < 4 {
+            return Err(VmError::InvalidTransaction(
+                "Workflow op missing selector".to_string(),
+            ));
+        }
+        let payload = &tx.data[4..];
+        if payload.len() > WORKFLOW_PAYLOAD_MAX_BYTES {
+            return Err(VmError::InvalidTransaction(format!(
+                "Workflow payload exceeds {} bytes (got {})",
+                WORKFLOW_PAYLOAD_MAX_BYTES,
+                payload.len()
+            )));
+        }
+        // Reject empty payloads except for ops where empty is meaningful.
+        // All current workflow ops require at least an id field, so reject.
+        if payload.is_empty() {
+            return Err(VmError::InvalidTransaction(
+                "Workflow op requires JSON payload".to_string(),
+            ));
+        }
+        // Lightweight JSON well-formedness check — full structural decode
+        // happens in the node-side WorkflowRuntime which has the typed
+        // schemas. Catching malformed JSON here keeps bad txs out of blocks.
+        if let Err(e) = serde_json::from_slice::<serde_json::Value>(payload) {
+            return Err(VmError::InvalidTransaction(format!(
+                "Workflow payload is not valid JSON: {}",
+                e
+            )));
+        }
+
+        // Charge fee.
+        let gas_cost = tx.gas_price.saturating_mul(gas_cost_units as u128);
+        let bal = state.get_balance(&tx.from);
+        if bal < gas_cost {
+            return Err(VmError::InsufficientBalance {
+                required: gas_cost,
+                available: bal,
+            });
+        }
+        let new_bal = bal.saturating_sub(gas_cost);
+        state.set_balance(&tx.from, new_bal);
+
+        // Persist marker so the WorkflowRuntime can replay / hydrate.
+        // Key: `wf:<op>:<id>`. Value: the raw JSON payload.
+        let marker_key = format!("wf:{}:{}", op_marker_prefix, op_marker_id);
+        let marker_blob = payload.to_vec();
+        state.set_storage(&SYSTEM_ADDRESS, marker_key.as_bytes(), marker_blob.clone());
+
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        // Log layout: `from(32) || marker_key_len_le(4) || marker_key ||
+        //              payload_len_le(4) || payload`. The node-side scan
+        // matches on `topic == op_topic` and decodes the typed payload.
+        let mut log_data =
+            Vec::with_capacity(32 + 4 + marker_key.len() + 4 + payload.len());
+        log_data.extend_from_slice(&tx.from);
+        log_data.extend_from_slice(&(marker_key.len() as u32).to_le_bytes());
+        log_data.extend_from_slice(marker_key.as_bytes());
+        log_data.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        log_data.extend_from_slice(payload);
+
+        let log = Log::new(SYSTEM_ADDRESS.to_vec(), vec![op_topic.to_vec()], log_data);
+
+        let state_changes = vec![
+            StateChange::new(
+                tx.from.clone(),
+                b"balance".to_vec(),
+                Some(bal.to_le_bytes().to_vec()),
+                Some(new_bal.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                marker_key.as_bytes().to_vec(),
+                None,
+                Some(marker_blob),
+            ),
+            StateChange::new(
+                tx.from.clone(),
+                b"nonce".to_vec(),
+                Some(old_nonce.to_le_bytes().to_vec()),
+                Some((old_nonce + 1).to_le_bytes().to_vec()),
+            ),
+        ];
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            marker_key.into_bytes(),
+            vec![log],
+            state_changes,
+        ))
+    }
+
+    async fn execute_workflow_create(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        let id = workflow_extract_field(&tx.data[4..], "workflow_id")?;
+        self.execute_workflow_op(
+            tx,
+            state,
+            gas_meter,
+            GAS_WORKFLOW_CREATE,
+            b"WorkflowCreate",
+            "create",
+            &id,
+        )
+        .await
+    }
+
+    async fn execute_workflow_sign(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        let id = workflow_extract_field(&tx.data[4..], "workflow_id")?;
+        let did = workflow_extract_field(&tx.data[4..], "signer_did")?;
+        let key = format!("{}:{}", id, did);
+        self.execute_workflow_op(
+            tx,
+            state,
+            gas_meter,
+            GAS_WORKFLOW_SIGN,
+            b"WorkflowSign",
+            "sign",
+            &key,
+        )
+        .await
+    }
+
+    async fn execute_workflow_transition(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        let id = workflow_extract_field(&tx.data[4..], "workflow_id")?;
+        let to = workflow_extract_field(&tx.data[4..], "to_status")?;
+        let key = format!("{}:{}", id, to);
+        self.execute_workflow_op(
+            tx,
+            state,
+            gas_meter,
+            GAS_WORKFLOW_TRANSITION,
+            b"WorkflowTransition",
+            "tx",
+            &key,
+        )
+        .await
+    }
+
+    async fn execute_workflow_register_obligation(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        let id = workflow_extract_field(&tx.data[4..], "obligation_id")?;
+        self.execute_workflow_op(
+            tx,
+            state,
+            gas_meter,
+            GAS_WORKFLOW_REGISTER_OBLIGATION,
+            b"WorkflowObligationRegister",
+            "obl",
+            &id,
+        )
+        .await
+    }
+
+    async fn execute_workflow_discharge_obligation(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        let id = workflow_extract_field(&tx.data[4..], "obligation_id")?;
+        self.execute_workflow_op(
+            tx,
+            state,
+            gas_meter,
+            GAS_WORKFLOW_DISCHARGE_OBLIGATION,
+            b"WorkflowObligationDischarge",
+            "obl_dis",
+            &id,
+        )
+        .await
+    }
+
+    async fn execute_workflow_default_obligation(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        let id = workflow_extract_field(&tx.data[4..], "obligation_id")?;
+        self.execute_workflow_op(
+            tx,
+            state,
+            gas_meter,
+            GAS_WORKFLOW_DEFAULT_OBLIGATION,
+            b"WorkflowObligationDefault",
+            "obl_def",
+            &id,
+        )
+        .await
+    }
+
+    async fn execute_workflow_register_gate(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        let id = workflow_extract_field(&tx.data[4..], "gate_id")?;
+        self.execute_workflow_op(
+            tx,
+            state,
+            gas_meter,
+            GAS_WORKFLOW_REGISTER_GATE,
+            b"WorkflowGateRegister",
+            "gate",
+            &id,
+        )
+        .await
+    }
+
+    async fn execute_workflow_open_approval(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        let id = workflow_extract_field(&tx.data[4..], "request_id")?;
+        self.execute_workflow_op(
+            tx,
+            state,
+            gas_meter,
+            GAS_WORKFLOW_OPEN_APPROVAL,
+            b"WorkflowApprovalOpen",
+            "appr_open",
+            &id,
+        )
+        .await
+    }
+
+    async fn execute_workflow_submit_decision(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        let req = workflow_extract_field(&tx.data[4..], "request_id")?;
+        let did = workflow_extract_field(&tx.data[4..], "approver_did")?;
+        let key = format!("{}:{}", req, did);
+        self.execute_workflow_op(
+            tx,
+            state,
+            gas_meter,
+            GAS_WORKFLOW_SUBMIT_DECISION,
+            b"WorkflowApprovalDecision",
+            "appr_dec",
+            &key,
+        )
+        .await
+    }
+
+    async fn execute_workflow_kill_switch(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        let id = workflow_extract_field(&tx.data[4..], "workflow_id")?;
+        self.execute_workflow_op(
+            tx,
+            state,
+            gas_meter,
+            GAS_WORKFLOW_KILL_SWITCH,
+            b"WorkflowKillSwitch",
+            "kill",
+            &id,
+        )
+        .await
+    }
+
+    async fn execute_workflow_register_privacy_domain(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        let id = workflow_extract_field(&tx.data[4..], "domain_id")?;
+        self.execute_workflow_op(
+            tx,
+            state,
+            gas_meter,
+            GAS_WORKFLOW_REGISTER_PRIVACY_DOMAIN,
+            b"WorkflowPrivacyDomainRegister",
+            "pd",
+            &id,
+        )
+        .await
+    }
+
+    async fn execute_workflow_freeze_privacy_domain(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        let id = workflow_extract_field(&tx.data[4..], "domain_id")?;
+        self.execute_workflow_op(
+            tx,
+            state,
+            gas_meter,
+            GAS_WORKFLOW_FREEZE_PRIVACY_DOMAIN,
+            b"WorkflowPrivacyDomainFreeze",
+            "pd_freeze",
+            &id,
+        )
+        .await
+    }
+}
+
+/// Extract a top-level string field from a JSON workflow payload. The VM
+/// uses this only to derive the marker storage key — full structural
+/// validation is the node-side WorkflowRuntime's job. Returns
+/// `InvalidTransaction` if the field is missing or not a string.
+fn workflow_extract_field(payload: &[u8], field: &str) -> Result<String> {
+    let v: serde_json::Value = serde_json::from_slice(payload)
+        .map_err(|e| VmError::InvalidTransaction(format!("Invalid workflow JSON: {}", e)))?;
+    let s = v
+        .get(field)
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| {
+            VmError::InvalidTransaction(format!(
+                "Workflow payload missing required string field `{}`",
+                field
+            ))
+        })?;
+    if s.is_empty() {
+        return Err(VmError::InvalidTransaction(format!(
+            "Workflow payload field `{}` must not be empty",
+            field
+        )));
+    }
+    if s.len() > 256 {
+        return Err(VmError::InvalidTransaction(format!(
+            "Workflow payload field `{}` exceeds 256 bytes (got {})",
+            field,
+            s.len()
+        )));
+    }
+    Ok(s.to_string())
 }
 
 // ---- Free helpers for escrow handlers ---------------------------------------
@@ -2131,6 +2882,39 @@ struct ReleaseEscrowPayload {
 #[derive(Debug, Clone, serde::Deserialize)]
 struct RefundEscrowPayload {
     escrow_id: [u8; 32],
+}
+
+// ---- Validator-registry payloads (Dynamic Validator Set) -------------------
+
+/// JSON payload decoded from `tx.data[4..]` for `RegisterValidator`.
+///
+/// `consensus_pubkey` is the 32-byte Ed25519 BFT signing key. `pq_pubkey` is
+/// the 1952-byte ML-DSA-65 verifying key (FIPS 204) — mandatory hybrid PQ.
+/// `withdrawal_address` is the `Address` rewards/return-of-stake settle to.
+/// `metadata_uri` is an optional ≤256-byte off-chain pointer (e.g. moniker,
+/// website, contact).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ValidatorRegisterPayload {
+    consensus_pubkey: Vec<u8>,
+    pq_pubkey: Vec<u8>,
+    withdrawal_address: Address,
+    self_stake: u128,
+    #[serde(default)]
+    metadata_uri: String,
+}
+
+/// JSON payload decoded from `tx.data[4..]` for `UpdateValidatorMetadata`.
+///
+/// At least one of `metadata_uri` / `tee_attestation_hash` should be set —
+/// the registry treats `None` as "no change" for that field. `tee_attestation_hash`
+/// is a 32-byte SHA-256 commitment to a fresh attestation document; the active-set
+/// boundary applies the TEE multiplier from this commitment.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ValidatorUpdateMetadataPayload {
+    #[serde(default)]
+    metadata_uri: Option<String>,
+    #[serde(default)]
+    tee_attestation_hash: Option<Vec<u8>>,
 }
 
 // ---- Kill-switch payloads (Agent-Swarm Spec 1) ------------------------------
@@ -2566,6 +3350,51 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_PAY_INSURANCE_CLAIM => {
                 self.execute_pay_insurance_claim(tx, state, &mut gas_meter).await
             }
+            SELECTOR_VALIDATOR_REGISTER => {
+                self.execute_validator_register(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_VALIDATOR_EXIT => {
+                self.execute_validator_exit(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_VALIDATOR_UPDATE_METADATA => {
+                self.execute_validator_update_metadata(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_WORKFLOW_CREATE => {
+                self.execute_workflow_create(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_WORKFLOW_SIGN => {
+                self.execute_workflow_sign(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_WORKFLOW_TRANSITION => {
+                self.execute_workflow_transition(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_WORKFLOW_REGISTER_OBLIGATION => {
+                self.execute_workflow_register_obligation(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_WORKFLOW_DISCHARGE_OBLIGATION => {
+                self.execute_workflow_discharge_obligation(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_WORKFLOW_DEFAULT_OBLIGATION => {
+                self.execute_workflow_default_obligation(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_WORKFLOW_REGISTER_GATE => {
+                self.execute_workflow_register_gate(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_WORKFLOW_OPEN_APPROVAL => {
+                self.execute_workflow_open_approval(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_WORKFLOW_SUBMIT_DECISION => {
+                self.execute_workflow_submit_decision(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_WORKFLOW_KILL_SWITCH => {
+                self.execute_workflow_kill_switch(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_WORKFLOW_REGISTER_PRIVACY_DOMAIN => {
+                self.execute_workflow_register_privacy_domain(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_WORKFLOW_FREEZE_PRIVACY_DOMAIN => {
+                self.execute_workflow_freeze_privacy_domain(tx, state, &mut gas_meter).await
+            }
             _ => Err(VmError::InvalidTransaction(format!(
                 "Unknown native function selector: {:?}",
                 selector
@@ -2620,6 +3449,21 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_INCREASE_AGENT_BOND => GAS_BOND_INCREASE,
             SELECTOR_WITHDRAW_AGENT_BOND => GAS_BOND_WITHDRAW,
             SELECTOR_PAY_INSURANCE_CLAIM => GAS_PAY_INSURANCE_CLAIM,
+            SELECTOR_VALIDATOR_REGISTER => GAS_VALIDATOR_REGISTER,
+            SELECTOR_VALIDATOR_EXIT => GAS_VALIDATOR_EXIT,
+            SELECTOR_VALIDATOR_UPDATE_METADATA => GAS_VALIDATOR_UPDATE_METADATA,
+            SELECTOR_WORKFLOW_CREATE => GAS_WORKFLOW_CREATE,
+            SELECTOR_WORKFLOW_SIGN => GAS_WORKFLOW_SIGN,
+            SELECTOR_WORKFLOW_TRANSITION => GAS_WORKFLOW_TRANSITION,
+            SELECTOR_WORKFLOW_REGISTER_OBLIGATION => GAS_WORKFLOW_REGISTER_OBLIGATION,
+            SELECTOR_WORKFLOW_DISCHARGE_OBLIGATION => GAS_WORKFLOW_DISCHARGE_OBLIGATION,
+            SELECTOR_WORKFLOW_DEFAULT_OBLIGATION => GAS_WORKFLOW_DEFAULT_OBLIGATION,
+            SELECTOR_WORKFLOW_REGISTER_GATE => GAS_WORKFLOW_REGISTER_GATE,
+            SELECTOR_WORKFLOW_OPEN_APPROVAL => GAS_WORKFLOW_OPEN_APPROVAL,
+            SELECTOR_WORKFLOW_SUBMIT_DECISION => GAS_WORKFLOW_SUBMIT_DECISION,
+            SELECTOR_WORKFLOW_KILL_SWITCH => GAS_WORKFLOW_KILL_SWITCH,
+            SELECTOR_WORKFLOW_REGISTER_PRIVACY_DOMAIN => GAS_WORKFLOW_REGISTER_PRIVACY_DOMAIN,
+            SELECTOR_WORKFLOW_FREEZE_PRIVACY_DOMAIN => GAS_WORKFLOW_FREEZE_PRIVACY_DOMAIN,
             _ => GAS_TRANSFER, // Default to transfer cost
         })
     }
@@ -3206,5 +4050,209 @@ mod tests {
         // Vault must still be funded.
         let vault_addr = derive_vault_address(&escrow_id);
         assert_eq!(state.get_balance(vault_addr.as_bytes()), 5_000);
+    }
+
+    // ---- Workflow handler smoke tests ---------------------------------------
+
+    fn make_workflow_tx(selector: [u8; 4], from: Vec<u8>, json: &str) -> VmTransaction {
+        let mut data = Vec::with_capacity(4 + json.len());
+        data.extend_from_slice(&selector);
+        data.extend_from_slice(json.as_bytes());
+        VmTransaction::new(
+            from,
+            None,
+            0,
+            data,
+            200_000,
+            1_000_000_000,
+            0,
+            VmType::Tenzro,
+            1337,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_workflow_create_emits_log_and_marker() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![7u8; 20];
+        state.set_balance(&from, 10_000_000_000_000_000_000u128);
+
+        let payload = r#"{"workflow_id":"wf123","creator":"did:tenzro:human:alice:1","title":"swap"}"#;
+        let tx = make_workflow_tx(SELECTOR_WORKFLOW_CREATE, from.clone(), payload);
+
+        let res = executor.execute_transaction(&tx, &mut state).await.unwrap();
+        assert!(res.success);
+        assert_eq!(res.gas_used, GAS_WORKFLOW_CREATE);
+        assert_eq!(res.logs.len(), 1);
+        assert_eq!(res.logs[0].topics[0], b"WorkflowCreate");
+
+        // Marker is persisted under SYSTEM_ADDRESS.
+        let marker = state.get_storage(&SYSTEM_ADDRESS, b"wf:create:wf123");
+        assert_eq!(marker.as_deref(), Some(payload.as_bytes()));
+
+        // Nonce incremented.
+        assert_eq!(state.get_nonce(&from), 1);
+    }
+
+    #[tokio::test]
+    async fn test_workflow_sign_uses_composite_marker_key() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![8u8; 20];
+        state.set_balance(&from, 10_000_000_000_000_000_000u128);
+
+        let payload =
+            r#"{"workflow_id":"wf42","signer_did":"did:tenzro:human:bob:1","signature":"0x00"}"#;
+        let tx = make_workflow_tx(SELECTOR_WORKFLOW_SIGN, from.clone(), payload);
+
+        let res = executor.execute_transaction(&tx, &mut state).await.unwrap();
+        assert!(res.success);
+        assert_eq!(res.logs[0].topics[0], b"WorkflowSign");
+
+        let marker = state.get_storage(
+            &SYSTEM_ADDRESS,
+            b"wf:sign:wf42:did:tenzro:human:bob:1",
+        );
+        assert!(marker.is_some(), "composite-key marker must be persisted");
+    }
+
+    #[tokio::test]
+    async fn test_workflow_rejects_oversized_payload() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![9u8; 20];
+        state.set_balance(&from, 10_000_000_000_000_000_000u128);
+
+        // Build a > 64KiB payload that's still well-formed JSON.
+        let huge_value = "x".repeat(WORKFLOW_PAYLOAD_MAX_BYTES + 1);
+        let payload = format!(
+            r#"{{"workflow_id":"wf","creator":"did:tenzro:human:a:1","blob":"{}"}}"#,
+            huge_value
+        );
+        let tx = make_workflow_tx(SELECTOR_WORKFLOW_CREATE, from, &payload);
+
+        let err = executor
+            .execute_transaction(&tx, &mut state)
+            .await
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("exceeds"),
+            "expected size-limit rejection, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workflow_rejects_malformed_json() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![10u8; 20];
+        state.set_balance(&from, 10_000_000_000_000_000_000u128);
+
+        let tx = make_workflow_tx(SELECTOR_WORKFLOW_TRANSITION, from, "{not json");
+        let err = executor
+            .execute_transaction(&tx, &mut state)
+            .await
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("not valid JSON") || msg.contains("Invalid workflow JSON"),
+            "expected JSON parse error, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workflow_rejects_missing_id_field() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![11u8; 20];
+        state.set_balance(&from, 10_000_000_000_000_000_000u128);
+
+        // Valid JSON, but missing the `obligation_id` field.
+        let payload = r#"{"some_other_field":"x"}"#;
+        let tx = make_workflow_tx(SELECTOR_WORKFLOW_REGISTER_OBLIGATION, from, payload);
+        let err = executor
+            .execute_transaction(&tx, &mut state)
+            .await
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("obligation_id"),
+            "expected missing-field error mentioning `obligation_id`, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workflow_estimate_gas_table() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let state = StateAdapter::new();
+
+        // Each workflow selector should map to its dedicated gas table entry.
+        let cases: Vec<([u8; 4], u64)> = vec![
+            (SELECTOR_WORKFLOW_CREATE, GAS_WORKFLOW_CREATE),
+            (SELECTOR_WORKFLOW_SIGN, GAS_WORKFLOW_SIGN),
+            (SELECTOR_WORKFLOW_TRANSITION, GAS_WORKFLOW_TRANSITION),
+            (
+                SELECTOR_WORKFLOW_REGISTER_OBLIGATION,
+                GAS_WORKFLOW_REGISTER_OBLIGATION,
+            ),
+            (
+                SELECTOR_WORKFLOW_DISCHARGE_OBLIGATION,
+                GAS_WORKFLOW_DISCHARGE_OBLIGATION,
+            ),
+            (
+                SELECTOR_WORKFLOW_DEFAULT_OBLIGATION,
+                GAS_WORKFLOW_DEFAULT_OBLIGATION,
+            ),
+            (SELECTOR_WORKFLOW_REGISTER_GATE, GAS_WORKFLOW_REGISTER_GATE),
+            (SELECTOR_WORKFLOW_OPEN_APPROVAL, GAS_WORKFLOW_OPEN_APPROVAL),
+            (SELECTOR_WORKFLOW_SUBMIT_DECISION, GAS_WORKFLOW_SUBMIT_DECISION),
+            (SELECTOR_WORKFLOW_KILL_SWITCH, GAS_WORKFLOW_KILL_SWITCH),
+            (
+                SELECTOR_WORKFLOW_REGISTER_PRIVACY_DOMAIN,
+                GAS_WORKFLOW_REGISTER_PRIVACY_DOMAIN,
+            ),
+            (
+                SELECTOR_WORKFLOW_FREEZE_PRIVACY_DOMAIN,
+                GAS_WORKFLOW_FREEZE_PRIVACY_DOMAIN,
+            ),
+        ];
+        for (sel, want) in cases {
+            let mut data = sel.to_vec();
+            data.extend_from_slice(b"{}");
+            let tx = VmTransaction::new(
+                vec![0u8; 20],
+                None,
+                0,
+                data,
+                200_000,
+                1_000_000_000,
+                0,
+                VmType::Tenzro,
+                1337,
+            );
+            let got = executor.estimate_gas(&tx, &state).await.unwrap();
+            assert_eq!(got, want, "selector {:?} estimated wrong gas", sel);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_workflow_kill_switch_charges_higher_gas() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![12u8; 20];
+        state.set_balance(&from, 10_000_000_000_000_000_000u128);
+
+        let payload = r#"{"workflow_id":"emerg","scope":"workflow","reason":"oncall"}"#;
+        let tx = make_workflow_tx(SELECTOR_WORKFLOW_KILL_SWITCH, from, payload);
+
+        let res = executor.execute_transaction(&tx, &mut state).await.unwrap();
+        assert_eq!(res.gas_used, GAS_WORKFLOW_KILL_SWITCH);
+        assert!(GAS_WORKFLOW_KILL_SWITCH > GAS_WORKFLOW_TRANSITION);
+        assert_eq!(res.logs[0].topics[0], b"WorkflowKillSwitch");
     }
 }

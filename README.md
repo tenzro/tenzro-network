@@ -260,6 +260,15 @@ This means a single agent identity can compose a card-rail TAP payment, an x402 
 - **AP2**: Agent Payments Protocol with intent/cart/payment VDC mandates, session lifecycle, and mandate-pair validation
 - **AAP** (Agent Access Protocol): OAuth 2.1 + DPoP + RAR layering for agent-issued bearer tokens. The CLI exposes both `tenzro auth` and the alias `tenzro aap` — both names hit the same `tenzro_*Token*` and wallet-link RPCs.
 
+### Multi-Party Workflows (Canton-native)
+- **Lifecycle**: typed state machine (`Draft → Active → AwaitingSignatures → Executing → Completed`, terminal `Cancelled / Disputed / Failed / Suspended`) with privileged-VM selectors `0x01000040`–`0x0100004B` for every state change.
+- **Receipts**: every transition produces a `WorkflowReceipt` linked into a per-workflow hash chain, persisted under `wf_receipt:<id>` and (optionally) mirrored to a `Tenzro.Workflow.Receipt` Daml template through the co-located Canton participant.
+- **Privacy domains**: named ACLs of TDIP DIDs gate AES-256-GCM-sealed payloads with auditor read-through and governance-driven freeze.
+- **Fee routes**: basis-point recipient tables with `tenzro_computeFeeRoutePayouts` for read-only previews; actual settlement runs through the consensus-mediated escrow primitive.
+- **Kill switch**: `KillSwitchSuspend` / `KillSwitchCancel` selectors give the initiator a defined emergency-stop path so an autonomous agent can never be trapped in a non-responsive multi-party flow it originated.
+- **Surfaces**: read-only access via JSON-RPC (`tenzro_*`), MCP (port 3001), and A2A (`workflow` skill on the Tenzro Agent Card). Operational-metrics snapshot at `/metrics` with bundled Grafana dashboard (UID `tenzro-workflow`).
+- **Reference templates**: 5 ship under `crates/tenzro-workflow/reference_workflows/` (autonomous procurement, autonomous treasury, DvP settlement, environmental MRV, supply-chain DPP), each paired with a `*_daml_map.json` describing the Canton DAML projection.
+
 ### Compliance & Disclosure (EU AI Act Article 50)
 - **§50(1)** chatbot disclosure: every CLI / MCP / A2A AI text response is prefixed with `[AI]`. Single source of truth in `tenzro_node::eu_ai_disclosure`.
 - **§50(2)** synthetic-content marker: every inference output carries a C2PA-style `ProvenanceManifest` keyed by SHA-256 content hash. Validators sign manifests with their Ed25519 block-signing key. RPC `tenzro_getProvenance` and CLI `tenzro provenance get <content_hash>` resolve the cached manifest.

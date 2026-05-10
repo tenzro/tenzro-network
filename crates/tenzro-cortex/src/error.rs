@@ -29,8 +29,8 @@ pub enum CortexError {
     #[error("receipt verification failed: {0}")]
     InvalidReceipt(String),
 
-    #[error("cost {cost} exceeds caller budget {budget}")]
-    CostExceeded { cost: u64, budget: u64 },
+    #[error("cost {cost} wei exceeds caller budget {budget} wei")]
+    CostExceeded { cost: u128, budget: u128 },
 
     #[error("loops_used {loops_used} outside budget [{min},{max}]")]
     LoopsOutOfRange { loops_used: u32, min: u32, max: u32 },

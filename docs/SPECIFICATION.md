@@ -1553,6 +1553,165 @@ Canton topology is managed through topology transactions: `NamespaceDelegation`,
 
 By running Canton validators directly, Tenzro gains the enterprise-grade privacy and composability guarantees of the Canton Network — including sub-transaction privacy, need-to-know data sharing, atomic multi-synchronizer transfers, and regulatory-compliant smart contracts — without requiring users to interact with a separate ledger.
 
+### 14.7 Multi-Party Workflows on Canton
+
+The `tenzro-workflow` crate is a Canton-native multi-party workflow engine that turns a Tenzro chain transaction into a structured, multi-stakeholder process: a workflow has a typed lifecycle, a set of obligations distributed across counterparties, an approvals graph, fee routing, optional privacy domains, a kill-switch path, and a hash-chained audit receipt — all mirrored into Canton's Daml runtime through the same participant node used by §14.6.
+
+#### 14.7.1 Workflow object model
+
+A workflow is a `Workflow` value with the following fields:
+
+| Field | Description |
+|-------|-------------|
+| `id` | `WorkflowId` derived from `SHA-256("tenzro/workflow/id" \|\| initiator \|\| nonce_le \|\| template_id)` |
+| `template_id` | Reference to the workflow template (`AutonomousProcurement`, `BridgeArbitrage`, etc.) |
+| `initiator_did` | TDIP DID of the workflow originator |
+| `counterparties` | Ordered set of TDIP DIDs that must sign or act on the workflow |
+| `obligations` | Per-counterparty `Obligation` records: `{ counterparty_did, action, deadline, status }` |
+| `approvals` | `Approval` records gated by `policy_dsl` expressions (see §14.7.5) |
+| `fee_route_id` | Optional reference to a `FeeRoute` used for settlement payouts |
+| `privacy_domain_id` | Optional reference to a `PrivacyDomain` (see §14.7.4) |
+| `state` | `WorkflowState`: `Draft → Active → AwaitingSignatures → Executing → Completed`, with terminal `Cancelled`, `Disputed`, `Failed`, `Suspended` |
+| `signatures` | Map of `did → Signature` accumulating multi-party consent |
+
+State transitions are validated by a fixed transition table; an invalid edge is rejected at the manager API surface, not silently coerced.
+
+#### 14.7.2 Privileged-VM selectors
+
+Workflow writes flow through signed transactions dispatched by the Native VM, not RPC, so they are consensus-mediated and replayable from block history. The privileged-VM selectors are:
+
+| Selector | Operation | Description |
+|----------|-----------|-------------|
+| `0x01000040` | `CreateWorkflow` | Initialize a new workflow with template + counterparties |
+| `0x01000041` | `SubmitSignature` | Add a signature to `AwaitingSignatures` workflow |
+| `0x01000042` | `CompleteObligation` | Mark an obligation as fulfilled |
+| `0x01000043` | `RecordApproval` | Record a policy-gated approval |
+| `0x01000044` | `TransitionState` | Advance the state machine |
+| `0x01000045` | `RegisterFeeRoute` | Register a recipient/share fee route |
+| `0x01000046` | `RegisterPrivacyDomain` | Register a privacy domain with ACL |
+| `0x01000047` | `MirrorToCanton` | Mirror a receipt to Canton via the participant node |
+| `0x01000048` | `KillSwitchSuspend` | Suspend a workflow (initiator-only or governance-only) |
+| `0x01000049` | `KillSwitchCancel` | Cancel a suspended workflow |
+| `0x0100004A` | `OpenDispute` | Move a workflow into `Disputed` |
+| `0x0100004B` | `ResolveDispute` | Close a dispute with payout direction |
+
+All selectors enforce signer-vs-counterparty authorization at execution; an unauthorized signer returns a typed `WorkflowError::Unauthorized` instead of producing a partially-applied state.
+
+#### 14.7.3 Canton receipt mirror
+
+Every successful workflow state transition produces a `WorkflowReceipt`:
+
+```
+WorkflowReceipt {
+  id: Hash,                        // SHA-256(canonical receipt bytes)
+  workflow_id: WorkflowId,
+  state_before: WorkflowState,
+  state_after: WorkflowState,
+  signer: Did,
+  block_height: BlockHeight,
+  prev_receipt: Hash,              // hash-chain link
+  payload_envelope: ReceiptEnvelope, // inline summary or DA pointer
+}
+```
+
+Receipts are persisted to RocksDB under `wf_receipt:<id>` (see §17) and the **chain head** is stored in the workflow's `WorkflowMeta.last_receipt`. The full receipt history is recovered by walking `prev_receipt` backwards from the head until `Hash::default()` (genesis). For audit, `tenzro_listWorkflowReceipts` walks up to `max` entries; receipts are not held in memory.
+
+When a workflow is mirrored to Canton (selector `0x01000047`), the same receipt is projected into a `Tenzro.Workflow.Receipt` Daml template via the co-located participant's Ledger API. The Daml template carries the `ReceiptEnvelope` payload either inline (small payloads, defaults: settlement, kill-switch, lifecycle, governance) or as a `DaPointer` reference (large payloads, defaults: settlement-channel, inference, agent-message — see §17), and the originating Tenzro chain's `block_height + receipt_id` is recorded as the cross-ledger anchor. Canton's sub-transaction privacy ensures that only the workflow's stakeholders observe the mirrored receipt.
+
+#### 14.7.4 Privacy domains
+
+A `PrivacyDomain` is a named ACL of TDIP DIDs that gates encrypted payloads:
+
+```
+PrivacyDomain {
+  id: PrivacyDomainId,
+  initiator_did: Did,
+  acl: BTreeSet<Did>,              // members + auditors
+  auditors: BTreeSet<Did>,         // subset of acl with broader read scope
+  frozen: bool,                    // governance-froze new sealings
+  created_at: Timestamp,
+}
+```
+
+Workflows that opt into a privacy domain seal their `Workflow.payload` and event payloads with a domain key shared among the ACL. The `seal/open` round-trip is symmetric AES-256-GCM with the domain key derived per the standard `tenzro-crypto` envelope-encryption flow (§7). Auditors inside the ACL can `open` payloads they were never explicit recipients of; non-members and non-auditors cannot. A frozen domain refuses new `seal` operations but permits existing payloads to continue being opened — the data-retention contract is preserved across governance-driven freezes.
+
+#### 14.7.5 Policy DSL
+
+Approvals on a workflow are gated by a small DSL evaluated against a `PolicyContext` containing `{ now, signer, counterparties, accumulated_amount_today, kyc_tiers, ... }`. Expressions evaluate to `PolicyOutcome::{ Allow, Deny, RequireApproval(approver_did) }`. Combinators:
+
+- `amount_lte(N)` / `daily_amount_lte(N)` — numeric ceilings
+- `counterparty_kyc_tier_gte(tier)` — KYC gating
+- `time_window(start, end)` — wraps around midnight; supports business-hours
+- `and(left, right)` — short-circuits on `Deny`; `RequireApproval` propagates if either branch requires
+- `or(left, right)` — short-circuits on `Allow`; collapses to `RequireApproval` when no branch allows but at least one branch requires
+- `not(inner)` — flips `Allow ⇄ Deny`; `RequireApproval` is a no-op under negation
+
+The DSL is tree-shaped, terminating, and pure — it has no side effects and no I/O — which makes it safe to evaluate inside the Native VM during selector dispatch.
+
+#### 14.7.6 Fee routing
+
+A `FeeRoute` is a static recipient table:
+
+```
+FeeRoute {
+  id: FeeRouteId,
+  recipients: Vec<FeeRouteRecipient {
+    recipient_did: Did,
+    label: String,
+    share_bps: u16,                // basis points; sum of all = 10_000
+  }>,
+}
+```
+
+`compute_fee_route_payouts(route, gross_wei: u128)` returns per-recipient payout amounts using basis-point splits with truncation; any rounding remainder is added to the last recipient so the sum of payouts equals the gross. The RPC `tenzro_computeFeeRoutePayouts` exposes this as a read-only preview; actual settlement payouts move through the consensus-mediated escrow primitive (§9), not the preview RPC.
+
+#### 14.7.7 Kill switch
+
+Two privileged-VM selectors, `KillSwitchSuspend` (`0x01000048`) and `KillSwitchCancel` (`0x01000049`), provide a defined emergency-stop path:
+
+- **Suspend** moves the workflow into `Suspended`. It is callable by the initiator at any time and by governance-bound DIDs (per `IdentityRegistry::enforce_operation`) at any time.
+- **Cancel** moves a `Suspended` workflow into terminal `Cancelled`. It is callable only by the initiator after the workflow has been suspended.
+
+A suspended workflow rejects all writes except `KillSwitchCancel` and dispute selectors. The pair removes the only condition under which an autonomous agent could be trapped in a non-responsive multi-party flow it initiated.
+
+#### 14.7.8 Operational metrics
+
+`WorkflowRuntime::operational_metrics()` returns an `OperationalMetrics` snapshot computed by walking the in-memory workflow / obligation / approval indices once and partitioning by status. The snapshot is rendered by `OperationalMetrics::render_prometheus()` into the standard text exposition format with `# HELP` and `# TYPE` headers per metric and `BTreeMap` ordering for deterministic output. It is exposed through the node's `/metrics` endpoint and graphed by `deploy/monitoring/grafana-workflow-dashboard.json` (UID `tenzro-workflow`):
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `tenzro_workflow_workflows_total` | gauge | `status` |
+| `tenzro_workflow_obligations_total` | gauge | `status` |
+| `tenzro_workflow_approvals_total` | gauge | `status` |
+| `tenzro_workflow_signatures_collected_total` | counter | — |
+| `tenzro_workflow_canton_mirrored_total` | counter | — |
+| `tenzro_workflow_fee_routes_total` | gauge | — |
+| `tenzro_workflow_privacy_domains_total` | gauge | — |
+
+#### 14.7.9 RPC, MCP, and A2A surfaces
+
+Read-only access is exposed across all three external surfaces:
+
+- **JSON-RPC** (port 8545): `tenzro_getWorkflow`, `tenzro_getWorkflowLifecycle`, `tenzro_listWorkflowsByCreator`, `tenzro_listWorkflowsByParticipant`, `tenzro_listWorkflowsByStatus`, `tenzro_getObligation`, `tenzro_getApproval`, `tenzro_getWorkflowReceipt`, `tenzro_listWorkflowReceipts`, `tenzro_getFeeRoute`, `tenzro_listFeeRoutes`, `tenzro_computeFeeRoutePayouts`, `tenzro_getPrivacyDomain`, `tenzro_listPrivacyDomainsForDid`, `tenzro_getWorkflowOperationalMetrics`.
+- **MCP** (port 3001): the same surface mirrored as `#[tool]`-defined methods on the main MCP server — `get_workflow`, `get_workflow_lifecycle`, `list_workflows_by_creator`, `list_workflows_by_participant`, `list_workflows_by_status`, `get_obligation`, `get_approval`, `get_workflow_receipt`, `list_workflow_receipts`, `get_fee_route`, `list_fee_routes`, `compute_fee_route_payouts`, `get_privacy_domain`, `list_privacy_domains_for_did`, `get_workflow_operational_metrics`.
+- **A2A** (port 3002): the `workflow` skill on the Tenzro Agent Card surfaces all of the above through natural-language utterances, allowing peer agents to query workflow state, obligations, fee-route payouts, privacy domains, and Canton mirror status without bespoke RPC integration.
+
+Writes never occur through these surfaces — every state-changing operation is a privileged-VM selector dispatched by a signed transaction submitted via `tenzro_signAndSendTransaction` or `eth_sendRawTransaction`, ensuring the Tenzro chain's full block history is the canonical workflow log.
+
+#### 14.7.10 Reference templates
+
+Five reference workflow templates ship under `crates/tenzro-workflow/reference_workflows/`, each paired with a `*_daml_map.json` describing the Canton DAML projection:
+
+| Template | Pattern |
+|----------|---------|
+| `autonomous_procurement` | Buyer/seller/auditor procurement on Canton with DvP |
+| `autonomous_treasury` | Multi-sig treasury operations with policy-gated approvals |
+| `dvp_settlement` | Delivery-vs-payment settlement on a Canton synchronizer |
+| `environmental_mrv` | Environmental measurement / reporting / verification with auditor sign-off |
+| `supply_chain_dpp` | Supply-chain digital product passport with multi-party attestations |
+
+Each template defines its `WorkflowSpec` (counterparty roles, obligation set, approvals graph, fee route, privacy domain) and is instantiated at runtime via `tenzro-agent-kit`'s spawner. The agent-kit `reference_templates/` directory carries a separate set of agent templates (inference marketplace, RWA custodian, bridge arbitrage scanner, etc.) that may originate workflows but are not themselves workflow specs.
+
 ---
 
 ## 15. Wallet and Key Management
@@ -1966,7 +2125,7 @@ JSON-RPC error codes follow the workspace convention: `-32602` for validation er
 
 The CLI (`crates/tenzro-cli`) ships a `train` command group with seven subcommands mirroring the RPC surface: `post-task`, `list-runs`, `get-run`, `get-receipt`, `enroll-trainer`, `submit-gradient`, `finalize-round`. Specs and gradients are loaded from JSON files; `post_step_hashes` is parsed as an inline JSON object.
 
-Three reference agent templates are bootstrapped from `crates/tenzro-agent-kit/reference_templates/` and registered on every node startup:
+Three reference agent templates are bootstrapped from `crates/tenzro-workflow/reference_workflows/` and registered on every node startup:
 
 | Template | Modality | Min RAM | GPU | Platforms |
 |---|---|---|---|---|

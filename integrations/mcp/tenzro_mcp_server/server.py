@@ -422,7 +422,7 @@ async def register_identity(identity_type: str, display_name: str) -> str:
 @mcp.tool
 async def resolve_did(did: str) -> str:
     """Resolve a DID to its identity info and delegation scope."""
-    result = await rpc_call("tenzro_resolveIdentity", [did])
+    result = await rpc_call("tenzro_resolveIdentity", {"did": did})
     return json.dumps(result)
 
 

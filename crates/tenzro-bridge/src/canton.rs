@@ -45,6 +45,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tenzro_types::primitives::Hash;
+use tenzro_workflow::{
+    approval::{ApprovalDecision, ApprovalGate, ApprovalRequest, Decision},
+    lifecycle::LifecycleTransition,
+    obligation::Obligation,
+    workflow::{CantonMirror, Workflow},
+};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -484,6 +490,367 @@ impl CantonAdapter {
 
         Ok(filtered)
     }
+
+    // ─── Workflow stack mirroring ───────────────────────────────────────────
+    //
+    // The Tenzro Ledger is the source of truth for workflow state. The
+    // CantonAdapter mirrors that state into co-located Canton synchronizers
+    // by creating / exercising DAML wrapper templates and consuming inbound
+    // DAML events back into the Tenzro `WorkflowManager`. Canton becomes a
+    // privacy-preserving sub-network with its own party / sub-transaction
+    // confidentiality, while every state transition is anchored on Tenzro
+    // first via the privileged-VM workflow selectors.
+    //
+    // Template ids match the DAML codegen wave (Wave 6). The wrapper
+    // templates are deliberately thin: they hold the Tenzro `workflow_id`
+    // / `obligation_id` / `request_id` plus the canonical hash, and the
+    // Tenzro receipt root. All structural data still lives on Tenzro.
+
+    /// DAML template id for the workflow wrapper. Matches the Tenzro DAR
+    /// shipped with the autonomous_procurement reference template (Wave 6).
+    const TPL_WORKFLOW: &'static str = "Tenzro.Workflow:WorkflowAnchor";
+    /// DAML template id for an obligation anchor.
+    const TPL_OBLIGATION: &'static str = "Tenzro.Workflow:ObligationAnchor";
+    /// DAML template id for an approval request anchor.
+    const TPL_APPROVAL: &'static str = "Tenzro.Workflow:ApprovalAnchor";
+    /// DAML template id for the lifecycle log entry.
+    const TPL_LIFECYCLE: &'static str = "Tenzro.Workflow:LifecycleLog";
+
+    /// Mirrors a Tenzro `Workflow` onto a Canton synchronizer.
+    ///
+    /// Creates a `WorkflowAnchor` contract holding the workflow id, the
+    /// canonical hash signed by participants, the participant DIDs
+    /// (so Canton observers can scope visibility), and a pointer back
+    /// to the Tenzro receipt root.
+    ///
+    /// Returns the populated `CantonMirror` to attach to the Tenzro-side
+    /// `Workflow.canton_mirror`.
+    pub async fn mirror_workflow(
+        &self,
+        workflow: &Workflow,
+        synchronizer_id: &str,
+    ) -> Result<CantonMirror> {
+        if !self
+            .config
+            .synchronizer_ids
+            .contains(&synchronizer_id.to_string())
+        {
+            return Err(BridgeError::ChainNotSupported(format!(
+                "canton-{}",
+                synchronizer_id
+            )));
+        }
+
+        let canonical_hash = workflow.canonical_hash();
+        let participant_dids: Vec<String> = workflow
+            .participants
+            .iter()
+            .map(|p| p.did.clone())
+            .collect();
+
+        let payload = serde_json::json!({
+            "workflowId": format!("0x{}", hex::encode(workflow.workflow_id.as_bytes())),
+            "canonicalHash": format!("0x{}", hex::encode(canonical_hash.as_bytes())),
+            "creator": workflow.creator,
+            "title": workflow.title,
+            "participants": participant_dids,
+            "status": workflow.status.as_str(),
+            "tenzroParty": self.config.act_as_party,
+            "synchronizerId": synchronizer_id,
+        });
+
+        let response = self
+            .create_contract(Self::TPL_WORKFLOW, payload)
+            .await?;
+
+        info!(
+            "Canton mirror_workflow: workflow {} → contract {} on synchronizer {}",
+            hex::encode(workflow.workflow_id.as_bytes()),
+            response.contract_id,
+            synchronizer_id
+        );
+
+        Ok(CantonMirror {
+            synchronizer_id: synchronizer_id.to_string(),
+            party: self.config.act_as_party.clone(),
+            contract_id: response.contract_id,
+        })
+    }
+
+    /// Mirrors an `Obligation` as an `ObligationAnchor` contract.
+    ///
+    /// `parent_contract_id` is the WorkflowAnchor created by
+    /// `mirror_workflow`. The obligor / obligee DIDs are observers on
+    /// the contract so they can see discharge proofs flow inbound from
+    /// Tenzro.
+    pub async fn mirror_obligation(
+        &self,
+        obligation: &Obligation,
+        parent_contract_id: &str,
+    ) -> Result<String> {
+        let kind_tag = match &obligation.kind {
+            tenzro_workflow::obligation::ObligationKind::Pay { .. } => "Pay",
+            tenzro_workflow::obligation::ObligationKind::Deliver { .. } => "Deliver",
+            tenzro_workflow::obligation::ObligationKind::Attest { .. } => "Attest",
+            tenzro_workflow::obligation::ObligationKind::Settle { .. } => "Settle",
+            tenzro_workflow::obligation::ObligationKind::Custom { .. } => "Custom",
+        };
+
+        let status_tag = match &obligation.status {
+            tenzro_workflow::obligation::ObligationStatus::Pending => "pending",
+            tenzro_workflow::obligation::ObligationStatus::InProgress { .. } => "in_progress",
+            tenzro_workflow::obligation::ObligationStatus::Discharged { .. } => "discharged",
+            tenzro_workflow::obligation::ObligationStatus::Defaulted { .. } => "defaulted",
+            tenzro_workflow::obligation::ObligationStatus::Forgiven { .. } => "forgiven",
+        };
+
+        let payload = serde_json::json!({
+            "obligationId": format!("0x{}", hex::encode(obligation.obligation_id.as_bytes())),
+            "workflowId": format!("0x{}", hex::encode(obligation.workflow_id.as_bytes())),
+            "parentContractId": parent_contract_id,
+            "obligor": obligation.obligor,
+            "obligee": obligation.obligee,
+            "kind": kind_tag,
+            "status": status_tag,
+            "dueBy": obligation.due_by,
+            "tenzroParty": self.config.act_as_party,
+        });
+
+        let response = self
+            .create_contract(Self::TPL_OBLIGATION, payload)
+            .await?;
+
+        debug!(
+            "Canton mirror_obligation: obligation {} → contract {}",
+            hex::encode(obligation.obligation_id.as_bytes()),
+            response.contract_id
+        );
+
+        Ok(response.contract_id)
+    }
+
+    /// Mirrors an `ApprovalRequest` as an `ApprovalAnchor` contract.
+    ///
+    /// Approvers (per the gate's `ApproverSet`) become observers, so
+    /// their wallets can render the open request from the Canton side.
+    /// Decisions are mirrored back as exercise calls.
+    pub async fn mirror_approval(
+        &self,
+        gate: &ApprovalGate,
+        request: &ApprovalRequest,
+        parent_contract_id: &str,
+    ) -> Result<String> {
+        let approvers: Vec<String> = match &gate.approvers {
+            tenzro_workflow::approval::ApproverSet::Single { did } => vec![did.clone()],
+            tenzro_workflow::approval::ApproverSet::Threshold { dids, .. } => dids.clone(),
+            tenzro_workflow::approval::ApproverSet::Role { role, .. } => {
+                vec![format!("role:{}", role)]
+            }
+            tenzro_workflow::approval::ApproverSet::Delegated { from, .. } => vec![from.clone()],
+        };
+
+        let (m, n) = match &gate.approvers {
+            tenzro_workflow::approval::ApproverSet::Single { .. } => (1u8, 1u8),
+            tenzro_workflow::approval::ApproverSet::Threshold { m, n, .. } => (*m, *n),
+            tenzro_workflow::approval::ApproverSet::Role { m, .. } => (*m, *m),
+            tenzro_workflow::approval::ApproverSet::Delegated { .. } => (1u8, 1u8),
+        };
+
+        let payload = serde_json::json!({
+            "requestId": format!("0x{}", hex::encode(request.request_id.as_bytes())),
+            "gateId": format!("0x{}", hex::encode(gate.gate_id.as_bytes())),
+            "workflowId": format!("0x{}", hex::encode(request.workflow_id.as_bytes())),
+            "parentContractId": parent_contract_id,
+            "approvers": approvers,
+            "m": m,
+            "n": n,
+            "triggerContext": request.trigger_context,
+            "status": "open",
+            "tenzroParty": self.config.act_as_party,
+        });
+
+        let response = self
+            .create_contract(Self::TPL_APPROVAL, payload)
+            .await?;
+
+        debug!(
+            "Canton mirror_approval: request {} → contract {}",
+            hex::encode(request.request_id.as_bytes()),
+            response.contract_id
+        );
+
+        Ok(response.contract_id)
+    }
+
+    /// Appends a `LifecycleLog` contract for the given transition.
+    ///
+    /// Each lifecycle transition gets its own contract so that Canton
+    /// observers can stream the audit trail without re-fetching the
+    /// workflow anchor. The contract carries the canonical
+    /// `transition_hash` from the Tenzro side as the integrity binding.
+    pub async fn mirror_lifecycle(
+        &self,
+        transition: &LifecycleTransition,
+        parent_contract_id: &str,
+    ) -> Result<String> {
+        let trigger_tag = match &transition.trigger {
+            tenzro_workflow::lifecycle::TransitionTrigger::Participant { .. } => "participant",
+            tenzro_workflow::lifecycle::TransitionTrigger::ApprovalFinalized { .. } => {
+                "approval_finalized"
+            }
+            tenzro_workflow::lifecycle::TransitionTrigger::SignaturesComplete => {
+                "signatures_complete"
+            }
+            tenzro_workflow::lifecycle::TransitionTrigger::ObligationDischarged { .. } => {
+                "obligation_discharged"
+            }
+            tenzro_workflow::lifecycle::TransitionTrigger::ObligationDefaulted { .. } => {
+                "obligation_defaulted"
+            }
+            tenzro_workflow::lifecycle::TransitionTrigger::KillSwitch { .. } => "kill_switch",
+            tenzro_workflow::lifecycle::TransitionTrigger::Governance { .. } => "governance",
+            tenzro_workflow::lifecycle::TransitionTrigger::Timeout => "timeout",
+            tenzro_workflow::lifecycle::TransitionTrigger::CantonInbound { .. } => {
+                "canton_inbound"
+            }
+        };
+
+        let payload = serde_json::json!({
+            "workflowId": format!("0x{}", hex::encode(transition.workflow_id.as_bytes())),
+            "parentContractId": parent_contract_id,
+            "fromStatus": transition.from.as_str(),
+            "toStatus": transition.to.as_str(),
+            "trigger": trigger_tag,
+            "transitionHash": format!("0x{}",
+                hex::encode(transition.transition_hash.as_bytes())),
+            "at": transition.at,
+            "tenzroParty": self.config.act_as_party,
+        });
+
+        let response = self
+            .create_contract(Self::TPL_LIFECYCLE, payload)
+            .await?;
+
+        Ok(response.contract_id)
+    }
+
+    /// Mirrors an `ApprovalDecision` as an exercise on the open
+    /// `ApprovalAnchor` contract. The choice name is `Approve` or
+    /// `Reject`. The Tenzro-side decision signature is carried inside
+    /// the choice argument so Canton observers can verify it
+    /// independently of the JSON Ledger API auth path.
+    pub async fn mirror_approval_decision(
+        &self,
+        approval_contract_id: &str,
+        decision: &ApprovalDecision,
+    ) -> Result<()> {
+        let choice = match decision.decision {
+            Decision::Approve => "Approve",
+            Decision::Reject => "Reject",
+        };
+        let argument = serde_json::json!({
+            "approver": decision.by,
+            "at": decision.at,
+            "justification": decision.justification,
+            "signature": format!("0x{}", hex::encode(&decision.signature)),
+            "signedByPubkey": format!("0x{}", hex::encode(&decision.signed_by_pubkey)),
+        });
+
+        self.exercise_choice(approval_contract_id, Self::TPL_APPROVAL, choice, argument)
+            .await?;
+
+        debug!(
+            "Canton mirror_approval_decision: contract {} ← {} by {}",
+            approval_contract_id, choice, decision.by
+        );
+        Ok(())
+    }
+
+    /// Polls inbound DAML events for templates emitted by counterparties on
+    /// mirrored synchronizers and converts them into typed
+    /// `CantonInboundEvent`s. The caller — typically the node-side workflow
+    /// runtime — translates each event into the appropriate
+    /// `WorkflowManager` mutation (e.g. discharge a Settle obligation when
+    /// the counterparty exercises the matching DAML choice).
+    ///
+    /// This is a thin polling wrapper over `query_contracts`: in production
+    /// the participant exposes a streaming events API; the polling fallback
+    /// ensures correctness even when streaming is unavailable.
+    pub async fn consume_daml_events(&self) -> Result<Vec<CantonInboundEvent>> {
+        // Pull anchors of all four wrapper templates so the caller gets a
+        // unified view across workflows / obligations / approvals /
+        // lifecycle in one round trip.
+        let templates = vec![
+            Self::TPL_WORKFLOW.to_string(),
+            Self::TPL_OBLIGATION.to_string(),
+            Self::TPL_APPROVAL.to_string(),
+            Self::TPL_LIFECYCLE.to_string(),
+        ];
+
+        let contracts = self
+            .query_contracts(templates, serde_json::Value::Null)
+            .await?;
+
+        let events: Vec<CantonInboundEvent> = contracts
+            .into_iter()
+            .filter_map(|c| {
+                let tid = c.template_id.clone();
+                if tid.ends_with("WorkflowAnchor") {
+                    Some(CantonInboundEvent::Workflow {
+                        contract_id: c.contract_id,
+                        payload: c.payload,
+                    })
+                } else if tid.ends_with("ObligationAnchor") {
+                    Some(CantonInboundEvent::Obligation {
+                        contract_id: c.contract_id,
+                        payload: c.payload,
+                    })
+                } else if tid.ends_with("ApprovalAnchor") {
+                    Some(CantonInboundEvent::Approval {
+                        contract_id: c.contract_id,
+                        payload: c.payload,
+                    })
+                } else if tid.ends_with("LifecycleLog") {
+                    Some(CantonInboundEvent::Lifecycle {
+                        contract_id: c.contract_id,
+                        payload: c.payload,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        debug!(
+            "Canton consume_daml_events: returning {} typed inbound events",
+            events.len()
+        );
+        Ok(events)
+    }
+}
+
+/// Typed inbound event from a Canton synchronizer. Produced by
+/// `CantonAdapter::consume_daml_events`. The node-side workflow runtime
+/// matches on the variant and translates each event into the appropriate
+/// `WorkflowManager` mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CantonInboundEvent {
+    Workflow {
+        contract_id: String,
+        payload: serde_json::Value,
+    },
+    Obligation {
+        contract_id: String,
+        payload: serde_json::Value,
+    },
+    Approval {
+        contract_id: String,
+        payload: serde_json::Value,
+    },
+    Lifecycle {
+        contract_id: String,
+        payload: serde_json::Value,
+    },
 }
 
 #[async_trait]

@@ -19,7 +19,7 @@
 //! - **Mint**: Deposit TNZO → receive stTNZO at current exchange rate
 //! - **Burn**: Return stTNZO → receive TNZO at current exchange rate (after unbonding)
 //! - **Exchange rate**: `stTNZO_value = stTNZO_amount * exchange_rate`
-//!   where `exchange_rate = total_underlying_tnzo / total_sttnzo_supply`
+//!   where `exchange_rate = total_underlying_wei / total_sttnzo_supply`
 //!
 //! # Architecture
 //!
@@ -33,8 +33,33 @@
 use crate::error::{Result, TokenError};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tenzro_storage::{KvStore, WriteOp, CF_TOKENS};
 use tenzro_types::primitives::{Address, Timestamp};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+/// Singleton key for the `LiquidStakingConfig` under `CF_TOKENS`.
+const LIQUID_CONFIG_KEY: &[u8] = b"liquid:config";
+/// Singleton key for aggregate pool totals (supply / underlying / fees /
+/// rewards) serialized as `LiquidStakingTotals`.
+const LIQUID_TOTALS_KEY: &[u8] = b"liquid:totals";
+/// Per-holder stTNZO balance prefix: `liquid:bal:<address-bytes>`.
+const LIQUID_BALANCE_PREFIX: &[u8] = b"liquid:bal:";
+/// Per-validator delegation prefix: `liquid:val:<address-bytes>`.
+const LIQUID_DELEGATION_PREFIX: &[u8] = b"liquid:val:";
+/// Per-withdrawal-request prefix: `liquid:wr:<request_id>`.
+const LIQUID_WITHDRAWAL_PREFIX: &[u8] = b"liquid:wr:";
+
+/// Compact aggregate of pool totals — persisted as a single JSON value
+/// under `LIQUID_TOTALS_KEY` so deposit / withdraw / reward paths only do
+/// one totals round-trip per mutation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+struct LiquidStakingTotals {
+    total_sttnzo_supply: u128,
+    total_underlying_wei: u128,
+    total_protocol_fees: u128,
+    total_rewards_distributed: u128,
+}
 
 /// stTNZO decimals (same as TNZO: 18)
 pub const STTNZO_DECIMALS: u8 = 18;
@@ -92,7 +117,6 @@ pub struct WithdrawalRequest {
 /// Liquid staking pool manager
 ///
 /// Manages the stTNZO liquid staking derivative for Tenzro Network.
-#[derive(Debug)]
 pub struct LiquidStakingPool {
     /// Configuration
     config: parking_lot::RwLock<LiquidStakingConfig>,
@@ -104,7 +128,7 @@ pub struct LiquidStakingPool {
     total_sttnzo_supply: parking_lot::RwLock<u128>,
 
     /// Total underlying TNZO in the pool (staked + rewards - fees)
-    total_underlying_tnzo: parking_lot::RwLock<u128>,
+    total_underlying_wei: parking_lot::RwLock<u128>,
 
     /// Total protocol fees collected (TNZO)
     total_protocol_fees: parking_lot::RwLock<u128>,
@@ -117,6 +141,28 @@ pub struct LiquidStakingPool {
 
     /// Total rewards distributed through the pool
     total_rewards_distributed: parking_lot::RwLock<u128>,
+
+    /// Optional persistent storage backend. When wired, every mutating
+    /// path (deposit / request_withdrawal / claim_withdrawal /
+    /// distribute_rewards / add_validator / transfer / config update)
+    /// write-throughs to `CF_TOKENS`. Hydration on `with_storage` rebuilds
+    /// totals, balances, validator delegations, and pending withdrawals
+    /// from the same prefixes.
+    storage: Option<Arc<dyn KvStore>>,
+}
+
+impl std::fmt::Debug for LiquidStakingPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiquidStakingPool")
+            .field("config", &*self.config.read())
+            .field("holder_count", &self.sttnzo_balances.len())
+            .field("validator_count", &self.validator_delegations.len())
+            .field("pending_withdrawals", &self.withdrawal_requests.len())
+            .field("total_sttnzo_supply", &*self.total_sttnzo_supply.read())
+            .field("total_underlying_wei", &*self.total_underlying_wei.read())
+            .field("has_storage", &self.storage.is_some())
+            .finish()
+    }
 }
 
 impl LiquidStakingPool {
@@ -136,23 +182,293 @@ impl LiquidStakingPool {
             config: parking_lot::RwLock::new(config),
             sttnzo_balances: DashMap::new(),
             total_sttnzo_supply: parking_lot::RwLock::new(0),
-            total_underlying_tnzo: parking_lot::RwLock::new(0),
+            total_underlying_wei: parking_lot::RwLock::new(0),
             total_protocol_fees: parking_lot::RwLock::new(0),
             withdrawal_requests: DashMap::new(),
             validator_delegations: DashMap::new(),
             total_rewards_distributed: parking_lot::RwLock::new(0),
+            storage: None,
         })
+    }
+
+    /// Create a liquid staking pool with persistent backing in `CF_TOKENS`.
+    /// Hydrates config, aggregate totals, per-holder balances, validator
+    /// delegations, and pending withdrawal requests on construction.
+    pub fn with_storage(
+        config: LiquidStakingConfig,
+        storage: Arc<dyn KvStore>,
+    ) -> Result<Self> {
+        if config.protocol_fee_bps > 5000 {
+            return Err(TokenError::InvalidAmount(format!(
+                "Protocol fee {} bps exceeds maximum 5000 bps (50%)",
+                config.protocol_fee_bps
+            )));
+        }
+
+        let pool = Self {
+            config: parking_lot::RwLock::new(config),
+            sttnzo_balances: DashMap::new(),
+            total_sttnzo_supply: parking_lot::RwLock::new(0),
+            total_underlying_wei: parking_lot::RwLock::new(0),
+            total_protocol_fees: parking_lot::RwLock::new(0),
+            withdrawal_requests: DashMap::new(),
+            validator_delegations: DashMap::new(),
+            total_rewards_distributed: parking_lot::RwLock::new(0),
+            storage: Some(storage),
+        };
+
+        pool.hydrate_from_storage()?;
+        Ok(pool)
+    }
+
+    fn hydrate_from_storage(&self) -> Result<()> {
+        let storage = match &self.storage {
+            Some(s) => s.clone(),
+            None => return Ok(()),
+        };
+
+        // Config: hydrate if present, otherwise persist current default.
+        match storage
+            .get(CF_TOKENS, LIQUID_CONFIG_KEY)
+            .map_err(|e| TokenError::StorageError(format!("get liquid config: {}", e)))?
+        {
+            Some(bytes) => {
+                let cfg: LiquidStakingConfig = serde_json::from_slice(&bytes).map_err(|e| {
+                    TokenError::StorageError(format!("decode liquid config: {}", e))
+                })?;
+                *self.config.write() = cfg;
+            }
+            None => {
+                let snapshot = self.config.read().clone();
+                self.persist_config(&snapshot)?;
+            }
+        }
+
+        // Aggregate totals.
+        if let Some(bytes) = storage
+            .get(CF_TOKENS, LIQUID_TOTALS_KEY)
+            .map_err(|e| TokenError::StorageError(format!("get liquid totals: {}", e)))?
+        {
+            let totals: LiquidStakingTotals = serde_json::from_slice(&bytes).map_err(|e| {
+                TokenError::StorageError(format!("decode liquid totals: {}", e))
+            })?;
+            *self.total_sttnzo_supply.write() = totals.total_sttnzo_supply;
+            *self.total_underlying_wei.write() = totals.total_underlying_wei;
+            *self.total_protocol_fees.write() = totals.total_protocol_fees;
+            *self.total_rewards_distributed.write() = totals.total_rewards_distributed;
+        }
+
+        // Per-holder balances.
+        let bal_keys = storage
+            .get_keys_with_prefix(CF_TOKENS, LIQUID_BALANCE_PREFIX)
+            .map_err(|e| TokenError::StorageError(format!("scan liquid balances: {}", e)))?;
+        for key in &bal_keys {
+            let Some(bytes) = storage
+                .get(CF_TOKENS, key)
+                .map_err(|e| TokenError::StorageError(format!("get liquid balance: {}", e)))?
+            else {
+                continue;
+            };
+            let entry: (Address, u128) = serde_json::from_slice(&bytes).map_err(|e| {
+                TokenError::StorageError(format!("decode liquid balance: {}", e))
+            })?;
+            self.sttnzo_balances.insert(entry.0, entry.1);
+        }
+
+        // Validator delegations.
+        let val_keys = storage
+            .get_keys_with_prefix(CF_TOKENS, LIQUID_DELEGATION_PREFIX)
+            .map_err(|e| TokenError::StorageError(format!("scan liquid delegations: {}", e)))?;
+        for key in &val_keys {
+            let Some(bytes) = storage
+                .get(CF_TOKENS, key)
+                .map_err(|e| TokenError::StorageError(format!("get liquid delegation: {}", e)))?
+            else {
+                continue;
+            };
+            let entry: (Address, u128) = serde_json::from_slice(&bytes).map_err(|e| {
+                TokenError::StorageError(format!("decode liquid delegation: {}", e))
+            })?;
+            self.validator_delegations.insert(entry.0, entry.1);
+        }
+
+        // Pending withdrawal requests.
+        let wr_keys = storage
+            .get_keys_with_prefix(CF_TOKENS, LIQUID_WITHDRAWAL_PREFIX)
+            .map_err(|e| TokenError::StorageError(format!("scan liquid withdrawals: {}", e)))?;
+        for key in &wr_keys {
+            let Some(bytes) = storage
+                .get(CF_TOKENS, key)
+                .map_err(|e| TokenError::StorageError(format!("get liquid withdrawal: {}", e)))?
+            else {
+                continue;
+            };
+            let req: WithdrawalRequest = serde_json::from_slice(&bytes).map_err(|e| {
+                TokenError::StorageError(format!("decode liquid withdrawal: {}", e))
+            })?;
+            self.withdrawal_requests.insert(req.request_id.clone(), req);
+        }
+
+        info!(
+            holders = self.sttnzo_balances.len(),
+            validators = self.validator_delegations.len(),
+            pending_withdrawals = self.withdrawal_requests.len(),
+            supply = *self.total_sttnzo_supply.read(),
+            underlying = *self.total_underlying_wei.read(),
+            "LiquidStakingPool hydrated from storage"
+        );
+        Ok(())
+    }
+
+    fn persist_config(&self, cfg: &LiquidStakingConfig) -> Result<()> {
+        if let Some(storage) = &self.storage {
+            let value = serde_json::to_vec(cfg)
+                .map_err(|e| TokenError::StorageError(format!("encode liquid config: {}", e)))?;
+            storage
+                .write_batch_sync(vec![WriteOp::Put {
+                    cf: CF_TOKENS.to_string(),
+                    key: LIQUID_CONFIG_KEY.to_vec(),
+                    value,
+                }])
+                .map_err(|e| {
+                    TokenError::StorageError(format!("persist liquid config: {}", e))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn persist_totals(&self) -> Result<()> {
+        if let Some(storage) = &self.storage {
+            let totals = LiquidStakingTotals {
+                total_sttnzo_supply: *self.total_sttnzo_supply.read(),
+                total_underlying_wei: *self.total_underlying_wei.read(),
+                total_protocol_fees: *self.total_protocol_fees.read(),
+                total_rewards_distributed: *self.total_rewards_distributed.read(),
+            };
+            let value = serde_json::to_vec(&totals)
+                .map_err(|e| TokenError::StorageError(format!("encode liquid totals: {}", e)))?;
+            storage
+                .write_batch_sync(vec![WriteOp::Put {
+                    cf: CF_TOKENS.to_string(),
+                    key: LIQUID_TOTALS_KEY.to_vec(),
+                    value,
+                }])
+                .map_err(|e| {
+                    TokenError::StorageError(format!("persist liquid totals: {}", e))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn balance_storage_key(addr: &Address) -> Vec<u8> {
+        let mut k = LIQUID_BALANCE_PREFIX.to_vec();
+        k.extend_from_slice(addr.as_bytes());
+        k
+    }
+
+    fn delegation_storage_key(addr: &Address) -> Vec<u8> {
+        let mut k = LIQUID_DELEGATION_PREFIX.to_vec();
+        k.extend_from_slice(addr.as_bytes());
+        k
+    }
+
+    fn withdrawal_storage_key(request_id: &str) -> Vec<u8> {
+        let mut k = LIQUID_WITHDRAWAL_PREFIX.to_vec();
+        k.extend_from_slice(request_id.as_bytes());
+        k
+    }
+
+    fn persist_balance(&self, addr: &Address, amount: u128) -> Result<()> {
+        if let Some(storage) = &self.storage {
+            let key = Self::balance_storage_key(addr);
+            if amount == 0 {
+                storage
+                    .write_batch_sync(vec![WriteOp::Delete {
+                        cf: CF_TOKENS.to_string(),
+                        key,
+                    }])
+                    .map_err(|e| {
+                        TokenError::StorageError(format!("delete liquid balance: {}", e))
+                    })?;
+            } else {
+                let value = serde_json::to_vec(&(*addr, amount)).map_err(|e| {
+                    TokenError::StorageError(format!("encode liquid balance: {}", e))
+                })?;
+                storage
+                    .write_batch_sync(vec![WriteOp::Put {
+                        cf: CF_TOKENS.to_string(),
+                        key,
+                        value,
+                    }])
+                    .map_err(|e| {
+                        TokenError::StorageError(format!("persist liquid balance: {}", e))
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn persist_delegation(&self, validator: &Address, amount: u128) -> Result<()> {
+        if let Some(storage) = &self.storage {
+            let key = Self::delegation_storage_key(validator);
+            let value = serde_json::to_vec(&(*validator, amount)).map_err(|e| {
+                TokenError::StorageError(format!("encode liquid delegation: {}", e))
+            })?;
+            storage
+                .write_batch_sync(vec![WriteOp::Put {
+                    cf: CF_TOKENS.to_string(),
+                    key,
+                    value,
+                }])
+                .map_err(|e| {
+                    TokenError::StorageError(format!("persist liquid delegation: {}", e))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn persist_withdrawal(&self, req: &WithdrawalRequest) -> Result<()> {
+        if let Some(storage) = &self.storage {
+            let key = Self::withdrawal_storage_key(&req.request_id);
+            let value = serde_json::to_vec(req).map_err(|e| {
+                TokenError::StorageError(format!("encode liquid withdrawal: {}", e))
+            })?;
+            storage
+                .write_batch_sync(vec![WriteOp::Put {
+                    cf: CF_TOKENS.to_string(),
+                    key,
+                    value,
+                }])
+                .map_err(|e| {
+                    TokenError::StorageError(format!("persist liquid withdrawal: {}", e))
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Update the config (governance-driven). Validates and persists.
+    pub fn update_config(&self, new_config: LiquidStakingConfig) -> Result<()> {
+        if new_config.protocol_fee_bps > 5000 {
+            return Err(TokenError::InvalidAmount(format!(
+                "Protocol fee {} bps exceeds maximum 5000 bps (50%)",
+                new_config.protocol_fee_bps
+            )));
+        }
+        *self.config.write() = new_config.clone();
+        self.persist_config(&new_config)?;
+        info!("LiquidStakingConfig updated");
+        Ok(())
     }
 
     /// Get the current exchange rate: TNZO per stTNZO.
     ///
-    /// `exchange_rate = total_underlying_tnzo / total_sttnzo_supply`
+    /// `exchange_rate = total_underlying_wei / total_sttnzo_supply`
     ///
     /// Returns the rate as a fixed-point number with 18 decimals.
     /// A rate of `1_000_000_000_000_000_000` (10^18) means 1:1.
     pub fn exchange_rate(&self) -> u128 {
         let supply = *self.total_sttnzo_supply.read();
-        let underlying = *self.total_underlying_tnzo.read();
+        let underlying = *self.total_underlying_wei.read();
 
         if supply == 0 {
             // Initial rate is 1:1
@@ -189,7 +505,7 @@ impl LiquidStakingPool {
 
         // Check pool cap
         if config.max_total_deposits > 0 {
-            let current_total = *self.total_underlying_tnzo.read();
+            let current_total = *self.total_underlying_wei.read();
             if current_total + tnzo_amount > config.max_total_deposits {
                 return Err(TokenError::InvalidAmount(
                     "Pool cap exceeded".to_string()
@@ -230,11 +546,20 @@ impl LiquidStakingPool {
         let current_balance = self.sttnzo_balances.get(&depositor)
             .map(|v| *v)
             .unwrap_or(0);
-        self.sttnzo_balances.insert(depositor, current_balance + sttnzo_amount);
+        let new_balance = current_balance + sttnzo_amount;
+        self.sttnzo_balances.insert(depositor, new_balance);
 
         // Update totals
         *self.total_sttnzo_supply.write() += sttnzo_amount;
-        *self.total_underlying_tnzo.write() += tnzo_amount;
+        *self.total_underlying_wei.write() += tnzo_amount;
+
+        // Persist holder balance + aggregate totals.
+        if let Err(e) = self.persist_balance(&depositor, new_balance) {
+            warn!("Failed to persist stTNZO balance: {}", e);
+        }
+        if let Err(e) = self.persist_totals() {
+            warn!("Failed to persist liquid totals: {}", e);
+        }
 
         info!(
             "stTNZO: Deposited {} TNZO, minted {} stTNZO to {} (rate: {})",
@@ -279,7 +604,8 @@ impl LiquidStakingPool {
             })?;
 
         // Burn stTNZO
-        self.sttnzo_balances.insert(requester, balance - sttnzo_amount);
+        let new_balance = balance - sttnzo_amount;
+        self.sttnzo_balances.insert(requester, new_balance);
         *self.total_sttnzo_supply.write() -= sttnzo_amount;
 
         // Don't subtract from underlying yet — wait until claim
@@ -303,6 +629,18 @@ impl LiquidStakingPool {
         let request_id = request.request_id.clone();
         self.withdrawal_requests.insert(request_id.clone(), request.clone());
 
+        // Persist updated holder balance, aggregate totals, and the new
+        // withdrawal request.
+        if let Err(e) = self.persist_balance(&requester, new_balance) {
+            warn!("Failed to persist stTNZO balance: {}", e);
+        }
+        if let Err(e) = self.persist_totals() {
+            warn!("Failed to persist liquid totals: {}", e);
+        }
+        if let Err(e) = self.persist_withdrawal(&request) {
+            warn!("Failed to persist withdrawal request: {}", e);
+        }
+
         info!(
             "stTNZO: Withdrawal requested: {} stTNZO -> {} TNZO, unbonding until {}",
             sttnzo_amount, tnzo_amount, request.unbonding_complete_at
@@ -315,31 +653,49 @@ impl LiquidStakingPool {
     ///
     /// Returns the TNZO amount to transfer to the user.
     pub fn claim_withdrawal(&self, request_id: &str) -> Result<(Address, u128)> {
-        let mut request = self.withdrawal_requests.get_mut(request_id)
-            .ok_or_else(|| TokenError::InvalidAmount(
-                format!("Withdrawal request not found: {}", request_id)
-            ))?;
+        // Snapshot + mutate under a short-lived RefMut, then drop the shard
+        // lock before persisting (which itself takes locks inside the
+        // storage backend). Same pattern as `governance::execute_proposal`.
+        let snapshot = {
+            let mut request = self
+                .withdrawal_requests
+                .get_mut(request_id)
+                .ok_or_else(|| {
+                    TokenError::InvalidAmount(format!(
+                        "Withdrawal request not found: {}",
+                        request_id
+                    ))
+                })?;
 
-        if request.claimed {
-            return Err(TokenError::InvalidAmount(
-                "Withdrawal already claimed".to_string()
-            ));
-        }
+            if request.claimed {
+                return Err(TokenError::InvalidAmount(
+                    "Withdrawal already claimed".to_string(),
+                ));
+            }
 
-        // Check unbonding period
-        if Timestamp::now() < request.unbonding_complete_at {
-            return Err(TokenError::StakeLocked {
-                unlock_time: request.unbonding_complete_at.as_millis(),
-            });
-        }
+            if Timestamp::now() < request.unbonding_complete_at {
+                return Err(TokenError::StakeLocked {
+                    unlock_time: request.unbonding_complete_at.as_millis(),
+                });
+            }
 
-        // Mark as claimed
-        request.claimed = true;
-        let requester = request.requester;
-        let tnzo_amount = request.tnzo_amount;
+            request.claimed = true;
+            request.value().clone()
+        };
+
+        let requester = snapshot.requester;
+        let tnzo_amount = snapshot.tnzo_amount;
 
         // Subtract from underlying pool
-        *self.total_underlying_tnzo.write() -= tnzo_amount.min(*self.total_underlying_tnzo.read());
+        *self.total_underlying_wei.write() -= tnzo_amount.min(*self.total_underlying_wei.read());
+
+        // Persist the claimed-flag flip and updated totals.
+        if let Err(e) = self.persist_withdrawal(&snapshot) {
+            warn!("Failed to persist claimed withdrawal: {}", e);
+        }
+        if let Err(e) = self.persist_totals() {
+            warn!("Failed to persist liquid totals: {}", e);
+        }
 
         info!(
             "stTNZO: Withdrawal claimed: {} TNZO to {}",
@@ -373,13 +729,18 @@ impl LiquidStakingPool {
         let staker_reward = reward_amount - protocol_fee;
 
         // Add staker portion to underlying (increases exchange rate)
-        *self.total_underlying_tnzo.write() += staker_reward;
+        *self.total_underlying_wei.write() += staker_reward;
 
         // Track protocol fees
         *self.total_protocol_fees.write() += protocol_fee;
 
         // Track total rewards
         *self.total_rewards_distributed.write() += reward_amount;
+
+        // Persist updated aggregates.
+        if let Err(e) = self.persist_totals() {
+            warn!("Failed to persist liquid totals: {}", e);
+        }
 
         let new_rate = self.exchange_rate();
         debug!(
@@ -414,7 +775,7 @@ impl LiquidStakingPool {
     pub fn stats(&self) -> LiquidStakingStats {
         LiquidStakingStats {
             total_sttnzo_supply: *self.total_sttnzo_supply.read(),
-            total_underlying_tnzo: *self.total_underlying_tnzo.read(),
+            total_underlying_wei: *self.total_underlying_wei.read(),
             exchange_rate: self.exchange_rate(),
             total_protocol_fees: *self.total_protocol_fees.read(),
             total_rewards_distributed: *self.total_rewards_distributed.read(),
@@ -430,7 +791,11 @@ impl LiquidStakingPool {
         let current = self.validator_delegations.get(&validator)
             .map(|v| *v)
             .unwrap_or(0);
-        self.validator_delegations.insert(validator, current + amount);
+        let new_amount = current + amount;
+        self.validator_delegations.insert(validator, new_amount);
+        if let Err(e) = self.persist_delegation(&validator, new_amount) {
+            warn!("Failed to persist validator delegation: {}", e);
+        }
     }
 
     /// Get all validator delegations
@@ -450,12 +815,40 @@ impl LiquidStakingPool {
             });
         }
 
-        self.sttnzo_balances.insert(*from, from_balance - amount);
+        let new_from = from_balance - amount;
+        self.sttnzo_balances.insert(*from, new_from);
         let to_balance = self.balance_of(to);
-        self.sttnzo_balances.insert(*to, to_balance + amount);
+        let new_to = to_balance + amount;
+        self.sttnzo_balances.insert(*to, new_to);
+
+        if let Err(e) = self.persist_balance(from, new_from) {
+            warn!("Failed to persist stTNZO balance: {}", e);
+        }
+        if let Err(e) = self.persist_balance(to, new_to) {
+            warn!("Failed to persist stTNZO balance: {}", e);
+        }
 
         debug!("stTNZO: Transferred {} from {} to {}", amount, from, to);
         Ok(())
+    }
+
+    /// List all pending (unclaimed) withdrawal requests for a holder.
+    pub fn pending_withdrawals_for(&self, holder: &Address) -> Vec<WithdrawalRequest> {
+        self.withdrawal_requests
+            .iter()
+            .filter(|entry| !entry.value().claimed && entry.value().requester == *holder)
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// Look up a single withdrawal request by ID.
+    pub fn get_withdrawal(&self, request_id: &str) -> Option<WithdrawalRequest> {
+        self.withdrawal_requests.get(request_id).map(|r| r.value().clone())
+    }
+
+    /// Read a snapshot of the current liquid staking config.
+    pub fn config(&self) -> LiquidStakingConfig {
+        self.config.read().clone()
     }
 }
 
@@ -485,7 +878,7 @@ pub struct LiquidStakingStats {
     /// Total stTNZO in circulation
     pub total_sttnzo_supply: u128,
     /// Total TNZO underlying the pool
-    pub total_underlying_tnzo: u128,
+    pub total_underlying_wei: u128,
     /// Current exchange rate (TNZO per stTNZO, 18 decimals)
     pub exchange_rate: u128,
     /// Total protocol fees collected
@@ -524,7 +917,7 @@ mod tests {
         assert_eq!(sttnzo, deposit_amount); // 1:1 initial rate
         assert_eq!(pool.balance_of(&user), deposit_amount);
         assert_eq!(*pool.total_sttnzo_supply.read(), deposit_amount);
-        assert_eq!(*pool.total_underlying_tnzo.read(), deposit_amount);
+        assert_eq!(*pool.total_underlying_wei.read(), deposit_amount);
     }
 
     #[test]
@@ -626,7 +1019,7 @@ mod tests {
 
         let stats = pool.stats();
         assert_eq!(stats.total_sttnzo_supply, 1000 * one_tnzo());
-        assert_eq!(stats.total_underlying_tnzo, 1000 * one_tnzo());
+        assert_eq!(stats.total_underlying_wei, 1000 * one_tnzo());
         assert_eq!(stats.holder_count, 1);
         assert_eq!(stats.exchange_rate, ONE_STTNZO);
     }

@@ -1,0 +1,167 @@
+{
+  "_comment_layout": "Reference workflow spec — load with serde_json into tenzro_workflow::Workflow. workflow_id and gate_id are 32-byte hash arrays; placeholders here MUST be re-derived at load time. Accompanied by dvp_settlement_daml_map.json.",
+  "_comment_scenario": "Atomic Delivery-versus-Payment settlement: two counterparties exchange a tokenized asset (security or commodity) against a stablecoin payment. Both legs settle in the same Canton transaction or both fail (CIP-56 atomic-swap). Custodian holds the security; treasurer holds the cash leg. Auditor + clearing-agent observe.",
+
+  "workflow_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+  "template_id": null,
+  "creator": "did:tenzro:human:bank-a:1",
+  "title": "dvp_settlement",
+  "description": "Bilateral atomic delivery-versus-payment between two institutional counterparties. Security leg + cash leg settle as a single Canton transaction.",
+
+  "participants": [
+    {
+      "did": "did:tenzro:human:bank-a:1",
+      "roles": ["Initiator", "Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:bank-b:1",
+      "roles": ["Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:machine:bank-a:settlement-bot:1",
+      "roles": ["Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:machine:bank-b:settlement-bot:1",
+      "roles": ["Counterparty"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:bank-a:custodian:1",
+      "roles": ["Custodian"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:bank-a:treasurer:1",
+      "roles": ["Treasurer", "Approver"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:clearing-agent:1",
+      "roles": ["Auditor", "OracleProvider"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    },
+    {
+      "did": "did:tenzro:human:auditor-firm:1",
+      "roles": ["Auditor"],
+      "canton_party_hint": null,
+      "joined_at": 0,
+      "bond_required": null
+    }
+  ],
+
+  "obligations": [
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+  ],
+  "_obligation_records": [
+    {
+      "_comment": "Cash leg: Bank-A pays Bank-B in USDC.",
+      "obligor": "did:tenzro:machine:bank-a:settlement-bot:1",
+      "obligee": "did:tenzro:machine:bank-b:settlement-bot:1",
+      "kind": {
+        "Pay": {
+          "amount_wei": 10000000000000,
+          "asset": {
+            "chain": "canton:global-synchronizer",
+            "symbol": "USDC",
+            "token_address": null
+          }
+        }
+      },
+      "due_by": null,
+      "status": "Pending",
+      "discharge_proof_required": {
+        "CantonExercise": {
+          "template_id": "Tenzro.Workflow.DvpSettlement:ActiveDvpSettlement",
+          "choice": "DischargePay_cashleg"
+        }
+      },
+      "bond_anchor": null
+    },
+    {
+      "_comment": "Security leg: Bank-B delivers tokenized bond ISIN to Bank-A.",
+      "obligor": "did:tenzro:machine:bank-b:settlement-bot:1",
+      "obligee": "did:tenzro:machine:bank-a:settlement-bot:1",
+      "kind": {
+        "Deliver": {
+          "resource_did": "did:tenzro:resource:isin:US1234567890",
+          "qty": 1000
+        }
+      },
+      "due_by": null,
+      "status": "Pending",
+      "discharge_proof_required": {
+        "CantonExercise": {
+          "template_id": "Tenzro.Workflow.DvpSettlement:ActiveDvpSettlement",
+          "choice": "DischargeDeliver_securityleg"
+        }
+      },
+      "bond_anchor": null
+    }
+  ],
+
+  "approval_gates": [
+    {
+      "_comment_id": "Derived at load time via ApprovalGate::derive_id(workflow_id, 'pre_settlement_clearance').",
+      "gate_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      "workflow_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      "triggers": "Allow",
+      "approvers": {
+        "Threshold": {
+          "dids": [
+            "did:tenzro:human:bank-a:treasurer:1",
+            "did:tenzro:human:clearing-agent:1"
+          ],
+          "m": 2,
+          "n": 2
+        }
+      },
+      "timeout": 86400,
+      "on_timeout": "AutoReject"
+    }
+  ],
+
+  "root_policy": {
+    "And": [
+      { "AssetIn": ["USDC"] },
+      { "ChainIn": ["canton:global-synchronizer"] },
+      { "CounterpartyKycTierGte": 3 }
+    ]
+  },
+
+  "privacy_domain": null,
+  "_comment_privacy_domain": "Set at load time. Visibility = MembersPlusAuditors so the clearing-agent and external auditor receive unredacted DvP receipts. Counterparty banks remain the only ones who can decrypt the price/quantity payload during the settlement window.",
+
+  "fee_route": null,
+  "_comment_fee_route": "Set at load time. Suggested split: 95% Bank-B (security seller), 4.5% clearing-agent fee, 0.5% Tenzro network fee.",
+
+  "signatures": [],
+  "status": "Draft",
+
+  "canton_mirror": {
+    "synchronizer_id": "global-synchronizer",
+    "party": "tenzro::1220dvp00000000000000000000000000000000000000000000000000000000",
+    "contract_id": "00dvp#0"
+  },
+
+  "created_at": 1700000000,
+  "updated_at": 1700000000
+}

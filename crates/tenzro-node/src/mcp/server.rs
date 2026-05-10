@@ -155,8 +155,9 @@ pub struct CortexReasonParams {
     pub min_loops: Option<u32>,
     #[schemars(description = "Maximum recurrent loops (overrides tier). Optional")]
     pub max_loops: Option<u32>,
-    #[schemars(description = "Maximum cost in TNZO base units. Rejects if pricing exceeds. Optional")]
-    pub max_cost_tnzo: Option<u64>,
+    #[schemars(description = "Maximum cost in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string. Rejects if pricing exceeds. Optional", with = "Option<String>")]
+    #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
+    pub max_cost_wei: Option<u128>,
     #[schemars(description = "Attestation requirement: 'none', 'tee', 'tee_and_zk'. Default inferred from tier")]
     pub attestation: Option<String>,
     #[schemars(description = "Caller address (20- or 32-byte hex). Optional")]
@@ -328,8 +329,8 @@ pub struct CreateWalletParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct StakeTokensParams {
-    #[schemars(description = "Amount to stake in TNZO (e.g. 1000.0 for 1000 TNZO)")]
-    pub amount: f64,
+    #[schemars(description = "Amount to stake in wei as a decimal string (1 TNZO = 10^18 wei). Example: '1000000000000000000000' for 1000 TNZO.")]
+    pub amount: String,
     #[schemars(description = "Provider type to stake for: 'validator', 'model_provider', 'tee_provider', or 'storage_provider'")]
     pub provider_type: String,
 }
@@ -346,8 +347,8 @@ pub struct RegisterProviderParams {
     pub provider_type: String,
     #[schemars(description = "Provider display name")]
     pub name: String,
-    #[schemars(description = "Initial stake amount in TNZO (e.g. 1000.0)")]
-    pub stake: Option<f64>,
+    #[schemars(description = "Optional initial stake in wei as a decimal string (1 TNZO = 10^18 wei). Example: '10000000000000000000000' for 10,000 TNZO. Omit or '0' to register without staking.")]
+    pub stake: Option<String>,
     #[schemars(description = "Maximum concurrent requests to handle (default 10)")]
     pub max_concurrent: Option<u32>,
 }
@@ -370,8 +371,9 @@ pub struct PostTaskParams {
     pub task_type: String,
     #[schemars(description = "Hex-encoded address of the task poster")]
     pub poster_address: String,
-    #[schemars(description = "Maximum price willing to pay in TNZO (e.g. 1.5 for 1.5 TNZO)")]
-    pub max_price_tnzo: f64,
+    #[schemars(description = "Maximum price willing to pay in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.", with = "String")]
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
+    pub max_price_wei: u128,
     #[schemars(description = "Input data or prompt for the task")]
     pub input: String,
     #[schemars(description = "Optional: minimum model size required (e.g. '7b', '70b')")]
@@ -390,8 +392,9 @@ pub struct ListTasksParams {
     pub status: Option<String>,
     #[schemars(description = "Filter by poster address (optional)")]
     pub poster: Option<String>,
-    #[schemars(description = "Maximum price filter in TNZO (only show tasks at or below this price)")]
-    pub max_price_tnzo: Option<f64>,
+    #[schemars(description = "Maximum price filter in wei (only show tasks at or below this price). Accepts u64 number or decimal string.", with = "Option<String>")]
+    #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
+    pub max_price_wei: Option<u128>,
     #[schemars(description = "Maximum number of results (default 20, max 100)")]
     pub limit: Option<usize>,
     #[schemars(description = "Offset for pagination")]
@@ -404,8 +407,9 @@ pub struct QuoteTaskParams {
     pub task_id: String,
     #[schemars(description = "Hex-encoded address of the provider submitting the quote")]
     pub provider_address: String,
-    #[schemars(description = "Quoted price in TNZO (e.g. 0.5)")]
-    pub price_tnzo: f64,
+    #[schemars(description = "Quoted price in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.", with = "String")]
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
+    pub price_wei: u128,
     #[schemars(description = "Model ID the provider will use to complete the task")]
     pub model_id: String,
     #[schemars(description = "Estimated time to complete the task in seconds")]
@@ -669,8 +673,8 @@ pub struct DelegateVotingPowerParams {
     pub from_address: String,
     #[schemars(description = "Hex-encoded delegate address to receive voting power")]
     pub to_address: String,
-    #[schemars(description = "Amount of TNZO to delegate (e.g. 100.0). If omitted, delegates all staked balance.")]
-    pub amount_tnzo: Option<f64>,
+    #[schemars(description = "Amount in wei as a decimal string (1 TNZO = 10^18 wei). Example: '100000000000000000000' for 100 TNZO. If omitted, delegates the full staked balance.")]
+    pub amount_wei: Option<String>,
 }
 
 // ─── Token Params ───
@@ -729,8 +733,8 @@ pub struct SettlePaymentParams {
     pub payer: String,
     #[schemars(description = "Hex-encoded payee address")]
     pub payee: String,
-    #[schemars(description = "Amount in TNZO (e.g. 1.5)")]
-    pub amount_tnzo: f64,
+    #[schemars(description = "Amount in wei as a decimal string (1 TNZO = 10^18 wei). Example: '1500000000000000000' for 1.5 TNZO.")]
+    pub amount_wei: String,
     #[schemars(description = "Service type: 'inference', 'tee', 'storage', 'general'")]
     pub service_type: String,
     #[schemars(description = "Optional reference ID for this settlement")]
@@ -743,8 +747,8 @@ pub struct CreateEscrowParams {
     pub payer: String,
     #[schemars(description = "Hex-encoded payee address (receives funds on release)")]
     pub payee: String,
-    #[schemars(description = "Amount in TNZO to hold in escrow")]
-    pub amount_tnzo: f64,
+    #[schemars(description = "Amount in wei to hold in escrow as a decimal string (1 TNZO = 10^18 wei).")]
+    pub amount_wei: String,
     #[schemars(description = "Release condition: 'provider_signature' | 'consumer_signature' | 'both_signatures' | 'verifier_signature' | 'timeout' | 'custom'")]
     pub release_condition: String,
     #[schemars(description = "Timeout duration in seconds (for timeout-based release)")]
@@ -775,16 +779,18 @@ pub struct OpenPaymentChannelParams {
     pub sender: String,
     #[schemars(description = "Hex-encoded recipient address")]
     pub recipient: String,
-    #[schemars(description = "Initial deposit amount in TNZO")]
-    pub deposit_tnzo: f64,
+    #[schemars(description = "Initial deposit amount in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.", with = "String")]
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
+    pub deposit_wei: u128,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ClosePaymentChannelParams {
     #[schemars(description = "Payment channel ID to close")]
     pub channel_id: String,
-    #[schemars(description = "Final balance owed to recipient in TNZO")]
-    pub final_balance_tnzo: f64,
+    #[schemars(description = "Final balance owed to recipient in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.", with = "String")]
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
+    pub final_balance_wei: u128,
     #[schemars(description = "Hex-encoded signature from the channel sender authorizing the final balance")]
     pub sender_signature_hex: String,
 }
@@ -843,10 +849,10 @@ pub struct GetProviderScheduleParams {
 pub struct SetProviderPricingParams {
     #[schemars(description = "Hex-encoded provider address")]
     pub provider_address: String,
-    #[schemars(description = "Price per 1000 inference tokens in TNZO (e.g. 0.001)")]
-    pub price_per_1k_tokens: f64,
-    #[schemars(description = "Optional minimum charge per request in TNZO")]
-    pub min_charge_tnzo: Option<f64>,
+    #[schemars(description = "Wei per input token (decimal string; 1 TNZO = 10^18 wei)")]
+    pub input_price_per_token_wei: String,
+    #[schemars(description = "Wei per output token (decimal string; 1 TNZO = 10^18 wei)")]
+    pub output_price_per_token_wei: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -891,8 +897,9 @@ pub struct DelegateTaskParams {
     pub delegate_did: String,
     #[schemars(description = "Task description or task ID to delegate")]
     pub task: String,
-    #[schemars(description = "Optional maximum TNZO budget for the delegated task")]
-    pub max_budget_tnzo: Option<f64>,
+    #[schemars(description = "Optional maximum budget for the delegated task in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.", with = "Option<String>")]
+    #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
+    pub max_budget_wei: Option<u128>,
 }
 
 // ─── Kill-Switch Params ───
@@ -979,8 +986,9 @@ pub struct DiscoverModelsParams {
     pub category: Option<String>,
     #[schemars(description = "Only return models currently being served")]
     pub serving_only: Option<bool>,
-    #[schemars(description = "Maximum price per 1k tokens in TNZO")]
-    pub max_price_tnzo: Option<f64>,
+    #[schemars(description = "Maximum price per 1k tokens in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.", with = "Option<String>")]
+    #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
+    pub max_price_wei: Option<u128>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1621,8 +1629,8 @@ pub struct CreateUserWalletParams {
     pub app_id: String,
     #[schemars(description = "Human-readable label for the user wallet")]
     pub label: String,
-    #[schemars(description = "Initial TNZO funding amount (e.g. 10.0)")]
-    pub initial_funding: Option<f64>,
+    #[schemars(description = "Optional initial funding in wei as a decimal string (1 TNZO = 10^18 wei). Example: '10000000000000000000' for 10 TNZO.")]
+    pub initial_funding_wei: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1631,8 +1639,8 @@ pub struct FundUserWalletParams {
     pub master_address: String,
     #[schemars(description = "Hex-encoded user wallet address (destination)")]
     pub user_address: String,
-    #[schemars(description = "Amount of TNZO to transfer (e.g. 5.0)")]
-    pub amount: f64,
+    #[schemars(description = "Amount in wei as a decimal string (1 TNZO = 10^18 wei). Example: '5000000000000000000' for 5 TNZO.")]
+    pub amount_wei: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1645,10 +1653,8 @@ pub struct ListUserWalletsParams {
 pub struct SponsorTransactionParams {
     #[schemars(description = "Hex-encoded master/paymaster address that sponsors the gas")]
     pub master_address: String,
-    #[schemars(description = "Hex-encoded recipient address")]
-    pub to: String,
-    #[schemars(description = "Amount of TNZO to transfer (e.g. 1.0)")]
-    pub amount: f64,
+    #[schemars(description = "User transaction object to sponsor. Must include `gas_limit` and `gas_price` (and any other tx fields). The master pays gas_limit * gas_price out of its TNZO balance.")]
+    pub user_tx: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2097,6 +2103,84 @@ pub struct VideoEmbedParams {
     pub frame_stride: Option<u32>,
 }
 
+// ─── Workflow stack params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WorkflowIdParams {
+    #[schemars(description = "32-byte hex workflow id (with or without 0x prefix)")]
+    pub workflow_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreatorDidParams {
+    #[schemars(description = "Creator DID (did:tenzro:human:... or did:tenzro:machine:...)")]
+    pub creator_did: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DidParams {
+    #[schemars(description = "DID string")]
+    pub did: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WorkflowStatusParams {
+    #[schemars(description = "Workflow status: draft | awaiting_signatures | active | suspended | settling | completed | failed | disputed | cancelled")]
+    pub status: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ObligationIdParams {
+    #[schemars(description = "32-byte hex obligation id")]
+    pub obligation_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ApprovalGateIdParams {
+    #[schemars(description = "32-byte hex approval gate id")]
+    pub gate_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ApprovalRequestIdParams {
+    #[schemars(description = "32-byte hex approval request id")]
+    pub request_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PrivacyDomainIdParams {
+    #[schemars(description = "32-byte hex privacy domain id")]
+    pub domain_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WorkflowReceiptIdParams {
+    #[schemars(description = "32-byte hex receipt id")]
+    pub receipt_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WorkflowReceiptListParams {
+    #[schemars(description = "32-byte hex workflow id")]
+    pub workflow_id: String,
+    #[schemars(description = "Maximum receipts to return (default 256)")]
+    pub max: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FeeRouteIdParams {
+    #[schemars(description = "32-byte hex fee route id")]
+    pub fee_route_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FeeRoutePayoutsParams {
+    #[schemars(description = "32-byte hex fee route id")]
+    pub fee_route_id: String,
+    #[schemars(description = "Gross amount in wei (decimal string — u128)")]
+    pub gross_wei: String,
+}
+
 #[derive(Clone)]
 pub struct TenzroMcpServer {
     node: Arc<TenzroNode>,
@@ -2310,11 +2394,9 @@ impl TenzroMcpServer {
             0
         };
 
-        let balance_tnzo = balance as f64 / 1e18;
         json_result(serde_json::json!({
             "address": format!("0x{}", addr_hex),
             "balance_wei": balance.to_string(),
-            "balance_tnzo": format!("{:.6} TNZO", balance_tnzo),
         }))
     }
 
@@ -3375,8 +3457,8 @@ impl TenzroMcpServer {
                 "serving": is_serving,
                 "availability": availability,
                 "pricing": {
-                    "input_per_token": if is_serving { 0.0 } else { pricing.input_price_per_token },
-                    "output_per_token": if is_serving { 0.0 } else { pricing.output_price_per_token },
+                    "input_per_token_wei": if is_serving { "0".to_string() } else { pricing.input_price_per_token_wei.to_string() },
+                    "output_per_token_wei": if is_serving { "0".to_string() } else { pricing.output_price_per_token_wei.to_string() },
                     "currency": "TNZO",
                 },
             });
@@ -3451,8 +3533,8 @@ impl TenzroMcpServer {
         if let Some(n) = params.max_loops {
             budget.max_loops = n;
         }
-        if let Some(c) = params.max_cost_tnzo {
-            budget.max_cost_tnzo = c;
+        if let Some(c) = params.max_cost_wei {
+            budget.max_cost_wei = c;
         }
         if let Some(att) = params.attestation.as_deref() {
             budget.attestation = match att {
@@ -3508,16 +3590,16 @@ impl TenzroMcpServer {
 
         self.node.metrics().record_inference();
 
-        // Best-effort TNZO settlement: requester → worker.
-        let settled = if resp.price_tnzo > 0
+        // Best-effort wei settlement: requester → worker.
+        let settled = if resp.price_wei > 0
             && requester != tenzro_types::primitives::Address::default()
         {
             match self.node.token() {
                 Some(token) => {
-                    match token.transfer(&requester, &resp.worker, resp.price_tnzo as u128) {
+                    match token.transfer(&requester, &resp.worker, resp.price_wei) {
                         Ok(_) => {
                             tracing::info!(
-                                amount_tnzo = resp.price_tnzo,
+                                amount_wei = resp.price_wei,
                                 loops_used = resp.metadata.loops_used,
                                 "Cortex MCP inference settled on-chain"
                             );
@@ -3532,7 +3614,7 @@ impl TenzroMcpServer {
                 None => false,
             }
         } else {
-            resp.price_tnzo == 0
+            resp.price_wei == 0
         };
 
         // The output is arbitrary model-produced bytes. Emit a best-effort
@@ -3611,8 +3693,8 @@ impl TenzroMcpServer {
 
             match model_runtime.generate(&svc.model_id, &message, &config).await {
                 Ok(result) => {
-                    // Local models are free — no TNZO cost
-                    let cost = 0.0_f64;
+                    // Local models are free — no wei cost
+                    let cost_wei: u128 = 0;
 
                     let load = self.node.load_tracker.snapshot(&svc.model_id).map(|s| {
                         serde_json::json!({
@@ -3631,7 +3713,7 @@ impl TenzroMcpServer {
                             "completion_tokens": result.output_tokens,
                             "total_tokens": result.input_tokens + result.output_tokens,
                         },
-                        "cost_tnzo": cost,
+                        "cost_wei": cost_wei.to_string(),
                         "generation_time_ms": result.generation_time_ms,
                         "tokens_per_second": result.tokens_per_second,
                         "load": load,
@@ -4376,7 +4458,11 @@ impl TenzroMcpServer {
             }),
         };
 
-        let amount_wei = (params.amount * 1e18) as u128;
+        let amount_wei: u128 = params.amount.parse().map_err(|_| ErrorData {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from("Stake amount must be a wei decimal string (e.g. '1000000000000000000000' for 1000 TNZO)"),
+            data: None,
+        })?;
         if amount_wei == 0 {
             return Err(ErrorData {
                 code: ErrorCode::INVALID_PARAMS,
@@ -4398,7 +4484,6 @@ impl TenzroMcpServer {
             Ok(_) => {
                 json_result(serde_json::json!({
                     "status": "staked",
-                    "amount_tnzo": format!("{:.6} TNZO", params.amount),
                     "amount_wei": amount_wei.to_string(),
                     "provider_type": format!("{:?}", provider_type),
                     "staker": format!("0x{}", hex::encode(&staker_address.as_bytes()[..20])),
@@ -4431,7 +4516,7 @@ impl TenzroMcpServer {
                 json_result(serde_json::json!({
                     "status": "unstaking",
                     "address": format!("0x{}", hex::encode(&address.as_bytes()[..20])),
-                    "amount_tnzo": format!("{:.6} TNZO", staked_amount as f64 / 1e18),
+                    "amount_wei": staked_amount.to_string(),
                     "unbonding_period": "7 days",
                     "message": "Unstaking initiated. Tokens will be available after the unbonding period.",
                 }))
@@ -4466,19 +4551,25 @@ impl TenzroMcpServer {
         let max_concurrent = params.max_concurrent.unwrap_or(10);
 
         // If stake amount provided, stake tokens
-        if let Some(stake_amount) = params.stake
-            && stake_amount > 0.0
-                && let Some(staking) = self.node.staking() {
-                    let amount_wei = (stake_amount * 1e18) as u128;
-                    let staker_address = if let Some(registry) = self.node.identity_registry() {
-                        let identities = registry.list_all();
-                        identities.first().map(|(_, id)| id.wallet_address)
-                            .unwrap_or_else(Address::zero)
-                    } else {
-                        Address::zero()
-                    };
-                    let _ = staking.stake(staker_address, amount_wei, provider_type);
-                }
+        let stake_wei: u128 = match params.stake.as_deref() {
+            None | Some("") | Some("0") => 0,
+            Some(s) => s.parse().map_err(|_| ErrorData {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("Stake must be a wei decimal string (e.g. '10000000000000000000000' for 10,000 TNZO)"),
+                data: None,
+            })?,
+        };
+        if stake_wei > 0
+            && let Some(staking) = self.node.staking() {
+                let staker_address = if let Some(registry) = self.node.identity_registry() {
+                    let identities = registry.list_all();
+                    identities.first().map(|(_, id)| id.wallet_address)
+                        .unwrap_or_else(Address::zero)
+                } else {
+                    Address::zero()
+                };
+                let _ = staking.stake(staker_address, stake_wei, provider_type);
+            }
 
         json_result(serde_json::json!({
             "status": "registered",
@@ -4486,7 +4577,7 @@ impl TenzroMcpServer {
             "provider_type": format!("{:?}", provider_type),
             "name": params.name,
             "max_concurrent": max_concurrent,
-            "stake": params.stake.unwrap_or(0.0),
+            "stake_wei": stake_wei.to_string(),
             "message": format!("Provider '{}' registered as {:?}. Use serve_model or start providing services.", params.name, provider_type),
         }))
     }
@@ -4529,7 +4620,6 @@ impl TenzroMcpServer {
         json_result(serde_json::json!({
             "models_served": models_served,
             "total_inferences": total_inferences,
-            "total_staked_tnzo": format!("{:.6} TNZO", total_staked as f64 / 1e18),
             "total_staked_wei": total_staked.to_string(),
             "validator_count": validator_count,
             "identity_count": {
@@ -4571,8 +4661,8 @@ impl TenzroMcpServer {
         // Parse poster address
         let poster = parse_address(&params.poster_address)?;
 
-        // Convert price from TNZO float to micro-units (u128, 18 decimals)
-        let max_price: u128 = (params.max_price_tnzo * 1e18) as u128;
+        // Wire is wei (1 TNZO = 10^18 wei) — pass through directly.
+        let max_price: u128 = params.max_price_wei;
 
         let mut task = TaskInfo::new(
             params.title,
@@ -4610,7 +4700,6 @@ impl TenzroMcpServer {
             "title": task.title,
             "task_type": format!("{:?}", task.task_type),
             "poster": format!("{}", task.poster),
-            "max_price_tnzo": params.max_price_tnzo,
             "max_price_wei": task.max_price.to_string(),
             "status": "open",
             "created_at": task.created_at.0,
@@ -4664,8 +4753,7 @@ impl TenzroMcpServer {
                             continue;
                         }
                     }
-                    if let Some(max_price) = params.max_price_tnzo {
-                        let max_wei = (max_price * 1e18) as u128;
+                    if let Some(max_wei) = params.max_price_wei {
                         if task.max_price > max_wei {
                             continue;
                         }
@@ -4676,7 +4764,7 @@ impl TenzroMcpServer {
                         "title": task.title,
                         "task_type": format!("{:?}", task.task_type),
                         "poster": format!("{}", task.poster),
-                        "max_price_tnzo": task.max_price as f64 / 1e18,
+                        "max_price_wei": task.max_price.to_string(),
                         "status": format!("{:?}", task.status),
                         "priority": format!("{:?}", task.priority),
                         "required_model": task.required_model,
@@ -4718,7 +4806,7 @@ impl TenzroMcpServer {
             })?;
 
         let provider = parse_address(&params.provider_address)?;
-        let price: u128 = (params.price_tnzo * 1e18) as u128;
+        let price: u128 = params.price_wei;
 
         let now = chrono::Utc::now().timestamp() as u64;
         let quote = TaskQuote {
@@ -4741,7 +4829,6 @@ impl TenzroMcpServer {
         json_result(serde_json::json!({
             "task_id": quote.task_id,
             "provider": params.provider_address,
-            "price_tnzo": params.price_tnzo,
             "price_wei": quote.price.to_string(),
             "model_id": quote.model_id,
             "estimated_secs": quote.estimated_duration_secs,
@@ -5282,7 +5369,11 @@ impl TenzroMcpServer {
             },
             "treasury" => ProposalType::TreasuryGrant {
                 recipient: addr,
-                amount: payload.get("amount").and_then(|v| v.as_f64()).map(|a| (a * 1e18) as u128).unwrap_or(0u128),
+                // amount is wei (1 TNZO = 10^18 wei), as a decimal string or u64-range JSON number
+                amount: payload.get("amount")
+                    .and_then(|v| v.as_str().and_then(|s| s.parse::<u128>().ok())
+                        .or_else(|| v.as_u64().map(|n| n as u128)))
+                    .unwrap_or(0u128),
             },
             _ => ProposalType::Custom {
                 proposal_data: serde_json::to_vec(&payload).unwrap_or_default(),
@@ -5311,11 +5402,9 @@ impl TenzroMcpServer {
         let voting_power = staking.get_stake(&addr)
             .map(|info| info.amount)
             .unwrap_or(0u128);
-        let voting_power_tnzo = voting_power as f64 / 1e18;
         json_result(serde_json::json!({
             "address": params.address,
-            "voting_power_atto": voting_power.to_string(),
-            "voting_power_tnzo": voting_power_tnzo,
+            "voting_power_wei": voting_power.to_string(),
         }))
     }
 
@@ -5328,22 +5417,27 @@ impl TenzroMcpServer {
             .map_err(|e| err_internal(format!("Invalid from_address: {}", e)))?;
         let to = parse_address(&params.to_address)
             .map_err(|e| err_internal(format!("Invalid to_address: {}", e)))?;
-        let amount_atto = params.amount_tnzo.map(|t| (t * 1e18) as u128);
+        let amount_wei: u128 = match params.amount_wei.as_deref() {
+            None | Some("") => 0,
+            Some(s) => s.parse().map_err(|_| err_internal(
+                "amount_wei must be a wei decimal string (e.g. '100000000000000000000' for 100 TNZO)"
+            ))?,
+        };
         let governance = self.node.governance()
             .ok_or_else(|| err_internal("Governance not available"))?;
-        governance.delegate(from, to, amount_atto.unwrap_or(0))
+        governance.delegate(from, to, amount_wei)
             .map_err(|e| err_internal(format!("delegate_voting_power failed: {}", e)))?;
         json_result(serde_json::json!({
             "from": params.from_address,
             "to": params.to_address,
-            "amount_atto": amount_atto.unwrap_or(0).to_string(),
+            "amount_wei": amount_wei.to_string(),
             "success": true,
         }))
     }
 
     // ─── Token Tools ───
 
-    #[tool(description = "Get the TNZO token balance for an address. Returns the balance in both atto-TNZO (raw) and TNZO (human-readable decimal).")]
+    #[tool(description = "Get the TNZO token balance for an address. Returns the balance in wei (1 TNZO = 10^18 wei) as a decimal string.")]
     async fn token_balance(
         &self,
         Parameters(params): Parameters<TokenBalanceParams>,
@@ -5352,27 +5446,23 @@ impl TenzroMcpServer {
             .map_err(|e| err_internal(format!("Invalid address: {}", e)))?;
         let token = self.node.token()
             .ok_or_else(|| err_internal("Token not available"))?;
-        let balance_atto = token.balance_of(&addr);
-        let balance_tnzo = balance_atto as f64 / 1e18;
+        let balance_wei = token.balance_of(&addr);
         json_result(serde_json::json!({
             "address": params.address,
-            "balance_atto": balance_atto.to_string(),
-            "balance_tnzo": balance_tnzo,
+            "balance_wei": balance_wei.to_string(),
         }))
     }
 
-    #[tool(description = "Get the total TNZO token supply. Returns total supply in both atto-TNZO and TNZO. Useful for inflation monitoring and economic analysis.")]
+    #[tool(description = "Get the total TNZO token supply in wei (1 TNZO = 10^18 wei). Useful for inflation monitoring and economic analysis.")]
     async fn total_supply(
         &self,
         Parameters(_params): Parameters<TotalSupplyParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let token = self.node.token()
             .ok_or_else(|| err_internal("Token not available"))?;
-        let supply_atto = token.total_supply();
-        let supply_tnzo = supply_atto as f64 / 1e18;
+        let supply_wei = token.total_supply();
         json_result(serde_json::json!({
-            "total_supply_atto": supply_atto.to_string(),
-            "total_supply_tnzo": supply_tnzo,
+            "total_supply_wei": supply_wei.to_string(),
         }))
     }
 
@@ -5434,7 +5524,12 @@ impl TenzroMcpServer {
             .map_err(|e| err_internal(format!("Invalid payer address: {}", e)))?;
         let payee = parse_address(&params.payee)
             .map_err(|e| err_internal(format!("Invalid payee address: {}", e)))?;
-        let amount_atto = (params.amount_tnzo * 1e18) as u64;
+        let amount_wei_u128: u128 = params.amount_wei.parse().map_err(|_| err_internal(
+            "amount_wei must be a wei decimal string (e.g. '1500000000000000000' for 1.5 TNZO)"
+        ))?;
+        let amount_wei: u64 = amount_wei_u128.try_into().map_err(|_| err_internal(
+            "settle_payment amount overflows u64; use a smaller value or split the settlement"
+        ))?;
         let service_type = match params.service_type.to_lowercase().as_str() {
             "inference" | "ai_inference" | "model_inference" => ServiceType::ModelInference {
                 model_id: String::new(),
@@ -5462,7 +5557,7 @@ impl TenzroMcpServer {
             payer,
             payee,
             service_type,
-            amount_atto,
+            amount_wei,
             proof,
         );
         let settlement = self.node.settlement()
@@ -5473,8 +5568,7 @@ impl TenzroMcpServer {
             "receipt_id": receipt.receipt_id,
             "payer": params.payer,
             "payee": params.payee,
-            "amount_atto": amount_atto.to_string(),
-            "amount_tnzo": params.amount_tnzo,
+            "amount_wei": amount_wei.to_string(),
             "reference_id": params.reference_id,
             "status": format!("{:?}", receipt.status),
             "transaction_hash": receipt.transaction_hash,
@@ -5490,7 +5584,9 @@ impl TenzroMcpServer {
             .map_err(|e| err_internal(format!("Invalid payer address: {}", e)))?;
         let _ = parse_address(&params.payee)
             .map_err(|e| err_internal(format!("Invalid payee address: {}", e)))?;
-        let amount_atto = (params.amount_tnzo * 1e18) as u128;
+        let amount_atto: u128 = params.amount_wei.parse().map_err(|_| err_internal(
+            "amount_wei must be a wei decimal string (1 TNZO = 10^18 wei)"
+        ))?;
         let release_conditions = match params.release_condition.to_lowercase().as_str() {
             "timeout" => serde_json::json!({ "type": "Timeout" }),
             "provider" | "provider_signature" => serde_json::json!({ "type": "ProviderSignature" }),
@@ -5678,17 +5774,17 @@ impl TenzroMcpServer {
             .map_err(|e| err_internal(format!("Invalid sender address: {}", e)))?;
         let recipient = parse_address(&params.recipient)
             .map_err(|e| err_internal(format!("Invalid recipient address: {}", e)))?;
-        let deposit_atto = (params.deposit_tnzo * 1e18) as u128;
+        let deposit_wei = params.deposit_wei;
         let chan_mgr = self.node.channel_manager()
             .ok_or_else(|| err_internal("Channel manager not available"))?;
         let expires_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() + 86400;
-        let channel = chan_mgr.open_channel(sender, recipient, deposit_atto, AssetId::tnzo(), Timestamp(expires_at as i64))
+        let channel = chan_mgr.open_channel(sender, recipient, deposit_wei, AssetId::tnzo(), Timestamp(expires_at as i64))
             .map_err(|e| err_internal(format!("open_payment_channel failed: {}", e)))?;
         json_result(serde_json::json!({
             "channel_id": channel.channel_id,
             "status": "open",
-            "deposit_atto": deposit_atto.to_string(),
+            "deposit_wei": deposit_wei.to_string(),
             "expires_at": expires_at,
         }))
     }
@@ -5705,7 +5801,7 @@ impl TenzroMcpServer {
         json_result(serde_json::json!({
             "channel_id": params.channel_id,
             "status": "closed",
-            "final_balance_tnzo": params.final_balance_tnzo,
+            "final_balance_wei": params.final_balance_wei.to_string(),
             "sender_signature_hex": params.sender_signature_hex,
         }))
     }
@@ -5950,20 +6046,33 @@ impl TenzroMcpServer {
             .map_err(|e| err_internal(format!("Serialization failed: {}", e)))?)
     }
 
-    #[tool(description = "Set the pricing configuration for a provider node. Define TNZO price per 1k tokens and minimum charge. Returns the updated pricing config.")]
+    #[tool(description = "Set the per-token pricing configuration for a provider node. Prices are wei per token (1 TNZO = 10^18 wei). Returns the updated pricing config.")]
     async fn set_provider_pricing(
         &self,
         Parameters(params): Parameters<SetProviderPricingParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let _addr = parse_address(&params.provider_address)
             .map_err(|e| err_internal(format!("Invalid provider address: {}", e)))?;
+        let input_wei: u128 = params.input_price_per_token_wei.parse().map_err(|_| {
+            err_internal(
+                "input_price_per_token_wei must be a non-negative decimal string fitting in u128"
+                    .to_string(),
+            )
+        })?;
+        let output_wei: u128 = params.output_price_per_token_wei.parse().map_err(|_| {
+            err_internal(
+                "output_price_per_token_wei must be a non-negative decimal string fitting in u128"
+                    .to_string(),
+            )
+        })?;
         let mut pricing = self.node.provider_pricing.write();
-        pricing.input_price_per_token = params.price_per_1k_tokens / 1000.0;
-        pricing.output_price_per_token = params.price_per_1k_tokens / 1000.0;
+        pricing.input_price_per_token_wei = input_wei;
+        pricing.output_price_per_token_wei = output_wei;
         json_result(serde_json::json!({
             "success": true,
             "message": "Provider pricing updated",
-            "min_charge_tnzo": params.min_charge_tnzo,
+            "input_price_per_token_wei": input_wei.to_string(),
+            "output_price_per_token_wei": output_wei.to_string(),
         }))
     }
 
@@ -6003,14 +6112,14 @@ impl TenzroMcpServer {
         )))
     }
 
-    #[tool(description = "Delegate a task from one agent to another on the Tenzro Network. Optionally set a TNZO budget cap for the delegated task. Returns the delegation record and task ID.")]
+    #[tool(description = "Delegate a task from one agent to another on the Tenzro Network. Optionally set a wei budget cap for the delegated task (1 TNZO = 10^18 wei). Returns the delegation record and task ID.")]
     async fn delegate_task(
         &self,
         Parameters(params): Parameters<DelegateTaskParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         Err(err_internal(format!(
-            "delegate_task requires network consensus — not available on local node (delegator={}, delegate={}, task={}, budget={:?})",
-            params.delegator_did, params.delegate_did, params.task, params.max_budget_tnzo
+            "delegate_task requires network consensus — not available on local node (delegator={}, delegate={}, task={}, budget_wei={:?})",
+            params.delegator_did, params.delegate_did, params.task, params.max_budget_wei
         )))
     }
 
@@ -6162,8 +6271,8 @@ impl TenzroMcpServer {
         Parameters(params): Parameters<DiscoverModelsParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         Err(err_internal(format!(
-            "discover_models requires network gossip — not available on local node (category={:?}, serving_only={:?}, max_price={:?})",
-            params.category, params.serving_only, params.max_price_tnzo
+            "discover_models requires network gossip — not available on local node (category={:?}, serving_only={:?}, max_price_wei={:?})",
+            params.category, params.serving_only, params.max_price_wei
         )))
     }
 
@@ -6861,29 +6970,28 @@ impl TenzroMcpServer {
 
         let native_balance = token.balance_of(&address);
         let spl_balance = tenzro_token::native_to_spl(native_balance).unwrap_or(0);
-        let balance_tnzo = native_balance as f64 / 1e18;
 
         json_result(serde_json::json!({
             "address": params.address,
             "token": params.token.as_deref().unwrap_or("TNZO"),
             "native": {
-                "balance": native_balance.to_string(),
+                "balance_wei": native_balance.to_string(),
                 "decimals": 18,
-                "display": format!("{:.6} TNZO", balance_tnzo),
             },
             "evm_wtnzo": {
-                "balance": native_balance.to_string(),
+                "balance_wei": native_balance.to_string(),
                 "decimals": 18,
                 "note": "Pointer model: same as native balance"
             },
             "svm_wtnzo": {
-                "balance": spl_balance.to_string(),
+                "balance_base_units": spl_balance.to_string(),
                 "decimals": 9,
                 "note": "9-decimal SPL representation"
             },
             "daml_holding": {
-                "amount": format!("{:.18}", balance_tnzo),
-                "note": "CIP-56 Decimal representation"
+                "amount_wei": native_balance.to_string(),
+                "decimals": 18,
+                "note": "CIP-56 Holding (18 decimals canonical, render as Decimal as needed)"
             }
         }))
     }
@@ -8464,20 +8572,24 @@ impl TenzroMcpServer {
         let result = rpc_dispatch(&self.node,"tenzro_createUserWallet", serde_json::json!({
             "app_id": params.app_id,
             "label": params.label,
-            "initial_funding": params.initial_funding,
+            "initial_funding": params.initial_funding_wei.unwrap_or_else(|| "0".to_string()),
         })).await.map_err(|e| err_internal(format!("createUserWallet failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Fund a user wallet from the app's master wallet. Transfers TNZO from the master address to the user address.")]
+    #[tool(description = "Fund a user wallet from the app's master wallet. Transfers TNZO (wei) from the master address to the user address.")]
     async fn fund_user_wallet(
         &self,
         Parameters(params): Parameters<FundUserWalletParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
+        // Validate wei amount before dispatch
+        let _: u128 = params.amount_wei.parse().map_err(|_| err_internal(
+            "amount_wei must be a wei decimal string (e.g. '5000000000000000000' for 5 TNZO)"
+        ))?;
         let result = rpc_dispatch(&self.node,"tenzro_fundUserWallet", serde_json::json!({
             "master_address": params.master_address,
             "user_address": params.user_address,
-            "amount": params.amount,
+            "amount": params.amount_wei,
         })).await.map_err(|e| err_internal(format!("fundUserWallet failed: {}", e)))?;
         json_result(result)
     }
@@ -8500,8 +8612,7 @@ impl TenzroMcpServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_sponsorTransaction", serde_json::json!({
             "master_address": params.master_address,
-            "to": params.to,
-            "amount": params.amount,
+            "user_tx": params.user_tx,
         })).await.map_err(|e| err_internal(format!("sponsorTransaction failed: {}", e)))?;
         json_result(result)
     }
@@ -9347,6 +9458,209 @@ impl TenzroMcpServer {
         let result = rpc_dispatch(&self.node, "tenzro_videoEmbed", payload)
             .await
             .map_err(|e| err_internal(format!("videoEmbed failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Workflow stack (Canton-native workflows) ───
+    //
+    // Writes flow through `send_transaction` with the privileged-VM
+    // workflow selectors (`0x01000040`–`0x0100004B`). These tools are
+    // read-only views over the in-memory `WorkflowRuntime` state, which
+    // is rehydrated from RocksDB on node startup.
+
+    #[tool(description = "Fetch a workflow by 32-byte hex id. Returns the full Workflow record (creator, participants, obligations, approval gates, status, canton_mirror, signatures). Read-only. Writes use send_transaction with the workflow privileged-VM selectors.")]
+    async fn get_workflow(
+        &self,
+        Parameters(params): Parameters<WorkflowIdParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({ "workflow_id": params.workflow_id });
+        let result = rpc_dispatch(&self.node, "tenzro_getWorkflow", payload)
+            .await
+            .map_err(|e| err_internal(format!("getWorkflow failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List workflow ids created by a given DID. Returns up to all workflows the DID has authored, regardless of status.")]
+    async fn list_workflows_by_creator(
+        &self,
+        Parameters(params): Parameters<CreatorDidParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({ "creator_did": params.creator_did });
+        let result = rpc_dispatch(&self.node, "tenzro_listWorkflowsByCreator", payload)
+            .await
+            .map_err(|e| err_internal(format!("listWorkflowsByCreator failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List workflow ids that include a DID as a participant (regardless of role). The DID may be the creator, an obligor, an oblige, or an approver.")]
+    async fn list_workflows_by_participant(
+        &self,
+        Parameters(params): Parameters<DidParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({ "did": params.did });
+        let result = rpc_dispatch(&self.node, "tenzro_listWorkflowsByParticipant", payload)
+            .await
+            .map_err(|e| err_internal(format!("listWorkflowsByParticipant failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List workflow ids in a given status. Status: draft | awaiting_signatures | active | suspended | settling | completed | failed | disputed | cancelled.")]
+    async fn list_workflows_by_status(
+        &self,
+        Parameters(params): Parameters<WorkflowStatusParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({ "status": params.status });
+        let result = rpc_dispatch(&self.node, "tenzro_listWorkflowsByStatus", payload)
+            .await
+            .map_err(|e| err_internal(format!("listWorkflowsByStatus failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Full lifecycle history for a workflow: ordered list of LifecycleTransition entries (from-status, to-status, reason, actor, at). Useful for audit and dispute resolution.")]
+    async fn get_workflow_lifecycle(
+        &self,
+        Parameters(params): Parameters<WorkflowIdParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({ "workflow_id": params.workflow_id });
+        let result = rpc_dispatch(&self.node, "tenzro_getWorkflowLifecycle", payload)
+            .await
+            .map_err(|e| err_internal(format!("getWorkflowLifecycle failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch an obligation record by 32-byte hex id. Returns the obligor / oblige / kind / amount / status / discharge proof.")]
+    async fn get_obligation(
+        &self,
+        Parameters(params): Parameters<ObligationIdParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({ "obligation_id": params.obligation_id });
+        let result = rpc_dispatch(&self.node, "tenzro_getObligation", payload)
+            .await
+            .map_err(|e| err_internal(format!("getObligation failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch an approval gate by 32-byte hex id. Returns the approver set (single / threshold / role / delegated), m-of-n threshold, on-event trigger, and effect.")]
+    async fn get_approval_gate(
+        &self,
+        Parameters(params): Parameters<ApprovalGateIdParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({ "gate_id": params.gate_id });
+        let result = rpc_dispatch(&self.node, "tenzro_getApprovalGate", payload)
+            .await
+            .map_err(|e| err_internal(format!("getApprovalGate failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch an open or finalized approval request by 32-byte hex id. Returns the gate, decisions collected, threshold progress, and final outcome (approved / rejected / pending).")]
+    async fn get_approval_request(
+        &self,
+        Parameters(params): Parameters<ApprovalRequestIdParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({ "request_id": params.request_id });
+        let result = rpc_dispatch(&self.node, "tenzro_getApprovalRequest", payload)
+            .await
+            .map_err(|e| err_internal(format!("getApprovalRequest failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch a privacy domain by 32-byte hex id. Returns members, X25519 envelope policy, freeze status. Members see plaintext, non-members see Deny (indistinguishable from non-existence).")]
+    async fn get_privacy_domain(
+        &self,
+        Parameters(params): Parameters<PrivacyDomainIdParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({ "domain_id": params.domain_id });
+        let result = rpc_dispatch(&self.node, "tenzro_getPrivacyDomain", payload)
+            .await
+            .map_err(|e| err_internal(format!("getPrivacyDomain failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List privacy domains a given DID is a member of. Caller-side filtered to the DIDs the requester is authorized to see.")]
+    async fn list_privacy_domains_for_did(
+        &self,
+        Parameters(params): Parameters<DidParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({ "did": params.did });
+        let result = rpc_dispatch(&self.node, "tenzro_listPrivacyDomainsForDid", payload)
+            .await
+            .map_err(|e| err_internal(format!("listPrivacyDomainsForDid failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch a single workflow receipt by 32-byte hex id. Receipts are append-only and form a per-workflow hash chain via prev_receipt for audit.")]
+    async fn get_workflow_receipt(
+        &self,
+        Parameters(params): Parameters<WorkflowReceiptIdParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({ "receipt_id": params.receipt_id });
+        let result = rpc_dispatch(&self.node, "tenzro_getWorkflowReceipt", payload)
+            .await
+            .map_err(|e| err_internal(format!("getWorkflowReceipt failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Walk a workflow's receipt chain from head backwards via prev_receipt. Returns receipts oldest-last, bounded by `max` (default 256). Use this for audit trails and dispute history.")]
+    async fn list_workflow_receipts(
+        &self,
+        Parameters(params): Parameters<WorkflowReceiptListParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({
+            "workflow_id": params.workflow_id,
+            "max": params.max,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_listWorkflowReceipts", payload)
+            .await
+            .map_err(|e| err_internal(format!("listWorkflowReceipts failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch a fee route by 32-byte hex id. Fee routes describe how a settlement payout is split across recipients in basis points (must sum to 10_000).")]
+    async fn get_fee_route(
+        &self,
+        Parameters(params): Parameters<FeeRouteIdParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({ "fee_route_id": params.fee_route_id });
+        let result = rpc_dispatch(&self.node, "tenzro_getFeeRoute", payload)
+            .await
+            .map_err(|e| err_internal(format!("getFeeRoute failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List every registered fee route. Each route has a label, splits in bps, and a derived 32-byte id used by Workflow.fee_route.")]
+    async fn list_fee_routes(&self) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_listFeeRoutes", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listFeeRoutes failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Pure preview: how would a `gross_wei` amount be split across a fee route's recipients? Truncates to last for the remainder. Does not settle — settlement is consensus-mediated.")]
+    async fn compute_fee_route_payouts(
+        &self,
+        Parameters(params): Parameters<FeeRoutePayoutsParams>,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let payload = serde_json::json!({
+            "fee_route_id": params.fee_route_id,
+            "gross_wei": params.gross_wei,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_computeFeeRoutePayouts", payload)
+            .await
+            .map_err(|e| err_internal(format!("computeFeeRoutePayouts failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Snapshot of workflow operational metrics (workflows/obligations/approvals partitioned by status, signature totals, canton-mirror count, fee routes, privacy domains). Returns the same data as the /metrics scrape, but as typed JSON.")]
+    async fn get_workflow_operational_metrics(
+        &self,
+    ) -> std::result::Result<CallToolResult, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getWorkflowOperationalMetrics",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getWorkflowOperationalMetrics failed: {}", e)))?;
         json_result(result)
     }
 }

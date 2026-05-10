@@ -1,0 +1,22 @@
+{
+  "_comment": "DAML codegen mapping for autonomous_treasury.json. Settle obligations bind to a Tenzro-side SettlementReceipt — no external interface needed since the discharge produces an on-chain settlement record consumed by the Canton mirror via the receipt-anchor template.",
+
+  "module": "Tenzro.Workflow.AutonomousTreasury",
+  "template_name": "AutonomousTreasury",
+  "obligation_spec_type": "ObligationSpec",
+
+  "obligation_choices": [
+    {
+      "kind_tag": "Settle",
+      "choice_name": "DischargeSettle",
+      "choice_args": [
+        { "name": "settlement_id", "daml_type": "Text" },
+        { "name": "settlement_receipt_hash", "daml_type": "Text" },
+        { "name": "amount", "daml_type": "Decimal" },
+        { "name": "asset_symbol", "daml_type": "Text" }
+      ]
+    }
+  ],
+
+  "external_interface": null
+}
