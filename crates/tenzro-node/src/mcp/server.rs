@@ -867,26 +867,39 @@ pub struct GetProviderPricingParams {
 pub struct RegisterAgentParams {
     #[schemars(description = "Human-readable agent name")]
     pub name: String,
-    #[schemars(description = "Agent type: 'autonomous', 'assistant', 'validator', 'oracle'")]
-    pub agent_type: String,
-    #[schemars(description = "DID of the controller (human or machine) that owns this agent")]
-    pub controller_did: String,
-    #[schemars(description = "List of capability names this agent declares (e.g. ['inference', 'settlement'])")]
+    #[schemars(description = "Hex-encoded creator address (the human/machine address that owns this agent). 20- or 32-byte hex, with or without 0x prefix.")]
+    pub creator: String,
+    #[schemars(description = "Capability short names: 'nlp', 'vision', 'code', 'data', 'blockchain', 'smart_contract', 'api_integration', 'coordination'. Anything else is treated as a Custom capability with that name. Defaults to a single 'general' capability when omitted.")]
+    #[serde(default)]
     pub capabilities: Vec<String>,
-    #[schemars(description = "Optional endpoint URL for remote agent invocation")]
-    pub endpoint: Option<String>,
+    #[schemars(description = "BYOK: optional 32-byte Ed25519 verifying key (hex). If supplied, `pq_public_key` MUST also be supplied. When both are present, no server-side wallet is provisioned and the agent is registered self-custodially with the caller's keys. When both are absent, the node provisions a server-side hybrid (FROST + ML-DSA-65) wallet.")]
+    #[serde(default)]
+    pub public_key: Option<String>,
+    #[schemars(description = "BYOK: optional 1952-byte ML-DSA-65 verifying key (hex). Required iff `public_key` is supplied.")]
+    #[serde(default)]
+    pub pq_public_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SendAgentMessageParams {
-    #[schemars(description = "DID of the sender agent")]
-    pub from_did: String,
-    #[schemars(description = "DID of the recipient agent")]
-    pub to_did: String,
-    #[schemars(description = "Message type: 'task', 'response', 'status', 'error'")]
-    pub message_type: String,
-    #[schemars(description = "JSON payload of the message")]
-    pub payload: serde_json::Value,
+    #[schemars(description = "Sender agent_id (16-byte hex, as returned by register_agent). Must already be registered with the local node's AgentRuntime.")]
+    pub from: String,
+    #[schemars(description = "Recipient agent_id (same format). Must be registered with the local node's MessageRouter.")]
+    pub to: String,
+    #[schemars(description = "UTF-8 message body. Becomes AgentMessage.payload.")]
+    pub message: String,
+    #[schemars(description = "Optional message type: 'task_request' (default), 'task_response', 'query', 'query_response', 'notification', 'coordination', 'error'.")]
+    #[serde(default)]
+    pub message_type: Option<String>,
+    #[schemars(description = "Optional message_id of a prior message this is a reply to. Changes the canonical hash, so callers must include it BEFORE signing.")]
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    #[schemars(description = "Hybrid signing: 64-byte Ed25519 signature (hex) over SHA-256(AgentMessage::signing_data()). Required (with pq_signature) when the router enforces signing.")]
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[schemars(description = "Hybrid signing: 3309-byte ML-DSA-65 signature (hex) over the same hash. Required (with signature) when the router enforces signing.")]
+    #[serde(default)]
+    pub pq_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -6096,26 +6109,195 @@ impl TenzroMcpServer {
 
     // ─── Agent Advanced Tools ───
 
-    #[tool(description = "Register a new AI agent identity on the Tenzro Network. Creates a TDIP DID with an auto-provisioned MPC wallet. Returns the agent DID and wallet address.")]
+    #[tool(description = "Register a new AI agent identity on the Tenzro Network. Two modes: (1) provisioner — node provisions a server-side hybrid wallet (FROST Ed25519 + ML-DSA-65), returns the classical_public_key + pq_verifying_key_len; (2) BYOK — caller supplies both `public_key` (32B Ed25519) and `pq_public_key` (1952B ML-DSA-65) hex, registration is self-custodial. Returns agent_id, wallet_address, tenzro_did, registration_fee, and `byok` flag.")]
     async fn register_agent(
         &self,
         Parameters(params): Parameters<RegisterAgentParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        Err(err_internal(format!(
-            "register_agent requires network consensus — not available on local node (requested: name={}, type={}, controller={}, capabilities={:?}, endpoint={:?})",
-            params.name, params.agent_type, params.controller_did, params.capabilities, params.endpoint
-        )))
+        use tenzro_types::agent::Capability;
+
+        let creator = parse_address(&params.creator)?;
+
+        let capabilities: Vec<Capability> = if params.capabilities.is_empty() {
+            vec![Capability::Custom { name: "general".to_string(), parameters: std::collections::HashMap::new() }]
+        } else {
+            params.capabilities.iter().map(|s| match s.as_str() {
+                "nlp" => Capability::NaturalLanguageProcessing { languages: vec!["en".to_string()] },
+                "vision" => Capability::ComputerVision { tasks: vec!["detection".to_string()] },
+                "code" => Capability::CodeGeneration { languages: vec!["rust".to_string(), "python".to_string()] },
+                "data" => Capability::DataAnalysis { formats: vec!["json".to_string(), "csv".to_string()] },
+                "blockchain" => Capability::BlockchainInteraction { chains: vec!["tenzro".to_string()] },
+                "smart_contract" => Capability::SmartContractExecution,
+                "api_integration" => Capability::ExternalAPIIntegration { apis: vec![] },
+                "coordination" => Capability::MultiAgentCoordination,
+                other => Capability::Custom { name: other.to_string(), parameters: std::collections::HashMap::new() },
+            }).collect()
+        };
+
+        let agent_runtime = self.node.agent_runtime().ok_or_else(|| {
+            err_internal("Agent runtime not initialized")
+        })?;
+
+        // BYOK path: both keys supplied → no server-side wallet provisioning.
+        // Half-supplied is rejected to avoid mixed custody.
+        match (params.public_key.as_deref(), params.pq_public_key.as_deref()) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(err_internal(
+                    "BYOK registration requires BOTH `public_key` and `pq_public_key` (Ed25519 + ML-DSA-65)",
+                ));
+            }
+            (Some(pk_hex), Some(pq_hex)) => {
+                let strip_0x = |s: &str| s.strip_prefix("0x").unwrap_or(s).to_string();
+                let pk_bytes = hex::decode(strip_0x(pk_hex))
+                    .map_err(|e| err_internal(format!("public_key is not valid hex: {}", e)))?;
+                if pk_bytes.len() != 32 {
+                    return Err(err_internal(format!(
+                        "public_key must be 32 bytes (Ed25519), got {}", pk_bytes.len()
+                    )));
+                }
+                let pq_bytes = hex::decode(strip_0x(pq_hex))
+                    .map_err(|e| err_internal(format!("pq_public_key is not valid hex: {}", e)))?;
+                if pq_bytes.len() != 1952 {
+                    return Err(err_internal(format!(
+                        "pq_public_key must be 1952 bytes (ML-DSA-65), got {}", pq_bytes.len()
+                    )));
+                }
+
+                let agent = agent_runtime
+                    .register_agent_with_keys(
+                        params.name.clone(),
+                        creator,
+                        capabilities,
+                        false,
+                        0,
+                        pk_bytes,
+                        pq_bytes,
+                    )
+                    .await
+                    .map_err(|e| err_internal(format!("BYOK agent registration failed: {}", e)))?;
+
+                return json_result(serde_json::json!({
+                    "agent_id": agent.identity.agent_id,
+                    "name": agent.identity.name,
+                    "creator": format!("{}", agent.identity.creator),
+                    "wallet_address": format!("{}", agent.wallet_address),
+                    "capabilities": agent.capabilities.len(),
+                    "status": format!("{:?}", agent.status),
+                    "created_at": agent.created_at.to_rfc3339(),
+                    "tenzro_did": agent.tenzro_did,
+                    "registration_fee": agent.registration_fee.to_string(),
+                    "byok": true,
+                }));
+            }
+            (None, None) => { /* fall through to provisioner path */ }
+        }
+
+        let agent = agent_runtime
+            .register_agent(params.name.clone(), creator, capabilities, false, 0)
+            .await
+            .map_err(|e| err_internal(format!("Agent registration failed: {}", e)))?;
+
+        json_result(serde_json::json!({
+            "agent_id": agent.identity.agent_id,
+            "name": agent.identity.name,
+            "creator": format!("{}", agent.identity.creator),
+            "wallet_address": format!("{}", agent.wallet_address),
+            "capabilities": agent.capabilities.len(),
+            "status": format!("{:?}", agent.status),
+            "created_at": agent.created_at.to_rfc3339(),
+            "tenzro_did": agent.tenzro_did,
+            "registration_fee": agent.registration_fee.to_string(),
+            "classical_public_key": hex::encode(agent.classical_public_key()),
+            "pq_verifying_key_len": agent.pq_verifying_key().len(),
+            "byok": false,
+        }))
     }
 
-    #[tool(description = "Send a message from one agent to another via the A2A protocol. Supports task, response, status, and error message types. Returns message delivery confirmation.")]
+    #[tool(description = "Submit a hybrid-signed (Ed25519 + ML-DSA-65) AgentMessage to a recipient agent's queue. Signing preimage: SHA-256(AgentMessage::signing_data()) — which includes both wallet addresses (resolved from registry, not wire). Both signature legs are required when the router enforces signing (production default); half-signed messages are rejected. Returns message_id, status, timestamp, and signed flag.")]
     async fn send_agent_message(
         &self,
         Parameters(params): Parameters<SendAgentMessageParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        Err(err_internal(format!(
-            "send_agent_message requires network consensus — not available on local node (from={}, to={}, type={}, payload_size={})",
-            params.from_did, params.to_did, params.message_type, params.payload.to_string().len()
-        )))
+        use tenzro_types::agent::{AgentMessage, AgentMessageType};
+
+        let agent_runtime = self.node.agent_runtime().ok_or_else(|| {
+            err_internal("Agent runtime not initialized")
+        })?;
+
+        let from_agent = agent_runtime.get_agent(&params.from)
+            .map_err(|e| err_internal(format!("'from' agent not registered: {}", e)))?;
+        let to_agent = agent_runtime.get_agent(&params.to)
+            .map_err(|e| err_internal(format!("'to' agent not registered: {}", e)))?;
+
+        let message_type = match params.message_type.as_deref() {
+            None | Some("task_request") => AgentMessageType::TaskRequest,
+            Some("task_response") => AgentMessageType::TaskResponse,
+            Some("query") => AgentMessageType::Query,
+            Some("query_response") => AgentMessageType::QueryResponse,
+            Some("notification") => AgentMessageType::Notification,
+            Some("coordination") => AgentMessageType::Coordination,
+            Some("error") => AgentMessageType::Error,
+            Some(other) => return Err(err_internal(format!(
+                "Unknown message_type '{}': use task_request|task_response|query|query_response|notification|coordination|error",
+                other
+            ))),
+        };
+
+        let mut message = AgentMessage::new(
+            from_agent.identity.clone(),
+            to_agent.identity.clone(),
+            message_type,
+            params.message.as_bytes().to_vec(),
+        );
+
+        // `reply_to` MUST be set before attaching signatures because it is part
+        // of `signing_data`.
+        if let Some(reply_to) = params.reply_to.as_deref() {
+            message = message.as_reply_to(reply_to.to_string());
+        }
+
+        match (params.signature.as_deref(), params.pq_signature.as_deref()) {
+            (Some(s), Some(p)) => {
+                let strip_0x = |s: &str| s.strip_prefix("0x").unwrap_or(s).to_string();
+                let classical = hex::decode(strip_0x(s))
+                    .map_err(|e| err_internal(format!("Invalid hex in 'signature': {}", e)))?;
+                if classical.len() != 64 {
+                    return Err(err_internal(format!(
+                        "'signature' must be 64 bytes (Ed25519), got {}", classical.len()
+                    )));
+                }
+                let pq = hex::decode(strip_0x(p))
+                    .map_err(|e| err_internal(format!("Invalid hex in 'pq_signature': {}", e)))?;
+                if pq.len() != 3309 {
+                    return Err(err_internal(format!(
+                        "'pq_signature' must be 3309 bytes (ML-DSA-65), got {}", pq.len()
+                    )));
+                }
+                message = message.with_hybrid_signature(classical, pq);
+            }
+            (None, None) => {
+                // Both absent — let the router reject if signing is enabled.
+                // Keeps the unsigned path working for tests/dev configs where
+                // `enable_signing == false`.
+            }
+            _ => {
+                return Err(err_internal(
+                    "Mixed-mode signature: both 'signature' and 'pq_signature' are required together (or omit both)",
+                ));
+            }
+        }
+
+        agent_runtime.send_message(message.clone()).await
+            .map_err(|e| err_internal(format!("Failed to send message: {}", e)))?;
+
+        json_result(serde_json::json!({
+            "message_id": message.message_id,
+            "from": params.from,
+            "to": params.to,
+            "status": "sent",
+            "timestamp": message.timestamp.as_millis(),
+            "signed": message.signature.is_some(),
+        }))
     }
 
     #[tool(description = "Delegate a task from one agent to another on the Tenzro Network. Optionally set a wei budget cap for the delegated task (1 TNZO = 10^18 wei). Returns the delegation record and task ID.")]

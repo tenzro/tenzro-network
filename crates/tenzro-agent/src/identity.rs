@@ -177,6 +177,26 @@ pub struct RegisteredAgent {
     /// chain. Downstream auditors correlate against `frozen_at_block`.
     #[serde(default = "default_principal_chain")]
     pub principal_chain: PrincipalChain,
+    /// Classical Ed25519 verifying key bound to this agent (32 bytes).
+    ///
+    /// For provisioner-path agents this is the FROST aggregated group public
+    /// key (the same key the chain sees signing transactions). For BYOK
+    /// agents this is the caller-supplied verifying key.
+    ///
+    /// Used by `MessageRouter` to verify `AgentMessage` classical signatures
+    /// produced by this agent.
+    #[serde(default)]
+    pub classical_public_key: Vec<u8>,
+    /// ML-DSA-65 (FIPS 204) verifying key bytes (exactly 1952 bytes).
+    ///
+    /// For provisioner-path agents this is the wallet's auto-provisioned
+    /// PQ verifying key. For BYOK agents this is the caller-supplied
+    /// verifying key.
+    ///
+    /// Used by `MessageRouter` to verify `AgentMessage` post-quantum
+    /// signatures produced by this agent.
+    #[serde(default)]
+    pub pq_verifying_key: Vec<u8>,
 }
 
 /// Serde default for `RegisteredAgent::principal_chain` so historical records
@@ -225,6 +245,8 @@ impl RegisteredAgent {
         wallet_id: String,
         capabilities: Vec<Capability>,
         tee_backed: bool,
+        classical_public_key: Vec<u8>,
+        pq_verifying_key: Vec<u8>,
     ) -> Self {
         // Default to a tombstoned anonymous chain rooted at the agent_id —
         // callers that bind to TDIP overwrite this via `set_principal_chain`
@@ -245,7 +267,19 @@ impl RegisteredAgent {
             tenzro_did: None,
             registration_fee: 0,
             principal_chain,
+            classical_public_key,
+            pq_verifying_key,
         }
+    }
+
+    /// Returns the classical Ed25519 verifying key bound to this agent.
+    pub fn classical_public_key(&self) -> &[u8] {
+        &self.classical_public_key
+    }
+
+    /// Returns the ML-DSA-65 verifying key bound to this agent.
+    pub fn pq_verifying_key(&self) -> &[u8] {
+        &self.pq_verifying_key
     }
 
     /// Overwrites the frozen principal chain. Used by the registration path
@@ -494,6 +528,12 @@ impl AgentIdentityManager {
         let wallet_address = wallet.address;
         let wallet_id = wallet.wallet_id.clone();
 
+        // Capture the wallet's classical (FROST aggregated Ed25519) and
+        // post-quantum (ML-DSA-65) verifying keys so the message router can
+        // verify hybrid-signed AgentMessages produced by this agent.
+        let classical_public_key = wallet.public_key.to_bytes();
+        let pq_verifying_key = wallet.pq_verifying_key_bytes();
+
         // Create agent identity
         let identity = AgentIdentity::new(agent_id.clone(), wallet_address, name.clone(), creator);
 
@@ -504,6 +544,8 @@ impl AgentIdentityManager {
             wallet_id.to_string(),
             capabilities.clone(),
             tee_backed,
+            classical_public_key.clone(),
+            pq_verifying_key.clone(),
         );
 
         // HIGH #105: Bind to TDIP IdentityRegistry if configured. This mints a
@@ -513,10 +555,13 @@ impl AgentIdentityManager {
         // and validate the quoted fee against `gas_policy` before storing the
         // local agent record.
         if let Some(ref registry) = self.identity_registry {
-            // Use the wallet's public key bytes as the identity's public key.
-            // The wallet provisioner returns a real key, so this binds the
-            // TDIP record to the same key material that signs transactions.
-            let public_key = wallet_address.as_bytes().to_vec();
+            // Use the wallet's classical Ed25519 verifying key as the
+            // identity's public key. The wallet provisioner returns a real
+            // FROST-aggregated key, so this binds the TDIP record to the
+            // same key material that signs both transactions and agent
+            // messages — and lets the MessageRouter resolver round-trip
+            // back to the same verifying key.
+            let public_key = classical_public_key.clone();
 
             // Convert typed agent capabilities to string labels for TDIP.
             let cap_strings: Vec<String> = capabilities
@@ -601,6 +646,162 @@ impl AgentIdentityManager {
         info!(
             "Agent {} registered successfully with wallet {}",
             agent_id, wallet_id
+        );
+
+        Ok(agent)
+    }
+
+    /// Registers a new agent using **caller-supplied** classical and
+    /// post-quantum verifying keys (BYOK path).
+    ///
+    /// Unlike [`Self::register_agent_with_gas_policy`], this method does
+    /// **not** invoke the wallet provisioner — no FROST shares are minted
+    /// on the node and no signing key material lives server-side. The
+    /// agent's `wallet_address` is derived deterministically from the
+    /// supplied Ed25519 verifying key as `Address(SHA-256(public_key))`,
+    /// matching the registry's `register_autonomous_machine_with_keys`
+    /// path so an off-node caller can reproduce it without a round-trip.
+    ///
+    /// All other behaviour matches the provisioner path: the agent gets a
+    /// deterministic agent_id, is bound to TDIP if a registry is wired
+    /// (subject to `gas_policy`), and has its hybrid keys captured on the
+    /// returned `RegisteredAgent` so the message router can verify
+    /// signatures it produces.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` — display name.
+    /// * `creator` — 32-byte address of the registering principal.
+    /// * `capabilities` — typed capability list.
+    /// * `tee_backed` — whether the agent runs inside a TEE.
+    /// * `nonce` — replay-protection nonce; used in `agent_id` derivation.
+    /// * `classical_public_key` — 32-byte Ed25519 verifying key.
+    /// * `pq_verifying_key` — 1952-byte ML-DSA-65 verifying key.
+    /// * `gas_policy` — TDIP fee budget; ignored when no registry is wired.
+    pub async fn register_agent_with_keys(
+        &self,
+        name: String,
+        creator: Address,
+        capabilities: Vec<Capability>,
+        tee_backed: bool,
+        nonce: u64,
+        classical_public_key: Vec<u8>,
+        pq_verifying_key: Vec<u8>,
+        gas_policy: GasPolicy,
+    ) -> Result<RegisteredAgent> {
+        if classical_public_key.len() != 32 {
+            return Err(AgentError::InvalidArgument(format!(
+                "Ed25519 verifying key must be 32 bytes, got {}",
+                classical_public_key.len()
+            )));
+        }
+        if pq_verifying_key.len() != 1952 {
+            return Err(AgentError::InvalidArgument(format!(
+                "ML-DSA-65 verifying key must be 1952 bytes, got {}",
+                pq_verifying_key.len()
+            )));
+        }
+
+        let agent_id = Self::generate_agent_id(&creator, nonce);
+        if self.agents.contains_key(&agent_id) {
+            return Err(AgentError::AgentAlreadyExists(agent_id));
+        }
+
+        debug!("Registering BYOK agent {} with ID {}", name, agent_id);
+
+        // Deterministic wallet_address from the Ed25519 key. Matches the
+        // registry's BYOK path so the caller, the node, and any other
+        // observer all converge on the same address without a network
+        // round-trip.
+        let hash = sha256(&classical_public_key);
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes.copy_from_slice(hash.as_bytes());
+        let wallet_address = Address::new(addr_bytes);
+
+        let wallet_id = format!("byok-{}", &agent_id[agent_id.len().saturating_sub(12)..]);
+
+        let identity = AgentIdentity::new(agent_id.clone(), wallet_address, name.clone(), creator);
+        let mut agent = RegisteredAgent::new(
+            identity,
+            wallet_address,
+            wallet_id,
+            capabilities.clone(),
+            tee_backed,
+            classical_public_key.clone(),
+            pq_verifying_key.clone(),
+        );
+
+        if let Some(ref registry) = self.identity_registry {
+            let cap_strings: Vec<String> = capabilities.iter().map(capability_label).collect();
+
+            let registration = registry
+                .register_autonomous_machine_with_keys(
+                    classical_public_key.clone(),
+                    pq_verifying_key.clone(),
+                    cap_strings,
+                )
+                .await
+                .map_err(|e| AgentError::BlockchainBindingFailed(format!(
+                    "TDIP BYOK registration failed for agent {}: {}",
+                    agent.identity.agent_id, e
+                )))?;
+
+            let fee_required = registration.fee_required;
+            let machine_identity = registration.identity;
+
+            if !gas_policy.allows(fee_required) {
+                let supplied = gas_policy.budget().unwrap_or(0);
+                warn!(
+                    "Refusing to bind BYOK agent {} to TDIP DID {}: fee {} > budget {}",
+                    agent.identity.agent_id,
+                    machine_identity.did_string(),
+                    fee_required,
+                    supplied
+                );
+                return Err(AgentError::InsufficientGas {
+                    required: fee_required,
+                    supplied,
+                });
+            }
+
+            let machine_did = machine_identity.did_string();
+
+            if let Err(e) = registry.link_tenzro_agent(&machine_did, agent.identity.agent_id.clone()) {
+                return Err(AgentError::BlockchainBindingFailed(format!(
+                    "Failed to link BYOK agent {} to TDIP DID {}: {}",
+                    agent.identity.agent_id, machine_did, e
+                )));
+            }
+
+            agent.tenzro_did = Some(machine_did.clone());
+            agent.registration_fee = fee_required;
+
+            let frozen_chain = registry.resolve_principal_chain(
+                &machine_did,
+                BlockHeight::new(0),
+            );
+            agent.set_principal_chain(frozen_chain);
+
+            info!(
+                "BYOK agent {} bound to TDIP DID {} (wallet_address {}, fee {} smallest TNZO)",
+                agent.identity.agent_id,
+                machine_did,
+                agent.wallet_address,
+                fee_required
+            );
+        } else {
+            debug!(
+                "BYOK agent {} registered without TDIP binding (local-only mode)",
+                agent.identity.agent_id
+            );
+        }
+
+        let aid = agent.identity.agent_id.clone();
+        self.agents.insert(aid.clone(), agent.clone());
+
+        info!(
+            "BYOK agent {} registered successfully (no server-side wallet)",
+            aid
         );
 
         Ok(agent)

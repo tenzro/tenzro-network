@@ -2828,6 +2828,46 @@ async fn handle_summarize_controller(
     })
 }
 
+/// `tenzro_registerAgent` — register an autonomous AI agent on the network.
+///
+/// Two modes:
+///
+/// 1. **Provisioner path (default)** — omit `public_key` and
+///    `pq_public_key`. The node provisions a 2-of-3 FROST MPC wallet for
+///    the agent server-side. The wallet's signing material lives on the
+///    node and is used for both transactions and `AgentMessage` signing.
+///    Suitable for agents that delegate custody to the host node.
+///
+/// 2. **BYOK path** — supply `public_key` (32B Ed25519 hex) **and**
+///    `pq_public_key` (1952B ML-DSA-65 hex). Both are required together;
+///    half-supplied is rejected with `-32602`. The node does **not**
+///    provision a wallet. The agent's `wallet_address` is derived
+///    deterministically as `Address(SHA-256(public_key))` so the caller
+///    can reproduce it without a round-trip. The caller signs all
+///    `AgentMessage`s off-node; the node verifies them via the bound
+///    keys.
+///
+/// In both modes the agent's hybrid verifying keys are bound into the
+/// `MessageRouter` resolver so signed messages produced by the agent
+/// verify against the registered keys.
+///
+/// # Params
+///
+/// | field | required | description |
+/// |---|---|---|
+/// | `name` | yes | Display name. |
+/// | `creator` | yes | 32-byte hex address of the registering principal. |
+/// | `capabilities` | no | Array of capability tags: `nlp`, `vision`, `code`, `data`, `blockchain`, or any custom string. |
+/// | `public_key` | BYOK only | 32-byte Ed25519 verifying key, hex-encoded (with or without `0x` prefix). |
+/// | `pq_public_key` | BYOK only | 1952-byte ML-DSA-65 verifying key, hex-encoded. |
+///
+/// # Returns
+///
+/// `{ agent_id, name, creator, wallet_address, capabilities, status,
+/// created_at, tenzro_did, registration_fee, byok }`. Provisioner-path
+/// responses additionally include `classical_public_key` (hex) and
+/// `pq_verifying_key_len` so the caller can record the wallet's keys
+/// for later signature verification.
 async fn handle_register_agent(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -2879,6 +2919,83 @@ async fn handle_register_agent(
         data: None,
     })?;
 
+    // BYOK path detection: if the caller supplied `public_key` AND
+    // `pq_public_key`, register without provisioning a server-side wallet.
+    // Both are required together — half-supplied is rejected so callers
+    // don't accidentally end up with one server-held key and one
+    // self-custodial key.
+    let pk_param = params.get("public_key").and_then(|v| v.as_str());
+    let pq_param = params.get("pq_public_key").and_then(|v| v.as_str());
+
+    match (pk_param, pq_param) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "BYOK registration requires BOTH `public_key` and `pq_public_key` (Ed25519 + ML-DSA-65)".to_string(),
+                data: None,
+            });
+        }
+        (Some(pk_hex), Some(pq_hex)) => {
+            let pk_bytes = hex::decode(pk_hex.trim_start_matches("0x"))
+                .map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("public_key is not valid hex: {}", e),
+                    data: None,
+                })?;
+            if pk_bytes.len() != 32 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("public_key must be 32 bytes (Ed25519), got {}", pk_bytes.len()),
+                    data: None,
+                });
+            }
+            let pq_bytes = hex::decode(pq_hex.trim_start_matches("0x"))
+                .map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("pq_public_key is not valid hex: {}", e),
+                    data: None,
+                })?;
+            if pq_bytes.len() != 1952 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("pq_public_key must be 1952 bytes (ML-DSA-65), got {}", pq_bytes.len()),
+                    data: None,
+                });
+            }
+
+            let agent = agent_runtime
+                .register_agent_with_keys(
+                    name.to_string(),
+                    creator,
+                    capabilities,
+                    false,
+                    0,
+                    pk_bytes,
+                    pq_bytes,
+                )
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("BYOK agent registration failed: {}", e),
+                    data: None,
+                })?;
+
+            return Ok(serde_json::json!({
+                "agent_id": agent.identity.agent_id,
+                "name": agent.identity.name,
+                "creator": format!("{}", agent.identity.creator),
+                "wallet_address": format!("{}", agent.wallet_address),
+                "capabilities": agent.capabilities.len(),
+                "status": format!("{:?}", agent.status),
+                "created_at": agent.created_at.to_rfc3339(),
+                "tenzro_did": agent.tenzro_did,
+                "registration_fee": agent.registration_fee.to_string(),
+                "byok": true,
+            }));
+        }
+        (None, None) => { /* fall through to provisioner path */ }
+    }
+
     let agent = agent_runtime.register_agent(name.to_string(), creator, capabilities, false, 0).await
         .map_err(|e| JsonRpcError {
             code: -32000,
@@ -2900,9 +3017,51 @@ async fn handle_register_agent(
         "capabilities": agent.capabilities.len(),
         "status": format!("{:?}", agent.status),
         "created_at": agent.created_at.to_rfc3339(),
+        "tenzro_did": agent.tenzro_did,
+        "registration_fee": agent.registration_fee.to_string(),
+        "classical_public_key": hex::encode(agent.classical_public_key()),
+        "pq_verifying_key_len": agent.pq_verifying_key().len(),
+        "byok": false,
     }))
 }
 
+/// `tenzro_sendAgentMessage` — submit a hybrid-signed (Ed25519 + ML-DSA-65)
+/// `AgentMessage` to a recipient agent's queue.
+///
+/// # Params
+///
+/// | field | required | description |
+/// |---|---|---|
+/// | `from` | yes | Sender agent_id (16-byte hex, as returned by `tenzro_registerAgent`). Must already be registered with the local node's `AgentRuntime`. |
+/// | `to` | yes | Recipient agent_id (same format). Must be registered with the local node's `MessageRouter`. |
+/// | `message` | yes | UTF-8 message body. Becomes `AgentMessage.payload`. |
+/// | `signature` | yes¹ | Ed25519 signature (hex, 64 bytes) over `AgentMessage::hash()` of the constructed message. |
+/// | `pq_signature` | yes¹ | ML-DSA-65 signature (hex, 3309 bytes) over the same hash. |
+/// | `message_type` | no | One of `task_request` (default), `task_response`, `query`, `query_response`, `notification`, `coordination`, `error`. |
+/// | `reply_to` | no | Optional `message_id` of a prior message this is a reply to (changes the canonical hash, so callers must include it BEFORE signing). |
+///
+/// ¹ Both signature legs are mandatory whenever the message router is
+/// configured with `enable_signing == true` (the default in production).
+/// The router rejects unsigned and half-signed messages — see
+/// `MessageRouter::validate_message` in `tenzro-agent/src/messaging.rs`.
+///
+/// # Canonical signing preimage
+///
+/// Sign `SHA-256(AgentMessage::signing_data())` where `signing_data` is the
+/// length-prefixed concatenation documented on `AgentMessage::signing_data`.
+/// Critically, `signing_data` includes `from.address` and `to.address` —
+/// which the server resolves from the agent registry, not from the wire.
+/// To sign correctly, callers must already know both endpoints' wallet
+/// addresses (read them once at registration time or via
+/// `tenzro_getAgent`).
+///
+/// # Errors
+///
+/// - `-32602` — missing/malformed params (bad hex, wrong length, unknown
+///   `message_type`).
+/// - `-32000` — registry lookup failed (`from`/`to` agent not registered)
+///   or message validation/delivery failed (signature mismatch, rate
+///   limit, recipient queue full).
 async fn handle_send_agent_message(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -2943,32 +3102,103 @@ async fn handle_send_agent_message(
         data: None,
     })?;
 
-    // Construct AgentMessage
-    use tenzro_types::agent::{AgentMessage, AgentIdentity, AgentMessageType};
-    use tenzro_types::primitives::Address;
+    use tenzro_types::agent::{AgentMessage, AgentMessageType};
 
-    // For simplicity, create minimal AgentIdentity structures
-    // In production, these would be looked up from the registry
-    let from_identity = AgentIdentity::new(
-        from_id.to_string(),
-        Address::zero(),
-        from_id.to_string(),
-        Address::zero(),
-    );
+    // Resolve real `AgentIdentity` records from the runtime registry so the
+    // canonical `signing_data` (which includes wallet addresses) matches what
+    // the caller signed. Synthesizing zero-address placeholders, as the
+    // previous implementation did, made every signature unverifiable.
+    let from_agent = agent_runtime.get_agent(from_id)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("'from' agent not registered: {}", e),
+            data: None,
+        })?;
+    let to_agent = agent_runtime.get_agent(to_id)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("'to' agent not registered: {}", e),
+            data: None,
+        })?;
 
-    let to_identity = AgentIdentity::new(
-        to_id.to_string(),
-        Address::zero(),
-        to_id.to_string(),
-        Address::zero(),
-    );
+    // Optional `message_type` override. Default `task_request` matches the
+    // pre-existing wire shape.
+    let message_type = match params.get("message_type").and_then(|v| v.as_str()) {
+        None | Some("task_request") => AgentMessageType::TaskRequest,
+        Some("task_response") => AgentMessageType::TaskResponse,
+        Some("query") => AgentMessageType::Query,
+        Some("query_response") => AgentMessageType::QueryResponse,
+        Some("notification") => AgentMessageType::Notification,
+        Some("coordination") => AgentMessageType::Coordination,
+        Some("error") => AgentMessageType::Error,
+        Some(other) => return Err(JsonRpcError {
+            code: -32602,
+            message: format!("Unknown message_type '{}': use task_request|task_response|query|query_response|notification|coordination|error", other),
+            data: None,
+        }),
+    };
 
-    let message = AgentMessage::new(
-        from_identity,
-        to_identity,
-        AgentMessageType::TaskRequest,
+    let mut message = AgentMessage::new(
+        from_agent.identity.clone(),
+        to_agent.identity.clone(),
+        message_type,
         message_content.as_bytes().to_vec(),
     );
+
+    // Optional `reply_to` MUST be set before attaching signatures because it
+    // is part of `signing_data`.
+    if let Some(reply_to) = params.get("reply_to").and_then(|v| v.as_str()) {
+        message = message.as_reply_to(reply_to.to_string());
+    }
+
+    // Hybrid signature legs. Both are required whenever the router is
+    // configured to enforce signing (the production default). The router's
+    // `validate_message` rejects half-signed messages to prevent downgrade
+    // attacks, so we surface the same rule at the RPC boundary.
+    let sig_hex = params.get("signature").and_then(|v| v.as_str());
+    let pq_sig_hex = params.get("pq_signature").and_then(|v| v.as_str());
+    match (sig_hex, pq_sig_hex) {
+        (Some(s), Some(p)) => {
+            let strip_0x = |s: &str| s.strip_prefix("0x").unwrap_or(s).to_string();
+            let classical = hex::decode(strip_0x(s)).map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid hex in 'signature': {}", e),
+                data: None,
+            })?;
+            if classical.len() != 64 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("'signature' must be 64 bytes (Ed25519), got {}", classical.len()),
+                    data: None,
+                });
+            }
+            let pq = hex::decode(strip_0x(p)).map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid hex in 'pq_signature': {}", e),
+                data: None,
+            })?;
+            if pq.len() != 3309 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("'pq_signature' must be 3309 bytes (ML-DSA-65), got {}", pq.len()),
+                    data: None,
+                });
+            }
+            message = message.with_hybrid_signature(classical, pq);
+        }
+        (None, None) => {
+            // Both absent — let the router reject if signing is enabled. This
+            // keeps the legacy unsigned path working for tests/dev configs
+            // where `enable_signing == false`.
+        }
+        _ => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "Mixed-mode signature: both 'signature' and 'pq_signature' are required together (or omit both)".to_string(),
+                data: None,
+            });
+        }
+    }
 
     agent_runtime.send_message(message.clone()).await
         .map_err(|e| JsonRpcError {
@@ -2983,6 +3213,7 @@ async fn handle_send_agent_message(
         "to": to_id,
         "status": "sent",
         "timestamp": message.timestamp.as_millis(),
+        "signed": message.signature.is_some(),
     }))
 }
 

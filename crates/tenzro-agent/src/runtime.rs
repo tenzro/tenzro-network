@@ -11,7 +11,7 @@ use crate::{
     error::{AgentError, Result},
     identity::{AgentIdentityManager, AgentStatus, RegisteredAgent},
     lifecycle::{AgentLifecycle, AgentLifecycleEvent, AgentLifecycleInfo, AgentState, HeartbeatConfig},
-    messaging::MessageRouter,
+    messaging::{AgentVerifyingKeys, MessageRouter},
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -492,13 +492,28 @@ impl AgentRuntime {
                 .or_insert(seq);
         }
 
-        // Step 6: register hydrated agents with the message router.
+        // Step 6: register hydrated agents with the message router and bind
+        // their hybrid verifying keys back into the local resolver so signed
+        // AgentMessages keep verifying after a node restart.
         for agent_id in &hydrated_agent_ids {
             if let Err(e) = message_router.register_agent(agent_id.clone()) {
                 warn!(
                     "Failed to register hydrated agent {} with message router: {}",
                     agent_id, e
                 );
+                continue;
+            }
+            if let Ok(agent) = identity_manager.get_agent(agent_id) {
+                if let Some(keys) = build_agent_verifying_keys(&agent) {
+                    let _ = message_router.register_local_key(agent_id.clone(), keys);
+                } else {
+                    warn!(
+                        "Hydrated agent {} has no classical/PQ verifying keys on \
+                         file — signed message verification will fail until \
+                         it is re-registered",
+                        agent_id
+                    );
+                }
             }
         }
 
@@ -681,6 +696,22 @@ impl AgentRuntime {
         // Register with message router
         self.message_router.register_agent(agent_id.clone())?;
 
+        // Bind the agent's hybrid verifying keys into the router's
+        // resolver so it can verify Ed25519 + ML-DSA-65 signatures on
+        // inbound `AgentMessage`s. Without this the router rejects every
+        // signed message with "no public key on file". For routers wired
+        // with a custom (non-local) resolver this is a no-op — that
+        // resolver is expected to be populated out-of-band.
+        if let Some(keys) = build_agent_verifying_keys(&agent) {
+            let _ = self.message_router.register_local_key(agent_id.clone(), keys);
+        } else {
+            warn!(
+                "Agent {} registered without classical/PQ verifying keys — \
+                 signed message verification will fail until keys are bound",
+                agent_id
+            );
+        }
+
         // Register capabilities
         for capability in capabilities {
             self.capability_registry
@@ -699,6 +730,83 @@ impl AgentRuntime {
 
         info!(
             "Agent {} registered successfully with {} capabilities (state: Active)",
+            agent_id,
+            agent.capabilities.len()
+        );
+
+        Ok(agent)
+    }
+
+    /// Registers a new agent using **caller-supplied** classical (Ed25519)
+    /// and post-quantum (ML-DSA-65) verifying keys (BYOK path).
+    ///
+    /// No wallet is provisioned on the node — the agent's address is
+    /// derived deterministically from the supplied Ed25519 key. The
+    /// agent's hybrid keys are bound into the message router's resolver
+    /// so the caller can sign `AgentMessage`s off-node and have the
+    /// router verify them.
+    pub async fn register_agent_with_keys(
+        &self,
+        name: String,
+        creator: Address,
+        capabilities: Vec<Capability>,
+        tee_backed: bool,
+        nonce: u64,
+        classical_public_key: Vec<u8>,
+        pq_verifying_key: Vec<u8>,
+    ) -> Result<RegisteredAgent> {
+        if self.identity_manager.agent_count() >= self.config.max_agents {
+            return Err(AgentError::ResourceLimitExceeded(
+                "Maximum number of agents reached".to_string(),
+            ));
+        }
+
+        let agent = self
+            .identity_manager
+            .register_agent_with_keys(
+                name,
+                creator,
+                capabilities.clone(),
+                tee_backed,
+                nonce,
+                classical_public_key,
+                pq_verifying_key,
+                crate::identity::GasPolicy::AcceptAny,
+            )
+            .await?;
+
+        let agent_id = agent.identity.agent_id.clone();
+
+        self.lifecycle_manager.initialize(agent_id.clone())?;
+        self.lifecycle_manager.activate(&agent_id)?;
+
+        self.message_router.register_agent(agent_id.clone())?;
+
+        // Bind the caller-supplied verifying keys into the router's
+        // resolver. This is the whole point of BYOK — the caller signs
+        // off-node and we verify here.
+        if let Some(keys) = build_agent_verifying_keys(&agent) {
+            let _ = self.message_router.register_local_key(agent_id.clone(), keys);
+        } else {
+            warn!(
+                "BYOK agent {} registered without verifying keys after construction \
+                 — this is a bug, signed message verification will fail",
+                agent_id
+            );
+        }
+
+        for capability in capabilities {
+            self.capability_registry
+                .register_capability(agent_id.clone(), capability)?;
+        }
+
+        self.persist_agent(&agent)?;
+        self.persist_lifecycle(&agent_id)?;
+
+        self.update_statistics().await;
+
+        info!(
+            "BYOK agent {} registered successfully with {} capabilities (state: Active, no server-side wallet)",
             agent_id,
             agent.capabilities.len()
         );
@@ -1394,6 +1502,27 @@ impl Default for AgentRuntime {
     fn default() -> Self {
         Self::new().expect("Failed to create AgentRuntime")
     }
+}
+
+/// Build an `AgentVerifyingKeys` bundle from a `RegisteredAgent`'s stored
+/// classical (Ed25519) and post-quantum (ML-DSA-65) verifying keys.
+///
+/// Returns `None` when either key is empty (e.g. a pre-existing record
+/// hydrated from storage that predates the keys being captured), or when
+/// the classical key's length doesn't fit Ed25519's 32-byte format. The
+/// caller must surface this gap — verification will fail until the agent
+/// is re-registered with valid keys.
+fn build_agent_verifying_keys(agent: &RegisteredAgent) -> Option<AgentVerifyingKeys> {
+    let classical_bytes = agent.classical_public_key();
+    let pq_bytes = agent.pq_verifying_key();
+    if classical_bytes.is_empty() || pq_bytes.is_empty() {
+        return None;
+    }
+    let classical = tenzro_crypto::keys::PublicKey::new(
+        tenzro_crypto::keys::KeyType::Ed25519,
+        classical_bytes.to_vec(),
+    );
+    Some(AgentVerifyingKeys::new(classical, pq_bytes.to_vec()))
 }
 
 #[cfg(test)]

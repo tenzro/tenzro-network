@@ -77,6 +77,12 @@ pub enum AgentError {
     #[error("Invalid agent ID: {0}")]
     InvalidAgentId(String),
 
+    /// Caller-supplied argument is malformed (wrong length, wrong type,
+    /// out of range, etc.). Used by BYOK paths to reject keys that are
+    /// not exactly the expected size.
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
+
     /// Message queue full
     #[error("Message queue full for agent {0}")]
     MessageQueueFull(String),

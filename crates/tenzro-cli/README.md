@@ -485,14 +485,15 @@ tenzro provenance get 0x<sha256_hex>
 ### Agent Operations
 
 ```bash
-# Register agent
-tenzro agent register --name "MyAgent" --capabilities inference,trading
+# Register agent (server-provisioned hybrid wallet: FROST-Ed25519 + ML-DSA-65)
+# Capabilities: nlp,vision,code,data,blockchain,smart_contract,api_integration,coordination
+tenzro agent register --name "MyAgent" --creator <address> --capabilities nlp,data
 
 # List agents
 tenzro agent list
 
 # Send agent message (tenzro_sendAgentMessage)
-tenzro agent send <agent_id> <message>
+tenzro agent send --from <agent_id> --to <agent_id> <message>
 
 # Spawn new agent
 tenzro agent spawn --parent <parent_id>
