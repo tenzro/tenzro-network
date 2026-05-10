@@ -975,6 +975,114 @@ impl IdentityRegistry {
         })
     }
 
+    /// Registers an autonomous machine identity using **caller-supplied
+    /// keys** instead of provisioning a server-side wallet (BYOK path).
+    ///
+    /// The caller passes their own classical (Ed25519) and post-quantum
+    /// (ML-DSA-65) verifying keys. The wallet binder is **not** invoked —
+    /// no `WalletBinding` is created and no FROST shares are minted on the
+    /// node. The identity's `wallet_address` is derived deterministically
+    /// from the supplied Ed25519 key as `Address(SHA-256(public_key))` so
+    /// it is reproducible by the caller without a round-trip.
+    ///
+    /// This is the path used by self-custodial agent operators that hold
+    /// their own private keys (typically inside a hardware wallet, MPC
+    /// network, or another node) and don't want the registry node to be
+    /// able to sign on their behalf.
+    ///
+    /// # Arguments
+    ///
+    /// * `public_key` — 32-byte Ed25519 verifying key.
+    /// * `pq_verifying_key` — 1952-byte ML-DSA-65 (FIPS 204) verifying key.
+    /// * `capabilities` — opaque capability strings stored on the identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns `IdentityError::InvalidPublicKey` when the classical key is
+    /// not 32 bytes or the post-quantum key is not 1952 bytes.
+    pub async fn register_autonomous_machine_with_keys(
+        &self,
+        public_key: Vec<u8>,
+        pq_verifying_key: Vec<u8>,
+        capabilities: Vec<String>,
+    ) -> Result<RegistrationResult> {
+        if public_key.len() != 32 {
+            return Err(IdentityError::InvalidPublicKey(format!(
+                "Ed25519 verifying key must be exactly 32 bytes, got {}",
+                public_key.len()
+            )));
+        }
+        if pq_verifying_key.len() != 1952 {
+            return Err(IdentityError::InvalidPublicKey(format!(
+                "ML-DSA-65 verifying key must be exactly 1952 bytes, got {}",
+                pq_verifying_key.len()
+            )));
+        }
+
+        let did = TenzroDid::new_autonomous_machine();
+        let did_string = did.to_string();
+
+        // Deterministic wallet_address from the Ed25519 verifying key. The
+        // caller can reproduce this off-node without any registry round-trip.
+        let hash = tenzro_crypto::sha256(&public_key);
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes.copy_from_slice(hash.as_bytes());
+        let wallet_address = Address::new(addr_bytes);
+
+        // Self-custodial wallets have no node-side wallet_id; use a stable,
+        // public marker derived from the DID so audit logs can correlate.
+        let wallet_id = format!("byok-{}", &did_string[did_string.len().saturating_sub(12)..]);
+
+        let mut identity = TenzroIdentity {
+            did,
+            public_keys: vec![PublicKeyInfo {
+                key_id: "key-1".to_string(),
+                key_type: "Ed25519".to_string(),
+                public_key,
+                purposes: vec![KeyPurpose::Authentication],
+            }],
+            identity_data: IdentityData::Machine {
+                capabilities: capabilities.clone(),
+                delegation_scope: DelegationScope::unrestricted(),
+                controller_did: None,
+                reputation: 0,
+                tenzro_agent_id: None,
+                erc8004_agent_id: None,
+                is_seed_agent: false,
+            },
+            status: IdentityStatus::Active,
+            wallet_address,
+            wallet_id,
+            pq_verifying_key,
+            credentials: Vec::new(),
+            services: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata: HashMap::new(),
+            username: None,
+        };
+
+        let fee_required = self.fee_schedule.machine_identity_registration;
+
+        info!(
+            "Registered autonomous machine identity (BYOK): {} with capabilities: {:?}, fee: {} TNZO",
+            did_string,
+            capabilities,
+            fee_required / 1_000_000_000_000_000_000
+        );
+
+        if let Some(agent_id) = self.mirror_to_erc8004(&did_string, &identity) {
+            identity.set_erc8004_agent_id(agent_id);
+        }
+
+        self.persist_identity(&did_string, &identity);
+        self.identities.insert(did_string, identity.clone());
+        Ok(RegistrationResult {
+            identity,
+            fee_required,
+        })
+    }
+
     /// Mirror a freshly-registered machine identity into the on-chain
     /// ERC-8004 IdentityRegistry, if a mirror is wired. Best-effort —
     /// any error is logged at warn level and dropped so the TDIP

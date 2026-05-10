@@ -94,6 +94,11 @@ pub enum IdentityError {
     #[error("wallet error: {0}")]
     WalletError(String),
 
+    /// Caller-supplied public key was malformed (wrong length, wrong
+    /// curve, etc.). Used by BYOK registration paths.
+    #[error("invalid public key: {0}")]
+    InvalidPublicKey(String),
+
     /// Cryptographic operation failed
     #[error("crypto error: {0}")]
     CryptoError(String),

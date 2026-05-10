@@ -163,7 +163,7 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0
 - **Audio (ASR)**: listAudioCatalog, listAudioModels, loadAudioModel, unloadAudioModel, transcribe
 - **Video**: listVideoCatalog, listVideoModels, loadVideoModel, unloadVideoModel, videoEmbed
 - **Settlement**: settle, getSettlement
-- **Agents**: registerAgent, sendAgentMessage
+- **Agents**: registerAgent (provisioner mode → server-held FROST-Ed25519 + ML-DSA-65 hybrid wallet, returns `classical_public_key` + `pq_verifying_key_len`; BYOK mode → caller supplies `public_key` (32B Ed25519) + `pq_public_key` (1952B ML-DSA-65), `byok: true`), sendAgentMessage (optional hybrid `signature` (64B Ed25519) + `pq_signature` (3309B ML-DSA-65) — both or neither; mixed-mode rejected)
 - **Identity**: registerIdentity, importIdentity, resolveDidDocument, resolveIdentity, participate, forgetIdentity (GDPR Article 17 right-to-erasure — DID must already be `Revoked`)
 - **Network**: nodeInfo, peerCount, syncing, hardwareProfile, role
 - **Governance**: listProposals, vote, getVotingPower
