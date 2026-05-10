@@ -128,6 +128,12 @@ pub enum IdentityData {
         /// once at provisioning and never mutated; reverting it would
         /// allow wash trading. Default `false` for ordinary machines.
         is_seed_agent: bool,
+        /// Sequential ERC-8004 `agentId` (uint256) allocated by the
+        /// IdentityRegistry mirror at registration time. `None` when no
+        /// mirror is wired (e.g. a node without ERC-8004 enabled) or
+        /// when the mirror call failed — the TDIP record stays
+        /// authoritative either way.
+        erc8004_agent_id: Option<u64>,
     },
 }
 
@@ -265,6 +271,25 @@ impl TenzroIdentity {
         match &self.identity_data {
             IdentityData::Human { .. } => false,
             IdentityData::Machine { is_seed_agent, .. } => *is_seed_agent,
+        }
+    }
+
+    /// Returns the sequential ERC-8004 `agentId` allocated for this
+    /// machine identity by the on-chain IdentityRegistry mirror, if any.
+    /// `None` for humans, for machines registered without a mirror, and
+    /// for machines whose mirror call failed.
+    pub fn erc8004_agent_id(&self) -> Option<u64> {
+        match &self.identity_data {
+            IdentityData::Human { .. } => None,
+            IdentityData::Machine { erc8004_agent_id, .. } => *erc8004_agent_id,
+        }
+    }
+
+    /// Set the ERC-8004 `agentId` returned by the on-chain mirror.
+    /// Idempotent — overwrites any previous value. No-op for humans.
+    pub(crate) fn set_erc8004_agent_id(&mut self, id: u64) {
+        if let IdentityData::Machine { erc8004_agent_id, .. } = &mut self.identity_data {
+            *erc8004_agent_id = Some(id);
         }
     }
 
@@ -413,6 +438,7 @@ mod tests {
                 controller_did: Some(controller.to_string()),
                 reputation: 500,
                 tenzro_agent_id: None,
+                erc8004_agent_id: None,
                 is_seed_agent: false,
             },
             status: IdentityStatus::Active,

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::{
-    account_abstraction::{Eip7702Authorization, EIP_7702_TX_TYPE, process_7702_authorizations, cleanup_7702_authorizations},
+    account_abstraction::{Eip7702Authorization, EIP_7702_TX_TYPE, process_7702_authorizations},
     config::VmConfig,
     error::{Result, VmError},
     evm::EvmExecutor,
@@ -286,16 +286,16 @@ impl MultiVmRuntime {
 
         // EIP-7702: Process authorization list if present in tx data
         // Check for EIP-7702 marker prefix (0x04 followed by CBOR-encoded auth list)
-        let eip7702_upgraded = if tx.data.first() == Some(&EIP_7702_TX_TYPE) && tx.data.len() > 1 {
-            match serde_json::from_slice::<Vec<Eip7702Authorization>>(&tx.data[1..]) {
-                Ok(authorizations) => {
-                    process_7702_authorizations(&authorizations, self.config.chain_id, state)?
-                }
-                Err(_) => Vec::new(), // Not a valid EIP-7702 payload, proceed normally
+        if tx.data.first() == Some(&EIP_7702_TX_TYPE) && tx.data.len() > 1 {
+            if let Ok(authorizations) =
+                serde_json::from_slice::<Vec<Eip7702Authorization>>(&tx.data[1..])
+            {
+                // Per EIP-7702 the designator is persistent — once installed
+                // it survives the transaction (success or revert) and only
+                // changes when a subsequent authorization is consumed.
+                process_7702_authorizations(&authorizations, self.config.chain_id, state)?;
             }
-        } else {
-            Vec::new()
-        };
+        }
 
         // Get the appropriate executor
         let executor = self.get_executor(tx.vm_type)?;
@@ -305,18 +305,8 @@ impl MultiVmRuntime {
         let timeout_duration = std::time::Duration::from_secs(30);
 
         let result = match tokio::time::timeout(timeout_duration, execution_future).await {
-            Ok(result) => {
-                // EIP-7702: Clean up code delegations after execution (success or revert)
-                if !eip7702_upgraded.is_empty() {
-                    cleanup_7702_authorizations(&eip7702_upgraded, state);
-                }
-                result?
-            }
+            Ok(result) => result?,
             Err(_) => {
-                // Clean up even on timeout
-                if !eip7702_upgraded.is_empty() {
-                    cleanup_7702_authorizations(&eip7702_upgraded, state);
-                }
                 // EIP-1153: Clear transient reentrancy guard
                 self.reentrancy_guard.clear();
                 return Err(VmError::Internal(format!(

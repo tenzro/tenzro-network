@@ -4,13 +4,13 @@ AI agent infrastructure with self-sovereign identity and inter-agent communicati
 
 ## Overview
 
-**tenzro-agent** provides the foundational infrastructure for AI agents to operate autonomously on the Tenzro Network. Each agent receives a self-sovereign identity with an auto-provisioned MPC wallet, can communicate with other agents using the A2A (Agent-to-Agent) protocol, and integrates with Anthropic's Model Context Protocol (MCP).
+**tenzro-agent** provides the foundational infrastructure for AI agents to operate autonomously on the Tenzro Network. Each agent receives a self-sovereign identity with an auto-provisioned FROST-Ed25519 threshold wallet, can communicate with other agents using the A2A (Agent-to-Agent) protocol, and integrates with Anthropic's Model Context Protocol (MCP).
 
 Agents are first-class citizens on the network, with identity anchored in the Tenzro Decentralized Identity Protocol (TDIP) and support for fine-grained delegation from human controllers.
 
 ## Key Features
 
-- **Self-Sovereign Identity** — Every agent gets a unique TDIP identity with auto-provisioned 2-of-3 MPC wallet
+- **Self-Sovereign Identity** — Every agent gets a unique TDIP identity with auto-provisioned 2-of-3 FROST-Ed25519 threshold wallet (RFC 9591)
 - **A2A Protocol** — Agent-to-Agent messaging protocol for inter-agent communication with task delegation
 - **MCP Bridge** — Real MCP Streamable HTTP client transport (JSON-RPC 2.0, `Mcp-Session-Id` sessions, `tools/list`, `tools/call`)
 - **MCP Client** — Connect to remote MCP servers (protocol version 2025-11-25)
@@ -26,7 +26,7 @@ Agents are first-class citizens on the network, with identity anchored in the Te
 
 ### Core Infrastructure
 - **AgentRuntime** — Manages agent lifecycle, execution, and resource allocation; coordinates all subsystems
-- **AgentIdentityManager** — Self-sovereign agent identities with TDIP integration and auto-provisioned MPC wallets
+- **AgentIdentityManager** — Self-sovereign agent identities with TDIP integration and auto-provisioned FROST-Ed25519 threshold wallets
 - **AgentLifecycle** — State machine with transitions: Created, Active, Suspended, Terminated; heartbeat monitoring
 
 ### Communication
@@ -136,7 +136,7 @@ The `insert_hydrated()` method on `AgentIdentityManager` and `AgentLifecycle` by
 
 - **tenzro-types** — Core types and primitives
 - **tenzro-crypto** — Cryptographic operations
-- **tenzro-wallet** — MPC wallet provisioning
+- **tenzro-wallet** — FROST-Ed25519 threshold wallet provisioning
 - **tenzro-identity** — TDIP identity integration
 - **tenzro-storage** — RocksDB persistence (CF_AGENTS)
 

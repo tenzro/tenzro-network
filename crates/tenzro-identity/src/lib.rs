@@ -78,8 +78,9 @@ pub use delegation::{DelegationEntry, DelegationScope, TimeBound};
 pub use did::{DidType, TenzroDid};
 pub use document::{DidDocument, DidService, VerificationMethod};
 pub use erc8004::{
-    derive_agent_id, AgentRecord, Erc8004Adapter, Erc8004Addresses, Erc8004Transport,
-    EthAddress, FeedbackEntry, ValidationRequest, ValidationResult,
+    agent_id_from_uint256_be, agent_id_to_uint256_be, AgentRecord, Erc8004Adapter,
+    Erc8004Addresses, Erc8004Transport, EthAddress, FeedbackEntry, MetadataEntry,
+    OnChainAgentRegistry, ValidationRequest, ValidationResult,
 };
 pub use error::{IdentityError, Result};
 pub use identity::{

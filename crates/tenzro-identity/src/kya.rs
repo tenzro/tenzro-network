@@ -310,6 +310,7 @@ mod tests {
                 controller_did: controller.map(String::from),
                 reputation: 0,
                 tenzro_agent_id: None,
+                erc8004_agent_id: None,
                 is_seed_agent,
             },
             status,

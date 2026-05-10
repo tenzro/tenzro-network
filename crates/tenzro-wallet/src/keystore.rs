@@ -1,29 +1,50 @@
-//! Secure key storage for Tenzro Network wallets.
+//! Encrypted local storage for FROST-Ed25519 threshold wallets.
 //!
-//! This module provides encrypted local storage of MPC key shares
-//! with password-based encryption and key rotation support.
+//! Each wallet is sealed with the user's password via Argon2id-derived
+//! AES-256-GCM. Three on-disk artifacts per wallet:
+//!
+//!   * `<id>.json` — the FROST `PublicKeyPackage` (non-secret) plus every
+//!     held `KeyShare`, each encrypted independently.
+//!   * `<id>.pq.json` — the wallet's mandatory ML-DSA-65 sealed seed.
+//!
+//! The `PublicKeyPackage` is required at unlock time so the wallet can
+//! reconstruct enough state to coordinate FROST round-2 signing and
+//! aggregation. It is encrypted under the same Argon2id-derived key as the
+//! shares — not because it carries secrets but to make the unlock atomic
+//! (one password derivation per wallet).
 
 use crate::error::{Result, WalletError};
 use crate::wallet::{KeyShare, WalletId};
-use argon2::{Argon2, Algorithm, Params, Version};
+use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tenzro_crypto::encryption::SymmetricKey;
+use tenzro_crypto::frost::PublicKeyPackage;
 use tenzro_crypto::pq::MlDsaSigningKey;
 use tracing::debug;
 
-/// Encrypted key share storage entry
+/// Persisted wallet bundle. The shares (and the pubkey package) are each
+/// AES-256-GCM-sealed under the same Argon2id-derived key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncryptedWalletBundle {
+    /// Wallet ID this bundle belongs to.
+    wallet_id: WalletId,
+    /// Salt for the Argon2id KDF (shared by all sealed payloads in the bundle).
+    salt: [u8; 32],
+    /// Encrypted FROST `PublicKeyPackage` (JSON-serialized then sealed).
+    encrypted_pubkey_package: Vec<u8>,
+    /// Encrypted key shares.
+    encrypted_shares: Vec<EncryptedKeyShare>,
+}
+
+/// One sealed FROST key share.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EncryptedKeyShare {
-    /// Wallet ID
-    wallet_id: WalletId,
-    /// Share index
-    share_index: u32,
-    /// Encrypted share data
+    /// 1-based FROST signer index.
+    signer_index: u16,
+    /// AES-256-GCM ciphertext over the share's serialized bytes.
     encrypted_data: Vec<u8>,
-    /// Salt for key derivation
-    salt: [u8; 32],
 }
 
 /// Encrypted ML-DSA-65 signing-key storage entry.
@@ -41,36 +62,39 @@ struct EncryptedPqSeed {
     salt: [u8; 32],
 }
 
-/// Keystore for secure storage of MPC key shares.
-///
-/// Key shares are encrypted with a password-derived key and stored locally.
+/// In-memory cache entry — both the shares and the pubkey package needed to
+/// rebuild a working wallet.
+#[derive(Clone)]
+struct CacheEntry {
+    pubkey_package: PublicKeyPackage,
+    shares: Vec<KeyShare>,
+}
+
+/// Keystore for secure storage of FROST wallets.
 pub struct Keystore {
-    /// Storage directory path
     storage_path: PathBuf,
-    /// In-memory cache of decrypted shares (cleared on drop)
-    cache: HashMap<WalletId, Vec<KeyShare>>,
+    cache: HashMap<WalletId, CacheEntry>,
 }
 
 impl Keystore {
-    /// Create a new keystore at the specified path
+    /// Create a new keystore at the specified path.
     pub fn new<P: AsRef<Path>>(storage_path: P) -> Result<Self> {
         let storage_path = storage_path.as_ref().to_path_buf();
-
-        // Create storage directory if it doesn't exist
         if !storage_path.exists() {
             std::fs::create_dir_all(&storage_path)?;
         }
-
         Ok(Self {
             storage_path,
             cache: HashMap::new(),
         })
     }
 
-    /// Store key shares encrypted with a password
+    /// Store a wallet's FROST shares + public-key package, sealed with the
+    /// user's password.
     pub fn store_shares(
         &mut self,
         wallet_id: &WalletId,
+        pubkey_package: &PublicKeyPackage,
         shares: &[KeyShare],
         password: &str,
     ) -> Result<()> {
@@ -80,48 +104,68 @@ impl Keystore {
             ));
         }
 
-        // Derive encryption key from password
         let salt = Self::generate_salt();
         let encryption_key = Self::derive_key(password, &salt)?;
 
-        // Encrypt each share
-        let mut encrypted_shares = Vec::new();
+        // Seal the public-key package.
+        let pubkey_json = serde_json::to_vec(pubkey_package)
+            .map_err(|e| WalletError::SerializationError(e.to_string()))?;
+        let encrypted_pubkey_package = encryption_key
+            .encrypt(&pubkey_json)
+            .map_err(|e| WalletError::EncryptionError(e.to_string()))?;
+
+        // Seal each share independently.
+        let mut encrypted_shares = Vec::with_capacity(shares.len());
         for share in shares {
             let share_bytes = share.to_bytes();
             let encrypted_data = encryption_key
                 .encrypt(&share_bytes)
                 .map_err(|e| WalletError::EncryptionError(e.to_string()))?;
-
             encrypted_shares.push(EncryptedKeyShare {
-                wallet_id: wallet_id.clone(),
-                share_index: share.share_index,
+                signer_index: share.signer_index.0,
                 encrypted_data,
-                salt,
             });
         }
 
-        // Store to file
-        let file_path = self.get_keystore_path(wallet_id);
-        let json = serde_json::to_string(&encrypted_shares)
-            .map_err(|e| WalletError::SerializationError(e.to_string()))?;
+        let bundle = EncryptedWalletBundle {
+            wallet_id: wallet_id.clone(),
+            salt,
+            encrypted_pubkey_package,
+            encrypted_shares,
+        };
 
+        let file_path = self.get_keystore_path(wallet_id);
+        let json = serde_json::to_string(&bundle)
+            .map_err(|e| WalletError::SerializationError(e.to_string()))?;
         std::fs::write(&file_path, json)?;
 
-        // Cache the decrypted shares
-        self.cache.insert(wallet_id.clone(), shares.to_vec());
+        self.cache.insert(
+            wallet_id.clone(),
+            CacheEntry {
+                pubkey_package: pubkey_package.clone(),
+                shares: shares.to_vec(),
+            },
+        );
 
         Ok(())
     }
 
-    /// Load key shares by decrypting with a password
-    pub fn load_shares(&mut self, wallet_id: &WalletId, password: &str) -> Result<Vec<KeyShare>> {
-        // Check cache first
-        if let Some(shares) = self.cache.get(wallet_id) {
-            debug!("Loaded {} shares from cache for wallet {}", shares.len(), wallet_id);
-            return Ok(shares.clone());
+    /// Load and decrypt a wallet bundle: returns the FROST public-key
+    /// package and every held key share.
+    pub fn load_shares(
+        &mut self,
+        wallet_id: &WalletId,
+        password: &str,
+    ) -> Result<(PublicKeyPackage, Vec<KeyShare>)> {
+        if let Some(entry) = self.cache.get(wallet_id) {
+            debug!(
+                "Loaded wallet {} from cache ({} shares)",
+                wallet_id,
+                entry.shares.len()
+            );
+            return Ok((entry.pubkey_package.clone(), entry.shares.clone()));
         }
 
-        // Load from file
         let file_path = self.get_keystore_path(wallet_id);
         if !file_path.exists() {
             return Err(WalletError::KeystoreError(format!(
@@ -131,74 +175,90 @@ impl Keystore {
         }
 
         let json = std::fs::read_to_string(&file_path)?;
-        let encrypted_shares: Vec<EncryptedKeyShare> = serde_json::from_str(&json)
+        let bundle: EncryptedWalletBundle = serde_json::from_str(&json)
             .map_err(|e| WalletError::SerializationError(e.to_string()))?;
 
-        if encrypted_shares.is_empty() {
+        if bundle.encrypted_shares.is_empty() {
             return Err(WalletError::KeystoreError(
                 "No encrypted shares found in keystore".to_string(),
             ));
         }
 
-        // Decrypt shares using the password
-        let mut decrypted_shares = Vec::new();
-        for encrypted in encrypted_shares {
-            // Derive decryption key from password and stored salt
-            let decryption_key = Self::derive_key(password, &encrypted.salt)?;
+        let decryption_key = Self::derive_key(password, &bundle.salt)?;
 
-            // Decrypt the share data
+        // Decrypt the public-key package.
+        let pubkey_json = decryption_key
+            .decrypt(&bundle.encrypted_pubkey_package)
+            .map_err(|e| {
+                WalletError::KeystoreError(format!(
+                    "Failed to decrypt FROST public-key package (wrong password?): {}",
+                    e
+                ))
+            })?;
+        let pubkey_package: PublicKeyPackage = serde_json::from_slice(&pubkey_json)
+            .map_err(|e| WalletError::SerializationError(e.to_string()))?;
+
+        // Decrypt each share.
+        let mut decrypted_shares = Vec::with_capacity(bundle.encrypted_shares.len());
+        for encrypted in bundle.encrypted_shares {
             let decrypted_bytes = decryption_key
                 .decrypt(&encrypted.encrypted_data)
                 .map_err(|e| {
                     WalletError::KeystoreError(format!(
                         "Failed to decrypt share {} (wrong password?): {}",
-                        encrypted.share_index, e
+                        encrypted.signer_index, e
                     ))
                 })?;
-
-            // Deserialize the KeyShare from decrypted bytes
-            let share = Self::deserialize_share(&decrypted_bytes, encrypted.share_index)?;
+            let share = KeyShare::from_bytes(&decrypted_bytes)?;
+            if share.signer_index.0 != encrypted.signer_index {
+                return Err(WalletError::SerializationError(format!(
+                    "Signer index mismatch on disk: envelope says {}, payload says {}",
+                    encrypted.signer_index, share.signer_index.0
+                )));
+            }
             decrypted_shares.push(share);
         }
 
         debug!(
-            "Loaded {} shares from keystore for wallet {}",
+            "Loaded wallet {} from keystore ({} shares, threshold {})",
+            wallet_id,
             decrypted_shares.len(),
-            wallet_id
+            pubkey_package.threshold,
         );
 
-        // Cache the decrypted shares
-        self.cache
-            .insert(wallet_id.clone(), decrypted_shares.clone());
+        self.cache.insert(
+            wallet_id.clone(),
+            CacheEntry {
+                pubkey_package: pubkey_package.clone(),
+                shares: decrypted_shares.clone(),
+            },
+        );
 
-        Ok(decrypted_shares)
+        Ok((pubkey_package, decrypted_shares))
     }
 
-    /// Check if wallet exists in keystore
+    /// Check if a wallet exists in the keystore.
     pub fn has_wallet(&self, wallet_id: &WalletId) -> bool {
         self.get_keystore_path(wallet_id).exists()
     }
 
-    /// Delete wallet from keystore
+    /// Delete a wallet (classical bundle + ML-DSA-65 sealed seed).
     pub fn delete_wallet(&mut self, wallet_id: &WalletId) -> Result<()> {
         let file_path = self.get_keystore_path(wallet_id);
         if file_path.exists() {
             std::fs::remove_file(&file_path)?;
         }
 
-        // Also remove the ML-DSA-65 sealed seed if present.
         let pq_path = self.get_pq_keystore_path(wallet_id);
         if pq_path.exists() {
             std::fs::remove_file(&pq_path)?;
         }
 
-        // Remove from cache
         self.cache.remove(wallet_id);
-
         Ok(())
     }
 
-    /// List all wallet IDs in the keystore
+    /// List all wallet IDs in the keystore.
     pub fn list_wallets(&self) -> Result<Vec<WalletId>> {
         let mut wallet_ids = Vec::new();
 
@@ -210,8 +270,6 @@ impl Keystore {
                 && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
             {
                 // Skip ML-DSA-65 sealed-seed companion files (`<id>.pq.json`).
-                // These are stored alongside the classical keystore but are
-                // not separate wallets.
                 if stem.ends_with(".pq") {
                     continue;
                 }
@@ -222,23 +280,16 @@ impl Keystore {
         Ok(wallet_ids)
     }
 
-    /// Change password for a wallet (classical shares + PQ seed).
+    /// Change password for a wallet (FROST bundle + PQ seed).
     pub fn change_password(
         &mut self,
         wallet_id: &WalletId,
         old_password: &str,
         new_password: &str,
     ) -> Result<()> {
-        // Load shares with old password
-        let shares = self.load_shares(wallet_id, old_password)?;
+        let (pubkey_package, shares) = self.load_shares(wallet_id, old_password)?;
+        self.store_shares(wallet_id, &pubkey_package, &shares, new_password)?;
 
-        // Re-encrypt classical shares with new password
-        self.store_shares(wallet_id, &shares, new_password)?;
-
-        // Re-encrypt the ML-DSA-65 seed if it exists. The seed is mandatory for
-        // every freshly-provisioned wallet; older test fixtures may not yet
-        // carry one, so missing seeds are tolerated here for backward-compat
-        // with the in-memory test path that bypasses `provision_wallet()`.
         let pq_path = self.get_pq_keystore_path(wallet_id);
         if pq_path.exists() {
             let pq_key = self.load_pq_seed(wallet_id, old_password)?;
@@ -248,14 +299,15 @@ impl Keystore {
         Ok(())
     }
 
-    /// Clear the in-memory cache
+    /// Clear the in-memory cache.
     pub fn clear_cache(&mut self) {
         self.cache.clear();
     }
 
-    /// Get the file path for a wallet's keystore
+    /// Get the file path for a wallet's keystore bundle.
     fn get_keystore_path(&self, wallet_id: &WalletId) -> PathBuf {
-        self.storage_path.join(format!("{}.json", wallet_id.as_str()))
+        self.storage_path
+            .join(format!("{}.json", wallet_id.as_str()))
     }
 
     /// Get the file path for a wallet's ML-DSA-65 sealed seed.
@@ -265,11 +317,6 @@ impl Keystore {
     }
 
     /// Persist the wallet's ML-DSA-65 signing seed sealed with `password`.
-    ///
-    /// The 32-byte FIPS 204 seed is encrypted with an Argon2id-derived
-    /// AES-256-GCM key (same KDF parameters as the classical share keystore)
-    /// and written to `<wallet_id>.pq.json`. This is **mandatory** for every
-    /// wallet — the post-quantum migration has no classical-only fallback.
     pub fn store_pq_seed(
         &mut self,
         wallet_id: &WalletId,
@@ -332,7 +379,7 @@ impl Keystore {
         })
     }
 
-    /// Generate a random salt
+    /// Generate a random salt.
     fn generate_salt() -> [u8; 32] {
         let mut salt = [0u8; 32];
         use rand::RngCore;
@@ -340,159 +387,34 @@ impl Keystore {
         salt
     }
 
-    /// Derive an encryption key from a password and salt using Argon2id
+    /// Derive an encryption key from a password and salt using Argon2id.
     fn derive_key(password: &str, salt: &[u8; 32]) -> Result<SymmetricKey> {
-        // Use Argon2id for password-based key derivation
-        // Parameters: 64 MB memory, time cost 3, parallelism 4
         let params = Params::new(
-            65536,  // memory cost in 1 KiB blocks = 64 MB
-            3,      // time cost (iterations)
-            4,      // parallelism
+            65536,    // memory cost in 1 KiB blocks = 64 MB
+            3,        // time cost (iterations)
+            4,        // parallelism
             Some(32), // output length (32 bytes for AES-256)
         )
-        .map_err(|e| WalletError::KeystoreError(format!("Failed to create Argon2 params: {}", e)))?;
+        .map_err(|e| {
+            WalletError::KeystoreError(format!("Failed to create Argon2 params: {}", e))
+        })?;
 
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
-        // Derive the key using Argon2
         let mut key_bytes = [0u8; 32];
         argon2
             .hash_password_into(password.as_bytes(), salt, &mut key_bytes)
-            .map_err(|e| WalletError::KeystoreError(format!("Argon2 key derivation failed: {}", e)))?;
+            .map_err(|e| {
+                WalletError::KeystoreError(format!("Argon2 key derivation failed: {}", e))
+            })?;
 
         SymmetricKey::from_bytes(&key_bytes)
             .map_err(|e| WalletError::KeystoreError(e.to_string()))
-    }
-
-    /// Deserialize a key share from bytes
-    fn deserialize_share(bytes: &[u8], expected_share_index: u32) -> Result<KeyShare> {
-        use tenzro_crypto::mpc::{MpcKeyShare, ThresholdConfig};
-        use tenzro_crypto::{KeyType, PublicKey};
-
-        // Deserialize the SerializableKeyShare structure
-        #[derive(serde::Deserialize)]
-        struct SerializableKeyShare {
-            share_index: u32,
-            participant_id: String,
-            mpc_share_bytes: Vec<u8>,
-        }
-
-        let serializable: SerializableKeyShare = serde_json::from_slice(bytes)
-            .map_err(|e| WalletError::SerializationError(format!("Failed to deserialize KeyShare: {}", e)))?;
-
-        // Verify share index matches
-        if serializable.share_index != expected_share_index {
-            return Err(WalletError::SerializationError(format!(
-                "Share index mismatch: expected {}, got {}",
-                expected_share_index, serializable.share_index
-            )));
-        }
-
-        // Manually deserialize MpcKeyShare from bytes
-        // Format: share_id (4) | key_type (1) | threshold (4) | total_shares (4) |
-        //         share_data_len (4) | share_data (n) | pubkey_len (4) | pubkey (m)
-        let share_bytes = &serializable.mpc_share_bytes;
-        if share_bytes.len() < 21 {
-            return Err(WalletError::SerializationError(
-                "MpcKeyShare bytes too short".to_string(),
-            ));
-        }
-
-        let mut pos = 0;
-
-        // Read share_id
-        let share_id = u32::from_le_bytes([
-            share_bytes[pos],
-            share_bytes[pos + 1],
-            share_bytes[pos + 2],
-            share_bytes[pos + 3],
-        ]);
-        pos += 4;
-
-        // Read key_type
-        let key_type = match share_bytes[pos] {
-            0 => KeyType::Ed25519,
-            1 => KeyType::Secp256k1,
-            _ => {
-                return Err(WalletError::SerializationError(
-                    "Invalid key type byte".to_string(),
-                ))
-            }
-        };
-        pos += 1;
-
-        // Read threshold config
-        let threshold = u32::from_le_bytes([
-            share_bytes[pos],
-            share_bytes[pos + 1],
-            share_bytes[pos + 2],
-            share_bytes[pos + 3],
-        ]) as usize;
-        pos += 4;
-
-        let total_shares = u32::from_le_bytes([
-            share_bytes[pos],
-            share_bytes[pos + 1],
-            share_bytes[pos + 2],
-            share_bytes[pos + 3],
-        ]) as usize;
-        pos += 4;
-
-        let config = ThresholdConfig::new(threshold, total_shares)
-            .map_err(|e| WalletError::SerializationError(e.to_string()))?;
-
-        // Read share_data
-        let share_data_len = u32::from_le_bytes([
-            share_bytes[pos],
-            share_bytes[pos + 1],
-            share_bytes[pos + 2],
-            share_bytes[pos + 3],
-        ]) as usize;
-        pos += 4;
-
-        if share_bytes.len() < pos + share_data_len + 4 {
-            return Err(WalletError::SerializationError(
-                "Invalid share_data length".to_string(),
-            ));
-        }
-
-        let share_data = share_bytes[pos..pos + share_data_len].to_vec();
-        pos += share_data_len;
-
-        // Read public_key
-        let pubkey_len = u32::from_le_bytes([
-            share_bytes[pos],
-            share_bytes[pos + 1],
-            share_bytes[pos + 2],
-            share_bytes[pos + 3],
-        ]) as usize;
-        pos += 4;
-
-        if share_bytes.len() < pos + pubkey_len {
-            return Err(WalletError::SerializationError(
-                "Invalid public key length".to_string(),
-            ));
-        }
-
-        let pubkey_bytes = share_bytes[pos..pos + pubkey_len].to_vec();
-        let public_key = PublicKey::new(key_type, pubkey_bytes);
-
-        // Reconstruct MpcKeyShare
-        let mpc_share = MpcKeyShare::new(share_id, key_type, config, share_data, public_key)
-            .map_err(|e| WalletError::SerializationError(e.to_string()))?;
-
-        // Reconstruct KeyShare
-        Ok(KeyShare::new(
-            serializable.share_index,
-            serializable.participant_id,
-            mpc_share,
-        ))
     }
 }
 
 impl Drop for Keystore {
     fn drop(&mut self) {
-        // Clear cache on drop for security
         self.cache.clear();
     }
 }
@@ -508,38 +430,67 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mut keystore = Keystore::new(temp_dir.path()).unwrap();
 
-        // Provision a wallet
         let provisioner = WalletProvisioner::new();
         let wallet = provisioner.provision_wallet().unwrap();
+        let pubkey_package = wallet.frost_pubkey_package().unwrap().clone();
 
         let password = "test-password-123";
 
-        // Store shares
         keystore
-            .store_shares(&wallet.wallet_id, &wallet.key_shares, password)
+            .store_shares(&wallet.wallet_id, &pubkey_package, &wallet.key_shares, password)
             .unwrap();
 
-        // Check wallet exists
         assert!(keystore.has_wallet(&wallet.wallet_id));
-
-        // Shares should be in cache after store_shares
     }
 
     #[test]
-    fn test_keystore_cache() {
+    fn test_keystore_round_trip_signs_after_unlock() {
+        use crate::mpc_signing::MpcSigner;
+        use crate::wallet::MpcWallet;
+        use tenzro_types::primitives::Address;
+
         let temp_dir = TempDir::new().unwrap();
         let mut keystore = Keystore::new(temp_dir.path()).unwrap();
 
         let provisioner = WalletProvisioner::new();
-        let wallet = provisioner.provision_wallet().unwrap();
+        let original = provisioner.provision_wallet().unwrap();
+        let pubkey_package = original.frost_pubkey_package().unwrap().clone();
+        let pq_key = original.pq_signing_key().unwrap().clone();
+        let original_pk = original.public_key.clone();
+        let wallet_id = original.wallet_id.clone();
+        let address = original.address;
+        let key_shares = original.key_shares.clone();
 
         keystore
-            .store_shares(&wallet.wallet_id, &wallet.key_shares, "password")
+            .store_shares(&wallet_id, &pubkey_package, &key_shares, "pw")
             .unwrap();
-
-        // Should find in cache
+        keystore.store_pq_seed(&wallet_id, &pq_key, "pw").unwrap();
         keystore.clear_cache();
-        // After clearing, shares are no longer available without re-provisioning
+        drop(original);
+
+        let (loaded_pkg, loaded_shares) = keystore.load_shares(&wallet_id, "pw").unwrap();
+        let loaded_pq = keystore.load_pq_seed(&wallet_id, "pw").unwrap();
+        assert_eq!(loaded_shares.len(), 3);
+        assert_eq!(loaded_pkg.threshold, 2);
+        assert_eq!(loaded_pkg.total, 3);
+
+        // Make sure the rehydrated wallet can produce a valid signature.
+        let _ = address;
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[..20].copy_from_slice(loaded_pkg.group_public_key.as_public_key().to_address().as_bytes());
+        let rehydrated_address = Address::new(addr_bytes);
+
+        let restored = MpcWallet::new(
+            wallet_id.clone(),
+            rehydrated_address,
+            loaded_shares,
+            loaded_pkg,
+            loaded_pq,
+        )
+        .unwrap();
+
+        let sig = MpcSigner::sign(&restored, b"keystore round-trip").unwrap();
+        tenzro_crypto::signatures::verify(&original_pk, b"keystore round-trip", &sig).unwrap();
     }
 
     #[test]
@@ -548,19 +499,26 @@ mod tests {
         let mut keystore = Keystore::new(temp_dir.path()).unwrap();
 
         let provisioner = WalletProvisioner::new();
-
-        // Create multiple wallets
         let wallet1 = provisioner.provision_wallet().unwrap();
         let wallet2 = provisioner.provision_wallet().unwrap();
 
         keystore
-            .store_shares(&wallet1.wallet_id, &wallet1.key_shares, "password1")
+            .store_shares(
+                &wallet1.wallet_id,
+                wallet1.frost_pubkey_package().unwrap(),
+                &wallet1.key_shares,
+                "password1",
+            )
             .unwrap();
         keystore
-            .store_shares(&wallet2.wallet_id, &wallet2.key_shares, "password2")
+            .store_shares(
+                &wallet2.wallet_id,
+                wallet2.frost_pubkey_package().unwrap(),
+                &wallet2.key_shares,
+                "password2",
+            )
             .unwrap();
 
-        // List wallets
         let wallet_ids = keystore.list_wallets().unwrap();
         assert_eq!(wallet_ids.len(), 2);
         assert!(wallet_ids.contains(&wallet1.wallet_id));
@@ -576,14 +534,16 @@ mod tests {
         let wallet = provisioner.provision_wallet().unwrap();
 
         keystore
-            .store_shares(&wallet.wallet_id, &wallet.key_shares, "password")
+            .store_shares(
+                &wallet.wallet_id,
+                wallet.frost_pubkey_package().unwrap(),
+                &wallet.key_shares,
+                "password",
+            )
             .unwrap();
 
         assert!(keystore.has_wallet(&wallet.wallet_id));
-
-        // Delete wallet
         keystore.delete_wallet(&wallet.wallet_id).unwrap();
-
         assert!(!keystore.has_wallet(&wallet.wallet_id));
     }
 
@@ -594,21 +554,28 @@ mod tests {
 
         let provisioner = WalletProvisioner::new();
         let wallet = provisioner.provision_wallet().unwrap();
-
-        let old_password = "old-password";
-        let new_password = "new-password";
+        let pq_key = wallet.pq_signing_key().unwrap().clone();
 
         keystore
-            .store_shares(&wallet.wallet_id, &wallet.key_shares, old_password)
+            .store_shares(
+                &wallet.wallet_id,
+                wallet.frost_pubkey_package().unwrap(),
+                &wallet.key_shares,
+                "old-password",
+            )
             .unwrap();
-
-        // Change password (stores with new encryption)
         keystore
-            .change_password(&wallet.wallet_id, old_password, new_password)
+            .store_pq_seed(&wallet.wallet_id, &pq_key, "old-password")
             .unwrap();
 
-        // Verify new password works by loading shares
-        let shares = keystore.load_shares(&wallet.wallet_id, new_password).unwrap();
+        keystore
+            .change_password(&wallet.wallet_id, "old-password", "new-password")
+            .unwrap();
+        keystore.clear_cache();
+
+        let (_, shares) = keystore
+            .load_shares(&wallet.wallet_id, "new-password")
+            .unwrap();
         assert_eq!(shares.len(), wallet.key_shares.len());
     }
 }

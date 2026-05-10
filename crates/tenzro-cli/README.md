@@ -6,7 +6,7 @@ The official command-line interface for operating Tenzro Network nodes, managing
 
 - **Network Onboarding**: One-click participation via `join` command
 - **Node Management**: Monitor node status
-- **Wallet Operations**: Create MPC wallets, check balances, send transactions (real reqwest RPC client)
+- **Wallet Operations**: Create FROST-Ed25519 threshold wallets, check balances, send transactions (real reqwest RPC client)
 - **Model Management**: List, download, serve AI models (local + remote RPC)
 - **Multi-Modal Inference**: Forecast, vision/text/video embedding, segmentation, detection, audio transcription via dedicated CLI commands
 - **Staking**: Stake TNZO tokens as validator or provider
@@ -99,7 +99,7 @@ tenzro node mempool-lane --address 0xabc...
 ### Wallet Operations
 
 ```bash
-# Create a chain-agnostic 2-of-3 Ed25519 MPC wallet (calls tenzro_createWallet).
+# Create a chain-agnostic 2-of-3 FROST-Ed25519 (RFC 9591) threshold wallet (calls tenzro_createWallet).
 # A single wallet projects into EVM, SVM, and Canton via the pointer-token
 # model — there is no per-chain wallet. Use `tenzro token cross-vm-transfer` /
 # `tenzro token wrap-tnzo` for VM-specific operations, and `tenzro bridge` /
@@ -379,8 +379,10 @@ tenzro 8004 request-validation --agent-id <id> --task <task>
 tenzro 8004 submit-validation --validation-id <id> --result <result>
 ```
 
-`agentId = keccak256(utf8(did_string))` matches the native Tenzro
-identity registry, so the same calldata works against either surface.
+`agentId` is a sequential `uint256` (1-indexed) allocated by the
+registry at `register*()` time — server-allocated, never derivable
+client-side. Calldata is byte-identical against either the native
+Tenzro registry or an Ethereum mirror.
 
 ### Reputation
 

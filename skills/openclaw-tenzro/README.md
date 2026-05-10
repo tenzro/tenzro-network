@@ -78,9 +78,9 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 
 ### Tenzro Blockchain
 
-**Authentication (OAuth 2.1 + DPoP):** `onboard_human`, `onboard_delegated_agent`, `onboard_autonomous_agent` (each provisions a TDIP identity, MPC wallet, and access + refresh tokens), `refresh_token` (exchange refresh → fresh access token), `link_wallet_for_auth` (mint an auth session against an existing wallet), `revoke_jwt`, `revoke_did`. Tokens follow RFC 6749 + RFC 9449 — pass `dpop_jkt` (RFC 7638 thumbprint of the holder's Ed25519 key) to bind the token to a holder key.
+**Authentication (OAuth 2.1 + DPoP):** `onboard_human`, `onboard_delegated_agent`, `onboard_autonomous_agent` (each provisions a TDIP identity, FROST-Ed25519 threshold wallet, and access + refresh tokens), `refresh_token` (exchange refresh → fresh access token), `link_wallet_for_auth` (mint an auth session against an existing wallet), `revoke_jwt`, `revoke_did`. Tokens follow RFC 6749 + RFC 9449 — pass `dpop_jkt` (RFC 7638 thumbprint of the holder's Ed25519 key) to bind the token to a holder key.
 
-**Wallet & Transactions:** `create_wallet` (chain-agnostic 2-of-3 Ed25519 MPC wallet — projects into EVM, SVM, and Canton via the pointer-token model, no `chain` parameter), `get_balance`, `send_transaction` (server-side `tenzro_signAndSendTransaction` with live nonce + gas-price lookup, accepts `value` or `amount` alias, rejects self-sends), `get_transaction` (returns `status: "pending"` while in-mempool, `"finalized"` once block-included), `list_accounts`
+**Wallet & Transactions:** `create_wallet` (chain-agnostic 2-of-3 FROST-Ed25519 (RFC 9591) threshold wallet — projects into EVM, SVM, and Canton via the pointer-token model, no `chain` parameter), `get_balance`, `send_transaction` (server-side `tenzro_signAndSendTransaction` with live nonce + gas-price lookup, accepts `value` or `amount` alias, rejects self-sends), `get_transaction` (returns `status: "pending"` while in-mempool, `"finalized"` once block-included), `list_accounts`
 
 **Identity (TDIP):** `register_identity`, `resolve_did`, `set_username`, `resolve_username`, `import_identity`, `list_identities`
 

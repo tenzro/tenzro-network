@@ -1,17 +1,18 @@
 # tenzro-wallet
 
-MPC Wallet System for Tenzro Network — Auto-Provisioned Threshold Wallets
+FROST-Ed25519 Threshold Wallet System for Tenzro Network — Auto-Provisioned
 
 ## Overview
 
-`tenzro-wallet` provides seamless wallet provisioning using Multi-Party Computation (MPC) for the Tenzro Network blockchain. Users get instant, secure wallets without managing seed phrases or private keys.
+`tenzro-wallet` provides seamless wallet provisioning using FROST-Ed25519 (RFC 9591) threshold signatures for the Tenzro Network blockchain. Users get instant, secure wallets without managing seed phrases or private keys. Every wallet also carries a mandatory ML-DSA-65 post-quantum signing key for hybrid signatures.
 
 ## Key Features
 
-- **Seamless Onboarding**: Auto-provisioned MPC wallets with no seed phrases
-- **Threshold Signatures**: Default 2-of-3 (configurable) multi-party signing
+- **Seamless Onboarding**: Auto-provisioned FROST-Ed25519 wallets with no seed phrases
+- **Threshold Signatures**: Default 2-of-3 (configurable) FROST-Ed25519 signing per RFC 9591
+- **Hybrid PQ Signatures**: Every wallet pairs a FROST-Ed25519 classical leg with a mandatory ML-DSA-65 post-quantum leg
 - **Multi-Asset Support**: TNZO, USDC, USDT, ETH, SOL, BTC, and custom assets
-- **Encrypted Storage**: Password-protected keystore for key shares using Argon2id (64MB memory, 3 iterations, parallelism 4)
+- **Encrypted Storage**: Password-protected keystore for FROST secret shares + public-key package using Argon2id (64MB memory, 3 iterations, parallelism 4)
 - **Transaction Validation**: Chain ID, nonce, gas bounds, address checks, data size limits, memo validation, tx-type-specific rules
 - **Signature Verification**: Automatic post-signing cryptographic verification via `tenzro_crypto::signatures::verify()`
 - **Transaction Builder**: Type-safe builder pattern with auto gas estimation per transaction type
@@ -23,18 +24,20 @@ MPC Wallet System for Tenzro Network — Auto-Provisioned Threshold Wallets
 
 ## Architecture
 
-### MPC Wallet Model
+### FROST-Ed25519 Wallet Model
 
-Each wallet uses threshold secret sharing:
-- **Key Shares**: Distributed across multiple parties (default: 3 shares)
+Each wallet uses FROST-Ed25519 threshold signatures (RFC 9591):
+- **Secret Shares**: Distributed across multiple parties (default: 3 shares) via FROST trusted-dealer keygen
 - **Threshold**: Minimum shares needed to sign (default: 2)
-- **Security**: No single point of failure; compromise of one share does not expose the wallet
+- **Public Key Package**: Group public key + per-signer verifying shares; persisted alongside secret shares
+- **Aggregated Output**: Single 64-byte standard Ed25519 signature that verifies under the group public key
+- **Security**: No single point of failure; compromise of fewer than `threshold` shares does not expose the wallet
 
 ### Components
 
-- **WalletProvisioner**: Auto-generates MPC wallets with threshold key shares
+- **WalletProvisioner**: Auto-generates FROST-Ed25519 wallets with threshold secret shares
 - **WalletService**: Main service for wallet operations (provision, sign, balance)
-- **MpcSigner**: Handles threshold signature generation and combination
+- **FrostSigner**: Coordinates FROST round1 commitments, round2 signature shares, and aggregation in-process
 - **TransactionValidator**: Validates transactions against security policies
 - **TransactionBuilder**: Type-safe transaction construction with validation
 - **NonceManager**: Per-address nonce tracking with replay protection
@@ -58,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create wallet service
     let service = TenzroWalletService::new()?;
 
-    // Auto-provision a new MPC wallet
+    // Auto-provision a new FROST-Ed25519 threshold wallet
     let wallet = service.provision_wallet().await?;
 
     println!("Wallet ID: {}", wallet.wallet_id);
@@ -90,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transfer(1000)
         .build_validated()?;
 
-    // Sign (validates, signs with MPC threshold, and verifies signature)
+    // Sign (validates, runs FROST round1+round2, aggregates, and verifies signature)
     let signature = service.sign_transaction(&wallet.wallet_id, &tx).await?;
     println!("Signature: {} bytes", signature.len());
 
@@ -122,18 +125,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 use tenzro_wallet::provisioning::{ProvisioningConfig, WalletProvisioner};
-use tenzro_crypto::KeyType;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a 3-of-5 threshold configuration with Secp256k1
-    let config = ProvisioningConfig::new(3, 5)?
-        .with_key_type(KeyType::Secp256k1);
+    // Create a 3-of-5 FROST-Ed25519 threshold configuration (RFC 9591)
+    let config = ProvisioningConfig::new(3, 5)?;
 
     let provisioner = WalletProvisioner::with_config(config)?;
     let wallet = provisioner.provision_wallet()?;
 
     println!("Created {}-of-{} wallet", wallet.threshold, wallet.total_shares);
-    println!("Key type: {:?}", wallet.key_type);
+    println!("Key type: {:?}", wallet.key_type());
 
     Ok(())
 }
@@ -181,13 +182,13 @@ let alice = book.find_by_name("Alice")?;
 ## Modules
 
 ### `wallet`
-Core wallet types including `MpcWallet`, `WalletId`, and `KeyShare`.
+Core wallet types including `MpcWallet` (FROST-Ed25519 + ML-DSA-65 hybrid), `WalletId`, and `KeyShare`.
 
 ### `provisioning`
-Automatic wallet provisioning with configurable threshold schemes.
+Automatic wallet provisioning with configurable FROST-Ed25519 threshold schemes.
 
 ### `mpc_signing`
-Threshold signature operations: partial signature creation and combination.
+FROST-Ed25519 signing flow: in-process round1 commit, round2 signature share, and aggregation to a single 64-byte standard Ed25519 signature.
 
 ### `validation`
 Transaction validation with chain ID, nonce, gas, address, and data size checks.
@@ -211,7 +212,7 @@ Multi-asset balance tracking with support for pending transactions.
 Asset registry managing supported assets and metadata.
 
 ### `keystore`
-Encrypted storage of MPC key shares using Argon2id KDF.
+Encrypted storage of FROST secret shares + public-key package using Argon2id KDF; ML-DSA-65 seed sealed in the same bundle.
 
 ### `state_sync`
 On-chain balance/nonce synchronization via `ChainStateProvider` trait.
@@ -225,16 +226,16 @@ Core `WalletService` trait defining the wallet interface.
 ## Default Configuration
 
 - **Threshold**: 2-of-3 (2 shares required to sign, 3 total shares)
-- **Key Type**: Ed25519 (native Tenzro signatures)
+- **Signature Scheme**: FROST-Ed25519 (RFC 9591) classical leg + ML-DSA-65 post-quantum leg
 - **Default Assets**: TNZO, USDT, USDC, ETH, SOL, BTC
 - **Keystore**: Argon2id with 64MB memory, 3 iterations, parallelism 4
-- **Storage**: In-memory with encrypted keystore for key shares
+- **Storage**: In-memory with encrypted keystore for FROST shares + ML-DSA-65 seed
 
 ## Security Features
 
 ### Production-Ready Components
 
-- **Key Shares**: Generated using Shamir's Secret Sharing over GF(256)
+- **Key Shares**: Generated via FROST-Ed25519 trusted-dealer keygen (RFC 9591); DKG variant (`frost::dkg_part1`) available
 - **Keystore Encryption**: Argon2id KDF with 64MB memory cost, 3 iterations, parallelism 4
 - **Transaction Validation**: Chain ID, nonce, gas bounds, address format checks, data size limits
 - **Signature Verification**: Automatic post-signing verification via `tenzro_crypto::signatures::verify()`
@@ -246,12 +247,12 @@ Core `WalletService` trait defining the wallet interface.
 
 ### 1. Provisioning
 ```
-User joins network → Auto-provision MPC wallet → Generate key shares → Store encrypted
+User joins network → Auto-provision FROST-Ed25519 wallet → Run trusted-dealer keygen → Generate ML-DSA-65 keypair → Store encrypted bundle
 ```
 
 ### 2. Signing
 ```
-Transaction created → Validate → Gather threshold shares → Create partial signatures → Combine → Verify → Final signature
+Transaction created → Validate → FROST round1 commit (threshold signers) → Build signing package → FROST round2 sign → Aggregate to Ed25519 sig → Verify → Sign ML-DSA-65 leg → Hybrid signature
 ```
 
 ### 3. Balance Updates
@@ -278,7 +279,7 @@ Test coverage: 99 unit tests + 6 integration tests passing.
 ## Dependencies
 
 - `tenzro-types` - Core types for Tenzro Network
-- `tenzro-crypto` - Cryptographic primitives and MPC operations
+- `tenzro-crypto` - Cryptographic primitives, FROST-Ed25519 (RFC 9591), and ML-DSA-65
 - `tokio` - Async runtime
 - `serde` - Serialization framework
 - `uuid` - Unique wallet identifiers

@@ -53,11 +53,11 @@ pub struct WalletCreateCmd {
 
     /// Threshold (e.g., 2 for 2-of-3)
     #[arg(long, default_value = "2")]
-    threshold: usize,
+    threshold: u16,
 
     /// Total shares
     #[arg(long, default_value = "3")]
-    total_shares: usize,
+    total_shares: u16,
 
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
@@ -85,7 +85,7 @@ impl WalletCreateCmd {
             "address": wallet.address.to_string(),
             "threshold": wallet.threshold,
             "total_shares": wallet.total_shares,
-            "key_type": format!("{:?}", wallet.key_type)
+            "key_type": format!("{:?}", wallet.key_type())
         }])).await?;
 
         spinner.finish_and_clear();
@@ -95,7 +95,7 @@ impl WalletCreateCmd {
         output::print_field("Wallet ID", &wallet.wallet_id.to_string());
         output::print_field("Address", &wallet.address.to_string());
         output::print_field("Threshold", &format!("{}-of-{}", wallet.threshold, wallet.total_shares));
-        output::print_field("Key Type", &format!("{:?}", wallet.key_type));
+        output::print_field("Key Type", &format!("{:?}", wallet.key_type()));
 
         if let Some(name) = &self.name {
             output::print_field("Name", name);

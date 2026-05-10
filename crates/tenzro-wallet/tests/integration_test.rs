@@ -101,17 +101,15 @@ fn test_provisioner_custom_config() {
     use tenzro_wallet::provisioning::ProvisioningConfig;
     use tenzro_crypto::KeyType;
 
-    // Create custom 3-of-5 config
-    let config = ProvisioningConfig::new(3, 5)
-        .unwrap()
-        .with_key_type(KeyType::Secp256k1);
+    // Custom 3-of-5 FROST config (FROST-Ed25519 per RFC 9591).
+    let config = ProvisioningConfig::new(3, 5).unwrap();
 
     let provisioner = WalletProvisioner::with_config(config).unwrap();
     let wallet = provisioner.provision_wallet().unwrap();
 
     assert_eq!(wallet.threshold, 3);
     assert_eq!(wallet.total_shares, 5);
-    assert_eq!(wallet.key_type, KeyType::Secp256k1);
+    assert_eq!(wallet.key_type(), KeyType::Ed25519);
 }
 
 #[tokio::test]

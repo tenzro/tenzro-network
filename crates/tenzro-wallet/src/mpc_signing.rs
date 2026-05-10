@@ -1,109 +1,69 @@
-//! Threshold signature operations for MPC wallets in Tenzro Network.
+//! FROST-Ed25519 threshold signing coordinator (RFC 9591).
 //!
-//! This module handles the creation and combination of partial signatures
-//! from MPC key shares.
+//! For in-process custody (auto-provisioned wallets where one node holds all
+//! shares) the wallet runs both rounds of FROST internally and aggregates the
+//! resulting signature. The output is a standard 64-byte Ed25519 signature
+//! that verifies under the wallet's group public key with
+//! `tenzro_crypto::signatures::verify`.
+//!
+//! Distributed custody (one signer per node, exchanged commitments and
+//! signature shares over the wire) is a follow-up — the FROST primitives in
+//! `tenzro_crypto::frost` already expose `round1_commit` / `build_signing_package`
+//! / `round2_sign` / `aggregate_signature` for that profile.
 
 use crate::error::{Result, WalletError};
 use crate::wallet::{KeyShare, MpcWallet};
-use tenzro_crypto::mpc::{
-    combine_signatures_with_message, create_partial_signature,
-    PartialSignature,
+use tenzro_crypto::frost::{
+    aggregate_signature, build_signing_package, round1_commit, round2_sign, PublicKeyPackage,
+    SignatureShare, SigningCommitments, SigningNonces,
 };
 use tenzro_crypto::Signature;
 use tracing::{debug, info};
 
-/// MPC signing coordinator for Tenzro Network wallets.
-///
-/// Handles the multi-party signature generation process:
-/// 1. Create partial signatures from each key share
-/// 2. Collect threshold number of partial signatures
-/// 3. Combine into a full signature
+/// FROST signing coordinator for Tenzro Network wallets.
 pub struct MpcSigner;
 
 impl MpcSigner {
-    /// Sign data using MPC wallet's key shares.
-    ///
-    /// This method:
-    /// 1. Verifies we have enough shares to meet the threshold
-    /// 2. Creates partial signatures from each share
-    /// 3. Combines them into a full signature using real MPC key reconstruction
+    /// Sign data using a FROST threshold wallet (in-process, all shares local).
     pub fn sign(wallet: &MpcWallet, data: &[u8]) -> Result<Signature> {
-        // Check if we have enough shares
         if !wallet.can_sign() {
             return Err(WalletError::ThresholdNotMet {
                 got: wallet.share_count(),
-                need: wallet.threshold,
+                need: wallet.threshold as usize,
             });
         }
 
+        let pubkey_pkg = wallet.frost_pubkey_package()?;
+
         debug!(
-            "Signing with MPC wallet {} using {} shares",
+            "FROST-signing with wallet {} ({}-of-{}) using {} shares",
             wallet.wallet_id,
-            wallet.share_count()
+            wallet.threshold,
+            wallet.total_shares,
+            wallet.share_count(),
         );
 
-        // Create partial signatures from each key share
-        let partial_sigs = Self::create_partial_signatures(&wallet.key_shares, data)?;
-
-        debug!(
-            "Created {} partial signatures",
-            partial_sigs.len()
-        );
-
-        // Combine partial signatures into a full signature using real MPC key reconstruction
-        let signature = Self::combine_partial_signatures_with_shares(
-            &wallet.key_shares,
-            &partial_sigs,
-            data,
-        )?;
+        // Use exactly `threshold` shares — FROST aggregation rejects extras
+        // beyond the signing set committed to in round 1.
+        let signing_set = &wallet.key_shares[..wallet.threshold as usize];
+        let signature = run_frost_session(signing_set, pubkey_pkg, data)?;
 
         info!(
-            "Successfully signed data with wallet {}",
+            "Successfully FROST-signed with wallet {}",
             wallet.wallet_id
         );
 
         Ok(signature)
     }
 
-    /// Create partial signatures from key shares
-    fn create_partial_signatures(
-        shares: &[KeyShare],
-        data: &[u8],
-    ) -> Result<Vec<PartialSignature>> {
-        let mut partial_sigs = Vec::new();
-
-        for share in shares {
-            let partial = create_partial_signature(&share.mpc_share, data)
-                .map_err(|e| WalletError::SignatureFailed(e.to_string()))?;
-
-            partial_sigs.push(partial);
-        }
-
-        Ok(partial_sigs)
-    }
-
-    /// Combine partial signatures into a full signature using real MPC key reconstruction
-    fn combine_partial_signatures_with_shares(
-        shares: &[KeyShare],
-        partial_sigs: &[PartialSignature],
-        message: &[u8],
-    ) -> Result<Signature> {
-        // Convert KeyShare references to MpcKeyShare references
-        let mpc_shares: Vec<&tenzro_crypto::mpc::MpcKeyShare> =
-            shares.iter().map(|s| &s.mpc_share).collect();
-
-        let signature = combine_signatures_with_message(&mpc_shares, partial_sigs, message)
-            .map_err(|e| WalletError::SignatureFailed(e.to_string()))?;
-
-        Ok(signature)
-    }
-
-    /// Sign data using only a subset of shares (useful for threshold signing)
+    /// Sign with a caller-chosen subset of shares (must be ≥ `threshold`).
+    /// Useful when the wallet holds more shares than required for signing
+    /// (e.g. recovery scenarios).
     pub fn sign_with_shares(
+        wallet: &MpcWallet,
         shares: &[KeyShare],
         threshold: usize,
         data: &[u8],
-        _key_type: tenzro_crypto::KeyType,
     ) -> Result<Signature> {
         if shares.len() < threshold {
             return Err(WalletError::ThresholdNotMet {
@@ -112,104 +72,92 @@ impl MpcSigner {
             });
         }
 
-        // Use only threshold number of shares
-        let shares_to_use = &shares[..threshold];
+        let pubkey_pkg = wallet.frost_pubkey_package()?;
+        let signing_set = &shares[..threshold];
 
         debug!(
-            "Signing with {} of {} shares",
-            shares_to_use.len(),
+            "FROST-signing with {} of {} provided shares",
+            signing_set.len(),
             shares.len()
         );
 
-        // Create partial signatures
-        let partial_sigs = Self::create_partial_signatures(shares_to_use, data)?;
+        run_frost_session(signing_set, pubkey_pkg, data)
+    }
+}
 
-        // Combine signatures using real MPC key reconstruction
-        let signature = Self::combine_partial_signatures_with_shares(shares_to_use, &partial_sigs, data)?;
-
-        Ok(signature)
+/// Run a single FROST signing session: round 1 commit → build signing
+/// package → round 2 sign → aggregate.
+fn run_frost_session(
+    signing_set: &[KeyShare],
+    pubkey_pkg: &PublicKeyPackage,
+    data: &[u8],
+) -> Result<Signature> {
+    // Round 1: each signer commits.
+    let mut nonces: Vec<(u16, SigningNonces)> = Vec::with_capacity(signing_set.len());
+    let mut commitments: Vec<SigningCommitments> = Vec::with_capacity(signing_set.len());
+    for share in signing_set {
+        let (n, c) = round1_commit(&share.secret_share)
+            .map_err(|e| WalletError::SignatureFailed(format!("FROST round1: {}", e)))?;
+        nonces.push((share.signer_index.0, n));
+        commitments.push(c);
     }
 
-    /// Verify that a partial signature is valid
-    pub fn verify_partial_signature(partial_sig: &PartialSignature) -> bool {
-        partial_sig.verify_commitment()
+    // Coordinator: build the signing package.
+    let signing_pkg = build_signing_package(data, &commitments)
+        .map_err(|e| WalletError::SignatureFailed(format!("FROST build_signing_package: {}", e)))?;
+
+    // Round 2: each signer produces its signature share.
+    let mut shares_out: Vec<SignatureShare> = Vec::with_capacity(signing_set.len());
+    for share in signing_set {
+        let n = nonces
+            .iter()
+            .find(|(idx, _)| *idx == share.signer_index.0)
+            .map(|(_, n)| n)
+            .ok_or_else(|| {
+                WalletError::SignatureFailed(format!(
+                    "missing round-1 nonces for signer {}",
+                    share.signer_index.0
+                ))
+            })?;
+        let sig_share = round2_sign(&signing_pkg, n, &share.secret_share)
+            .map_err(|e| WalletError::SignatureFailed(format!("FROST round2: {}", e)))?;
+        shares_out.push(sig_share);
     }
 
-    /// Collect partial signatures from multiple sources (for distributed MPC)
-    pub fn collect_partial_signatures(
-        local_shares: &[KeyShare],
-        remote_partials: Vec<PartialSignature>,
-        data: &[u8],
-    ) -> Result<Vec<PartialSignature>> {
-        let mut all_partials = Vec::new();
+    // Aggregator: produce the final 64-byte Ed25519 signature.
+    let signature = aggregate_signature(&signing_pkg, &shares_out, pubkey_pkg)
+        .map_err(|e| WalletError::SignatureFailed(format!("FROST aggregate: {}", e)))?;
 
-        // Create partials from local shares
-        for share in local_shares {
-            let partial = create_partial_signature(&share.mpc_share, data)
-                .map_err(|e| WalletError::SignatureFailed(e.to_string()))?;
-            all_partials.push(partial);
-        }
-
-        // Add remote partials
-        all_partials.extend(remote_partials);
-
-        // Verify all commitments
-        for partial in &all_partials {
-            if !Self::verify_partial_signature(partial) {
-                return Err(WalletError::SignatureFailed(format!(
-                    "Invalid commitment for share {}",
-                    partial.share_id
-                )));
-            }
-        }
-
-        Ok(all_partials)
-    }
+    Ok(signature)
 }
 
 /// Helper for signing transaction data with automatic verification.
 pub struct TransactionSigner;
 
 impl TransactionSigner {
-    /// Sign transaction data with an MPC wallet and verify the signature.
-    ///
-    /// After producing the threshold signature, this method verifies it
-    /// against the wallet's public key to ensure correctness before returning.
+    /// Sign transaction data with a FROST wallet and verify the signature.
     pub fn sign_transaction(wallet: &MpcWallet, tx_data: &[u8]) -> Result<Vec<u8>> {
         let signature = MpcSigner::sign(wallet, tx_data)?;
-
-        // Verify the signature against the wallet's public key
         Self::verify_signature(&wallet.public_key, tx_data, &signature)?;
-
         Ok(signature.to_bytes())
     }
 
-    /// Sign a message with an MPC wallet and verify the signature.
+    /// Sign a message with a FROST wallet and verify the signature.
     pub fn sign_message(wallet: &MpcWallet, message: &[u8]) -> Result<Vec<u8>> {
-        // Hash the message first for standardization
         let message_hash = tenzro_crypto::hash::sha256(message);
         let signature = MpcSigner::sign(wallet, message_hash.as_bytes())?;
-
-        // Verify the signature
         Self::verify_signature(&wallet.public_key, message_hash.as_bytes(), &signature)?;
-
         Ok(signature.to_bytes())
     }
 
     /// Sign raw bytes (for custom signing workflows) with verification.
     pub fn sign_raw(wallet: &MpcWallet, data: &[u8]) -> Result<Vec<u8>> {
         let signature = MpcSigner::sign(wallet, data)?;
-
-        // Verify the signature
         Self::verify_signature(&wallet.public_key, data, &signature)?;
-
         Ok(signature.to_bytes())
     }
 
     /// Verify a signature against a public key.
-    ///
-    /// This is called automatically after signing but can also be used
-    /// independently to verify externally-produced signatures.
     pub fn verify_signature(
         public_key: &tenzro_crypto::PublicKey,
         data: &[u8],
@@ -227,7 +175,7 @@ mod tests {
     use tenzro_crypto::KeyType;
 
     #[test]
-    fn test_mpc_signing() {
+    fn test_frost_signing_produces_valid_ed25519() {
         let provisioner = WalletProvisioner::new();
         let wallet = provisioner.provision_wallet().unwrap();
 
@@ -235,82 +183,64 @@ mod tests {
         let signature = MpcSigner::sign(&wallet, data).unwrap();
 
         assert_eq!(signature.key_type(), KeyType::Ed25519);
-        assert!(!signature.as_bytes().is_empty());
+        assert_eq!(signature.as_bytes().len(), 64);
+
+        // Aggregated signature MUST verify under the group public key with
+        // the standard Ed25519 verifier.
+        tenzro_crypto::signatures::verify(&wallet.public_key, data, &signature)
+            .expect("FROST signature must verify under group key");
     }
 
     #[test]
-    fn test_threshold_signing() {
+    fn test_threshold_signing_succeeds_with_min_set() {
         let provisioner = WalletProvisioner::new();
         let wallet = provisioner.provision_wallet().unwrap();
 
-        // Should succeed with threshold (2) shares
         let data = b"test data";
-        let shares_to_use = &wallet.key_shares[..2];
-        let result = MpcSigner::sign_with_shares(shares_to_use, 2, data, wallet.key_type);
-        assert!(result.is_ok());
+        let shares_to_use = wallet.key_shares[..2].to_vec();
+        let sig = MpcSigner::sign_with_shares(&wallet, &shares_to_use, 2, data).unwrap();
+        tenzro_crypto::signatures::verify(&wallet.public_key, data, &sig).unwrap();
     }
 
     #[test]
-    fn test_insufficient_shares() {
+    fn test_insufficient_shares_rejected() {
         let provisioner = WalletProvisioner::new();
         let wallet = provisioner.provision_wallet().unwrap();
 
-        // Should fail with only 1 share (threshold is 2)
         let data = b"test data";
-        let shares_to_use = &wallet.key_shares[..1];
-        let result = MpcSigner::sign_with_shares(shares_to_use, 2, data, wallet.key_type);
+        let shares_to_use = wallet.key_shares[..1].to_vec();
+        let result = MpcSigner::sign_with_shares(&wallet, &shares_to_use, 2, data);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_transaction_signer() {
+    fn test_transaction_signer_round_trips() {
         let provisioner = WalletProvisioner::new();
         let wallet = provisioner.provision_wallet().unwrap();
 
         let tx_data = b"transaction data";
         let sig_bytes = TransactionSigner::sign_transaction(&wallet, tx_data).unwrap();
-        assert!(!sig_bytes.is_empty());
+        assert_eq!(sig_bytes.len(), 64);
     }
 
     #[test]
-    fn test_message_signer() {
+    fn test_message_signer_round_trips() {
         let provisioner = WalletProvisioner::new();
         let wallet = provisioner.provision_wallet().unwrap();
 
         let message = b"Hello, Tenzro Network!";
         let sig_bytes = TransactionSigner::sign_message(&wallet, message).unwrap();
-        assert!(!sig_bytes.is_empty());
+        assert_eq!(sig_bytes.len(), 64);
     }
 
     #[test]
-    fn test_partial_signature_verification() {
+    fn test_signature_bound_to_message() {
         let provisioner = WalletProvisioner::new();
         let wallet = provisioner.provision_wallet().unwrap();
 
-        let data = b"test";
-        let share = &wallet.key_shares[0];
-        let partial = create_partial_signature(&share.mpc_share, data).unwrap();
-
-        assert!(MpcSigner::verify_partial_signature(&partial));
-    }
-
-    #[test]
-    fn test_collect_partial_signatures() {
-        let provisioner = WalletProvisioner::new();
-        let wallet = provisioner.provision_wallet().unwrap();
-
-        let data = b"test data";
-
-        // Use first share locally, second share remotely
-        let local_shares = &wallet.key_shares[..1];
-        let remote_partial = create_partial_signature(&wallet.key_shares[1].mpc_share, data).unwrap();
-
-        let collected = MpcSigner::collect_partial_signatures(
-            local_shares,
-            vec![remote_partial],
-            data,
-        ).unwrap();
-
-        assert_eq!(collected.len(), 2);
+        let sig = MpcSigner::sign(&wallet, b"message A").unwrap();
+        // Verifying against a different message MUST fail.
+        let result = tenzro_crypto::signatures::verify(&wallet.public_key, b"message B", &sig);
+        assert!(result.is_err());
     }
 }

@@ -727,7 +727,7 @@ impl IdentityRegistry {
         })?;
         let binding = binder.provision_wallet(&did_string).await?;
 
-        let identity = TenzroIdentity {
+        let mut identity = TenzroIdentity {
             did,
             public_keys: vec![PublicKeyInfo {
                 key_id: "key-1".to_string(),
@@ -745,6 +745,7 @@ impl IdentityRegistry {
                 },
                 reputation: 0,
                 tenzro_agent_id: None,
+                erc8004_agent_id: None,
                 is_seed_agent: false,
             },
             status: IdentityStatus::Active,
@@ -782,6 +783,12 @@ impl IdentityRegistry {
             let snapshot = controller.clone();
             drop(controller);
             self.persist_identity(controller_did, &snapshot);
+        }
+
+        // Mirror first so we can patch the allocated ERC-8004 agentId onto the
+        // identity before persisting and inserting into the in-memory store.
+        if let Some(agent_id) = self.mirror_to_erc8004(&did_string, &identity) {
+            identity.set_erc8004_agent_id(agent_id);
         }
 
         self.persist_identity(&did_string, &identity);
@@ -830,7 +837,7 @@ impl IdentityRegistry {
         let (wallet_address, wallet_id, pq_verifying_key) =
             self.provision_or_default(&did_string).await?;
 
-        let identity = TenzroIdentity {
+        let mut identity = TenzroIdentity {
             did,
             public_keys: vec![PublicKeyInfo {
                 key_id: "key-1".to_string(),
@@ -844,6 +851,7 @@ impl IdentityRegistry {
                 controller_did: Some(controller_did.to_string()),
                 reputation: 0,
                 tenzro_agent_id: None,
+                erc8004_agent_id: None,
                 is_seed_agent: false,
             },
             status: IdentityStatus::Active,
@@ -878,8 +886,13 @@ impl IdentityRegistry {
             self.persist_identity(controller_did, &controller);
         }
 
+        // Mirror first so we can patch the allocated ERC-8004 agentId onto the
+        // identity before persisting and inserting into the in-memory store.
+        if let Some(agent_id) = self.mirror_to_erc8004(&did_string, &identity) {
+            identity.set_erc8004_agent_id(agent_id);
+        }
+
         self.persist_identity(&did_string, &identity);
-        self.mirror_to_erc8004(&did_string, &identity);
         self.identities.insert(did_string, identity.clone());
         Ok(RegistrationResult {
             identity,
@@ -912,7 +925,7 @@ impl IdentityRegistry {
         let (wallet_address, wallet_id, pq_verifying_key) =
             self.provision_or_default(&did_string).await?;
 
-        let identity = TenzroIdentity {
+        let mut identity = TenzroIdentity {
             did,
             public_keys: vec![PublicKeyInfo {
                 key_id: "key-1".to_string(),
@@ -926,6 +939,7 @@ impl IdentityRegistry {
                 controller_did: None,
                 reputation: 0,
                 tenzro_agent_id: None,
+                erc8004_agent_id: None,
                 is_seed_agent: false,
             },
             status: IdentityStatus::Active,
@@ -947,8 +961,13 @@ impl IdentityRegistry {
             did_string, capabilities, fee_required / 1_000_000_000_000_000_000
         );
 
+        // Mirror first so we can patch the allocated ERC-8004 agentId onto the
+        // identity before persisting and inserting into the in-memory store.
+        if let Some(agent_id) = self.mirror_to_erc8004(&did_string, &identity) {
+            identity.set_erc8004_agent_id(agent_id);
+        }
+
         self.persist_identity(&did_string, &identity);
-        self.mirror_to_erc8004(&did_string, &identity);
         self.identities.insert(did_string, identity.clone());
         Ok(RegistrationResult {
             identity,
@@ -960,15 +979,15 @@ impl IdentityRegistry {
     /// ERC-8004 IdentityRegistry, if a mirror is wired. Best-effort —
     /// any error is logged at warn level and dropped so the TDIP
     /// registration succeeds regardless.
-    fn mirror_to_erc8004(&self, did_string: &str, identity: &TenzroIdentity) {
-        let Some(registry) = self.on_chain_agent_registry.as_ref() else {
-            return;
-        };
+    ///
+    /// On success, returns the freshly-allocated sequential `agentId`
+    /// so the caller can persist it onto the TDIP machine identity.
+    fn mirror_to_erc8004(&self, did_string: &str, identity: &TenzroIdentity) -> Option<u64> {
+        let registry = self.on_chain_agent_registry.as_ref()?;
         // Only machines are mirrored — humans don't have an ERC-8004 record.
         if !identity.is_machine() {
-            return;
+            return None;
         }
-        let agent_id = crate::erc8004::derive_agent_id(did_string);
         // Map the bound wallet's hex string to a 20-byte EVM address. If the
         // wallet binder produced a non-EVM placeholder (legacy stub), zero out
         // the address — the on-chain record still resolves, just without a
@@ -977,20 +996,23 @@ impl IdentityRegistry {
         // Metadata URI = the canonical DID URL. Future: route through a
         // gateway that resolves to the W3C DID document JSON.
         let metadata_uri = format!("did:{}", did_string.trim_start_matches("did:"));
-        if let Err(e) =
-            registry.mirror_register_agent(&agent_id, &agent_address, &metadata_uri)
-        {
-            tracing::warn!(
-                "ERC-8004 mirror failed for {}: {} (TDIP registration unaffected)",
-                did_string,
-                e
-            );
-        } else {
-            tracing::debug!(
-                "ERC-8004 mirror: {} -> agent_id=0x{}",
-                did_string,
-                hex::encode(agent_id)
-            );
+        match registry.mirror_register_agent(did_string, &agent_address, &metadata_uri) {
+            Ok(agent_id) => {
+                tracing::debug!(
+                    "ERC-8004 mirror: {} -> agent_id={}",
+                    did_string,
+                    agent_id
+                );
+                Some(agent_id)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "ERC-8004 mirror failed for {}: {} (TDIP registration unaffected)",
+                    did_string,
+                    e
+                );
+                None
+            }
         }
     }
 

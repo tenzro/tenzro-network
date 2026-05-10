@@ -995,7 +995,7 @@ Same surface mirrored as MCP tools (`workflow_*`, `obligation_*`, `approval_*`, 
 - **Mirroring Canton's view-encryption inside Tenzro gossip.** Canton-grade selective disclosure requires mirroring to Canton; Tenzro PrivacyDomain is application-layer envelope encryption only.
 - **Rust-native DAR builder.** We shell out to `daml build` (offline, CI-only).
 - **CIP-56 ↔ ERC-7683 standardization PR.** Tenzro implements 7683-style fills as CIP-56 `TransferInstruction` proposals; we may file a CIP if the pattern is reusable, but that's a separate work item.
-- **Cross-controller workflow chains** where two unrelated controllers jointly govern an agent. Joint custody is a wallet-layer (MPC) construct, not a workflow-layer one.
+- **Cross-controller workflow chains** where two unrelated controllers jointly govern an agent. Joint custody is a wallet-layer (FROST-Ed25519 threshold) construct, not a workflow-layer one.
 - **Onchain DAML interpretation in `tenzro-vm`.** We continue to use Canton as the DAML execution environment; Tenzro mirrors and indexes, doesn't interpret.
 
 ## 11. Verification plan

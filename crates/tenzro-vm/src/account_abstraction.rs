@@ -581,6 +581,12 @@ pub struct EntryPoint {
 
     /// Total operations processed
     pub total_ops_processed: AtomicU64,
+
+    /// Optional ERC-7579 validator registry. When set, `validate_user_op` will
+    /// route to installed validators in priority order before falling back to
+    /// the legacy length-only signature check. When unset, the legacy check
+    /// applies (used by the existing test suite and non-modular accounts).
+    pub validator_registry: Option<std::sync::Arc<crate::aa_validators::ValidatorRegistry>>,
 }
 
 impl EntryPoint {
@@ -593,7 +599,20 @@ impl EntryPoint {
             nonces: DashMap::new(),
             deposits: DashMap::new(),
             total_ops_processed: AtomicU64::new(0),
+            validator_registry: None,
         }
+    }
+
+    /// Attach an ERC-7579 validator registry (builder pattern). Once set,
+    /// signature validation is delegated to the installed validator modules
+    /// for the sender account. See `crate::aa_validators` for the trait and
+    /// reference modules.
+    pub fn with_validator_registry(
+        mut self,
+        registry: std::sync::Arc<crate::aa_validators::ValidatorRegistry>,
+    ) -> Self {
+        self.validator_registry = Some(registry);
+        self
     }
 
     /// Set the chain ID for EIP-712 domain separator (builder pattern)
@@ -685,8 +704,33 @@ impl EntryPoint {
             ));
         }
 
-        // Validate signature (simplified - in production, this would verify actual cryptographic signature)
-        if op.signature.is_empty() {
+        // Validate signature. If an ERC-7579 validator registry is attached
+        // and the sender has any installed validator modules, route to them
+        // (the first non-failure validator wins). Otherwise fall back to the
+        // legacy length-only check used by non-modular accounts.
+        if let Some(registry) = self.validator_registry.as_ref() {
+            // Compute the canonical UserOp hash bound to this EntryPoint
+            // (chain_id + address). 32-byte preimage matches what the on-chain
+            // EntryPoint passes to `IValidator::validateUserOp`.
+            let mut op_hash = [0u8; 32];
+            let h = op.hash(self.chain_id, &self.address);
+            let take = h.len().min(32);
+            op_hash[..take].copy_from_slice(&h[..take]);
+
+            // Account has at least one installed validator → strict route.
+            if !registry.list_for_account(&op.sender).is_empty() {
+                let result = registry
+                    .validate_user_op(op, &op_hash)
+                    .map_err(|e| AccountAbstractionError::InvalidUserOp(e.to_string()))?;
+                if result.is_failure() {
+                    return Err(AccountAbstractionError::InvalidSignature);
+                }
+                // Skip the legacy length check — the validator module owns
+                // the signature semantics.
+            } else if op.signature.is_empty() {
+                return Err(AccountAbstractionError::InvalidSignature);
+            }
+        } else if op.signature.is_empty() {
             return Err(AccountAbstractionError::InvalidSignature);
         }
 
@@ -1273,9 +1317,16 @@ pub fn parse_7702_designator(code: &[u8]) -> Option<Vec<u8>> {
 /// Process an EIP-7702 authorization list before transaction execution.
 ///
 /// For each authorization, verifies the signature, checks the nonce, and
-/// temporarily sets the EOA's code to the delegate contract's code. Returns
-/// the list of upgraded EOA addresses so the caller can clean up after
-/// execution completes.
+/// **persistently** writes the 23-byte designator into the EOA's code slot.
+///
+/// Per EIP-7702 the delegation **survives the transaction** — the EOA stays
+/// delegated until a subsequent tx submits a fresh authorization (including
+/// one delegating to `address(0)` to clear it). This matches mainnet semantics
+/// post-Pectra. Callers MUST NOT roll the code slot back at end-of-tx.
+///
+/// Per the spec, the EOA's nonce is also incremented as part of consuming the
+/// authorization (EIP-7702 §3) so a single authorization cannot be replayed.
+/// Returns the list of EOAs that were delegated.
 pub fn process_7702_authorizations(
     authorizations: &[Eip7702Authorization],
     expected_chain_id: u64,
@@ -1320,6 +1371,11 @@ pub fn process_7702_authorizations(
         // so upgrades to the delegate are picked up automatically.
         let designator = build_7702_designator(&auth.delegate_address)?;
         state.set_code(&eoa_address, designator);
+
+        // Per EIP-7702 §3: increment the EOA's nonce so the authorization
+        // (which embeds the old nonce) cannot be replayed.
+        state.set_nonce(&eoa_address, current_nonce.saturating_add(1));
+
         seen_eoas.insert(eoa_address.clone());
         upgraded_eoas.push(eoa_address.clone());
         info!(
@@ -1330,19 +1386,6 @@ pub fn process_7702_authorizations(
     }
 
     Ok(upgraded_eoas)
-}
-
-/// Clean up EIP-7702 code delegation after transaction execution.
-///
-/// Removes the temporarily injected code from each upgraded EOA, restoring
-/// them to their original empty-code state.
-pub fn cleanup_7702_authorizations(
-    upgraded_eoas: &[Vec<u8>],
-    state: &mut dyn VmState,
-) {
-    for eoa in upgraded_eoas {
-        state.set_code(eoa, vec![]);
-    }
 }
 
 #[cfg(test)]
@@ -2033,8 +2076,11 @@ mod tests {
         assert_eq!(&code[3..], delegate_addr.as_slice());
         assert_eq!(parse_7702_designator(&code), Some(delegate_addr.clone()));
 
-        cleanup_7702_authorizations(&upgraded, &mut state);
-        assert_eq!(state.get_code(eoa), Some(vec![]));
+        // Per EIP-7702 the designator is persistent — not rolled back at
+        // end-of-tx — and the EOA's nonce was incremented as part of consuming
+        // the authorization, blocking replay.
+        assert_eq!(state.get_nonce(eoa), 1);
+        assert_eq!(state.get_code(eoa), Some(code));
     }
 
     #[test]

@@ -3,11 +3,12 @@
 //! This crate provides cryptographic operations for the Tenzro Network blockchain,
 //! including:
 //!
-//! - **Key Management**: Ed25519 and Secp256k1 keypairs with address derivation
+//! - **Key Management**: Ed25519, Secp256k1, and Secp256r1 (P-256) keypairs with address derivation
 //! - **Signatures**: Digital signature creation and verification
+//! - **WebAuthn**: FIDO2 / passkey assertion verification, the device-side primitive for self-custody
 //! - **Hashing**: SHA-256 and Keccak-256 (for EVM compatibility)
 //! - **Encryption**: AES-256-GCM symmetric encryption and X25519 key exchange
-//! - **MPC**: Multi-party computation and threshold signatures for auto-provisioned wallets
+//! - **FROST**: Real threshold Ed25519 signing (RFC 9591) where the secret key is never reconstructed
 //!
 //! # Examples
 //!
@@ -60,29 +61,41 @@
 //! # }
 //! ```
 //!
-//! ## MPC Threshold Signatures
+//! ## FROST-Ed25519 Threshold Signing (RFC 9591)
+//!
+//! Real threshold signing — the secret key is **never** materialized in any
+//! single process. Output is a 64-byte standard Ed25519 signature that
+//! verifies under the group public key with `signatures::verify`.
 //!
 //! ```
-//! use tenzro_crypto::mpc::{ThresholdConfig, generate_key_shares, create_partial_signature, combine_signatures_with_message, MpcKeyShare};
-//! use tenzro_crypto::KeyType;
+//! use tenzro_crypto::frost::{
+//!     keygen_with_trusted_dealer, round1_commit, build_signing_package,
+//!     round2_sign, aggregate_signature,
+//! };
+//! use tenzro_crypto::signatures;
 //!
 //! # fn main() -> tenzro_crypto::Result<()> {
-//! // Create a 2-of-3 threshold configuration
-//! let config = ThresholdConfig::new(2, 3)?;
+//! // 2-of-3 threshold key (trusted dealer; DKG variant in `frost::dkg_part1`).
+//! let (group_pkg, shares) = keygen_with_trusted_dealer(2, 3)?;
 //!
-//! // Generate key shares
-//! let shares = generate_key_shares(KeyType::Ed25519, config)?;
+//! // Round 1: each signer commits.
+//! let (n1, c1) = round1_commit(&shares[0])?;
+//! let (n2, c2) = round1_commit(&shares[1])?;
 //!
-//! // Create partial signatures
-//! let message = b"Tenzro Network MPC transaction";
-//! let partial_sigs: Vec<_> = shares.iter()
-//!     .take(2)
-//!     .map(|share| create_partial_signature(share, message))
-//!     .collect::<Result<_, _>>()?;
+//! // Coordinator builds the signing package over the message.
+//! let message = b"Tenzro Network FROST transaction";
+//! let signing_pkg = build_signing_package(message, &[c1, c2])?;
 //!
-//! // Reconstruct master key from shares and produce a real signature
-//! let share_refs: Vec<&MpcKeyShare> = shares.iter().take(2).collect();
-//! let signature = combine_signatures_with_message(&share_refs, &partial_sigs, message)?;
+//! // Round 2: each signer produces its signature share.
+//! let s1 = round2_sign(&signing_pkg, &n1, &shares[0])?;
+//! let s2 = round2_sign(&signing_pkg, &n2, &shares[1])?;
+//!
+//! // Aggregate to a single 64-byte standard Ed25519 signature.
+//! let sig = aggregate_signature(&signing_pkg, &[s1, s2], &group_pkg)?;
+//!
+//! // Verifies under the group public key with the standard Ed25519 verifier.
+//! let group_pk = group_pkg.group_public_key.as_public_key();
+//! signatures::verify(&group_pk, message, &sig)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -91,13 +104,15 @@ pub mod bls;
 pub mod composite;
 pub mod encryption;
 pub mod error;
+pub mod frost;
 pub mod hash;
 pub mod keys;
-pub mod mpc;
+pub mod p256;
 pub mod pq;
 pub mod rng;
 pub mod signatures;
 pub mod vrf;
+pub mod webauthn;
 
 // Re-export commonly used types
 pub use composite::{
@@ -105,6 +120,17 @@ pub use composite::{
     StandardHybridVerifier,
 };
 pub use error::{CryptoError, Result};
+pub use frost::{
+    aggregate_signature as frost_aggregate, build_signing_package as frost_build_signing_package,
+    dkg_part1 as frost_dkg_part1, dkg_part2 as frost_dkg_part2, dkg_part3 as frost_dkg_part3,
+    keygen_with_trusted_dealer as frost_keygen, round1_commit as frost_round1_commit,
+    round2_sign as frost_round2_sign, DkgRound1, DkgRound1Public, DkgRound1Secret, DkgRound2,
+    DkgRound2Secret, DkgRound2Unicast, GroupPublicKey as FrostGroupPublicKey,
+    PublicKeyPackage as FrostPublicKeyPackage, SecretShare as FrostSecretShare,
+    SignatureShare as FrostSignatureShare, SignerIndex as FrostSignerIndex,
+    SigningCommitments as FrostSigningCommitments, SigningNonces as FrostSigningNonces,
+    SigningPackage as FrostSigningPackage,
+};
 pub use hash::{sha256, keccak256, Hash, Hasher, Keccak256, Sha256};
 pub use keys::{Address, KeyPair, KeyType, PublicKey, SecretKey};
 pub use pq::{
@@ -112,6 +138,14 @@ pub use pq::{
     ML_DSA_65_SIG_LEN, ML_DSA_65_VK_LEN, ML_KEM_768_CT_LEN, ML_KEM_768_EK_LEN, ML_KEM_SS_LEN,
 };
 pub use signatures::{Signature, Signer, Verifier};
+pub use p256::{
+    build_p256verify_input, P256KeyPair, P256Signature, P256Signer, P256Verifier,
+    P256_PUBLIC_KEY_LEN, P256_PUBLIC_KEY_SEC1_LEN, P256_SIGNATURE_LEN,
+};
+pub use webauthn::{
+    unwrap_der_signature, verify_webauthn_assertion, webauthn_signed_hash,
+    webauthn_signed_payload, WebAuthnAssertion, WebAuthnCeremonyType,
+};
 
 #[cfg(test)]
 mod tests {
@@ -198,22 +232,4 @@ mod tests {
         assert_eq!(decrypted, plaintext);
     }
 
-    #[test]
-    fn test_mpc_workflow() {
-        use mpc::{ThresholdConfig, generate_key_shares, create_partial_signature, combine_signatures_with_message, MpcKeyShare};
-
-        let config = ThresholdConfig::new(2, 3).unwrap();
-        let shares = generate_key_shares(KeyType::Ed25519, config).unwrap();
-
-        let message = b"Tenzro Network MPC test";
-        let partial_sigs: Vec<_> = shares
-            .iter()
-            .take(2)
-            .map(|share| create_partial_signature(share, message).unwrap())
-            .collect();
-
-        let share_refs: Vec<&MpcKeyShare> = shares.iter().take(2).collect();
-        let signature = combine_signatures_with_message(&share_refs, &partial_sigs, message).unwrap();
-        assert_eq!(signature.key_type(), KeyType::Ed25519);
-    }
 }

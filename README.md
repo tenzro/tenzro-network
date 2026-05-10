@@ -13,7 +13,7 @@ Tenzro Network is a fully decentralized protocol for the AI economy:
 
 - **Providers** earn TNZO by securing the network (validators), serving AI models (inference), running TEE enclaves (confidential computing), and contributing GPU compute to verifiable training runs
 - **Users** discover and consume AI models, verify proofs, and interact through CLI, SDKs, or MCP
-- **Agents** operate autonomously with self-sovereign identities, MPC wallets, and delegation scopes — discovering compute, negotiating prices, and settling autonomously on the same TNZO rails
+- **Agents** operate autonomously with self-sovereign identities, FROST-Ed25519 threshold wallets, and delegation scopes — discovering compute, negotiating prices, and settling autonomously on the same TNZO rails
 - **Settlement** happens on-chain with micropayment channels for per-token billing and escrow + on-chain run-root commitments for training jobs
 - **Cross-chain** interoperability via LayerZero V2, Chainlink CCIP, deBridge DLN, LI.FI, Wormhole, and Canton
 
@@ -23,7 +23,7 @@ Tenzro turns AI compute into a unit of economic exchange — denominated, settle
 
 - **Tokenized AI inference.** Anyone can run AI models (chat, vision, audio, forecasting, embeddings, segmentation, detection) and offer them on the marketplace. Users and agents pay per token (or per inference); providers earn TNZO directly. Confidential variants run inside TEE enclaves (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC). Micropayment channels make high-frequency, low-value billing efficient.
 - **Tokenized AI training (Tenzro Train).** Decentralized verifiable training using a Decoupled DiLoCo–style protocol. GPU providers contribute compute and earn TNZO; sponsors fund runs from on-chain escrow. Every accepted outer gradient produces a signed receipt, and every run finalizes a run-root commitment on-chain. Phase 1 ships timeseries-first with simple mean aggregation, stake bonding, and the Open trust tier; Byzantine-robust aggregation, multi-region scale, and TEE-resident data are roadmap.
-- **Agentic finance.** Autonomous agents discover providers, negotiate, pay, and settle in TNZO using the same TDIP identity, MPC wallet, and delegation scope. AP2 mandates, x402 micropayments, ERC-8004 trustless-agent registries, and ERC-4337 v0.8 smart accounts all run inside Tenzro consensus.
+- **Agentic finance.** Autonomous agents discover providers, negotiate, pay, and settle in TNZO using the same TDIP identity, FROST-Ed25519 threshold wallet, and delegation scope. AP2 mandates, x402 micropayments, ERC-8004 trustless-agent registries, and ERC-4337 v0.8 smart accounts all run inside Tenzro consensus.
 
 Verifiability is not optional. Inference results, settlements, and identity claims can be proven via Plonky3 STARKs over the KoalaBear field (transparent setup, post-quantum-conjectured soundness) or attested by hardware enclaves — both anchored on-chain via the `ZK_VERIFY` and `TEE_VERIFY` precompiles. Where Render rents raw GPUs and Bittensor coordinates subnet intelligence, Tenzro unifies inference, training, agent settlement, identity, verification, and cross-chain reach under one tokenized substrate.
 
@@ -74,12 +74,12 @@ For the full ecosystem context — what AP2, x402, ERC-8004, and CIP-56 are doin
 | Crate | Description |
 |-------|-------------|
 | **tenzro-types** | Core types, constants, primitives (zero internal deps) |
-| **tenzro-crypto** | Ed25519, Secp256k1, AES-256-GCM, X25519, BLS12-381, MPC threshold signing, VRF (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI) |
+| **tenzro-crypto** | Ed25519, Secp256k1, AES-256-GCM, X25519, BLS12-381, FROST-Ed25519 threshold signatures (RFC 9591), VRF (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI) |
 | **tenzro-tee** | TEE abstraction: Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC with X.509 cert chain verification |
 | **tenzro-zk** | Plonky3 STARKs over the KoalaBear field (Poseidon2 + FRI), three pre-built AIRs (inference / settlement / identity), no trusted setup, post-quantum sound |
 | **tenzro-network** | libp2p P2P networking: gossipsub, Kademlia DHT, peer management, rate limiting |
 | **tenzro-storage** | RocksDB with column families, Merkle Patricia Trie, snapshots, fsync durability |
-| **tenzro-wallet** | MPC 2-of-3 threshold wallets, Argon2id keystore, transaction builder, nonce management, key zeroization |
+| **tenzro-wallet** | FROST-Ed25519 (RFC 9591) 2-of-3 threshold wallets + ML-DSA-65 hybrid PQ leg, Argon2id keystore, transaction builder, nonce management, key zeroization |
 | **tenzro-auth** | Authentication engine: AAP (Agent Authentication Protocol), DPoP, RAR (Rich Authorization Requests) |
 | **tenzro-consensus** | HotStuff-2 BFT: two-phase commit, TEE-weighted leader selection, equivocation detection + slashing |
 | **tenzro-vm** | Multi-VM: EVM (revm) + SVM (solana_rbpf) + DAML, Block-STM parallel execution, EIP-1559, ERC-4337 AA, 17 precompiles (incl. VRF at 0x1007) |
@@ -120,7 +120,7 @@ cargo build --release -p tenzro-node -p tenzro-cli
 ### Join the Network
 
 ```bash
-# Join — provisions identity + MPC wallet + hardware profile
+# Join — provisions identity + FROST-Ed25519 threshold wallet + hardware profile
 tenzro join --name "Your Name"
 
 # Mint a DPoP-bound bearer JWT for authenticated RPC/MCP access
@@ -243,7 +243,7 @@ This means a single agent identity can compose a card-rail TAP payment, an x402 
 - X.509 certificate chain verification with pinned vendor root CAs
 - AES-256-GCM enclave encryption with HKDF key derivation
 - Plonky3 STARK proofs over KoalaBear (no trusted setup, post-quantum sound), with on-chain `ZkCommitmentRegistry` for O(1) EVM verification
-- MPC 2-of-3 threshold wallets with Argon2id key derivation
+- FROST-Ed25519 (RFC 9591) 2-of-3 threshold wallets with Argon2id key derivation, paired with mandatory ML-DSA-65 post-quantum signatures
 - VRF (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI) for provably-fair randomness — precompile `0x1007`, NFT `mintRandom` (`0x52517e21`)
 
 ### Cross-Chain Bridge

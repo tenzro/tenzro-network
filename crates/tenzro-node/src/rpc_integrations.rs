@@ -471,10 +471,13 @@ pub(crate) async fn handle_get_kya_record(
 ///    round-trip and no central trust anchor required.
 /// 2. **Cross-network discovery via ERC-8004** — every TDIP machine
 ///    identity is automatically mirrored into the
-///    `IdentityRegistry` system contract at precompile `0x101a`, so any
-///    EVM tool can resolve `agentId = keccak256(utf8(did_string))` and
-///    hit the same agent record from Ethereum, L2s, or any chain that
-///    supports ERC-8004.
+///    `IdentityRegistry` system contract at precompile `0x101a`. The
+///    registry allocates a sequential `uint256 agentId` (1-indexed) at
+///    register-time and stores it on `IdentityData::Machine.erc8004_agent_id`;
+///    reverse DID → id resolution via
+///    `OnChainAgentRegistry::lookup_agent_id_by_did`. Any EVM tool can
+///    then resolve the same agent record from Ethereum, L2s, or any chain
+///    that supports ERC-8004.
 /// 3. **W3C DID Document service entries for federation pointers** —
 ///    Tenzro DIDs can carry `service[].type = "MastercardKYA"` or
 ///    `"VisaTAP"` entries pointing at the upstream federation directory
@@ -534,7 +537,9 @@ pub(crate) async fn handle_mastercard_kya_protocol_info(
             "cross_network_discovery": {
                 "system_contract": "ERC8004_IDENTITY",
                 "precompile": "0x101a",
-                "agent_id_derivation": "keccak256(utf8(did_string))",
+                "agent_id_allocation": "sequential_uint256_one_indexed_allocated_by_registry_at_register_time",
+                "tdip_field": "IdentityData::Machine.erc8004_agent_id",
+                "reverse_lookup": "OnChainAgentRegistry::lookup_agent_id_by_did",
                 "auto_mirror": "OnChainAgentRegistry::mirror_register_agent_invoked_on_register_machine_with_fee",
                 "rationale": "any_evm_tool_can_resolve_tenzro_agents_via_erc8004_byte_identical_calldata",
             },
@@ -929,9 +934,10 @@ pub(crate) async fn handle_process_spt_granted_token_deactivated(
 ///    `charge.dispute.closed` the caller MUST pass `dispute_status` (
 ///    `"won"` or `"lost"`) — the closed event is ambiguous on its own.
 /// 3. Calls [`crate::erc8004_reputation_dispatcher::dispatch_settlement_outcome`]
-///    which derives the 32-byte `agentId` from the machine DID via
-///    [`tenzro_identity::erc8004::derive_agent_id`] and appends one
-///    `FeedbackEntry` row.
+///    which resolves the machine DID to its sequential `uint256 agentId`
+///    via [`tenzro_identity::erc8004::OnChainAgentRegistry::lookup_agent_id_by_did`]
+///    (allocated at machine-identity registration time) and appends one
+///    `FeedbackEntry` row keyed by the `agentId`'s big-endian 32-byte word.
 ///
 /// The cross-write is **append-only**: replaying the same webhook
 /// produces a new feedback row each time. This mirrors at-least-once
@@ -1026,6 +1032,14 @@ pub(crate) async fn handle_process_spt_settlement_outcome(
         data: None,
     })?;
 
+    let agent_registry = node.erc8004_agent_registry().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "ERC-8004 OnChainAgentRegistry mirror not initialized on this node — \
+                  cannot resolve machine DID to sequential agentId"
+            .to_string(),
+        data: None,
+    })?;
+
     let validator_addr = node.local_validator_address().ok_or_else(|| JsonRpcError {
         code: -32603,
         message: "Local validator address not available — \
@@ -1048,6 +1062,7 @@ pub(crate) async fn handle_process_spt_settlement_outcome(
         dispute_status.as_deref(),
         &rater,
         registry,
+        agent_registry,
     )
     .map_err(|e| JsonRpcError {
         code: -32603,
@@ -1303,63 +1318,99 @@ pub(crate) async fn handle_ap2_report_mandate_violation(
 // ERC-8004 — Trustless Agents Registry
 // ============================================================
 
-/// `tenzro_erc8004DeriveAgentId` — compute canonical `agentId`
-/// (`keccak256(did)`) from a Tenzro DID.
-pub(crate) async fn handle_erc8004_derive_agent_id(
-    _node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let params = params.ok_or_else(|| missing("Missing params"))?;
-    let params = unwrap_arr(params);
-    let did = params
-        .get("did")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| missing("Missing did"))?;
-    let agent_id = tenzro_identity::erc8004::derive_agent_id(did);
-    Ok(json!({
-        "did": did,
-        "agent_id": format!("0x{}", hex::encode(agent_id)),
-    }))
-}
-
-/// `tenzro_erc8004EncodeRegister` — produce calldata for
-/// `registerAgent(bytes32, address, string)`.
+/// `tenzro_erc8004EncodeRegister` — produce calldata for the ERC-8004
+/// `register()` overload (no arguments). The on-chain registry allocates a
+/// fresh sequential `uint256 agentId` for `msg.sender` and returns it; the
+/// agentId is read back from the transaction return data, not derived
+/// off-chain.
 pub(crate) async fn handle_erc8004_encode_register(
     _node: &Arc<TenzroNode>,
-    params: Option<Value>,
+    _params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    let params = params.ok_or_else(|| missing("Missing params"))?;
-    let params = unwrap_arr(params);
-
-    let did = params
-        .get("did")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| missing("Missing did"))?;
-    let address = params
-        .get("agent_address")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| missing("Missing agent_address"))?;
-    let metadata_uri = params
-        .get("metadata_uri")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let agent_id = tenzro_identity::erc8004::derive_agent_id(did);
-    let addr_bytes = parse_eth_addr(address)?;
-
-    let data = tenzro_identity::erc8004::abi::encode_register_agent(
-        tenzro_identity::erc8004::selectors::REGISTER_AGENT,
-        &agent_id,
-        &addr_bytes,
-        metadata_uri,
+    let data = tenzro_identity::erc8004::abi::encode_register(
+        tenzro_identity::erc8004::selectors::REGISTER,
     );
     Ok(json!({
-        "agent_id": format!("0x{}", hex::encode(agent_id)),
         "calldata": format!("0x{}", hex::encode(&data)),
     }))
 }
 
-/// `tenzro_erc8004EncodeGetAgent` — produce calldata for `getAgent(bytes32)`.
+/// `tenzro_erc8004EncodeRegisterWithUri` — produce calldata for the ERC-8004
+/// `register(string agentURI)` overload. Allocates a fresh `agentId` and
+/// binds the supplied metadata URI atomically.
+pub(crate) async fn handle_erc8004_encode_register_with_uri(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let agent_uri = params
+        .get("agent_uri")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let data = tenzro_identity::erc8004::abi::encode_register_with_uri(
+        tenzro_identity::erc8004::selectors::REGISTER_WITH_URI,
+        agent_uri,
+    );
+    Ok(json!({
+        "calldata": format!("0x{}", hex::encode(&data)),
+    }))
+}
+
+/// `tenzro_erc8004EncodeRegisterWithMetadata` — produce calldata for the
+/// ERC-8004 `register(string agentURI, (string,bytes)[] metadata)`
+/// overload. Allocates a fresh `agentId`, binds the URI, and atomically
+/// writes the supplied metadata batch.
+pub(crate) async fn handle_erc8004_encode_register_with_metadata(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let agent_uri = params
+        .get("agent_uri")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let metadata_json = params
+        .get("metadata")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| invalid_params("missing array field 'metadata'"))?;
+
+    let mut metadata = Vec::with_capacity(metadata_json.len());
+    for entry in metadata_json {
+        let key = entry
+            .get("key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_params("metadata entry missing string field 'key'"))?
+            .to_string();
+        let value_hex = entry
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_params("metadata entry missing hex string field 'value'"))?;
+        let value = hex::decode(value_hex.trim_start_matches("0x"))
+            .map_err(|e| invalid_params(format!("invalid hex in metadata value: {e}")))?;
+        metadata.push(tenzro_identity::erc8004::MetadataEntry {
+            metadata_key: key,
+            metadata_value: value,
+        });
+    }
+
+    let data = tenzro_identity::erc8004::abi::encode_register_with_metadata(
+        tenzro_identity::erc8004::selectors::REGISTER_WITH_METADATA,
+        agent_uri,
+        &metadata,
+    );
+    Ok(json!({
+        "calldata": format!("0x{}", hex::encode(&data)),
+    }))
+}
+
+/// `tenzro_erc8004EncodeGetAgent` — produce calldata for
+/// `getAgent(uint256 agentId)`.
 pub(crate) async fn handle_erc8004_encode_get_agent(
     _node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -1367,16 +1418,15 @@ pub(crate) async fn handle_erc8004_encode_get_agent(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let agent_id = parse_bytes32(
+    let agent_id = parse_agent_id_u64(
         params
             .get("agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing agent_id"))?,
     )?;
 
     let data = tenzro_identity::erc8004::abi::encode_get_agent(
         tenzro_identity::erc8004::selectors::GET_AGENT,
-        &agent_id,
+        agent_id,
     );
     Ok(json!({
         "calldata": format!("0x{}", hex::encode(&data)),
@@ -1415,10 +1465,9 @@ pub(crate) async fn handle_erc8004_encode_feedback(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let subject = parse_bytes32(
+    let subject_agent_id = parse_agent_id_u64(
         params
             .get("subject_agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing subject_agent_id"))?,
     )?;
     let rating: i8 = params
@@ -1433,7 +1482,7 @@ pub(crate) async fn handle_erc8004_encode_feedback(
 
     let data = tenzro_identity::erc8004::abi::encode_submit_feedback(
         tenzro_identity::erc8004::selectors::SUBMIT_FEEDBACK,
-        &subject,
+        subject_agent_id,
         rating,
         context_uri,
     );
@@ -1458,10 +1507,9 @@ pub(crate) async fn handle_erc8004_encode_validation_request(
             .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing validator_address"))?,
     )?;
-    let agent_id = parse_bytes32(
+    let agent_id = parse_agent_id_u64(
         params
             .get("agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing agent_id"))?,
     )?;
     let request_uri = params
@@ -1478,7 +1526,7 @@ pub(crate) async fn handle_erc8004_encode_validation_request(
     let data = tenzro_identity::erc8004::abi::encode_validation_request(
         tenzro_identity::erc8004::selectors::VALIDATION_REQUEST,
         &validator_address,
-        &agent_id,
+        agent_id,
         request_uri,
         &request_hash,
     );
@@ -1548,10 +1596,9 @@ pub(crate) async fn handle_erc8004_encode_set_agent_uri(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let agent_id = parse_bytes32(
+    let agent_id = parse_agent_id_u64(
         params
             .get("agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing agent_id"))?,
     )?;
     let metadata_uri = params
@@ -1561,7 +1608,7 @@ pub(crate) async fn handle_erc8004_encode_set_agent_uri(
 
     let data = tenzro_identity::erc8004::abi::encode_set_agent_uri(
         tenzro_identity::erc8004::selectors::SET_AGENT_URI,
-        &agent_id,
+        agent_id,
         metadata_uri,
     );
     Ok(json!({
@@ -1578,10 +1625,9 @@ pub(crate) async fn handle_erc8004_encode_set_agent_wallet(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let agent_id = parse_bytes32(
+    let agent_id = parse_agent_id_u64(
         params
             .get("agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing agent_id"))?,
     )?;
     let new_wallet = parse_eth_addr(
@@ -1603,7 +1649,7 @@ pub(crate) async fn handle_erc8004_encode_set_agent_wallet(
 
     let data = tenzro_identity::erc8004::abi::encode_set_agent_wallet(
         tenzro_identity::erc8004::selectors::SET_AGENT_WALLET,
-        &agent_id,
+        agent_id,
         &new_wallet,
         deadline,
         &signature,
@@ -1622,10 +1668,9 @@ pub(crate) async fn handle_erc8004_encode_set_metadata(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let agent_id = parse_bytes32(
+    let agent_id = parse_agent_id_u64(
         params
             .get("agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing agent_id"))?,
     )?;
     let metadata_key = params
@@ -1641,7 +1686,7 @@ pub(crate) async fn handle_erc8004_encode_set_metadata(
 
     let data = tenzro_identity::erc8004::abi::encode_set_metadata(
         tenzro_identity::erc8004::selectors::SET_METADATA,
-        &agent_id,
+        agent_id,
         metadata_key,
         &metadata_value,
     );
@@ -1661,10 +1706,9 @@ pub(crate) async fn handle_erc8004_encode_get_metadata(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let agent_id = parse_bytes32(
+    let agent_id = parse_agent_id_u64(
         params
             .get("agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing agent_id"))?,
     )?;
     let metadata_key = params
@@ -1674,7 +1718,7 @@ pub(crate) async fn handle_erc8004_encode_get_metadata(
 
     let data = tenzro_identity::erc8004::abi::encode_get_metadata(
         tenzro_identity::erc8004::selectors::GET_METADATA,
-        &agent_id,
+        agent_id,
         metadata_key,
     );
     Ok(json!({
@@ -1714,16 +1758,15 @@ pub(crate) async fn handle_erc8004_encode_get_agent_uri(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let agent_id = parse_bytes32(
+    let agent_id = parse_agent_id_u64(
         params
             .get("agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing agent_id"))?,
     )?;
 
     let data = tenzro_identity::erc8004::abi::encode_get_agent_uri(
         tenzro_identity::erc8004::selectors::GET_AGENT_URI,
-        &agent_id,
+        agent_id,
     );
     Ok(json!({
         "calldata": format!("0x{}", hex::encode(&data)),
@@ -1739,16 +1782,15 @@ pub(crate) async fn handle_erc8004_encode_get_agent_wallet(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let agent_id = parse_bytes32(
+    let agent_id = parse_agent_id_u64(
         params
             .get("agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing agent_id"))?,
     )?;
 
     let data = tenzro_identity::erc8004::abi::encode_get_agent_wallet(
         tenzro_identity::erc8004::selectors::GET_AGENT_WALLET,
-        &agent_id,
+        agent_id,
     );
     Ok(json!({
         "calldata": format!("0x{}", hex::encode(&data)),
@@ -1766,10 +1808,9 @@ pub(crate) async fn handle_erc8004_encode_revoke_feedback(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let agent_id = parse_bytes32(
+    let agent_id = parse_agent_id_u64(
         params
             .get("agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing agent_id"))?,
     )?;
     let feedback_id = parse_bytes32(
@@ -1781,7 +1822,7 @@ pub(crate) async fn handle_erc8004_encode_revoke_feedback(
 
     let data = tenzro_identity::erc8004::abi::encode_revoke_feedback(
         tenzro_identity::erc8004::selectors::REVOKE_FEEDBACK,
-        &agent_id,
+        agent_id,
         &feedback_id,
     );
     Ok(json!({
@@ -1798,10 +1839,9 @@ pub(crate) async fn handle_erc8004_encode_append_response(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let agent_id = parse_bytes32(
+    let agent_id = parse_agent_id_u64(
         params
             .get("agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing agent_id"))?,
     )?;
     let feedback_id = parse_bytes32(
@@ -1817,7 +1857,7 @@ pub(crate) async fn handle_erc8004_encode_append_response(
 
     let data = tenzro_identity::erc8004::abi::encode_append_response(
         tenzro_identity::erc8004::selectors::APPEND_RESPONSE,
-        &agent_id,
+        agent_id,
         &feedback_id,
         response_uri,
     );
@@ -1837,10 +1877,9 @@ pub(crate) async fn handle_erc8004_encode_is_feedback_revoked(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let agent_id = parse_bytes32(
+    let agent_id = parse_agent_id_u64(
         params
             .get("agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing agent_id"))?,
     )?;
     let feedback_id = parse_bytes32(
@@ -1852,7 +1891,7 @@ pub(crate) async fn handle_erc8004_encode_is_feedback_revoked(
 
     let data = tenzro_identity::erc8004::abi::encode_is_feedback_revoked(
         tenzro_identity::erc8004::selectors::IS_FEEDBACK_REVOKED,
-        &agent_id,
+        agent_id,
         &feedback_id,
     );
     Ok(json!({
@@ -1869,10 +1908,9 @@ pub(crate) async fn handle_erc8004_encode_get_feedback_responses(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let agent_id = parse_bytes32(
+    let agent_id = parse_agent_id_u64(
         params
             .get("agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing agent_id"))?,
     )?;
     let feedback_id = parse_bytes32(
@@ -1884,7 +1922,7 @@ pub(crate) async fn handle_erc8004_encode_get_feedback_responses(
 
     let data = tenzro_identity::erc8004::abi::encode_get_feedback_responses(
         tenzro_identity::erc8004::selectors::GET_FEEDBACK_RESPONSES,
-        &agent_id,
+        agent_id,
         &feedback_id,
     );
     Ok(json!({
@@ -1903,10 +1941,9 @@ pub(crate) async fn handle_erc8004_encode_get_feedback(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let subject = parse_bytes32(
+    let subject_agent_id = parse_agent_id_u64(
         params
             .get("subject_agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing subject_agent_id"))?,
     )?;
     let index = params
@@ -1916,7 +1953,7 @@ pub(crate) async fn handle_erc8004_encode_get_feedback(
 
     let data = tenzro_identity::erc8004::abi::encode_get_feedback(
         tenzro_identity::erc8004::selectors::GET_FEEDBACK,
-        &subject,
+        subject_agent_id,
         index,
     );
     Ok(json!({
@@ -1933,16 +1970,15 @@ pub(crate) async fn handle_erc8004_encode_get_feedback_count(
     let params = params.ok_or_else(|| missing("Missing params"))?;
     let params = unwrap_arr(params);
 
-    let subject = parse_bytes32(
+    let subject_agent_id = parse_agent_id_u64(
         params
             .get("subject_agent_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| missing("Missing subject_agent_id"))?,
     )?;
 
     let data = tenzro_identity::erc8004::abi::encode_get_feedback_count(
         tenzro_identity::erc8004::selectors::GET_FEEDBACK_COUNT,
-        &subject,
+        subject_agent_id,
     );
     Ok(json!({
         "calldata": format!("0x{}", hex::encode(&data)),
@@ -2361,6 +2397,54 @@ fn parse_bytes32(s: &str) -> std::result::Result<[u8; 32], JsonRpcError> {
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
+}
+
+/// Parse an ERC-8004 `uint256 agentId` from JSON. Accepts a JSON number, a
+/// decimal string, or a `0x`-prefixed big-endian hex string up to 32 bytes.
+/// Rejects values that don't fit in `u64` (the on-chain registry's id-space
+/// is sequential and doesn't approach `2^64` in any realistic deployment),
+/// so callers passing non-zero upper 24 bytes will see an explicit
+/// diagnostic rather than silent truncation.
+fn parse_agent_id_u64(value: &Value) -> std::result::Result<u64, JsonRpcError> {
+    if let Some(n) = value.as_u64() {
+        return Ok(n);
+    }
+    let s = value
+        .as_str()
+        .ok_or_else(|| invalid_params("agent_id must be a uint256 number or string"))?;
+
+    if let Some(hex_str) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        // Pad odd-length hex (e.g. "0x1") to even before decoding.
+        let padded = if hex_str.len() % 2 == 1 {
+            format!("0{hex_str}")
+        } else {
+            hex_str.to_string()
+        };
+        let bytes = hex::decode(&padded)
+            .map_err(|e| invalid_params(format!("invalid agent_id hex: {e}")))?;
+        if bytes.len() > 32 {
+            return Err(invalid_params(format!(
+                "agent_id is at most 32 bytes (uint256), got {} bytes",
+                bytes.len()
+            )));
+        }
+        // Pack right-aligned into a 32-byte big-endian word.
+        let mut word = [0u8; 32];
+        word[32 - bytes.len()..].copy_from_slice(&bytes);
+        // Reject any value with non-zero bits above bit 63.
+        if word[..24].iter().any(|b| *b != 0) {
+            return Err(invalid_params(
+                "agent_id exceeds u64 range (non-zero upper 24 bytes) — \
+                 the on-chain registry allocates ids sequentially from 1, \
+                 so this value cannot have been produced by register(...)",
+            ));
+        }
+        return Ok(u64::from_be_bytes(word[24..32].try_into().unwrap()));
+    }
+
+    s.parse::<u64>().map_err(|e| {
+        invalid_params(format!("agent_id decimal string did not parse as u64: {e}"))
+    })
 }
 
 #[cfg(test)]

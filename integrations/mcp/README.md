@@ -112,11 +112,11 @@ The server exposes a Python subset across the categories below. The authoritativ
 
 The Tenzro Agent Access Protocol (AAP) layers seven `aap_*` claims on top of OAuth 2.1, DPoP-bound JWTs (RFC 9449), and Rich Authorization Requests (RFC 9396).
 
-- `onboard_human` — Provision a `did:tenzro:human:*` identity, MPC wallet, and access + refresh tokens (RFC 6749 + RFC 9449).
+- `onboard_human` — Provision a `did:tenzro:human:*` identity, FROST-Ed25519 threshold wallet, and access + refresh tokens (RFC 6749 + RFC 9449).
 - `onboard_delegated_agent` — Issue an agent identity bound to a controller DID with a delegation scope.
 - `onboard_autonomous_agent` — Issue a fully autonomous agent identity backed by a TNZO bond.
 - `refresh_token` — Exchange a refresh token for a fresh access token (refresh tokens are not rotated in V1).
-- `link_wallet_for_auth` — Mint a fresh access + refresh token pair against an existing MPC wallet.
+- `link_wallet_for_auth` — Mint a fresh access + refresh token pair against an existing FROST-Ed25519 threshold wallet.
 - `revoke_jwt` / `revoke_did` — Revoke a single JWT by `jti` or cascade-invalidate every JWT minted under a DID.
 - `oauth_discovery` — RFC 8414 Authorization Server Metadata discovery document.
 - `exchange_token` — RFC 8693 OAuth 2.0 Token Exchange for delegated/impersonation flows.
@@ -127,7 +127,7 @@ Pass `dpop_jkt` (RFC 7638 thumbprint of the holder's Ed25519 public key) to bind
 ### Wallet & Balance (6 tools)
 
 - `get_balance` — Get TNZO balance in wei
-- `create_wallet` — Provision a chain-agnostic 2-of-3 Ed25519 MPC wallet (no seed phrase). Tenzro wallets are not per-chain — a single wallet projects into EVM, SVM, and Canton via the pointer-token model, so there is no `chain` parameter. Use `cross_vm_transfer` / `wrap_tnzo` for VM-specific operations and the bridge tools (`bridge_tokens`, deBridge, Wormhole, Li.Fi) for sends to external chains.
+- `create_wallet` — Provision a chain-agnostic 2-of-3 FROST-Ed25519 (RFC 9591) threshold wallet (no seed phrase). Tenzro wallets are not per-chain — a single wallet projects into EVM, SVM, and Canton via the pointer-token model, so there is no `chain` parameter. Use `cross_vm_transfer` / `wrap_tnzo` for VM-specific operations and the bridge tools (`bridge_tokens`, deBridge, Wormhole, Li.Fi) for sends to external chains.
 - `send_transaction` — Send TNZO transfer via server-side `tenzro_signAndSendTransaction` (live nonce + gas-price lookup; accepts `value` or `amount` alias; rejects self-sends with `cannot transfer to self`)
 - `request_faucet` — Request 100 testnet TNZO (24h cooldown)
 - `token_balance` — Get TNZO balance via token subsystem
@@ -174,15 +174,15 @@ Pass `dpop_jkt` (RFC 7638 thumbprint of the holder's Ed25519 public key) to bind
 - `spt_issue` — Issue a SharedPaymentToken bound to a principal/agent DID pair. The node-side `SptCeilingResolver` cross-checks the requested cap against the principal's `DelegationScope` and runtime `SpendingPolicy` before signing.
 - `spt_verify` — Verify SPT signature, principal/agent DID activity, and remaining cap.
 
-### ERC-8004 v0.6+ Trustless Agents Registry (22 tools)
+### ERC-8004 v0.6+ Trustless Agents Registry
 
-IdentityRegistry (10): `erc8004_derive_agent_id`, `erc8004_encode_register`, `erc8004_encode_get_agent`, `erc8004_decode_get_agent`, `erc8004_encode_set_agent_uri`, `erc8004_encode_set_agent_wallet`, `erc8004_encode_set_metadata`, `erc8004_encode_get_metadata`, `erc8004_decode_get_metadata`, `erc8004_encode_get_agent_uri`, `erc8004_encode_get_agent_wallet`.
+IdentityRegistry: `erc8004_encode_register` (no-arg overload), `erc8004_encode_register_with_uri` (`register(string)` overload), `erc8004_encode_register_with_metadata` (`register(string,(string,bytes)[])` overload), `erc8004_encode_get_agent`, `erc8004_decode_get_agent`, `erc8004_encode_set_agent_uri`, `erc8004_encode_set_agent_wallet`, `erc8004_encode_set_metadata`, `erc8004_encode_get_metadata`, `erc8004_decode_get_metadata`, `erc8004_encode_get_agent_uri`, `erc8004_encode_get_agent_wallet`.
 
-ReputationRegistry (9): `erc8004_encode_feedback`, `erc8004_encode_get_feedback`, `erc8004_encode_get_feedback_count`, `erc8004_encode_revoke_feedback`, `erc8004_encode_is_feedback_revoked`, `erc8004_encode_append_response`, `erc8004_encode_get_feedback_responses`.
+ReputationRegistry: `erc8004_encode_feedback`, `erc8004_encode_get_feedback`, `erc8004_encode_get_feedback_count`, `erc8004_encode_revoke_feedback`, `erc8004_encode_is_feedback_revoked`, `erc8004_encode_append_response`, `erc8004_encode_get_feedback_responses`.
 
-ValidationRegistry (3): `erc8004_encode_validation_request`, `erc8004_encode_validation_response`, `erc8004_encode_get_validation`.
+ValidationRegistry: `erc8004_encode_validation_request`, `erc8004_encode_validation_response`, `erc8004_encode_get_validation`.
 
-Calldata is byte-identical to the native EVM precompiles `0x101a` / `0x101b` / `0x101c` (`agentId = keccak256(utf8(did_string))`).
+Calldata is byte-identical to the native EVM precompiles `0x101a` / `0x101b` / `0x101c`. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — server-allocated, never derivable client-side. Encoder tools accept `agent_id` as a JSON number, decimal string, or 0x-prefixed hex word (rejected if it exceeds `u64::MAX`).
 
 ### Identity (right-to-erasure)
 
@@ -361,11 +361,11 @@ Per-modality `list_*_catalog`, `list_*_models`, `load_*_model`, `unload_*_model`
 
 ### Custody (9 tools)
 
-- `create_mpc_wallet` — Create MPC threshold wallet
+- `create_mpc_wallet` — Create FROST-Ed25519 (RFC 9591) threshold wallet
 - `export_keystore` — Export encrypted keystore
 - `import_keystore` — Import from keystore
-- `get_key_shares` — Get MPC key share configuration
-- `rotate_keys` — Rotate MPC key shares
+- `get_key_shares` — Get FROST-Ed25519 secret share configuration
+- `rotate_keys` — Rotate FROST-Ed25519 secret shares
 - `set_spending_limits` — Set daily and per-tx limits
 - `get_spending_limits` — Get spending limits and usage
 - `authorize_session` — Create time-limited session key
