@@ -244,16 +244,25 @@ impl TransactionValidator {
             });
         }
 
-        // Recipient can be zero only for contract deployment
+        // `to` may be zero for typed transactions where the recipient is
+        // either nonexistent (contract creation, governance ops) or encoded
+        // inside the typed payload (release/refund derive recipient from VM
+        // state via `escrow_id`). Plain `Transfer` and `BridgeTransfer` still
+        // require a non-zero recipient.
         if tx.to == Address::zero() {
             match &tx.tx_type {
-                TransactionType::ContractDeploy { .. } => {
-                    // Zero address is valid for contract creation
+                TransactionType::ContractDeploy { .. }
+                | TransactionType::ReleaseEscrow { .. }
+                | TransactionType::RefundEscrow { .. }
+                | TransactionType::GovernancePropose { .. }
+                | TransactionType::GovernanceVote { .. }
+                | TransactionType::ProviderUnstake { .. } => {
+                    // `to` is structurally ignored by the VM for these variants.
                 }
                 _ => {
                     errors.push(ValidationError {
                         field: "to".to_string(),
-                        message: "recipient address cannot be zero (except for contract deployment)".to_string(),
+                        message: "recipient address cannot be zero for this transaction type".to_string(),
                     });
                 }
             }

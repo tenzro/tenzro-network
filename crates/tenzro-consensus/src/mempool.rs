@@ -1,4 +1,30 @@
-//! Transaction mempool with priority ordering
+//! Transaction mempool with priority ordering.
+//!
+//! ## Mempool ↔ proposer coupling
+//!
+//! `select_transactions` is **non-destructive**: it reads the priority queue
+//! without removing anything. Removal happens only via [`Mempool::remove_transactions`],
+//! which the consensus engine invokes on **finalization** of a block.
+//!
+//! This is the canonical production pattern — same shape as CometBFT's
+//! `ReapMaxBytesMaxGas` + `Update` split, the original Diem/Libra mempool, and
+//! pre-Quorum-Store Aptos. It guarantees liveness across view changes:
+//! transactions in an abandoned proposal stay selectable, so the next leader
+//! picks them up. Across concurrent in-flight proposals the same tx may appear
+//! in more than one — at most one block finalizes, the other proposal is
+//! dropped wholesale, and the `contains_key` check on subsequent selections
+//! filters out anything already finalized.
+//!
+//! The destructive-pop-with-explicit-reinjection pattern (the obvious
+//! alternative) is **not** used by any major project in 2026: it requires
+//! plumbing proposal lifecycle (timeout, abandon, commit) back into the
+//! mempool, and any desync between the in-flight set and the abandonment
+//! notification reproduces exactly the stranding bug this design avoids.
+//!
+//! Future direction: abandon priority-pull entirely in favor of Quorum Store
+//! (Aptos) or DAG-mempool (Sui Mysticeti), where data availability is
+//! certified before consensus orders it. Until then, non-destructive read is
+//! the right interim design.
 
 use crate::admission::{AdmissionController, AdmissionDecision, Lane};
 use crate::config::ConsensusConfig;
@@ -368,7 +394,23 @@ impl Mempool {
         self.transactions.get(hash).map(|tx| tx.clone())
     }
 
-    /// Selects transactions for block proposal
+    /// Selects transactions for block proposal.
+    ///
+    /// Selected transactions are put **back** into the priority queue so they
+    /// remain selectable on a subsequent call. They are only removed from the
+    /// `transactions` map by [`Self::remove_transactions`] on finalization.
+    /// This is what guarantees liveness across view changes: if a proposal is
+    /// abandoned (timeout, leader change), the txs it carried are still in
+    /// the mempool and will be re-selected by the next leader's
+    /// `select_transactions` call.
+    ///
+    /// Within a single call, a tx is popped at most once (BinaryHeap pop is
+    /// destructive); duplicates within the returned `Vec` are therefore
+    /// impossible. Across calls, the same tx may be selected for two
+    /// concurrent in-flight proposals — that's fine: at most one of those
+    /// blocks finalizes, the other proposal is dropped wholesale, and the
+    /// `contains_key` check on subsequent selections filters out anything
+    /// already finalized.
     pub fn select_transactions(
         &self,
         max_count: usize,
@@ -376,7 +418,7 @@ impl Mempool {
     ) -> Vec<SignedTransaction> {
         let mut selected = Vec::new();
         let mut total_gas = 0u64;
-        let mut temp_queue = Vec::new();
+        let mut reinsert = Vec::new();
 
         let mut queue = self.queue.write();
 
@@ -400,23 +442,28 @@ impl Mempool {
 
             // Check gas limit
             if total_gas + gas_limit > max_gas {
-                temp_queue.push(prioritized);
+                reinsert.push(prioritized);
                 continue;
             }
 
             // Check count limit
             if selected.len() >= max_count {
-                temp_queue.push(prioritized);
+                reinsert.push(prioritized);
                 continue;
             }
 
-            // Add to selected
+            // Add to selected, and queue it for reinsertion so it's
+            // available again if this proposal doesn't finalize.
             selected.push(tx.clone());
             total_gas += gas_limit;
+            reinsert.push(prioritized);
         }
 
-        // Put back unselected transactions
-        for tx in temp_queue {
+        // Put back every transaction we popped — selected txs included.
+        // `remove_transactions` (called on finalization) is what actually
+        // takes them out of the mempool. Until then, they must remain
+        // selectable so a view-change can't strand them.
+        for tx in reinsert {
             queue.push(tx);
         }
 
@@ -642,6 +689,53 @@ mod tests {
         // Select with low gas limit - should only get one transaction
         let selected = mempool.select_transactions(10, 25000);
         assert_eq!(selected.len(), 1);
+    }
+
+    /// Regression: `select_transactions` must NOT remove selected txs from
+    /// the mempool. They are only removed by `remove_transactions` on
+    /// finalization. This is what guarantees liveness when a proposal is
+    /// abandoned by a view change — the next leader's selection must still
+    /// see them.
+    #[test]
+    fn test_select_is_non_destructive_across_view_changes() {
+        let config = Arc::new(ConsensusConfig::default());
+        let mempool = Mempool::new(config);
+
+        let tx1 = create_test_transaction(100, 1);
+        let tx2 = create_test_transaction(200, 2);
+        let tx3 = create_test_transaction(150, 3);
+
+        mempool.add_transaction(tx1).unwrap();
+        mempool.add_transaction(tx2).unwrap();
+        mempool.add_transaction(tx3).unwrap();
+        assert_eq!(mempool.len(), 3);
+
+        // Leader 1 selects — proposal is built but never finalizes (e.g. view
+        // change before commit QC). `remove_transactions` is NOT called.
+        let leader1 = mempool.select_transactions(10, 1_000_000);
+        assert_eq!(leader1.len(), 3);
+        assert_eq!(mempool.len(), 3, "select must not shrink mempool");
+
+        // Leader 2 selects on the next view. With the buggy
+        // destructive-pop-no-reinsert design, this returned 0 — the selected
+        // txs were stranded. With the fix, the same 3 txs are re-selected.
+        let leader2 = mempool.select_transactions(10, 1_000_000);
+        assert_eq!(
+            leader2.len(),
+            3,
+            "after a view change, abandoned txs must be re-selectable"
+        );
+
+        // Order is preserved across selections (still gas-priority sorted).
+        assert_eq!(leader2[0].transaction.gas_price, 200);
+
+        // Only finalization removes them.
+        let hashes: Vec<_> = leader2.iter().cloned().map(|mut t| t.hash()).collect();
+        mempool.remove_transactions(&hashes);
+        assert_eq!(mempool.len(), 0);
+
+        let leader3 = mempool.select_transactions(10, 1_000_000);
+        assert_eq!(leader3.len(), 0);
     }
 
     #[test]

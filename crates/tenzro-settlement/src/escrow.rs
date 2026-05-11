@@ -549,6 +549,97 @@ impl EscrowManager {
         verify_release_conditions(conditions, proof)
     }
 
+    // -----------------------------------------------------------------
+    // VM-log reflection API
+    // -----------------------------------------------------------------
+    //
+    // The Native VM (`tenzro-vm/src/native/mod.rs`) is the source of truth
+    // for escrow state and vault balances. The post-execute log scan in
+    // `tenzro-node::EventLoop::process_escrow_logs` decodes
+    // `EscrowCreated` / `EscrowReleased` / `EscrowRefunded` topics, pulls
+    // the canonical `EscrowAccount` JSON from the matching `StateChange`
+    // (written by the VM under `SYSTEM_ADDRESS / escrow:<hex>`), and
+    // dispatches into the reflection methods below. These methods perform
+    // pure index updates with write-through to RocksDB; they do **not**
+    // touch the legacy in-memory `balances` map and do **not** check
+    // payer balance (the VM has already moved funds and persisted the
+    // vault state).
+
+    /// Reflects a VM-created escrow into the off-chain index.
+    ///
+    /// Inserts the record into `escrows`, appends to `escrows_by_payer`
+    /// and `escrows_by_payee`, and atomically persists the record + both
+    /// index entries to `CF_SETTLEMENTS`. Idempotent: a second call with
+    /// the same `escrow.escrow_id` is a no-op (the index already contains
+    /// the id; the record is rewritten with identical bytes).
+    pub fn reflect_escrow_created(&self, escrow: EscrowAccount) -> Result<()> {
+        let escrow_id = escrow.escrow_id.clone();
+
+        // Idempotency: if already indexed, drop the duplicate. Persistence
+        // is keyed by escrow_id so the second write would be byte-identical
+        // anyway, but we want to avoid pushing the id onto the payer/payee
+        // index list a second time.
+        if self.escrows.contains_key(&escrow_id) {
+            return Ok(());
+        }
+
+        self.escrows_by_payer
+            .entry(escrow.payer)
+            .or_default()
+            .push(escrow_id.clone());
+        self.escrows_by_payee
+            .entry(escrow.payee)
+            .or_default()
+            .push(escrow_id.clone());
+        self.escrows.insert(escrow_id, escrow.clone());
+
+        self.persist_escrow_atomic(&escrow, true)?;
+        Ok(())
+    }
+
+    /// Reflects a VM-released escrow: flips status to `Released` and
+    /// rewrites the persisted record. No-op if the escrow is not present
+    /// in the index (e.g. node started after the create block); future
+    /// hydration will pick up the released record from VM state on next
+    /// reflect_escrow_created call (which will not occur — so callers
+    /// must ensure the create reflection landed first; in practice the
+    /// event loop processes both in block order).
+    pub fn reflect_escrow_released(&self, escrow_id: &str) -> Result<()> {
+        let snapshot = {
+            let mut entry = match self.escrows.get_mut(escrow_id) {
+                Some(e) => e,
+                None => return Ok(()),
+            };
+            let escrow = entry.value_mut();
+            if escrow.status == EscrowStatus::Released {
+                return Ok(());
+            }
+            escrow.status = EscrowStatus::Released;
+            escrow.clone()
+        };
+        self.persist_escrow_atomic(&snapshot, false)?;
+        Ok(())
+    }
+
+    /// Reflects a VM-refunded escrow: flips status to `Refunded` and
+    /// rewrites the persisted record. No-op if not present.
+    pub fn reflect_escrow_refunded(&self, escrow_id: &str) -> Result<()> {
+        let snapshot = {
+            let mut entry = match self.escrows.get_mut(escrow_id) {
+                Some(e) => e,
+                None => return Ok(()),
+            };
+            let escrow = entry.value_mut();
+            if escrow.status == EscrowStatus::Refunded {
+                return Ok(());
+            }
+            escrow.status = EscrowStatus::Refunded;
+            escrow.clone()
+        };
+        self.persist_escrow_atomic(&snapshot, false)?;
+        Ok(())
+    }
+
     /// Returns escrow statistics
     pub fn stats(&self) -> EscrowStats {
         let total_escrows = self.escrows.len();

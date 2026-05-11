@@ -4100,6 +4100,17 @@ impl TenzroNode {
             event_loop
         };
 
+        // Wire the on-chain escrow query index. The post-execute scan
+        // mirrors VM-emitted EscrowCreated/Released/Refunded logs into
+        // the off-chain EscrowManager (which the by-payer/by-payee read
+        // RPCs query). Without this, escrow txs commit on chain but the
+        // by-payer / by-payee indices stay empty.
+        let event_loop = if let Some(ref em) = self.escrow_manager {
+            event_loop.with_escrow_manager(em.clone())
+        } else {
+            event_loop
+        };
+
         // Wire permissionless ValidatorRegistry. The event loop's
         // post-block scan mirrors VM-emitted ValidatorRegister /
         // ValidatorExit / ValidatorMetadataUpdate logs into this
