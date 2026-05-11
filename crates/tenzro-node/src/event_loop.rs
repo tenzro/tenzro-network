@@ -309,6 +309,15 @@ pub struct EventLoop {
     /// marker; this manager is the authoritative read model that lane
     /// resolution and receipt envelopes consult.
     bond_manager: Option<Arc<BondManager>>,
+    /// On-chain escrow query index. Wired so the post-execute scan can
+    /// reflect VM-emitted `EscrowCreated` / `EscrowReleased` / `EscrowRefunded`
+    /// logs into the off-chain `EscrowManager`. The Native VM is the source
+    /// of truth for escrow state and vault balances; this manager is the
+    /// read model that `tenzro_listEscrowsByPayer` / `tenzro_listEscrowsByPayee`
+    /// query. Without this wired, escrow transactions execute on chain
+    /// (vault balances + the `escrow:<hex>` marker under `SYSTEM_ADDRESS`)
+    /// but the by-payer/by-payee read indices stay empty.
+    escrow_manager: Option<Arc<tenzro_settlement::EscrowManager>>,
     /// Permissionless validator registry (Dynamic Validator Set).
     ///
     /// The on-chain source of truth for who is a validator. The post-execute
@@ -418,6 +427,7 @@ impl EventLoop {
             staking: None,
             identity_registry: None,
             bond_manager: None,
+            escrow_manager: None,
             validator_registry: None,
             workflow_runtime: None,
             block_import_rx: None,
@@ -522,6 +532,21 @@ impl EventLoop {
     /// posted bonds never promote their agents into Bonded lanes.
     pub fn with_bond_manager(mut self, bond_manager: Arc<BondManager>) -> Self {
         self.bond_manager = Some(bond_manager);
+        self
+    }
+
+    /// Wires the on-chain escrow query index. Required for the post-execute
+    /// log scan to mirror VM-emitted escrow events into the off-chain
+    /// `EscrowManager`. Without this, escrow transactions execute on chain
+    /// (vault balances + `escrow:<hex>` marker under `SYSTEM_ADDRESS`) but
+    /// the by-payer/by-payee read indices stay empty, so
+    /// `tenzro_listEscrowsByPayer` / `tenzro_listEscrowsByPayee` return
+    /// empty arrays.
+    pub fn with_escrow_manager(
+        mut self,
+        escrow_manager: Arc<tenzro_settlement::EscrowManager>,
+    ) -> Self {
+        self.escrow_manager = Some(escrow_manager);
         self
     }
 
@@ -2037,6 +2062,18 @@ impl EventLoop {
                         // balances and on-chain markers are already
                         // committed by the VM at this point.
                         self.process_bond_logs(&result, block_height).await;
+
+                        // Post-execute escrow scan: mirrors VM-emitted
+                        // `EscrowCreated` / `EscrowReleased` / `EscrowRefunded`
+                        // logs into the off-chain `EscrowManager` query index
+                        // (CF_SETTLEMENTS / `escrow:` + `escrow_payer:` +
+                        // `escrow_payee:` keys). The VM has already moved
+                        // funds and persisted the canonical `EscrowAccount`
+                        // under SYSTEM_ADDRESS; this populates the by-payer
+                        // and by-payee indices that `tenzro_listEscrowsByPayer`
+                        // / `tenzro_listEscrowsByPayee` read.
+                        self.process_escrow_logs(&result, block_height).await;
+
                         // Same pattern for ValidatorRegister / ValidatorExit /
                         // ValidatorMetadataUpdate logs — drive the off-chain
                         // ValidatorRegistry from VM-emitted events. The VM
@@ -2887,6 +2924,141 @@ impl EventLoop {
                 }
 
                 _ => {}
+            }
+        }
+    }
+
+    /// Reflect VM-emitted escrow logs into the off-chain
+    /// `EscrowManager` query index.
+    ///
+    /// The Native VM is the source of truth for escrow state and vault
+    /// balances. The VM persists the canonical `EscrowAccount` JSON under
+    /// `SYSTEM_ADDRESS` at storage key `escrow:<hex(escrow_id)>` and emits
+    /// one of three log topics:
+    ///
+    /// | Topic            | Data layout                                         |
+    /// |------------------|-----------------------------------------------------|
+    /// | `EscrowCreated`  | `escrow_id(32) ‖ payer_addr(32) ‖ vault_bytes(32)` |
+    /// | `EscrowReleased` | `escrow_id(32) ‖ payee_bytes(32) ‖ amount(16 LE)`  |
+    /// | `EscrowRefunded` | `escrow_id(32) ‖ payer(32)       ‖ amount(16 LE)`  |
+    ///
+    /// We extract the escrow id from the log, locate the matching
+    /// `StateChange` written by the VM at the same height (the new value
+    /// is `serde_json::to_vec(&EscrowAccount{...})`), deserialize it, and
+    /// reflect it into `EscrowManager`. The reflection methods do **not**
+    /// touch balances and do **not** check ordering — the VM has already
+    /// validated the transition. Errors are logged but never abort the
+    /// block; divergence is recoverable on restart via
+    /// `EscrowManager::with_storage`'s hydrate path.
+    async fn process_escrow_logs(
+        &self,
+        result: &tenzro_vm::ExecutionResult,
+        block_height: BlockHeight,
+    ) {
+        let any_escrow = result.logs.iter().any(|l| {
+            l.topics.first().map(|t| {
+                let s = t.as_slice();
+                s == b"EscrowCreated" || s == b"EscrowReleased" || s == b"EscrowRefunded"
+            }).unwrap_or(false)
+        });
+        if !any_escrow {
+            return;
+        }
+
+        let escrow_manager = match self.escrow_manager.as_ref() {
+            Some(m) => m.clone(),
+            None => {
+                debug!(
+                    block_height = block_height.0,
+                    "Escrow log observed but EscrowManager not wired; skipping reflection"
+                );
+                return;
+            }
+        };
+
+        // VM `SYSTEM_ADDRESS` is `[0xFF; 20]` (private to tenzro-vm).
+        const SYSTEM_ADDRESS_BYTES: [u8; 20] = [0xFF; 20];
+        const ESCROW_KEY_PREFIX: &[u8] = b"escrow:";
+
+        for log in &result.logs {
+            let topic = match log.topics.first() {
+                Some(t) => t.as_slice(),
+                None => continue,
+            };
+
+            // All three topics start their data with the 32-byte escrow_id.
+            if log.data.len() < 32 {
+                warn!(
+                    topic = %String::from_utf8_lossy(topic),
+                    data_len = log.data.len(),
+                    "Escrow log payload shorter than 32 bytes; skipping"
+                );
+                continue;
+            }
+            let escrow_id_bytes = &log.data[..32];
+            let escrow_id_hex = hex::encode(escrow_id_bytes);
+            let storage_key = format!("escrow:{}", escrow_id_hex);
+
+            // Locate the matching state change: address == SYSTEM_ADDRESS,
+            // key == "escrow:<hex>", new_value carries the canonical
+            // EscrowAccount JSON.
+            let escrow_blob = result.state_changes.iter().find_map(|sc| {
+                if sc.address.as_slice() == SYSTEM_ADDRESS_BYTES.as_slice()
+                    && sc.key.as_slice() == storage_key.as_bytes()
+                    && sc.key.starts_with(ESCROW_KEY_PREFIX)
+                {
+                    sc.new_value.as_deref()
+                } else {
+                    None
+                }
+            });
+
+            let escrow_blob = match escrow_blob {
+                Some(b) => b,
+                None => {
+                    warn!(
+                        topic = %String::from_utf8_lossy(topic),
+                        escrow_id = %escrow_id_hex,
+                        "Escrow log has no matching SYSTEM_ADDRESS state change; skipping"
+                    );
+                    continue;
+                }
+            };
+
+            let escrow: tenzro_settlement::escrow::EscrowAccount =
+                match serde_json::from_slice(escrow_blob) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!(
+                            topic = %String::from_utf8_lossy(topic),
+                            escrow_id = %escrow_id_hex,
+                            error = %e,
+                            "Failed to decode EscrowAccount from VM state change; skipping"
+                        );
+                        continue;
+                    }
+                };
+
+            let outcome = match topic {
+                b"EscrowCreated" => escrow_manager.reflect_escrow_created(escrow),
+                b"EscrowReleased" => escrow_manager.reflect_escrow_released(&escrow_id_hex),
+                b"EscrowRefunded" => escrow_manager.reflect_escrow_refunded(&escrow_id_hex),
+                _ => continue,
+            };
+
+            match outcome {
+                Ok(()) => debug!(
+                    topic = %String::from_utf8_lossy(topic),
+                    escrow_id = %escrow_id_hex,
+                    "EscrowManager reflected escrow log"
+                ),
+                Err(e) => warn!(
+                    topic = %String::from_utf8_lossy(topic),
+                    escrow_id = %escrow_id_hex,
+                    error = %e,
+                    "EscrowManager rejected reflected escrow log; \
+                     on-chain and off-chain may have diverged"
+                ),
             }
         }
     }

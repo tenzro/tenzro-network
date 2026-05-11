@@ -4375,11 +4375,16 @@ fn handle_escrow_write_deprecated(method: &str) -> std::result::Result<Value, Js
 }
 
 /// Render an `EscrowAccount` as JSON for read-only RPC responses.
+///
+/// Wire convention: 32-byte ids and addresses are emitted as `0x`-prefixed
+/// lowercase hex, matching `tx_hash` / `block_hash` / address fields elsewhere
+/// in the JSON-RPC surface. Internal DashMap / RocksDB keys remain bare hex —
+/// callers should not depend on the storage-key form.
 fn escrow_to_json(escrow: &tenzro_settlement::EscrowAccount) -> Value {
     serde_json::json!({
-        "escrow_id": escrow.escrow_id,
-        "payer": format!("{}", escrow.payer),
-        "payee": format!("{}", escrow.payee),
+        "escrow_id": format!("0x{}", escrow.escrow_id),
+        "payer": format!("0x{}", hex::encode(escrow.payer.as_bytes())),
+        "payee": format!("0x{}", hex::encode(escrow.payee.as_bytes())),
         "amount": escrow.amount.to_string(),
         "asset_id": escrow.asset_id,
         "status": format!("{:?}", escrow.status),
@@ -4401,7 +4406,7 @@ async fn handle_get_escrow(
         data: None,
     })?;
 
-    let escrow_id = params
+    let escrow_id_raw = params
         .get("escrow_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| JsonRpcError {
@@ -4409,6 +4414,10 @@ async fn handle_get_escrow(
             message: "Missing escrow_id".to_string(),
             data: None,
         })?;
+    // The wire convention is `0x`-prefixed hex (matches what `escrow_to_json`
+    // emits), but the in-memory / RocksDB key is bare hex. Strip on input so
+    // both forms accept.
+    let escrow_id = escrow_id_raw.strip_prefix("0x").unwrap_or(escrow_id_raw);
 
     let escrow_manager = node.escrow_manager().ok_or_else(|| JsonRpcError {
         code: -32000,
@@ -23796,9 +23805,17 @@ async fn resolve_auth_to_wallet(
         }
     };
 
-    // Look up the wallet bound to the controller DID. The auth engine
-    // resolves authority *given* a wallet id, so we resolve the binding
-    // first and pass it in.
+    // Look up the wallet bound to the **bearer** DID (`claims.sub`) — the
+    // entity whose DPoP key signs the request and whose MPC wallet must
+    // produce the on-chain signature. For autonomous agents and humans
+    // this equals `claims.controller_did`; for delegated agents the
+    // controller is the parent (human/upstream agent) but the bearer is
+    // the delegated agent itself, and it is the bearer's wallet — not
+    // the controller's — that owns the `from` address on the wire.
+    //
+    // `controller_did` remains the authorization anchor for RAR scope
+    // and cascading-revocation checks (see `engine.resolve_authority`
+    // below, which gets the full `claims` and walks the act-chain).
     let registry = match node.identity_registry() {
         Some(r) => r,
         None => {
@@ -23809,14 +23826,14 @@ async fn resolve_auth_to_wallet(
             });
         }
     };
-    let wallet_id = match registry.find_wallet_id_for_did(&claims.controller_did) {
+    let wallet_id = match registry.find_wallet_id_for_did(&claims.sub) {
         Ok(w) => w,
         Err(e) => {
             return AuthOutcome::AuthError(JsonRpcError {
                 code: -32001,
                 message: format!(
-                    "No wallet bound to controller DID {}: {}",
-                    claims.controller_did, e
+                    "No wallet bound to bearer DID {}: {}",
+                    claims.sub, e
                 ),
                 data: None,
             });
