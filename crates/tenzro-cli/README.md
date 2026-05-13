@@ -180,8 +180,8 @@ audit the disclosure string in one place.
 
 ```bash
 # Timeseries forecasting (tenzro_forecast)
-# Catalog: Chronos-2, Chronos-Bolt small/base, TimesFM 2.5 200M, Granite-TTM-r2
-tenzro forecast --model chronos-bolt-small --context <values> --horizon 64
+# Catalog: TimesFM 2.5 200M
+tenzro forecast --model timesfm-2.5-200m --context <values> --horizon 64
 
 # Text embedding (tenzro_textEmbed)
 # Catalog: Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M, BGE-M3, Snowflake Arctic
@@ -192,7 +192,7 @@ tenzro embed-text --model qwen3-embedding-0.6b --text "hello world"
 tenzro embed-image --model siglip2-base --image ./photo.png
 
 # Segmentation (tenzro_segment)
-# Catalog: SAM 3 / 3.1, SAM 2 base/large, EdgeSAM, MobileSAM
+# Catalog: SAM 2 base/large, EdgeSAM, MobileSAM
 tenzro segment --model sam-2-base --image ./photo.png --points "320,240"
 
 # Object detection (tenzro_detect)

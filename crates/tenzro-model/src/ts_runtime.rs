@@ -7,19 +7,18 @@
 //!
 //! # Scope
 //!
-//! Foundation timeseries models in 2026 (TimesFM 2.5, Chronos-2,
-//! Granite-TTM r2, Toto-Open-Base, Moirai-MoE) have similar but not
-//! identical I/O signatures. This module ships a common `ForecastModel`
-//! trait plus a `GenericForecast` implementation that fits the most
-//! common shape:
+//! This module ships a common `ForecastModel` trait plus a
+//! `GenericForecast` implementation for ONNX foundation forecasters that
+//! fit a single-tensor input contract:
 //!
-//!   input  : `[batch=1, context_len]`           (f32 univariate history)
-//!   output : `[batch=1, horizon]` or
-//!            `[batch=1, horizon, n_quantiles]`  (point or quantile forecast)
+//!   input  : `[batch, context_len]`             (f32 univariate history)
+//!   output : `[batch, horizon]` or
+//!            `[batch, horizon, n_quantiles]`    (point or quantile forecast)
 //!
-//! TimesFM 2.5 200M and Chronos-2 (post-quantizer-fused export) both fit
-//! this shape. Patch-based models (Granite-TTM, Moirai) need their own
-//! adapter — wired in follow-ups when their catalog entries land.
+//! TimesFM 2.5 200M fits this shape and is the active live model.
+//! Multi-input encoder-decoder forecasters (T5-based families with
+//! `context_mask`, `group_ids`, `future_covariates`, …) need their own
+//! adapter — `GenericForecast` will reject them at load time.
 //!
 //! # Threading
 //!
@@ -95,7 +94,6 @@ pub trait ForecastModel: Send + Sync {
     fn max_horizon(&self) -> usize;
 }
 
-#[cfg(feature = "onnx")]
 mod onnx_backend {
     use super::*;
     use ndarray::Array2;
@@ -103,8 +101,8 @@ mod onnx_backend {
     use ort::value::Tensor;
     use std::time::Instant;
 
-    /// Generic ONNX forecast model — fits TimesFM 2.5, Chronos-2 (fused),
-    /// and similar architectures with `[1, context_len] -> [1, horizon]` shape.
+    /// Generic ONNX forecast model — fits TimesFM 2.5 and similar
+    /// single-input architectures with `[1, context_len] -> [1, horizon]` shape.
     ///
     /// `Session::run` requires `&mut self` in ort 2.x, so the session is
     /// wrapped in a `Mutex` to expose a `&self` API. ONNX Runtime sessions
@@ -116,14 +114,33 @@ mod onnx_backend {
         max_horizon: usize,
         input_name: String,
         output_name: String,
+        batch_size: usize,
     }
 
     impl GenericForecast {
         /// Load an ONNX file and inspect its input/output names.
+        ///
+        /// `output_name` is the prediction output to read. If `None`, the
+        /// first output is used — fine for single-output forecasters.
+        /// Multi-output exports (e.g. TimesFM transformers ONNX which returns
+        /// `last_hidden_state`, `mean_predictions`, `full_predictions`) must
+        /// pass the explicit prediction tensor name (typically
+        /// `"full_predictions"` for the quantile head or `"mean_predictions"`
+        /// for the point forecast).
+        ///
+        /// `batch_size` is the leading input dimension. For most foundation
+        /// forecasters this is `None` (treated as 1). TimesFM 2.5
+        /// transformers ONNX requires `Some(2)` because its decoder applies
+        /// flip-invariance averaging across the batch axis (config flag
+        /// `force_flip_invariance: true`). When `batch_size > 1` the history
+        /// is tiled across the batch dim and the row `[0, ..]` is read from
+        /// the output.
         pub fn from_onnx(
             path: impl AsRef<Path>,
             context_length: usize,
             max_horizon: usize,
+            output_name: Option<String>,
+            batch_size: Option<usize>,
         ) -> Result<Self> {
             let session = Session::builder()
                 .map_err(|e| ModelError::InvalidModel(format!("ORT session builder: {}", e)))?
@@ -137,18 +154,36 @@ mod onnx_backend {
                 .first()
                 .map(|i| i.name.clone())
                 .ok_or_else(|| ModelError::InvalidModel("ONNX model has no inputs".to_string()))?;
-            let output_name = session
-                .outputs
-                .first()
-                .map(|o| o.name.clone())
-                .ok_or_else(|| ModelError::InvalidModel("ONNX model has no outputs".to_string()))?;
+            let resolved_output_name = match output_name {
+                Some(name) => {
+                    if !session.outputs.iter().any(|o| o.name == name) {
+                        let available: Vec<&str> =
+                            session.outputs.iter().map(|o| o.name.as_str()).collect();
+                        return Err(ModelError::InvalidModel(format!(
+                            "ONNX output '{}' not found; available outputs: {:?}",
+                            name, available
+                        )));
+                    }
+                    name
+                }
+                None => session
+                    .outputs
+                    .first()
+                    .map(|o| o.name.clone())
+                    .ok_or_else(|| {
+                        ModelError::InvalidModel("ONNX model has no outputs".to_string())
+                    })?,
+            };
+
+            let batch_size = batch_size.unwrap_or(1).max(1);
 
             Ok(Self {
                 session: parking_lot::Mutex::new(session),
                 context_length,
                 max_horizon,
                 input_name,
-                output_name,
+                output_name: resolved_output_name,
+                batch_size,
             })
         }
 
@@ -191,8 +226,19 @@ mod onnx_backend {
 
             let start = Instant::now();
             let fitted = self.fit_history(history);
-            let arr = Array2::<f32>::from_shape_vec((1, self.context_length), fitted)
-                .map_err(|e| ModelError::InferenceError(format!("input shape: {}", e)))?;
+            // Tile the fitted history across the batch dimension. For
+            // single-batch models this is a single copy; for flip-invariant
+            // exports (TimesFM 2.5 requires batch=2) the same row is
+            // repeated and the output is read from row 0.
+            let mut tiled = Vec::with_capacity(self.batch_size * self.context_length);
+            for _ in 0..self.batch_size {
+                tiled.extend_from_slice(&fitted);
+            }
+            let arr = Array2::<f32>::from_shape_vec(
+                (self.batch_size, self.context_length),
+                tiled,
+            )
+            .map_err(|e| ModelError::InferenceError(format!("input shape: {}", e)))?;
 
             let input_tensor = Tensor::from_array(arr)
                 .map_err(|e| ModelError::InferenceError(format!("ORT tensor: {}", e)))?;
@@ -217,18 +263,36 @@ mod onnx_backend {
                 (shape.iter().copied().collect(), data.to_vec())
             };
 
-            // Expect [1, horizon] or [1, horizon, n_quantiles]. Slice off
-            // exactly `config.horizon` rows from the time dimension.
+            // Expect [B, horizon] or [B, horizon, n_quantiles] where B is
+            // `self.batch_size`. Always read row 0 — when B > 1 the input
+            // was tiled across the batch dim so row 0 is the answer for
+            // this caller's history. Slice off exactly `config.horizon`
+            // rows from the time dimension.
             let (point, quantiles) = match dims.as_slice() {
-                [1, t] => {
-                    let h = (*t as usize).min(config.horizon);
+                [b, t] => {
+                    let b = *b as usize;
+                    if b == 0 {
+                        return Err(ModelError::InferenceError(
+                            "output batch dim is 0".to_string(),
+                        ));
+                    }
+                    let t = *t as usize;
+                    let h = t.min(config.horizon);
+                    // Row 0 starts at index 0 and runs for `t` elements.
                     (raw[..h].to_vec(), Vec::new())
                 }
-                [1, t, q] => {
-                    let h = (*t as usize).min(config.horizon);
+                [b, t, q] => {
+                    let b = *b as usize;
+                    if b == 0 {
+                        return Err(ModelError::InferenceError(
+                            "output batch dim is 0".to_string(),
+                        ));
+                    }
+                    let t = *t as usize;
                     let q = *q as usize;
-                    // Layout assumed [batch, time, quantile], row-major.
-                    // Median (or middle quantile) becomes the point forecast.
+                    let h = t.min(config.horizon);
+                    // Layout [batch, time, quantile], row-major. Row 0
+                    // occupies indices `0 .. t * q`.
                     let median_idx = q / 2;
                     let mut point = Vec::with_capacity(h);
                     let mut q_series: Vec<Vec<f32>> = vec![Vec::with_capacity(h); q];
@@ -245,7 +309,7 @@ mod onnx_backend {
                 }
                 other => {
                     return Err(ModelError::InferenceError(format!(
-                        "unexpected output shape {:?}, expected [1, T] or [1, T, Q]",
+                        "unexpected output shape {:?}, expected [B, T] or [B, T, Q]",
                         other
                     )));
                 }
@@ -269,47 +333,7 @@ mod onnx_backend {
     }
 }
 
-#[cfg(feature = "onnx")]
 pub use onnx_backend::GenericForecast;
-
-#[cfg(not(feature = "onnx"))]
-mod stub_backend {
-    use super::*;
-
-    /// Stub for builds without the `onnx` feature. Constructing it always
-    /// returns an error so callers can detect the missing backend.
-    #[derive(Debug)]
-    pub struct GenericForecast;
-
-    impl GenericForecast {
-        pub fn from_onnx(
-            _path: impl AsRef<Path>,
-            _context_length: usize,
-            _max_horizon: usize,
-        ) -> Result<Self> {
-            Err(ModelError::ProviderNotAvailable(
-                "ONNX backend not enabled — rebuild tenzro-model with --features onnx".to_string(),
-            ))
-        }
-    }
-
-    impl ForecastModel for GenericForecast {
-        fn forecast(&self, _history: &[f32], _config: &ForecastConfig) -> Result<ForecastResult> {
-            Err(ModelError::ProviderNotAvailable(
-                "ONNX backend not enabled — rebuild tenzro-model with --features onnx".to_string(),
-            ))
-        }
-        fn context_length(&self) -> usize {
-            0
-        }
-        fn max_horizon(&self) -> usize {
-            0
-        }
-    }
-}
-
-#[cfg(not(feature = "onnx"))]
-pub use stub_backend::GenericForecast;
 
 /// Runtime that owns multiple loaded forecast models, keyed by model_id.
 ///
@@ -339,14 +363,31 @@ impl TimeseriesRuntime {
     }
 
     /// Load an ONNX model from disk and register it.
+    ///
+    /// `output_name` selects which ONNX output to read as the forecast.
+    /// `None` means "use the first output" — correct for single-output
+    /// exports. Multi-output graphs (TimesFM transformers ONNX returns
+    /// `last_hidden_state`, `mean_predictions`, `full_predictions`) must
+    /// pass the explicit prediction tensor name.
+    ///
+    /// `batch_size` is the fixed leading input dimension. `None` defaults
+    /// to 1. TimesFM 2.5 transformers ONNX needs `Some(2)`.
     pub fn load_onnx(
         &self,
         model_id: impl Into<String>,
         path: impl AsRef<Path>,
         context_length: usize,
         max_horizon: usize,
+        output_name: Option<String>,
+        batch_size: Option<usize>,
     ) -> Result<()> {
-        let model = GenericForecast::from_onnx(path, context_length, max_horizon)?;
+        let model = GenericForecast::from_onnx(
+            path,
+            context_length,
+            max_horizon,
+            output_name,
+            batch_size,
+        )?;
         self.models
             .insert(model_id.into(), Arc::new(model) as Arc<dyn ForecastModel>);
         Ok(())
@@ -434,18 +475,6 @@ mod tests {
         match err {
             ModelError::ModelNotFound(_) => {}
             other => panic!("expected NotFound, got {:?}", other),
-        }
-    }
-
-    #[cfg(not(feature = "onnx"))]
-    #[test]
-    fn stub_load_returns_not_available() {
-        let err = GenericForecast::from_onnx("/nowhere.onnx", 512, 64).unwrap_err();
-        match err {
-            ModelError::ProviderNotAvailable(msg) => {
-                assert!(msg.contains("ONNX"), "expected ONNX hint, got: {}", msg);
-            }
-            other => panic!("expected NotAvailable, got {:?}", other),
         }
     }
 

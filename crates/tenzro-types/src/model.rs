@@ -388,10 +388,10 @@ pub struct TimeseriesParameters {
     /// Maximum number of forecast steps the model can emit in one pass.
     pub max_horizon: u32,
     /// Number of quantiles emitted per step (1 = point forecast,
-    /// >1 = quantile forecast like Chronos-Bolt's 9 quantiles).
+    /// >1 = quantile forecast).
     pub n_quantiles: u32,
     /// Number of input feature channels (1 = univariate;
-    /// >1 = multivariate / covariate-aware models like Chronos-2).
+    /// >1 = multivariate / covariate-aware).
     pub num_features: u32,
 }
 

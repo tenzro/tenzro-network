@@ -1,17 +1,18 @@
 //! Audio (ASR-only) runtime backed by ONNX Runtime.
 //!
-//! Stub-only in wave 1. The runtime registry, request/result types,
-//! and trait are stable; concrete ORT-backed implementations land
-//! when the catalog's audio entries (Moonshine v2, Distil-Whisper,
-//! Whisper-v3-turbo, Parakeet TDT 0.6B v3, Canary 1B Flash) have
-//! verified ONNX exports.
+//! Stub-only in this wave. The runtime registry, request/result types,
+//! and trait are stable. The concrete ORT-backed implementations for
+//! Moonshine v2 (raw waveform → token IDs) and the Whisper / Distil-Whisper
+//! family (log-mel spectrogram → autoregressive decode with KV-cache via
+//! `decoder_model_merged.onnx`) are scoped for the next wave alongside
+//! the Parakeet RNN-T transducer decoder.
 //!
 //! # Audio formats
 //!
-//! Real implementation will accept raw bytes (WAV via `hound`,
+//! The real implementation will accept raw bytes (WAV via `hound`,
 //! MP3/FLAC via `symphonia`) and resample to 16 kHz mono. Mel
 //! spectrogram parameters (n_fft, hop_length, n_mels) differ across
-//! Whisper/Moonshine/Parakeet — each runtime owns its own
+//! Whisper / Moonshine / Parakeet — each runtime owns its own
 //! preprocessing.
 
 use std::path::Path;

@@ -343,11 +343,11 @@ pub fn get_vision_model_by_id(id: &str) -> Option<OnnxVisionEntry> {
 /// (the export harness that produces the artifacts referenced here).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OnnxForecastEntry {
-    /// Internal model ID (e.g. "chronos-bolt-small").
+    /// Internal model ID (e.g. "timesfm-2.5-200m").
     pub id: String,
     /// Human-readable name.
     pub name: String,
-    /// Architecture family (e.g. "chronos-bolt", "ttm", "timesfm").
+    /// Architecture family (e.g. "timesfm").
     pub family: String,
     /// Upstream HuggingFace repository ID (PyTorch source weights).
     pub hf_repo: String,
@@ -384,94 +384,23 @@ pub struct OnnxForecastEntry {
 /// a single-file ONNX artifact compatible with `GenericForecast`.
 pub fn get_forecast_catalog() -> Vec<OnnxForecastEntry> {
     vec![
-        // ── Chronos-Bolt (Apache 2.0, Amazon) ──────────────────────
-        // T5-derived encoder + linear quantile head. 9 quantiles
-        // (0.1, 0.2, ..., 0.9). Tier-A export — single-file FP32 ONNX.
-        OnnxForecastEntry {
-            id: "chronos-bolt-small".into(),
-            name: "Chronos-Bolt Small".into(),
-            family: "chronos-bolt".into(),
-            hf_repo: "amazon/chronos-bolt-small".into(),
-            hf_filename: "model.onnx".into(),
-            context_length: 2048,
-            max_horizon: 64,
-            n_quantiles: 9,
-            parameters: "48M".into(),
-            size_bytes: 192_000_000,
-            min_ram_gb: 1,
-            license: "Apache 2.0".into(),
-            license_tier: LicenseTier::Permissive,
-            description:
-                "Amazon Chronos-Bolt small — fast quantile forecaster, T5-derived encoder".into(),
-        },
-        OnnxForecastEntry {
-            id: "chronos-bolt-base".into(),
-            name: "Chronos-Bolt Base".into(),
-            family: "chronos-bolt".into(),
-            hf_repo: "amazon/chronos-bolt-base".into(),
-            hf_filename: "model.onnx".into(),
-            context_length: 2048,
-            max_horizon: 64,
-            n_quantiles: 9,
-            parameters: "205M".into(),
-            size_bytes: 820_000_000,
-            min_ram_gb: 2,
-            license: "Apache 2.0".into(),
-            license_tier: LicenseTier::Permissive,
-            description:
-                "Amazon Chronos-Bolt base — same architecture as small, larger params".into(),
-        },
-        // ── Chronos-2 (Apache 2.0, Amazon, Oct 2025) ───────────────
-        // Multivariate + covariate support; new flagship quantile forecaster.
-        OnnxForecastEntry {
-            id: "chronos-2".into(),
-            name: "Chronos-2".into(),
-            family: "chronos-2".into(),
-            hf_repo: "amazon/chronos-2".into(),
-            hf_filename: "model.onnx".into(),
-            context_length: 4096,
-            max_horizon: 128,
-            n_quantiles: 9,
-            parameters: "120M".into(),
-            size_bytes: 480_000_000,
-            min_ram_gb: 2,
-            license: "Apache 2.0".into(),
-            license_tier: LicenseTier::Permissive,
-            description:
-                "Amazon Chronos-2 — flagship multivariate forecaster with covariate support".into(),
-        },
-        // ── Granite Tiny TimeMixer r2 (Apache 2.0, IBM) ────────────
-        // Patch-based mixer; point forecast only (no quantile head).
-        OnnxForecastEntry {
-            id: "granite-ttm-r2-512".into(),
-            name: "Granite TTM r2 (512/96)".into(),
-            family: "ttm".into(),
-            hf_repo: "ibm-granite/granite-timeseries-ttm-r2".into(),
-            hf_filename: "model.onnx".into(),
-            context_length: 512,
-            max_horizon: 96,
-            n_quantiles: 0,
-            parameters: "1M".into(),
-            size_bytes: 4_000_000,
-            min_ram_gb: 1,
-            license: "Apache 2.0".into(),
-            license_tier: LicenseTier::Permissive,
-            description: "IBM Granite Tiny TimeMixer r2 — ultra-compact patch-based forecaster"
-                .into(),
-        },
         // ── TimesFM 2.5 (Apache 2.0, Google) ───────────────────────
         // Decoder-only transformer with patch tokenizer. 10 quantiles.
+        // Community ONNX export (pdufour) is the only live-loadable form;
+        // upstream google/timesfm-2.5-200m-pytorch ships PyTorch weights.
+        // Requires batch_size=2 (force_flip_invariance: true in config) —
+        // the runtime tiles input + reads row 0.
         OnnxForecastEntry {
             id: "timesfm-2.5-200m".into(),
             name: "TimesFM 2.5 200M".into(),
             family: "timesfm".into(),
-            hf_repo: "google/timesfm-2.5-200m-pytorch".into(),
-            hf_filename: "model.onnx".into(),
+            hf_repo: "pdufour/timesfm-2.5-200m-transformers-onnx".into(),
+            hf_filename: "onnx/model.onnx".into(),
             context_length: 2048,
             max_horizon: 128,
             n_quantiles: 10,
             parameters: "200M".into(),
-            size_bytes: 800_000_000,
+            size_bytes: 1_001_713_626,
             min_ram_gb: 2,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
@@ -548,7 +477,7 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             id: "qwen3-embedding-0.6b".into(),
             name: "Qwen3-Embedding 0.6B".into(),
             family: "qwen3-embedding".into(),
-            hf_repo: "Qwen/Qwen3-Embedding-0.6B".into(),
+            hf_repo: "onnx-community/Qwen3-Embedding-0.6B-ONNX".into(),
             hf_filename: "onnx/model.onnx".into(),
             tokenizer_filename: "tokenizer.json".into(),
             max_sequence_length: 32768,
@@ -565,7 +494,7 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             id: "qwen3-embedding-4b".into(),
             name: "Qwen3-Embedding 4B".into(),
             family: "qwen3-embedding".into(),
-            hf_repo: "Qwen/Qwen3-Embedding-4B".into(),
+            hf_repo: "onnx-community/Qwen3-Embedding-4B-ONNX".into(),
             hf_filename: "onnx/model.onnx".into(),
             tokenizer_filename: "tokenizer.json".into(),
             max_sequence_length: 32768,
@@ -582,7 +511,7 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             id: "qwen3-embedding-8b".into(),
             name: "Qwen3-Embedding 8B".into(),
             family: "qwen3-embedding".into(),
-            hf_repo: "Qwen/Qwen3-Embedding-8B".into(),
+            hf_repo: "onnx-community/Qwen3-Embedding-8B-ONNX".into(),
             hf_filename: "onnx/model.onnx".into(),
             tokenizer_filename: "tokenizer.json".into(),
             max_sequence_length: 32768,
@@ -681,95 +610,73 @@ pub struct OnnxSegmentationEntry {
 
 /// Get the curated ONNX segmentation catalog.
 pub fn get_segmentation_catalog() -> Vec<OnnxSegmentationEntry> {
+    // SAM 3 / SAM 3.1 are intentionally absent: their community ONNX exports
+    // bundle a CLIP-style text encoder and a 14-input box-prompted decoder
+    // that returns a variable number of detections (not the SAM-1/SAM-2
+    // point/box prompt → 3-mask shape that this runtime's `Segmenter` trait
+    // models). Text-promptable segmentation will land in a separate
+    // `text_segmentation_runtime` when Meta or the community publishes a
+    // stable ONNX schema.
     vec![
-        // ── SAM 3 / SAM 3.1 (custom SAM License — commercial-OK) ───
-        // Released Nov 2025 + Mar 2026. Has ITAR/military/nuclear restrictions.
-        OnnxSegmentationEntry {
-            id: "sam3".into(),
-            name: "SAM 3".into(),
-            family: "sam3".into(),
-            hf_repo: "facebook/sam3".into(),
-            encoder_filename: "onnx/encoder.onnx".into(),
-            decoder_filename: "onnx/decoder.onnx".into(),
-            input_size: 1024,
-            size_bytes: 2_500_000_000,
-            min_ram_gb: 8,
-            license: "SAM License".into(),
-            license_tier: LicenseTier::CommercialCustom,
-            description: "Meta SAM 3 — flagship segment-anything model (Nov 2025)".into(),
-        },
-        OnnxSegmentationEntry {
-            id: "sam3.1".into(),
-            name: "SAM 3.1".into(),
-            family: "sam3".into(),
-            hf_repo: "facebook/sam3.1".into(),
-            encoder_filename: "onnx/encoder.onnx".into(),
-            decoder_filename: "onnx/decoder.onnx".into(),
-            input_size: 1024,
-            size_bytes: 2_500_000_000,
-            min_ram_gb: 8,
-            license: "SAM License".into(),
-            license_tier: LicenseTier::CommercialCustom,
-            description: "Meta SAM 3.1 — refined SOTA segmentation (Mar 2026)".into(),
-        },
-        // ── SAM 2 (Apache 2.0, Meta) — previous-gen tier ───────────
+        // ── SAM 2 (community ONNX export — vietanhdev / samexporter) ─
+        // Meta source is Apache 2.0; ONNX exports inherit that tier.
         OnnxSegmentationEntry {
             id: "sam2-base".into(),
             name: "SAM 2 base".into(),
             family: "sam2".into(),
-            hf_repo: "facebook/sam2-hiera-base-plus".into(),
-            encoder_filename: "onnx/encoder.onnx".into(),
-            decoder_filename: "onnx/decoder.onnx".into(),
+            hf_repo: "vietanhdev/segment-anything-2-onnx-models".into(),
+            encoder_filename: "sam2_hiera_base_plus_encoder.onnx".into(),
+            decoder_filename: "sam2_hiera_base_plus_decoder.onnx".into(),
             input_size: 1024,
             size_bytes: 320_000_000,
             min_ram_gb: 2,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
-            description: "Meta SAM 2 base — previous-gen segment-anything".into(),
+            description: "Meta SAM 2 base (community ONNX export) — previous-gen SOTA".into(),
         },
         OnnxSegmentationEntry {
             id: "sam2-large".into(),
             name: "SAM 2 large".into(),
             family: "sam2".into(),
-            hf_repo: "facebook/sam2-hiera-large".into(),
-            encoder_filename: "onnx/encoder.onnx".into(),
-            decoder_filename: "onnx/decoder.onnx".into(),
+            hf_repo: "vietanhdev/segment-anything-2-onnx-models".into(),
+            encoder_filename: "sam2_hiera_large_encoder.onnx".into(),
+            decoder_filename: "sam2_hiera_large_decoder.onnx".into(),
             input_size: 1024,
             size_bytes: 900_000_000,
             min_ram_gb: 4,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
-            description: "Meta SAM 2 large — high-fidelity previous-gen segmentation".into(),
+            description: "Meta SAM 2 large (community ONNX export) — high-fidelity".into(),
         },
-        // ── EdgeSAM (MIT) — edge tier ─────────────────────────────
+        // ── EdgeSAM (NTU S-Lab 1.0 — non-commercial) ────────────────
         OnnxSegmentationEntry {
             id: "edgesam".into(),
             name: "EdgeSAM".into(),
             family: "edgesam".into(),
-            hf_repo: "chongzhou96/EdgeSAM".into(),
-            encoder_filename: "edge_sam_encoder.onnx".into(),
-            decoder_filename: "edge_sam_decoder.onnx".into(),
+            hf_repo: "chongzhou/EdgeSAM".into(),
+            encoder_filename: "edge_sam_3x_encoder.onnx".into(),
+            decoder_filename: "edge_sam_3x_decoder.onnx".into(),
             input_size: 1024,
             size_bytes: 38_000_000,
             min_ram_gb: 1,
-            license: "MIT".into(),
-            license_tier: LicenseTier::Permissive,
-            description: "EdgeSAM — ultra-compact 9.6M-param segmentation, edge-tier".into(),
+            license: "NTU S-Lab License 1.0".into(),
+            license_tier: LicenseTier::NonCommercial,
+            description: "EdgeSAM — ultra-compact 9.6M-param segmentation (research-only)".into(),
         },
-        // ── MobileSAM (Apache 2.0) — edge tier ────────────────────
+        // ── MobileSAM (Apache 2.0) — edge tier ─────────────────────
         OnnxSegmentationEntry {
             id: "mobilesam".into(),
             name: "MobileSAM".into(),
             family: "mobilesam".into(),
-            hf_repo: "ChaoningZhang/MobileSAM".into(),
+            hf_repo: "vietanhdev/segment-anything-onnx-models".into(),
             encoder_filename: "mobile_sam_encoder.onnx".into(),
-            decoder_filename: "mobile_sam_decoder.onnx".into(),
+            decoder_filename: "mobile_sam.decoder.onnx".into(),
             input_size: 1024,
             size_bytes: 40_000_000,
             min_ram_gb: 1,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
-            description: "MobileSAM — compact mobile-optimized segmentation".into(),
+            description: "MobileSAM (community ONNX export) — compact mobile-optimized".into(),
         },
     ]
 }
@@ -824,14 +731,17 @@ pub fn get_detection_catalog() -> Vec<OnnxDetectionEntry> {
     vec![
         // ── RF-DETR (Apache 2.0, Roboflow) ─────────────────────────
         // 6 size tiers from nano to 2x-large.
+        // RF-DETR has tier-specific input resolutions (384–880). The
+        // detector reads the actual shape from the loaded ONNX session
+        // at load time; these catalog values are advisory.
         OnnxDetectionEntry {
             id: "rf-detr-nano".into(),
             name: "RF-DETR nano".into(),
             family: "rf-detr".into(),
             hf_repo: "PierreMarieCurie/rf-detr-onnx".into(),
-            hf_filename: "rf_detr_nano.onnx".into(),
-            input_size: 640,
-            num_classes: 80,
+            hf_filename: "rf-detr-nano.onnx".into(),
+            input_size: 384,
+            num_classes: 90,
             size_bytes: 30_000_000,
             min_ram_gb: 1,
             license: "Apache 2.0".into(),
@@ -843,9 +753,9 @@ pub fn get_detection_catalog() -> Vec<OnnxDetectionEntry> {
             name: "RF-DETR small".into(),
             family: "rf-detr".into(),
             hf_repo: "PierreMarieCurie/rf-detr-onnx".into(),
-            hf_filename: "rf_detr_small.onnx".into(),
-            input_size: 640,
-            num_classes: 80,
+            hf_filename: "rf-detr-small.onnx".into(),
+            input_size: 512,
+            num_classes: 90,
             size_bytes: 60_000_000,
             min_ram_gb: 1,
             license: "Apache 2.0".into(),
@@ -857,9 +767,9 @@ pub fn get_detection_catalog() -> Vec<OnnxDetectionEntry> {
             name: "RF-DETR medium".into(),
             family: "rf-detr".into(),
             hf_repo: "PierreMarieCurie/rf-detr-onnx".into(),
-            hf_filename: "rf_detr_medium.onnx".into(),
-            input_size: 640,
-            num_classes: 80,
+            hf_filename: "rf-detr-medium.onnx".into(),
+            input_size: 576,
+            num_classes: 90,
             size_bytes: 110_000_000,
             min_ram_gb: 2,
             license: "Apache 2.0".into(),
@@ -871,37 +781,37 @@ pub fn get_detection_catalog() -> Vec<OnnxDetectionEntry> {
             name: "RF-DETR base".into(),
             family: "rf-detr".into(),
             hf_repo: "PierreMarieCurie/rf-detr-onnx".into(),
-            hf_filename: "rf_detr_base.onnx".into(),
-            input_size: 640,
-            num_classes: 80,
+            hf_filename: "rf-detr-base-coco.onnx".into(),
+            input_size: 560,
+            num_classes: 90,
             size_bytes: 180_000_000,
             min_ram_gb: 2,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
-            description: "RF-DETR base — real-time DETR baseline".into(),
+            description: "RF-DETR base — real-time DETR baseline (COCO)".into(),
         },
         OnnxDetectionEntry {
             id: "rf-detr-large".into(),
             name: "RF-DETR large".into(),
             family: "rf-detr".into(),
             hf_repo: "PierreMarieCurie/rf-detr-onnx".into(),
-            hf_filename: "rf_detr_large.onnx".into(),
-            input_size: 640,
-            num_classes: 80,
+            hf_filename: "rf-detr-large-2026.onnx".into(),
+            input_size: 704,
+            num_classes: 90,
             size_bytes: 350_000_000,
             min_ram_gb: 3,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
-            description: "RF-DETR large — high-accuracy real-time DETR".into(),
+            description: "RF-DETR large — high-accuracy real-time DETR (2026 refresh)".into(),
         },
         OnnxDetectionEntry {
             id: "rf-detr-2xl".into(),
             name: "RF-DETR 2x-large".into(),
             family: "rf-detr".into(),
             hf_repo: "PierreMarieCurie/rf-detr-onnx".into(),
-            hf_filename: "rf_detr_2xl.onnx".into(),
-            input_size: 640,
-            num_classes: 80,
+            hf_filename: "rf-detr-xxlarge.onnx".into(),
+            input_size: 768,
+            num_classes: 90,
             size_bytes: 700_000_000,
             min_ram_gb: 4,
             license: "Apache 2.0".into(),
@@ -1007,15 +917,18 @@ pub struct OnnxAudioEntry {
 /// Get the curated ONNX audio-ASR catalog.
 pub fn get_audio_catalog() -> Vec<OnnxAudioEntry> {
     vec![
-        // ── Moonshine v2 (MIT, Useful Sensors, Feb 2026) ───────────
-        // Single-file encoder. Replaces v1.
+        // ── Moonshine (MIT, Useful Sensors) ────────────────────────
+        // Community ONNX export at onnx-community/moonshine-{tiny,base}-ONNX.
+        // Standard transformers.js layout: onnx/encoder_model.onnx +
+        // onnx/decoder_model_merged.onnx (single graph keyed by
+        // `use_cache_branch` bool input).
         OnnxAudioEntry {
-            id: "moonshine-tiny-v2".into(),
-            name: "Moonshine Tiny v2".into(),
+            id: "moonshine-tiny".into(),
+            name: "Moonshine Tiny".into(),
             family: "moonshine".into(),
-            hf_repo: "UsefulSensors/moonshine".into(),
-            encoder_filename: "tiny/v2/encoder.onnx".into(),
-            decoder_filename: Some("tiny/v2/decoder.onnx".into()),
+            hf_repo: "onnx-community/moonshine-tiny-ONNX".into(),
+            encoder_filename: "onnx/encoder_model.onnx".into(),
+            decoder_filename: Some("onnx/decoder_model_merged.onnx".into()),
             joiner_filename: None,
             sample_rate: 16000,
             max_audio_seconds: 30,
@@ -1024,15 +937,15 @@ pub fn get_audio_catalog() -> Vec<OnnxAudioEntry> {
             min_ram_gb: 1,
             license: "MIT".into(),
             license_tier: LicenseTier::Permissive,
-            description: "Moonshine Tiny v2 — on-device English ASR, edge-tier".into(),
+            description: "Moonshine Tiny — on-device English ASR, edge-tier (raw waveform input)".into(),
         },
         OnnxAudioEntry {
-            id: "moonshine-base-v2".into(),
-            name: "Moonshine Base v2".into(),
+            id: "moonshine-base".into(),
+            name: "Moonshine Base".into(),
             family: "moonshine".into(),
-            hf_repo: "UsefulSensors/moonshine".into(),
-            encoder_filename: "base/v2/encoder.onnx".into(),
-            decoder_filename: Some("base/v2/decoder.onnx".into()),
+            hf_repo: "onnx-community/moonshine-base-ONNX".into(),
+            encoder_filename: "onnx/encoder_model.onnx".into(),
+            decoder_filename: Some("onnx/decoder_model_merged.onnx".into()),
             joiner_filename: None,
             sample_rate: 16000,
             max_audio_seconds: 30,
@@ -1041,16 +954,18 @@ pub fn get_audio_catalog() -> Vec<OnnxAudioEntry> {
             min_ram_gb: 1,
             license: "MIT".into(),
             license_tier: LicenseTier::Permissive,
-            description: "Moonshine Base v2 — on-device English ASR, balanced".into(),
+            description: "Moonshine Base — on-device English ASR, balanced (raw waveform input)".into(),
         },
         // ── Distil-Whisper (MIT, HuggingFace) ──────────────────────
+        // Merged decoder with `use_cache_branch` input — single graph
+        // handles both prefill and incremental decode.
         OnnxAudioEntry {
             id: "distil-whisper-small-en".into(),
             name: "Distil-Whisper small.en".into(),
             family: "whisper".into(),
             hf_repo: "distil-whisper/distil-small.en".into(),
             encoder_filename: "onnx/encoder_model.onnx".into(),
-            decoder_filename: Some("onnx/decoder_model.onnx".into()),
+            decoder_filename: Some("onnx/decoder_model_merged.onnx".into()),
             joiner_filename: None,
             sample_rate: 16000,
             max_audio_seconds: 30,
@@ -1059,7 +974,7 @@ pub fn get_audio_catalog() -> Vec<OnnxAudioEntry> {
             min_ram_gb: 2,
             license: "MIT".into(),
             license_tier: LicenseTier::Permissive,
-            description: "Distil-Whisper small.en — distilled English ASR".into(),
+            description: "Distil-Whisper small.en — distilled English ASR (80-mel)".into(),
         },
         OnnxAudioEntry {
             id: "distil-whisper-medium-en".into(),
@@ -1067,7 +982,7 @@ pub fn get_audio_catalog() -> Vec<OnnxAudioEntry> {
             family: "whisper".into(),
             hf_repo: "distil-whisper/distil-medium.en".into(),
             encoder_filename: "onnx/encoder_model.onnx".into(),
-            decoder_filename: Some("onnx/decoder_model.onnx".into()),
+            decoder_filename: Some("onnx/decoder_model_merged.onnx".into()),
             joiner_filename: None,
             sample_rate: 16000,
             max_audio_seconds: 30,
@@ -1076,7 +991,7 @@ pub fn get_audio_catalog() -> Vec<OnnxAudioEntry> {
             min_ram_gb: 3,
             license: "MIT".into(),
             license_tier: LicenseTier::Permissive,
-            description: "Distil-Whisper medium.en — higher-accuracy distilled English ASR".into(),
+            description: "Distil-Whisper medium.en — higher-accuracy distilled English ASR (80-mel)".into(),
         },
         OnnxAudioEntry {
             id: "distil-whisper-large-v3".into(),
@@ -1084,7 +999,7 @@ pub fn get_audio_catalog() -> Vec<OnnxAudioEntry> {
             family: "whisper".into(),
             hf_repo: "distil-whisper/distil-large-v3".into(),
             encoder_filename: "onnx/encoder_model.onnx".into(),
-            decoder_filename: Some("onnx/decoder_model.onnx".into()),
+            decoder_filename: Some("onnx/decoder_model_merged.onnx".into()),
             joiner_filename: None,
             sample_rate: 16000,
             max_audio_seconds: 30,
@@ -1093,16 +1008,18 @@ pub fn get_audio_catalog() -> Vec<OnnxAudioEntry> {
             min_ram_gb: 4,
             license: "MIT".into(),
             license_tier: LicenseTier::Permissive,
-            description: "Distil-Whisper large-v3 — multilingual distilled ASR".into(),
+            description: "Distil-Whisper large-v3 — multilingual distilled ASR (128-mel)".into(),
         },
         // ── Whisper Large-v3-turbo (MIT, OpenAI) ───────────────────
+        // Community ONNX export at onnx-community/whisper-large-v3-turbo;
+        // OpenAI's own repo ships PyTorch only.
         OnnxAudioEntry {
             id: "whisper-large-v3-turbo".into(),
             name: "Whisper Large-v3-turbo".into(),
             family: "whisper".into(),
-            hf_repo: "openai/whisper-large-v3-turbo".into(),
+            hf_repo: "onnx-community/whisper-large-v3-turbo".into(),
             encoder_filename: "onnx/encoder_model.onnx".into(),
-            decoder_filename: Some("onnx/decoder_model.onnx".into()),
+            decoder_filename: Some("onnx/decoder_model_merged.onnx".into()),
             joiner_filename: None,
             sample_rate: 16000,
             max_audio_seconds: 30,
@@ -1111,48 +1028,18 @@ pub fn get_audio_catalog() -> Vec<OnnxAudioEntry> {
             min_ram_gb: 5,
             license: "MIT".into(),
             license_tier: LicenseTier::Permissive,
-            description: "OpenAI Whisper Large-v3-turbo — flagship multilingual ASR".into(),
+            description: "OpenAI Whisper Large-v3-turbo — flagship multilingual ASR (128-mel)".into(),
         },
-        // ── Parakeet TDT 0.6B v3 (CC-BY-4.0, NVIDIA) ───────────────
-        // Transducer with encoder + joiner; 25 European languages.
-        OnnxAudioEntry {
-            id: "parakeet-tdt-0.6b-v3".into(),
-            name: "Parakeet TDT 0.6B v3".into(),
-            family: "parakeet".into(),
-            hf_repo: "nvidia/parakeet-tdt-0.6b-v3".into(),
-            encoder_filename: "onnx/encoder.onnx".into(),
-            decoder_filename: Some("onnx/decoder.onnx".into()),
-            joiner_filename: Some("onnx/joiner.onnx".into()),
-            sample_rate: 16000,
-            max_audio_seconds: 60,
-            languages: vec![
-                "en".into(), "de".into(), "es".into(), "fr".into(), "it".into(),
-                "nl".into(), "pl".into(), "pt".into(), "ru".into(), "sv".into(),
-            ],
-            size_bytes: 2_400_000_000,
-            min_ram_gb: 4,
-            license: "CC-BY-4.0".into(),
-            license_tier: LicenseTier::Attribution,
-            description: "NVIDIA Parakeet TDT 0.6B v3 — 25 European languages".into(),
-        },
-        // ── Canary 1B Flash (CC-BY-4.0, NVIDIA) ────────────────────
-        OnnxAudioEntry {
-            id: "canary-1b-flash".into(),
-            name: "Canary 1B Flash".into(),
-            family: "canary".into(),
-            hf_repo: "nvidia/canary-1b-flash".into(),
-            encoder_filename: "onnx/encoder.onnx".into(),
-            decoder_filename: Some("onnx/decoder.onnx".into()),
-            joiner_filename: None,
-            sample_rate: 16000,
-            max_audio_seconds: 60,
-            languages: vec!["en".into(), "de".into(), "es".into(), "fr".into()],
-            size_bytes: 4_000_000_000,
-            min_ram_gb: 6,
-            license: "CC-BY-4.0".into(),
-            license_tier: LicenseTier::Attribution,
-            description: "NVIDIA Canary 1B Flash — large multilingual ASR".into(),
-        },
+        // ── Parakeet TDT 0.6B v3 (DEFERRED to wave 2) ──────────────
+        // Community ONNX export at istupakov/parakeet-tdt-0.6b-v3-onnx
+        // (fused decoder_joint-model.onnx). RNN-T transducer decoding loop
+        // is non-trivial; ships in the audio runtime's wave-2 milestone
+        // alongside Canary-class models. Catalog entry intentionally
+        // omitted from wave 1 — registering it would surface a model the
+        // runtime cannot serve.
+        // ── Canary 1B Flash (NOT SHIPPED) ──────────────────────────
+        // No published ONNX export exists in the 2026 OSS landscape.
+        // Re-evaluate when nvidia/ or a community account publishes one.
     ]
 }
 
@@ -2362,10 +2249,6 @@ mod tests {
     fn test_forecast_catalog_not_empty() {
         let catalog = get_forecast_catalog();
         assert!(!catalog.is_empty());
-        assert!(
-            catalog.len() >= 4,
-            "Expected at least 4 timeseries forecasters"
-        );
     }
 
     #[test]
@@ -2391,9 +2274,6 @@ mod tests {
 
     #[test]
     fn test_forecast_get_by_id() {
-        assert!(get_forecast_model_by_id("chronos-bolt-small").is_some());
-        assert!(get_forecast_model_by_id("chronos-bolt-base").is_some());
-        assert!(get_forecast_model_by_id("granite-ttm-r2-512").is_some());
         assert!(get_forecast_model_by_id("timesfm-2.5-200m").is_some());
         assert!(get_forecast_model_by_id("nonexistent").is_none());
     }
@@ -2413,30 +2293,14 @@ mod tests {
         let catalog = get_forecast_catalog();
         let families: std::collections::HashSet<&str> =
             catalog.iter().map(|m| m.family.as_str()).collect();
-        assert!(families.contains("chronos-bolt"));
-        assert!(families.contains("ttm"));
         assert!(families.contains("timesfm"));
     }
 
     #[test]
     fn test_forecast_quantile_shape_invariant() {
-        // n_quantiles == 0 → point forecast; > 0 → quantile head.
-        // Both are valid per the runtime contract; pin a couple of
-        // known values from targets.toml.
-        let chronos = get_forecast_model_by_id("chronos-bolt-small").unwrap();
-        assert_eq!(chronos.n_quantiles, 9);
-        let granite = get_forecast_model_by_id("granite-ttm-r2-512").unwrap();
-        assert_eq!(granite.n_quantiles, 0);
+        // n_quantiles > 0 → quantile head; TimesFM 2.5 ships 10 bands.
         let timesfm = get_forecast_model_by_id("timesfm-2.5-200m").unwrap();
         assert_eq!(timesfm.n_quantiles, 10);
-    }
-
-    #[test]
-    fn test_chronos_2_present() {
-        let chronos2 = get_forecast_model_by_id("chronos-2").unwrap();
-        assert_eq!(chronos2.family, "chronos-2");
-        assert!(chronos2.context_length >= 4096);
-        assert_eq!(chronos2.license_tier, LicenseTier::Permissive);
     }
 
     // ── Vision catalog (DINOv3 + SigLIP2 large/so400m) ──────────────
@@ -2524,26 +2388,32 @@ mod tests {
     #[test]
     fn test_segmentation_catalog_not_empty() {
         let catalog = get_segmentation_catalog();
-        assert!(catalog.len() >= 6, "expected ≥6 segmentation models");
+        // SAM 2 base + large, EdgeSAM, MobileSAM. SAM 3 is deferred to a
+        // future text-promptable runtime — see comment in
+        // `get_segmentation_catalog`.
+        assert_eq!(catalog.len(), 4, "expected 4 segmentation models");
     }
 
     #[test]
-    fn test_segmentation_sam3_commercial_custom() {
-        for id in &["sam3", "sam3.1"] {
+    fn test_segmentation_sam2_permissive() {
+        for id in &["sam2-base", "sam2-large"] {
             let e = get_segmentation_model_by_id(id)
                 .unwrap_or_else(|| panic!("missing {}", id));
-            assert_eq!(e.license_tier, LicenseTier::CommercialCustom);
+            assert_eq!(e.license_tier, LicenseTier::Permissive);
         }
     }
 
     #[test]
     fn test_segmentation_edge_tier() {
-        for id in &["edgesam", "mobilesam"] {
-            let e = get_segmentation_model_by_id(id)
-                .unwrap_or_else(|| panic!("missing {}", id));
-            assert_eq!(e.license_tier, LicenseTier::Permissive);
-            assert!(e.size_bytes < 50_000_000, "{} should be edge-sized", id);
-        }
+        // EdgeSAM is research-only (NTU S-Lab 1.0 = NonCommercial); MobileSAM
+        // is Apache 2.0. Both are <50 MB.
+        let edgesam = get_segmentation_model_by_id("edgesam").expect("missing edgesam");
+        assert_eq!(edgesam.license_tier, LicenseTier::NonCommercial);
+        assert!(edgesam.size_bytes < 50_000_000);
+
+        let mobilesam = get_segmentation_model_by_id("mobilesam").expect("missing mobilesam");
+        assert_eq!(mobilesam.license_tier, LicenseTier::Permissive);
+        assert!(mobilesam.size_bytes < 50_000_000);
     }
 
     #[test]

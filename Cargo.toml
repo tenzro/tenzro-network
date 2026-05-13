@@ -245,6 +245,25 @@ ndarray = "0.16"
 # Image decoding + resize for vision encoder preprocessing.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 
+# HF tokenizers — text-embedding runtime (Qwen3-Embedding, BGE-M3, EmbeddingGemma,
+# Snowflake Arctic) and Whisper/Moonshine BPE tokenization. `onig` enables the
+# SentencePiece pre-tokenizer used by XLM-R-family models.
+tokenizers = { version = "0.20", default-features = false, features = ["onig", "esaxx_fast"] }
+
+# Audio decode + resample + FFT for ASR runtime.
+# hound: WAV; symphonia: MP3/FLAC/Ogg/MP4-AAC container; rubato: 48k/44.1k→16k
+# resample; realfft: real-input FFT for mel-spectrogram.
+hound = "3.5"
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "wav", "isomp4", "ogg", "vorbis"] }
+rubato = "0.16"
+realfft = "3.4"
+
+# Video frame extraction shells out to the `ffmpeg` CLI binary (see
+# crates/tenzro-model/src/video_runtime.rs). No `ffmpeg-sys-next` linkage —
+# the Dockerfile installs `ffmpeg` as a system package. `tempfile` lets us
+# hand a path to the CLI without exposing AVIO callbacks for in-memory bytes.
+tempfile = "3"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

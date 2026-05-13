@@ -10,16 +10,12 @@ The output is always a single-file ONNX with shape `[1, context_len]
 per-model tweaks.
 
 Supported architectures:
-- chronos-bolt: T5 encoder + linear quantile head (Apache 2.0, Amazon).
-- chronos-2:    T5-derived encoder + multivariate quantile head with
-                covariate channel (Apache 2.0, Amazon, Oct 2025).
-- ttm:          Granite Tiny TimeMixer, patch-based (Apache 2.0, IBM).
 - timesfm:      Google TimesFM 2.5, patch decoder (Apache 2.0, Google).
 
-`ttm` and `timesfm` use a hand-rolled torch.onnx.export wrapper because
-their published `forward()` signatures don't match the
-`[B, T] -> [B, H]` shape the runtime expects. Wrapper modules adapt the
-real model's I/O to the runtime's contract before tracing.
+`timesfm` uses a hand-rolled torch.onnx.export wrapper because its
+published `forward()` signature doesn't match the `[B, T] -> [B, H, Q]`
+shape the runtime expects. The wrapper module adapts the real model's
+I/O to the runtime's contract before tracing.
 """
 
 from __future__ import annotations
@@ -70,180 +66,6 @@ def load_targets(path: Path | None = None) -> dict[str, Target]:
 # ──────────────────────────────────────────────────────────────────────
 # Architecture-specific export functions
 # ──────────────────────────────────────────────────────────────────────
-
-
-def export_chronos_bolt(target: Target, out_path: Path, opset: int) -> Path:
-    """Export Chronos-Bolt small/base.
-
-    Chronos-Bolt is a T5-derived encoder that takes a univariate context
-    (already scaled by the model's internal Mean Scaler) and emits
-    `[B, n_quantiles, H]` quantile predictions. We wrap it so the ONNX
-    sees `[B, T] -> [B, H, Q]` (transpose at the end so the time axis
-    comes before the quantile axis, matching the runtime's expected
-    layout for `[1, T, Q]` tensors).
-    """
-    from transformers import AutoModelForSeq2SeqLM
-
-    print(f"  → loading {target.hf_repo} (this is the heaviest step)")
-    model = AutoModelForSeq2SeqLM.from_pretrained(
-        target.hf_repo,
-        torch_dtype=torch.float32,
-        trust_remote_code=True,  # Chronos-Bolt ships custom modeling code
-    )
-    model.eval()
-
-    class ChronosWrapper(torch.nn.Module):
-        def __init__(self, inner: torch.nn.Module, horizon: int):
-            super().__init__()
-            self.inner = inner
-            self.horizon = horizon
-
-        def forward(self, context: torch.Tensor) -> torch.Tensor:
-            # Chronos-Bolt's `predict` returns [B, Q, H]; transpose to
-            # [B, H, Q] for the runtime.
-            quantiles = self.inner.predict(
-                context=context, prediction_length=self.horizon
-            )
-            return quantiles.transpose(1, 2).contiguous()
-
-    wrapper = ChronosWrapper(model, target.max_horizon).eval()
-    dummy = torch.randn(1, target.context_length, dtype=torch.float32)
-
-    print(f"  → tracing to ONNX (opset={opset})")
-    torch.onnx.export(
-        wrapper,
-        (dummy,),
-        out_path.as_posix(),
-        input_names=["context"],
-        output_names=["quantiles"],
-        dynamic_axes={
-            "context": {0: "batch"},
-            "quantiles": {0: "batch"},
-        },
-        opset_version=opset,
-        do_constant_folding=True,
-    )
-    return out_path
-
-
-def export_chronos_2(target: Target, out_path: Path, opset: int) -> Path:
-    """Export Chronos-2 (Oct 2025).
-
-    Chronos-2 is the multivariate successor to Chronos-Bolt. It accepts
-    a univariate target context plus an optional covariate tensor and
-    emits `[B, n_quantiles, H]` quantile predictions over the target.
-    The exported wrapper takes both inputs and transposes the output to
-    `[B, H, Q]` to match the runtime's `[1, T, Q]` layout convention.
-
-    Covariates are passed as `[B, T, C]` where `C=0` is allowed (zero
-    covariates → falls back to univariate forecasting). The runtime
-    feeds an empty tensor for univariate calls.
-    """
-    from transformers import AutoModelForSeq2SeqLM
-
-    print(f"  → loading {target.hf_repo} (this is the heaviest step)")
-    model = AutoModelForSeq2SeqLM.from_pretrained(
-        target.hf_repo,
-        torch_dtype=torch.float32,
-        trust_remote_code=True,
-    )
-    model.eval()
-
-    class Chronos2Wrapper(torch.nn.Module):
-        def __init__(self, inner: torch.nn.Module, horizon: int):
-            super().__init__()
-            self.inner = inner
-            self.horizon = horizon
-
-        def forward(
-            self,
-            context: torch.Tensor,
-            covariates: torch.Tensor,
-        ) -> torch.Tensor:
-            # Chronos-2 returns [B, Q, H]; transpose to [B, H, Q].
-            quantiles = self.inner.predict(
-                context=context,
-                covariates=covariates,
-                prediction_length=self.horizon,
-            )
-            return quantiles.transpose(1, 2).contiguous()
-
-    wrapper = Chronos2Wrapper(model, target.max_horizon).eval()
-    dummy_context = torch.randn(1, target.context_length, dtype=torch.float32)
-    # Trace with one covariate channel; the runtime can pass C=0 (empty)
-    # for univariate inference, which broadcasts cleanly through the
-    # exported graph.
-    dummy_covariates = torch.randn(1, target.context_length, 1, dtype=torch.float32)
-
-    print(f"  → tracing to ONNX (opset={opset})")
-    torch.onnx.export(
-        wrapper,
-        (dummy_context, dummy_covariates),
-        out_path.as_posix(),
-        input_names=["context", "covariates"],
-        output_names=["quantiles"],
-        dynamic_axes={
-            "context": {0: "batch"},
-            "covariates": {0: "batch", 2: "n_covariates"},
-            "quantiles": {0: "batch"},
-        },
-        opset_version=opset,
-        do_constant_folding=True,
-    )
-    return out_path
-
-
-def export_ttm(target: Target, out_path: Path, opset: int) -> Path:
-    """Export Granite Tiny TimeMixer.
-
-    TTM is patch-based and multivariate-capable, but the runtime only
-    supports univariate forecasts. We wrap to fix `n_features=1` and
-    return `[B, H]` (point forecast — TTM doesn't emit quantiles).
-    """
-    from transformers import AutoConfig, AutoModelForSeq2SeqLM
-
-    cfg = AutoConfig.from_pretrained(target.hf_repo, trust_remote_code=True)
-    print(f"  → loading {target.hf_repo}")
-    model = AutoModelForSeq2SeqLM.from_pretrained(
-        target.hf_repo,
-        torch_dtype=torch.float32,
-        trust_remote_code=True,
-    )
-    model.eval()
-
-    class TtmWrapper(torch.nn.Module):
-        def __init__(self, inner: torch.nn.Module, horizon: int):
-            super().__init__()
-            self.inner = inner
-            self.horizon = horizon
-
-        def forward(self, history: torch.Tensor) -> torch.Tensor:
-            # history: [B, T] → [B, T, 1] for univariate input.
-            x = history.unsqueeze(-1)
-            # TTM returns ForecastModelOutput with .prediction_outputs
-            # of shape [B, H, n_features]; squeeze back to [B, H].
-            out = self.inner(past_values=x).prediction_outputs[..., 0]
-            return out
-
-    wrapper = TtmWrapper(model, target.max_horizon).eval()
-    dummy = torch.randn(1, target.context_length, dtype=torch.float32)
-
-    print(f"  → tracing to ONNX (opset={opset})")
-    torch.onnx.export(
-        wrapper,
-        (dummy,),
-        out_path.as_posix(),
-        input_names=["history"],
-        output_names=["forecast"],
-        dynamic_axes={
-            "history": {0: "batch"},
-            "forecast": {0: "batch"},
-        },
-        opset_version=opset,
-        do_constant_folding=True,
-    )
-    _ = cfg
-    return out_path
 
 
 def export_timesfm(target: Target, out_path: Path, opset: int) -> Path:
@@ -308,9 +130,6 @@ def export_timesfm(target: Target, out_path: Path, opset: int) -> Path:
 
 
 EXPORTERS = {
-    "chronos-bolt": export_chronos_bolt,
-    "chronos-2": export_chronos_2,
-    "ttm": export_ttm,
     "timesfm": export_timesfm,
 }
 
@@ -322,7 +141,7 @@ EXPORTERS = {
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("target_id", help="ID from targets.toml (e.g. 'chronos-bolt-small')")
+    p.add_argument("target_id", help="ID from targets.toml (e.g. 'timesfm-2.5-200m')")
     p.add_argument(
         "--out",
         type=Path,

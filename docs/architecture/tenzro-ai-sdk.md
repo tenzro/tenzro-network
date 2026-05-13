@@ -122,7 +122,7 @@ for await (const part of result.fullStream) {
 const { embedding } = await embed({ model: tenzro('qwen3-embed-4b'), value: 'hello world' });
 const { embeddings } = await embedMany({ model: tenzro('qwen3-embed-4b'), values: docs });
 const { embedding: imageEmb } = await embedImage({ model: tenzro('siglip2-large'), image: pngBytes });
-const { predictions } = await forecast({ model: tenzro('chronos-2'), series, horizon: 24 });
+const { predictions } = await forecast({ model: tenzro('timesfm-2.5-200m'), series, horizon: 24 });
 const { masks } = await segment({ model: tenzro('sam-3'), image: pngBytes, prompts });
 const { detections } = await detect({ model: tenzro('rf-detr-medium'), image: pngBytes });
 const { text } = await transcribe({ model: tenzro('whisper-v3-turbo'), audio: wavBytes });

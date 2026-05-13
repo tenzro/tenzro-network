@@ -1318,6 +1318,48 @@ pub(crate) async fn handle_ap2_report_mandate_violation(
 // ERC-8004 — Trustless Agents Registry
 // ============================================================
 
+/// `tenzro_erc8004DeriveAgentId` — resolve a TDIP DID to its on-chain ERC-8004
+/// `uint256 agentId`. The Tenzro registry allocates agentIds sequentially when
+/// a machine is registered (not as a keccak256 hash), so this is a lookup
+/// against the [`OnChainAgentRegistry`] mirror, not an off-chain derivation.
+///
+/// Returns `{did, agent_id}` where `agent_id` is the decimal string form of
+/// the allocated `uint256`. Returns -32603 if the DID has never been
+/// registered.
+pub(crate) async fn handle_erc8004_derive_agent_id(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let did = params
+        .get("did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing did"))?
+        .to_string();
+
+    let registry = node.erc8004_agent_registry().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "ERC-8004 mirror not initialized on this node".to_string(),
+        data: None,
+    })?;
+
+    let agent_id = registry.lookup_agent_id_by_did(&did).ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: format!(
+            "DID {} has no allocated ERC-8004 agentId. Register the machine identity first.",
+            did
+        ),
+        data: None,
+    })?;
+
+    Ok(json!({
+        "did": did,
+        "agent_id": agent_id.to_string(),
+    }))
+}
+
 /// `tenzro_erc8004EncodeRegister` — produce calldata for the ERC-8004
 /// `register()` overload (no arguments). The on-chain registry allocates a
 /// fresh sequential `uint256 agentId` for `msg.sender` and returns it; the

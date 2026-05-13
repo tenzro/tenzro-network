@@ -1,31 +1,24 @@
 # Tenzro Timeseries ONNX Export Harness
 
 Reproducible exporter that takes upstream timeseries foundation models
-(Chronos-Bolt, Granite-TTM, TimesFM 2.5, …) and produces single-file
-ONNX artifacts compatible with the Tenzro `TimeseriesRuntime`
-(`crates/tenzro-model/src/ts_runtime.rs`).
+and produces single-file ONNX artifacts compatible with the Tenzro
+`TimeseriesRuntime` (`crates/tenzro-model/src/ts_runtime.rs`).
 
 ## Why this exists
 
-As of 2026-04, no first-party ungated ONNX timeseries foundation models
-exist on HuggingFace. The upstream repos all ship safetensors only.
-Since Apache 2.0 / MIT licensed weights are redistributable, we export
-them ourselves and host the ONNX artifacts under a `tenzro/` org so the
-runtime catalog (`crates/tenzro-model/src/catalog.rs::get_forecast_catalog`)
-can point to them.
+The catalog (`crates/tenzro-model/src/catalog.rs::get_forecast_catalog`)
+points at the community ONNX export at
+`pdufour/timesfm-2.5-200m-transformers-onnx`. This harness is the
+fallback path. If that community export ever goes offline, falls behind
+upstream, or breaks compatibility with the runtime contract, the
+maintainer can re-export from the upstream Apache-2.0 checkpoint and
+host the artifact under a `tenzro/` HF org.
 
 ## Targets
 
-| Model | Upstream repo | Params | License | Tier |
-|-------|---------------|--------|---------|------|
-| Chronos-Bolt small | `amazon/chronos-bolt-small` | 48M | Apache 2.0 | A — first |
-| Chronos-Bolt base | `amazon/chronos-bolt-base` | 205M | Apache 2.0 | A |
-| Chronos-2 | `amazon/chronos-2` | 120M | Apache 2.0 | B — multivariate w/ covariates |
-| Granite-TTM r2 (512) | `ibm-granite/granite-timeseries-ttm-r2` | 1M | Apache 2.0 | B |
-| TimesFM 2.5 200M | `google/timesfm-2.5-200m-pytorch` | 200M | Apache 2.0 | B |
-
-Tier A: small, well-defined transformer — straight `optimum-cli` path.
-Tier B: custom architecture, may need manual `torch.onnx.export` shim.
+| Model | Upstream repo | Params | License |
+|-------|---------------|--------|---------|
+| TimesFM 2.5 200M | `google/timesfm-2.5-200m-pytorch` | 200M | Apache 2.0 |
 
 ## Layout
 
@@ -45,11 +38,11 @@ cd tools/ts-export
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
-# Export Chronos-Bolt small to ./out/chronos-bolt-small.onnx
-python export.py chronos-bolt-small --out ./out
+# Export TimesFM 2.5 to ./out/timesfm-2.5-200m.onnx
+python export.py timesfm-2.5-200m --out ./out
 
 # Smoke-test the export
-python verify.py ./out/chronos-bolt-small.onnx
+python verify.py ./out/timesfm-2.5-200m.onnx
 ```
 
 ## CI
@@ -61,8 +54,7 @@ HuggingFace.
 
 We deliberately don't auto-publish — Apache 2.0 redistribution is
 fine, but we want a human in the loop to sanity-check the export
-before it lands in the catalog and the runtime starts pointing
-real users at it.
+before pointing the runtime at it.
 
 ## Adding a new target
 

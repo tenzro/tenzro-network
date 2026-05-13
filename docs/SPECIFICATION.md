@@ -988,7 +988,7 @@ The inference layer is intentionally not text-only. Three runtimes coexist behin
 
 **Vision encoder runtime (ONNX).** Foundation vision encoders — CLIP ViT-B/32, CLIP ViT-L/14, SigLIP base, SigLIP2 base, DINOv2 small/base/large — load through ONNX Runtime via the `onnx` cargo feature. The runtime decodes PNG/JPEG/WebP via the `image` crate, applies Lanczos3 resize, and runs CLIP-style or ImageNet normalization (configurable per registration). Output embeddings (`[1, D]` or `[1, 1, D]`) can be L2-normalized and fed into an in-process cosine-similarity helper for image-text retrieval. The catalog ships seven verified ungated models, all under MIT or Apache 2.0.
 
-**Timeseries forecasting runtime (ONNX).** Foundation timeseries models — TimesFM 2.5, Chronos-2 (post-quantizer-fused), Granite-TTM r2 — load through the same ONNX Runtime backend. The runtime accepts a univariate context window `[1, context_len]` and returns either a point forecast `[1, horizon]` or a quantile forecast `[1, horizon, n_quantiles]`. Patch-based models (Granite-TTM, Moirai) plug in via per-model adapters. Inference is dispatched through `tokio::task::spawn_blocking` with a `parking_lot::Mutex` per session to satisfy ORT's non-concurrent contract.
+**Timeseries forecasting runtime (ONNX).** Foundation timeseries forecasters with a single-tensor input contract — TimesFM 2.5 — load through the same ONNX Runtime backend. The runtime accepts a univariate context window `[batch, context_len]` and returns either a point forecast `[batch, horizon]` or a quantile forecast `[batch, horizon, n_quantiles]`. Multi-input encoder-decoder forecasters (T5-based families with covariate and mask channels) plug in via per-family adapters. Inference is dispatched through `tokio::task::spawn_blocking` with a `parking_lot::Mutex` per session to satisfy ORT's non-concurrent contract.
 
 The node exposes these through dedicated RPC namespaces: `tenzro_chat` (LLM, with classic and rich shapes), `tenzro_forecast` (timeseries), and vision-encoder methods that return raw embedding vectors. All three honor the same provider registration, pricing, routing, and settlement plumbing.
 
@@ -1160,7 +1160,7 @@ Agent Templates are reusable, versioned blueprints for spawning autonomous agent
 | Model Inference Proxy | Worker | Routes inference requests to optimal model providers with fallback |
 | Yield Rebalancer | Specialist | Rebalances yield positions across DeFi protocols based on APY and risk |
 | Premium Alpha Advisor | Specialist | Provides premium analytics and trading signals to subscribers |
-| Timeseries Forecaster | Worker | Forecast inference using TimesFM, Chronos, and Granite-TTM models |
+| Timeseries Forecaster | Worker | Forecast inference using TimesFM 2.5 |
 | Audio Transcriber | Worker | Transcribes audio using Whisper, Distil-Whisper, Moonshine, Parakeet, Canary |
 | Video Analyst | Worker | Analyzes video content with frame-level embeddings and multi-modal reasoning |
 | Vision Indexer | Worker | Indexes image collections with CLIP, SigLIP2, DINOv3 embeddings |

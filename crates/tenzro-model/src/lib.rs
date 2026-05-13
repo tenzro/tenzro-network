@@ -172,14 +172,16 @@ pub use vision_runtime::{
     VisionRuntime, cosine_similarity,
 };
 pub use text_embedding_runtime::{
-    StubTextEncoder, TextEmbedConfig, TextEmbedResult, TextEmbeddingRuntime, TextEncoder,
+    GenericTextEncoder, StubTextEncoder, TextEmbedConfig, TextEmbedResult, TextEmbeddingRuntime,
+    TextEncoder, TextEncoderFamily,
 };
 pub use segmentation_runtime::{
-    BoxPrompt, PointPrompt, SegmentMask, SegmentPrompt, SegmentResult, SegmentationRuntime,
-    Segmenter, StubSegmenter,
+    BoxPrompt, GenericSamSegmenter, PointPrompt, SamFamily, SegmentMask, SegmentPrompt,
+    SegmentResult, SegmentationRuntime, Segmenter, StubSegmenter,
 };
 pub use detection_runtime::{
-    DetectResult, Detection, DetectionRuntime, Detector, StubDetector,
+    DetectResult, Detection, DetectionRuntime, Detector, DetrFamily, GenericDetrDetector,
+    StubDetector,
 };
 pub use audio_runtime::{
     AudioRuntime, StubTranscriber, TranscribeConfig, TranscribeResult, Transcriber,
@@ -187,6 +189,7 @@ pub use audio_runtime::{
 };
 pub use video_runtime::{
     StubVideoEncoder, VideoEmbedConfig, VideoEmbedResult, VideoEncoder, VideoRuntime,
+    VisionFallbackVideoEncoder,
 };
 pub use provenance::{
     hash_content, verify_manifest, Ed25519ProvenanceSigner, ProvenanceError, ProvenanceSigner,

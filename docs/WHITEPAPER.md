@@ -911,7 +911,7 @@ Beyond chat / LLM serving, the network ships seven ONNX-backed inference runtime
 
 | Runtime | Catalog | Modality |
 |---------|---------|----------|
-| `TimeseriesRuntime` | Chronos-2, Chronos-Bolt, TimesFM 2.5, Granite-TTM-r2 | Forecast (`[1, ctx_len] -> [1, horizon]` or quantile output) |
+| `TimeseriesRuntime` | TimesFM 2.5 | Forecast (`[1, ctx_len] -> [1, horizon]` or quantile output) |
 | `VisionRuntime` | CLIP ViT-B/32 + L/14, SigLIP2 base/large/so400m, DINOv3 vits16/vitb16/vitl16 | Image embed / similarity / classification |
 | `TextEmbeddingRuntime` | Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M, BGE-M3, Snowflake Arctic Embed L v2.0 | Text embed (Matryoshka 768/512/256/128 supported) |
 | `SegmentationRuntime` | SAM 3 / 3.1, SAM 2 base/large, EdgeSAM, MobileSAM | Two-pass encoder/decoder with point/box prompts |

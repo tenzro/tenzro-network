@@ -139,7 +139,7 @@ The Tenzro A2A agent exposes the skills below covering blockchain, AI, identity,
 |-------|-----|-------------|
 | **AI Inference** | `inference` | Route inference to model providers, settle in TNZO |
 | **Cortex Reasoning Workers** | `cortex` | Tenzro Cortex reasoning-tier inference via signed receipts (Fast/Standard/Deep budgets, MoE rdt-moe family, max_cost_wei cap) |
-| **Forecast** | `forecast` | Timeseries forecasting via Chronos-2, Chronos-Bolt, TimesFM 2.5, Granite-TTM-r2 |
+| **Forecast** | `forecast` | Timeseries forecasting via TimesFM 2.5 |
 | **Vision** | `vision` | Image embedding/similarity via CLIP, SigLIP2, DINOv3 |
 | **Text Embedding** | `text_embedding` | Qwen3-Embedding, EmbeddingGemma, BGE-M3, Snowflake Arctic |
 | **Segmentation** | `segmentation` | SAM 3 / 3.1, SAM 2, EdgeSAM, MobileSAM |
@@ -192,7 +192,7 @@ The agent routes messages based on natural language content:
 | `block`, `height`, `transaction`, `block range`, `sync from`, `catch up` | Block/transaction queries (single block, transaction lookup, batch range for catch-up sync) |
 | `identity`, `did`, `register`, `resolve`, `username` | Identity Management |
 | `model`, `inference`, `ai`, `chat` | AI Inference |
-| `forecast`, `timeseries`, `chronos`, `timesfm` | Forecast |
+| `forecast`, `timeseries`, `timesfm` | Forecast |
 | `image embed`, `clip`, `siglip`, `dinov3`, `vision` | Vision |
 | `text embed`, `embedding`, `qwen3-embedding`, `bge-m3`, `arctic` | Text Embedding |
 | `segment`, `mask`, `sam` | Segmentation |
