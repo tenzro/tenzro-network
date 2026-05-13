@@ -245,12 +245,12 @@ impl NftTransferCmd {
 /// Query the owner of an NFT
 #[derive(Debug, Parser)]
 pub struct NftOwnerCmd {
-    /// Collection ID (hex)
+    /// Collection ID
     #[arg(long)]
-    collection: String,
+    collection_id: String,
     /// Token ID
     #[arg(long)]
-    token_id: u64,
+    token_id: String,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -264,13 +264,15 @@ impl NftOwnerCmd {
         let spinner = output::create_spinner("Querying owner...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_nftOwnerOf", serde_json::json!({
-            "collection": self.collection,
+        let result: serde_json::Value = rpc.call("tenzro_getNftInfo", serde_json::json!({
+            "collection_id": self.collection_id,
             "token_id": self.token_id,
         })).await?;
 
         spinner.finish_and_clear();
 
+        output::print_field("Collection ID", result.get("collection_id").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field("Token ID", result.get("token_id").and_then(|v| v.as_str()).unwrap_or(""));
         output::print_field("Owner", result.get("owner").and_then(|v| v.as_str()).unwrap_or("unknown"));
 
         Ok(())
@@ -316,9 +318,9 @@ impl NftBalanceCmd {
 /// Get NFT collection info
 #[derive(Debug, Parser)]
 pub struct NftInfoCmd {
-    /// Collection ID (hex)
+    /// Collection ID
     #[arg(long)]
-    collection: String,
+    collection_id: String,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -332,8 +334,8 @@ impl NftInfoCmd {
         let spinner = output::create_spinner("Querying collection...");
         let rpc = RpcClient::new(&self.rpc);
 
-        let result: serde_json::Value = rpc.call("tenzro_getNftCollection", serde_json::json!({
-            "collection": self.collection,
+        let result: serde_json::Value = rpc.call("tenzro_getNftInfo", serde_json::json!({
+            "collection_id": self.collection_id,
         })).await?;
 
         spinner.finish_and_clear();
@@ -344,6 +346,11 @@ impl NftInfoCmd {
         output::print_field("Total Supply", &result.get("total_supply").and_then(|v| v.as_u64()).unwrap_or(0).to_string());
         output::print_field("Standard", result.get("standard").and_then(|v| v.as_str()).unwrap_or(""));
         output::print_field("Creator", result.get("creator").and_then(|v| v.as_str()).unwrap_or(""));
+        if let Some(evm_addr) = result.get("evm_address").and_then(|v| v.as_str()) {
+            if !evm_addr.is_empty() {
+                output::print_field("EVM Address", evm_addr);
+            }
+        }
 
         Ok(())
     }
@@ -408,8 +415,8 @@ impl NftListCmd {
 pub struct NftRegisterPointerCmd {
     /// Collection ID (hex)
     #[arg(long)]
-    collection: String,
-    /// Target VM: evm or svm
+    collection_id: String,
+    /// Target VM: evm, svm, or daml
     #[arg(long)]
     vm: String,
     /// Pointer contract address (EVM) or mint address (SVM)
@@ -429,7 +436,7 @@ impl NftRegisterPointerCmd {
         let rpc = RpcClient::new(&self.rpc);
 
         let result: serde_json::Value = rpc.call("tenzro_registerNftPointer", serde_json::json!({
-            "collection": self.collection,
+            "collection_id": self.collection_id,
             "vm": self.vm,
             "address": self.address,
         })).await?;
@@ -437,9 +444,9 @@ impl NftRegisterPointerCmd {
         spinner.finish_and_clear();
 
         output::print_success("NFT pointer registered successfully!");
-        output::print_field("Collection", result.get("collection").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field("Collection ID", result.get("collection_id").and_then(|v| v.as_str()).unwrap_or(""));
         output::print_field("VM", result.get("vm").and_then(|v| v.as_str()).unwrap_or(""));
-        output::print_field("Pointer Address", result.get("pointer_address").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field("Address", result.get("address").and_then(|v| v.as_str()).unwrap_or(""));
         output::print_field("Status", result.get("status").and_then(|v| v.as_str()).unwrap_or(""));
 
         Ok(())
