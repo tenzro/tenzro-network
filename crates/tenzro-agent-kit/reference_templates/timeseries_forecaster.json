@@ -1,7 +1,7 @@
 {
   "template_id": "ref-timeseries-forecaster-v1",
   "name": "Timeseries Forecaster",
-  "description": "Autonomous agent that ingests numeric series (price, demand, telemetry) and produces probabilistic forecasts using Tenzro-served timeseries foundation models (Chronos-2, Chronos-Bolt, TimesFM 2.5, Granite-TTM). Optionally writes the forecast hash on-chain for verifiable settlement of forecast-as-a-service contracts.",
+  "description": "Autonomous agent that ingests numeric series (price, demand, telemetry) and produces probabilistic forecasts using Tenzro-served timeseries foundation models (TimesFM 2.5). Optionally writes the forecast hash on-chain for verifiable settlement of forecast-as-a-service contracts.",
   "template_type": "autonomous",
   "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
   "version": "1.0.0",
@@ -33,20 +33,15 @@
     "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
   },
   "pricing": "free",
-  "system_prompt": "You are a timeseries forecasting agent. When a forecast request arrives: (1) inspect series length, requested horizon, and whether covariates are provided; (2) pick the best registered timeseries model — prefer Chronos-2 for multivariate / covariates, TimesFM 2.5 for long-context univariate, Chronos-Bolt for low-latency edge inference, Granite-TTM for short-horizon tabular; (3) issue tenzro_forecast against the chosen model; (4) return the quantile bands the user requested; (5) optionally hash the (input_series, horizon, output_quantiles) tuple and emit a verifiable receipt for settlement-grade forecasts. Never exceed delegation limits.",
+  "system_prompt": "You are a timeseries forecasting agent. When a forecast request arrives: (1) inspect series length and requested horizon; (2) pick a registered timeseries model — TimesFM 2.5 is the default decoder-only foundation forecaster; (3) issue tenzro_forecast against the chosen model; (4) return the quantile bands the user requested; (5) optionally hash the (input_series, horizon, output_quantiles) tuple and emit a verifiable receipt for settlement-grade forecasts. Never exceed delegation limits.",
   "examples": [
     {
-      "description": "Forecast next 24 hours of energy demand",
-      "user_input": "Forecast 24h ahead given the last 168 hours of demand series, p10/p50/p90 bands",
-      "expected_output": "Selected chronos-2 (multivariate, 8k context). 24-step quantile forecast with p10/p50/p90 returned in 280ms. Receipt hash 0xfeed... emitted on-chain."
-    },
-    {
-      "description": "Edge-tier price forecast",
-      "user_input": "Forecast next 12 minutes of TNZO/USD on the last 200 ticks, fastest path",
-      "expected_output": "Selected chronos-bolt-small (edge tier). 12-step forecast returned in 45ms."
+      "description": "Foundation-model forecast on intraday prices",
+      "user_input": "Forecast next 64 minutes of TNZO/USD on the last 512 ticks with quantile bands",
+      "expected_output": "Selected timesfm-2.5-200m (decoder-only foundation forecaster). 64-step forecast with 10 quantile bands returned in ~12s on CPU."
     }
   ],
-  "tags": ["timeseries", "forecasting", "chronos", "timesfm", "granite-ttm", "ai"],
+  "tags": ["timeseries", "forecasting", "timesfm", "ai"],
   "download_count": 0,
   "rating": 0,
   "content_hash": null,

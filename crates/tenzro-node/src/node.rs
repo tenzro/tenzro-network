@@ -1462,6 +1462,16 @@ impl TenzroNode {
                 self.zk_commitment_registry.len()
             );
 
+            // NFT_FACTORY (0x1006) — swap the in-memory registry created at
+            // VM construction time for one backed by RocksDB CF_NFTS, hydrating
+            // any pre-existing collection / mint / balance / pointer state.
+            if let Some(ref storage) = self.storage {
+                vm_runtime
+                    .precompiles()
+                    .upgrade_nft_factory(storage.clone() as Arc<dyn KvStore>);
+                info!("NFT_FACTORY precompile wired to persistent NftRegistry (CF_NFTS)");
+            }
+
             // ERC-8004 system contracts (0x101a / 0x101b / 0x101c).
             // The handles are stashed on Node so the agent runtime auto-mirror
             // (see init_ai_infrastructure) can write through to the on-chain

@@ -29,16 +29,16 @@ class LoadTargetsTests(unittest.TestCase):
     def test_loads_default_targets(self) -> None:
         targets = export.load_targets()
         self.assertGreater(len(targets), 0)
-        self.assertIn("chronos-bolt-small", targets)
+        self.assertIn("timesfm-2.5-200m", targets)
 
-    def test_chronos_bolt_small_fields(self) -> None:
-        t = export.load_targets()["chronos-bolt-small"]
-        self.assertEqual(t.hf_repo, "amazon/chronos-bolt-small")
-        self.assertEqual(t.arch, "chronos-bolt")
+    def test_timesfm_fields(self) -> None:
+        t = export.load_targets()["timesfm-2.5-200m"]
+        self.assertEqual(t.hf_repo, "google/timesfm-2.5-200m-pytorch")
+        self.assertEqual(t.arch, "timesfm")
         self.assertEqual(t.license, "Apache-2.0")
         self.assertEqual(t.context_length, 2048)
-        self.assertEqual(t.max_horizon, 64)
-        self.assertEqual(t.n_quantiles, 9)
+        self.assertEqual(t.max_horizon, 128)
+        self.assertEqual(t.n_quantiles, 10)
 
     def test_all_targets_have_known_arch(self) -> None:
         targets = export.load_targets()

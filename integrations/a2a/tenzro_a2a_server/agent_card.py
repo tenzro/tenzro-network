@@ -539,15 +539,12 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "name": "Timeseries Forecasting",
                 "description": (
                     "Probabilistic timeseries forecasting via Tenzro-served "
-                    "foundation models (Chronos-2, Chronos-Bolt, TimesFM 2.5, "
-                    "Granite-TTM). Returns quantile bands and supports "
-                    "multivariate inputs with covariates."
+                    "foundation models (TimesFM 2.5). Returns quantile bands."
                 ),
-                "tags": ["timeseries", "forecasting", "ai", "chronos", "timesfm"],
+                "tags": ["timeseries", "forecasting", "ai", "timesfm"],
                 "examples": [
                     "List available forecast models",
-                    "Forecast next 24 steps of [1.0, 1.2, 1.4, ...] with chronos-2",
-                    "Quantile forecast (p10/p50/p90) horizon=12 on chronos-bolt-small",
+                    "Quantile forecast (p10/p50/p90) horizon=64 on timesfm-2.5-200m",
                 ],
                 "inputModes": ["application/json"],
                 "outputModes": ["application/json"],

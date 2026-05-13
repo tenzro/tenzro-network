@@ -208,7 +208,7 @@ enum Command {
     #[command(subcommand, name = "embed-text")]
     EmbedText(EmbedTextCommand),
 
-    /// Image segmentation (SAM 3, SAM 2, EdgeSAM, MobileSAM)
+    /// Image segmentation (SAM 2, EdgeSAM, MobileSAM)
     #[command(subcommand)]
     Segment(SegmentCommand),
 

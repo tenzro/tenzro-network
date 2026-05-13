@@ -11,6 +11,7 @@ use crate::{error::Result, VmError};
 // Re-export types for service injection
 use tenzro_model::routing::InferenceRouter;
 use tenzro_settlement::SettlementEngine;
+use tenzro_storage::KvStore;
 
 /// Precompile address type
 pub type PrecompileAddress = Vec<u8>;
@@ -237,7 +238,7 @@ impl PrecompileRegistry {
     /// "precompile not found" error, which the EVM handles as a normal call
     /// to an unallocated address.
     pub fn new() -> Self {
-        Self::new_with_services(None, None, None)
+        Self::new_with_services(None, None, None, None)
     }
 
     /// Create a new precompile registry, optionally pre-wiring the
@@ -245,12 +246,16 @@ impl PrecompileRegistry {
     ///
     /// `Some(InferenceRouter)` registers MODEL_INFERENCE (0x102) at
     /// construction; `Some(SettlementEngine)` registers SETTLEMENT (0x103);
-    /// `Some(ZkCommitmentRegistry)` registers ZK_VERIFY (0x101). Any of these
-    /// may be wired later via [`upgrade_services`].
+    /// `Some(ZkCommitmentRegistry)` registers ZK_VERIFY (0x101);
+    /// `Some(KvStore)` registers NFT_FACTORY (0x1006) with persistent state
+    /// (without a store, NFT_FACTORY is registered with an in-memory-only
+    /// registry — mutations are lost on restart). Any of these may be wired
+    /// later via [`upgrade_services`] / [`upgrade_nft_factory`].
     pub fn new_with_services(
         inference_router: Option<Arc<InferenceRouter>>,
         settlement_engine: Option<Arc<SettlementEngine>>,
         zk_commitment_registry: Option<Arc<ZkCommitmentRegistry>>,
+        nft_storage: Option<Arc<dyn KvStore>>,
     ) -> Self {
         let registry = Self {
             precompiles: DashMap::new(),
@@ -264,6 +269,7 @@ impl PrecompileRegistry {
             inference_router,
             settlement_engine,
             zk_commitment_registry,
+            nft_storage,
         );
 
         registry
@@ -337,9 +343,27 @@ impl PrecompileRegistry {
         inference_router: Option<Arc<InferenceRouter>>,
         settlement_engine: Option<Arc<SettlementEngine>>,
         zk_commitment_registry: Option<Arc<ZkCommitmentRegistry>>,
+        nft_storage: Option<Arc<dyn KvStore>>,
     ) {
         // TEE attestation verification — has no service dependency, always registered.
         self.register(PRECOMPILE_TEE_VERIFY.to_vec(), Arc::new(precompile_tee_verify));
+
+        // NFT factory (0x1006) — ERC-721/1155 collection creation, mint, transfer,
+        // mintRandom. Always registered. When `nft_storage` is provided, mutations
+        // write through to `CF_NFTS` and previous state is hydrated on startup;
+        // without a store, the registry is in-memory-only and state is lost on
+        // restart. The store can be upgraded later via `upgrade_nft_factory`.
+        {
+            use crate::evm::nft_factory::{create_nft_factory_precompile, NftRegistry};
+            let nft_registry = match nft_storage {
+                Some(store) => Arc::new(NftRegistry::with_storage(store)),
+                None => Arc::new(NftRegistry::new()),
+            };
+            self.register(
+                PRECOMPILE_NFT_FACTORY.to_vec(),
+                create_nft_factory_precompile(nft_registry),
+            );
+        }
 
         // Service-dependent precompiles: only registered when their backing
         // service is provided. Calls to unregistered addresses return
@@ -372,6 +396,24 @@ impl PrecompileRegistry {
                 }),
             );
         }
+    }
+
+    /// Upgrade the NFT_FACTORY precompile (0x1006) to a storage-backed
+    /// `NftRegistry`, hydrating any pre-existing state from `CF_NFTS`.
+    ///
+    /// The VM runtime is built before persistent storage is wired into node
+    /// startup, so NFT_FACTORY is initially registered in-memory-only. This
+    /// method swaps it for a persistent registry once `RocksDbStore` is
+    /// available. Idempotent: calling repeatedly with the same store rebuilds
+    /// the registry from disk.
+    pub fn upgrade_nft_factory(&self, store: Arc<dyn KvStore>) {
+        use crate::evm::nft_factory::{create_nft_factory_precompile, NftRegistry};
+        tracing::info!("Wiring NFT_FACTORY precompile (0x1006) to persistent NftRegistry");
+        let nft_registry = Arc::new(NftRegistry::with_storage(store));
+        self.register(
+            PRECOMPILE_NFT_FACTORY.to_vec(),
+            create_nft_factory_precompile(nft_registry),
+        );
     }
 
     /// Wire up the service-dependent precompiles after registry construction.
@@ -3222,7 +3264,7 @@ mod tests {
         use tenzro_zk::Proof;
 
         let zk_registry = Arc::new(ZkCommitmentRegistry::new());
-        let registry = PrecompileRegistry::new_with_services(None, None, Some(zk_registry.clone()));
+        let registry = PrecompileRegistry::new_with_services(None, None, Some(zk_registry.clone()), None);
 
         let proof = Proof::new(
             vec![0xab, 0xcd, 0xef],
@@ -3248,7 +3290,7 @@ mod tests {
     #[test]
     fn test_zk_precompile_real_rejects_malformed() {
         let zk_registry = Arc::new(ZkCommitmentRegistry::new());
-        let registry = PrecompileRegistry::new_with_services(None, None, Some(zk_registry));
+        let registry = PrecompileRegistry::new_with_services(None, None, Some(zk_registry), None);
 
         // Garbage bytes → [0]
         let r = registry.execute(PRECOMPILE_ZK_VERIFY, &[0xff; 16], 500_000).unwrap();

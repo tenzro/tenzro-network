@@ -963,12 +963,12 @@ mod tests {
         assert_eq!(chat.model_id(), "model-text");
 
         let fc = InferencePayload::Forecast {
-            model_id: "chronos-2".into(),
+            model_id: "timesfm-2.5-200m".into(),
             context: vec![1.0, 2.0, 3.0],
             horizon: 12,
         };
         assert_eq!(fc.payload_modality(), ModelModality::Timeseries);
-        assert_eq!(fc.model_id(), "chronos-2");
+        assert_eq!(fc.model_id(), "timesfm-2.5-200m");
 
         let det = InferencePayload::Detect {
             model_id: "rf-detr-nano".into(),
@@ -1065,7 +1065,7 @@ mod tests {
     #[test]
     fn payload_serializes_round_trip() {
         let p = InferencePayload::Forecast {
-            model_id: "chronos-2".into(),
+            model_id: "timesfm-2.5-200m".into(),
             context: vec![1.0, 2.0],
             horizon: 4,
         };

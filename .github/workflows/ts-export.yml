@@ -11,9 +11,9 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Target ID (from targets.toml) — e.g. "chronos-bolt-small", or "all"'
+        description: 'Target ID (from targets.toml) — e.g. "timesfm-2.5-200m", or "all"'
         required: true
-        default: 'chronos-bolt-small'
+        default: 'timesfm-2.5-200m'
       opset:
         description: 'ONNX opset version'
         required: false

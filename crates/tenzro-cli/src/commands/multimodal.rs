@@ -126,7 +126,7 @@ impl EmbedTextRunCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum SegmentCommand {
-    /// List the curated segmentation catalog (SAM 3, SAM 2, EdgeSAM, MobileSAM).
+    /// List the curated segmentation catalog (SAM 2, EdgeSAM, MobileSAM).
     Catalog(SegmentCatalogCmd),
     /// List currently-loaded segmenters.
     List(SegmentListCmd),

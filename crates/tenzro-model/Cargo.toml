@@ -39,17 +39,30 @@ llama-cpp-2 = { workspace = true }
 # Unicode decoding for llama.cpp token_to_piece
 encoding_rs = "0.8"
 
-# ONNX Runtime for non-LLM modalities (timeseries, vision). Optional —
-# only pulled in by the `onnx` feature so default builds stay fast.
-ort = { workspace = true, optional = true }
-ndarray = { workspace = true, optional = true }
-image = { workspace = true, optional = true }
+# ONNX Runtime for non-LLM modalities (timeseries, vision, text-embedding,
+# segmentation, detection, audio, video). Always enabled — same posture as
+# llama-cpp-2: every node can serve any model in the catalog. Runtime cost
+# when no model is loaded is zero (Sessions are per-loaded-model, gated by
+# tenzro_load*Model RPCs).
+ort = { workspace = true }
+ndarray = { workspace = true }
+image = { workspace = true }
+
+# Text-embedding tokenizer (Qwen3, BGE-M3, EmbeddingGemma, Snowflake Arctic)
+# and Whisper/Moonshine BPE.
+tokenizers = { workspace = true }
+
+# Audio decode + resample + FFT for ASR runtime.
+hound = { workspace = true }
+symphonia = { workspace = true }
+rubato = { workspace = true }
+realfft = { workspace = true }
+
+# Video frame extraction shells out to the `ffmpeg` CLI binary.
+tempfile = { workspace = true }
 
 [features]
 default = []
-# ONNX Runtime backend — enables ts_runtime / vision_runtime modules.
-# Adds ~30s to first-build (downloads ONNX Runtime binary).
-onnx = ["dep:ort", "dep:ndarray", "dep:image"]
 # NVIDIA CUDA — datacenter (A100/H100/B200) and consumer (RTX 3090/4090)
 cuda = ["llama-cpp-2/cuda"]
 # NVIDIA CUDA without virtual memory management (older drivers / embedded)

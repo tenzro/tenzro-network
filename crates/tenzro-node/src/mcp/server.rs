@@ -2034,7 +2034,7 @@ pub struct ModelIdParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ForecastParams {
-    #[schemars(description = "Registered forecast model id (e.g. 'chronos-bolt-base', 'chronos-2', 'timesfm-2.5', 'granite-ttm-r2')")]
+    #[schemars(description = "Registered forecast model id (e.g. 'timesfm-2.5-200m')")]
     pub model_id: String,
     #[schemars(description = "Univariate context series (most-recent-last). Non-empty.")]
     pub history: Vec<f32>,
@@ -2042,7 +2042,7 @@ pub struct ForecastParams {
     pub horizon: u32,
     #[schemars(description = "Optional output quantile levels in (0,1) (e.g. [0.1, 0.5, 0.9]). Defaults to model-native quantiles.")]
     pub quantiles: Option<Vec<f32>>,
-    #[schemars(description = "Optional sampling frequency in seconds (used by frequency-aware models like Granite-TTM)")]
+    #[schemars(description = "Optional sampling frequency in seconds (used by frequency-aware models)")]
     pub frequency_seconds: Option<u64>,
 }
 
@@ -2078,7 +2078,7 @@ pub struct TextEmbedParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SegmentParams {
-    #[schemars(description = "Registered segmenter id (e.g. 'sam3', 'sam2-base', 'edgesam', 'mobilesam')")]
+    #[schemars(description = "Registered segmenter id (e.g. 'sam2-base', 'sam2-large', 'edgesam', 'mobilesam')")]
     pub model_id: String,
     #[schemars(description = "Base64-encoded image bytes")]
     pub image_base64: String,
@@ -9229,7 +9229,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX forecast (timeseries) catalog. Returns models like Chronos-Bolt, Chronos-2, TimesFM 2.5, Granite-TTM-r2 — each with HF repo, context length, max horizon, and quantile support.")]
+    #[tool(description = "Browse the curated ONNX forecast (timeseries) catalog. Returns models like TimesFM 2.5 — each with HF repo, context length, max horizon, and quantile support.")]
     async fn list_forecast_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -9415,7 +9415,7 @@ impl TenzroMcpServer {
 
     // ─── Multi-modal: Segmentation ───
 
-    #[tool(description = "List segmentation models currently loaded on this node (SAM 3, SAM 2, EdgeSAM, MobileSAM). Use list_segmentation_catalog to browse the curated catalog.")]
+    #[tool(description = "List segmentation models currently loaded on this node (SAM 2, EdgeSAM, MobileSAM). Use list_segmentation_catalog to browse the curated catalog.")]
     async fn list_segmentation_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -9430,7 +9430,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX segmentation catalog: SAM 3, SAM 2 (base/large), EdgeSAM, MobileSAM. Wave 1 ships scaffolding — sessions load via tenzro download/serve once the platform downloader is wired.")]
+    #[tool(description = "Browse the curated ONNX segmentation catalog: SAM 2 (base/large), EdgeSAM, MobileSAM. SAM 3 / 3.1 are text-promptable with a different decoder ABI and are not exposed via this point/box segment tool.")]
     async fn list_segmentation_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -9543,7 +9543,7 @@ impl TenzroMcpServer {
 
     // ─── Multi-modal: Audio ASR ───
 
-    #[tool(description = "List ASR (speech-to-text) models currently loaded on this node (Whisper, Distil-Whisper, Moonshine, Parakeet, Canary). Use list_audio_catalog to browse the curated catalog.")]
+    #[tool(description = "List ASR (speech-to-text) models currently loaded on this node. Note: the audio transcriber runtime is scaffolding only — `transcribe` returns ProviderNotAvailable until the ORT-backed Whisper / Moonshine / Parakeet / Canary implementations land in the next wave.")]
     async fn list_audio_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -9554,7 +9554,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX ASR catalog: Moonshine v2 (tiny/base, MIT, on-device), Distil-Whisper (small.en/medium.en/large-v3, MIT), Whisper Large-v3-turbo (MIT, flagship), Parakeet-TDT-0.6B-v3 (CC-BY-4.0, 25 European langs), Canary-1B-Flash (CC-BY-4.0, multilingual).")]
+    #[tool(description = "Browse the curated ONNX ASR catalog: Moonshine v2 (tiny/base, MIT, on-device), Distil-Whisper (small.en/medium.en/large-v3, MIT), Whisper Large-v3-turbo (MIT, flagship), Parakeet-TDT-0.6B-v3 (CC-BY-4.0, 25 European langs), Canary-1B-Flash (CC-BY-4.0, multilingual). The catalog is stable; the ORT-backed transcribers ship in the next wave (today the runtime returns ProviderNotAvailable).")]
     async fn list_audio_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -9580,7 +9580,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Transcribe an audio clip (WAV/MP3/FLAC, base64-encoded) with a registered ASR model. Optional language hint, per-segment timestamps, and decoding temperature.")]
+    #[tool(description = "Transcribe an audio clip (WAV/MP3/FLAC, base64-encoded) with a registered ASR model. Optional language hint, per-segment timestamps, and decoding temperature. Note: the ORT-backed transcriber lands in the next wave — today this call returns ProviderNotAvailable.")]
     async fn transcribe(
         &self,
         Parameters(params): Parameters<TranscribeParams>,
@@ -9939,7 +9939,7 @@ impl ServerHandler for TenzroMcpServer {
              • delete_model_mcp — Delete a downloaded model from disk\n\
              • get_download_progress — Check download progress for a model\n\n\
              Multi-modal AI — Forecast (Timeseries):\n\
-             • forecast — Run a univariate timeseries forecast (Chronos-2, TimesFM 2.5, Granite-TTM)\n\
+             • forecast — Run a univariate timeseries forecast (TimesFM 2.5)\n\
              • list_forecast_models — List loaded forecast models\n\
              • list_forecast_catalog — Browse curated forecast catalog\n\
              • unload_forecast_model — Drop a forecast model\n\n\
@@ -9955,7 +9955,7 @@ impl ServerHandler for TenzroMcpServer {
              • list_text_embedding_catalog — Browse curated text-embedding catalog\n\
              • unload_text_embedding_model — Drop a text encoder\n\n\
              Multi-modal AI — Segmentation:\n\
-             • segment — Prompt-driven mask segmentation (SAM 3, SAM 2, EdgeSAM, MobileSAM)\n\
+             • segment — Prompt-driven mask segmentation (SAM 2, EdgeSAM, MobileSAM)\n\
              • list_segmentation_models — List loaded segmenters\n\
              • list_segmentation_catalog — Browse curated segmentation catalog\n\
              • unload_segmentation_model — Drop a segmenter\n\n\
@@ -9964,8 +9964,8 @@ impl ServerHandler for TenzroMcpServer {
              • list_detection_models — List loaded detectors\n\
              • list_detection_catalog — Browse curated detection catalog\n\
              • unload_detection_model — Drop a detector\n\n\
-             Multi-modal AI — Audio (ASR):\n\
-             • transcribe — Speech-to-text (Whisper, Distil-Whisper, Moonshine, Parakeet, Canary)\n\
+             Multi-modal AI — Audio (ASR, scaffolding — ORT-backed transcribers ship next wave):\n\
+             • transcribe — Speech-to-text (catalog: Whisper, Distil-Whisper, Moonshine, Parakeet, Canary; today returns ProviderNotAvailable)\n\
              • list_audio_models — List loaded ASR models\n\
              • list_audio_catalog — Browse curated ASR catalog\n\
              • unload_audio_model — Drop an ASR model\n\n\

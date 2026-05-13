@@ -103,7 +103,7 @@ fn forecast_catalog_is_non_empty_and_well_formed() {
     let catalog = get_forecast_catalog();
     assert!(
         !catalog.is_empty(),
-        "forecast catalog must ship at least Chronos-Bolt + TimesFM 2.5"
+        "forecast catalog must ship TimesFM 2.5"
     );
     for entry in &catalog {
         assert!(!entry.id.is_empty(), "forecast entry has empty id");

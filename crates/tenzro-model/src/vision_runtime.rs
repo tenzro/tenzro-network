@@ -116,7 +116,6 @@ pub trait ImageEncoder: Send + Sync {
     fn embedding_dim(&self) -> usize;
 }
 
-#[cfg(feature = "onnx")]
 mod onnx_backend {
     use super::*;
     use image::imageops::FilterType;
@@ -291,52 +290,7 @@ mod onnx_backend {
     }
 }
 
-#[cfg(feature = "onnx")]
 pub use onnx_backend::GenericImageEncoder;
-
-#[cfg(not(feature = "onnx"))]
-mod stub_backend {
-    use super::*;
-
-    /// Stub for builds without the `onnx` feature. Constructing it always
-    /// returns an error so callers can detect the missing backend.
-    #[derive(Debug)]
-    pub struct GenericImageEncoder;
-
-    impl GenericImageEncoder {
-        pub fn from_onnx(
-            _path: impl AsRef<Path>,
-            _input_size: u32,
-            _embedding_dim: usize,
-            _normalization: ImageNormalization,
-        ) -> Result<Self> {
-            Err(ModelError::ProviderNotAvailable(
-                "ONNX backend not enabled — rebuild tenzro-model with --features onnx".to_string(),
-            ))
-        }
-    }
-
-    impl ImageEncoder for GenericImageEncoder {
-        fn embed(
-            &self,
-            _image_bytes: &[u8],
-            _config: &ImageEmbedConfig,
-        ) -> Result<ImageEmbedResult> {
-            Err(ModelError::ProviderNotAvailable(
-                "ONNX backend not enabled — rebuild tenzro-model with --features onnx".to_string(),
-            ))
-        }
-        fn input_size(&self) -> u32 {
-            0
-        }
-        fn embedding_dim(&self) -> usize {
-            0
-        }
-    }
-}
-
-#[cfg(not(feature = "onnx"))]
-pub use stub_backend::GenericImageEncoder;
 
 /// Cosine similarity between two equal-length embeddings. Returns 0.0 if
 /// either vector is empty or has zero norm. Range is `[-1.0, 1.0]`.
@@ -519,23 +473,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "onnx"))]
-    #[test]
-    fn stub_load_returns_not_available() {
-        let err = GenericImageEncoder::from_onnx(
-            "/nowhere.onnx",
-            224,
-            512,
-            ImageNormalization::CLIP,
-        )
-        .unwrap_err();
-        match err {
-            ModelError::ProviderNotAvailable(msg) => {
-                assert!(msg.contains("ONNX"), "expected ONNX hint, got: {}", msg);
-            }
-            other => panic!("expected NotAvailable, got {:?}", other),
-        }
-    }
 
     /// A trivial mock encoder used to exercise the runtime dispatch path
     /// without requiring ONNX.
