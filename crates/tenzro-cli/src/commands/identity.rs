@@ -1,13 +1,12 @@
 //! Identity management commands for the Tenzro CLI
 //!
-//! Supports both TDIP (Tenzro Decentralized Identity Protocol) and PDIS (Personal Decentralized
-//! Identity Standard) identities.
+//! Supports TDIP (Tenzro Decentralized Identity Protocol) identities.
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
 use crate::output::{self};
 
-/// Identity management commands (TDIP + PDIS)
+/// Identity management commands (TDIP)
 #[derive(Debug, Subcommand)]
 pub enum IdentityCommand {
     /// Register a new TDIP identity
@@ -38,6 +37,10 @@ pub enum IdentityCommand {
     Revoke(IdentityRevokeCmd),
     /// Hard-delete a revoked identity (TDIP/GDPR Article 17 right-to-erasure)
     Forget(IdentityForgetCmd),
+    /// Export a portable CARv1 identity bundle (DID + credentials + encrypted keystore files)
+    ExportCar(IdentityExportCarCmd),
+    /// Import a portable CARv1 identity bundle produced by `export-car`
+    ImportCar(IdentityImportCarCmd),
 }
 
 impl IdentityCommand {
@@ -57,6 +60,8 @@ impl IdentityCommand {
             Self::JwksGet(cmd) => cmd.execute().await,
             Self::Revoke(cmd) => cmd.execute().await,
             Self::Forget(cmd) => cmd.execute().await,
+            Self::ExportCar(cmd) => cmd.execute().await,
+            Self::ImportCar(cmd) => cmd.execute().await,
         }
     }
 }
@@ -764,6 +769,120 @@ impl IdentityForgetCmd {
         }
         if let Some(note) = result.get("note").and_then(|v| v.as_str()) {
             output::print_field("Note", note);
+        }
+        Ok(())
+    }
+}
+
+/// Export a portable CARv1 identity bundle. The bundle contains the
+/// TenzroIdentity (DID + credentials + delegations) plus the encrypted
+/// keystore files for the bound MPC wallet (FROST shares, ML-DSA-65 seed,
+/// BLS12-381 seed). The keystore files are exported as already-encrypted
+/// ciphertext — the password never leaves the user's head, so the CAR
+/// bundle can travel over insecure transport (email, USB stick, etc.).
+#[derive(Debug, Parser)]
+pub struct IdentityExportCarCmd {
+    /// The DID to export
+    did: String,
+
+    /// Output path for the CAR file
+    #[arg(long)]
+    output: std::path::PathBuf,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl IdentityExportCarCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        use base64::Engine as _;
+
+        output::print_header("Export Identity (CARv1)");
+        let spinner = output::create_spinner("Building bundle...");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_exportIdentityCar", serde_json::json!({ "did": self.did }))
+            .await?;
+
+        let car_base64 = result
+            .get("car_base64")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("RPC response missing car_base64"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(car_base64)
+            .map_err(|e| anyhow::anyhow!("base64 decode failed: {e}"))?;
+        std::fs::write(&self.output, &bytes)
+            .map_err(|e| anyhow::anyhow!("write {}: {e}", self.output.display()))?;
+
+        spinner.finish_and_clear();
+        output::print_success("Bundle written");
+        println!();
+        output::print_field("DID", &self.did);
+        output::print_field("Output", &self.output.display().to_string());
+        output::print_field("Size (bytes)", &bytes.len().to_string());
+        if let Some(wallet_id) = result.get("wallet_id").and_then(|v| v.as_str()) {
+            output::print_field("Wallet ID", wallet_id);
+        }
+        Ok(())
+    }
+}
+
+/// Import a portable CARv1 identity bundle previously produced by
+/// `export-car`. Restores the TenzroIdentity into the registry and the
+/// encrypted keystore files into the local wallet service. The original
+/// keystore password (never embedded in the CAR) is required to actually
+/// unlock the wallet afterward.
+#[derive(Debug, Parser)]
+pub struct IdentityImportCarCmd {
+    /// Path to the CAR file to import
+    #[arg(long)]
+    input: std::path::PathBuf,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl IdentityImportCarCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        use base64::Engine as _;
+
+        output::print_header("Import Identity (CARv1)");
+        let spinner = output::create_spinner("Restoring bundle...");
+
+        let bytes = std::fs::read(&self.input)
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", self.input.display()))?;
+        let car_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_importIdentityCar",
+                serde_json::json!({ "car_base64": car_base64 }),
+            )
+            .await?;
+
+        spinner.finish_and_clear();
+        output::print_success("Identity restored");
+        println!();
+        if let Some(did) = result.get("did").and_then(|v| v.as_str()) {
+            output::print_field("DID", did);
+        }
+        if let Some(wid) = result.get("wallet_id").and_then(|v| v.as_str()) {
+            output::print_field("Wallet ID", wid);
+        }
+        if let Some(addr) = result.get("wallet_address").and_then(|v| v.as_str()) {
+            output::print_field("Wallet Address", addr);
+        }
+        if let Some(n) = result.get("credential_count").and_then(|v| v.as_u64()) {
+            output::print_field("Credentials", &n.to_string());
+        }
+        if let Some(n) = result.get("imported_wallet_files").and_then(|v| v.as_u64()) {
+            output::print_field("Wallet Files", &n.to_string());
         }
         Ok(())
     }

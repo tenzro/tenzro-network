@@ -35,7 +35,12 @@ ecdsa = { workspace = true }
 ciborium = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, optional = true }
+jsonwebtoken = { workspace = true, optional = true }
 libc = { workspace = true }
+k256 = { workspace = true }
+hkdf = "0.12"
+sha3 = { workspace = true }
+zeroize = { workspace = true }
 
 [features]
 default = ["all-tees"]
@@ -43,4 +48,8 @@ intel-tdx = ["reqwest"]
 amd-sev-snp = ["reqwest"]
 aws-nitro = []
 nvidia-gpu = ["reqwest"]
-all-tees = ["intel-tdx", "amd-sev-snp", "aws-nitro", "nvidia-gpu"]
+# Intel Tiber Trust Authority — hosted attestation verification service that
+# returns a signed JWT (EAT profile) after appraising a TDX/SGX/TPM quote.
+# Implies `intel-tdx` because Tiber verifies TDX Quotes end-to-end.
+intel-tiber = ["intel-tdx", "jsonwebtoken"]
+all-tees = ["intel-tdx", "amd-sev-snp", "aws-nitro", "nvidia-gpu", "intel-tiber"]

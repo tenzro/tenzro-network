@@ -83,12 +83,32 @@ class TrainingModality(str, Enum):
 
 
 class AggregationRule:
-    """Phase 1 only emits ``Mean``. Other variants are placeholders for Phase 2."""
+    """JSON wire-format helpers mirroring ``tenzro_types::training::AggregationRule``.
+
+    Serde encodes unit variants as bare strings (``"Mean"``,
+    ``"CoordinateMedian"``) and variants-with-fields as a single-key object
+    (``{"TrimmedMean": {"alpha_bps": 1000}}``).
+
+    Tier policy (enforced by the Rust runtime at task registration):
+    ``Mean`` admits at all tiers; ``TrimmedMean`` / ``CoordinateMedian`` /
+    ``Krum`` require ``TrainingTier.VERIFIED`` or higher.
+    """
 
     @staticmethod
-    def mean() -> dict[str, Any] | str:
-        # Rust serde tags unit enum variants by name as bare strings.
+    def mean() -> str:
         return "Mean"
+
+    @staticmethod
+    def trimmed_mean(alpha_bps: int) -> dict[str, Any]:
+        return {"TrimmedMean": {"alpha_bps": alpha_bps}}
+
+    @staticmethod
+    def coordinate_median() -> str:
+        return "CoordinateMedian"
+
+    @staticmethod
+    def krum(f: int) -> dict[str, Any]:
+        return {"Krum": {"f": f}}
 
 
 # ---------------------------------------------------------------------------

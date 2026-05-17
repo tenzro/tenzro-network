@@ -408,7 +408,7 @@ impl UpdateTemplateCmd {
 /// Invoke (run) a spawned agent template end-to-end.
 ///
 /// For paid templates the payer wallet is charged:
-///   - `AGENT_MARKETPLACE_COMMISSION_BPS` (5%) flows to the network treasury
+///   - `MARKETPLACE_COMMISSION_BPS` (5%) flows to the network treasury
 ///   - the remainder is paid to the template's `creator_wallet`
 ///
 /// Successful non-dry-run invocations are metered (invocation_count +

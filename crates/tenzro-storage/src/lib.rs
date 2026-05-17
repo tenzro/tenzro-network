@@ -66,6 +66,8 @@ pub use da::{
     compute_commitment, DaBackend, DaBackendId, DaBackendStatus, DaPointer, InlineFallbackBackend,
     ReceiptEnvelope, ReceiptKind, ReceiptStorageMode, ReceiptSummary,
 };
+#[cfg(feature = "celestia")]
+pub use da::CelestiaBackend;
 
 /// Storage version for compatibility tracking
 pub const STORAGE_VERSION: u32 = 1;

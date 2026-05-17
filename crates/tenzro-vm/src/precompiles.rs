@@ -81,6 +81,13 @@ pub const PRECOMPILE_ERC8004_REPUTATION: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 /// attestation, ABI-compatible with the Ethereum reference contracts.
 pub const PRECOMPILE_ERC8004_VALIDATION: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1c, 0];
 
+// ERC-7579 modular validator precompiles. Re-exported from `crate::erc7579`
+// so that the registry-side wiring can reach them without an extra import.
+pub use crate::erc7579::{
+    PRECOMPILE_SESSION_KEY_VALIDATOR, PRECOMPILE_SOCIAL_RECOVERY_VALIDATOR,
+    PRECOMPILE_SPENDING_LIMIT_VALIDATOR,
+};
+
 /// Precompile execution result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrecompileResult {
@@ -558,6 +565,70 @@ impl PrecompileRegistry {
         );
 
         (identity, reputation, validation)
+    }
+
+    /// Register the ERC-7579 modular validator precompiles
+    /// (`0x101d` / `0x101e` / `0x101f`) and return the live module handles
+    /// so the caller can install per-account configurations into them.
+    ///
+    /// - `0x101d`: [`SocialRecoveryValidator`] — N-of-M guardian quorum
+    ///   (composite Ed25519 + ML-DSA-65 signatures)
+    /// - `0x101e`: [`SessionKeyValidator`] — session-bound keys with target /
+    ///   selector / value / time restrictions
+    /// - `0x101f`: [`SpendingLimitValidator`] — on-chain twin of the runtime
+    ///   `SpendingPolicy` (per-tx + rolling-window daily ceilings)
+    ///
+    /// All three are AND-combined by the [`crate::aa_validators::ValidatorRegistry`]
+    /// — every installed validator must approve a `UserOperation` for the
+    /// EntryPoint to accept it. This matches the custody invariant from
+    /// `feedback_custody_enforce_at_signing_time`: the on-chain validator
+    /// modules are the primary control surface; off-chain
+    /// `SpendingPolicyResolver` is defence-in-depth only.
+    pub fn register_erc7579_validator_precompiles(
+        &self,
+    ) -> (
+        Arc<crate::erc7579::SocialRecoveryValidator>,
+        Arc<crate::erc7579::SessionKeyValidator>,
+        Arc<crate::erc7579::SpendingLimitValidator>,
+    ) {
+        use crate::erc7579::{
+            create_session_key_validator_precompile,
+            create_social_recovery_validator_precompile,
+            create_spending_limit_validator_precompile, SessionKeyValidator,
+            SocialRecoveryValidator, SpendingLimitValidator,
+        };
+
+        let mut social_recovery_addr = [0u8; 20];
+        social_recovery_addr.copy_from_slice(&PRECOMPILE_SOCIAL_RECOVERY_VALIDATOR[..20]);
+        let mut session_key_addr = [0u8; 20];
+        session_key_addr.copy_from_slice(&PRECOMPILE_SESSION_KEY_VALIDATOR[..20]);
+        let mut spending_limit_addr = [0u8; 20];
+        spending_limit_addr.copy_from_slice(&PRECOMPILE_SPENDING_LIMIT_VALIDATOR[..20]);
+
+        let social_recovery = Arc::new(SocialRecoveryValidator::new(social_recovery_addr));
+        let session_key = Arc::new(SessionKeyValidator::new(session_key_addr));
+        let spending_limit = Arc::new(SpendingLimitValidator::new(spending_limit_addr));
+
+        self.register(
+            PRECOMPILE_SOCIAL_RECOVERY_VALIDATOR.to_vec(),
+            create_social_recovery_validator_precompile(Arc::clone(&social_recovery)),
+        );
+        self.register(
+            PRECOMPILE_SESSION_KEY_VALIDATOR.to_vec(),
+            create_session_key_validator_precompile(Arc::clone(&session_key)),
+        );
+        self.register(
+            PRECOMPILE_SPENDING_LIMIT_VALIDATOR.to_vec(),
+            create_spending_limit_validator_precompile(Arc::clone(&spending_limit)),
+        );
+
+        tracing::info!(
+            "Registered ERC-7579 modular validator precompiles \
+             (0x101d SocialRecoveryValidator, 0x101e SessionKeyValidator, \
+             0x101f SpendingLimitValidator)"
+        );
+
+        (social_recovery, session_key, spending_limit)
     }
 }
 

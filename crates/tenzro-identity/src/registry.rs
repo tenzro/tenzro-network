@@ -1,8 +1,7 @@
 //! Identity registry for the Tenzro Decentralized Identity Protocol
 //!
-//! The `IdentityRegistry` is the central store for all TDIP identities.
-//! It replaces `PdisRegistry` with a unified registry that handles both
-//! human and machine identities.
+//! The `IdentityRegistry` is the central store for all TDIP identities,
+//! handling both human and machine identities through a unified type.
 
 use crate::credential::{TenzroCredentialType, VerifiableCredential};
 use crate::delegation::DelegationScope;
@@ -145,8 +144,7 @@ pub struct RegistrationResult {
 /// Central registry for Tenzro Decentralized Identity Protocol identities
 ///
 /// Thread-safe (DashMap-backed) registry supporting concurrent identity
-/// operations. Replaces the PDIS `PdisRegistry` with unified handling
-/// of both human and machine identities.
+/// operations on both human and machine identities through a unified type.
 ///
 /// # Persistence
 ///
@@ -557,7 +555,7 @@ impl IdentityRegistry {
         let did = TenzroDid::new_human();
         let did_string = did.to_string();
 
-        let (wallet_address, wallet_id, pq_verifying_key) =
+        let (wallet_address, wallet_id, pq_verifying_key, bls_verifying_key) =
             self.provision_or_default(&did_string).await?;
 
         let identity = TenzroIdentity {
@@ -577,6 +575,7 @@ impl IdentityRegistry {
             wallet_address,
             wallet_id,
             pq_verifying_key,
+            bls_verifying_key,
             credentials: Vec::new(),
             services: Vec::new(),
             created_at: Utc::now(),
@@ -647,6 +646,7 @@ impl IdentityRegistry {
             wallet_address: binding.address,
             wallet_id: binding.wallet_id,
             pq_verifying_key: binding.pq_verifying_key,
+            bls_verifying_key: binding.bls_verifying_key,
             credentials: Vec::new(),
             services: Vec::new(),
             created_at: Utc::now(),
@@ -752,6 +752,7 @@ impl IdentityRegistry {
             wallet_address: binding.address,
             wallet_id: binding.wallet_id,
             pq_verifying_key: binding.pq_verifying_key,
+            bls_verifying_key: binding.bls_verifying_key,
             credentials: Vec::new(),
             services: Vec::new(),
             created_at: Utc::now(),
@@ -834,7 +835,7 @@ impl IdentityRegistry {
         let did = TenzroDid::new_machine(&controller_id);
         let did_string = did.to_string();
 
-        let (wallet_address, wallet_id, pq_verifying_key) =
+        let (wallet_address, wallet_id, pq_verifying_key, bls_verifying_key) =
             self.provision_or_default(&did_string).await?;
 
         let mut identity = TenzroIdentity {
@@ -858,6 +859,7 @@ impl IdentityRegistry {
             wallet_address,
             wallet_id,
             pq_verifying_key,
+            bls_verifying_key,
             credentials: Vec::new(),
             services: Vec::new(),
             created_at: Utc::now(),
@@ -922,7 +924,7 @@ impl IdentityRegistry {
         let did = TenzroDid::new_autonomous_machine();
         let did_string = did.to_string();
 
-        let (wallet_address, wallet_id, pq_verifying_key) =
+        let (wallet_address, wallet_id, pq_verifying_key, bls_verifying_key) =
             self.provision_or_default(&did_string).await?;
 
         let mut identity = TenzroIdentity {
@@ -946,6 +948,7 @@ impl IdentityRegistry {
             wallet_address,
             wallet_id,
             pq_verifying_key,
+            bls_verifying_key,
             credentials: Vec::new(),
             services: Vec::new(),
             created_at: Utc::now(),
@@ -994,16 +997,20 @@ impl IdentityRegistry {
     ///
     /// * `public_key` — 32-byte Ed25519 verifying key.
     /// * `pq_verifying_key` — 1952-byte ML-DSA-65 (FIPS 204) verifying key.
+    /// * `bls_verifying_key` — 48-byte BLS12-381 G1-compressed verifying key
+    ///   (`min_pk` scheme), used for HotStuff-2 vote aggregation.
     /// * `capabilities` — opaque capability strings stored on the identity.
     ///
     /// # Errors
     ///
     /// Returns `IdentityError::InvalidPublicKey` when the classical key is
-    /// not 32 bytes or the post-quantum key is not 1952 bytes.
+    /// not 32 bytes, the post-quantum key is not 1952 bytes, or the BLS key
+    /// is not 48 bytes.
     pub async fn register_autonomous_machine_with_keys(
         &self,
         public_key: Vec<u8>,
         pq_verifying_key: Vec<u8>,
+        bls_verifying_key: Vec<u8>,
         capabilities: Vec<String>,
     ) -> Result<RegistrationResult> {
         if public_key.len() != 32 {
@@ -1016,6 +1023,12 @@ impl IdentityRegistry {
             return Err(IdentityError::InvalidPublicKey(format!(
                 "ML-DSA-65 verifying key must be exactly 1952 bytes, got {}",
                 pq_verifying_key.len()
+            )));
+        }
+        if bls_verifying_key.len() != 48 {
+            return Err(IdentityError::InvalidPublicKey(format!(
+                "BLS12-381 G1-compressed verifying key must be exactly 48 bytes, got {}",
+                bls_verifying_key.len()
             )));
         }
 
@@ -1054,6 +1067,7 @@ impl IdentityRegistry {
             wallet_address,
             wallet_id,
             pq_verifying_key,
+            bls_verifying_key,
             credentials: Vec::new(),
             services: Vec::new(),
             created_at: Utc::now(),
@@ -2074,6 +2088,33 @@ impl IdentityRegistry {
         self.identities.insert(key, identity);
     }
 
+    /// Insert an identity into the registry from an externally produced
+    /// record — used by the CARv1 import flow (C.6) to land an identity on
+    /// a new node from an export bundle. Persists to RocksDB if storage is
+    /// configured, then publishes to the in-memory cache so subsequent
+    /// `resolve` / `find_wallet_id_for_did` calls see it.
+    ///
+    /// Refuses to overwrite an existing identity with the same DID: the
+    /// import flow is "land it on a fresh machine", not "patch a live
+    /// record". Callers that genuinely want to replace must
+    /// [`Self::forget_identity`] first.
+    pub fn import_identity(&self, identity: TenzroIdentity) -> Result<()> {
+        let key = identity.did.to_string();
+        if self.identities.contains_key(&key) {
+            return Err(IdentityError::AlreadyExists(key));
+        }
+        self.persist_identity(&key, &identity);
+        if let Some(ref username) = identity.username {
+            // Best-effort: claim the username on this node too. If the name
+            // is already taken locally we keep the identity (the user can
+            // re-register a new name) rather than reject the whole import.
+            let _ = self.usernames.insert(username.clone(), key.clone());
+            self.persist_username(username, &key);
+        }
+        self.identities.insert(key, identity);
+        Ok(())
+    }
+
     /// Registers a unique username for an identity.
     ///
     /// Validates the username format (lowercase alphanumeric + underscores,
@@ -2182,10 +2223,18 @@ impl IdentityRegistry {
     /// When a `WalletBinder` is configured, the key comes from the wallet's
     /// keystore; otherwise we generate an ephemeral one so the identity still
     /// satisfies the structural invariant (test/no-binder paths only).
-    async fn provision_or_default(&self, did: &str) -> Result<(Address, String, Vec<u8>)> {
+    async fn provision_or_default(
+        &self,
+        did: &str,
+    ) -> Result<(Address, String, Vec<u8>, Vec<u8>)> {
         if let Some(ref binder) = self.wallet_binder {
             let binding = binder.provision_wallet(did).await?;
-            Ok((binding.address, binding.wallet_id, binding.pq_verifying_key))
+            Ok((
+                binding.address,
+                binding.wallet_id,
+                binding.pq_verifying_key,
+                binding.bls_verifying_key,
+            ))
         } else {
             // Default: generate a placeholder address from the DID
             let hash = tenzro_crypto::sha256(did.as_bytes());
@@ -2196,7 +2245,12 @@ impl IdentityRegistry {
             let pq_verifying_key = tenzro_crypto::pq::MlDsaSigningKey::generate()
                 .verifying_key_bytes()
                 .to_vec();
-            Ok((address, wallet_id, pq_verifying_key))
+            let bls_verifying_key = tenzro_crypto::bls::BlsKeyPair::generate()
+                .map_err(|e| IdentityError::WalletError(e.to_string()))?
+                .public_key()
+                .to_bytes()
+                .to_vec();
+            Ok((address, wallet_id, pq_verifying_key, bls_verifying_key))
         }
     }
 }
@@ -3183,7 +3237,7 @@ mod tests {
         // Wave 3d: every broadcast carries a verifiable hybrid signature.
         for s in sent.iter() {
             s.verify().expect("signed revocation must verify");
-            assert!(s.signature.is_hybrid(), "must carry PQ leg");
+            assert!(!s.signature.pq.is_empty(), "must carry PQ leg");
         }
     }
 

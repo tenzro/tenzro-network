@@ -36,6 +36,36 @@ use tenzro_types::primitives::{BlockHeight, Hash};
 use crate::error::{NodeError, Result};
 use crate::metrics::MetricsCollector;
 
+/// Static context needed to assemble periodic `ProviderAnnouncementMessage`
+/// broadcasts from inside the event loop.
+///
+/// Snapshot semantics: `hardware`, `geography`, `provider_address`,
+/// `provider_type`, `capabilities`, `rpc_endpoint` are captured once at node
+/// startup. Per-tick we still re-read `served_models` from the live
+/// `Arc<DashMap>` so additions / withdrawals propagate without a node restart.
+#[derive(Debug, Clone)]
+pub struct ProviderAnnouncementContext {
+    /// `tenzro_types::HardwareCapabilities::detect()` evaluated once at startup.
+    pub hardware: tenzro_types::HardwareCapabilities,
+    /// Operator-declared geography (`NodeConfig::geography`). `None` means
+    /// "unknown" — receivers must NOT treat it as a wildcard.
+    pub geography: Option<String>,
+    /// Provider wallet address (hex-encoded with `0x` prefix or empty if
+    /// the node has no provisioned identity yet).
+    pub provider_address: String,
+    /// Provider class string (`"llm"`, `"tee"`, `"general"`).
+    pub provider_type: String,
+    /// Capability labels (e.g. `"inference"`, `"tee-attestation"`).
+    pub capabilities: Vec<String>,
+    /// External (advertised) RPC endpoint URL — what peers should dial for
+    /// inference. Built from `external_rpc_addr` if set, otherwise from
+    /// `rpc_addr`.
+    pub rpc_endpoint: String,
+    /// TTL in seconds for each announcement record. Receivers evict entries
+    /// whose `last_seen + ttl_secs < now`.
+    pub ttl_secs: u64,
+}
+
 /// Event types flowing through the node
 #[derive(Debug, Clone)]
 pub enum NodeEvent {
@@ -65,6 +95,16 @@ pub enum NodeEvent {
     /// the node's `RemoteWorkerRegistry` without blocking the gossipsub
     /// receiver task.
     CortexAdvertisementReceived(Vec<u8>),
+    /// Tenzro Train gossip message received on either `tenzro/training`
+    /// (`OuterGradient` payloads from remote trainers) or
+    /// `tenzro/training/syncer` (`SyncRound` payloads from remote syncers).
+    ///
+    /// The event loop decodes via `tenzro_training::decode_for_topic`,
+    /// enforces topic discipline, and dispatches into the local
+    /// `TrainingRuntime` for idempotent application. The
+    /// `accept_outer_gradient` path dedups by `trainer_did`, so
+    /// re-receiving a self-published gradient is a no-op.
+    TrainingGossipReceived { topic: String, bytes: Vec<u8> },
     /// Shutdown signal
     Shutdown,
 }
@@ -276,6 +316,13 @@ pub struct EventLoop {
     network_agents: Option<Arc<DashMap<String, crate::node::NetworkAgentEntry>>>,
     /// Shared reference to the node's network_providers map for gossipsub provider discovery
     network_providers: Option<Arc<DashMap<String, crate::node::NetworkProviderEntry>>>,
+    /// Provider announcement broadcast context. When `Some`, the periodic
+    /// `provider_heartbeat` tick rebuilds a `ProviderAnnouncementMessage`
+    /// from the current `served_models` / `provider_pricing` / hardware
+    /// snapshot and broadcasts it on `tenzro/providers` so peers can
+    /// merge it into their `network_providers` cache. `None` on light
+    /// clients that never serve.
+    provider_announcement_ctx: Option<ProviderAnnouncementContext>,
     /// Shared reference to the ModelRuntime for idle-TTL liveness checks of
     /// local model service instances.
     model_runtime: Option<Arc<tenzro_model::ModelRuntime>>,
@@ -287,6 +334,13 @@ pub struct EventLoop {
     /// verified Cortex advertisements received over the
     /// `tenzro/cortex` gossipsub topic.
     remote_cortex_workers: Option<Arc<tenzro_cortex::RemoteWorkerRegistry>>,
+    /// Shared reference to the node's `TrainingRuntime` used to ingest
+    /// `OuterGradient` payloads received on the `tenzro/training` topic
+    /// and observe `SyncRound` payloads on `tenzro/training/syncer`. The
+    /// dispatch goes through `SyncerState::accept_outer_gradient`, which
+    /// dedups by `trainer_did`, so re-receiving a self-published gradient
+    /// (the publisher is also subscribed to its own topic) is a no-op.
+    training_runtime: Option<Arc<tenzro_training::TrainingRuntime>>,
     /// Persistent kill-switch receipt store. Wired from the node so that the
     /// post-execute scan in `handle_block_finalized` can record the
     /// canonical `KillSwitchReceipt` (with the real `frozen_at_block`)
@@ -366,6 +420,12 @@ pub struct EventLoop {
     /// Initialized lazily inside `run()` once the engine has been spawned;
     /// `None` on a node with no network service (e.g. light-client mode).
     block_import_rx: Option<mpsc::Receiver<crate::block_sync::BlockImport>>,
+
+    /// Cosmos-style snapshot ABCI store. The post-finality hook calls
+    /// `produce_at(height, state_root)` every
+    /// [`crate::snapshot::SNAPSHOT_INTERVAL_BLOCKS`] finalized blocks
+    /// (currently 10,000). `None` until wired by the node.
+    snapshot_store: Option<Arc<crate::snapshot::SnapshotStore>>,
 }
 
 impl EventLoop {
@@ -420,9 +480,11 @@ impl EventLoop {
             swarm_manager: None,
             network_agents: None,
             network_providers: None,
+            provider_announcement_ctx: None,
             model_runtime: None,
             load_tracker: None,
             remote_cortex_workers: None,
+            training_runtime: None,
             kill_switch_store: None,
             staking: None,
             identity_registry: None,
@@ -434,7 +496,18 @@ impl EventLoop {
             burn_rate_manager: None,
             token: None,
             last_observed_epoch_supply: 0,
+            snapshot_store: None,
         }
+    }
+
+    /// Wires the snapshot ABCI store. Once set, `process_finality_notification`
+    /// triggers `produce_at` every `SNAPSHOT_INTERVAL_BLOCKS` finalized blocks.
+    pub fn with_snapshot_store(
+        mut self,
+        snapshot_store: Arc<crate::snapshot::SnapshotStore>,
+    ) -> Self {
+        self.snapshot_store = Some(snapshot_store);
+        self
     }
 
     /// Returns a clone of the event sender for RPC/network to submit events
@@ -644,6 +717,20 @@ impl EventLoop {
         self
     }
 
+    /// Wires the static context required to broadcast `ProviderAnnouncementMessage`
+    /// from the periodic `provider_heartbeat` tick.
+    ///
+    /// Without this wired, the heartbeat only evicts stale `network_providers`
+    /// entries — peers will never learn about this node's served models /
+    /// hardware / geography.
+    pub fn with_provider_announcement(
+        mut self,
+        ctx: ProviderAnnouncementContext,
+    ) -> Self {
+        self.provider_announcement_ctx = Some(ctx);
+        self
+    }
+
     /// Wires the shared `RemoteWorkerRegistry` so the event loop can ingest
     /// verified Cortex advertisements received on the
     /// `tenzro/cortex` gossipsub topic.
@@ -652,6 +739,18 @@ impl EventLoop {
         registry: Arc<tenzro_cortex::RemoteWorkerRegistry>,
     ) -> Self {
         self.remote_cortex_workers = Some(registry);
+        self
+    }
+
+    /// Wires the shared `TrainingRuntime` so the event loop can dispatch
+    /// `TrainingGossipReceived` events into the local syncer state. Without
+    /// this wired, training payloads decoded off the wire are dropped with
+    /// a debug-level log.
+    pub fn with_training_runtime(
+        mut self,
+        runtime: Arc<tenzro_training::TrainingRuntime>,
+    ) -> Self {
+        self.training_runtime = Some(runtime);
         self
     }
 
@@ -688,7 +787,42 @@ impl EventLoop {
             tx_count = notification.block.tx_count(),
             "Processing finality notification"
         );
-        self.handle_block_finalized(notification.block).await
+        let height = notification.height.0;
+        let state_root_bytes = notification.block.header.state_root;
+        let res = self.handle_block_finalized(notification.block).await;
+
+        // Snapshot ABCI: produce a state-sync snapshot every
+        // SNAPSHOT_INTERVAL_BLOCKS finalized blocks. We only attempt this
+        // after `handle_block_finalized` has run so the live KV store
+        // reflects the block we're snapshotting at.
+        if let Some(store) = self.snapshot_store.as_ref() {
+            if height > 0 && height % crate::snapshot::SNAPSHOT_INTERVAL_BLOCKS == 0 {
+                let mut sr = [0u8; 32];
+                let bytes = state_root_bytes.as_bytes();
+                let n = bytes.len().min(32);
+                sr[..n].copy_from_slice(&bytes[..n]);
+                let store = store.clone();
+                // Snapshot production walks 27 column families and is
+                // I/O-bound; run it off the event-loop thread so finality
+                // processing stays unblocked.
+                tokio::task::spawn_blocking(move || {
+                    match store.produce_at(height, sr) {
+                        Ok(m) => info!(
+                            height = m.height,
+                            num_chunks = m.num_chunks,
+                            "Produced state-sync snapshot"
+                        ),
+                        Err(e) => warn!(
+                            height = height,
+                            error = %e,
+                            "Failed to produce state-sync snapshot"
+                        ),
+                    }
+                });
+            }
+        }
+
+        res
     }
 
     /// Submits a finalized block to the event loop for execution
@@ -747,30 +881,26 @@ impl EventLoop {
         // Sync block height from persistent storage
         self.sync_height_from_storage().await?;
 
-        // Admitted-mesh warm-up gate: before draining outbound consensus
-        // messages, wait for the gossipsub mesh on `tenzro/consensus`
-        // to form AND for at least one mesh peer to be admitted to the
-        // local validator registry via the identify handshake.
+        // Validator-connectivity warm-up gate: before draining outbound
+        // consensus messages, wait for at least one peer to be (a) connected
+        // at the libp2p layer AND (b) admitted to the local validator
+        // registry via the identify handshake.
         //
-        // Two distinct races compose here:
+        // The previous gate (#143 era) waited for the gossipsub mesh on
+        // `tenzro/consensus`. Since #144 moved HotStuff-2 vote / proposal /
+        // timeout / NEC publishing onto the consensus-direct request-response
+        // overlay, gossipsub mesh state is no longer the right signal —
+        // `tenzro/consensus` carries zero traffic on a steady fleet (the
+        // topic is only kept subscribable for observers). The meaningful
+        // liveness condition for direct-overlay broadcast is "I have a
+        // dialable connection open to a validator I'm willing to send to."
         //
-        // 1. **Mesh formation.** Without it, the very first proposal/vote
-        //    fails with `NoPeersSubscribedToTopic` (rust-libp2p
-        //    `behaviour.rs:1064`).
-        //
-        // 2. **Identify-driven admission.** Even after the mesh forms,
-        //    receivers' `authorize_peer_for_topic` rejects messages from
-        //    PeerIds not yet in the validator registry. Identify is a
-        //    separate libp2p protocol from gossipsub — its single
-        //    round-trip per peer can finish *after* gossipsub's GRAFT
-        //    handshake. The window in between is where consensus messages
-        //    are silently dropped, manifesting as `votes=1 threshold=N`
-        //    on every validator and the chain stuck at height 0.
-        //
-        // `wait_for_admitted_mesh` collapses both gates: it returns once at
-        // least `min_admitted` mesh peers are also in the validator
-        // registry. In permissive mode (no registry installed — pre-genesis
-        // or single-node), it falls back to the plain mesh peer count.
+        // The identify-driven admission race remains: `try_register_validator_on_identify`
+        // fires asynchronously after the libp2p connection is up, and any
+        // `BroadcastToValidators` issued before it completes dispatches to
+        // an empty validator set (`Ok(0)` — silently no-op). Polling
+        // `connected_validator_count` collapses both conditions: a non-zero
+        // count means at least one peer is both connected AND admitted.
         //
         // **Retry until ready** (lesson from 2026-04-30 wedge — see
         // `hotstuff2.rs::resume_from_height` regression). Previously we
@@ -778,71 +908,90 @@ impl EventLoop {
         // production meant validator-0 booted with admitted=0, broadcast
         // proposals into the void, and never received the SyncInfo gossip
         // it needed to advance its pacemaker — so the wedge persisted
-        // until manual intervention. Lighthouse and Lotus both rely on
-        // flood_publish for liveness rather than gating, but they also do
-        // not start consensus before the mesh has at least one peer. We
-        // do the same: poll in 30s windows indefinitely, logging each
-        // iteration so operators can diagnose stalls. A node that never
-        // achieves admitted ≥ 1 is genuinely isolated and should not be
-        // pretending to participate in consensus.
+        // until manual intervention. We poll in 30s windows indefinitely,
+        // logging each iteration so operators can diagnose stalls. A node
+        // that never achieves admitted ≥ 1 is genuinely isolated and
+        // should not be pretending to participate in consensus.
         // Subscribe to shutdown early so the warm-up loop below can be
-        // interrupted cleanly while waiting for mesh peers.
+        // interrupted cleanly while waiting for validator peers.
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         if let Some(ref network) = self.network {
-            const CONSENSUS_TOPIC: &str = "tenzro/consensus";
             const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
             let warmup_start = std::time::Instant::now();
             let mut attempt: u32 = 0;
+
+            // **Bootstrap quorum threshold.** Wait for ≥ 2f+1 admitted
+            // validator peers (the BFT safety threshold) before starting
+            // consensus, not just ≥ 1. This is the production pattern from
+            // Solana (`--wait-for-supermajority`) and CometBFT (`genesis_time`
+            // + per-peer round-state gossip): on a freshly-bootstrapped
+            // fleet, starting consensus with only 1 peer admitted means the
+            // first many views proceed without quorum, the pacemaker burns
+            // through its timeout schedule, and validators end up at
+            // wildly skewed views by the time the rest catch up. Gating on
+            // ≥ 2f+1 ensures view 0 begins with enough peers to actually
+            // finalize a block on the first round. The threshold is
+            // computed from the active validator set at start time; for a
+            // single-node-bootstrap test path (n=1), `2f+1 = 1` and this
+            // gate degenerates to the prior behaviour.
+            let admitted_threshold = if let Some(ref consensus) = self.consensus {
+                let n = consensus.epoch_manager().current_validator_set().len();
+                // 2f+1 where f = (n-1)/3. Equivalent to n - f.
+                let f = (n.saturating_sub(1)) / 3;
+                n.saturating_sub(f).max(1)
+            } else {
+                1
+            };
+
             'warmup: loop {
                 attempt = attempt.saturating_add(1);
                 tokio::select! {
                     biased;
                     _ = shutdown_rx.recv() => {
-                        info!("Shutdown requested during mesh warm-up — exiting event loop");
+                        info!("Shutdown requested during validator warm-up — exiting event loop");
                         return Ok(());
                     }
-                    res = network.wait_for_admitted_mesh(CONSENSUS_TOPIC, 1, ATTEMPT_TIMEOUT) => {
+                    res = network.wait_for_connected_validators(admitted_threshold, ATTEMPT_TIMEOUT) => {
                         match res {
-                            Ok(count) if count >= 1 => {
+                            Ok(count) if count >= admitted_threshold => {
                                 info!(
-                                    topic = CONSENSUS_TOPIC,
-                                    admitted_mesh_peers = count,
+                                    connected_validators = count,
+                                    admitted_threshold = admitted_threshold,
                                     attempts = attempt,
                                     elapsed_secs = warmup_start.elapsed().as_secs(),
-                                    "Admitted-mesh warm-up complete — first consensus publish safe"
+                                    "Bootstrap quorum reached — starting consensus with ≥ 2f+1 admitted peers"
                                 );
                                 break 'warmup;
                             }
                             Ok(count) => {
                                 warn!(
-                                    topic = CONSENSUS_TOPIC,
-                                    admitted_mesh_peers = count,
+                                    connected_validators = count,
+                                    admitted_threshold = admitted_threshold,
                                     attempts = attempt,
                                     elapsed_secs = warmup_start.elapsed().as_secs(),
-                                    "Admitted-mesh warm-up: still no admitted peers — \
-                                     retrying (consensus will not start until at least 1 peer is admitted)"
+                                    "Bootstrap quorum not yet reached — waiting for ≥ 2f+1 admitted peers \
+                                     before starting consensus (avoids pacemaker race on staggered boot)"
                                 );
                             }
                             Err(e) => {
                                 warn!(
-                                    topic = CONSENSUS_TOPIC,
                                     attempts = attempt,
                                     elapsed_secs = warmup_start.elapsed().as_secs(),
                                     error = %e,
-                                    "Admitted-mesh warm-up: query failed — retrying"
+                                    "Validator warm-up: query failed — retrying"
                                 );
                             }
                         }
                     }
                 }
-                // Brief backoff between attempts. wait_for_admitted_mesh
-                // already polls every 100ms internally, so this just
-                // adds a small breath between full 30s windows.
+                // Brief backoff between attempts. wait_for_connected_validators
+                // already polls every 100ms internally, so this just adds a
+                // small breath between full 30s windows.
                 tokio::select! {
                     biased;
                     _ = shutdown_rx.recv() => {
-                        info!("Shutdown requested during mesh warm-up backoff — exiting event loop");
+                        info!("Shutdown requested during validator warm-up backoff — exiting event loop");
                         return Ok(());
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
@@ -1232,13 +1381,58 @@ impl EventLoop {
                         }
                     }
                 }
-                // Provider heartbeat: evict expired network_providers entries every 60s.
+                // Provider heartbeat: evict expired network_providers entries every 60s
+                // AND re-broadcast a `ProviderAnnouncementMessage` so peers learn about
+                // this node's served models, hardware envelope, and declared geography.
                 _ = provider_heartbeat.tick() => {
                     if let Some(ref np) = self.network_providers {
                         let now = std::time::Instant::now();
                         np.retain(|_key, entry| {
                             let ttl = std::time::Duration::from_secs(entry.announcement.ttl_secs);
                             now.duration_since(entry.last_seen) < ttl
+                        });
+                    }
+
+                    // Broadcast our own provider announcement (only if context wired).
+                    if let (Some(network), Some(ctx)) = (&self.network, &self.provider_announcement_ctx) {
+                        let served: Vec<String> = self.served_models
+                            .as_ref()
+                            .map(|m| m.iter().map(|e| e.key().clone()).collect())
+                            .unwrap_or_default();
+
+                        let local_peer_id = match network.local_peer_id().await {
+                            Ok(pid) => pid.to_string(),
+                            Err(e) => {
+                                debug!(error = %e, "Skipping provider announcement: local_peer_id unavailable");
+                                continue;
+                            }
+                        };
+
+                        let ann = tenzro_network::ProviderAnnouncementMessage {
+                            peer_id: local_peer_id,
+                            provider_address: ctx.provider_address.clone(),
+                            provider_type: ctx.provider_type.clone(),
+                            served_models: served,
+                            capabilities: ctx.capabilities.clone(),
+                            rpc_endpoint: ctx.rpc_endpoint.clone(),
+                            status: "active".to_string(),
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                            ttl_secs: ctx.ttl_secs,
+                            runtime_support: tenzro_types::RuntimeSupport::default(),
+                            network_profile: tenzro_types::NodeNetworkProfile::default(),
+                            trust_profile: tenzro_types::TrustProfile::default(),
+                            worker_roles: Vec::new(),
+                            hardware: ctx.hardware.clone(),
+                            geography: ctx.geography.clone(),
+                        };
+                        let broadcast_msg = tenzro_network::NetworkMessage::new(
+                            tenzro_network::MessagePayload::ProviderAnnouncement(ann),
+                        );
+                        let net = network.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = net.broadcast("tenzro/providers", broadcast_msg).await {
+                                debug!(error = %e, "Failed to broadcast provider heartbeat");
+                            }
                         });
                     }
                 }
@@ -1327,7 +1521,16 @@ impl EventLoop {
                         };
                         info!(kind = dbg_kind, "event_loop.outbound_consensus: received msg from consensus engine");
                         if let Some(ref network) = self.network {
-                            let net_payload = match msg {
+                            // Build the wire-format `ConsensusMessage` for the
+                            // consensus-direct overlay. Replaces the previous
+                            // gossipsub `tenzro/consensus` publish path (#144).
+                            // The `tenzro/consensus` topic is no longer
+                            // published to anywhere in the codebase; observers
+                            // (RPC nodes, light clients) follow consensus by
+                            // subscribing to it for the legacy wire shape, but
+                            // on a steady fleet of validators it carries zero
+                            // traffic.
+                            let net_msg: Option<ConsensusMessage> = match msg {
                                 ConsensusOutMessage::Vote(vote) => {
                                     let net_vote_type = match vote.vote_type {
                                         ConsVoteType::Prepare => NetVoteType::Prevote,
@@ -1343,7 +1546,7 @@ impl EventLoop {
                                         .and_then(|s| bincode::serialize(&vote.public_key).map(|p| (s, p)));
                                     match encoded {
                                         Ok((sig_bytes, pk_bytes)) => {
-                                            Some(MessagePayload::Consensus(ConsensusMessage::Vote {
+                                            Some(ConsensusMessage::Vote {
                                                 block_hash: vote.block_hash,
                                                 voter: hex::encode(vote.voter.as_bytes()),
                                                 vote_type: net_vote_type,
@@ -1352,7 +1555,8 @@ impl EventLoop {
                                                 high_qc_view: vote.high_qc_view,
                                                 signature: sig_bytes,
                                                 public_key: pk_bytes,
-                                            }))
+                                                bls_signature: vote.bls_signature.to_bytes().to_vec(),
+                                            })
                                         }
                                         Err(e) => {
                                             warn!(error = %e, "Failed to encode hybrid vote payload; dropping");
@@ -1398,14 +1602,14 @@ impl EventLoop {
                                             }
                                         }
                                     });
-                                    Some(MessagePayload::Consensus(ConsensusMessage::Proposal {
+                                    Some(ConsensusMessage::Proposal {
                                         block: Box::new(block),
                                         proposer: hex::encode(proposer.as_bytes()),
                                         round,
                                         high_qc_view,
                                         timeout_certificate: tc_bytes,
                                         no_endorsement_certificate: nec_bytes,
-                                    }))
+                                    })
                                 }
                                 ConsensusOutMessage::Timeout(timeout_msg) => {
                                     // Serialize hybrid signature and composite
@@ -1418,14 +1622,14 @@ impl EventLoop {
                                         .and_then(|s| bincode::serialize(&timeout_msg.public_key).map(|p| (s, p)));
                                     match encoded {
                                         Ok((sig_bytes, pk_bytes)) => {
-                                            Some(MessagePayload::Consensus(ConsensusMessage::Timeout {
+                                            Some(ConsensusMessage::Timeout {
                                                 format_version: timeout_msg.format_version,
                                                 view: timeout_msg.view,
                                                 high_qc_view: timeout_msg.high_qc_view,
                                                 voter: timeout_msg.voter,
                                                 signature: sig_bytes,
                                                 public_key: pk_bytes,
-                                            }))
+                                            })
                                         }
                                         Err(e) => {
                                             warn!(error = %e, "Failed to encode hybrid timeout payload; dropping");
@@ -1441,13 +1645,13 @@ impl EventLoop {
                                         .and_then(|s| bincode::serialize(&nec_msg.public_key).map(|p| (s, p)));
                                     match encoded {
                                         Ok((sig_bytes, pk_bytes)) => {
-                                            Some(MessagePayload::Consensus(ConsensusMessage::NoEndorsement {
+                                            Some(ConsensusMessage::NoEndorsement {
                                                 format_version: nec_msg.format_version,
                                                 view: nec_msg.view,
                                                 voter: nec_msg.voter,
                                                 signature: sig_bytes,
                                                 public_key: pk_bytes,
-                                            }))
+                                            })
                                         }
                                         Err(e) => {
                                             warn!(error = %e, "Failed to encode hybrid no-endorsement payload; dropping");
@@ -1456,18 +1660,17 @@ impl EventLoop {
                                     }
                                 }
                             };
-                            if let Some(payload) = net_payload {
-                                let broadcast_msg = NetworkMessage::new(payload);
+                            if let Some(consensus_msg) = net_msg {
                                 let network_clone = network.clone();
-                                info!("event_loop.outbound_consensus: spawning broadcast to tenzro/consensus");
+                                info!("event_loop.outbound_consensus: spawning consensus-direct broadcast to validator set");
                                 tokio::spawn(async move {
-                                    match network_clone.broadcast("tenzro/consensus", broadcast_msg).await {
-                                        Ok(_) => info!("event_loop.outbound_consensus: broadcast OK"),
-                                        Err(e) => warn!(error = %e, "event_loop.outbound_consensus: broadcast FAILED"),
+                                    match network_clone.broadcast_to_validators(consensus_msg).await {
+                                        Ok(n) => info!(dispatched = n, "event_loop.outbound_consensus: consensus-direct broadcast OK"),
+                                        Err(e) => warn!(error = %e, "event_loop.outbound_consensus: consensus-direct broadcast FAILED"),
                                     }
                                 });
                             } else {
-                                warn!("event_loop.outbound_consensus: net_payload was None (encoding failed)");
+                                warn!("event_loop.outbound_consensus: consensus_msg was None (encoding failed)");
                             }
                         }
                     }
@@ -1615,6 +1818,152 @@ impl EventLoop {
                                 Err(e) => warn!(
                                     error = %e,
                                     "Failed to decode cortex advertisement JSON payload"
+                                ),
+                            }
+                        }
+                        NodeEvent::TrainingGossipReceived { topic, bytes } => {
+                            match tenzro_training::decode_for_topic(&topic, &bytes) {
+                                Ok(tenzro_training::TrainingGossipMessage::OuterGradient(g)) => {
+                                    let task_id = g.task_id.clone();
+                                    let round = g.round;
+                                    let fragment = g.fragment;
+                                    let trainer_did = g.trainer_did.clone();
+                                    if let Some(ref runtime) = self.training_runtime {
+                                        match runtime.syncers.get(&task_id) {
+                                            Some(state) => match state.accept_outer_gradient(g) {
+                                                Ok(()) => info!(
+                                                    %task_id,
+                                                    round,
+                                                    fragment,
+                                                    %trainer_did,
+                                                    "Ingested OuterGradient from gossip"
+                                                ),
+                                                Err(e) => warn!(
+                                                    %task_id,
+                                                    %trainer_did,
+                                                    error = %e,
+                                                    "Failed to accept gossiped OuterGradient"
+                                                ),
+                                            },
+                                            None => debug!(
+                                                %task_id,
+                                                "Dropping gossiped OuterGradient for unknown task"
+                                            ),
+                                        }
+                                    } else {
+                                        debug!(
+                                            %task_id,
+                                            "Dropping gossiped OuterGradient (training runtime not wired)"
+                                        );
+                                    }
+                                }
+                                Ok(tenzro_training::TrainingGossipMessage::SyncRound(r)) => {
+                                    // Multi-syncer witness pattern: every node that holds
+                                    // the run's syncer state attempts to apply the round
+                                    // locally. `finalize_round` is idempotent on
+                                    // matching (round, state_root) and surfaces
+                                    // `ConflictingFinalize` on divergence — that is the
+                                    // fork-detection signal.
+                                    let task_id = r.task_id.clone();
+                                    let round = r.round;
+                                    let state_root = r.state_root;
+                                    let is_nec = r.no_quorum_witnesses.is_some();
+                                    if let Some(ref runtime) = self.training_runtime {
+                                        if let Some(state) = runtime.syncers.get(&task_id) {
+                                            match state.finalize_round(round, state_root) {
+                                                Ok(()) => {
+                                                    if let Err(e) = runtime.persist_run(&state) {
+                                                        warn!(
+                                                            %task_id,
+                                                            error = %e,
+                                                            "Failed to persist run after gossiped SyncRound apply"
+                                                        );
+                                                    }
+                                                    info!(
+                                                        %task_id,
+                                                        round,
+                                                        %state_root,
+                                                        nec = is_nec,
+                                                        "Applied SyncRound from gossip"
+                                                    );
+                                                }
+                                                Err(tenzro_training::TrainingError::ConflictingFinalize {
+                                                    expected,
+                                                    got,
+                                                    ..
+                                                }) => {
+                                                    // Fork: a peer witness committed a
+                                                    // different state_root for the same
+                                                    // round. Log loudly — fraud-proof
+                                                    // path lives one wave out.
+                                                    warn!(
+                                                        %task_id,
+                                                        round,
+                                                        expected = %expected,
+                                                        got = %got,
+                                                        "Fork detected on training round (ConflictingFinalize)"
+                                                    );
+                                                }
+                                                Err(e) => debug!(
+                                                    %task_id,
+                                                    round,
+                                                    error = %e,
+                                                    "SyncRound apply skipped"
+                                                ),
+                                            }
+                                        } else {
+                                            debug!(
+                                                %task_id,
+                                                round,
+                                                "Observed SyncRound for unknown task"
+                                            );
+                                        }
+                                    } else {
+                                        debug!(
+                                            %task_id,
+                                            round,
+                                            %state_root,
+                                            "Observed SyncRound (training runtime not wired)"
+                                        );
+                                    }
+                                }
+                                Ok(tenzro_training::TrainingGossipMessage::InstallSealedManifest(
+                                    manifest,
+                                )) => {
+                                    // Phase B2 (#217): enrolled trainers in any
+                                    // region learn the sponsor-signed binding
+                                    // from `tenzro/training`. `install_sealed_manifest`
+                                    // is idempotent on (task_id, manifest_hash) and
+                                    // also verifies the manifest binds the task spec's
+                                    // `tee://<hex>` dataset_ref — so re-receiving the
+                                    // publisher's own broadcast or a duplicate from a
+                                    // neighbor witness is a safe no-op.
+                                    let task_id = manifest.task_id.clone();
+                                    let envelope_count = manifest.envelopes.len();
+                                    if let Some(ref runtime) = self.training_runtime {
+                                        match runtime.install_sealed_manifest(manifest) {
+                                            Ok(_) => info!(
+                                                %task_id,
+                                                envelope_count,
+                                                "Installed SealedDatasetManifest from gossip"
+                                            ),
+                                            Err(e) => debug!(
+                                                %task_id,
+                                                error = %e,
+                                                "SealedDatasetManifest install skipped"
+                                            ),
+                                        }
+                                    } else {
+                                        debug!(
+                                            %task_id,
+                                            "Observed SealedDatasetManifest (training runtime not wired)"
+                                        );
+                                    }
+                                }
+                                Err(e) => warn!(
+                                    %topic,
+                                    error = %e,
+                                    "Failed to decode TrainingGossip payload"
                                 ),
                             }
                         }
@@ -2435,6 +2784,7 @@ impl EventLoop {
                         entry.address,
                         pk,
                         entry.pq_pubkey.clone(),
+                        entry.bls_pubkey.clone(),
                         entry.self_stake,
                     );
                     em.add_pending_validator(info);
@@ -3137,6 +3487,7 @@ impl EventLoop {
                         from_addr,
                         parsed.consensus_pubkey,
                         parsed.pq_pubkey,
+                        parsed.bls_pubkey,
                         parsed.withdrawal_address,
                         parsed.self_stake,
                         current_epoch,
@@ -3641,6 +3992,7 @@ struct ParsedValidatorRegister {
     from: tenzro_types::primitives::Address,
     self_stake: u128,
     consensus_pubkey: Vec<u8>,
+    bls_pubkey: Vec<u8>,
     pq_pubkey: Vec<u8>,
     withdrawal_address: tenzro_types::primitives::Address,
     metadata_uri: String,
@@ -3650,25 +4002,27 @@ struct ParsedValidatorRegister {
 ///
 /// Layout (mirror of the inline emit in
 /// `tenzro_vm::native::execute_validator_register`):
-/// `from(32) || stake_le(16) || consensus_pubkey(32) ||
+/// `from(32) || stake_le(16) || consensus_pubkey(32) || bls_pubkey(48) ||
 ///  pq_pubkey_len_le(4) || pq_pubkey || withdrawal(32) ||
 ///  metadata_uri_len_le(4) || metadata_uri`.
 fn decode_validator_register_log(data: &[u8]) -> Option<ParsedValidatorRegister> {
-    // 32 from + 16 stake + 32 consensus_pubkey + 4 pq_len = 84 bytes minimum
-    if data.len() < 84 {
+    // 32 from + 16 stake + 32 consensus_pubkey + 48 bls + 4 pq_len = 132 bytes minimum
+    if data.len() < 132 {
         return None;
     }
     let from = tenzro_types::primitives::Address::from_bytes(&data[0..32])?;
     let self_stake = u128::from_le_bytes(data[32..48].try_into().ok()?);
     let mut consensus_pubkey = vec![0u8; 32];
     consensus_pubkey.copy_from_slice(&data[48..80]);
-    let pq_len = u32::from_le_bytes(data[80..84].try_into().ok()?) as usize;
-    let after_pq = 84usize.checked_add(pq_len)?;
+    let mut bls_pubkey = vec![0u8; 48];
+    bls_pubkey.copy_from_slice(&data[80..128]);
+    let pq_len = u32::from_le_bytes(data[128..132].try_into().ok()?) as usize;
+    let after_pq = 132usize.checked_add(pq_len)?;
     // Need pq_pubkey + 32 withdrawal + 4 uri_len after that
     if data.len() < after_pq + 32 + 4 {
         return None;
     }
-    let pq_pubkey = data[84..after_pq].to_vec();
+    let pq_pubkey = data[132..after_pq].to_vec();
     let withdrawal_address =
         tenzro_types::primitives::Address::from_bytes(&data[after_pq..after_pq + 32])?;
     let after_withdrawal = after_pq + 32;
@@ -3687,6 +4041,7 @@ fn decode_validator_register_log(data: &[u8]) -> Option<ParsedValidatorRegister>
         from,
         self_stake,
         consensus_pubkey,
+        bls_pubkey,
         pq_pubkey,
         withdrawal_address,
         metadata_uri,
@@ -4039,6 +4394,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
         TransactionType::RegisterValidator {
             consensus_pubkey,
             pq_pubkey,
+            bls_pubkey,
             withdrawal_address,
             self_stake,
             metadata_uri,
@@ -4047,6 +4403,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             struct ValidatorRegisterPayload<'a> {
                 consensus_pubkey: &'a [u8],
                 pq_pubkey: &'a [u8],
+                bls_pubkey: &'a [u8],
                 withdrawal_address: &'a tenzro_types::primitives::Address,
                 self_stake: u128,
                 metadata_uri: &'a str,
@@ -4054,6 +4411,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             let payload = ValidatorRegisterPayload {
                 consensus_pubkey,
                 pq_pubkey,
+                bls_pubkey,
                 withdrawal_address,
                 self_stake: *self_stake,
                 metadata_uri,

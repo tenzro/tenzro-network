@@ -19,7 +19,7 @@ Protocol-only Rust crate for **Tenzro Train** — decentralized, verifiable, mul
 The inner training loop — forward/backward, optimizer step, FSDP sharding — is the responsibility of the **Python reference trainer** at `integrations/trainer/` (PyTorch FSDP2 + Hivemind + safetensors). The two layers communicate over JSON-RPC (`tenzro_training_*` namespace exposed by `tenzro-node`) plus the gossip topics:
 
 - `tenzro/training` — outer gradient submissions, fragment payloads
-- `tenzro/training/syncer/1.0.0` — syncer status, round transitions, finality
+- `tenzro/training/syncer` — syncer status, round transitions, finality
 
 This split mirrors how every production decentralized training run in 2026 (Prime Intellect's INTELLECT-1/2/3, Nous Research's Hermes 4.3 on Psyche/DisTrO, OpenDiLoCo) structures its stack: Python + PyTorch for the inner loop, a typed protocol crate for orchestration. See `TRAIN.md` §7.1 for the full rationale.
 

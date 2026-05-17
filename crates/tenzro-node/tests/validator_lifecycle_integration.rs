@@ -49,6 +49,7 @@ fn apply_epoch_transition(
             entry.address,
             pk,
             entry.pq_pubkey.clone(),
+            entry.bls_pubkey.clone(),
             entry.self_stake,
         );
         em.add_pending_validator(info);
@@ -59,8 +60,8 @@ fn apply_epoch_transition(
     }
 }
 
-/// Returns a `(consensus_address, ed25519_keypair)` pair.
-fn fresh_validator_keys(seed: u8) -> (Address, KeyPair, Vec<u8>) {
+/// Returns a `(consensus_address, ed25519_keypair, pq_vk, bls_vk)` tuple.
+fn fresh_validator_keys(seed: u8) -> (Address, KeyPair, Vec<u8>, Vec<u8>) {
     // Deterministic-ish address by repeating seed across the 32 bytes —
     // good enough for an in-process unit test where uniqueness is the only
     // requirement (no on-chain derivation, no signing through this addr).
@@ -69,16 +70,17 @@ fn fresh_validator_keys(seed: u8) -> (Address, KeyPair, Vec<u8>) {
 
     let kp = KeyPair::generate(KeyType::Ed25519).expect("keypair gen");
     let pq_vk = vec![0u8; ML_DSA_65_VK_LEN]; // Stub PQ key for registry.
+    let bls_vk = vec![0u8; 48]; // Stub BLS12-381 G1-compressed verifying key.
 
-    (address, kp, pq_vk)
+    (address, kp, pq_vk, bls_vk)
 }
 
 #[tokio::test]
 async fn full_lifecycle_register_activate_produce_exit() {
     // ---- Setup ----
     // Genesis validator (always active) + a candidate that joins later.
-    let (genesis_addr, genesis_kp, genesis_pq) = fresh_validator_keys(0x01);
-    let (cand_addr, cand_kp, cand_pq) = fresh_validator_keys(0x02);
+    let (genesis_addr, genesis_kp, genesis_pq, genesis_bls) = fresh_validator_keys(0x01);
+    let (cand_addr, cand_kp, cand_pq, cand_bls) = fresh_validator_keys(0x02);
 
     // Bootstrap EpochManager with just the genesis validator so the active
     // set can produce blocks before the candidate is admitted.
@@ -86,6 +88,7 @@ async fn full_lifecycle_register_activate_produce_exit() {
         genesis_addr,
         genesis_kp.public_key().clone(),
         genesis_pq.clone(),
+        genesis_bls.clone(),
         DEFAULT_MIN_VALIDATOR_SELF_STAKE,
     );
     let em = Arc::new(
@@ -100,6 +103,7 @@ async fn full_lifecycle_register_activate_produce_exit() {
             genesis_addr,
             genesis_kp.public_key().as_bytes().to_vec(),
             genesis_pq.clone(),
+            genesis_bls.clone(),
             genesis_addr,
             DEFAULT_MIN_VALIDATOR_SELF_STAKE,
             String::new(),
@@ -114,6 +118,7 @@ async fn full_lifecycle_register_activate_produce_exit() {
             cand_addr,
             cand_kp.public_key().as_bytes().to_vec(),
             cand_pq.clone(),
+            cand_bls.clone(),
             cand_addr,
             DEFAULT_MIN_VALIDATOR_SELF_STAKE,
             0,
@@ -184,7 +189,7 @@ async fn full_lifecycle_register_activate_produce_exit() {
 #[tokio::test]
 async fn jail_blocks_reactivation_until_governance() {
     // ---- Setup: registry + EpochManager with one Active validator ----
-    let (v_addr, v_kp, v_pq) = fresh_validator_keys(0x03);
+    let (v_addr, v_kp, v_pq, v_bls) = fresh_validator_keys(0x03);
 
     let registry = ValidatorRegistry::new();
     registry
@@ -192,6 +197,7 @@ async fn jail_blocks_reactivation_until_governance() {
             v_addr,
             v_kp.public_key().as_bytes().to_vec(),
             v_pq.clone(),
+            v_bls.clone(),
             v_addr,
             DEFAULT_MIN_VALIDATOR_SELF_STAKE,
             String::new(),
@@ -230,6 +236,7 @@ async fn jail_blocks_reactivation_until_governance() {
             v_addr,
             v_kp.public_key().as_bytes().to_vec(),
             v_pq,
+            v_bls,
             v_addr,
             DEFAULT_MIN_VALIDATOR_SELF_STAKE,
             10,

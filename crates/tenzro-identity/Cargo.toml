@@ -24,5 +24,12 @@ chrono = { workspace = true }
 hex = { workspace = true }
 bs58 = { workspace = true }
 
+# CARv1 + IPLD/DAG-CBOR for portable identity export bundles (C.6).
+serde_ipld_dagcbor = { workspace = true }
+cid = { workspace = true }
+multihash = { workspace = true }
+multihash-codetable = { workspace = true }
+unsigned-varint = { workspace = true }
+
 [dev-dependencies]
 parking_lot = { workspace = true }

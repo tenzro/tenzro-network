@@ -175,20 +175,11 @@ impl TimeoutMsg {
                 self.voter
             )));
         }
-        match &self.public_key.pq {
-            Some(pq_bytes) if pq_bytes == &validator.pq_public_key => {}
-            Some(_) => {
-                return Err(ConsensusError::InvalidSignature(format!(
-                    "timeout PQ public key does not match registered validator key for {}",
-                    self.voter
-                )));
-            }
-            None => {
-                return Err(ConsensusError::InvalidSignature(format!(
-                    "timeout missing PQ public key (Wave 3d hybrid required) for {}",
-                    self.voter
-                )));
-            }
+        if self.public_key.pq != validator.pq_public_key {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "timeout PQ public key does not match registered validator key for {}",
+                self.voter
+            )));
         }
 
         let payload = self.signing_payload();
@@ -352,27 +343,18 @@ impl TimeoutCertificate {
                     signer.voter
                 )));
             }
-            match &signer.public_key.pq {
-                Some(pq_bytes) if pq_bytes == &validator.pq_public_key => {}
-                Some(_) => {
-                    return Err(ConsensusError::InvalidSignature(format!(
-                        "TC signer {}: PQ key mismatch with registered validator",
-                        signer.voter
-                    )));
-                }
-                None => {
-                    return Err(ConsensusError::InvalidSignature(format!(
-                        "TC signer {}: missing PQ key (Wave 3d hybrid required)",
-                        signer.voter
-                    )));
-                }
+            if signer.public_key.pq != validator.pq_public_key {
+                return Err(ConsensusError::InvalidSignature(format!(
+                    "TC signer {}: PQ key mismatch with registered validator",
+                    signer.voter
+                )));
             }
 
             // Reconstruct the canonical TimeoutMsg signing payload for this
             // signer and verify their signature. Per-signer payload binds
             // (view, high_qc_view, voter) — the same bytes the original
             // TimeoutMsg signed.
-            let placeholder = CompositeSignature::new(Vec::new(), None);
+            let placeholder = CompositeSignature::new(Vec::new(), Vec::new());
             let unsigned = TimeoutMsg::new(
                 self.view,
                 signer.high_qc_view,
@@ -718,20 +700,11 @@ impl NoEndorsementMsg {
                 self.voter
             )));
         }
-        match &self.public_key.pq {
-            Some(pq_bytes) if pq_bytes == &validator.pq_public_key => {}
-            Some(_) => {
-                return Err(ConsensusError::InvalidSignature(format!(
-                    "no-endorsement PQ public key does not match registered validator key for {}",
-                    self.voter
-                )));
-            }
-            None => {
-                return Err(ConsensusError::InvalidSignature(format!(
-                    "no-endorsement missing PQ public key (Wave 3d hybrid required) for {}",
-                    self.voter
-                )));
-            }
+        if self.public_key.pq != validator.pq_public_key {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "no-endorsement PQ public key does not match registered validator key for {}",
+                self.voter
+            )));
         }
 
         let payload = self.signing_payload();
@@ -860,24 +833,15 @@ impl NoEndorsementCertificate {
                     signer.voter
                 )));
             }
-            match &signer.public_key.pq {
-                Some(pq_bytes) if pq_bytes == &validator.pq_public_key => {}
-                Some(_) => {
-                    return Err(ConsensusError::InvalidSignature(format!(
-                        "NEC signer {}: PQ key mismatch with registered validator",
-                        signer.voter
-                    )));
-                }
-                None => {
-                    return Err(ConsensusError::InvalidSignature(format!(
-                        "NEC signer {}: missing PQ key (Wave 3d hybrid required)",
-                        signer.voter
-                    )));
-                }
+            if signer.public_key.pq != validator.pq_public_key {
+                return Err(ConsensusError::InvalidSignature(format!(
+                    "NEC signer {}: PQ key mismatch with registered validator",
+                    signer.voter
+                )));
             }
 
             // Reconstruct the canonical NoEndorsementMsg signing payload.
-            let placeholder = CompositeSignature::new(Vec::new(), None);
+            let placeholder = CompositeSignature::new(Vec::new(), Vec::new());
             let unsigned = NoEndorsementMsg::new(
                 self.view,
                 signer.voter,
@@ -1021,6 +985,7 @@ mod tests {
     use super::*;
     use crate::validator::ValidatorInfo;
     use std::sync::Arc;
+    use tenzro_crypto::bls::BlsKeyPair;
     use tenzro_crypto::composite::{HybridSigner, InMemoryHybridSigner};
     use tenzro_crypto::pq::MlDsaSigningKey;
     use tenzro_crypto::signatures::Ed25519SignerImpl;
@@ -1029,6 +994,7 @@ mod tests {
     fn build_validator(stake: u128) -> (KeyPair, MlDsaSigningKey, Address, ValidatorInfo) {
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let pq = MlDsaSigningKey::generate();
+        let bls = BlsKeyPair::generate().unwrap();
         let crypto_addr = keypair.address();
         let mut addr_bytes = [0u8; 32];
         addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
@@ -1037,6 +1003,7 @@ mod tests {
             address,
             keypair.public_key().clone(),
             pq.verifying_key_bytes().to_vec(),
+            bls.public_key().to_bytes().to_vec(),
             stake,
         );
         (keypair, pq, address, info)
@@ -1051,9 +1018,9 @@ mod tests {
     ) -> TimeoutMsg {
         let composite_pk = CompositePublicKey::new(
             keypair.public_key().clone(),
-            Some(pq.verifying_key_bytes().to_vec()),
+            pq.verifying_key_bytes().to_vec(),
         );
-        let placeholder = CompositeSignature::new(Vec::new(), None);
+        let placeholder = CompositeSignature::new(Vec::new(), Vec::new());
         let unsigned = TimeoutMsg::new(
             view,
             high_qc_view,
@@ -1457,9 +1424,9 @@ mod tests {
     ) -> NoEndorsementMsg {
         let composite_pk = CompositePublicKey::new(
             keypair.public_key().clone(),
-            Some(pq.verifying_key_bytes().to_vec()),
+            pq.verifying_key_bytes().to_vec(),
         );
-        let placeholder = CompositeSignature::new(Vec::new(), None);
+        let placeholder = CompositeSignature::new(Vec::new(), Vec::new());
         let unsigned = NoEndorsementMsg::new(view, address, placeholder, composite_pk.clone());
         let payload = unsigned.signing_payload();
 

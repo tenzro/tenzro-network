@@ -18,9 +18,11 @@ use rmcp::{
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
     model::*,
-    tool, tool_router,
+    tool, tool_router, Json,
 };
 use serde::Deserialize;
+
+use super::server::RpcPassthroughOutput;
 
 // ─── Constants ───
 
@@ -519,21 +521,21 @@ fn err_invalid_params(msg: impl Into<String>) -> ErrorData {
     }
 }
 
-fn json_result(value: serde_json::Value) -> std::result::Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&value).unwrap(),
-    )]))
+fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
-/// Wrap a plain string into a successful `CallToolResult`.
+/// Wrap a plain string into a successful tool result.
 ///
 /// Used by `lz_broadcast_signed_tx` to return the raw transaction hash from
 /// `eth_sendRawTransaction`. The hex calldata builders (`lz_send_message`,
 /// `lz_oft_send`, `lz_stargate_send`, `lz_transfer_build`) all instruct the
 /// caller to sign and broadcast — `lz_broadcast_signed_tx` is the canonical
 /// broadcast path.
-fn text_result(text: impl Into<String>) -> std::result::Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(text.into())]))
+fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    Ok(Json(RpcPassthroughOutput {
+        result: serde_json::json!({ "message": text.into() }),
+    }))
 }
 
 // ─── LayerZero MCP Server ───
@@ -775,7 +777,7 @@ impl LayerZeroMcpServer {
     async fn lz_quote_fee(
         &self,
         Parameters(params): Parameters<LzQuoteFeeParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_url = chain_rpc(&params.src_chain).ok_or_else(|| {
             err_invalid_params(format!(
                 "Unsupported source chain '{}'. Supported: ethereum, arbitrum, optimism, polygon, bsc, avalanche, base, zksync, sei, sonic, berachain, story, monad, megaeth, tron",
@@ -852,7 +854,7 @@ impl LayerZeroMcpServer {
     async fn lz_send_message(
         &self,
         Parameters(params): Parameters<LzSendMessageParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         // Validate source chain
         let _rpc_url = chain_rpc(&params.src_chain).ok_or_else(|| {
             err_invalid_params(format!(
@@ -919,7 +921,7 @@ impl LayerZeroMcpServer {
     async fn lz_track_message(
         &self,
         Parameters(params): Parameters<LzTrackMessageParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let tx_hash = if params.tx_hash.starts_with("0x") || params.tx_hash.starts_with("0X") {
             params.tx_hash.clone()
         } else {
@@ -948,7 +950,7 @@ impl LayerZeroMcpServer {
     async fn lz_get_message(
         &self,
         Parameters(params): Parameters<LzGetMessageParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let guid = if params.guid.starts_with("0x") || params.guid.starts_with("0X") {
             params.guid.clone()
         } else {
@@ -973,7 +975,7 @@ impl LayerZeroMcpServer {
     async fn lz_oft_quote(
         &self,
         Parameters(params): Parameters<LzOftQuoteParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         // Validate chain names
         if chain_eid(&params.src_chain).is_none() {
             return Err(err_invalid_params(format!(
@@ -1008,7 +1010,7 @@ impl LayerZeroMcpServer {
     async fn lz_oft_list(
         &self,
         Parameters(_params): Parameters<LzOftListParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let response = self.metadata_api_get("/experiment/ofts/list").await?;
 
         json_result(serde_json::json!({
@@ -1020,7 +1022,7 @@ impl LayerZeroMcpServer {
     async fn lz_encode_options(
         &self,
         Parameters(params): Parameters<LzEncodeOptionsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let gas_limit = params.gas_limit.unwrap_or(200_000);
         let native_drop = params.native_drop.unwrap_or(0);
 
@@ -1047,7 +1049,7 @@ impl LayerZeroMcpServer {
     async fn lz_get_deployments(
         &self,
         Parameters(_params): Parameters<LzGetDeploymentsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let response = self.metadata_api_get("/deployments").await?;
 
         json_result(serde_json::json!({
@@ -1060,7 +1062,7 @@ impl LayerZeroMcpServer {
     async fn lz_list_dvns(
         &self,
         Parameters(_params): Parameters<LzListDvnsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let response = self.metadata_api_get("/dvns").await?;
 
         json_result(serde_json::json!({
@@ -1072,7 +1074,7 @@ impl LayerZeroMcpServer {
     async fn lz_get_messages_by_address(
         &self,
         Parameters(params): Parameters<LzGetMessagesByAddressParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let address = if params.address.starts_with("0x") || params.address.starts_with("0X") {
             params.address.clone()
         } else {
@@ -1102,7 +1104,7 @@ impl LayerZeroMcpServer {
     async fn lz_list_chains(
         &self,
         Parameters(_params): Parameters<LzListChainsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chains: Vec<serde_json::Value> = all_chains()
             .into_iter()
             .map(|(name, eid)| {
@@ -1125,7 +1127,7 @@ impl LayerZeroMcpServer {
     async fn lz_get_chain_rpc(
         &self,
         Parameters(params): Parameters<LzGetChainRpcParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_url = chain_rpc(&params.chain_name).ok_or_else(|| {
             err_invalid_params(format!(
                 "No RPC URL for chain '{}'. Supported: ethereum, arbitrum, optimism, polygon, bsc, avalanche, base, zksync, sei, sonic, berachain, story, monad, megaeth, tron. Solana does not use EVM RPC.",
@@ -1153,7 +1155,7 @@ impl LayerZeroMcpServer {
     async fn lz_transfer_quote(
         &self,
         Parameters(params): Parameters<LzTransferQuoteParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let body = serde_json::json!({
             "srcChainKey": params.src_chain,
             "dstChainKey": params.dst_chain,
@@ -1204,7 +1206,7 @@ impl LayerZeroMcpServer {
     async fn lz_transfer_build(
         &self,
         Parameters(params): Parameters<LzTransferBuildParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let body = serde_json::json!({
             "quoteId": params.quote_id,
         });
@@ -1245,7 +1247,7 @@ impl LayerZeroMcpServer {
     async fn lz_transfer_status(
         &self,
         Parameters(params): Parameters<LzTransferStatusParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let url = format!("{}/status/{}", TRANSFER_API, params.quote_id);
         let resp = self
             .http
@@ -1280,7 +1282,7 @@ impl LayerZeroMcpServer {
     async fn lz_transfer_chains(
         &self,
         Parameters(_params): Parameters<LzTransferChainsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let url = format!("{}/chains", TRANSFER_API);
         let resp = self
             .http
@@ -1315,7 +1317,7 @@ impl LayerZeroMcpServer {
     async fn lz_transfer_tokens(
         &self,
         Parameters(params): Parameters<LzTransferTokensParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let url = if let Some(ref chain) = params.chain {
             format!("{}/tokens?chainKey={}", TRANSFER_API, chain)
         } else {
@@ -1361,7 +1363,7 @@ impl LayerZeroMcpServer {
     async fn lz_stargate_quote(
         &self,
         Parameters(params): Parameters<LzStargateQuoteParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_url = chain_rpc(&params.src_chain).ok_or_else(|| {
             err_invalid_params(format!("Unsupported source chain '{}'", params.src_chain))
         })?;
@@ -1469,7 +1471,7 @@ impl LayerZeroMcpServer {
     async fn lz_stargate_send(
         &self,
         Parameters(params): Parameters<LzStargateSendParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_url = chain_rpc(&params.src_chain).ok_or_else(|| {
             err_invalid_params(format!("Unsupported source chain '{}'", params.src_chain))
         })?;
@@ -1639,7 +1641,7 @@ impl LayerZeroMcpServer {
     async fn lz_oft_send(
         &self,
         Parameters(params): Parameters<LzOftSendParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_url = chain_rpc(&params.src_chain).ok_or_else(|| {
             err_invalid_params(format!("Unsupported source chain '{}'", params.src_chain))
         })?;
@@ -1752,7 +1754,7 @@ impl LayerZeroMcpServer {
     async fn lz_broadcast_signed_tx(
         &self,
         Parameters(params): Parameters<LzBroadcastSignedTxParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_url = chain_rpc(&params.src_chain).ok_or_else(|| {
             err_invalid_params(format!("Unknown chain: {}", params.src_chain))
         })?;

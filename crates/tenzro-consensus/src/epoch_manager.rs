@@ -362,6 +362,7 @@ pub struct EpochStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tenzro_crypto::bls::BlsKeyPair;
     use tenzro_crypto::pq::MlDsaSigningKey;
     use tenzro_crypto::{KeyPair, KeyType};
 
@@ -372,10 +373,12 @@ mod tests {
         addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
         let address = tenzro_types::primitives::Address::new(addr_bytes);
         let pq = MlDsaSigningKey::generate();
+        let bls = BlsKeyPair::generate().unwrap();
         ValidatorInfo::new(
             address,
             keypair.public_key().clone(),
             pq.verifying_key_bytes().to_vec(),
+            bls.public_key().to_bytes().to_vec(),
             stake,
         )
     }
@@ -467,10 +470,11 @@ mod tests {
         let v0_addr = v0.address;
         let v0_pk = v0.public_key.clone();
         let v0_pq = v0.pq_public_key.clone();
+        let v0_bls = v0.bls_public_key.clone();
         let manager = EpochManager::new(vec![v0.clone()], 100).unwrap();
 
         // Same address, larger stake
-        let v0_updated = ValidatorInfo::new(v0_addr, v0_pk, v0_pq, 5000);
+        let v0_updated = ValidatorInfo::new(v0_addr, v0_pk, v0_pq, v0_bls, 5000);
         manager.add_pending_validator(v0_updated);
 
         let next = manager.transition_epoch(BlockHeight::from(100)).unwrap();
@@ -516,11 +520,12 @@ mod tests {
         let v0_addr = v0.address;
         let v0_pk = v0.public_key.clone();
         let v0_pq = v0.pq_public_key.clone();
+        let v0_bls = v0.bls_public_key.clone();
         let manager = EpochManager::new(vec![v0.clone()], 100).unwrap();
 
         manager.remove_pending_validator(&v0_addr);
         // Now re-stake same address with new amount
-        let v0_restaked = ValidatorInfo::new(v0_addr, v0_pk, v0_pq, 7777);
+        let v0_restaked = ValidatorInfo::new(v0_addr, v0_pk, v0_pq, v0_bls, 7777);
         manager.add_pending_validator(v0_restaked);
 
         // The add should clear the prior pending removal for the same address

@@ -17,10 +17,34 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 parking_lot = { workspace = true }
+dashmap = { workspace = true }
 bytes = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
 flate2 = { workspace = true }
+
+# Optional: Celestia DA backend
+celestia-rpc = { workspace = true, optional = true }
+celestia-types = { workspace = true, optional = true }
+
+# Optional: EigenDA + Avail DA backends — both speak HTTP to a local
+# sidecar gateway (`eigenda-proxy` and `avail-light` respectively), so the
+# only real new dependency is `reqwest` (Avail additionally uses `base64`
+# for payload encoding on the wire).
+reqwest = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enable the Celestia data-availability backend (`CelestiaBackend`).
+# Requires a celestia-node JSON-RPC endpoint and an auth token.
+celestia = ["dep:celestia-rpc", "dep:celestia-types"]
+# Enable the EigenDA data-availability backend (`EigenDaBackend`).
+# Requires a reachable `eigenda-proxy` HTTP gateway.
+eigenda = ["dep:reqwest"]
+# Enable the Avail data-availability backend (`AvailBackend`).
+# Requires a reachable `avail-light` HTTP gateway.
+avail = ["dep:reqwest", "dep:base64"]
 
 [dev-dependencies]
 tenzro-crypto = { workspace = true }

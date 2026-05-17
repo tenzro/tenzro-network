@@ -10,12 +10,13 @@
 //!   * `AllowBlockList` — byzantine peers permanently blocked by PeerId.
 
 use libp2p::{
+    autonat, dcutr,
     gossipsub::{
         self, IdentTopic, MessageAuthenticity, MessageId,
         PeerScoreParams, PeerScoreThresholds, ValidationMode,
     },
-    identify, kad, ping,
-    swarm::NetworkBehaviour,
+    identify, kad, ping, relay,
+    swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
     PeerId,
 };
 use libp2p_allow_block_list as allow_block_list;
@@ -26,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::block_sync_proto::{self, BlockSyncBehaviour};
+use crate::consensus_direct_proto::{self, ConsensusDirectBehaviour};
 use crate::gossip::{validate_gossip_message, MessageDeduplicator, MessageValidation};
 
 /// Topics on which ONLY validators may publish. Enforced in the gossip validation
@@ -59,6 +61,66 @@ pub struct TenzroBehaviour {
     /// gossipsub backfill. Modeled on Sui's `state_sync` and Aptos'
     /// `storage-service` — see `block_sync_proto.rs` for the wire types.
     pub block_sync: BlockSyncBehaviour,
+
+    /// Consensus-direct request/response protocol
+    /// (`/tenzro/consensus-direct/1.0.0`). Carries HotStuff-2 vote /
+    /// proposal / timeout / NEC traffic on a per-validator overlay, replacing
+    /// the gossipsub `tenzro/consensus` publish path. The gossipsub topic
+    /// remains *subscribable* for observers (RPC / indexer / light-client
+    /// nodes) but on a steady fleet of validators it carries zero traffic
+    /// because every publisher has been migrated here. See
+    /// `consensus_direct_proto.rs` for the wire types and concurrency limits.
+    pub consensus_direct: ConsensusDirectBehaviour,
+
+    // ─── NAT traversal stack (libp2p 2026 reference design) ────────────────
+    //
+    // Validators with a confirmed public address run the **server** halves
+    // (`relay` + `autonat_server`) so they can keep the network reachable
+    // for community joiners behind home / mobile / corporate NATs. Joiners
+    // run only the **client** halves (`relay_client`, `autonat_client`,
+    // `dcutr`) and never serve relay traffic themselves.
+    //
+    // The split between client and server is driven by the
+    // `enable_relay` + `enable_hole_punching` config flags. Callers pick
+    // sensible defaults by role:
+    //   * `Validator`             → enable_relay=true,  enable_hole_punching=true
+    //   * `RPC` / `LightClient`   → enable_relay=false, enable_hole_punching=true
+    //   * `ModelProvider` / joiner→ enable_relay=false, enable_hole_punching=true
+    //
+    // All five fields are wrapped in `Toggle` so they can be conditionally
+    // disabled at build time without bifurcating the `NetworkBehaviour`
+    // type. A toggled-off field is a no-op for the swarm.
+
+    /// Circuit-Relay v2 SERVER (spec/libp2p/circuit-relay-v2). Enabled on
+    /// public validators so joiners behind NAT can use them as relay hops
+    /// for DCUtR hole-punch coordination. Gated by `enable_relay`.
+    pub relay: Toggle<relay::Behaviour>,
+
+    /// Circuit-Relay v2 CLIENT — lets THIS node dial peers via a relay and
+    /// also expose `/p2p-circuit` listeners so others can reach us before
+    /// DCUtR upgrades the connection to direct. The transport half is
+    /// installed by `SwarmBuilder::with_relay_client()`; this is the
+    /// behaviour half. Gated by `enable_hole_punching`.
+    pub relay_client: Toggle<relay::client::Behaviour>,
+
+    /// AutoNAT v2 CLIENT — asks public peers "can you reach me at this
+    /// address?" and updates the swarm's confirmed external address when a
+    /// dial-back succeeds. Always on when hole punching is enabled — this
+    /// is what tells DCUtR whether we even need to hole-punch. Gated by
+    /// `enable_hole_punching`.
+    pub autonat_client: Toggle<autonat::v2::client::Behaviour>,
+
+    /// AutoNAT v2 SERVER — answers dial-back requests for peers that want
+    /// to confirm their own reachability. Enabled on validators so the
+    /// network has a quorum of dial-back responders. Gated by `enable_relay`
+    /// (the de-facto "public, well-connected node" flag).
+    pub autonat_server: Toggle<autonat::v2::server::Behaviour>,
+
+    /// Direct Connection Upgrade through Relay (DCUtR). Coordinates
+    /// simultaneous TCP/QUIC dials between two NATed peers via a relayed
+    /// signalling channel, then upgrades the connection from relayed to
+    /// direct. Gated by `enable_hole_punching`.
+    pub dcutr: Toggle<dcutr::Behaviour>,
 }
 
 /// Wrapper providing application-level message deduplication on top of TenzroBehaviour
@@ -70,12 +132,29 @@ pub struct TenzroNetwork {
 }
 
 impl TenzroBehaviour {
-    /// Creates a new TenzroBehaviour
+    /// Creates a new TenzroBehaviour.
+    ///
+    /// `relay_client_behaviour` is the behaviour half returned by
+    /// `SwarmBuilder::with_relay_client()` and must be threaded in from the
+    /// service-layer swarm construction. Pass `None` to disable the relay
+    /// client transport entirely (e.g. tests that don't exercise NAT
+    /// traversal); the field is then toggled off and `enable_hole_punching`
+    /// is treated as no-op for the relay-client + DCUtR pair.
+    ///
+    /// `enable_relay` enables the relay v2 SERVER + AutoNAT v2 SERVER —
+    /// only validators with a confirmed public address should set this.
+    ///
+    /// `enable_hole_punching` enables the relay-client + AutoNAT v2 client +
+    /// DCUtR triple, which is what NATed nodes need to reach the network
+    /// from behind a residential / mobile / corporate firewall.
     pub fn new(
         local_peer_id: PeerId,
         local_key: &libp2p::identity::Keypair,
         protocol_version: String,
         user_agent: String,
+        enable_relay: bool,
+        enable_hole_punching: bool,
+        relay_client_behaviour: Option<relay::client::Behaviour>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Gossipsub config tuned for small validator sets. Mesh params must be
         // satisfiable with the *current* peer count or no mesh ever forms and
@@ -170,9 +249,26 @@ impl TenzroBehaviour {
         // Create Kademlia DHT (S/Kademlia disjoint paths, 30s timeout, k=10)
         let kademlia = crate::discovery::create_kademlia(local_peer_id);
 
-        // Create identify behaviour
+        // Create identify behaviour.
+        //
+        // `hide_listen_addrs(true)` is essential on cloud deployments. When a
+        // node binds to `/ip4/0.0.0.0/tcp/9000` the libp2p swarm enumerates
+        // every interface — including the docker0 bridge (172.17.0.1) on
+        // hosts running `--network host` containers, and any kube CNI overlay
+        // address. Identify will then advertise the entire bag of listen
+        // addrs to every peer; peers receive 172.17.0.1, dial it, hit their
+        // OWN docker0 bridge, get "Unexpected peer ID" from a local
+        // container, and the per-IP rate limiter then bans the legitimate
+        // peer. Observed on the GCE multi-region testnet 2026-05-14.
+        //
+        // With this flag set, Identify advertises only what we explicitly
+        // tell the swarm to publish via `Swarm::add_external_address` — i.e.
+        // either (a) a statically-configured public IP for validator nodes
+        // or (b) an address that AutoNAT v2 has confirmed reachable. Both
+        // paths are correct; neither leaks the docker bridge.
         let identify_config = identify::Config::new(protocol_version, local_key.public())
-            .with_agent_version(user_agent);
+            .with_agent_version(user_agent)
+            .with_hide_listen_addrs(true);
         let identify = identify::Behaviour::new(identify_config);
 
         // Create ping behaviour
@@ -209,6 +305,75 @@ impl TenzroBehaviour {
         // with the production-tuned config from `block_sync_proto::new_behaviour`.
         let block_sync = block_sync_proto::new_behaviour();
 
+        // Consensus-direct protocol: per-validator overlay for HotStuff-2
+        // vote / proposal / timeout / NEC traffic. Replaces the gossipsub
+        // `tenzro/consensus` publish path so consensus messages bypass the
+        // mesh entirely and get per-message delivery semantics.
+        let consensus_direct = consensus_direct_proto::new_behaviour();
+
+        // ─── NAT traversal stack ──────────────────────────────────────────
+        //
+        // Build only the halves the role asked for. Fields are wrapped in
+        // `Toggle` so the final NetworkBehaviour stays type-monomorphic
+        // regardless of which combination is active.
+
+        // Relay v2 SERVER. Defaults are libp2p-recommended for a public
+        // validator-class node: 32 reservations, 16 circuits per peer,
+        // 2-minute reservation TTL, 4 KiB/s circuit rate limit. These are
+        // intentionally conservative — relay traffic is a side-channel
+        // service to community joiners, not a primary throughput path.
+        let relay = if enable_relay {
+            Toggle::from(Some(relay::Behaviour::new(
+                local_peer_id,
+                relay::Config::default(),
+            )))
+        } else {
+            Toggle::from(None)
+        };
+
+        // Relay v2 CLIENT. The transport half is installed by
+        // `SwarmBuilder::with_relay_client()` in service.rs; the behaviour
+        // half is what we wire into the combined NetworkBehaviour here.
+        // Disabled if hole-punching is off OR if the caller did not provide
+        // the relay client behaviour (e.g. dev-transport test path).
+        let relay_client = if enable_hole_punching {
+            Toggle::from(relay_client_behaviour)
+        } else {
+            Toggle::from(None)
+        };
+
+        // AutoNAT v2 client — needed to discover whether we're behind NAT
+        // and, if so, what our public address is. Trivial CPU cost; safe
+        // to leave on whenever hole punching is enabled.
+        let autonat_client = if enable_hole_punching {
+            Toggle::from(Some(autonat::v2::client::Behaviour::new(
+                rand::rngs::OsRng,
+                autonat::v2::client::Config::default(),
+            )))
+        } else {
+            Toggle::from(None)
+        };
+
+        // AutoNAT v2 server — answers dial-back probes for other peers.
+        // Only enabled on validators with a confirmed public address (same
+        // gate as the relay server).
+        let autonat_server = if enable_relay {
+            Toggle::from(Some(autonat::v2::server::Behaviour::new(
+                rand::rngs::OsRng,
+            )))
+        } else {
+            Toggle::from(None)
+        };
+
+        // DCUtR — the actual hole-punch coordinator. Requires both
+        // relay-client (for the signalling channel) and AutoNAT-client (to
+        // know we have a public-but-NATed address worth punching to).
+        let dcutr = if enable_hole_punching {
+            Toggle::from(Some(dcutr::Behaviour::new(local_peer_id)))
+        } else {
+            Toggle::from(None)
+        };
+
         Ok(Self {
             gossipsub,
             kademlia,
@@ -217,6 +382,12 @@ impl TenzroBehaviour {
             connection_limits,
             allow_block_list,
             block_sync,
+            consensus_direct,
+            relay,
+            relay_client,
+            autonat_client,
+            autonat_server,
+            dcutr,
         })
     }
 
@@ -268,7 +439,14 @@ impl TenzroBehaviour {
 }
 
 impl TenzroNetwork {
-    /// Creates a new TenzroNetwork with application-level deduplication
+    /// Creates a new TenzroNetwork with application-level deduplication.
+    ///
+    /// This convenience constructor disables NAT-traversal (no relay
+    /// server, no relay client, no AutoNAT, no DCUtR). It exists for tests
+    /// and tooling that exercise the gossip + dedup layer without
+    /// constructing a full SwarmBuilder. Production code paths construct
+    /// `TenzroBehaviour` directly via the swarm builder in
+    /// `service::run_event_loop`.
     pub fn new(
         local_peer_id: PeerId,
         local_key: &libp2p::identity::Keypair,
@@ -280,6 +458,9 @@ impl TenzroNetwork {
             local_key,
             protocol_version,
             user_agent,
+            false, // enable_relay
+            false, // enable_hole_punching
+            None,  // relay_client_behaviour
         )?;
 
         Ok(Self {
@@ -365,6 +546,9 @@ mod tests {
             &keypair,
             "tenzro/1.0.0".to_string(),
             "tenzro-network/0.1.0".to_string(),
+            false, // enable_relay
+            false, // enable_hole_punching
+            None,  // relay_client_behaviour
         );
 
         assert!(behaviour.is_ok());
@@ -380,6 +564,9 @@ mod tests {
             &keypair,
             "tenzro/1.0.0".to_string(),
             "tenzro-network/0.1.0".to_string(),
+            false, // enable_relay
+            false, // enable_hole_punching
+            None,  // relay_client_behaviour
         )
         .unwrap();
 

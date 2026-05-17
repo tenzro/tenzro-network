@@ -13,6 +13,9 @@ use tenzro_types::primitives::{Address, BlockHeight, Hash};
 use tenzro_types::principal_chain::{
     anonymous_chain_for_address, PrincipalChain, PrincipalChainResolver,
 };
+use tenzro_storage::{
+    compute_commitment, ReceiptEnvelope, ReceiptKind, ReceiptStorageMode, ReceiptSummary,
+};
 use tenzro_types::settlement::{
     ProofType, ServiceProof, SettlementReceipt, SettlementRequest, SettlementStatus,
 };
@@ -524,11 +527,32 @@ impl SettlementEngine {
                 .get(tenzro_storage::CF_SETTLEMENTS, &key)
                 .map_err(|e| SettlementError::StorageError(e.to_string()))?
             {
-                match serde_json::from_slice::<SettlementReceipt>(&bytes) {
-                    Ok(r) => {
-                        self.receipts.insert(r.receipt_id.clone(), r);
+                // Wave 7: receipts are wrapped in `ReceiptEnvelope`. Decode the
+                // envelope, validate it, then deserialize the inline payload
+                // back into a `SettlementReceipt`.
+                match serde_json::from_slice::<ReceiptEnvelope>(&bytes) {
+                    Ok(envelope) => {
+                        if let Err(e) = envelope.validate() {
+                            warn!("skip invalid receipt envelope: {}", e);
+                            continue;
+                        }
+                        let payload = match envelope.inline_payload.as_ref() {
+                            Some(p) => p,
+                            None => {
+                                warn!(
+                                    "skip offloaded receipt envelope (escrow should be inline)"
+                                );
+                                continue;
+                            }
+                        };
+                        match serde_json::from_slice::<SettlementReceipt>(payload) {
+                            Ok(r) => {
+                                self.receipts.insert(r.receipt_id.clone(), r);
+                            }
+                            Err(e) => warn!("skip undecodable wrapped receipt: {}", e),
+                        }
                     }
-                    Err(e) => warn!("skip undecodable receipt record: {}", e),
+                    Err(e) => warn!("skip undecodable receipt envelope: {}", e),
                 }
             }
         }
@@ -584,6 +608,13 @@ impl SettlementEngine {
     }
 
     /// Persists a single receipt + both party indices atomically.
+    ///
+    /// **Wire format (Spec 7 / Tasks #147 + #150):** the receipt is wrapped in
+    /// a [`ReceiptEnvelope`] with `kind = ReceiptKind::SettlementEscrow` and
+    /// `storage_mode = Inline` (escrow is audit-critical and small). The
+    /// canonical payload is `serde_json::to_vec(&SettlementReceipt)`; the
+    /// commitment is `SHA-256(canonical_payload)`. Hydration unwraps the
+    /// envelope back into a `SettlementReceipt`.
     fn persist_receipt_and_indices(
         &self,
         receipt: &SettlementReceipt,
@@ -595,8 +626,35 @@ impl SettlementEngine {
             None => return Ok(()),
         };
 
-        let receipt_bytes = serde_json::to_vec(receipt).map_err(|e| {
+        // Canonical payload: serde_json over the SettlementReceipt itself.
+        // Same encoding used by hydration to deserialize the wrapped payload.
+        let payload = serde_json::to_vec(receipt).map_err(|e| {
             SettlementError::StorageError(format!("serialize receipt: {}", e))
+        })?;
+
+        // Build the inline-summary that's surfaced to indexes regardless of
+        // storage mode. Receipt id is hashed so the summary fits the typed
+        // `Hash` field; full UUID is recoverable from the wrapped payload.
+        let receipt_id_hash = compute_commitment(receipt.receipt_id.as_bytes());
+        let summary = ReceiptSummary {
+            receipt_id: receipt_id_hash,
+            payer: Some(format!("{}", receipt.customer)),
+            payee: Some(format!("{}", receipt.provider)),
+            amount_wei: Some(receipt.amount as u128),
+            timestamp: receipt.settled_at,
+            principal_chain_summary: Some(receipt.principal_chain.summary()),
+        };
+
+        // Escrow defaults to Inline. Use the kind's default — never hard-code
+        // the mode at the call site (Task #150).
+        let kind = ReceiptKind::SettlementEscrow;
+        debug_assert_eq!(kind.default_mode(), ReceiptStorageMode::Inline);
+        let envelope = ReceiptEnvelope::inline(kind, summary, payload);
+        envelope.validate().map_err(|e| {
+            SettlementError::StorageError(format!("envelope validate: {}", e))
+        })?;
+        let receipt_bytes = serde_json::to_vec(&envelope).map_err(|e| {
+            SettlementError::StorageError(format!("serialize receipt envelope: {}", e))
         })?;
         let provider_bytes = serde_json::to_vec(provider_history).map_err(|e| {
             SettlementError::StorageError(format!("serialize provider index: {}", e))

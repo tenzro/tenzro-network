@@ -52,11 +52,11 @@ impl MppVoucher {
                 tenzro_crypto::keys::KeyType::Ed25519,
                 self.public_key.clone(),
             ),
-            Some(self.pq_public_key.clone()),
+            self.pq_public_key.clone(),
         );
         let composite_sig = tenzro_crypto::composite::CompositeSignature::new(
             self.signature.clone(),
-            Some(self.pq_signature.clone()),
+            self.pq_signature.clone(),
         );
         let verifier = tenzro_crypto::composite::StandardHybridVerifier::new(composite_pk);
         use tenzro_crypto::composite::HybridVerifier;
@@ -337,7 +337,7 @@ mod tests {
             nonce,
             signature: composite.classical,
             public_key: keys.pub_bytes.clone(),
-            pq_signature: composite.pq.unwrap_or_default(),
+            pq_signature: composite.pq,
             pq_public_key: keys.pq_pub_bytes.clone(),
         }
     }

@@ -130,6 +130,11 @@ pub struct ValidatorRegisterCmd {
     #[arg(long)]
     pq_pubkey: String,
 
+    /// 48-byte BLS12-381 G1-compressed verifying key (hex; `min_pk` scheme).
+    /// Used by HotStuff-2 to aggregate per-vote signatures into a single QC-level aggregate.
+    #[arg(long)]
+    bls_pubkey: String,
+
     /// Withdrawal address — rewards / unbonded principal settle here (hex; 32 bytes)
     #[arg(long)]
     withdrawal_address: String,
@@ -165,6 +170,13 @@ impl ValidatorRegisterCmd {
                 pq_bytes.len()
             ));
         }
+        let bls_bytes = hex_to_vec(&self.bls_pubkey, "bls_pubkey")?;
+        if bls_bytes.len() != 48 {
+            return Err(anyhow!(
+                "bls_pubkey must be 48 bytes (BLS12-381 G1-compressed, min_pk), got {}",
+                bls_bytes.len()
+            ));
+        }
         let withdrawal_bytes: [u8; 32] =
             hex_to_fixed(&self.withdrawal_address, "withdrawal_address")?;
 
@@ -180,6 +192,7 @@ impl ValidatorRegisterCmd {
             "data": {
                 "consensus_pubkey": consensus_bytes.to_vec(),
                 "pq_pubkey": pq_bytes,
+                "bls_pubkey": bls_bytes,
                 "withdrawal_address": withdrawal_bytes,
                 "self_stake": self.self_stake.to_string(),
                 "metadata_uri": self.metadata_uri,

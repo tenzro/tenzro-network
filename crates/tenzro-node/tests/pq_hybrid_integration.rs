@@ -306,7 +306,7 @@ async fn revocation_broadcast_signature_required() {
     let signed = SignedRevocationEntry::sign(entry.clone(), signer.as_ref())
         .expect("sign revocation");
     assert!(
-        signed.signature.is_hybrid(),
+        !signed.signature.pq.is_empty(),
         "broadcast must carry both classical and PQ legs"
     );
     signed.verify().expect("freshly-signed entry verifies");

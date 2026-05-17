@@ -1,0 +1,41 @@
+[package]
+name = "tenzro-iroh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Iroh (QUIC-native content-addressed transport) integration for Tenzro Network — endpoint lifecycle, blob distribution, CRDT documents, and the tenzro:// URI resolver"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-storage = { workspace = true }
+tenzro-training = { workspace = true }
+
+# Async + error plumbing for the resolver trait surface.
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+anyhow = { workspace = true }
+hex = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+url = { workspace = true }
+
+# Iroh stack.
+# Phase A2 consumer: DaBackend over iroh-blobs.
+# Phase B1 consumer: outer-gradient distribution over iroh-blobs.
+# Phase B2 consumer: sealed-shard ciphertexts over iroh-blobs; the
+#                    SealedDatasetManifest itself rides the existing
+#                    `tenzro/training` libp2p gossipsub topic instead of
+#                    iroh-docs (see sealed_shard_store.rs for rationale).
+# Phase D2 (#223):  iroh-gossip + irpc → A2A/MCP-over-iroh.
+# Per CLAUDE.md pre-launch hygiene: no unused deps shipped to the workspace.
+iroh = { workspace = true }
+iroh-base = { workspace = true }
+iroh-blobs = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

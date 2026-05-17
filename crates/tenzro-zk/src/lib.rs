@@ -54,6 +54,7 @@ pub use p3_koala_bear::KoalaBear;
 
 // Re-export TEE integration helpers.
 pub use tee_integration::{
-    extract_tee_public_key, generate_tee_zk_proof, get_expected_measurement,
-    sign_tee_zk_proof, verify_tee_zk_proof, verify_tee_zk_signature,
+    bind_external_attestation_result, extract_tee_public_key, generate_tee_zk_proof,
+    get_expected_measurement, sign_tee_zk_proof, sign_tee_zk_proof_hybrid,
+    verify_tee_zk_proof, verify_tee_zk_signature,
 };

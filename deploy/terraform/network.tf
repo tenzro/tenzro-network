@@ -53,12 +53,16 @@ resource "google_compute_firewall" "allow_rpc_internal" {
   source_ranges = ["10.0.0.0/20", "10.4.0.0/14", "10.8.0.0/20"]
 }
 
-# Deny direct RPC/API/metrics access from internet
+# Default-deny RPC/API/metrics access from internet. Priority 2000 (lower
+# than the per-tag allow rules at priority 1000) so tagged VMs that
+# explicitly need public RPC exposure — e.g. `tenzro-validator-rpc` on the
+# Phase A GCE bootstrap — bypass this rule via the higher-priority allow.
+# Anything not tagged gets denied.
 resource "google_compute_firewall" "deny_rpc_external" {
   name     = "tenzro-deny-rpc-external"
   network  = google_compute_network.tenzro.name
   project  = var.project_id
-  priority = 1000
+  priority = 2000
 
   deny {
     protocol = "tcp"

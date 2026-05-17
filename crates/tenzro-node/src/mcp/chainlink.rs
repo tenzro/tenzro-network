@@ -5,10 +5,12 @@ use rmcp::{
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
     model::*,
-    tool, tool_handler, tool_router, ServerHandler,
+    tool, tool_handler, tool_router, Json, ServerHandler,
 };
 use serde::Deserialize;
 use tracing::info;
+
+use super::server::RpcPassthroughOutput;
 
 // ─── Constants ───
 
@@ -325,18 +327,18 @@ fn err_internal(msg: impl Into<String>) -> ErrorData {
     ErrorData::internal_error(msg.into(), None)
 }
 
-fn json_result(value: serde_json::Value) -> std::result::Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&value).unwrap(),
-    )]))
+fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
 /// Wrap a plain-text status string as a successful tool result.
 ///
 /// Used by tools that return a single textual value such as a transaction
 /// hash from a CCIP / VRF broadcast.
-fn text_result(text: impl Into<String>) -> std::result::Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(text.into())]))
+fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    Ok(Json(RpcPassthroughOutput {
+        result: serde_json::json!({ "message": text.into() }),
+    }))
 }
 
 /// Build a dRPC URL for a given chain slug, falling back to public RPCs when
@@ -733,7 +735,7 @@ impl ChainlinkMcpServer {
     async fn ccip_get_fee(
         &self,
         Parameters(params): Parameters<CcipGetFeeParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain = resolve_chain(&params.src_chain_id)?;
         if chain.router_address.is_empty() {
             return Err(err_invalid(format!(
@@ -809,7 +811,7 @@ impl ChainlinkMcpServer {
     async fn ccip_send_message(
         &self,
         Parameters(params): Parameters<CcipSendMessageParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain = resolve_chain(&params.src_chain_id)?;
         if chain.router_address.is_empty() {
             return Err(err_invalid(format!(
@@ -914,7 +916,7 @@ impl ChainlinkMcpServer {
     async fn ccip_track_message(
         &self,
         Parameters(params): Parameters<CcipTrackMessageParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain = resolve_chain(&params.dst_chain_id)?;
 
         let message_id_bytes = parse_hex(&params.message_id)?;
@@ -969,7 +971,7 @@ impl ChainlinkMcpServer {
     async fn ccip_get_supported_chains(
         &self,
         Parameters(params): Parameters<CcipGetSupportedChainsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let env = params.environment.as_deref().unwrap_or("mainnet");
         let url = format!("{}/chains?environment={}", CCIP_API_BASE, env);
 
@@ -1004,7 +1006,7 @@ impl ChainlinkMcpServer {
     async fn ccip_get_supported_tokens(
         &self,
         Parameters(params): Parameters<CcipGetSupportedTokensParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let env = params.environment.as_deref().unwrap_or("mainnet");
         let url = format!("{}/tokens?environment={}", CCIP_API_BASE, env);
 
@@ -1039,7 +1041,7 @@ impl ChainlinkMcpServer {
     async fn ccip_get_lanes(
         &self,
         Parameters(params): Parameters<CcipGetLanesParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let env = params.environment.as_deref().unwrap_or("mainnet");
         let mut url = format!("{}/lanes?environment={}", CCIP_API_BASE, env);
 
@@ -1083,7 +1085,7 @@ impl ChainlinkMcpServer {
     async fn chainlink_get_price(
         &self,
         Parameters(params): Parameters<ChainlinkGetPriceParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain_id = params.chain_id.as_deref().unwrap_or("ethereum");
         let chain = resolve_chain(chain_id)?;
 
@@ -1181,7 +1183,7 @@ impl ChainlinkMcpServer {
     async fn chainlink_list_feeds(
         &self,
         Parameters(params): Parameters<ChainlinkListFeedsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain = params.chain.as_deref().unwrap_or("ethereum");
 
         let feeds = match chain.to_lowercase().as_str() {
@@ -1235,7 +1237,7 @@ impl ChainlinkMcpServer {
     async fn chainlink_check_upkeep(
         &self,
         Parameters(params): Parameters<ChainlinkCheckUpkeepParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain_id = params.chain_id.as_deref().unwrap_or("ethereum");
         let chain = resolve_chain(chain_id)?;
 
@@ -1318,7 +1320,7 @@ impl ChainlinkMcpServer {
     async fn chainlink_get_upkeep_info(
         &self,
         Parameters(params): Parameters<ChainlinkGetUpkeepInfoParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain_id = params.chain_id.as_deref().unwrap_or("ethereum");
         let chain = resolve_chain(chain_id)?;
 
@@ -1396,7 +1398,7 @@ impl ChainlinkMcpServer {
     async fn chainlink_estimate_functions_cost(
         &self,
         Parameters(params): Parameters<ChainlinkEstimateFunctionsCostParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain_id = params.chain_id.as_deref().unwrap_or("ethereum");
         let chain = resolve_chain(chain_id)?;
 
@@ -1464,7 +1466,7 @@ impl ChainlinkMcpServer {
     async fn ds_get_report(
         &self,
         Parameters(params): Parameters<DsGetReportParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let feed_id = if params.feed_id.starts_with("0x") {
             params.feed_id.clone()
         } else {
@@ -1527,7 +1529,7 @@ impl ChainlinkMcpServer {
     async fn ds_list_feeds(
         &self,
         Parameters(params): Parameters<DsListFeedsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let url = if let Some(ref class) = params.asset_class {
             format!("{}/feeds?assetClass={}", DATA_STREAMS_API, class)
         } else {
@@ -1582,7 +1584,7 @@ impl ChainlinkMcpServer {
     async fn vrf_request_random(
         &self,
         Parameters(params): Parameters<VrfRequestRandomParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain = params.chain.as_deref().unwrap_or("ethereum");
         let coordinator = vrf_coordinator(chain).ok_or_else(|| {
             err_invalid(format!("No VRF v2.5 coordinator for '{}'. Supported: ethereum, arbitrum, base", chain))
@@ -1652,7 +1654,7 @@ impl ChainlinkMcpServer {
     async fn vrf_get_subscription(
         &self,
         Parameters(params): Parameters<VrfGetSubscriptionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain_name = params.chain.as_deref().unwrap_or("ethereum");
         let coordinator = vrf_coordinator(chain_name).ok_or_else(|| {
             err_invalid(format!("No VRF v2.5 coordinator for '{}'. Supported: ethereum, arbitrum, base", chain_name))
@@ -1714,7 +1716,7 @@ impl ChainlinkMcpServer {
     async fn por_get_reserve(
         &self,
         Parameters(params): Parameters<PorGetReserveParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain_id = params.chain.as_deref().unwrap_or("ethereum");
         let chain = resolve_chain(chain_id)?;
 
@@ -1775,7 +1777,7 @@ impl ChainlinkMcpServer {
     async fn por_list_feeds(
         &self,
         Parameters(_params): Parameters<PorListFeedsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         json_result(serde_json::json!({
             "chain": "Ethereum",
             "feeds": [
@@ -1793,7 +1795,7 @@ impl ChainlinkMcpServer {
     async fn ccip_get_token_pool(
         &self,
         Parameters(params): Parameters<CcipGetTokenPoolParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain_id = params.chain.as_deref().unwrap_or("ethereum");
         let chain = resolve_chain(chain_id)?;
 
@@ -1834,7 +1836,7 @@ impl ChainlinkMcpServer {
     async fn ccip_get_rate_limits(
         &self,
         Parameters(params): Parameters<CcipGetRateLimitsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain_id = params.chain.as_deref().unwrap_or("ethereum");
         let chain = resolve_chain(chain_id)?;
 
@@ -1920,7 +1922,7 @@ impl ChainlinkMcpServer {
     async fn chainlink_get_subscription(
         &self,
         Parameters(params): Parameters<ChainlinkGetSubscriptionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain_id = params.chain_id.as_deref().unwrap_or("ethereum");
         let chain = resolve_chain(chain_id)?;
 
@@ -2030,7 +2032,7 @@ impl ChainlinkMcpServer {
     async fn chainlink_broadcast_signed_tx(
         &self,
         Parameters(params): Parameters<ChainlinkBroadcastTxParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain = resolve_chain(&params.chain)?;
         let tx_hash = eth_send_raw_tx(
             &self.http_client,

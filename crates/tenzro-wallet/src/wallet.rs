@@ -12,6 +12,7 @@
 
 use crate::error::{Result, WalletError};
 use serde::{Deserialize, Serialize};
+use tenzro_crypto::bls::BlsKeyPair;
 use tenzro_crypto::frost::{PublicKeyPackage, SecretShare, SignerIndex};
 use tenzro_crypto::pq::MlDsaSigningKey;
 use tenzro_crypto::{KeyType, PublicKey};
@@ -162,6 +163,15 @@ pub struct MpcWallet {
     pub pq_signing_key: Option<MlDsaSigningKey>,
     /// ML-DSA-65 verifying key bytes (FIPS 204, exactly 1952 bytes).
     pub pq_verifying_key: Vec<u8>,
+    /// BLS12-381 signing key (`min_pk` scheme) for HotStuff-2 vote
+    /// aggregation. Mandatory — every wallet carries one. Lives alongside
+    /// the FROST shares and ML-DSA-65 seed in the keystore. The
+    /// corresponding 48-byte G1-compressed public key is bound to the
+    /// identity at registration.
+    #[serde(skip)]
+    pub bls_signing_key: Option<BlsKeyPair>,
+    /// BLS12-381 G1-compressed verifying key (exactly 48 bytes).
+    pub bls_verifying_key: Vec<u8>,
 }
 
 impl std::fmt::Debug for MpcWallet {
@@ -206,6 +216,21 @@ impl std::fmt::Debug for MpcWallet {
                 "pq_verifying_key",
                 &format_args!("<{} bytes>", self.pq_verifying_key.len()),
             )
+            .field(
+                "bls_signing_key",
+                &format_args!(
+                    "{}",
+                    if self.bls_signing_key.is_some() {
+                        "<loaded>"
+                    } else {
+                        "<not loaded>"
+                    }
+                ),
+            )
+            .field(
+                "bls_verifying_key",
+                &format_args!("<{} bytes>", self.bls_verifying_key.len()),
+            )
             .finish()
     }
 }
@@ -213,14 +238,16 @@ impl std::fmt::Debug for MpcWallet {
 impl MpcWallet {
     /// Create a new FROST threshold wallet.
     ///
-    /// `pq_signing_key` is mandatory and bound directly into the wallet
-    /// alongside the FROST shares. There is no classical-only fallback.
+    /// `pq_signing_key` and `bls_signing_key` are both mandatory and bound
+    /// directly into the wallet alongside the FROST shares. There is no
+    /// classical-only fallback.
     pub fn new(
         wallet_id: WalletId,
         address: Address,
         key_shares: Vec<KeyShare>,
         frost_pubkey_package: PublicKeyPackage,
         pq_signing_key: MlDsaSigningKey,
+        bls_signing_key: BlsKeyPair,
     ) -> Result<Self> {
         if key_shares.is_empty() {
             return Err(WalletError::InvalidKeyShare(
@@ -235,6 +262,7 @@ impl MpcWallet {
         ];
 
         let pq_verifying_key = pq_signing_key.verifying_key_bytes().to_vec();
+        let bls_verifying_key = bls_signing_key.public_key().to_bytes().to_vec();
         let public_key = frost_pubkey_package.group_public_key.as_public_key();
         let threshold = frost_pubkey_package.threshold;
         let total_shares = frost_pubkey_package.total;
@@ -253,6 +281,8 @@ impl MpcWallet {
             label: None,
             pq_signing_key: Some(pq_signing_key),
             pq_verifying_key,
+            bls_signing_key: Some(bls_signing_key),
+            bls_verifying_key,
         })
     }
 
@@ -281,6 +311,21 @@ impl MpcWallet {
     /// 1952-byte ML-DSA-65 verifying key bytes (FIPS 204).
     pub fn pq_verifying_key_bytes(&self) -> Vec<u8> {
         self.pq_verifying_key.clone()
+    }
+
+    /// Borrow the BLS12-381 signing key.
+    pub fn bls_signing_key(&self) -> Result<&BlsKeyPair> {
+        self.bls_signing_key.as_ref().ok_or_else(|| {
+            WalletError::SignatureFailed(
+                "BLS12-381 signing key not loaded — keystore must decrypt the wallet first"
+                    .to_string(),
+            )
+        })
+    }
+
+    /// 48-byte BLS12-381 G1-compressed verifying key bytes (`min_pk` scheme).
+    pub fn bls_verifying_key_bytes(&self) -> &[u8] {
+        &self.bls_verifying_key
     }
 
     /// Get the wallet ID.
@@ -410,6 +455,7 @@ mod tests {
             key_shares,
             pubkey_pkg,
             MlDsaSigningKey::generate(),
+            BlsKeyPair::generate().unwrap(),
         )
         .unwrap()
     }

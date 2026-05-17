@@ -14,9 +14,7 @@
 
 The Tenzro Decentralized Identity Protocol (TDIP) is the native identity standard for the Tenzro Network, providing a unified, W3C-compatible decentralized identity system for humans, machines, and autonomous AI agents. TDIP defines how identities are created, managed, delegated, verified, and revoked on the Tenzro Ledger.
 
-TDIP is designed for the AI age — where autonomous agents act on behalf of humans, conduct financial transactions, access intelligence services, and interact with other agents. Every identity on Tenzro is a TDIP identity. The protocol supports two identity tiers (human and machine), fine-grained delegation scopes, verifiable credentials with inheritance, cascading revocation, and auto-provisioned MPC wallets.
-
-PDIS (Praecise Digital Identity Standard) is supported as a secondary, interoperable standard via PDIS-TENZRO (PDIS-3). TDIP is the canonical native format.
+TDIP is designed for the AI age — where autonomous agents act on behalf of humans, conduct financial transactions, access intelligence services, and interact with other agents. Every identity on Tenzro is a TDIP identity. The protocol recognises **three identity classes** — humans, delegated agents (machines under a human controller), and autonomous agents (self-sovereign machines) — under fine-grained delegation scopes, verifiable credentials with inheritance, cascading revocation, and auto-provisioned MPC wallets.
 
 ---
 
@@ -64,14 +62,6 @@ TDIP DIDs resolve to DID Documents via the Tenzro Ledger's identity registry. Re
 - On-chain: via `IdentityRegistry.resolve(did)`
 - Via RPC: `tenzro_resolveIdentity` and `tenzro_resolveDidDocument`
 - Via SDK: `client.identity.resolve(did)`
-
-### 2.3 PDIS Scheme Support
-
-TDIP parsers also accept the `did:pdis:` scheme (PDIS secondary standard):
-```
-did:pdis:guardian:{uuid}  → did:tenzro:human:{uuid}
-did:pdis:agent:{uuid}     → did:tenzro:machine:{uuid}
-```
 
 ---
 
@@ -670,19 +660,7 @@ pub struct ServiceEndpoint {
 
 ## 14. Interoperability
 
-### 14.1 PDIS Compatibility
-
-TDIP is the native identity standard. PDIS-TENZRO (PDIS-3) provides interoperability:
-
-| Aspect | TDIP (Native) | PDIS-3 (Interop) |
-|--------|-------------|-------------------|
-| DID Scheme | `did:tenzro:` | `did:pdis:` (mapped) |
-| Identity Types | Human, Machine | Guardian (PDIS-1), Agent (PDIS-2) |
-| Registration | Direct on-chain | Via PDIS provisioning flow |
-| Wallet | Auto-provisioned MPC | Auto-provisioned MPC |
-| Credentials | W3C VC native | W3C VC compatible |
-
-### 14.2 ERC-8004 Compatibility
+### 14.1 ERC-8004 Compatibility
 
 TDIP machine identities are addressable through ERC-8004 system contracts on Tenzro's EVM via three native precompiles, with calldata byte-identical to canonical Ethereum deployments:
 
@@ -694,7 +672,7 @@ TDIP machine identities are addressable through ERC-8004 system contracts on Ten
 
 Selectors match `tenzro_identity::erc8004::selectors` byte-for-byte, so the same calldata works against either the native Tenzro registry or any Ethereum mirror. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — server-allocated, never derivable client-side. The `IdentityData::Machine.erc8004_agent_id` field captures the allocation so the TDIP record carries the canonical id for cross-system lookup, and `OnChainAgentRegistry::lookup_agent_id_by_did` provides reverse DID → agentId resolution.
 
-### 14.3 Cross-Chain Identity
+### 14.2 Cross-Chain Identity
 
 TDIP identities can have registrations on multiple chains:
 

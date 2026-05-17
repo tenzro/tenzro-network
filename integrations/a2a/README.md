@@ -112,7 +112,7 @@ local tip against peer-reported network tips (gossiped on
 
 ## Agent Skills
 
-The Tenzro A2A agent exposes the skills below covering blockchain, AI, identity, payments, lifecycle, bonds, and agent orchestration. The Agent Card at `tenzro_a2a_server/agent_card.py` is the authoritative source for skill IDs and descriptions.
+The Tenzro A2A agent exposes 40 skills covering blockchain, AI, identity, payments, lifecycle, bonds, and agent orchestration. The Agent Card at `tenzro_a2a_server/agent_card.py` is the authoritative source for skill IDs and descriptions.
 
 ### Core Blockchain
 

@@ -18,6 +18,9 @@ pub enum ProviderCommand {
     /// Provider pricing management
     #[command(subcommand)]
     Pricing(PricingCommand),
+    /// Compute bond (admission collateral) management
+    #[command(subcommand)]
+    Bond(BondCommand),
 }
 
 impl ProviderCommand {
@@ -28,7 +31,270 @@ impl ProviderCommand {
             Self::Models(cmd) => cmd.execute().await,
             Self::List(cmd) => cmd.execute().await,
             Self::Pricing(cmd) => cmd.execute().await,
+            Self::Bond(cmd) => cmd.execute().await,
         }
+    }
+}
+
+/// Compute bond (admission collateral) subcommands.
+///
+/// Providers must post a compute bond before they can register via
+/// `tenzro provider register`. The bond is held in a deterministic vault
+/// derived from the provider DID and is returnable after a 7-day cooldown.
+#[derive(Debug, Subcommand)]
+pub enum BondCommand {
+    /// Post a new compute bond
+    Post(BondPostCmd),
+    /// Top up an existing bond
+    Increase(BondIncreaseCmd),
+    /// Get a single provider's bond state
+    Get(BondGetCmd),
+    /// List all compute bonds on the node
+    List(BondListCmd),
+    /// Initiate withdrawal (or finalize once cooldown elapses)
+    Withdraw(BondWithdrawCmd),
+}
+
+impl BondCommand {
+    pub async fn execute(&self) -> Result<()> {
+        match self {
+            Self::Post(cmd) => cmd.execute().await,
+            Self::Increase(cmd) => cmd.execute().await,
+            Self::Get(cmd) => cmd.execute().await,
+            Self::List(cmd) => cmd.execute().await,
+            Self::Withdraw(cmd) => cmd.execute().await,
+        }
+    }
+}
+
+fn print_compute_bond_state(state: &serde_json::Value) {
+    if let Some(v) = state.get("provider_did").and_then(|v| v.as_str()) {
+        output::print_field("Provider DID", v);
+    }
+    if let Some(v) = state.get("provider_address").and_then(|v| v.as_str()) {
+        output::print_field("Provider Address", &output::format_address(v));
+    }
+    if let Some(v) = state.get("amount").and_then(|v| v.as_str()) {
+        output::print_field("Amount (wei)", v);
+    }
+    if let Some(v) = state.get("status").and_then(|v| v.as_str()) {
+        let active = v == "Active";
+        output::print_status("Status", v, active);
+    }
+    if let Some(v) = state.get("cooldown_until").and_then(|v| v.as_u64()) {
+        output::print_field("Cooldown Until (ms)", &v.to_string());
+    }
+    if let Some(v) = state.get("last_modified_block").and_then(|v| v.as_u64()) {
+        output::print_field("Last Modified Block", &v.to_string());
+    }
+    if let Some(v) = state.get("effective_amount").and_then(|v| v.as_str()) {
+        output::print_field("Effective for Registration", v);
+    }
+    if let Some(v) = state.get("is_eligible").and_then(|v| v.as_bool()) {
+        output::print_field("Registration-Eligible", &v.to_string());
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct BondPostCmd {
+    /// Provider DID (e.g. did:tenzro:machine:...)
+    #[arg(long)]
+    did: String,
+
+    /// Provider wallet address (32-byte hex; with or without 0x)
+    #[arg(long)]
+    address: String,
+
+    /// Bond amount in TNZO (decimal, e.g. "100" for 100 TNZO)
+    #[arg(long)]
+    amount: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl BondPostCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Post Compute Bond");
+        let amount_wei = crate::units::tnzo_to_wei_string(&self.amount)?;
+        output::print_field("Provider DID", &self.did);
+        output::print_field("Provider Address", &output::format_address(&self.address));
+        output::print_field("Amount", &format!("{} TNZO ({} wei)", self.amount, amount_wei));
+        println!();
+
+        let rpc = crate::rpc::RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Posting compute bond...");
+        let state: serde_json::Value = rpc
+            .call(
+                "tenzro_postComputeBond",
+                serde_json::json!([{
+                    "provider_did": self.did,
+                    "provider_address": self.address,
+                    "amount": amount_wei,
+                }]),
+            )
+            .await?;
+        spinner.finish_and_clear();
+        output::print_success("Compute bond posted");
+        println!();
+        print_compute_bond_state(&state);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct BondIncreaseCmd {
+    /// Provider DID
+    #[arg(long)]
+    did: String,
+
+    /// Additional amount in TNZO
+    #[arg(long)]
+    amount: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl BondIncreaseCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Increase Compute Bond");
+        let amount_wei = crate::units::tnzo_to_wei_string(&self.amount)?;
+        output::print_field("Provider DID", &self.did);
+        output::print_field("Top-up", &format!("{} TNZO ({} wei)", self.amount, amount_wei));
+        println!();
+
+        let rpc = crate::rpc::RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Increasing compute bond...");
+        let state: serde_json::Value = rpc
+            .call(
+                "tenzro_increaseComputeBond",
+                serde_json::json!([{
+                    "provider_did": self.did,
+                    "amount": amount_wei,
+                }]),
+            )
+            .await?;
+        spinner.finish_and_clear();
+        output::print_success("Compute bond increased");
+        println!();
+        print_compute_bond_state(&state);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct BondGetCmd {
+    /// Provider DID
+    #[arg(long)]
+    did: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl BondGetCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Compute Bond");
+        let rpc = crate::rpc::RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Fetching compute bond...");
+        let state: serde_json::Value = rpc
+            .call(
+                "tenzro_getComputeBond",
+                serde_json::json!([{ "provider_did": self.did }]),
+            )
+            .await?;
+        spinner.finish_and_clear();
+        if state.is_null() {
+            output::print_warning(&format!("No compute bond found for {}", self.did));
+            return Ok(());
+        }
+        print_compute_bond_state(&state);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct BondListCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl BondListCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Compute Bonds");
+        let rpc = crate::rpc::RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Listing compute bonds...");
+        let result: serde_json::Value = rpc
+            .call("tenzro_listComputeBonds", serde_json::json!([]))
+            .await?;
+        spinner.finish_and_clear();
+        let bonds = result
+            .get("bonds")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if bonds.is_empty() {
+            output::print_info("No compute bonds posted yet");
+            return Ok(());
+        }
+        let headers = vec!["Provider DID", "Address", "Amount (wei)", "Status", "Eligible"];
+        let mut rows = Vec::new();
+        for b in &bonds {
+            rows.push(vec![
+                b.get("provider_did").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                output::format_address(b.get("provider_address").and_then(|v| v.as_str()).unwrap_or("")),
+                b.get("amount").and_then(|v| v.as_str()).unwrap_or("0").to_string(),
+                b.get("status").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
+                b.get("is_eligible").and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
+            ]);
+        }
+        output::print_table(&headers, &rows);
+        println!();
+        output::print_field("Total", &bonds.len().to_string());
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct BondWithdrawCmd {
+    /// Provider DID
+    #[arg(long)]
+    did: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl BondWithdrawCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Withdraw Compute Bond");
+        output::print_info("Active → Cooldown initiates a 7-day unbonding window. Re-run after the cooldown elapses to finalize and reclaim funds.");
+        println!();
+
+        let rpc = crate::rpc::RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Submitting withdrawal...");
+        let state: serde_json::Value = rpc
+            .call(
+                "tenzro_withdrawComputeBond",
+                serde_json::json!([{ "provider_did": self.did }]),
+            )
+            .await?;
+        spinner.finish_and_clear();
+        let status = state.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+        match status {
+            "Cooldown" => output::print_success("Withdrawal initiated — bond is in 7-day cooldown"),
+            "Returned" => output::print_success("Bond returned to provider"),
+            other => output::print_warning(&format!("Unexpected post-withdraw status: {}", other)),
+        }
+        println!();
+        print_compute_bond_state(&state);
+        Ok(())
     }
 }
 
@@ -60,6 +326,12 @@ pub struct ProviderRegisterCmd {
     /// Provider name
     #[arg(long)]
     name: Option<String>,
+
+    /// Provider DID — must match a posted compute bond. Required for
+    /// model-provider, tee-provider, and storage-provider types; ignored
+    /// for validator type (validators are gated by self-stake instead).
+    #[arg(long)]
+    did: Option<String>,
 
     /// Stake amount (TNZO) — optional for model/inference providers, required for validators
     #[arg(long, default_value = "0")]
@@ -130,6 +402,7 @@ impl ProviderRegisterCmd {
         let result: serde_json::Value = rpc.call("tenzro_registerProvider", serde_json::json!([{
             "provider_type": self.r#type,
             "name": self.name.as_deref(),
+            "provider_did": self.did.as_deref(),
             "stake": stake_wei,
             "max_concurrent": self.max_concurrent,
         }])).await?;

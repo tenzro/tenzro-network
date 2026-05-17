@@ -153,6 +153,8 @@ impl WebServer {
             .route("/verify/inference", post(handlers::verify_inference))
             .route("/verify/health", get(handlers::health))
             .route("/health", get(handlers::health))
+            .route("/verify/ready", get(handlers::ready))
+            .route("/ready", get(handlers::ready))
             .route("/status", get(handlers::status))
             .route("/faucet", post(handlers::faucet))
             // OAuth 2.1 / RFC 8693 / RFC 7662 / RFC 7009 / RFC 9728

@@ -19,7 +19,7 @@ The agent marketplace is end-to-end paid-capable. Creators can publish templates
 
 | Field | Semantics |
 |-------|-----------|
-| `creator_did: Option<String>` | Optional DID binding (`did:tenzro:human:...`, `did:tenzro:machine:...`, `did:pdis:guardian:...`, `did:pdis:agent:...`). Immutable after registration. Used for reputation and attribution. |
+| `creator_did: Option<String>` | Optional DID binding to one of TDIP's three identity classes — human (`did:tenzro:human:{uuid}`), delegated agent (`did:tenzro:machine:{controller}:{uuid}`), or autonomous agent (`did:tenzro:machine:{uuid}`). Immutable after registration. Used for reputation and attribution. |
 | `creator_wallet: Option<Address>` | **Mandatory** for any non-`Free` `pricing`. Receives the creator share of every paid invocation. Registration fails with `MissingCreatorWallet` if omitted for paid templates. |
 | `invocation_count: u64` | Monotonically incremented by `tenzro_runAgentTemplate`. |
 | `total_revenue: u128` | Cumulative `fee_paid` credited across all invocations. |
@@ -40,7 +40,7 @@ The compact string form is accepted by `tenzro_registerAgentTemplate`, the CLI `
 
 ### Network commission
 
-`AGENT_MARKETPLACE_COMMISSION_BPS = 500` (5%). Defined in `tenzro_types` alongside the other protocol-level constants. On every paid `tenzro_runAgentTemplate`:
+`MARKETPLACE_COMMISSION_BPS = 500` (5%). Defined in `tenzro_types::marketplace` and shared across all three Tenzro marketplaces (agent templates, skills, tools). On every paid `tenzro_runAgentTemplate`:
 
 ```
 fee_paid          = pricing.price_for(tokens_estimate, max_iterations)

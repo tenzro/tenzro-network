@@ -19,7 +19,7 @@ pub enum TaskCommand {
     Quote(SubmitQuoteCmd),
     /// Assign a task to a provider (accept a quote)
     Assign(AssignTaskCmd),
-    /// Mark a task as completed with result
+    /// Mark a task as completed with output
     Complete(CompleteTaskCmd),
     /// Update a task
     Update(UpdateTaskCmd),
@@ -391,9 +391,9 @@ impl AssignTaskCmd {
 pub struct CompleteTaskCmd {
     /// Task ID to complete
     task_id: String,
-    /// Result/output of the completed task
+    /// Output of the completed task
     #[arg(long)]
-    result: String,
+    output: String,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -403,14 +403,14 @@ impl CompleteTaskCmd {
     pub async fn execute(self) -> Result<()> {
         output::print_header("Complete Task");
 
-        let spinner = output::create_spinner("Submitting task result...");
+        let spinner = output::create_spinner("Submitting task output...");
         let rpc = rpc::RpcClient::new(&self.rpc);
 
         let result: Result<serde_json::Value> = rpc.call(
             "tenzro_completeTask",
             serde_json::json!([{
                 "task_id": self.task_id,
-                "result": self.result
+                "output": self.output
             }]),
         ).await;
         spinner.finish_and_clear();

@@ -387,13 +387,17 @@ pub enum TransactionType {
     ///
     /// Authorization: `tx.from` is the validator's stake-owning wallet. The
     /// classical Ed25519 signature in `SignedTransaction::signature` proves
-    /// control of `consensus_pubkey` and the ML-DSA-65 leg proves control of
-    /// `pq_pubkey`.
+    /// control of `consensus_pubkey`, the ML-DSA-65 leg proves control of
+    /// `pq_pubkey`, and the BLS leg proves control of `bls_pubkey`.
     RegisterValidator {
         /// 32-byte Ed25519 BFT signing key.
         consensus_pubkey: Vec<u8>,
         /// 1952-byte ML-DSA-65 verifying key (FIPS 204). Mandatory hybrid PQ.
         pq_pubkey: Vec<u8>,
+        /// 48-byte BLS12-381 G1-compressed verifying key (`min_pk` scheme).
+        /// Mandatory third leg, used by HotStuff-2 to aggregate per-vote
+        /// signatures into a single QC-level aggregate.
+        bls_pubkey: Vec<u8>,
         /// Address rewards / unbonded principal settle to.
         withdrawal_address: Address,
         /// Self-stake committed to the candidate. Must be ≥ the registry's
@@ -598,6 +602,7 @@ impl SignedTransaction {
             TransactionType::RegisterValidator {
                 consensus_pubkey,
                 pq_pubkey,
+                bls_pubkey,
                 metadata_uri,
                 ..
             } => {
@@ -606,6 +611,9 @@ impl SignedTransaction {
                 }
                 if pq_pubkey.len() != 1952 {
                     return Err("pq_pubkey must be 1952 bytes (ML-DSA-65 vk)");
+                }
+                if bls_pubkey.len() != 48 {
+                    return Err("bls_pubkey must be 48 bytes (BLS12-381 G1-compressed, min_pk)");
                 }
                 if metadata_uri.len() > 256 {
                     return Err("metadata_uri exceeds 256 bytes");

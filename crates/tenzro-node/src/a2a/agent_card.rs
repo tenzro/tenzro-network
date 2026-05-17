@@ -683,6 +683,135 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                 input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
                 output_modes: vec!["application/json".to_string()],
             },
+            AgentSkill {
+                id: "adaptive-burn".to_string(),
+                name: "Adaptive Burn-Rate Governance Dial".to_string(),
+                description:
+                    "Read-side surface for the adaptive burn-rate dial (Spec 7). Exposes the \
+                     current BurnRateConfig (base / local / paymaster bps with treasury \
+                     complements; paymaster locked at 100% burn), the latest \
+                     SupplyMetricsSnapshot (rolling-window epoch delta, burn + emission \
+                     breakdowns), and the pure-function BurnRateRecommendation (NoChange / \
+                     IncreaseBurnPct / DecreaseBurnPct / AlarmHighInflation / \
+                     AlarmHighDeflation with magnitude bps capped at the normal / alarm \
+                     ceiling). The dial moves only via on-chain governance proposals; the \
+                     auto-proposal generator + EIP-1559 fee-market consumer wiring lands in \
+                     a follow-up wave."
+                        .to_string(),
+                tags: vec![
+                    "adaptive-burn".to_string(),
+                    "governance".to_string(),
+                    "tokenomics".to_string(),
+                    "supply".to_string(),
+                    "burn-rate".to_string(),
+                    "eip-1559".to_string(),
+                    "spec-7".to_string(),
+                ],
+                examples: vec![
+                    "Get the current burn-rate config and target band".to_string(),
+                    "Get the latest supply-metrics snapshot".to_string(),
+                    "Get the current burn-rate recommendation (action + magnitude bps)".to_string(),
+                    "List pending adaptive-burn governance proposals".to_string(),
+                ],
+                input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
+                id: "seed-agent".to_string(),
+                name: "SeedAgent Treasury Earmark".to_string(),
+                description:
+                    "SeedAgent treasury allocation surface (Spec 10). Exposes the \
+                     genesis-funded TreasuryEarmark singleton (initial / remaining / drawn \
+                     TNZO, decay schedule, sunset surplus burn bps), the governance-signed \
+                     Charter registry (OperationKind set + spend caps + counterparty filter \
+                     + throughput target + sunset), the per-DID SeedAgentRecord roster \
+                     (status: Active / Paused / Quarantined / Terminated; allocation drawn; \
+                     optional bond id), and the network-activity counters with \
+                     `exclude_seed` filter to isolate organic flows from protocol-owned \
+                     bootstrap traffic during the 12-month earmark window."
+                        .to_string(),
+                tags: vec![
+                    "seed-agent".to_string(),
+                    "treasury".to_string(),
+                    "earmark".to_string(),
+                    "charter".to_string(),
+                    "bootstrap".to_string(),
+                    "spec-10".to_string(),
+                    "governance".to_string(),
+                ],
+                examples: vec![
+                    "Show the SeedAgent treasury earmark (allocation remaining, decay schedule, agent count)".to_string(),
+                    "List every SeedAgent governance charter".to_string(),
+                    "Fetch SeedAgent charter 0x… (operations, spend caps, sunset)".to_string(),
+                    "List provisioned seed agents under charter 0x…".to_string(),
+                    "Get 24h network activity with exclude_seed=true".to_string(),
+                ],
+                input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
+                id: "erc7683".to_string(),
+                name: "ERC-7683 Cross-Chain Intents".to_string(),
+                description:
+                    "ERC-7683 cross-chain intent settler surface (Spec 4). Origin-side \
+                     reads against the Tenzro7683Order envelope persisted under the \
+                     `7683_origin:` keyspace, with the OrderState machine Open → \
+                     AwaitingProof → Settled / Refunded / ForceRefundEligible. \
+                     Destination-side commit of FillRecord (single-shot per order_id; \
+                     duplicate returns JSON-RPC -32010 OrderAlreadyFilled) plus fill read \
+                     endpoints. ProofRoute is one of LayerZero / Wormhole / DeBridge / \
+                     Hyperlane."
+                        .to_string(),
+                tags: vec![
+                    "erc-7683".to_string(),
+                    "cross-chain".to_string(),
+                    "intent".to_string(),
+                    "settler".to_string(),
+                    "fill".to_string(),
+                    "spec-4".to_string(),
+                    "layerzero".to_string(),
+                    "wormhole".to_string(),
+                    "debridge".to_string(),
+                    "hyperlane".to_string(),
+                ],
+                examples: vec![
+                    "Get ERC-7683 order 0x… (state, dest_chain, outputs)".to_string(),
+                    "List open ERC-7683 orders bound for dest_chain=8453".to_string(),
+                    "Record fill for order 0x… (origin_chain, filler, proof_route, outputs[])".to_string(),
+                    "Get fill record for order 0x… origin_chain=1".to_string(),
+                    "List every recorded ERC-7683 fill on this node".to_string(),
+                ],
+                input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
+                id: "iroh-transport".to_string(),
+                name: "Iroh QUIC Transport (tenzro/a2a)".to_string(),
+                description:
+                    "This node also serves A2A JSON-RPC over the `tenzro/a2a` ALPN on its iroh \
+                     endpoint, in addition to the HTTPS endpoint advertised by `url`. The iroh \
+                     EndpointId is byte-identical to the node's TDIP Ed25519 key and is \
+                     discoverable via `tenzro_iroh_getEndpointId` over the JSON-RPC namespace or \
+                     `tenzro_iroh_getInfo` for the full set of bound ALPNs and Pkarr relay. \
+                     Peers behind NAT can dial via Pkarr + DCUtR hole-punching, with relay \
+                     fallback, when direct HTTPS reachability is unavailable."
+                        .to_string(),
+                tags: vec![
+                    "transport".to_string(),
+                    "iroh".to_string(),
+                    "quic".to_string(),
+                    "pkarr".to_string(),
+                    "nat-traversal".to_string(),
+                    "alpn".to_string(),
+                ],
+                examples: vec![
+                    "Dial this node's A2A endpoint over iroh using the `tenzro/a2a` ALPN".to_string(),
+                    "Discover the iroh EndpointId via tenzro_iroh_getEndpointId".to_string(),
+                    "List bound ALPNs via tenzro_iroh_listAlpns".to_string(),
+                ],
+                input_modes: vec!["application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
         ],
         security_schemes: vec![SecurityScheme {
             scheme_type: "bearer".to_string(),
@@ -757,7 +886,7 @@ mod tests {
     #[test]
     fn test_agent_card_has_all_skills() {
         let card = build_agent_card("localhost:3002", "LightClient");
-        assert_eq!(card.skills.len(), 24);
+        assert_eq!(card.skills.len(), 28);
 
         let skill_ids: Vec<&str> = card.skills.iter().map(|s| s.id.as_str()).collect();
         assert!(skill_ids.contains(&"wallet"));
@@ -784,6 +913,10 @@ mod tests {
         assert!(skill_ids.contains(&"cct"));
         assert!(skill_ids.contains(&"cortex"));
         assert!(skill_ids.contains(&"capability_registry"));
+        assert!(skill_ids.contains(&"adaptive-burn"));
+        assert!(skill_ids.contains(&"seed-agent"));
+        assert!(skill_ids.contains(&"erc7683"));
+        assert!(skill_ids.contains(&"iroh-transport"));
     }
 
     #[test]

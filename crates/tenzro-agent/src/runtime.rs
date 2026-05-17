@@ -156,6 +156,19 @@ pub struct AgentRuntime {
     /// the store before the in-memory state is updated. Hydration on startup
     /// happens in [`AgentRuntime::with_storage`].
     storage: Option<Arc<dyn KvStore>>,
+    /// Phase B agent memory tier — optional [`crate::memory::MemoryManager`]
+    /// composing a Lance vector backend, a Tantivy text backend, and a DA
+    /// archival backend. Wired by the node at startup
+    /// (`init_ai_infrastructure`) rooted at `{data_dir}/agent_memory/`. When
+    /// present, the agent-memory RPCs / MCP tools / A2A skill route through
+    /// this manager.
+    ///
+    /// Stored behind a `OnceLock` so the runtime can be constructed first
+    /// (with the network transport) and the memory manager attached later
+    /// (after the data directory is known) without requiring `&mut self` or a
+    /// `Clone` impl on the runtime — both would force the rest of the node
+    /// to learn about the memory tier just to forward construction.
+    memory_manager: std::sync::OnceLock<Arc<crate::memory::MemoryManager>>,
 }
 
 impl AgentRuntime {
@@ -200,6 +213,7 @@ impl AgentRuntime {
             spending_policies: Arc::new(DashMap::new()),
             agent_tx_counters: Arc::new(DashMap::new()),
             storage: None,
+            memory_manager: std::sync::OnceLock::new(),
         })
     }
 
@@ -247,6 +261,7 @@ impl AgentRuntime {
             spending_policies: Arc::new(DashMap::new()),
             agent_tx_counters: Arc::new(DashMap::new()),
             storage: None,
+            memory_manager: std::sync::OnceLock::new(),
         })
     }
 
@@ -288,7 +303,10 @@ impl AgentRuntime {
                 timeout_multiplier: 1,
             },
         ));
-        let mut router = MessageRouter::new();
+        // Wire storage into the router so accepted agent messages are
+        // wrapped in `ReceiptEnvelope { kind: AgentMessage, OffloadedDA }`
+        // and persisted to `CF_AGENTS / message:<agent_id>:...`.
+        let mut router = MessageRouter::new().with_storage(storage.clone());
         if let Some(t) = transport {
             router = router.with_network_transport(t);
         }
@@ -564,7 +582,24 @@ impl AgentRuntime {
             spending_policies: Arc::new(DashMap::new()),
             agent_tx_counters,
             storage: Some(storage),
+            memory_manager: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Attach a [`crate::memory::MemoryManager`] to this runtime. Idempotent —
+    /// the first attachment wins; subsequent calls are silently ignored
+    /// (returns `false` to signal the manager was already set). The node
+    /// calls this exactly once during `init_ai_infrastructure`.
+    pub fn set_memory_manager(
+        &self,
+        memory_manager: Arc<crate::memory::MemoryManager>,
+    ) -> bool {
+        self.memory_manager.set(memory_manager).is_ok()
+    }
+
+    /// Borrow the attached memory manager, if any.
+    pub fn memory_manager(&self) -> Option<&Arc<crate::memory::MemoryManager>> {
+        self.memory_manager.get()
     }
 
     // ---- Persistence helpers ------------------------------------------------
@@ -737,14 +772,16 @@ impl AgentRuntime {
         Ok(agent)
     }
 
-    /// Registers a new agent using **caller-supplied** classical (Ed25519)
-    /// and post-quantum (ML-DSA-65) verifying keys (BYOK path).
+    /// Registers a new agent using **caller-supplied** classical (Ed25519),
+    /// post-quantum (ML-DSA-65), and BLS12-381 verifying keys (BYOK path).
     ///
     /// No wallet is provisioned on the node — the agent's address is
     /// derived deterministically from the supplied Ed25519 key. The
     /// agent's hybrid keys are bound into the message router's resolver
     /// so the caller can sign `AgentMessage`s off-node and have the
-    /// router verify them.
+    /// router verify them. The BLS key is propagated to the bound TDIP
+    /// identity so the agent inherits the public key needed for
+    /// HotStuff-2 vote aggregation if it later stakes as a validator.
     pub async fn register_agent_with_keys(
         &self,
         name: String,
@@ -754,6 +791,7 @@ impl AgentRuntime {
         nonce: u64,
         classical_public_key: Vec<u8>,
         pq_verifying_key: Vec<u8>,
+        bls_verifying_key: Vec<u8>,
     ) -> Result<RegisteredAgent> {
         if self.identity_manager.agent_count() >= self.config.max_agents {
             return Err(AgentError::ResourceLimitExceeded(
@@ -771,6 +809,7 @@ impl AgentRuntime {
                 nonce,
                 classical_public_key,
                 pq_verifying_key,
+                bls_verifying_key,
                 crate::identity::GasPolicy::AcceptAny,
             )
             .await?;

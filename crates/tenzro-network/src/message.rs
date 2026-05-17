@@ -6,6 +6,7 @@ use tenzro_types::{
     Block, SignedTransaction, Hash,
     ModelClass, ArtifactCompleteness, ArtifactMetadata, ModelTopology, ExecutionSupport,
     RuntimeSupport, NodeNetworkProfile, TrustProfile, WorkerRole,
+    HardwareCapabilities,
 };
 
 /// Network message envelope
@@ -82,9 +83,6 @@ pub enum MessagePayload {
     /// Transaction response
     TransactionResponse(Option<SignedTransaction>),
 
-    /// Consensus message (votes, proposals)
-    Consensus(ConsensusMessage),
-
     /// TEE attestation
     Attestation(AttestationMessage),
 
@@ -126,7 +124,6 @@ impl MessagePayload {
             Self::Transaction(_) | Self::TransactionRequest(_) | Self::TransactionResponse(_) => {
                 "tenzro/transactions"
             }
-            Self::Consensus(_) => "tenzro/consensus",
             Self::Attestation(_) => "tenzro/attestations",
             Self::InferenceRequest(_) | Self::InferenceResponse(_) => "tenzro/inference",
             Self::ModelRegistration(_) => "tenzro/models",
@@ -198,6 +195,11 @@ pub enum ConsensusMessage {
         signature: Vec<u8>,
         /// bincode-serialized `tenzro_crypto::composite::CompositePublicKey`
         public_key: Vec<u8>,
+        /// Raw 96-byte BLS12-381 G2 signature over the canonical QC payload
+        /// (`TENZRO_QC_BLS:` || vote_format_version || view || height || block_hash
+        /// || vote_type`). Aggregated by `VoteCollector` into the QC's
+        /// `bls_aggregate`.
+        bls_signature: Vec<u8>,
     },
     /// Commit message
     Commit {
@@ -456,6 +458,18 @@ pub struct ProviderAnnouncementMessage {
     /// RFC-0007: Worker roles this node can fulfil in distributed inference
     #[serde(default)]
     pub worker_roles: Vec<WorkerRole>,
+    /// Hardware envelope of this provider node — RAM, VRAM, disk, CPU, TEE
+    /// availability. Populated at announcement-build time from the local
+    /// `HardwareCapabilities::detect()` result so consumers can route by
+    /// memory / GPU / TEE class without an extra RPC round-trip.
+    #[serde(default)]
+    pub hardware: HardwareCapabilities,
+    /// Geographic locality declared by the operator (free-form identifier
+    /// such as `us-central1-a`, `eu-west`, `ap-southeast-1`). `None` means
+    /// the provider declined to declare a region; consumers must treat
+    /// `None` as "unknown geography", not as a wildcard match.
+    #[serde(default)]
+    pub geography: Option<String>,
 }
 
 /// Schedule for when a model is available for serving

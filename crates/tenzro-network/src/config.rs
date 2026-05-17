@@ -49,6 +49,19 @@ pub struct NetworkConfig {
 
     /// Enable relay server
     pub enable_relay: bool,
+
+    /// Statically-configured external addresses this node advertises to peers
+    /// via Identify. Required on cloud deployments where the host binds to
+    /// `0.0.0.0` and Identify's listen-addr enumeration is hidden (see
+    /// `behaviour.rs::hide_listen_addrs`). Each multiaddr listed here is
+    /// passed to `Swarm::add_external_address` at startup.
+    ///
+    /// For validator-0 in the live GCE testnet this is set to
+    /// `/ip4/<external-ip>/tcp/9000` from the per-VM Terraform output. For
+    /// nodes whose external address must be discovered (community joiners
+    /// behind NAT), leave this empty and rely on AutoNAT v2 + Relay v2 +
+    /// DCUtR to confirm a reachable address dynamically.
+    pub external_addresses: Vec<Multiaddr>,
 }
 
 impl Default for NetworkConfig {
@@ -72,13 +85,27 @@ impl Default for NetworkConfig {
             // SECURITY: mDNS leaks LAN presence — disabled by default for production;
             // `local()` preset re-enables it explicitly for dev.
             enable_mdns: false,
-            connection_idle_timeout: Duration::from_secs(120),
+            // 10 minutes. Two reasons it has to be this high on cloud deployments:
+            // (1) rust-libp2p closes any connection that stays idle this long with
+            //     no in-flight substream — and HotStuff-2 has long quiet pairwise
+            //     links during normal operation. A short value (e.g. 120s) causes
+            //     constant close+redial churn and degrades the gossipsub mesh from
+            //     full N-1 to 0-4 peers over an hour, stalling consensus (observed
+            //     on GCE multi-region 2026-05-14).
+            // (2) GCE's VPC fabric (Andromeda) silently evicts idle conntrack
+            //     entries at 10 minutes WITHOUT sending RST. Keeping libp2p's
+            //     idle timeout at or above 600s, combined with kernel TCP keepalive
+            //     set to fire every ~120s (configured at the host layer in
+            //     deploy/terraform/gce_validators/cloud-init.yaml), keeps the
+            //     conntrack entries warm before either side drops the connection.
+            connection_idle_timeout: Duration::from_secs(600),
             // Ethereum-class 700ms heartbeat for sub-second gossip propagation.
             gossip_heartbeat_interval: Duration::from_millis(700),
             protocol_version: "tenzro/1.0.0".to_string(),
             user_agent: "tenzro-network/0.1.0".to_string(),
             enable_hole_punching: true,
             enable_relay: false,
+            external_addresses: Vec::new(),
         }
     }
 }

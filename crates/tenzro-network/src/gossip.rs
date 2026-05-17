@@ -47,47 +47,7 @@ impl GossipTopics {
 
         // Tenzro Train: outer-gradient broadcast and syncer round publication
         topics.insert("training".to_string(), IdentTopic::new("tenzro/training"));
-        topics.insert("training_syncer".to_string(), IdentTopic::new("tenzro/training/syncer/1.0.0"));
-
-        Self { topics }
-    }
-
-    /// Creates topics for testnet
-    pub fn testnet() -> Self {
-        let mut topics = HashMap::new();
-
-        topics.insert("blocks".to_string(), IdentTopic::new("tenzro/testnet/blocks/1.0.0"));
-        topics.insert("transactions".to_string(), IdentTopic::new("tenzro/testnet/transactions/1.0.0"));
-        topics.insert("consensus".to_string(), IdentTopic::new("tenzro/testnet/consensus/1.0.0"));
-        topics.insert("attestations".to_string(), IdentTopic::new("tenzro/testnet/attestations/1.0.0"));
-        topics.insert("models".to_string(), IdentTopic::new("tenzro/testnet/models/1.0.0"));
-        topics.insert("inference".to_string(), IdentTopic::new("tenzro/testnet/inference/1.0.0"));
-        topics.insert("status".to_string(), IdentTopic::new("tenzro/testnet/status/1.0.0"));
-        topics.insert("agents".to_string(), IdentTopic::new("tenzro/testnet/agents/1.0.0"));
-        topics.insert("providers".to_string(), IdentTopic::new("tenzro/testnet/providers/1.0.0"));
-        topics.insert("cortex".to_string(), IdentTopic::new("tenzro/testnet/cortex/1.0.0"));
-        topics.insert("training".to_string(), IdentTopic::new("tenzro/testnet/training/1.0.0"));
-        topics.insert("training_syncer".to_string(), IdentTopic::new("tenzro/testnet/training/syncer/1.0.0"));
-
-        Self { topics }
-    }
-
-    /// Creates topics for mainnet
-    pub fn mainnet() -> Self {
-        let mut topics = HashMap::new();
-
-        topics.insert("blocks".to_string(), IdentTopic::new("tenzro/mainnet/blocks/1.0.0"));
-        topics.insert("transactions".to_string(), IdentTopic::new("tenzro/mainnet/transactions/1.0.0"));
-        topics.insert("consensus".to_string(), IdentTopic::new("tenzro/mainnet/consensus/1.0.0"));
-        topics.insert("attestations".to_string(), IdentTopic::new("tenzro/mainnet/attestations/1.0.0"));
-        topics.insert("models".to_string(), IdentTopic::new("tenzro/mainnet/models/1.0.0"));
-        topics.insert("inference".to_string(), IdentTopic::new("tenzro/mainnet/inference/1.0.0"));
-        topics.insert("status".to_string(), IdentTopic::new("tenzro/mainnet/status/1.0.0"));
-        topics.insert("agents".to_string(), IdentTopic::new("tenzro/mainnet/agents/1.0.0"));
-        topics.insert("providers".to_string(), IdentTopic::new("tenzro/mainnet/providers/1.0.0"));
-        topics.insert("cortex".to_string(), IdentTopic::new("tenzro/mainnet/cortex/1.0.0"));
-        topics.insert("training".to_string(), IdentTopic::new("tenzro/mainnet/training/1.0.0"));
-        topics.insert("training_syncer".to_string(), IdentTopic::new("tenzro/mainnet/training/syncer/1.0.0"));
+        topics.insert("training_syncer".to_string(), IdentTopic::new("tenzro/training/syncer"));
 
         Self { topics }
     }

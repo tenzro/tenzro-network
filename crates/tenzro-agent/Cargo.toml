@@ -12,6 +12,7 @@ tenzro-crypto = { workspace = true }
 tenzro-wallet = { workspace = true }
 tenzro-identity = { workspace = true }
 tenzro-storage = { workspace = true }
+tenzro-model = { workspace = true }
 async-trait = { workspace = true }
 bincode = { workspace = true }
 tokio = { workspace = true }
@@ -24,6 +25,19 @@ parking_lot = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
+futures-util = { workspace = true }
 bytes = { workspace = true }
 hex = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
+
+# Agent memory tier (Phase B): Lance-backed vector store + Tantivy BM25 index
+# composed by `MemoryManager` for hybrid recall (Reciprocal Rank Fusion, k=60).
+lancedb = { workspace = true }
+tantivy = { workspace = true }
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+bitflags = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

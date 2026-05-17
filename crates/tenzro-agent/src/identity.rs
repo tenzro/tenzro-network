@@ -677,6 +677,9 @@ impl AgentIdentityManager {
     /// * `nonce` — replay-protection nonce; used in `agent_id` derivation.
     /// * `classical_public_key` — 32-byte Ed25519 verifying key.
     /// * `pq_verifying_key` — 1952-byte ML-DSA-65 verifying key.
+    /// * `bls_verifying_key` — 48-byte BLS12-381 G1-compressed verifying key
+    ///   (`min_pk` scheme) used for HotStuff-2 vote aggregation when this
+    ///   identity stakes as a validator.
     /// * `gas_policy` — TDIP fee budget; ignored when no registry is wired.
     pub async fn register_agent_with_keys(
         &self,
@@ -687,6 +690,7 @@ impl AgentIdentityManager {
         nonce: u64,
         classical_public_key: Vec<u8>,
         pq_verifying_key: Vec<u8>,
+        bls_verifying_key: Vec<u8>,
         gas_policy: GasPolicy,
     ) -> Result<RegisteredAgent> {
         if classical_public_key.len() != 32 {
@@ -699,6 +703,12 @@ impl AgentIdentityManager {
             return Err(AgentError::InvalidArgument(format!(
                 "ML-DSA-65 verifying key must be 1952 bytes, got {}",
                 pq_verifying_key.len()
+            )));
+        }
+        if bls_verifying_key.len() != 48 {
+            return Err(AgentError::InvalidArgument(format!(
+                "BLS12-381 G1-compressed verifying key must be 48 bytes, got {}",
+                bls_verifying_key.len()
             )));
         }
 
@@ -738,6 +748,7 @@ impl AgentIdentityManager {
                 .register_autonomous_machine_with_keys(
                     classical_public_key.clone(),
                     pq_verifying_key.clone(),
+                    bls_verifying_key.clone(),
                     cap_strings,
                 )
                 .await

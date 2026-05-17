@@ -21,6 +21,7 @@ ENV CXX=clang++
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY sdk/ sdk/
+COPY tools/ tools/
 
 # Create minimal stub for desktop app workspace member (not built, but cargo needs it to resolve workspace)
 # The real Cargo.toml is excluded by .gcloudignore (apps/), so we generate a stub inline

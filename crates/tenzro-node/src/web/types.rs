@@ -130,6 +130,34 @@ pub struct HealthResponse {
     pub verification_service: bool,
 }
 
+// === Readiness (for K8s readinessProbe / load-balancer gating) ===
+//
+// Distinct from `/health`: `/health` is liveness (is the process alive
+// and not crash-looping), `/ready` is "is this pod safe to receive
+// production traffic." A node that has just finished pod-init but is
+// still bootstrapping consensus state passes liveness but must fail
+// readiness — otherwise the K8s service routes traffic to it and
+// clients see stale state.
+//
+// Ready iff:
+//   * `block_height >= network_median - block_lag_tolerance` (default 5)
+//   * `high_qc_view  >= network_high_qc - view_lag_tolerance`  (default 2)
+//   * peer_count >= 1 (at least one other peer to gossip with)
+//
+// When `network_median` is unknown (no fresh peer status), the node
+// reports Ready iff peer_count >= 1 — the alternative would be
+// "always not-ready on a fresh cluster," which prevents bootstrap.
+#[derive(Serialize)]
+pub struct ReadyResponse {
+    pub ready: bool,
+    pub block_height: u64,
+    pub network_tip: Option<u64>,
+    pub block_lag: Option<u64>,
+    pub high_qc_view: u64,
+    pub peer_count: u64,
+    pub reason: String,
+}
+
 // === Faucet ===
 #[derive(Deserialize)]
 pub struct FaucetRequest {

@@ -5,8 +5,37 @@ use crate::validator::{EquivocationDetector, EquivocationEvidence, ValidatorSet}
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tenzro_crypto::bls::{BlsPublicKey, BlsSignature};
 use tenzro_crypto::composite::{CompositePublicKey, CompositeSignature, HybridVerifier, StandardHybridVerifier};
 use tenzro_types::primitives::{Address, BlockHeight, Hash};
+
+/// Length-checked serde for the QC's 96-byte BLS aggregate. `serde` does not
+/// auto-derive `Serialize`/`Deserialize` for arrays larger than 32 bytes; we
+/// don't want to add a `serde_big_array` dependency for one field, and we don't
+/// want to widen `bls_aggregate` to `Vec<u8>` because the 96-byte invariant
+/// (BLS12-381 G2 compressed point) is load-bearing for `BlsSignature::from_bytes`.
+/// Wire format: a borrowed byte slice; deserialization rejects any length other
+/// than 96.
+mod bls_aggregate_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8; 96], ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_bytes(bytes)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[u8; 96], D::Error> {
+        let v: Vec<u8> = Vec::<u8>::deserialize(de)?;
+        if v.len() != 96 {
+            return Err(serde::de::Error::custom(format!(
+                "QC bls_aggregate must be exactly 96 bytes, got {}",
+                v.len()
+            )));
+        }
+        let mut out = [0u8; 96];
+        out.copy_from_slice(&v);
+        Ok(out)
+    }
+}
 
 /// Wire-format version for the [`Vote`] payload.
 ///
@@ -16,7 +45,12 @@ use tenzro_types::primitives::{Address, BlockHeight, Hash};
 /// - `3`: #171 SyncInfo piggyback — `high_qc_view` field added and bound into
 ///   the signing payload so a downgrade attempt that strips the field would
 ///   produce a different signing target than the legitimate signer used.
-pub const VOTE_FORMAT_VERSION: u8 = 3;
+/// - `4`: ROADMAP B.1 — BLS12-381 (`min_pk`) signature added as the third
+///   vote leg alongside Ed25519 + ML-DSA-65 so the [`QuorumCertificate`] can
+///   carry a single 96-byte aggregate signature instead of N Composite
+///   signatures. The composite per-vote leg is retained for the PQ-hybrid
+///   property; BLS provides the QC-level bandwidth/CPU win.
+pub const VOTE_FORMAT_VERSION: u8 = 4;
 
 /// A vote on a block proposal
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +79,19 @@ pub struct Vote {
     /// and refuses any mismatch as a forgery defence.
     pub public_key: CompositePublicKey,
 
+    /// BLS12-381 signature (G2-compressed, 96 bytes, `min_pk` scheme) over the
+    /// same canonical signing payload as `signature`. Mandatory under format
+    /// version 4 — the [`VoteCollector`] aggregates these into the QC's single
+    /// `bls_aggregate` field at quorum-formation time, collapsing N×96-byte
+    /// QC bandwidth to one 96-byte aggregate plus a signer bitmap.
+    ///
+    /// Aggregation is sound because every signer commits to the same message
+    /// (`signing_payload()` is fully derived from `(view, height, block_hash,
+    /// voter, vote_type, high_qc_view)`); receivers re-aggregate the active
+    /// validator set's `bls_public_key` entries against the bitmap and verify
+    /// in constant time.
+    pub bls_signature: BlsSignature,
+
     /// Vote type (prepare or commit)
     pub vote_type: VoteType,
 
@@ -70,6 +117,7 @@ impl Vote {
         voter: Address,
         signature: CompositeSignature,
         public_key: CompositePublicKey,
+        bls_signature: BlsSignature,
         vote_type: VoteType,
         high_qc_view: u64,
     ) -> Self {
@@ -81,6 +129,7 @@ impl Vote {
             voter,
             signature,
             public_key,
+            bls_signature,
             vote_type,
             high_qc_view,
         }
@@ -129,6 +178,30 @@ pub enum VoteType {
     Commit,
 }
 
+/// Canonical BLS signing payload for a single vote (the per-signer message
+/// every BLS signature aggregated into the QC commits to).
+///
+/// Distinct from [`Vote::signing_payload`] — that payload is the
+/// per-voter-bound payload covered by the [`CompositeSignature`]. The BLS
+/// payload is identical for every signer in a given (view, height, block,
+/// vote_type) tuple, which is the precondition for sound BLS aggregation
+/// under one DST.
+///
+/// Must match [`QuorumCertificate::bls_signing_payload`] byte-for-byte.
+pub fn bls_payload_for_vote(vote: &Vote) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(14 + 1 + 8 + 8 + 32 + 1);
+    payload.extend_from_slice(b"TENZRO_QC_BLS:");
+    payload.push(VOTE_FORMAT_VERSION);
+    payload.extend_from_slice(&vote.view.to_le_bytes());
+    payload.extend_from_slice(&vote.height.0.to_le_bytes());
+    payload.extend_from_slice(vote.block_hash.as_bytes());
+    match vote.vote_type {
+        VoteType::Prepare => payload.push(0x01),
+        VoteType::Commit => payload.push(0x02),
+    }
+    payload
+}
+
 /// Key for identifying a vote
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VoteKey {
@@ -152,11 +225,34 @@ pub struct QuorumCertificate {
     /// Vote type
     pub vote_type: VoteType,
 
-    /// Votes included in this QC
+    /// Votes included in this QC. Each carries its own [`CompositeSignature`]
+    /// (Ed25519 + ML-DSA-65) plus its individual [`BlsSignature`] — kept for
+    /// the slow-path verifier ([`Self::verify`]) and for forensic / slashing
+    /// evidence. The fast-path verifier ([`Self::verify_bls_aggregate`]) only
+    /// needs `bls_aggregate` + `signer_bitmap`.
     pub votes: Vec<Vote>,
 
     /// Total voting power of the votes
     pub voting_power: u128,
+
+    /// Aggregated BLS12-381 G2-compressed signature (96 bytes, `min_pk`
+    /// scheme) over the canonical vote signing payload, summing the
+    /// `bls_signature` field of every vote in `votes`. ROADMAP B.1: this is
+    /// the third signature leg, sitting alongside the per-vote
+    /// [`CompositeSignature`] entries — BLS gives O(1) verification cost on
+    /// the QC path; Composite preserves the PQ-hybrid property per individual
+    /// vote.
+    #[serde(with = "bls_aggregate_serde")]
+    pub bls_aggregate: [u8; 96],
+
+    /// Bitmap over the QC's epoch validator set (LSB-first within each byte,
+    /// least-significant byte first). Bit `i` set ⇔ validator at index `i` of
+    /// the active set contributed a vote (and therefore a BLS signature) to
+    /// `bls_aggregate`. Receivers reconstruct the aggregated public key by
+    /// summing the BLS public keys of the validators whose bits are set.
+    ///
+    /// Length is `ceil(active_set_len / 8)`.
+    pub signer_bitmap: Vec<u8>,
 }
 
 impl QuorumCertificate {
@@ -168,6 +264,8 @@ impl QuorumCertificate {
         vote_type: VoteType,
         votes: Vec<Vote>,
         voting_power: u128,
+        bls_aggregate: [u8; 96],
+        signer_bitmap: Vec<u8>,
     ) -> Self {
         Self {
             view,
@@ -176,6 +274,8 @@ impl QuorumCertificate {
             vote_type,
             votes,
             voting_power,
+            bls_aggregate,
+            signer_bitmap,
         }
     }
 
@@ -275,20 +375,11 @@ impl QuorumCertificate {
                     vote.voter
                 )));
             }
-            match &vote.public_key.pq {
-                Some(pq_bytes) if pq_bytes == &validator.pq_public_key => {}
-                Some(_) => {
-                    return Err(ConsensusError::InvalidSignature(format!(
-                        "QC vote PQ pubkey mismatch for {}",
-                        vote.voter
-                    )));
-                }
-                None => {
-                    return Err(ConsensusError::InvalidSignature(format!(
-                        "QC vote missing PQ pubkey (hybrid required) for {}",
-                        vote.voter
-                    )));
-                }
+            if vote.public_key.pq != validator.pq_public_key {
+                return Err(ConsensusError::InvalidSignature(format!(
+                    "QC vote PQ pubkey mismatch for {}",
+                    vote.voter
+                )));
             }
 
             // (5) Hybrid signature verification.
@@ -300,6 +391,30 @@ impl QuorumCertificate {
                     vote.voter, e
                 ))
             })?;
+
+            // (5b) Per-vote BLS signature must verify against the QC-canonical
+            // BLS payload. Slow-path forensic verifier — fast-path callers
+            // should use `verify_bls_aggregate` instead and skip the per-vote
+            // hybrid + BLS checks entirely.
+            let bls_pk = BlsPublicKey::from_bytes(&validator.bls_public_key).map_err(|e| {
+                ConsensusError::InvalidSignature(format!(
+                    "QC voter {} has malformed BLS verifying key: {}",
+                    vote.voter, e
+                ))
+            })?;
+            let bls_payload = bls_payload_for_vote(vote);
+            let bls_ok = vote.bls_signature.verify(&bls_pk, &bls_payload).map_err(|e| {
+                ConsensusError::InvalidSignature(format!(
+                    "QC vote BLS signature raised error for {}: {}",
+                    vote.voter, e
+                ))
+            })?;
+            if !bls_ok {
+                return Err(ConsensusError::InvalidSignature(format!(
+                    "QC vote BLS signature verification failed for {}",
+                    vote.voter
+                )));
+            }
 
             // (6) Duplicate voter check.
             if !seen_voters.insert(vote.voter) {
@@ -333,6 +448,154 @@ impl QuorumCertificate {
         }
 
         Ok(())
+    }
+
+    /// Fast-path BLS aggregate verifier (ROADMAP B.1).
+    ///
+    /// Re-aggregates the BLS public keys of validators whose bit is set in
+    /// `signer_bitmap` against the active set, then verifies `bls_aggregate`
+    /// in a single pairing check rather than N hybrid checks.
+    ///
+    /// Block-sync and the consensus engine should call this for QC validation
+    /// — the per-vote [`Self::verify`] path is reserved for forensic /
+    /// slashing-evidence reconstruction where individual signatures are
+    /// required.
+    ///
+    /// # Errors
+    ///
+    /// - Bitmap length does not match `ceil(active_set.len() / 8)`.
+    /// - Any out-of-range bit is set (signer index ≥ active set size).
+    /// - The set of signers does not meet the validator-set quorum threshold.
+    /// - Any signer's `bls_public_key` is not a valid 48-byte G1 point.
+    /// - The aggregate signature does not verify against the re-aggregated
+    ///   public key over `Self::bls_signing_payload()`.
+    pub fn verify_bls_aggregate(
+        &self,
+        validator_set: &crate::validator::ValidatorSet,
+    ) -> Result<()> {
+        let active = validator_set.active_validators();
+        let n = active.len();
+        let expected_bitmap_bytes = n.div_ceil(8);
+        if self.signer_bitmap.len() != expected_bitmap_bytes {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "QC signer_bitmap length {} does not match expected {} bytes for {} active validators",
+                self.signer_bitmap.len(),
+                expected_bitmap_bytes,
+                n
+            )));
+        }
+
+        // Walk bitmap, collect signer pubkeys + tally voting power.
+        let mut signer_pks: Vec<BlsPublicKey> = Vec::new();
+        let mut total_voting_power: u128 = 0;
+        for bit_index in 0..(expected_bitmap_bytes * 8) {
+            let byte = self.signer_bitmap[bit_index / 8];
+            if (byte >> (bit_index % 8)) & 1 == 0 {
+                continue;
+            }
+            if bit_index >= n {
+                return Err(ConsensusError::InvalidSignature(format!(
+                    "QC signer_bitmap has bit {} set but active set only has {} validators",
+                    bit_index, n
+                )));
+            }
+            let validator = &active[bit_index];
+            let pk = BlsPublicKey::from_bytes(&validator.bls_public_key).map_err(|e| {
+                ConsensusError::InvalidSignature(format!(
+                    "QC signer {} has malformed BLS verifying key: {}",
+                    validator.address, e
+                ))
+            })?;
+            signer_pks.push(pk);
+            total_voting_power = total_voting_power.saturating_add(validator.voting_power());
+        }
+
+        if signer_pks.is_empty() {
+            return Err(ConsensusError::InvalidSignature(
+                "QC signer_bitmap empty — no signers contributed to BLS aggregate".to_string(),
+            ));
+        }
+
+        let threshold = validator_set.quorum_threshold();
+        if signer_pks.len() < threshold {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "QC BLS aggregate has {} signers, below quorum threshold {}",
+                signer_pks.len(),
+                threshold
+            )));
+        }
+
+        // The QC's per-vote `voting_power` field is filled at QC formation
+        // from the same active set the bitmap indexes — keep them consistent.
+        if self.voting_power != total_voting_power {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "QC claims voting_power={} but bitmap-tallied power is {}",
+                self.voting_power, total_voting_power
+            )));
+        }
+
+        // Sum signer pubkeys into a single aggregate G1 point, then verify the
+        // aggregate signature against the canonical BLS signing payload.
+        let agg_pk = tenzro_crypto::bls::aggregate_public_keys(&signer_pks).map_err(|e| {
+            ConsensusError::InvalidSignature(format!(
+                "QC BLS aggregate public-key reconstruction failed: {}",
+                e
+            ))
+        })?;
+        let agg_pk_bytes = agg_pk.to_bytes();
+        let agg_pk_single = BlsPublicKey::from_bytes(&agg_pk_bytes).map_err(|e| {
+            ConsensusError::InvalidSignature(format!(
+                "QC BLS aggregate public-key serialization round-trip failed: {}",
+                e
+            ))
+        })?;
+
+        let agg_sig = BlsSignature::from_bytes(&self.bls_aggregate).map_err(|e| {
+            ConsensusError::InvalidSignature(format!(
+                "QC bls_aggregate is not a valid BLS signature: {}",
+                e
+            ))
+        })?;
+
+        let payload = self.bls_signing_payload();
+        let ok = agg_sig.verify(&agg_pk_single, &payload).map_err(|e| {
+            ConsensusError::InvalidSignature(format!(
+                "QC BLS aggregate verification raised error: {}",
+                e
+            ))
+        })?;
+        if !ok {
+            return Err(ConsensusError::InvalidSignature(
+                "QC BLS aggregate verification rejected the signature".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Canonical message that every per-vote BLS signature commits to and that
+    /// `bls_aggregate` must verify against.
+    ///
+    /// Distinct from [`Vote::signing_payload`] — that payload binds a single
+    /// voter's address and is keyed per-vote. The BLS aggregate covers a
+    /// per-QC payload that is identical for every signer in the bitmap, which
+    /// is the precondition for sound BLS aggregation under one DST.
+    ///
+    /// Format:
+    /// `"TENZRO_QC_BLS:" || vote_format_version(1) || view(u64 LE) ||
+    ///  height(u64 LE) || block_hash(32) || vote_type(1)`.
+    pub fn bls_signing_payload(&self) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(14 + 1 + 8 + 8 + 32 + 1);
+        payload.extend_from_slice(b"TENZRO_QC_BLS:");
+        payload.push(VOTE_FORMAT_VERSION);
+        payload.extend_from_slice(&self.view.to_le_bytes());
+        payload.extend_from_slice(&self.height.0.to_le_bytes());
+        payload.extend_from_slice(self.block_hash.as_bytes());
+        match self.vote_type {
+            VoteType::Prepare => payload.push(0x01),
+            VoteType::Commit => payload.push(0x02),
+        }
+        payload
     }
 }
 
@@ -435,20 +698,11 @@ impl VoteCollector {
                 vote.voter
             )));
         }
-        match &vote.public_key.pq {
-            Some(pq_bytes) if pq_bytes == &validator.pq_public_key => {}
-            Some(_) => {
-                return Err(ConsensusError::InvalidSignature(format!(
-                    "vote PQ public key does not match registered validator key for {}",
-                    vote.voter
-                )));
-            }
-            None => {
-                return Err(ConsensusError::InvalidSignature(format!(
-                    "vote missing PQ public key (Wave 3d hybrid required) for {}",
-                    vote.voter
-                )));
-            }
+        if vote.public_key.pq != validator.pq_public_key {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "vote PQ public key does not match registered validator key for {}",
+                vote.voter
+            )));
         }
 
         // SECURITY (Issue #13 - RESOLVED): Hybrid signature verification.
@@ -464,6 +718,35 @@ impl VoteCollector {
                     vote.voter, e
                 ))
             })?;
+
+        // ROADMAP B.1: third leg — BLS12-381. The vote MUST carry a BLS
+        // signature over the QC-level canonical payload (`bls_signing_payload`
+        // computed for this vote's view/height/hash/type) under the validator's
+        // registered `bls_public_key`. Verifying the per-vote leg here
+        // guarantees that when we aggregate at quorum the resulting aggregate
+        // is sound — every contributing signature is already known-valid.
+        let bls_pk = BlsPublicKey::from_bytes(&validator.bls_public_key).map_err(|e| {
+            ConsensusError::InvalidSignature(format!(
+                "validator {} has malformed BLS verifying key: {}",
+                vote.voter, e
+            ))
+        })?;
+        let bls_payload = bls_payload_for_vote(&vote);
+        let bls_ok = vote
+            .bls_signature
+            .verify(&bls_pk, &bls_payload)
+            .map_err(|e| {
+                ConsensusError::InvalidSignature(format!(
+                    "BLS vote signature raised error for {}: {}",
+                    vote.voter, e
+                ))
+            })?;
+        if !bls_ok {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "BLS vote signature verification failed for {}",
+                vote.voter
+            )));
+        }
 
         // SECURITY (Issue #14 - RESOLVED): Equivocation detection
         // Check for equivocation BEFORE adding to the per-block vote set.
@@ -523,6 +806,35 @@ impl VoteCollector {
 
         // Check if we have quorum
         if vote_count >= threshold {
+            // ROADMAP B.1: collapse the per-vote BLS signatures into a single
+            // 96-byte aggregate plus a signer bitmap indexed against the
+            // active validator set. Every signature was already verified in
+            // the per-vote path above so the aggregate is sound by
+            // construction.
+            let bls_sigs: Vec<BlsSignature> = votes_entry
+                .iter()
+                .map(|v| v.bls_signature.clone())
+                .collect();
+            let agg = tenzro_crypto::bls::aggregate_signatures(&bls_sigs).map_err(|e| {
+                ConsensusError::InvalidSignature(format!(
+                    "BLS aggregation at QC formation failed: {}",
+                    e
+                ))
+            })?;
+            let bls_aggregate = agg.to_bytes();
+
+            // Bitmap layout: one bit per validator in `active_validators()`,
+            // LSB-first within each byte, bytes in active-set order. Bit `i`
+            // set ⇔ that validator's address contributed a vote.
+            let active = self.validator_set.active_validators();
+            let bitmap_bytes = active.len().div_ceil(8);
+            let mut signer_bitmap = vec![0u8; bitmap_bytes];
+            for v in votes_entry.iter() {
+                if let Some(idx) = self.validator_set.index_of(&v.voter) {
+                    signer_bitmap[idx / 8] |= 1u8 << (idx % 8);
+                }
+            }
+
             let qc = QuorumCertificate::new(
                 vote.view,
                 vote.height,
@@ -530,6 +842,8 @@ impl VoteCollector {
                 vote.vote_type,
                 votes_entry.clone(),
                 total_voting_power,
+                bls_aggregate,
+                signer_bitmap,
             );
 
             // Store the QC
@@ -619,6 +933,7 @@ impl VoteCollector {
 mod tests {
     use super::*;
     use crate::validator::ValidatorInfo;
+    use tenzro_crypto::bls::BlsKeyPair;
     use tenzro_crypto::composite::{HybridSigner, InMemoryHybridSigner};
     use tenzro_crypto::pq::MlDsaSigningKey;
     use tenzro_crypto::signatures::Ed25519SignerImpl;
@@ -627,6 +942,7 @@ mod tests {
     struct TestValidator {
         info: ValidatorInfo,
         signer: InMemoryHybridSigner,
+        bls: BlsKeyPair,
     }
 
     fn create_test_validator(stake: u128) -> TestValidator {
@@ -637,15 +953,17 @@ mod tests {
         let address = tenzro_types::primitives::Address::new(addr_bytes);
         let pq = MlDsaSigningKey::generate();
         let pq_vk = pq.verifying_key_bytes().to_vec();
+        let bls = BlsKeyPair::generate().unwrap();
         let info = ValidatorInfo::new(
             address,
             keypair.public_key().clone(),
             pq_vk,
+            bls.public_key().to_bytes().to_vec(),
             stake,
         );
         let classical = Ed25519SignerImpl::new(keypair).unwrap();
         let signer = InMemoryHybridSigner::new(Box::new(classical), pq);
-        TestValidator { info, signer }
+        TestValidator { info, signer, bls }
     }
 
     fn create_signed_vote(
@@ -654,11 +972,13 @@ mod tests {
         voter: tenzro_types::primitives::Address,
         vote_type: VoteType,
         signer: &InMemoryHybridSigner,
+        bls: &BlsKeyPair,
     ) -> Vote {
-        // Build vote with placeholder signature first to compute payload.
+        // Build vote with placeholder signatures first to compute payload.
         // Tests use `high_qc_view = 0` (genesis-like) unless the test
         // explicitly overrides it.
-        let placeholder_sig = CompositeSignature::new(Vec::new(), None);
+        let placeholder_sig = CompositeSignature::new(Vec::new(), Vec::new());
+        let placeholder_bls = bls.sign(b"__placeholder__");
         let pk = signer.public_key().clone();
         let mut vote = Vote::new(
             view,
@@ -667,12 +987,15 @@ mod tests {
             voter,
             placeholder_sig,
             pk,
+            placeholder_bls,
             vote_type,
             0,
         );
         let payload = vote.signing_payload();
         let sig = signer.sign(&payload).unwrap();
         vote.signature = sig;
+        let bls_payload = bls_payload_for_vote(&vote);
+        vote.bls_signature = bls.sign(&bls_payload);
         vote
     }
 
@@ -693,17 +1016,17 @@ mod tests {
         let height = BlockHeight::from(10);
 
         // Add first vote
-        let vote1 = create_signed_vote(view, height, validators[0].info.address, VoteType::Prepare, &validators[0].signer);
+        let vote1 = create_signed_vote(view, height, validators[0].info.address, VoteType::Prepare, &validators[0].signer, &validators[0].bls);
         let result = collector.add_vote(vote1).unwrap();
         assert!(result.is_none());
 
         // Add second vote
-        let vote2 = create_signed_vote(view, height, validators[1].info.address, VoteType::Prepare, &validators[1].signer);
+        let vote2 = create_signed_vote(view, height, validators[1].info.address, VoteType::Prepare, &validators[1].signer, &validators[1].bls);
         let result = collector.add_vote(vote2).unwrap();
         assert!(result.is_none());
 
         // Add third vote - should reach quorum
-        let vote3 = create_signed_vote(view, height, validators[2].info.address, VoteType::Prepare, &validators[2].signer);
+        let vote3 = create_signed_vote(view, height, validators[2].info.address, VoteType::Prepare, &validators[2].signer, &validators[2].bls);
         let result = collector.add_vote(vote3).unwrap();
         assert!(result.is_some());
 
@@ -724,7 +1047,7 @@ mod tests {
         let validator_set = Arc::new(ValidatorSet::new(1, validator_infos).unwrap());
         let collector = VoteCollector::new(validator_set);
 
-        let vote1 = create_signed_vote(1, BlockHeight::from(1), validators[0].info.address, VoteType::Prepare, &validators[0].signer);
+        let vote1 = create_signed_vote(1, BlockHeight::from(1), validators[0].info.address, VoteType::Prepare, &validators[0].signer, &validators[0].bls);
         collector.add_vote(vote1.clone()).unwrap();
 
         // Try to add same vote again - should error due to duplicate voter
@@ -748,7 +1071,8 @@ mod tests {
         let pq = MlDsaSigningKey::generate();
         let classical = Ed25519SignerImpl::new(keypair).unwrap();
         let non_val_signer = InMemoryHybridSigner::new(Box::new(classical), pq);
-        let vote = create_signed_vote(1, BlockHeight::from(1), address, VoteType::Prepare, &non_val_signer);
+        let non_val_bls = BlsKeyPair::generate().unwrap();
+        let vote = create_signed_vote(1, BlockHeight::from(1), address, VoteType::Prepare, &non_val_signer, &non_val_bls);
 
         let result = collector.add_vote(vote);
         assert!(result.is_err());
@@ -765,7 +1089,8 @@ mod tests {
         // legitimate validator's composite public key embedded so we hit the
         // signature verification path rather than the public-key binding check.
         let validator_pk = validators[0].signer.public_key().clone();
-        let bad_sig = CompositeSignature::new(vec![0u8; 64], Some(vec![0u8; 3309]));
+        let bad_sig = CompositeSignature::new(vec![0u8; 64], vec![0u8; 3309]);
+        let bad_bls = validators[0].bls.sign(b"__garbage_payload__");
         let vote = Vote::new(
             1,
             BlockHeight::from(1),
@@ -773,6 +1098,7 @@ mod tests {
             validators[0].info.address,
             bad_sig,
             validator_pk,
+            bad_bls,
             VoteType::Prepare,
             0,
         );
@@ -799,7 +1125,7 @@ mod tests {
         let height = BlockHeight::from(10);
 
         // Validator 0 votes for block A (Hash::default())
-        let vote_a = create_signed_vote(view, height, validators[0].info.address, VoteType::Prepare, &validators[0].signer);
+        let vote_a = create_signed_vote(view, height, validators[0].info.address, VoteType::Prepare, &validators[0].signer, &validators[0].bls);
         let result = collector.add_vote(vote_a);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none()); // No QC yet
@@ -808,7 +1134,8 @@ mod tests {
         // Need to create a vote with a different block hash but signed by the same validator
         let mut different_hash_bytes = [0u8; 32];
         different_hash_bytes[0] = 0xFF;
-        let placeholder_sig = CompositeSignature::new(Vec::new(), None);
+        let placeholder_sig = CompositeSignature::new(Vec::new(), Vec::new());
+        let placeholder_bls_b = validators[0].bls.sign(b"__placeholder__");
         let pk_b = validators[0].signer.public_key().clone();
         let mut vote_b = Vote::new(
             view,
@@ -817,12 +1144,15 @@ mod tests {
             validators[0].info.address,
             placeholder_sig,
             pk_b,
+            placeholder_bls_b,
             VoteType::Prepare,
             0,
         );
         let payload_b = vote_b.signing_payload();
         let sig_b = validators[0].signer.sign(&payload_b).unwrap();
         vote_b.signature = sig_b;
+        let bls_payload_b = bls_payload_for_vote(&vote_b);
+        vote_b.bls_signature = validators[0].bls.sign(&bls_payload_b);
 
         let result = collector.add_vote(vote_b);
         assert!(result.is_err());
@@ -855,7 +1185,7 @@ mod tests {
 
         // Add votes for views 1, 2, 3
         for view in 1..=3u64 {
-            let vote = create_signed_vote(view, BlockHeight::from(10), validators[0].info.address, VoteType::Prepare, &validators[0].signer);
+            let vote = create_signed_vote(view, BlockHeight::from(10), validators[0].info.address, VoteType::Prepare, &validators[0].signer, &validators[0].bls);
             let _ = collector.add_vote(vote);
         }
 
@@ -866,5 +1196,139 @@ mod tests {
         assert_eq!(collector.vote_count(1, Hash::default(), VoteType::Prepare), 0);
         assert_eq!(collector.vote_count(2, Hash::default(), VoteType::Prepare), 1);
         assert_eq!(collector.vote_count(3, Hash::default(), VoteType::Prepare), 1);
+    }
+
+    /// Drives a 4-validator collector to quorum and returns
+    /// `(qc, validator_set, validators)` so individual aggregate-verification
+    /// tests can mutate the QC and re-verify it against the active set.
+    fn build_quorum_qc() -> (
+        QuorumCertificate,
+        Arc<crate::validator::ValidatorSet>,
+        Vec<TestValidator>,
+    ) {
+        let validators: Vec<TestValidator> = vec![
+            create_test_validator(1000),
+            create_test_validator(1000),
+            create_test_validator(1000),
+            create_test_validator(1000),
+        ];
+
+        let validator_infos: Vec<ValidatorInfo> =
+            validators.iter().map(|v| v.info.clone()).collect();
+        let validator_set = Arc::new(ValidatorSet::new(1, validator_infos).unwrap());
+        let collector = VoteCollector::new(validator_set.clone());
+
+        let view = 7u64;
+        let height = BlockHeight::from(42);
+        let block_hash = Hash::default();
+
+        // 3 votes meets the 4-validator (f=1, 2f+1=3) quorum threshold.
+        let v0 = create_signed_vote(
+            view,
+            height,
+            validators[0].info.address,
+            VoteType::Prepare,
+            &validators[0].signer,
+            &validators[0].bls,
+        );
+        let v1 = create_signed_vote(
+            view,
+            height,
+            validators[1].info.address,
+            VoteType::Prepare,
+            &validators[1].signer,
+            &validators[1].bls,
+        );
+        let v2 = create_signed_vote(
+            view,
+            height,
+            validators[2].info.address,
+            VoteType::Prepare,
+            &validators[2].signer,
+            &validators[2].bls,
+        );
+
+        assert!(collector.add_vote(v0).unwrap().is_none());
+        assert!(collector.add_vote(v1).unwrap().is_none());
+        let qc = collector
+            .add_vote(v2)
+            .unwrap()
+            .expect("third vote should form quorum");
+
+        // Sanity: QC was filed against the (view, block_hash, vote_type) we drove.
+        assert_eq!(qc.view, view);
+        assert_eq!(qc.height, height);
+        assert_eq!(qc.block_hash, block_hash);
+        assert_eq!(qc.vote_type, VoteType::Prepare);
+
+        (qc, validator_set, validators)
+    }
+
+    #[test]
+    fn test_qc_bls_aggregate_verifies_under_quorum() {
+        let (qc, validator_set, _validators) = build_quorum_qc();
+        qc.verify_bls_aggregate(&validator_set)
+            .expect("honest QC should verify via the BLS aggregate fast-path");
+    }
+
+    #[test]
+    fn test_qc_bls_aggregate_rejects_single_byte_tamper() {
+        let (qc, validator_set, _validators) = build_quorum_qc();
+        let mut tampered = qc.clone();
+        // Flip one bit in the aggregate signature. blst will either reject the
+        // point as malformed or the pairing check will fail; either way
+        // `verify_bls_aggregate` must not return Ok.
+        tampered.bls_aggregate[42] ^= 0x01;
+        let res = tampered.verify_bls_aggregate(&validator_set);
+        assert!(
+            res.is_err(),
+            "single-byte tamper of bls_aggregate must fail verification"
+        );
+    }
+
+    #[test]
+    fn test_qc_bls_aggregate_rejects_bitmap_length_mismatch() {
+        let (qc, validator_set, _validators) = build_quorum_qc();
+        let mut tampered = qc.clone();
+        // For 4 validators the bitmap is exactly 1 byte; pad an extra byte to
+        // break the length invariant `ceil(active_set.len() / 8)`.
+        tampered.signer_bitmap.push(0u8);
+        let err = tampered
+            .verify_bls_aggregate(&validator_set)
+            .expect_err("bitmap length mismatch must fail verification");
+        match err {
+            ConsensusError::InvalidSignature(msg) => {
+                assert!(
+                    msg.contains("signer_bitmap length"),
+                    "expected length-mismatch error, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidSignature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_qc_bls_aggregate_rejects_sub_quorum_bitmap() {
+        let (qc, validator_set, _validators) = build_quorum_qc();
+        let mut tampered = qc.clone();
+        // Clear all signer bits — the aggregate now claims zero contributors,
+        // which trips the empty-signers branch (sub-quorum is the same class
+        // of failure: signers < threshold).
+        for byte in tampered.signer_bitmap.iter_mut() {
+            *byte = 0u8;
+        }
+        let err = tampered
+            .verify_bls_aggregate(&validator_set)
+            .expect_err("empty signer bitmap must fail verification");
+        match err {
+            ConsensusError::InvalidSignature(msg) => {
+                assert!(
+                    msg.contains("signer_bitmap empty")
+                        || msg.contains("below quorum threshold"),
+                    "expected empty/sub-quorum error, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidSignature, got {other:?}"),
+        }
     }
 }

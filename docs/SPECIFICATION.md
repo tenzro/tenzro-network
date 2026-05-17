@@ -1188,23 +1188,16 @@ AgentRuntimeConfig {
 
 ### 12.1 Overview
 
-Tenzro Decentralized Identity Protocol (TDIP) provides a unified decentralized identity system for both humans and machines. TDIP is the primary identity standard on the Tenzro Network. PDIS (Personal Decentralized Identity Standard) remains fully supported as a secondary standard — both `did:tenzro:` and `did:pdis:` DID formats are parsed and interoperable.
+Tenzro Decentralized Identity Protocol (TDIP) provides a unified decentralized identity system for the Tenzro Network. The protocol recognises **three identity classes** — humans, delegated agents (machines under a human controller), and autonomous agents (self-sovereign machines) — all under a single `did:tenzro:` namespace.
 
-Every identity — human or machine — receives an auto-provisioned MPC wallet, a set of verifiable credentials, and W3C DID Document representation.
+Every identity receives an auto-provisioned MPC wallet, a set of verifiable credentials, and W3C DID Document representation.
 
 ### 12.2 DID Formats
 
-**TDIP DIDs (primary):**
 ```
-did:tenzro:human:{uuid}                    — Human identity
-did:tenzro:machine:{controller}:{uuid}     — Controlled machine identity
-did:tenzro:machine:{uuid}                  — Autonomous machine identity
-```
-
-**PDIS DIDs (secondary, fully supported):**
-```
-did:pdis:guardian:{uuid}                   — PDIS-1 Guardian (maps to human)
-did:pdis:agent:{controller}:{uuid}         — PDIS-2 Agent (maps to controlled machine)
+did:tenzro:human:{uuid}                    — Human identity (KYC-tiered)
+did:tenzro:machine:{controller}:{uuid}     — Delegated agent (machine under a human controller)
+did:tenzro:machine:{uuid}                  — Autonomous agent (self-sovereign machine, no controller)
 ```
 
 ### 12.3 Unified Identity Type
@@ -2229,7 +2222,7 @@ Tenzro Train is split across two layers, each owning what it does best:
 - Byzantine-robust aggregation rules over `ndarray` views of safetensors-decoded payloads
 - Nesterov-momentum outer optimizer
 - Syncer state machine, RocksDB write-through persistence (`CF_TRAINING_RUNS`, `CF_TRAINING_RECEIPTS`)
-- libp2p gossip topics: `tenzro/training` (trainer → syncer outer gradients) and `tenzro/training/syncer/1.0.0` (syncer → trainers post-step weights)
+- libp2p gossip topics: `tenzro/training` (trainer → syncer outer gradients) and `tenzro/training/syncer` (syncer → trainers post-step weights)
 - VM precompile `0x1008` (`TRAINING_VERIFY`) for on-chain receipt verification
 - JSON-RPC namespace `tenzro_training_*` (post / list / get / enroll / submit / finalize)
 - TNZO escrow, per-trainer reward distribution, network commission (5%), receipt-as-NFT minting
@@ -2255,7 +2248,7 @@ A training run has the following lifecycle (`TrainingRunStatus` transitions in p
    2. Each fragment is safetensors-encoded and SHA-256'd. The trainer signs an `OuterGradient` over `tenzro/train/outer-gradient || task_id || round || fragment || trainer_did || sha256 || payload_bytes || inner_step_count || submitted_at` and submits via `tenzro_training_submitOuterGradient`.
    3. The syncer buffers submissions per `(round, fragment)`. Once a fragment reaches `K`-of-`M` accepted submissions (or the grace window `τ` elapses), it is eligible for aggregation.
    4. The Python syncer-side helper aggregates accepted fragment payloads via `AggregationRule::Mean` (Phase 1), applies a Nesterov outer step, computes the post-step parameter SHA-256 per fragment, and calls `tenzro_training_finalizeRound` with `{fragment → post_step_hash}`.
-   5. The Rust syncer builds a `SyncRound` containing per-fragment `FragmentQuorumStatus` and the round's `state_root`, signs it, broadcasts on `tenzro/training/syncer/1.0.0`, and persists the new state root in `CF_TRAINING_RUNS`.
+   5. The Rust syncer builds a `SyncRound` containing per-fragment `FragmentQuorumStatus` and the round's `state_root`, signs it, broadcasts on `tenzro/training/syncer`, and persists the new state root in `CF_TRAINING_RUNS`.
 5. **Finalize.** When `current_round == max_rounds`, the syncer assembles a `TrainingReceipt` (capturing the verbatim task spec, all per-round state roots, the final model hash, per-trainer contribution counts and reward shares, the syncer's TEE attestation chain, and the run's Merkle `run_root`) and writes it to `CF_TRAINING_RECEIPTS` (→ `Completed`). The receipt is mintable as an NFT via the standard NFT factory at precompile `0x1006`.
 
 ### 20.5 On-Chain Commitments
@@ -2390,8 +2383,7 @@ The Python `OuterGradient.to_json()` produces the *exact* JSON shape the Rust sy
 - ~~Implement ZK trusted setup ceremony~~ — **OBSOLETED**: migrated to Plonky3 STARKs over KoalaBear; no trusted setup required
 
 ### Phase 2: Identity & Payments
-- ~~Implement Tenzro Decentralized Identity Protocol (TDIP)~~ — **DONE**: unified human/machine identity, W3C DID, verifiable credentials, delegation scopes
-- ~~Implement PDIS as secondary standard~~ — **DONE**: full `did:pdis:` format support alongside `did:tenzro:`
+- ~~Implement Tenzro Decentralized Identity Protocol (TDIP)~~ — **DONE**: three identity classes (human / delegated agent / autonomous agent), W3C DID, verifiable credentials, delegation scopes
 - ~~Implement MPP and x402 payment protocols~~ — **DONE**: HTTP 402 challenge/credential/receipt flows
 - ~~Implement Tempo network integration~~ — **DONE**: TempoBridgeAdapter, Tip20Token, TempoParticipant
 - ~~Implement identity-bound payments~~ — **DONE**: delegation scope enforcement on payments

@@ -12,7 +12,10 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tenzro_storage::{KvStore, WriteOp, CF_SETTLEMENTS};
+use tenzro_storage::{
+    compute_commitment, KvStore, ReceiptEnvelope, ReceiptKind, ReceiptStorageMode, ReceiptSummary,
+    WriteOp, CF_SETTLEMENTS,
+};
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::{Address, Timestamp};
 use tenzro_types::settlement::{SettlementReceipt, SettlementRequest};
@@ -258,11 +261,32 @@ impl BatchProcessor {
             value: result_value,
         });
 
-        // 3. Individual receipts (indexed for efficient lookup)
+        // 3. Individual receipts (indexed for efficient lookup) wrapped in
+        //    `ReceiptEnvelope` per Spec 7 / Tasks #147 + #150. Same
+        //    `ReceiptKind::SettlementEscrow` + Inline mode as the single-
+        //    settlement engine path; same canonical payload encoding
+        //    (`serde_json::to_vec(&SettlementReceipt)`).
         for (i, receipt) in result.receipts.iter().enumerate() {
             let receipt_key = format!("receipt:{}:{}", result.batch_id, i);
-            let receipt_value = serde_json::to_vec(receipt).map_err(|e| {
+            let payload = serde_json::to_vec(receipt).map_err(|e| {
                 SettlementError::BatchError(format!("Failed to serialize receipt: {}", e))
+            })?;
+            let summary = ReceiptSummary {
+                receipt_id: compute_commitment(receipt.receipt_id.as_bytes()),
+                payer: Some(format!("{}", receipt.customer)),
+                payee: Some(format!("{}", receipt.provider)),
+                amount_wei: Some(receipt.amount as u128),
+                timestamp: receipt.settled_at,
+                principal_chain_summary: Some(receipt.principal_chain.summary()),
+            };
+            let kind = ReceiptKind::SettlementEscrow;
+            debug_assert_eq!(kind.default_mode(), ReceiptStorageMode::Inline);
+            let envelope = ReceiptEnvelope::inline(kind, summary, payload);
+            envelope.validate().map_err(|e| {
+                SettlementError::BatchError(format!("envelope validate: {}", e))
+            })?;
+            let receipt_value = serde_json::to_vec(&envelope).map_err(|e| {
+                SettlementError::BatchError(format!("Failed to serialize receipt envelope: {}", e))
             })?;
             ops.push(WriteOp::Put {
                 cf: CF_SETTLEMENTS.to_string(),

@@ -42,6 +42,7 @@ pub mod canton;
 pub mod identity;
 pub mod fees;
 pub mod task;
+pub mod marketplace;
 pub mod agent_template;
 pub mod skill;
 pub mod tool;
@@ -55,6 +56,8 @@ pub mod training;
 pub mod principal_chain;
 pub mod kill_switch;
 pub mod intent_7683;
+pub mod hardware;
+pub mod tenzro_uri;
 
 // Re-export commonly used types
 pub use primitives::{Hash, Address, Signature, BlockHeight, Nonce, Timestamp, ChainId};
@@ -83,6 +86,7 @@ pub use task::{TaskInfo, TaskStatus, TaskType, TaskPriority, TaskQuote, TaskFilt
 pub use agent_template::{AgentTemplate, AgentTemplateStatus, AgentTemplateType, AgentCapability, AgentRuntimeRequirements, AgentPricingModel, AgentExample, AgentTemplateFilter, AgentTemplateInstance};
 pub use skill::{SkillDefinition, SkillStatus, SkillFilter, SkillInvocationResult};
 pub use tool::{ToolDefinition, ToolStatus, ToolFilter, ToolInvocationResult};
+pub use tenzro_uri::{TenzroUri, TenzroUriError, TENZRO_URI_SCHEME};
 pub use error::TenzroError;
 pub use config::{NetworkConfig, NodeConfig};
 pub use constants::*;
@@ -97,18 +101,20 @@ pub use cortex::{
     CortexRequest, CortexResponse, ReasoningBudget, ReasoningTier, CORTEX_FAMILY_KEY,
 };
 pub use training::{
-    AggregationRule, ArchitectureSpec, FragmentQuorumStatus, OuterGradient, SyncRound,
-    TrainingAttestation, TrainingModality, TrainingReceipt, TrainingRun, TrainingRunStatus,
-    TrainingTaskSpec, TrainingTier,
+    AggregationRule, ArchitectureSpec, FragmentQuorumStatus, OuterGradient,
+    SealedDatasetManifest, SealedShardEnvelope, SyncRound, TrainingAttestation, TrainingModality,
+    TrainingReceipt, TrainingRun, TrainingRunStatus, TrainingTaskSpec, TrainingTier,
 };
 pub use principal_chain::{
     ControllerActivitySummary, PrincipalChain, PrincipalChainSummary, PrincipalLink,
     PrincipalRole, MAX_DELEGATION_DEPTH,
 };
 pub use kill_switch::{KillSwitchAction, KillSwitchReceipt};
+pub use hardware::HardwareCapabilities;
 pub use intent_7683::{
-    compute_order_id, u128_to_uint256_be, uint256_be_to_u128, CrossChainOrder, FillInstruction,
-    GaslessCrossChainOrder, OrderState, Output, ProofRoute, ResolvedCrossChainOrder, TargetOutput,
-    Tenzro7683Order, TenzroOrderData, TokenAmount, FILL_KEY_PREFIX, ORDER_KEY_PREFIX,
+    compute_order_id, fill_storage_key, order_storage_key, u128_to_uint256_be,
+    uint256_be_to_u128, CrossChainOrder, FillInstruction, FillRecord, GaslessCrossChainOrder,
+    OrderState, Output, ProofRoute, ResolvedCrossChainOrder, TargetOutput, Tenzro7683Order,
+    TenzroOrderData, TokenAmount, FILL_KEY_PREFIX, ORDER_KEY_PREFIX,
     TENZRO_MAINNET_CHAIN_ID, TENZRO_TESTNET_CHAIN_ID,
 };

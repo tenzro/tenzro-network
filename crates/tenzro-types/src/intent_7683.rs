@@ -210,12 +210,69 @@ pub struct Tenzro7683Order {
     pub proof_route: ProofRoute,
 }
 
+/// Destination-side fill record for an ERC-7683 order. Persisted in
+/// `CF_SETTLEMENTS` under the [`FILL_KEY_PREFIX`] keyspace, keyed by
+/// `order_id`. Existence of this record is the idempotency guard — the
+/// destination settler refuses to process a second `fill(originData)` whose
+/// decoded `orderId` already maps to a `FillRecord`.
+///
+/// The record captures everything a downstream observer (origin-chain
+/// settler, indexer, dispute resolver) needs to verify that the fill
+/// happened on this Tenzro replica:
+///
+/// - `order_id` — the canonical 7683 order id this fill discharges.
+/// - `origin_chain_id` / `origin_settler` — where the order was opened (for
+///   reverse-route addressing when the bridge ferries fill proof back).
+/// - `filler` — Tenzro address of the solver who filled.
+/// - `recipient` — chain-discriminated recipient bytes32 the solver paid
+///   (mirrors the `Output.recipient` of the resolved order).
+/// - `outputs` — exact `Output` set the solver delivered (must equal the
+///   resolved order's `min_received` per spec).
+/// - `fill_tx_hash` — hash of the Tenzro transaction in which the fill
+///   transfers happened, so the bridge can attest to a specific block.
+/// - `filled_at` — wall-clock timestamp when the registry recorded the fill.
+/// - `proof_route` — bridge route the order designated for ferrying proof
+///   back to origin (snapshot at fill-time so an audit doesn't have to
+///   re-read the open envelope).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FillRecord {
+    pub order_id: Hash,
+    pub origin_chain_id: u32,
+    pub origin_settler: Address,
+    pub filler: Address,
+    pub recipient: [u8; 32],
+    pub outputs: Vec<Output>,
+    pub fill_tx_hash: Hash,
+    pub filled_at: Timestamp,
+    pub proof_route: ProofRoute,
+}
+
 /// `CF_SETTLEMENTS` key prefix for Tenzro-origin 7683 orders.
 pub const ORDER_KEY_PREFIX: &[u8] = b"7683_origin:";
 
 /// `CF_SETTLEMENTS` key prefix for destination-side fill records (the
 /// idempotency guard — same `order_id` cannot be filled twice).
 pub const FILL_KEY_PREFIX: &[u8] = b"7683_dest:";
+
+/// Build the `CF_SETTLEMENTS` storage key for a destination-side fill
+/// record. The key is `7683_dest:` followed by the raw 32-byte order id —
+/// keeps key size constant and lookup an O(1) point read.
+pub fn fill_storage_key(order_id: &Hash) -> Vec<u8> {
+    let mut key = Vec::with_capacity(FILL_KEY_PREFIX.len() + 32);
+    key.extend_from_slice(FILL_KEY_PREFIX);
+    key.extend_from_slice(order_id.as_bytes());
+    key
+}
+
+/// Build the `CF_SETTLEMENTS` storage key for a Tenzro-origin 7683 order
+/// envelope. Mirrors [`fill_storage_key`] for the open side. Defined here
+/// so callers don't have to reconstruct the layout in two crates.
+pub fn order_storage_key(order_id: &Hash) -> Vec<u8> {
+    let mut key = Vec::with_capacity(ORDER_KEY_PREFIX.len() + 32);
+    key.extend_from_slice(ORDER_KEY_PREFIX);
+    key.extend_from_slice(order_id.as_bytes());
+    key
+}
 
 /// Compute the canonical `order_id` for a `CrossChainOrder`.
 ///

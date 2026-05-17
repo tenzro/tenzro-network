@@ -22,3 +22,5 @@ hex = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
 ndarray = { workspace = true }
+bincode = { workspace = true }
+bytes = { workspace = true }

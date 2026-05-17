@@ -10,21 +10,23 @@
 //! did:tenzro:machine:{uuid}                  — Autonomous machine (no controller)
 //! ```
 //!
-//! Tenzro also supports the secondary `did:pdis:` method (`guardian` and `agent`
-//! variants) — both `did:tenzro:` and `did:pdis:` formats are parsed and
-//! interoperable; PDIS DIDs are internally mapped to the same [`TenzroDid`]
-//! structure. See `TDIP.md` for the full identity model.
+//! See `TDIP.md` for the full identity model.
 
 use crate::error::{IdentityError, Result};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// The type of a Tenzro DID
+/// The type of a Tenzro DID.
+///
+/// The protocol recognises three identity classes; the `Machine` variant
+/// covers both the delegated and autonomous sub-classes, distinguished
+/// by the presence of `controller_id` on the parsed `TenzroDid`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DidType {
-    /// Human identity (formerly PDIS-1 Guardian)
+    /// Human identity (`did:tenzro:human:{uuid}`)
     Human,
-    /// Machine identity with a human controller (formerly PDIS-2 Agent)
+    /// Machine/agent identity — delegated (`did:tenzro:machine:{controller}:{uuid}`)
+    /// or autonomous (`did:tenzro:machine:{uuid}`)
     Machine,
 }
 
@@ -81,18 +83,9 @@ impl TenzroDid {
     }
 
     /// Parses a DID string into a TenzroDid
-    ///
-    /// Supports both the primary `did:tenzro:` method and the secondary
-    /// `did:pdis:` method.
     pub fn parse(did: &str) -> Result<Self> {
-        // Try Tenzro (primary) method first
         if let Some(rest) = did.strip_prefix("did:tenzro:") {
             return Self::parse_tenzro(rest);
-        }
-
-        // Try PDIS (secondary) method
-        if let Some(rest) = did.strip_prefix("did:pdis:") {
-            return Self::parse_pdis(rest);
         }
 
         Err(IdentityError::InvalidDid(format!(
@@ -143,54 +136,6 @@ impl TenzroDid {
         } else {
             Err(IdentityError::InvalidDid(format!(
                 "unknown DID type in did:tenzro:{}",
-                rest
-            )))
-        }
-    }
-
-    /// Parses `did:pdis:guardian:` and `did:pdis:agent:` formats (PDIS
-    /// secondary DID method).
-    fn parse_pdis(rest: &str) -> Result<Self> {
-        if let Some(id) = rest.strip_prefix("guardian:") {
-            if id.is_empty() {
-                return Err(IdentityError::InvalidDid(
-                    "guardian DID missing identifier".to_string(),
-                ));
-            }
-            Ok(Self {
-                did_type: DidType::Human,
-                id: id.to_string(),
-                controller_id: None,
-            })
-        } else if let Some(rest) = rest.strip_prefix("agent:") {
-            // agent:{guardian_id}:{agent_id}
-            let parts: Vec<&str> = rest.splitn(2, ':').collect();
-            match parts.len() {
-                1 => {
-                    if parts[0].is_empty() {
-                        return Err(IdentityError::InvalidDid(
-                            "agent DID missing identifier".to_string(),
-                        ));
-                    }
-                    Ok(Self {
-                        did_type: DidType::Machine,
-                        id: parts[0].to_string(),
-                        controller_id: None,
-                    })
-                }
-                2 => Ok(Self {
-                    did_type: DidType::Machine,
-                    id: parts[1].to_string(),
-                    controller_id: Some(parts[0].to_string()),
-                }),
-                _ => Err(IdentityError::InvalidDid(format!(
-                    "invalid agent DID format: {}",
-                    rest
-                ))),
-            }
-        } else {
-            Err(IdentityError::InvalidDid(format!(
-                "unknown PDIS DID type: {}",
                 rest
             )))
         }
@@ -291,21 +236,6 @@ mod tests {
         assert_eq!(did.did_type, DidType::Machine);
         assert_eq!(did.id, "solo-id");
         assert!(did.controller_id.is_none());
-    }
-
-    #[test]
-    fn test_parse_pdis_guardian() {
-        let did = TenzroDid::parse("did:pdis:guardian:guardian-uuid").unwrap();
-        assert_eq!(did.did_type, DidType::Human);
-        assert_eq!(did.id, "guardian-uuid");
-    }
-
-    #[test]
-    fn test_parse_pdis_agent() {
-        let did = TenzroDid::parse("did:pdis:agent:guardian-uuid:agent-uuid").unwrap();
-        assert_eq!(did.did_type, DidType::Machine);
-        assert_eq!(did.id, "agent-uuid");
-        assert_eq!(did.controller_id, Some("guardian-uuid".to_string()));
     }
 
     #[test]

@@ -81,14 +81,19 @@ pub mod eu_ai_disclosure;
 pub mod event_loop;
 pub mod genesis;
 pub mod health;
+pub mod keygen;
 pub mod lane_resolver;
 pub mod lifecycle_state_bridge;
 pub mod liveness;
 pub mod mcp;
+pub mod delegation_scope_oracle;
 pub mod metrics;
+pub mod model_blob_fetcher_bridge;
 pub mod node;
 pub mod rpc;
 pub mod rpc_integrations;
+pub mod sla_slashing_bridge;
+pub mod snapshot;
 pub mod spending_policy_bridge;
 pub mod spt_ceiling_bridge;
 pub mod spt_revocation_dispatcher;
@@ -106,8 +111,20 @@ pub use rpc::RpcServer;
 /// Node crate version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Default RPC address
-pub const DEFAULT_RPC_ADDR: &str = "127.0.0.1:8545";
+/// Default RPC bind address.
+///
+/// Validators are the public infrastructure class of the network: they
+/// produce blocks AND serve RPC to wallets, dApps, and joiner nodes that
+/// need to read chain state. A network is only "open" when more than
+/// one validator can be dialled directly — otherwise the chain has
+/// decentralized consensus but a centralized gateway.
+///
+/// The default therefore binds to `0.0.0.0:8545`. Operators who want a
+/// loopback-only RPC (e.g. a model/TEE provider operated behind a
+/// trusted controller, or a dev node) opt in with
+/// `--rpc-addr 127.0.0.1:8545`. Per-role defaults in `NodeConfig::default_*`
+/// follow the same rule: validator binds public, provider/TEE bind loopback.
+pub const DEFAULT_RPC_ADDR: &str = "0.0.0.0:8545";
 
 /// Default data directory
 pub const DEFAULT_DATA_DIR: &str = "./data";

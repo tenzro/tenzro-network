@@ -61,9 +61,11 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> tenzro_consensus::Result<()> {
-//!     // Generate validator hybrid keypair (classical + ML-DSA-65)
+//!     // Generate validator triple keypair (Ed25519 classical + ML-DSA-65 PQ
+//!     // + BLS12-381 for HotStuff-2 vote-signature aggregation)
 //!     let keypair = KeyPair::generate(KeyType::Ed25519)?;
 //!     let pq_key = MlDsaSigningKey::generate();
+//!     let bls_key = tenzro_crypto::bls::BlsKeyPair::generate()?;
 //!
 //!     // Convert address (tenzro_crypto::Address is 20 bytes, tenzro_types::Address is 32 bytes)
 //!     let crypto_addr = keypair.address();
@@ -71,12 +73,13 @@
 //!     addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
 //!     let address = Address::new(addr_bytes);
 //!
-//!     // Create validators with mandatory PQ verifying keys
+//!     // Create validators with mandatory PQ + BLS verifying keys
 //!     let validators = vec![
 //!         ValidatorInfo::new(
 //!             address,
 //!             keypair.public_key().clone(),
 //!             pq_key.verifying_key_bytes().to_vec(),
+//!             bls_key.public_key().to_bytes().to_vec(),
 //!             1000,
 //!         ),
 //!     ];
@@ -89,7 +92,7 @@
 //!         .with_block_time(400)
 //!         .with_view_timeout(2000);
 //!
-//!     let mut engine = HotStuff2Engine::new(keypair, pq_key, config, epoch_manager);
+//!     let mut engine = HotStuff2Engine::new(keypair, pq_key, bls_key, config, epoch_manager);
 //!
 //!     // Start consensus
 //!     engine.start().await?;
@@ -149,11 +152,12 @@ pub use vote_state::{
     open_default_file_store, FileVoteStateStore, LastSignState, MemoryVoteStateStore,
     VoteStateStore, VoteStep, VrsDecision,
 };
-pub use voter::{QuorumCertificate, Vote, VoteCollector, VoteType};
+pub use voter::{bls_payload_for_vote, QuorumCertificate, Vote, VoteCollector, VoteType};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tenzro_crypto::bls::BlsKeyPair;
     use tenzro_crypto::pq::MlDsaSigningKey;
     use tenzro_crypto::{KeyPair, KeyType};
 
@@ -175,10 +179,12 @@ mod tests {
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let address = convert_address(keypair.address());
         let pq = MlDsaSigningKey::generate();
+        let bls = BlsKeyPair::generate().unwrap();
         let validator = ValidatorInfo::new(
             address,
             keypair.public_key().clone(),
             pq.verifying_key_bytes().to_vec(),
+            bls.public_key().to_bytes().to_vec(),
             1000,
         );
 
@@ -191,11 +197,13 @@ mod tests {
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let address = convert_address(keypair.address());
         let pq = MlDsaSigningKey::generate();
+        let bls = BlsKeyPair::generate().unwrap();
         let validators = vec![
             ValidatorInfo::new(
                 address,
                 keypair.public_key().clone(),
                 pq.verifying_key_bytes().to_vec(),
+                bls.public_key().to_bytes().to_vec(),
                 1000,
             ),
         ];
@@ -212,11 +220,13 @@ mod tests {
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let address = convert_address(keypair.address());
         let pq = MlDsaSigningKey::generate();
+        let bls = BlsKeyPair::generate().unwrap();
         let validators = vec![
             ValidatorInfo::new(
                 address,
                 keypair.public_key().clone(),
                 pq.verifying_key_bytes().to_vec(),
+                bls.public_key().to_bytes().to_vec(),
                 1000,
             ),
         ];
@@ -224,7 +234,8 @@ mod tests {
         let config = ConsensusConfig::default();
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
         let pq_engine = MlDsaSigningKey::generate();
-        let engine = HotStuff2Engine::new(keypair, pq_engine, config, epoch_manager);
+        let bls_engine = BlsKeyPair::generate().unwrap();
+        let engine = HotStuff2Engine::new(keypair, pq_engine, bls_engine, config, epoch_manager);
 
         assert_eq!(engine.finalized_height().await, tenzro_types::primitives::BlockHeight::from(0));
     }

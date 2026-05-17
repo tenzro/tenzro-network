@@ -8,6 +8,7 @@
 //! take actions in the world. Skills teach agents HOW to use tools;
 //! tools ARE the actual capabilities being invoked.
 
+use crate::primitives::Address;
 use serde::{Deserialize, Serialize};
 
 /// Status of a tool in the registry
@@ -66,6 +67,18 @@ pub struct ToolDefinition {
     /// DID of the agent or human who registered this tool
     pub creator_did: Option<String>,
 
+    /// Payout wallet for the creator's share of paid invocations.
+    /// **Mandatory** for any non-zero `price_per_call`; registration
+    /// fails (`ToolError::MissingCreatorWallet`) if omitted for a paid
+    /// tool. Free tools (`price_per_call == 0`) may leave this `None`.
+    pub creator_wallet: Option<Address>,
+
+    /// Price per invocation in TNZO atto-tokens (1 TNZO = 10^18 atto).
+    /// Set to `0` for a free tool. The split is identical to the agent
+    /// template marketplace: `MARKETPLACE_COMMISSION_BPS` (5%) to the
+    /// treasury, remainder to `creator_wallet`.
+    pub price_per_call: u128,
+
     /// Current status of the tool
     pub status: ToolStatus,
 
@@ -116,11 +129,28 @@ impl ToolDefinition {
             capabilities: Vec::new(),
             category,
             creator_did: None,
+            creator_wallet: None,
+            price_per_call: 0,
             status: ToolStatus::Active,
             created_at,
             invocation_count: 0,
             last_seen_at: created_at,
         }
+    }
+
+    /// Returns `true` when this tool is paid (non-zero `price_per_call`).
+    pub fn is_paid(&self) -> bool {
+        self.price_per_call > 0
+    }
+
+    /// Validate registration invariants. Any paid tool must declare a
+    /// `creator_wallet` to receive the creator share of each invocation.
+    /// Free tools (`price_per_call == 0`) may omit `creator_wallet`.
+    pub fn validate_for_registration(&self) -> Result<(), &'static str> {
+        if self.is_paid() && self.creator_wallet.is_none() {
+            return Err("Paid tool (price_per_call > 0) requires a creator_wallet");
+        }
+        Ok(())
     }
 
     /// Returns true if the tool is available for invocation
@@ -171,6 +201,15 @@ pub struct ToolInvocationResult {
     /// The output payload returned by the tool
     pub output: serde_json::Value,
 
+    /// Settlement transaction hash, if a payment was made. `None` for
+    /// free tools or for the in-process token transfer path (which
+    /// settles via the live `TnzoToken` ledger rather than a discrete
+    /// chain transaction).
+    pub settlement_tx: Option<String>,
+
+    /// Amount paid by the invoker in atto-TNZO. `0` for free tools.
+    pub amount_paid: u128,
+
     /// Unix timestamp when the invocation completed
     pub completed_at: u64,
 }
@@ -195,8 +234,53 @@ mod tests {
         assert_eq!(tool.version, "1.0.0");
         assert_eq!(tool.tool_type, "mcp");
         assert!(tool.is_available());
+        assert_eq!(tool.price_per_call, 0);
+        assert!(!tool.is_paid());
+        assert!(tool.creator_wallet.is_none());
         assert_eq!(tool.status, ToolStatus::Active);
         assert_eq!(tool.invocation_count, 0);
+    }
+
+    #[test]
+    fn paid_tool_without_wallet_fails_validation() {
+        let mut tool = ToolDefinition::new(
+            "premium-mcp".to_string(),
+            "1.0.0".to_string(),
+            "mcp".to_string(),
+            "https://example.com/mcp".to_string(),
+            "Paid MCP server".to_string(),
+            "data".to_string(),
+        );
+        tool.price_per_call = 1_000;
+        assert!(tool.validate_for_registration().is_err());
+    }
+
+    #[test]
+    fn free_tool_without_wallet_passes_validation() {
+        let tool = ToolDefinition::new(
+            "free-mcp".to_string(),
+            "1.0.0".to_string(),
+            "mcp".to_string(),
+            "https://example.com/mcp".to_string(),
+            "Free MCP server".to_string(),
+            "data".to_string(),
+        );
+        assert!(tool.validate_for_registration().is_ok());
+    }
+
+    #[test]
+    fn paid_tool_with_wallet_passes_validation() {
+        let mut tool = ToolDefinition::new(
+            "paid-mcp".to_string(),
+            "1.0.0".to_string(),
+            "mcp".to_string(),
+            "https://example.com/mcp".to_string(),
+            "Paid MCP server".to_string(),
+            "data".to_string(),
+        );
+        tool.price_per_call = 1_000;
+        tool.creator_wallet = Some(Address::default());
+        assert!(tool.validate_for_registration().is_ok());
     }
 
     #[test]

@@ -17,9 +17,11 @@ use rmcp::{
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
     model::*,
-    tool, tool_handler, tool_router, ServerHandler,
+    tool, tool_handler, tool_router, Json, ServerHandler,
 };
 use serde::Deserialize;
+
+use super::server::RpcPassthroughOutput;
 
 // ─── Tool parameter structs ───
 
@@ -178,18 +180,18 @@ fn err_invalid_params(msg: impl Into<String>) -> ErrorData {
     }
 }
 
-fn json_result(value: serde_json::Value) -> std::result::Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&value).unwrap(),
-    )]))
+fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
 /// Wrap a plain-text status string as a successful tool result.
 ///
 /// Used by tools that return a single textual value (e.g. transaction hash,
 /// confirmation message) rather than a structured JSON envelope.
-fn text_result(text: impl Into<String>) -> std::result::Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(text.into())]))
+fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    Ok(Json(RpcPassthroughOutput {
+        result: serde_json::json!({ "message": text.into() }),
+    }))
 }
 
 /// Normalize a hex string to have the `0x` prefix.
@@ -593,7 +595,7 @@ impl EthereumMcpServer {
     async fn eth_get_price(
         &self,
         Parameters(params): Parameters<EthGetPriceParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let feed_address = params
             .feed_address
             .unwrap_or_else(|| CHAINLINK_ETH_USD.to_string());
@@ -658,7 +660,7 @@ impl EthereumMcpServer {
     async fn eth_get_gas_price(
         &self,
         Parameters(_params): Parameters<EthGetGasPriceParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = self.rpc_call("eth_gasPrice", serde_json::json!([])).await?;
 
         let hex_str = result
@@ -677,7 +679,7 @@ impl EthereumMcpServer {
     async fn eth_estimate_gas(
         &self,
         Parameters(params): Parameters<EthEstimateGasParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut tx_obj = serde_json::json!({
             "to": normalize_hex(&params.to),
         });
@@ -711,7 +713,7 @@ impl EthereumMcpServer {
     async fn eth_get_fee_history(
         &self,
         Parameters(params): Parameters<EthGetFeeHistoryParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let block_count = params.block_count.unwrap_or_else(|| "5".to_string());
         let newest_block = params.newest_block.unwrap_or_else(|| "latest".to_string());
         let percentiles = params.reward_percentiles.unwrap_or_else(|| vec![25.0, 50.0, 75.0]);
@@ -740,7 +742,7 @@ impl EthereumMcpServer {
     async fn eth_get_balance(
         &self,
         Parameters(params): Parameters<EthGetBalanceParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let address = normalize_hex(&params.address);
         let block = params.block.unwrap_or_else(|| "latest".to_string());
 
@@ -766,7 +768,7 @@ impl EthereumMcpServer {
     async fn eth_get_token_balance(
         &self,
         Parameters(params): Parameters<EthGetTokenBalanceParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let token = normalize_hex(&params.token_address);
         let owner = normalize_hex(&params.owner_address);
 
@@ -796,7 +798,7 @@ impl EthereumMcpServer {
     async fn eth_get_transaction(
         &self,
         Parameters(params): Parameters<EthGetTransactionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let tx_hash = normalize_hex(&params.tx_hash);
 
         let result = self
@@ -820,7 +822,7 @@ impl EthereumMcpServer {
     async fn eth_get_block(
         &self,
         Parameters(params): Parameters<EthGetBlockParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let block_number = params
             .block_number
             .unwrap_or_else(|| "latest".to_string());
@@ -847,7 +849,7 @@ impl EthereumMcpServer {
     async fn eth_get_transaction_receipt(
         &self,
         Parameters(params): Parameters<EthGetTransactionReceiptParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let tx_hash = normalize_hex(&params.tx_hash);
 
         let result = self
@@ -875,7 +877,7 @@ impl EthereumMcpServer {
     async fn eth_resolve_ens(
         &self,
         Parameters(params): Parameters<EthResolveEnsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let name = params.name.trim().to_lowercase();
         if name.is_empty() {
             return Err(err_invalid_params("ENS name cannot be empty"));
@@ -946,7 +948,7 @@ impl EthereumMcpServer {
     async fn eth_lookup_ens(
         &self,
         Parameters(params): Parameters<EthLookupEnsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let address = normalize_hex(&params.address);
         let clean_addr = strip_0x(&address).to_lowercase();
 
@@ -1018,7 +1020,7 @@ impl EthereumMcpServer {
     async fn eth_call_contract(
         &self,
         Parameters(params): Parameters<EthCallContractParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let to = normalize_hex(&params.to);
         let data = normalize_hex(&params.data);
         let block = params.block.unwrap_or_else(|| "latest".to_string());
@@ -1037,7 +1039,7 @@ impl EthereumMcpServer {
     async fn eth_encode_function(
         &self,
         Parameters(params): Parameters<EthEncodeFunctionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let sig = params.function_sig.trim();
         if sig.is_empty() || !sig.contains('(') || !sig.contains(')') {
             return Err(err_invalid_params(
@@ -1088,7 +1090,7 @@ impl EthereumMcpServer {
     async fn eth_register_agent_8004(
         &self,
         Parameters(params): Parameters<EthRegisterAgent8004Params>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         if params.agent_name.is_empty() {
             return Err(err_invalid_params("agent_name cannot be empty"));
         }
@@ -1122,7 +1124,7 @@ impl EthereumMcpServer {
     async fn eth_lookup_agent_8004(
         &self,
         Parameters(params): Parameters<EthLookupAgent8004Params>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let input = params.agent_id_or_address.trim();
         if input.is_empty() {
             return Err(err_invalid_params(
@@ -1188,7 +1190,7 @@ impl EthereumMcpServer {
     async fn eth_get_attestation(
         &self,
         Parameters(params): Parameters<EthGetAttestationParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let uid = normalize_hex(&params.uid);
 
         let graphql_query = serde_json::json!({
@@ -1276,7 +1278,7 @@ impl EthereumMcpServer {
     async fn eth_send_raw_transaction(
         &self,
         Parameters(params): Parameters<EthSendRawTransactionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let raw = normalize_hex(&params.raw_tx);
         let resp_value = self
             .rpc_call("eth_sendRawTransaction", serde_json::json!([raw]))

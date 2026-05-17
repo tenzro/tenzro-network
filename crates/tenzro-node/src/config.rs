@@ -90,15 +90,20 @@ impl GenesisConfig {
 
 /// A genesis validator
 ///
-/// Every validator in genesis carries BOTH a classical Ed25519 public key
-/// and a post-quantum ML-DSA-65 verifying key. The hybrid signing scheme
-/// requires both legs to be present — there is no fallback path.
+/// Every validator in genesis carries THREE keys: a classical Ed25519 public
+/// key, a post-quantum ML-DSA-65 verifying key, and a BLS12-381 G1-compressed
+/// verifying key (`min_pk` scheme) for HotStuff-2 vote aggregation. All three
+/// legs are mandatory — there is no fallback path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenesisValidator {
     /// Hex-encoded Ed25519 public key (32 bytes)
     pub public_key: String,
     /// Hex-encoded ML-DSA-65 verifying key (1952 bytes)
     pub pq_public_key: String,
+    /// Hex-encoded BLS12-381 G1-compressed verifying key (`min_pk` scheme,
+    /// 48 bytes). Used by the consensus engine to aggregate per-validator
+    /// BLS vote signatures into a single QC-level aggregate.
+    pub bls_public_key: String,
     /// Stake amount in TNZO (whole units, will be multiplied by 10^18)
     pub stake: u64,
 }
@@ -259,6 +264,24 @@ pub struct BridgeAdapterConfig {
     /// Takes precedence over `private_key` when set.
     #[serde(default)]
     pub private_key_env: Option<String>,
+
+    /// Use a TEE-sealed signing key derived inside the local enclave
+    /// (AMD SEV-SNP via `SNP_GET_DERIVED_KEY`, or Intel TDX via
+    /// MRTD-as-IKM through HKDF-SHA256). When `true`, the signer is built
+    /// via `EvmTransactionSigner::with_tee_sealed` and `private_key` /
+    /// `private_key_env` are ignored. Off-hardware deployments error
+    /// loudly rather than silently falling back to a raw key.
+    ///
+    /// Production posture for the bridge custody key.
+    #[serde(default)]
+    pub tee_sealed: bool,
+
+    /// HKDF salt label for TEE-sealed key derivation (only used when
+    /// `tee_sealed = true`). Distinct labels produce unrelated keys from
+    /// the same enclave — separates bridge custody from MPC, settlement,
+    /// etc. Defaults to `"tenzro/bridge/evm-signer"` if unset.
+    #[serde(default)]
+    pub tee_label: Option<String>,
 }
 
 impl BridgeAdapterConfig {
@@ -275,6 +298,16 @@ impl BridgeAdapterConfig {
                 )));
         }
         Ok(self.private_key.clone())
+    }
+
+    /// HKDF label bytes used for TEE-sealed key derivation, defaulting to
+    /// `"tenzro/bridge/evm-signer"` when no override is set in config.
+    pub fn tee_label_bytes(&self) -> Vec<u8> {
+        self.tee_label
+            .as_deref()
+            .unwrap_or("tenzro/bridge/evm-signer")
+            .as_bytes()
+            .to_vec()
     }
 }
 
@@ -485,6 +518,30 @@ pub struct NodeConfig {
     /// Example: `Some("https://mcp.tenzro.network/mcp".to_string())`.
     #[serde(default)]
     pub external_mcp_addr: Option<String>,
+
+    /// Geographic locality of this node (free-form identifier such as
+    /// `us-central1-a`, `eu-west`, `ap-southeast-1`). Carried through to
+    /// the gossiped `ProviderAnnouncementMessage::geography` so peers can
+    /// route inference / TEE work by region. `None` means the operator
+    /// declined to declare; consumers must treat `None` as "unknown",
+    /// not as a wildcard.
+    #[serde(default)]
+    pub geography: Option<String>,
+
+    /// Tenzro iroh integration (Phase C1, #219). When `Some`, the node
+    /// constructs a single `IrohBackedResolver` at startup and shares it
+    /// across every consumer that needs an iroh endpoint: the training
+    /// `GradientPayloadStore`, the storage `IrohBlobsDaBackend`, and any
+    /// direct `tenzro://blob/<hash>` URI fetches. When `None`, the node
+    /// runs with the inline DA fallback and no `GradientPayloadStore`.
+    ///
+    /// The resolver binds **alongside** libp2p — it does not replace the
+    /// libp2p control plane. Per the locked model statement (2026-05-17):
+    /// "Tenzro uses Iroh as a performance-oriented P2P data plane while
+    /// retaining libp2p-style interoperability for decentralized
+    /// coordination."
+    #[serde(default)]
+    pub iroh: Option<tenzro_iroh::TenzroIrohConfig>,
 }
 
 impl Default for NodeConfig {
@@ -496,15 +553,33 @@ impl Default for NodeConfig {
 impl NodeConfig {
     /// Create a default validator configuration
     pub fn default_validator() -> Self {
+        // Validators are the public, well-connected node class — they run
+        // both halves of the NAT-traversal stack: relay v2 server +
+        // AutoNAT v2 server, so community joiners behind NAT can reach
+        // the network through them. Relay client + AutoNAT client + DCUtR
+        // are also on (kept inherited from `enable_hole_punching=true`)
+        // so a validator that itself starts behind NAT (e.g. dev laptop)
+        // still completes hole-punching against another validator. See
+        // `tenzro-network::TenzroBehaviour` for the full toggle matrix.
+        let network = NetworkConfig {
+            enable_relay: true,
+            ..NetworkConfig::default()
+        };
         Self {
             role: NetworkRole::Validator,
             data_dir: PathBuf::from("./data/validator"),
-            network: NetworkConfig::default(),
+            network,
             consensus: Some(ConsensusConfig::default()),
             tee_enabled: true,
             models_dir: None,
             log_level: "info".to_string(),
-            rpc_addr: "127.0.0.1:8545".to_string(),
+            // Validators are the public infrastructure class — they serve
+            // RPC to wallets / dApps / joiner nodes in addition to producing
+            // blocks. Binding loopback by default would leave the network
+            // with decentralized consensus but a single public gateway,
+            // which is functionally a centralized chain on the access axis.
+            // Override with `--rpc-addr 127.0.0.1:8545` for a private node.
+            rpc_addr: "0.0.0.0:8545".to_string(),
             web_addr: "0.0.0.0:8080".to_string(),
             mcp_addr: "0.0.0.0:3001".to_string(),
             a2a_addr: "0.0.0.0:3002".to_string(),
@@ -524,6 +599,8 @@ impl NodeConfig {
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
+            geography: None,
+            iroh: None,
         }
     }
 
@@ -557,6 +634,8 @@ impl NodeConfig {
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
+            geography: None,
+            iroh: None,
         }
     }
 
@@ -590,6 +669,8 @@ impl NodeConfig {
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
+            geography: None,
+            iroh: None,
         }
     }
 
@@ -623,6 +704,8 @@ impl NodeConfig {
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
+            geography: None,
+            iroh: None,
         }
     }
 

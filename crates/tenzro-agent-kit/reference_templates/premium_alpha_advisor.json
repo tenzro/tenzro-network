@@ -1,7 +1,7 @@
 {
   "template_id": "ref-premium-alpha-advisor-v1",
   "name": "Premium Alpha Advisor",
-  "description": "Paid specialist agent that analyzes on-chain positions, DEX liquidity depth, funding rates, and correlation across ETH/SOL/BTC markets to produce concise alpha recommendations. Demonstrates the Tenzro paid-agent marketplace end-to-end: creator DID binding, creator payout wallet, per-execution pricing, and the 5% AGENT_MARKETPLACE_COMMISSION_BPS network commission routed to the treasury.",
+  "description": "Paid specialist agent that analyzes on-chain positions, DEX liquidity depth, funding rates, and correlation across ETH/SOL/BTC markets to produce concise alpha recommendations. Demonstrates the Tenzro paid-agent marketplace end-to-end: creator DID binding, creator payout wallet, per-execution pricing, and the 5% MARKETPLACE_COMMISSION_BPS network commission routed to the treasury.",
   "template_type": "specialist",
   "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2],
   "creator_did": "did:tenzro:human:ref-premium-alpha-advisor",

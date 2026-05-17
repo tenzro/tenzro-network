@@ -139,6 +139,10 @@ pub struct ValidatorRegistryEntry {
     pub consensus_pubkey: Vec<u8>,
     /// ML-DSA-65 PQ verifying key (1952 bytes, FIPS 204).
     pub pq_pubkey: Vec<u8>,
+    /// BLS12-381 G1-compressed verifying key (`min_pk` scheme, 48 bytes).
+    /// Used by HotStuff-2 to aggregate per-validator vote signatures into
+    /// a single QC-level aggregate.
+    pub bls_pubkey: Vec<u8>,
     /// Address that receives staking rewards and withdrawn principal.
     /// May differ from `address` to allow cold-storage payouts.
     pub withdrawal_address: Address,
@@ -172,6 +176,7 @@ impl ValidatorRegistryEntry {
         address: Address,
         consensus_pubkey: Vec<u8>,
         pq_pubkey: Vec<u8>,
+        bls_pubkey: Vec<u8>,
         withdrawal_address: Address,
         self_stake: u128,
         registered_at_epoch: u64,
@@ -190,6 +195,12 @@ impl ValidatorRegistryEntry {
                 pq_pubkey.len()
             )));
         }
+        if bls_pubkey.len() != 48 {
+            return Err(TokenError::InvalidParameter(format!(
+                "BLS verifying key must be 48 bytes (BLS12-381 G1-compressed, min_pk), got {}",
+                bls_pubkey.len()
+            )));
+        }
         if metadata_uri.len() > 256 {
             return Err(TokenError::InvalidParameter(format!(
                 "metadata_uri exceeds 256 bytes (got {})",
@@ -200,6 +211,7 @@ impl ValidatorRegistryEntry {
             address,
             consensus_pubkey,
             pq_pubkey,
+            bls_pubkey,
             withdrawal_address,
             self_stake,
             status: ValidatorRegistryStatus::Candidate,
@@ -439,6 +451,7 @@ impl ValidatorRegistry {
         address: Address,
         consensus_pubkey: Vec<u8>,
         pq_pubkey: Vec<u8>,
+        bls_pubkey: Vec<u8>,
         withdrawal_address: Address,
         self_stake: u128,
         current_epoch: u64,
@@ -480,6 +493,7 @@ impl ValidatorRegistry {
             address,
             consensus_pubkey,
             pq_pubkey,
+            bls_pubkey,
             withdrawal_address,
             self_stake,
             current_epoch,
@@ -511,6 +525,7 @@ impl ValidatorRegistry {
         address: Address,
         consensus_pubkey: Vec<u8>,
         pq_pubkey: Vec<u8>,
+        bls_pubkey: Vec<u8>,
         withdrawal_address: Address,
         self_stake: u128,
         metadata_uri: String,
@@ -531,6 +546,12 @@ impl ValidatorRegistry {
                 pq_pubkey.len()
             )));
         }
+        if bls_pubkey.len() != 48 {
+            return Err(TokenError::InvalidParameter(format!(
+                "BLS verifying key must be 48 bytes (BLS12-381 G1-compressed, min_pk), got {}",
+                bls_pubkey.len()
+            )));
+        }
         if metadata_uri.len() > 256 {
             return Err(TokenError::InvalidParameter(format!(
                 "metadata_uri exceeds 256 bytes (got {})",
@@ -541,6 +562,7 @@ impl ValidatorRegistry {
             address,
             consensus_pubkey,
             pq_pubkey,
+            bls_pubkey,
             withdrawal_address,
             self_stake,
             status: ValidatorRegistryStatus::Active,
@@ -796,14 +818,14 @@ mod tests {
         Address::new(bytes)
     }
 
-    fn make_keys() -> (Vec<u8>, Vec<u8>) {
-        (vec![0u8; 32], vec![0u8; ML_DSA_65_VK_LEN])
+    fn make_keys() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        (vec![0u8; 32], vec![0u8; ML_DSA_65_VK_LEN], vec![0u8; 48])
     }
 
     #[test]
     fn seed_genesis_active_idempotent() {
         let reg = ValidatorRegistry::new();
-        let (ck, pk) = make_keys();
+        let (ck, pk, bk) = make_keys();
         let a = make_address(7);
 
         // First seed: inserted
@@ -812,6 +834,7 @@ mod tests {
                 a,
                 ck.clone(),
                 pk.clone(),
+                bk.clone(),
                 a,
                 DEFAULT_MIN_VALIDATOR_SELF_STAKE,
                 String::new(),
@@ -830,6 +853,7 @@ mod tests {
                 a,
                 ck.clone(),
                 pk.clone(),
+                bk.clone(),
                 a,
                 DEFAULT_MIN_VALIDATOR_SELF_STAKE * 2,
                 String::from("changed"),
@@ -855,6 +879,7 @@ mod tests {
                 a,
                 vec![0u8; 31],
                 vec![0u8; ML_DSA_65_VK_LEN],
+                vec![0u8; 48],
                 a,
                 DEFAULT_MIN_VALIDATOR_SELF_STAKE,
                 String::new(),
@@ -868,6 +893,21 @@ mod tests {
                 a,
                 vec![0u8; 32],
                 vec![0u8; 100],
+                vec![0u8; 48],
+                a,
+                DEFAULT_MIN_VALIDATOR_SELF_STAKE,
+                String::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, TokenError::InvalidParameter(_)));
+
+        // Wrong BLS pubkey length
+        let err = reg
+            .seed_genesis_active(
+                a,
+                vec![0u8; 32],
+                vec![0u8; ML_DSA_65_VK_LEN],
+                vec![0u8; 47],
                 a,
                 DEFAULT_MIN_VALIDATOR_SELF_STAKE,
                 String::new(),
@@ -879,10 +919,10 @@ mod tests {
     #[test]
     fn register_below_min_stake_fails() {
         let reg = ValidatorRegistry::new();
-        let (ck, pk) = make_keys();
+        let (ck, pk, bk) = make_keys();
         let a = make_address(1);
         let err = reg
-            .register_candidate(a, ck, pk, a, 100, 0, String::new())
+            .register_candidate(a, ck, pk, bk, a, 100, 0, String::new())
             .unwrap_err();
         assert!(matches!(err, TokenError::MinimumStakeNotMet { .. }));
     }
@@ -890,12 +930,13 @@ mod tests {
     #[test]
     fn register_then_activate_then_exit_full_lifecycle() {
         let reg = ValidatorRegistry::new();
-        let (ck, pk) = make_keys();
+        let (ck, pk, bk) = make_keys();
         let a = make_address(1);
         reg.register_candidate(
             a,
             ck.clone(),
             pk.clone(),
+            bk.clone(),
             a,
             DEFAULT_MIN_VALIDATOR_SELF_STAKE,
             0,
@@ -937,12 +978,13 @@ mod tests {
     #[test]
     fn reentry_blocked_during_cooldown() {
         let reg = ValidatorRegistry::new();
-        let (ck, pk) = make_keys();
+        let (ck, pk, bk) = make_keys();
         let a = make_address(1);
         reg.register_candidate(
             a,
             ck.clone(),
             pk.clone(),
+            bk.clone(),
             a,
             DEFAULT_MIN_VALIDATOR_SELF_STAKE,
             0,
@@ -961,6 +1003,7 @@ mod tests {
                 a,
                 ck.clone(),
                 pk.clone(),
+                bk.clone(),
                 a,
                 DEFAULT_MIN_VALIDATOR_SELF_STAKE,
                 3,
@@ -974,6 +1017,7 @@ mod tests {
             a,
             ck,
             pk,
+            bk,
             a,
             DEFAULT_MIN_VALIDATOR_SELF_STAKE,
             3 + DEFAULT_REENTRY_COOLDOWN_EPOCHS,
@@ -989,12 +1033,13 @@ mod tests {
     #[test]
     fn jail_forces_exit() {
         let reg = ValidatorRegistry::new();
-        let (ck, pk) = make_keys();
+        let (ck, pk, bk) = make_keys();
         let a = make_address(1);
         reg.register_candidate(
             a,
             ck,
             pk,
+            bk,
             a,
             DEFAULT_MIN_VALIDATOR_SELF_STAKE,
             0,
@@ -1015,12 +1060,13 @@ mod tests {
         // Set up 5 active validators by hand so the cap (4% of 5 = 0, floored
         // to MIN_CHURN_PER_EPOCH = 1) admits exactly one new candidate.
         for i in 1..=5u8 {
-            let (ck, pk) = make_keys();
+            let (ck, pk, bk) = make_keys();
             let a = make_address(i);
             reg.register_candidate(
                 a,
                 ck,
                 pk,
+                bk,
                 a,
                 DEFAULT_MIN_VALIDATOR_SELF_STAKE,
                 0,
@@ -1042,12 +1088,13 @@ mod tests {
 
         // Add 3 fresh candidates and run a transition.
         for i in 6..=8u8 {
-            let (ck, pk) = make_keys();
+            let (ck, pk, bk) = make_keys();
             let a = make_address(i);
             reg.register_candidate(
                 a,
                 ck,
                 pk,
+                bk,
                 a,
                 DEFAULT_MIN_VALIDATOR_SELF_STAKE,
                 0,

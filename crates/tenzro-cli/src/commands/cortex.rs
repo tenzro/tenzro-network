@@ -4,10 +4,6 @@
 //! cost, and attestation are all caller-controlled, priced on-chain, and
 //! cryptographically verified via signed receipts. Every inference can be
 //! settled in TNZO at the ledger layer.
-//!
-//! Tagline: "Cortex reasons. Praecise governs. Tenzro settles."
-//! (Praecise is an open AI governance framework by Ipnops; Tenzro
-//! integrates with it but does not own it.)
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

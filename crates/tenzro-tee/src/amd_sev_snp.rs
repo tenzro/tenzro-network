@@ -61,6 +61,9 @@ use crate::traits::TeeProvider;
 const SEV_IOCTL_MAGIC: u8 = b'S';
 #[cfg(target_os = "linux")]
 const SNP_GET_REPORT_NR: u8 = 0;
+/// SNP_GET_DERIVED_KEY ioctl: _IOWR('S', 0x1, struct snp_guest_request_ioctl)
+#[cfg(target_os = "linux")]
+const SNP_GET_DERIVED_KEY_NR: u8 = 1;
 
 /// Size of user-provided report data
 #[cfg(target_os = "linux")]
@@ -68,6 +71,26 @@ const SNP_REPORT_USER_DATA_SIZE: usize = 64;
 
 /// Size of the raw attestation report returned by the PSP
 const SNP_REPORT_SIZE: usize = 1184;
+
+/// Size of the derived key returned by the PSP (MSG_KEY_REQ response)
+pub const SNP_DERIVED_KEY_SIZE: usize = 64;
+
+/// Bit flags for `guest_field_select` in the SNP derived-key request.
+///
+/// These bits control which fields from the guest context are mixed into
+/// the key derivation. Setting a bit binds the derived key to that field —
+/// e.g. `MEASUREMENT` makes the key change if the VM's initial state changes.
+///
+/// Per AMD SEV-SNP ABI spec (revision 1.55), Table 16.
+#[allow(dead_code)]
+pub mod guest_field_select {
+    pub const GUEST_POLICY: u64 = 1 << 0;
+    pub const IMAGE_ID: u64 = 1 << 1;
+    pub const FAMILY_ID: u64 = 1 << 2;
+    pub const MEASUREMENT: u64 = 1 << 3;
+    pub const GUEST_SVN: u64 = 1 << 4;
+    pub const TCB_VERSION: u64 = 1 << 5;
+}
 
 /// SNP attestation report offsets (from AMD SEV-SNP ABI spec).
 ///
@@ -838,6 +861,139 @@ impl AmdSevSnpProvider {
     }
 }
 
+impl AmdSevSnpProvider {
+    /// Requests a 64-byte hardware-derived key from the AMD PSP via
+    /// `SNP_GET_DERIVED_KEY` on `/dev/sev-guest`.
+    ///
+    /// The PSP derives the key from a root key (VCEK or VMRK, selected by
+    /// `root_key_select`) mixed with the bits selected in `guest_field_select`.
+    /// Setting `MEASUREMENT | IMAGE_ID | GUEST_SVN` binds the key to the VM's
+    /// initial measured state — the same VM image redeploys to the same key,
+    /// any tampering produces a different key, and another tenant's VM cannot
+    /// recover this key even on the same physical host.
+    ///
+    /// Returns 64 bytes of raw key material suitable as input keying material
+    /// (IKM) for HKDF-SHA256.
+    ///
+    /// # Errors
+    ///
+    /// - [`TeeError::NotAvailable`] when not running on Linux or
+    ///   `/dev/sev-guest` is missing — there is no simulation fallback per
+    ///   Tenzro's no-simulation-on-testnet policy. Caller decides whether to
+    ///   fail open or proceed with a software-only signer.
+    /// - [`TeeError::AttestationGenerationFailed`] when the ioctl returns a
+    ///   non-zero exit (PSP firmware error, VMM passthrough error).
+    pub fn derived_key(
+        &self,
+        root_key_select: u32,
+        guest_field_select: u64,
+        vmpl: u32,
+        guest_svn: u32,
+        tcb_version: u64,
+    ) -> Result<[u8; SNP_DERIVED_KEY_SIZE]> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::fs::OpenOptions;
+            use std::os::unix::io::AsRawFd;
+
+            // struct snp_derived_key_req {
+            //   __u32 root_key_select;     // offset 0,  4 bytes
+            //   __u32 rsvd;                // offset 4,  4 bytes
+            //   __u64 guest_field_select;  // offset 8,  8 bytes
+            //   __u32 vmpl;                // offset 16, 4 bytes
+            //   __u32 guest_svn;           // offset 20, 4 bytes
+            //   __u64 tcb_version;         // offset 24, 8 bytes
+            // }                            // total = 32 bytes
+            const SNP_DERIVED_KEY_REQ_SIZE: usize = 32;
+            let mut req = vec![0u8; SNP_DERIVED_KEY_REQ_SIZE];
+            req[0..4].copy_from_slice(&root_key_select.to_le_bytes());
+            // rsvd at offset 4 stays zero
+            req[8..16].copy_from_slice(&guest_field_select.to_le_bytes());
+            req[16..20].copy_from_slice(&vmpl.to_le_bytes());
+            req[20..24].copy_from_slice(&guest_svn.to_le_bytes());
+            req[24..32].copy_from_slice(&tcb_version.to_le_bytes());
+
+            // Response buffer: PSP writes a 32-byte response header followed by
+            // struct snp_derived_key_resp { __u8 data[64]; }. The kernel sizes
+            // its response buffer at 4000 bytes (same as SNP_GET_REPORT) for
+            // forward compatibility — overallocate to match kernel behavior.
+            const SNP_DERIVED_KEY_RESP_SIZE: usize = 4000;
+            let mut resp = vec![0u8; SNP_DERIVED_KEY_RESP_SIZE];
+
+            // snp_guest_request_ioctl envelope (same shape used by SNP_GET_REPORT):
+            //   __u8  msg_version;        // offset 0   (+7 pad)
+            //   __u64 req_data;           // offset 8
+            //   __u64 resp_data;          // offset 16
+            //   union { __u64 exitinfo2;
+            //           struct { __u32 fw_error; __u32 vmm_error; } };
+            //                             // offset 24
+            const SNP_GUEST_REQUEST_IOCTL_SIZE: usize = 32;
+            let mut ioctl_buf = vec![0u8; SNP_GUEST_REQUEST_IOCTL_SIZE];
+            ioctl_buf[0] = 1; // msg_version = 1
+            let req_ptr = req.as_ptr() as u64;
+            ioctl_buf[8..16].copy_from_slice(&req_ptr.to_ne_bytes());
+            let resp_ptr = resp.as_mut_ptr() as u64;
+            ioctl_buf[16..24].copy_from_slice(&resp_ptr.to_ne_bytes());
+
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/sev-guest")
+                .map_err(|e| TeeError::not_available(format!(
+                    "Failed to open /dev/sev-guest: {}", e
+                )))?;
+
+            let ioctl_nr = build_ioctl_rw(
+                SEV_IOCTL_MAGIC,
+                SNP_GET_DERIVED_KEY_NR,
+                SNP_GUEST_REQUEST_IOCTL_SIZE as u32,
+            );
+
+            let ret = unsafe {
+                libc::ioctl(file.as_raw_fd(), ioctl_nr as libc::c_ulong, ioctl_buf.as_mut_ptr())
+            };
+
+            if ret != 0 {
+                let errno = std::io::Error::last_os_error();
+                let fw_error = u32::from_le_bytes([
+                    ioctl_buf[24], ioctl_buf[25], ioctl_buf[26], ioctl_buf[27]
+                ]);
+                let vmm_error = u32::from_le_bytes([
+                    ioctl_buf[28], ioctl_buf[29], ioctl_buf[30], ioctl_buf[31]
+                ]);
+                return Err(TeeError::AttestationGenerationFailed(format!(
+                    "SNP_GET_DERIVED_KEY ioctl failed: {} (fw_error: 0x{:X}, vmm_error: 0x{:X})",
+                    errno, fw_error, vmm_error
+                )));
+            }
+
+            // Response layout mirrors SNP_GET_REPORT: 32-byte header, then the
+            // snp_derived_key_resp.data[64].
+            let key_start = 32;
+            if resp.len() < key_start + SNP_DERIVED_KEY_SIZE {
+                return Err(TeeError::AttestationGenerationFailed(
+                    "SNP_GET_DERIVED_KEY response truncated".to_string()
+                ));
+            }
+            let mut out = [0u8; SNP_DERIVED_KEY_SIZE];
+            out.copy_from_slice(&resp[key_start..key_start + SNP_DERIVED_KEY_SIZE]);
+            tracing::debug!(
+                "SNP derived key obtained (root_key_select={}, guest_field_select=0x{:X})",
+                root_key_select, guest_field_select
+            );
+            Ok(out)
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (root_key_select, guest_field_select, vmpl, guest_svn, tcb_version);
+            Err(TeeError::not_available(
+                "SNP_GET_DERIVED_KEY requires Linux (ioctl to /dev/sev-guest)"
+            ))
+        }
+    }
+}
+
 impl Default for AmdSevSnpProvider {
     fn default() -> Self {
         Self::new()
@@ -1060,6 +1216,45 @@ mod tests {
     async fn test_sev_snp_provider_creation() {
         let provider = AmdSevSnpProvider::new();
         assert_eq!(provider.vendor(), TeeVendor::AmdSevSnp);
+    }
+
+    #[test]
+    fn test_derived_key_off_hardware_returns_not_available() {
+        // On every non-SEV host (including macOS dev machines and Linux CI
+        // without /dev/sev-guest), derived_key MUST return NotAvailable rather
+        // than fabricate key material. Per CLAUDE.md no-simulation policy.
+        let provider = AmdSevSnpProvider::new();
+        let result = provider.derived_key(
+            0,
+            guest_field_select::MEASUREMENT | guest_field_select::IMAGE_ID,
+            0,
+            0,
+            0,
+        );
+        match result {
+            Err(TeeError::NotAvailable(_)) => { /* expected on dev/CI */ }
+            Err(TeeError::AttestationGenerationFailed(_)) => {
+                // Acceptable on a real SEV host where /dev/sev-guest exists
+                // but the test isn't running under VMPL0.
+            }
+            Ok(_) => {
+                // Only acceptable if the test really is running on SEV-SNP
+                // hardware. Any other path producing Ok(_) would be a bug.
+                assert!(std::path::Path::new("/dev/sev-guest").exists());
+            }
+            Err(other) => panic!("unexpected error variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_guest_field_select_bits_match_amd_spec() {
+        // AMD SEV-SNP ABI spec rev 1.55, Table 16
+        assert_eq!(guest_field_select::GUEST_POLICY, 0x01);
+        assert_eq!(guest_field_select::IMAGE_ID, 0x02);
+        assert_eq!(guest_field_select::FAMILY_ID, 0x04);
+        assert_eq!(guest_field_select::MEASUREMENT, 0x08);
+        assert_eq!(guest_field_select::GUEST_SVN, 0x10);
+        assert_eq!(guest_field_select::TCB_VERSION, 0x20);
     }
 
     #[tokio::test]

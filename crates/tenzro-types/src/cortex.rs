@@ -19,10 +19,6 @@
 //!
 //! These types are transport-agnostic: the HTTP sidecar backend and on-chain
 //! settlement both work against the same structs.
-//!
-//! Positioning: **Cortex reasons. Praecise governs. Tenzro settles.**
-//! (Praecise is an open AI governance framework by Ipnops, not owned by
-//! Tenzro. Tenzro integrates with Praecise at the governance layer.)
 
 use crate::primitives::{Address, Hash, Signature, Timestamp};
 use serde::{Deserialize, Serialize};

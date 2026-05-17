@@ -4,27 +4,31 @@ use crate::{
     behaviour::{TenzroBehaviour, TenzroBehaviourEvent},
     block_sync_proto::{BlockSyncRequest, BlockSyncResponse},
     config::NetworkConfig,
+    consensus_direct_proto::{
+        ConsensusDirectError, ConsensusDirectRequest, ConsensusDirectResponse,
+        MAX_INBOUND_STREAMS_PER_PEER,
+    },
     error::{NetworkError, Result},
     gossip::{MessageDeduplicator, MessageValidation, validate_gossip_message},
-    message::{NetworkMessage, MessagePayload},
+    message::{ConsensusMessage, NetworkMessage, MessagePayload},
     metrics::NetworkMetrics,
     peer_manager::{PeerManager, ManagedPeer},
-    transport,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
 use libp2p::{
+    autonat, dcutr,
     gossipsub::{self, IdentTopic, TopicHash},
     identify,
     kad::{self, QueryResult},
-    ping,
+    ping, relay,
     request_response::{self, InboundRequestId, OutboundRequestId, ResponseChannel},
     swarm::SwarmEvent,
     Multiaddr, PeerId, Swarm,
 };
 use parking_lot::Mutex;
 use prometheus_client::registry::Registry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -103,39 +107,59 @@ fn load_or_generate_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::identi
     Ok(keypair)
 }
 
-/// Returns true only if `addr` contains a globally routable IP that other nodes
-/// can actually reach. Rejects:
-///   - loopback (127.x.x.x / ::1)
-///   - private RFC-1918 (10.x, 172.16-31.x, 192.168.x)
-///   - link-local (169.254.x.x / fe80::/10)
-///   - Docker bridge default (172.17.x.x)
+/// Returns true only if `addr` contains an IP that other nodes can actually
+/// reach. Rejects:
+///   - loopback (127.0.0.0/8 / ::1)
+///   - link-local (169.254.0.0/16 / fe80::/10)
 ///   - unspecified (0.0.0.0 / ::)
-///   - broadcast, documentation ranges
+///   - broadcast, documentation, benchmarking ranges
+///   - Docker bridge default range 172.16.0.0/12 — when a node `--network host`s
+///     a container, libp2p enumerates the docker0 bridge (commonly 172.17.0.1)
+///     and advertises it via Identify. Other peers then dial that address, hit
+///     their OWN docker0 bridge, and get "Unexpected peer ID" from whatever
+///     local container happens to be there. Per-IP rate limiters then ban the
+///     legitimate peer. Observed on the GCE multi-region testnet 2026-05-14.
+///   - IPv4 192.168.0.0/16 (consumer-NAT range — never inside our datacenter
+///     deployment; if a node reports it, it's a misconfig / NAT leak)
 ///   - IPv6 unique-local (fc00::/7) and multicast (ff00::/8)
 ///   - addresses with no IP component at all
 ///
-/// NOTE: Private IPs (10.x.x.x, 172.16-31.x.x, 192.168.x.x) are ACCEPTED
-/// because Kubernetes pods and GCE VMs use RFC-1918 addresses within the VPC.
+/// IPv4 10.0.0.0/8 is intentionally ACCEPTED — this is the GCE/AWS/K8s VPC
+/// subnet range and is the only reachable address for intra-region peers
+/// before AutoNAT confirms a public external IP. Cross-region peers connect
+/// via the public IPs that GCE allocates (which aren't in any RFC-1918 range).
 fn is_globally_routable(addr: &Multiaddr) -> bool {
     use libp2p::multiaddr::Protocol;
     for proto in addr.iter() {
         match proto {
             Protocol::Ip4(ip) => {
+                let octets = ip.octets();
+                // 172.16.0.0/12 — docker bridge default + corp-NAT range
+                let is_docker_or_corp = octets[0] == 172 && (octets[1] & 0xf0) == 16;
+                // 192.168.0.0/16 — consumer NAT, never in our DC deploy
+                let is_consumer_nat = octets[0] == 192 && octets[1] == 168;
+                // 100.64.0.0/10 — RFC 6598 carrier-grade NAT
+                let is_cgn = octets[0] == 100 && (octets[1] & 0xc0) == 64;
                 if ip.is_loopback()
                     || ip.is_link_local()
                     || ip.is_unspecified()
                     || ip.is_broadcast()
                     || ip.is_documentation()
+                    || is_docker_or_corp
+                    || is_consumer_nat
+                    || is_cgn
                 {
                     return false;
                 }
                 return true;
             }
             Protocol::Ip6(ip) => {
+                let seg0 = ip.segments()[0];
                 if ip.is_loopback()
                     || ip.is_unspecified()
                     || ip.is_multicast()
-                    || (ip.segments()[0] & 0xffc0) == 0xfe80  // fe80::/10 link-local
+                    || (seg0 & 0xffc0) == 0xfe80  // fe80::/10 link-local
+                    || (seg0 & 0xfe00) == 0xfc00  // fc00::/7 unique-local
                 {
                     return false;
                 }
@@ -281,6 +305,47 @@ pub trait NetworkService: Send + Sync {
     /// auto-assigned (e.g., `/ip4/127.0.0.1/tcp/0`) and the caller needs to
     /// know the bound address to share with peers.
     async fn listen_addresses(&self) -> Result<Vec<Multiaddr>>;
+
+    /// Sends a HotStuff-2 `ConsensusMessage` directly to every currently-
+    /// admitted validator over the `consensus-direct` request-response
+    /// overlay.
+    ///
+    /// Replaces the gossipsub `tenzro/consensus` publish path. The local
+    /// `ValidatorRegistry` snapshot is taken at send time; the message is
+    /// fanned out one request per peer. Per-peer transport failures are
+    /// logged but do NOT fail the call — quorum is the consumer's
+    /// responsibility, not the transport's.
+    ///
+    /// Returns `Ok(usize)` with the number of peers the request was
+    /// successfully dispatched to (in-flight; not yet acknowledged).
+    /// Returns `Err` only if no validator registry is installed or if
+    /// the validator set is empty (single-node operation; nothing to do).
+    async fn broadcast_to_validators(&self, message: ConsensusMessage) -> Result<usize>;
+
+    /// Returns the count of currently-connected peers that are also
+    /// admitted to the local validator registry.
+    ///
+    /// This is the warm-up gate for first-publish on the consensus-direct
+    /// overlay: a non-zero count means at least one validator peer is
+    /// reachable AND admitted, so `broadcast_to_validators` will dispatch
+    /// to at least one wire-bound stream.
+    ///
+    /// Returns 0 if no validator registry is installed (single-node /
+    /// pre-genesis operation).
+    async fn connected_validator_count(&self) -> Result<usize>;
+
+    /// Subscribes to inbound `ConsensusMessage`s arriving over the
+    /// `consensus-direct` overlay. Replaces the consensus-side
+    /// `subscribe("tenzro/consensus")` path.
+    ///
+    /// Only one subscriber is supported at a time — calling twice replaces
+    /// the previous channel. The subscriber MUST drain the receiver
+    /// continuously; if the channel is full or dropped, the event loop
+    /// responds to the sending peer with `ConsensusDirectError::NoSubscriber`,
+    /// surfacing the back-pressure to the consensus engine on the other side.
+    async fn subscribe_consensus_direct(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<ConsensusMessage>>;
 }
 
 /// Commands sent to the network service
@@ -385,6 +450,25 @@ enum NetworkCommand {
     /// flooders, mesh-warmup gates) attach to the same stream.
     SubscribePeerEvents {
         response: oneshot::Sender<Result<mpsc::UnboundedReceiver<PeerEvent>>>,
+    },
+    /// Fans out a HotStuff-2 `ConsensusMessage` over the consensus-direct
+    /// request-response overlay to every validator currently admitted to
+    /// the local registry. Returns the number of peers the request was
+    /// dispatched to.
+    BroadcastToValidators {
+        message: ConsensusMessage,
+        response: oneshot::Sender<Result<usize>>,
+    },
+    /// Returns the count of currently-connected peers that are also
+    /// admitted to the local validator registry. Used by the consensus
+    /// engine warm-up gate before the first `BroadcastToValidators`.
+    ConnectedValidatorCount {
+        response: oneshot::Sender<Result<usize>>,
+    },
+    /// Subscribes to inbound consensus-direct messages. One subscriber per
+    /// node — calling twice replaces the previous channel.
+    SubscribeConsensusDirect {
+        response: oneshot::Sender<Result<mpsc::UnboundedReceiver<ConsensusMessage>>>,
     },
     Shutdown {
         response: oneshot::Sender<Result<()>>,
@@ -600,6 +684,57 @@ impl TenzroNetworkService {
                     min_admitted = min_admitted,
                     "wait_for_admitted_mesh timed out — first publish may be silently dropped \
                      by receivers' validator-only topic gate"
+                );
+                return Ok(last_seen);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Polls until at least `min_validators` peers are both connected at
+    /// the libp2p layer AND admitted to the local validator registry, or
+    /// `timeout` elapses.
+    ///
+    /// This is the warm-up gate for the consensus-direct overlay (#144) —
+    /// it replaces the gossipsub-mesh-based gate that consensus used while
+    /// it was still publishing through gossipsub. Direct request-response
+    /// has no "mesh" — the only meaningful liveness signal is "I have a
+    /// connection open to a validator I'm willing to send to".
+    ///
+    /// On timeout, returns the last observed count so the caller can
+    /// decide whether to proceed in degraded mode (single-node operation,
+    /// pre-genesis) or keep waiting. Polls every 100ms — short enough not
+    /// to delay startup, long enough to let identify-driven admission
+    /// complete on a freshly-dialed peer.
+    pub async fn wait_for_connected_validators(
+        &self,
+        min_validators: usize,
+        timeout: std::time::Duration,
+    ) -> Result<usize> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        #[allow(unused_assignments)]
+        let mut last_seen = 0usize;
+        loop {
+            match self.connected_validator_count().await {
+                Ok(count) => {
+                    last_seen = count;
+                    if count >= min_validators {
+                        tracing::info!(
+                            connected_validators = count,
+                            min_validators = min_validators,
+                            "Connected validators ready — first consensus-direct broadcast safe"
+                        );
+                        return Ok(count);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    connected_validators = last_seen,
+                    min_validators = min_validators,
+                    "wait_for_connected_validators timed out — first \
+                     consensus-direct broadcast may dispatch to zero peers"
                 );
                 return Ok(last_seen);
             }
@@ -850,6 +985,26 @@ impl NetworkService for TenzroNetworkService {
         self.send_command(|response| NetworkCommand::ListenAddresses { response })
             .await
     }
+
+    async fn broadcast_to_validators(&self, message: ConsensusMessage) -> Result<usize> {
+        self.send_command(move |response| NetworkCommand::BroadcastToValidators {
+            message,
+            response,
+        })
+        .await
+    }
+
+    async fn subscribe_consensus_direct(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<ConsensusMessage>> {
+        self.send_command(|response| NetworkCommand::SubscribeConsensusDirect { response })
+            .await
+    }
+
+    async fn connected_validator_count(&self) -> Result<usize> {
+        self.send_command(|response| NetworkCommand::ConnectedValidatorCount { response })
+            .await
+    }
 }
 
 /// Event loop state
@@ -884,7 +1039,53 @@ struct EventLoopState {
     /// transitions through this channel — first physical connection emits
     /// `Connected`, last drop emits `Disconnected`.
     peer_event_subscriber: Option<mpsc::UnboundedSender<PeerEvent>>,
+    /// Subscriber channel for inbound consensus-direct messages. `None` until
+    /// the node-level consensus engine attaches via `SubscribeConsensusDirect`.
+    /// Inbound requests arriving while this is `None` are answered with
+    /// `ConsensusDirectError::NoSubscriber` so the sender stops retrying
+    /// against this peer.
+    consensus_direct_subscriber: Option<mpsc::UnboundedSender<ConsensusMessage>>,
+    /// Per-peer count of currently-in-flight inbound consensus-direct
+    /// streams. Used to enforce `MAX_INBOUND_STREAMS_PER_PEER` and reject
+    /// overflow with `ConsensusDirectError::ServerBusy` rather than queueing.
+    /// Decremented on `ResponseSent` / `InboundFailure`.
+    consensus_direct_inbound_inflight: HashMap<PeerId, usize>,
+    /// Tally of `observed_addr` reports received via Identify, keyed by the
+    /// reported external multiaddr → set of distinct peer IDs that have
+    /// reported it. Once a candidate accumulates reports from at least
+    /// `OBSERVED_ADDR_CONFIRMATION_THRESHOLD` distinct peers, we promote it
+    /// via `Swarm::add_external_address` so Identify advertises it on the
+    /// next exchange. This is the permissionless-NAT-discovery primitive:
+    /// every node learns its own public address from what its peers see,
+    /// without any per-deployment `--external-p2p-addr` configuration.
+    ///
+    /// The defence against an attacker lying about our address is AutoNAT v2
+    /// probe-back (registered in `TenzroBehaviour::autonat_client`): a third
+    /// party cannot fake a server-initiated dial-back to a candidate, so the
+    /// candidate is only advertised network-wide after AutoNAT confirms it.
+    /// The Identify observed_addr tally surfaces candidates; AutoNAT gates
+    /// promotion to confirmed-external.
+    observed_addrs: HashMap<Multiaddr, HashSet<PeerId>>,
+    /// External addresses we have already promoted via `add_external_address`
+    /// to avoid double-promotion when more `observed_addr` reports arrive
+    /// from additional peers after confirmation.
+    advertised_external_addrs: HashSet<Multiaddr>,
 }
+
+/// Number of distinct peers that must independently report the same
+/// `observed_addr` via Identify before we promote it to an external-address
+/// candidate. Set to 1 because AutoNAT v2 probe-back is the actual
+/// reachability gate: Identify gives us a candidate, AutoNAT confirms it
+/// cryptographically by asking a public peer to dial us back on that
+/// address. A liar can name any candidate; they cannot fake an AutoNAT
+/// dial-back from a third-party server. The higher N-distinct-peers value
+/// (3) used by Substrate is a belt without braces — appropriate when
+/// AutoNAT is not in the stack. Our stack has both, so the lower threshold
+/// is correct and necessary: a freshly-joined node typically has 1 peer at
+/// bootstrap (the seed) and cannot reach N=3 distinct reporters until it
+/// is already meshed, which is the very problem this primitive is meant
+/// to solve.
+const OBSERVED_ADDR_CONFIRMATION_THRESHOLD: usize = 1;
 
 /// Main event loop for the network service
 async fn run_event_loop(
@@ -898,26 +1099,67 @@ async fn run_event_loop(
 
     tracing::info!("Local peer ID: {}", local_peer_id);
 
-    // Create transport
-    let transport = transport::build_transport(&local_key)?;
+    // Swarm construction via `SwarmBuilder` — required for `with_relay_client()`
+    // which both adds the relay-client behaviour AND wraps the transport so
+    // that `/p2p-circuit` multiaddrs become dialable. The pre-existing
+    // hand-rolled `Swarm::new(transport, behaviour, ...)` path can't express
+    // that wrap, which is why the migration is needed for #132.
+    //
+    // Composition order (libp2p 0.56 docs):
+    //   identity → tokio → tcp(TLS+Yamux) → quic → dns → relay_client → behaviour → swarm_config
+    //
+    // The TCP transport keeps `libp2p-tls` (rustls + aws-lc-rs, PQ-hybrid
+    // X25519MLKEM768) — `with_tcp()` accepts the same `libp2p::tls::Config`
+    // constructor that `transport::build_transport()` used previously. The
+    // QUIC half is similarly inherited from the SwarmBuilder.
+    //
+    // `with_relay_client()` is unconditional here even when the role's
+    // `enable_hole_punching` is false: the cost of installing the transport
+    // wrapper is negligible and keeping it always-on lets a future config
+    // change re-enable hole punching without touching the swarm topology.
+    // The `relay_client` behaviour half is then conditionally toggled
+    // on/off inside `TenzroBehaviour::new()`.
+    let enable_relay = config.enable_relay;
+    let enable_hole_punching = config.enable_hole_punching;
+    let protocol_version = config.protocol_version.clone();
+    let user_agent = config.user_agent.clone();
+    let idle_timeout = config.connection_idle_timeout;
 
-    // Create behaviour
-    let behaviour = TenzroBehaviour::new(
-        local_peer_id,
-        &local_key,
-        config.protocol_version.clone(),
-        config.user_agent.clone(),
-    )
-    .map_err(|e| NetworkError::Transport(e.to_string()))?;
-
-    // Create swarm
-    let mut swarm = Swarm::new(
-        transport,
-        behaviour,
-        local_peer_id,
-        libp2p::swarm::Config::with_tokio_executor()
-            .with_idle_connection_timeout(config.connection_idle_timeout),
-    );
+    let mut swarm = libp2p::SwarmBuilder::with_existing_identity(local_key.clone())
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default().nodelay(true),
+            libp2p::tls::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .map_err(|e| NetworkError::Transport(format!("TCP/TLS upgrade failed: {}", e)))?
+        .with_quic()
+        .with_dns()
+        .map_err(|e| NetworkError::Transport(format!("DNS transport failed: {}", e)))?
+        .with_relay_client(libp2p::tls::Config::new, libp2p::yamux::Config::default)
+        .map_err(|e| NetworkError::Transport(format!("Relay client transport failed: {}", e)))?
+        .with_behaviour(|key, relay_client| {
+            // libp2p's `TryIntoBehaviour` impl requires
+            // `Result<B, Box<dyn std::error::Error + Send + Sync>>`.
+            // `TenzroBehaviour::new` returns the non-Send/Sync variant, so
+            // re-box the error here. The boxed error is later surfaced
+            // through `NetworkError::Transport` at the `?` site below.
+            TenzroBehaviour::new(
+                local_peer_id,
+                key,
+                protocol_version,
+                user_agent,
+                enable_relay,
+                enable_hole_punching,
+                Some(relay_client),
+            )
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                e.to_string().into()
+            })
+        })
+        .map_err(|e| NetworkError::Transport(format!("Behaviour construction failed: {}", e)))?
+        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(idle_timeout))
+        .build();
 
     // Listen on configured addresses
     for addr in &config.listen_addresses {
@@ -926,6 +1168,36 @@ async fn run_event_loop(
             .map_err(|e| NetworkError::Transport(format!("Failed to listen on {}: {}", addr, e)))?;
         tracing::info!("Listening on {}", addr);
     }
+
+    // Register statically-configured external addresses with the swarm.
+    // These are the ONLY addresses Identify will advertise to peers (because
+    // `hide_listen_addrs(true)` is set on the identify config) — see the
+    // long-form rationale in `behaviour.rs::TenzroBehaviour::new`. On cloud
+    // deployments where the node knows its own public IP at boot (validator
+    // VMs in our GCE testnet, for example) this is the cleanest way to
+    // prevent the docker0 / loopback / VPC-only addresses from being
+    // advertised. For nodes behind NAT, leave this empty and let AutoNAT v2
+    // confirm an external address dynamically.
+    for addr in &config.external_addresses {
+        if !is_globally_routable(addr) {
+            tracing::warn!(
+                "Refusing to advertise non-routable external address {} — \
+                 check NetworkConfig::external_addresses",
+                addr
+            );
+            continue;
+        }
+        swarm.add_external_address(addr.clone());
+        tracing::info!("Advertising external address {}", addr);
+    }
+    // Snapshot static external addresses so the observed_addr promotion path
+    // below doesn't re-promote them — see `EventLoopState::advertised_external_addrs`.
+    let preconfigured_external: HashSet<Multiaddr> = config
+        .external_addresses
+        .iter()
+        .filter(|a| is_globally_routable(a))
+        .cloned()
+        .collect();
 
     // Create peer manager. No longer needs `mut` — `add_protected_peer`
     // takes `&self` now that `protected_peers` is a lock-free `DashSet`.
@@ -1005,11 +1277,30 @@ async fn run_event_loop(
         block_sync_request_subscriber: None,
         block_sync_result_subscriber: None,
         peer_event_subscriber: None,
+        consensus_direct_subscriber: None,
+        consensus_direct_inbound_inflight: HashMap::new(),
+        observed_addrs: HashMap::new(),
+        advertised_external_addrs: preconfigured_external,
     };
 
     // Create periodic cleanup timer (every 60 seconds)
     let mut cleanup_interval = interval(Duration::from_secs(60));
     cleanup_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    // Periodic Kademlia bootstrap (every 60 seconds, mirrors Lighthouse).
+    //
+    // Kademlia routing tables degrade on churn-y networks: peers come and go,
+    // buckets thin out, and DHT lookups start to stall. Re-issuing `bootstrap()`
+    // on a slow tick keeps the routing table populated by re-exploring the
+    // ID space from our own peer ID. The QueryId is fire-and-forget — actual
+    // results land in `KademliaEvent::OutboundQueryProgressed` with
+    // `QueryResult::Bootstrap(_)` and are handled by the swarm event handler.
+    //
+    // Gated by `config.enable_dht` for symmetry with the one-shot bootstrap
+    // above; if the DHT is disabled, periodic bootstrap is meaningless.
+    let dht_enabled = config.enable_dht;
+    let mut kademlia_bootstrap_interval = interval(Duration::from_secs(60));
+    kademlia_bootstrap_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     // Main event loop
     loop {
@@ -1048,6 +1339,27 @@ async fn run_event_loop(
                     stats.connected,
                     stats.banned
                 );
+            }
+
+            // Periodic Kademlia bootstrap — keeps the DHT routing table fresh
+            // on long-running validators. Fire-and-forget; progress arrives
+            // via `KademliaEvent::OutboundQueryProgressed`.
+            _ = kademlia_bootstrap_interval.tick(), if dht_enabled => {
+                match state.swarm.behaviour_mut().kademlia.bootstrap() {
+                    Ok(query_id) => {
+                        tracing::debug!(
+                            ?query_id,
+                            "Periodic Kademlia bootstrap initiated"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Periodic Kademlia bootstrap failed to start \
+                             (no known peers in routing table?)"
+                        );
+                    }
+                }
             }
         }
     }
@@ -1195,6 +1507,196 @@ fn handle_block_sync_event(
     }
 }
 
+/// Translates a libp2p `request_response::Event` for the consensus-direct
+/// codec into the typed `ConsensusMessage` channel exposed to the consensus
+/// engine.
+///
+/// Inbound flow:
+///   1. Peer sends a `ConsensusDirectRequest::Message(ConsensusMessage)`.
+///   2. We check per-peer inbound concurrency; if at cap, immediately reply
+///      `Error(ServerBusy{limit})` (no queuing — same anti-pattern guard as
+///      block-sync).
+///   3. If no consensus subscriber is attached, immediately reply
+///      `Error(NoSubscriber)` so the sender stops retrying against us.
+///   4. Otherwise: bump in-flight count, push the message to the subscriber,
+///      and synchronously reply `Ack` (the consensus engine processes from
+///      its own queue independently — we do not block the wire on its
+///      pipeline).
+///
+/// Outbound flow:
+///   * `ResponseSent` → trace log (request fully flushed; nothing else to do).
+///   * `InboundFailure` → decrement in-flight counter and log.
+///   * `OutboundFailure` → log; the consensus retry policy in tenzro-consensus
+///     reacts to the typed error class returned through `Ack`/transport.
+fn handle_consensus_direct_event(
+    state: &mut EventLoopState,
+    event: request_response::Event<ConsensusDirectRequest, ConsensusDirectResponse>,
+) {
+    use request_response::{Event as RrEvent, Message};
+    match event {
+        RrEvent::Message {
+            peer,
+            message: Message::Request {
+                request_id: _,
+                request,
+                channel,
+            },
+            ..
+        } => {
+            // Per-peer inbound concurrency cap. Reject overflow synchronously
+            // with ServerBusy rather than queueing — queuing causes the
+            // requester's response timeout to fire while the request still
+            // sits in our backlog.
+            let inflight = state
+                .consensus_direct_inbound_inflight
+                .entry(peer)
+                .or_insert(0);
+            if *inflight >= MAX_INBOUND_STREAMS_PER_PEER {
+                tracing::warn!(
+                    %peer,
+                    limit = MAX_INBOUND_STREAMS_PER_PEER,
+                    "consensus-direct: rejecting overflow inbound stream"
+                );
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .consensus_direct
+                    .send_response(
+                        channel,
+                        ConsensusDirectResponse::Error(ConsensusDirectError::ServerBusy {
+                            limit: MAX_INBOUND_STREAMS_PER_PEER,
+                        }),
+                    );
+                return;
+            }
+
+            // No subscriber attached — sender should NOT retry against us.
+            // Reply NoSubscriber so the consensus retry policy on the other
+            // side can prune us from its targets.
+            let Some(tx) = state.consensus_direct_subscriber.as_ref() else {
+                tracing::warn!(
+                    %peer,
+                    "consensus-direct: no subscriber attached — replying NoSubscriber"
+                );
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .consensus_direct
+                    .send_response(
+                        channel,
+                        ConsensusDirectResponse::Error(ConsensusDirectError::NoSubscriber),
+                    );
+                return;
+            };
+
+            // Forward to the consensus engine. We Ack synchronously — the
+            // engine processes the message from its own queue. The Ack means
+            // "we accepted the message into our pipeline", not "we processed
+            // the consensus state-machine effect of this message".
+            let ConsensusDirectRequest::Message(consensus_msg) = request;
+            let send_result = tx.send(consensus_msg);
+            if send_result.is_err() {
+                tracing::warn!(
+                    %peer,
+                    "consensus-direct: subscriber dropped — replying NoSubscriber"
+                );
+                state.consensus_direct_subscriber = None;
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .consensus_direct
+                    .send_response(
+                        channel,
+                        ConsensusDirectResponse::Error(ConsensusDirectError::NoSubscriber),
+                    );
+                return;
+            }
+
+            *inflight += 1;
+
+            let _ = state
+                .swarm
+                .behaviour_mut()
+                .consensus_direct
+                .send_response(channel, ConsensusDirectResponse::Ack);
+        }
+        RrEvent::Message {
+            peer,
+            message: Message::Response {
+                request_id,
+                response,
+            },
+            ..
+        } => {
+            // Outbound responses are Ack/Error. We log Error variants because
+            // the sender's consensus retry policy may want to skip future
+            // dispatches to a NoSubscriber peer (the per-validator dispatch
+            // loop in event_loop.rs picks the validator set fresh each call,
+            // so a NoSubscriber decision is naturally recomputed next round).
+            match response {
+                ConsensusDirectResponse::Ack => {
+                    tracing::trace!(%peer, %request_id, "consensus-direct ack");
+                }
+                ConsensusDirectResponse::Error(err) => {
+                    tracing::warn!(
+                        %peer,
+                        %request_id,
+                        %err,
+                        "consensus-direct: peer returned error response"
+                    );
+                }
+            }
+        }
+        RrEvent::OutboundFailure {
+            peer,
+            request_id,
+            error,
+            ..
+        } => {
+            tracing::warn!(
+                %peer,
+                %request_id,
+                %error,
+                "consensus-direct outbound failure"
+            );
+        }
+        RrEvent::InboundFailure {
+            peer,
+            request_id,
+            error,
+            ..
+        } => {
+            tracing::debug!(
+                %peer,
+                %request_id,
+                %error,
+                "consensus-direct inbound failure"
+            );
+            // Decrement inflight on the failure path — the request never
+            // reached `send_response`, so the slot is freed here.
+            if let Some(count) = state.consensus_direct_inbound_inflight.get_mut(&peer)
+                && *count > 0
+            {
+                *count -= 1;
+            }
+        }
+        RrEvent::ResponseSent { peer, request_id, .. } => {
+            tracing::trace!(
+                %peer,
+                %request_id,
+                "consensus-direct response flushed to wire"
+            );
+            // Decrement inflight on the happy path — the response is now on
+            // the wire and the inbound stream slot is freed.
+            if let Some(count) = state.consensus_direct_inbound_inflight.get_mut(&peer)
+                && *count > 0
+            {
+                *count -= 1;
+            }
+        }
+    }
+}
+
 /// Handles swarm events
 async fn handle_swarm_event(
     state: &mut EventLoopState,
@@ -1317,12 +1819,78 @@ async fn handle_swarm_event(
                     .peer_manager
                     .update_protocol_version(&peer_id, info.protocol_version);
 
-                // Add only globally routable addresses to Kademlia DHT.
+                // Add only globally routable addresses to Kademlia DHT, then
+                // dial the discovered peer to actually form a mesh connection.
+                //
                 // Filters out loopback (127.x), private RFC-1918, Docker bridge (172.17.x),
                 // link-local, and unspecified addresses that K8s pods cannot reach.
-                for addr in info.listen_addrs {
-                    if is_globally_routable(&addr) {
-                        state.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                //
+                // The dial-on-discovery step is the canonical permissionless-mesh
+                // pattern used by Substrate (`discovery.rs::next_kad_random_query` →
+                // dial via Behaviour::poll), Lighthouse (`network/src/discovery.rs`
+                // `Discovery::dial_peer`), and IPFS Kubo. Without it, joiners learn
+                // about the other validators via Kademlia/Identify but never open
+                // TCP connections to them — the routing table fills up while
+                // `swarm.connected_peers()` stays at 0, producing a permanent
+                // star topology around the bootstrap node.
+                let already_connected = state.swarm.is_connected(&peer_id);
+                for addr in &info.listen_addrs {
+                    if is_globally_routable(addr) {
+                        state
+                            .swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, addr.clone());
+
+                        // Feed the discovered address into the Swarm's per-peer
+                        // address book so `request_response` behaviours
+                        // (`consensus_direct`, `block_sync`, etc.) can dial out
+                        // when they enqueue a request.
+                        //
+                        // **This is the canonical libp2p fix for "send_request
+                        // returns RequestId synchronously, then dial fails
+                        // silently."** `request_response::Behaviour` does not
+                        // auto-discover addresses from existing swarm
+                        // connections — it requires either an explicit address
+                        // on the request or a prior `Swarm::add_peer_address`
+                        // call. Without this hook, every cross-replica vote
+                        // dispatch was a no-op: `send_request` happily allocated
+                        // a RequestId, the dispatcher logged `dispatched=9`,
+                        // and the request sat in the state machine waiting for
+                        // a dial that never happened — never delivered as
+                        // `OutboundFailure::DialFailure` either, because the
+                        // dial wasn't scheduled. Result: consensus QC never
+                        // formed (`votes=1 threshold=7` forever).
+                        //
+                        // Identify's `Event::Received { peer_id, info }` is
+                        // the natural hook — `info.listen_addrs` is the peer's
+                        // self-advertised reachable set, which is exactly what
+                        // request_response needs to dial. The same address set
+                        // is already fed into Kademlia immediately above; this
+                        // call extends the same data into the swarm-level
+                        // address book that all behaviours consult.
+                        //
+                        // Refs: libp2p/rust-libp2p#5708, request_response
+                        // Behaviour docs (the `add_address` method on the
+                        // behaviour itself is deprecated in favour of
+                        // `Swarm::add_peer_address`).
+                        state.swarm.add_peer_address(peer_id, addr.clone());
+
+                        if !already_connected {
+                            match state.swarm.dial(addr.clone()) {
+                                Ok(()) => tracing::info!(
+                                    %peer_id,
+                                    %addr,
+                                    "Dialing Kademlia-discovered peer (Identify)"
+                                ),
+                                Err(e) => tracing::debug!(
+                                    %peer_id,
+                                    %addr,
+                                    error = %e,
+                                    "Dial-on-discovery skipped"
+                                ),
+                            }
+                        }
                     } else {
                         tracing::debug!(
                             "Skipping non-routable DHT address from {}: {}",
@@ -1330,6 +1898,60 @@ async fn handle_swarm_event(
                             addr
                         );
                     }
+                }
+
+                // Permissionless NAT discovery: every Identify exchange reports
+                // the local-node address the remote peer observed us at. Tally
+                // distinct peers per observed address; once N≥3 independent
+                // peers agree on the same external multiaddr, promote it via
+                // `Swarm::add_external_address` so Identify advertises it on
+                // the next exchange (libp2p sources advertised addrs from
+                // `Swarm::external_addresses()`).
+                //
+                // This is the same primitive Substrate / Lighthouse / IPFS /
+                // Sui use to ship NAT-agnostic permissionless networks —
+                // no `--external-p2p-addr` flag required, no per-deployment
+                // config, works from home wifi, mobile, EC2, GCE alike.
+                //
+                // The N-distinct-peers gate is the standard rust-libp2p
+                // defence against a single malicious peer lying about our
+                // address (see libp2p-identify CHANGELOG 0.43.0: observed
+                // addresses are no longer trusted by default). AutoNAT v2
+                // client (registered in `TenzroBehaviour::autonat_client`)
+                // adds orthogonal probe-back confirmation: it picks one of
+                // our advertised external addresses and asks a public peer
+                // to dial back to verify reachability. Both gates must pass.
+                let obs = info.observed_addr.clone();
+                if is_globally_routable(&obs) && !state.advertised_external_addrs.contains(&obs) {
+                    let reporters = state.observed_addrs.entry(obs.clone()).or_default();
+                    if reporters.insert(peer_id) {
+                        tracing::debug!(
+                            %peer_id,
+                            observed = %obs,
+                            count = reporters.len(),
+                            threshold = OBSERVED_ADDR_CONFIRMATION_THRESHOLD,
+                            "Observed-address report received via Identify"
+                        );
+                    }
+                    if reporters.len() >= OBSERVED_ADDR_CONFIRMATION_THRESHOLD {
+                        tracing::info!(
+                            address = %obs,
+                            reporters = reporters.len(),
+                            "Promoting observed address to advertised external address \
+                             (N distinct peers agree — permissionless NAT discovery)"
+                        );
+                        state.swarm.add_external_address(obs.clone());
+                        state.advertised_external_addrs.insert(obs.clone());
+                        // Free the tally memory for this address — once promoted,
+                        // additional reports are not actionable.
+                        state.observed_addrs.remove(&obs);
+                    }
+                } else if !is_globally_routable(&obs) {
+                    tracing::trace!(
+                        %peer_id,
+                        observed = %obs,
+                        "Ignoring non-routable observed address from peer"
+                    );
                 }
             }
             TenzroBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed { result, .. }) => {
@@ -1366,6 +1988,94 @@ async fn handle_swarm_event(
             TenzroBehaviourEvent::BlockSync(rr_event) => {
                 handle_block_sync_event(state, rr_event);
             }
+            TenzroBehaviourEvent::ConsensusDirect(rr_event) => {
+                handle_consensus_direct_event(state, rr_event);
+            }
+            TenzroBehaviourEvent::AutonatClient(autonat::v2::client::Event {
+                tested_addr,
+                bytes_sent,
+                server,
+                result,
+            }) => {
+                // AutoNAT v2 client probe result. Successful probes confirm
+                // an external address; libp2p's autonat client behaviour
+                // emits `SwarmEvent::ExternalAddrConfirmed` on success
+                // independently, so we just log here for observability.
+                match result {
+                    Ok(()) => tracing::info!(
+                        %server,
+                        address = %tested_addr,
+                        bytes_sent,
+                        "AutoNAT probe succeeded — address reachable"
+                    ),
+                    Err(e) => tracing::debug!(
+                        %server,
+                        address = %tested_addr,
+                        bytes_sent,
+                        error = %e,
+                        "AutoNAT probe failed — address not reachable from server"
+                    ),
+                }
+            }
+            TenzroBehaviourEvent::AutonatServer(_) => {
+                // Server-side dial-back requests. No action needed — the
+                // behaviour serves probes autonomously.
+            }
+            TenzroBehaviourEvent::RelayClient(relay_event) => match relay_event {
+                relay::client::Event::ReservationReqAccepted {
+                    relay_peer_id,
+                    renewal,
+                    limit,
+                } => {
+                    tracing::info!(
+                        %relay_peer_id,
+                        renewal,
+                        ?limit,
+                        "Circuit-Relay v2 reservation accepted — this node is now \
+                         reachable via /p2p/<relay>/p2p-circuit/p2p/<self>"
+                    );
+                }
+                relay::client::Event::OutboundCircuitEstablished {
+                    relay_peer_id,
+                    limit,
+                } => {
+                    tracing::info!(
+                        %relay_peer_id,
+                        ?limit,
+                        "Outbound circuit established via relay"
+                    );
+                }
+                relay::client::Event::InboundCircuitEstablished {
+                    src_peer_id,
+                    limit,
+                } => {
+                    tracing::info!(
+                        %src_peer_id,
+                        ?limit,
+                        "Inbound circuit established via relay"
+                    );
+                }
+            },
+            TenzroBehaviourEvent::Relay(_) => {
+                // Server-side relay events (reservation requests served to
+                // other peers). No action needed — the behaviour handles
+                // them autonomously according to `relay::Config`.
+            }
+            TenzroBehaviourEvent::Dcutr(dcutr::Event {
+                remote_peer_id,
+                result,
+            }) => match result {
+                Ok(conn_id) => tracing::info!(
+                    %remote_peer_id,
+                    ?conn_id,
+                    "DCUtR hole-punch succeeded — direct connection upgraded from relayed"
+                ),
+                Err(e) => tracing::debug!(
+                    %remote_peer_id,
+                    error = %e,
+                    "DCUtR hole-punch failed — will continue using relayed connection"
+                ),
+            },
             _ => {}
         },
         SwarmEvent::ConnectionEstablished {
@@ -1493,6 +2203,32 @@ async fn handle_swarm_event(
             } else {
                 tracing::warn!("Outgoing connection error (no peer ID): {}", error);
             }
+        }
+        SwarmEvent::NewExternalAddrCandidate { address } => {
+            // libp2p emits this when a behaviour (typically Identify or
+            // AutoNAT) surfaces an externally-observed address. We don't
+            // auto-promote here — the observed_addr tally in the Identify
+            // handler is what gates promotion. Logged for operator
+            // observability.
+            tracing::debug!(%address, "New external address candidate");
+        }
+        SwarmEvent::ExternalAddrConfirmed { address } => {
+            tracing::info!(
+                %address,
+                "External address confirmed (AutoNAT probe-back succeeded)"
+            );
+            // Belt-and-braces: AutoNAT-confirmed addresses are reliable
+            // reachability evidence. Make sure we also record it so the
+            // observed_addr tally doesn't waste cycles re-counting.
+            state.advertised_external_addrs.insert(address.clone());
+            state.observed_addrs.remove(&address);
+        }
+        SwarmEvent::ExternalAddrExpired { address } => {
+            tracing::info!(
+                %address,
+                "External address expired — stopping advertisement"
+            );
+            state.advertised_external_addrs.remove(&address);
         }
         _ => {}
     }
@@ -1670,6 +2406,59 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
             let (tx, rx) = mpsc::unbounded_channel();
             state.peer_event_subscriber = Some(tx);
             let _ = response.send(Ok(rx));
+        }
+        NetworkCommand::BroadcastToValidators { message, response } => {
+            // Snapshot the validator set at send time. Per the
+            // `ValidatorRegistry` trait contract, `validator_peer_ids()` is
+            // a cheap clone of the current admitted-validator set.
+            let result = match state.peer_manager.validator_registry() {
+                None => Err(NetworkError::InvalidConfig(
+                    "consensus-direct broadcast requires an installed ValidatorRegistry"
+                        .to_string(),
+                )),
+                Some(registry) => {
+                    let validator_set = registry.validator_peer_ids();
+                    let local = *state.swarm.local_peer_id();
+                    let request = ConsensusDirectRequest::Message(message);
+                    let mut dispatched = 0usize;
+                    for peer in validator_set.iter() {
+                        if *peer == local {
+                            // Skip self — consensus engine consumes its own
+                            // outbound messages directly via the in-process
+                            // channel, not over the wire.
+                            continue;
+                        }
+                        let _request_id = state
+                            .swarm
+                            .behaviour_mut()
+                            .consensus_direct
+                            .send_request(peer, request.clone());
+                        dispatched += 1;
+                    }
+                    Ok(dispatched)
+                }
+            };
+            let _ = response.send(result);
+        }
+        NetworkCommand::SubscribeConsensusDirect { response } => {
+            let (tx, rx) = mpsc::unbounded_channel();
+            state.consensus_direct_subscriber = Some(tx);
+            let _ = response.send(Ok(rx));
+        }
+        NetworkCommand::ConnectedValidatorCount { response } => {
+            let count = match state.peer_manager.validator_registry() {
+                None => 0,
+                Some(registry) => {
+                    let validator_set = registry.validator_peer_ids();
+                    let local = *state.swarm.local_peer_id();
+                    state
+                        .swarm
+                        .connected_peers()
+                        .filter(|p| **p != local && validator_set.contains(*p))
+                        .count()
+                }
+            };
+            let _ = response.send(Ok(count));
         }
         NetworkCommand::Shutdown { response } => {
             // Respond before the outer loop observes the Shutdown variant and breaks.

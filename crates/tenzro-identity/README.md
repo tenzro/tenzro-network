@@ -6,13 +6,17 @@ Unified identity protocol for humans and machines on the Tenzro Network.
 
 **tenzro-identity** implements the **Tenzro Decentralized Identity Protocol (TDIP)**, providing a comprehensive identity system that treats humans and AI agents as first-class citizens. The crate supports W3C DID Documents, verifiable credentials with recursive trust chain verification, fine-grained delegation scopes, cascading revocation, and automatic FROST-Ed25519 threshold wallet provisioning for every identity.
 
-The protocol uses the `did:tenzro:` namespace (TDIP primary standard); parsers also accept the `did:pdis:` scheme (PDIS secondary standard).
+The protocol recognises **three identity classes** under the `did:tenzro:` namespace:
+
+- **Human** — `did:tenzro:human:{uuid}`, KYC-tiered, controls zero or more delegated agents
+- **Delegated agent** — `did:tenzro:machine:{controller}:{uuid}`, machine under a human controller, scoped by `DelegationScope`
+- **Autonomous agent** — `did:tenzro:machine:{uuid}`, self-sovereign machine, no controller
 
 ## Key Types
 
 - **TenzroIdentity** — Unified identity type for both human and machine identities with JSON serialization (`to_bytes()`/`from_bytes()`)
-- **TenzroDid** — DID parser/formatter supporting `did:tenzro:human:{uuid}`, `did:tenzro:machine:{controller}:{uuid}`, `did:tenzro:machine:{uuid}` (autonomous), and `did:pdis:guardian:{uuid}` / `did:pdis:agent:{controller}:{uuid}` formats
-- **IdentityData** — Enum distinguishing Human (display_name, KYC tier, controlled_machines) from Machine (capabilities, delegation_scope, controller_did, reputation, tenzro_agent_id, `is_seed_agent`)
+- **TenzroDid** — DID parser/formatter supporting all three identity classes: `did:tenzro:human:{uuid}`, `did:tenzro:machine:{controller}:{uuid}` (delegated), `did:tenzro:machine:{uuid}` (autonomous). Three constructors: `new_human()`, `new_machine(controller_id)`, `new_autonomous_machine()`
+- **IdentityData** — Enum distinguishing Human (display_name, KYC tier, controlled_machines) from Machine (capabilities, delegation_scope, controller_did, reputation, tenzro_agent_id, `is_seed_agent`). The two machine sub-classes (delegated vs autonomous) are distinguished by `controller_did: Option<String>` — `Some(human_did)` = delegated, `None` = autonomous.
 - **`is_seed_agent`** — Immutable boolean on `IdentityData::Machine` set at registration, exposed via `TenzroIdentity::is_seed_agent()`. Drives the SeedAgent counterparty filter (`CounterpartyFilter::deny_other_seed_agents`) and lets organic-activity metrics exclude protocol-owned bootstrap traffic during the 12-month earmark window.
 - **IdentityRegistry** — Thread-safe central store using DashMap with cascading revocation, pluggable `DidResolutionBackend` and `RevocationBroadcaster`, username registry, and RocksDB write-through persistence via `KvStore`
 - **IdentityVerifier** — Trust chain verifier with recursive `verify_credential_chain()`, cycle detection, configurable depth bound (default 10), and trust-root anchoring
@@ -28,7 +32,7 @@ The protocol uses the `did:tenzro:` namespace (TDIP primary standard); parsers a
 
 - **10 modules:** credential, delegation, did, document, error, identity, registry, verification, w3c, wallet_binding
 - **W3C Standards:** Full DID Core 1.0 and Verifiable Credentials Data Model v2.0 support
-- **Unified Protocol:** Single identity type for humans and machines (TDIP primary, PDIS secondary)
+- **Unified Protocol:** Single `TenzroIdentity` type covering all three identity classes (human / delegated agent / autonomous agent)
 - **Delegation Enforcement:** Fine-grained permission scopes with `enforce_operation()` returning typed `DelegationViolation` errors
 - **Credential Inheritance:** Machine agents inherit credentials from controllers via `inherit_credential()`
 - **Recursive Trust Chain Verification:** `IdentityVerifier::verify_credential_chain()` with cycle detection, depth bound, and trust-root anchoring
@@ -39,7 +43,6 @@ The protocol uses the `did:tenzro:` namespace (TDIP primary standard); parsers a
 - **Username Registry:** Unique lowercase alphanumeric + underscore names (3-20 chars) with `register_username()` / `resolve_username()`
 - **Auto-Provisioned Wallets:** Every identity gets a 2-of-3 FROST-Ed25519 threshold wallet (RFC 9591) via `WalletBinder`
 - **Write-Through Persistence:** RocksDB storage via `KvStore` trait with `CF_IDENTITIES` column family
-- **PDIS Format Support:** Parses `did:pdis:guardian:{uuid}` and `did:pdis:agent:{controller}:{uuid}` (PDIS secondary standard)
 - **ERC-8004 Trustless Agents Registry:** Interoperability with Ethereum's ERC-8004 v0.6+ standard. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — server-allocated, never derivable client-side. The TDIP `IdentityData::Machine.erc8004_agent_id` field captures the allocation; reverse DID → id lookup via `OnChainAgentRegistry::lookup_agent_id_by_did`. Calldata encoders for `register()` / `register(string)` / `register(string,(string,bytes)[])` / `getAgent` / `submitFeedback` / `validationRequest` / `validationResponse`, plus ABI decoders for on-chain lookups. Selectors are byte-identical to the Tenzro VM precompiles `0x101a` (identity) / `0x101b` (reputation) / `0x101c` (validation), so the same calldata works against either the native Tenzro registry or an Ethereum mirror.
 - **85 Tests:** Comprehensive unit and integration tests covering all features
 

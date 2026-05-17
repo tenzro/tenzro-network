@@ -4,6 +4,7 @@
 //! agents and providers can publish callable skills for others to
 //! discover, invoke, and pay for autonomously.
 
+use crate::primitives::Address;
 use serde::{Deserialize, Serialize};
 
 /// Status of a skill in the registry
@@ -39,6 +40,13 @@ pub struct SkillDefinition {
 
     /// DID of the agent or human who registered this skill
     pub creator_did: String,
+
+    /// Payout wallet for the creator's share of paid invocations.
+    /// **Mandatory** for any non-zero `price_per_call`; registration
+    /// fails (`SkillError::MissingCreatorWallet`) if omitted for a
+    /// paid skill. Free skills (`price_per_call == 0`) may leave this
+    /// `None`.
+    pub creator_wallet: Option<Address>,
 
     /// Description of what this skill does
     pub description: String,
@@ -120,6 +128,7 @@ impl SkillDefinition {
             name,
             version,
             creator_did,
+            creator_wallet: None,
             description,
             input_schema: serde_json::Value::Object(serde_json::Map::new()),
             output_schema: serde_json::Value::Object(serde_json::Map::new()),
@@ -146,6 +155,23 @@ impl SkillDefinition {
     /// keep the skill from being swept as stale.
     pub fn touch(&mut self) {
         self.last_seen_at = default_last_seen();
+    }
+
+    /// Returns `true` when this skill is paid (non-zero `price_per_call`).
+    pub fn is_paid(&self) -> bool {
+        self.price_per_call > 0
+    }
+
+    /// Validate registration invariants. Any paid skill must declare a
+    /// `creator_wallet` to receive the creator share of each invocation;
+    /// otherwise the creator share would have no destination and the
+    /// network commission would have nothing to split against. Free
+    /// skills (`price_per_call == 0`) may omit `creator_wallet`.
+    pub fn validate_for_registration(&self) -> Result<(), &'static str> {
+        if self.is_paid() && self.creator_wallet.is_none() {
+            return Err("Paid skill (price_per_call > 0) requires a creator_wallet");
+        }
+        Ok(())
     }
 }
 
@@ -217,8 +243,48 @@ mod tests {
         assert_eq!(skill.name, "web-search");
         assert_eq!(skill.version, "1.0.0");
         assert!(skill.is_available());
+        assert!(skill.is_paid());
+        assert!(skill.creator_wallet.is_none(), "wallet starts unset; caller must populate before paid registration");
         assert_eq!(skill.status, SkillStatus::Active);
         assert_eq!(skill.invocation_count, 0);
+    }
+
+    #[test]
+    fn paid_skill_without_wallet_fails_validation() {
+        let skill = SkillDefinition::new(
+            "premium-skill".to_string(),
+            "1.0.0".to_string(),
+            "did:tenzro:human:creator".to_string(),
+            "Paid skill".to_string(),
+            1_000_000_000_000_000_000, // 1 TNZO
+        );
+        // creator_wallet starts as None — validate should reject.
+        assert!(skill.validate_for_registration().is_err());
+    }
+
+    #[test]
+    fn free_skill_without_wallet_passes_validation() {
+        let skill = SkillDefinition::new(
+            "free-skill".to_string(),
+            "1.0.0".to_string(),
+            "did:tenzro:human:creator".to_string(),
+            "Free skill".to_string(),
+            0,
+        );
+        assert!(skill.validate_for_registration().is_ok());
+    }
+
+    #[test]
+    fn paid_skill_with_wallet_passes_validation() {
+        let mut skill = SkillDefinition::new(
+            "paid-skill".to_string(),
+            "1.0.0".to_string(),
+            "did:tenzro:human:creator".to_string(),
+            "Paid skill".to_string(),
+            500,
+        );
+        skill.creator_wallet = Some(Address::default());
+        assert!(skill.validate_for_registration().is_ok());
     }
 
     #[test]

@@ -8,6 +8,7 @@ use tenzro_consensus::leader_reputation::LeaderReputation;
 use tenzro_consensus::validator::{EquivocationDetector, ValidatorInfo, ValidatorSet};
 use tenzro_consensus::voter::{Vote, VoteCollector, VoteType};
 use tenzro_consensus::{ConsensusConfig, EpochManager, Mempool};
+use tenzro_crypto::bls::BlsKeyPair;
 use tenzro_crypto::composite::{CompositePublicKey, CompositeSignature, HybridSigner, InMemoryHybridSigner};
 use tenzro_crypto::keys::{KeyPair, KeyType};
 use tenzro_crypto::pq::MlDsaSigningKey;
@@ -33,7 +34,14 @@ fn create_test_validator(stake: u128) -> TestValidator {
     let address = Address::new(addr_bytes);
     let pq = MlDsaSigningKey::generate();
     let pq_vk = pq.verifying_key_bytes().to_vec();
-    let info = ValidatorInfo::new(address, keypair.public_key().clone(), pq_vk, stake);
+    let bls = BlsKeyPair::generate().unwrap();
+    let info = ValidatorInfo::new(
+        address,
+        keypair.public_key().clone(),
+        pq_vk,
+        bls.public_key().to_bytes().to_vec(),
+        stake,
+    );
     let classical = Ed25519SignerImpl::new(keypair).unwrap();
     let signer = InMemoryHybridSigner::new(Box::new(classical), pq);
     TestValidator { info, signer }
@@ -56,7 +64,7 @@ fn create_signed_vote(
     vote_type: VoteType,
     signer: &InMemoryHybridSigner,
 ) -> Vote {
-    let placeholder_sig = CompositeSignature::new(Vec::new(), None);
+    let placeholder_sig = CompositeSignature::new(Vec::new(), Vec::new());
     let pk = signer.public_key().clone();
     let mut vote = Vote::new(view, height, block_hash, voter, placeholder_sig, pk, vote_type, 0);
     let payload = vote.signing_payload();
@@ -88,10 +96,12 @@ fn create_plain_validators(count: usize) -> Vec<ValidatorInfo> {
             let mut addr_bytes = [0u8; 32];
             addr_bytes[0] = i as u8;
             let pq = MlDsaSigningKey::generate();
+            let bls = BlsKeyPair::generate().unwrap();
             ValidatorInfo::new(
                 Address::new(addr_bytes),
                 keypair.public_key().clone(),
                 pq.verifying_key_bytes().to_vec(),
+                bls.public_key().to_bytes().to_vec(),
                 1000,
             )
         })
@@ -103,12 +113,12 @@ fn placeholder_composite_pk() -> CompositePublicKey {
     let pq = MlDsaSigningKey::generate();
     CompositePublicKey::new(
         kp.public_key().clone(),
-        Some(pq.verifying_key_bytes().to_vec()),
+        pq.verifying_key_bytes().to_vec(),
     )
 }
 
 fn placeholder_composite_sig() -> CompositeSignature {
-    CompositeSignature::new(vec![0u8; 64], Some(vec![0u8; 3309]))
+    CompositeSignature::new(vec![0u8; 64], vec![0u8; 3309])
 }
 
 // ---------------------------------------------------------------------------

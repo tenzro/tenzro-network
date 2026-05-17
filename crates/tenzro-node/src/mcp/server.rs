@@ -5,9 +5,9 @@ use rmcp::{
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
     model::*,
-    tool, tool_handler, tool_router, ServerHandler,
+    tool, tool_handler, tool_router, Json, ServerHandler,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{NodeError, Result as NodeResult};
 use crate::node::TenzroNode;
@@ -872,12 +872,15 @@ pub struct RegisterAgentParams {
     #[schemars(description = "Capability short names: 'nlp', 'vision', 'code', 'data', 'blockchain', 'smart_contract', 'api_integration', 'coordination'. Anything else is treated as a Custom capability with that name. Defaults to a single 'general' capability when omitted.")]
     #[serde(default)]
     pub capabilities: Vec<String>,
-    #[schemars(description = "BYOK: optional 32-byte Ed25519 verifying key (hex). If supplied, `pq_public_key` MUST also be supplied. When both are present, no server-side wallet is provisioned and the agent is registered self-custodially with the caller's keys. When both are absent, the node provisions a server-side hybrid (FROST + ML-DSA-65) wallet.")]
+    #[schemars(description = "BYOK: optional 32-byte Ed25519 verifying key (hex). If supplied, `pq_public_key` and `bls_public_key` MUST also be supplied. When all three are present, no server-side wallet is provisioned and the agent is registered self-custodially with the caller's keys. When all three are absent, the node provisions a server-side hybrid (FROST Ed25519 + ML-DSA-65 + BLS12-381) wallet.")]
     #[serde(default)]
     pub public_key: Option<String>,
     #[schemars(description = "BYOK: optional 1952-byte ML-DSA-65 verifying key (hex). Required iff `public_key` is supplied.")]
     #[serde(default)]
     pub pq_public_key: Option<String>,
+    #[schemars(description = "BYOK: optional 48-byte BLS12-381 G1-compressed verifying key (`min_pk` scheme, hex). Required iff `public_key` is supplied. Used for HotStuff-2 vote aggregation if the agent later stakes as a validator.")]
+    #[serde(default)]
+    pub bls_public_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -991,6 +994,127 @@ pub struct FileInsuranceClaimParams {
     pub narrative: Option<String>,
     #[schemars(description = "Nonce used to derive a deterministic claim_id")]
     pub nonce: u64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MemoryGrantParams {
+    #[schemars(description = "Agent DID the memory belongs to (e.g. 'did:tenzro:machine:...')")]
+    pub agent_did: String,
+    #[schemars(description = "The text payload to remember. Indexed for both vector and BM25 recall.")]
+    pub text: String,
+    #[schemars(description = "Memory kind: 'granted' (default), 'recalled', 'self_noted', or 'archived'.")]
+    pub kind: Option<String>,
+    #[schemars(description = "Memory source: 'controller' (default), 'tool', 'peer', or 'self'.")]
+    pub source: Option<String>,
+    #[schemars(description = "Free-form JSON metadata stored alongside the record.")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MemoryRecallParams {
+    #[schemars(description = "Agent DID whose memory tier should be searched.")]
+    pub agent_did: String,
+    #[schemars(description = "Natural-language query. Embedded for vector recall, parsed for BM25.")]
+    pub query: String,
+    #[schemars(description = "Top-k results to return per backend (default 10).")]
+    pub k: Option<u32>,
+    #[schemars(description = "Search mode: 'hybrid' (default, RRF k=60), 'vector', or 'text'.")]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MemoryArchiveParams {
+    #[schemars(description = "Memory record id (UUID v4) to archive.")]
+    pub record_id: String,
+    #[schemars(description = "Agent DID owning the record (used to scope the lookup).")]
+    pub agent_did: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct IrohPublishBlobParams {
+    #[schemars(description = "Base64-encoded payload to publish to the shared iroh-blobs store.")]
+    pub bytes_b64: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct IrohFetchBlobParams {
+    #[schemars(description = "Content-addressed tenzro:// URI to fetch (blob / model / gradient / shard / receipt).")]
+    pub tenzro_uri: String,
+}
+
+// ---- Spec 7: adaptive burn-rate governance dial ------------------------
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AdaptiveBurnEmptyParams {}
+
+// ---- Spec 10: SeedAgent treasury allocation ----------------------------
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SeedAgentCharterParams {
+    #[schemars(description = "32-byte charter id (hex, with or without 0x prefix).")]
+    pub charter_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SeedAgentListParams {
+    #[schemars(description = "Optional 32-byte charter id filter (hex). Omit to list every seed agent.")]
+    pub charter_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SeedAgentActivityParams {
+    #[schemars(description = "Time window — '1h', '24h', '7d', or '30d'. Default '24h'.")]
+    pub window: Option<String>,
+    #[schemars(description = "Skip transactions where either side is a registered seed agent. Default false.")]
+    pub exclude_seed: Option<bool>,
+}
+
+// ---- Spec 4: ERC-7683 cross-chain intent settler -----------------------
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc7683OrderIdParams {
+    #[schemars(description = "32-byte order id (hex, with or without 0x prefix).")]
+    pub order_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc7683ListOrdersParams {
+    #[schemars(description = "Optional state filter — one of: open, awaiting_proof, settled, refunded, force_refund_eligible.")]
+    pub state: Option<String>,
+    #[schemars(description = "Optional CAIP-2 numeric destination chain id filter.")]
+    pub dest_chain: Option<u32>,
+    #[schemars(description = "Maximum number of envelopes to return (default 50).")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc7683RecordFillParams {
+    #[schemars(description = "32-byte order id (hex).")]
+    pub order_id: String,
+    #[schemars(description = "CAIP-2 numeric origin chain id.")]
+    pub origin_chain_id: u32,
+    #[schemars(description = "Origin settler contract address (hex).")]
+    pub origin_settler: String,
+    #[schemars(description = "Filler address on the destination chain (hex).")]
+    pub filler: String,
+    #[schemars(description = "Recipient (32-byte left-padded) on the destination chain (hex).")]
+    pub recipient: String,
+    #[schemars(description = "Destination-chain fill transaction hash (hex).")]
+    pub fill_tx_hash: String,
+    #[schemars(description = "Wall-clock millis at which the fill landed.")]
+    pub filled_at_ms: i64,
+    #[schemars(description = "Proof route — one of: layerzero, wormhole, debridge, hyperlane.")]
+    pub proof_route: String,
+    #[schemars(description = "Outputs array (each entry: { token, amount, recipient, chain_id }).")]
+    pub outputs: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Erc7683GetFillParams {
+    #[schemars(description = "32-byte order id (hex).")]
+    pub order_id: String,
+    #[schemars(description = "CAIP-2 numeric origin chain id.")]
+    pub origin_chain_id: u32,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1418,8 +1542,156 @@ pub struct RegisterWebhookParams {
     pub event_types: Option<Vec<String>>,
     #[schemars(description = "Filter by involved addresses (hex, optional)")]
     pub addresses: Option<Vec<String>>,
-    #[schemars(description = "Shared secret for HMAC-SHA256 webhook signature verification")]
+    #[schemars(description = "Shared secret for HMAC-SHA256 webhook signature verification (must be at least 16 characters)")]
     pub secret: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteWebhookParams {
+    #[schemars(description = "Webhook id returned by register_webhook / list_webhooks")]
+    pub webhook_id: String,
+}
+
+// ─── SLA Fault Detector Params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SlaIssueProbeParams {
+    #[schemars(description = "DID of the ModelProvider / TeeProvider being probed")]
+    pub provider_did: String,
+    #[schemars(description = "Validator epoch the probe is issued in")]
+    pub epoch: u64,
+    #[schemars(description = "Probe round within the epoch")]
+    pub round: u64,
+    #[schemars(description = "Unix-millisecond deadline by which the provider must respond before the probe is considered missed")]
+    pub deadline_ms: i64,
+}
+
+// ─── Snapshot (State Sync) Params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SnapshotManifestParams {
+    #[schemars(description = "Block height of the snapshot to fetch the manifest for")]
+    pub height: u64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SnapshotChunkParams {
+    #[schemars(description = "Block height of the snapshot the chunk belongs to")]
+    pub height: u64,
+    #[schemars(description = "Index of the chunk to fetch (0..manifest.num_chunks)")]
+    pub chunk_index: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct OfferSnapshotParams {
+    #[schemars(description = "Block height of the snapshot being offered")]
+    pub height: u64,
+    #[schemars(description = "Hex-encoded state root committed at `height`. Caller MUST have verified this against a trusted QC at the same height before invoking this RPC.")]
+    pub state_root_hex: String,
+    #[schemars(description = "Number of chunks. Chunk indices are 0..num_chunks.")]
+    pub num_chunks: u32,
+    #[schemars(description = "Per-chunk SHA-256 hash (hex), indexed by chunk number. Length must equal num_chunks.")]
+    pub chunk_hashes_hex: Vec<String>,
+    #[schemars(description = "Wall-clock time the snapshot was produced (ISO 8601, UTC)")]
+    pub created_at: String,
+    #[schemars(description = "Manifest format version (current: 1)")]
+    pub format: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ApplySnapshotChunkParams {
+    #[schemars(description = "Block height of the snapshot the chunk belongs to")]
+    pub height: u64,
+    #[schemars(description = "Index of the chunk being applied (0..manifest.num_chunks)")]
+    pub chunk_index: u32,
+    #[schemars(description = "Base64-encoded chunk bytes. SHA-256 will be verified against manifest.chunk_hashes_hex[chunk_index] before disk write.")]
+    pub data_b64: String,
+}
+
+// ─── EIP-7702 Params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Eip7702SigningHashParams {
+    #[schemars(description = "EIP-155 chain ID the authorization is bound to")]
+    pub chain_id: u64,
+    #[schemars(description = "20-byte delegate contract address (0x-prefixed hex)")]
+    pub delegate_address: String,
+    #[schemars(description = "EOA authorization nonce (separate from the EOA's transaction nonce)")]
+    pub nonce: u64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Eip7702BuildDesignatorParams {
+    #[schemars(description = "20-byte delegate contract address (0x-prefixed hex). Embedded into the 23-byte designator after the 0xef0100 prefix.")]
+    pub delegate_address: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Eip7702ParseDesignatorParams {
+    #[schemars(description = "Account code bytes as hex (with or without 0x prefix). Returns is_designator=true only if exactly 23 bytes and starts with 0xef0100.")]
+    pub code: String,
+}
+
+// ─── Auth-engine approval workflow Params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListPendingApprovalsParams {
+    #[schemars(description = "Approver DID (e.g. 'did:tenzro:human:alice'). Returns every approval in `Pending` status whose approver_did matches. Lazy-expires stale records server-side before returning.")]
+    pub approver_did: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetApprovalParams {
+    #[schemars(description = "Engine-assigned approval id. A returned `Pending` record is guaranteed to still be live (lazy expiry runs on this read path). Returns -32000 if id is unknown.")]
+    pub approval_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DecideApprovalParams {
+    #[schemars(description = "Engine-assigned approval id")]
+    pub approval_id: String,
+    #[schemars(description = "Decision: 'approved' or 'denied'")]
+    pub decision: String,
+    #[schemars(description = "Optional but recommended: the deciding approver's DID. When supplied, the engine refuses the decision unless the record's approver_did matches (cross-approver tampering defence). Mismatch returns -32001 (forbidden).")]
+    pub approver_did: Option<String>,
+}
+
+// ─── Escrow + Dispute inspection Params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetEscrowParams {
+    #[schemars(description = "Escrow id — 32-byte SHA-256 digest derived by the VM during CreateEscrow. Accepts both 0x-prefixed and bare hex.")]
+    pub escrow_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListEscrowsByPayerParams {
+    #[schemars(description = "Payer address (the wallet that created the escrow). Returns {payer, count, escrows: [...]} from the `escrow_payer:` secondary index in CF_SETTLEMENTS.")]
+    pub payer: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListEscrowsByPayeeParams {
+    #[schemars(description = "Payee address (the recipient on successful release). Returns {payee, count, escrows: [...]} from the `escrow_payee:` secondary index in CF_SETTLEMENTS.")]
+    pub payee: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetDisputeParams {
+    #[schemars(description = "Dispute id. Returns the full ChannelDispute record (challenger, evidence blobs, status, opened_at/timeout_at/resolved_at, resolution). Returns -32004 if no dispute with that id exists.")]
+    pub dispute_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListDisputesByChannelParams {
+    #[schemars(description = "Channel id. Returns {channel_id, count, disputes: [...]} — every dispute (open or historical) attached to the channel. Empty list is not an error (count: 0).")]
+    pub channel_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetAgentDailySpendParams {
+    #[schemars(description = "Agent DID (`did:tenzro:machine:...`). The wire RPC triggers a UTC-midnight window reset before reading, so this value reflects only the current calendar day. Returns {agent_did, current_daily_spend, max_daily_spend, remaining, last_reset}.")]
+    pub agent_did: String,
 }
 
 // ─── Crypto Params ───
@@ -2122,6 +2394,136 @@ pub struct VideoEmbedParams {
     pub frame_stride: Option<u32>,
 }
 
+// ─── Multi-modal load params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LoadForecastModelParams {
+    #[schemars(description = "Model id to register under (e.g. 'timesfm-2.5-200m')")]
+    pub model_id: String,
+    #[schemars(description = "Filesystem path to the ONNX file")]
+    pub path: String,
+    #[schemars(description = "Context length (number of input timesteps the encoder accepts)")]
+    pub context_length: u32,
+    #[schemars(description = "Maximum forecast horizon supported by this export")]
+    pub max_horizon: u32,
+    #[schemars(description = "Optional explicit prediction output tensor name. Required for multi-output ONNX graphs where the first output is not the forecast (e.g. TimesFM transformers export).")]
+    pub output_name: Option<String>,
+    #[schemars(description = "Optional fixed leading batch dim. Defaults to 1. TimesFM 2.5 transformers ONNX requires 2 (flip-invariance averaging).")]
+    pub batch_size: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LoadVisionModelParams {
+    #[schemars(description = "Model id to register under (e.g. 'dinov3-vitb16')")]
+    pub model_id: String,
+    #[schemars(description = "Filesystem path to the ONNX file")]
+    pub path: String,
+    #[schemars(description = "Optional catalog id. If set, input_size/embedding_dim/normalization are read from the catalog and the explicit params below may be omitted.")]
+    pub catalog_id: Option<String>,
+    #[schemars(description = "Image input edge in pixels (square). Required if catalog_id is not provided.")]
+    pub input_size: Option<u32>,
+    #[schemars(description = "Output embedding dimension. Required if catalog_id is not provided.")]
+    pub embedding_dim: Option<u32>,
+    #[schemars(description = "Normalization preset ('clip', 'imagenet', 'siglip'). Optional override of catalog default.")]
+    pub normalization: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LoadTextEmbeddingModelParams {
+    #[schemars(description = "Model id to register under")]
+    pub model_id: String,
+    #[schemars(description = "Filesystem path to the ONNX file")]
+    pub path: String,
+    #[schemars(description = "Optional catalog id (e.g. 'qwen3-embedding-0.6b'). Wave-1 RPC stub: returns -32004 until ONNX loader lands.")]
+    pub catalog_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LoadSegmentationModelParams {
+    #[schemars(description = "Model id to register under (e.g. 'sam2-base')")]
+    pub model_id: String,
+    #[schemars(description = "Path to the encoder ONNX")]
+    pub encoder_path: String,
+    #[schemars(description = "Path to the decoder ONNX")]
+    pub decoder_path: String,
+    #[schemars(description = "SAM family: 'sam1' or 'sam2'")]
+    pub family: Option<String>,
+    #[schemars(description = "Optional catalog id. Wave-1 RPC stub: returns -32004 until ONNX loader lands.")]
+    pub catalog_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LoadDetectionModelParams {
+    #[schemars(description = "Model id to register under (e.g. 'rf-detr-base')")]
+    pub model_id: String,
+    #[schemars(description = "Filesystem path to the ONNX file")]
+    pub path: String,
+    #[schemars(description = "Detector family: 'rf-detr' or 'd-fine'")]
+    pub family: Option<String>,
+    #[schemars(description = "Optional catalog id. Wave-1 RPC stub: returns -32004 until ONNX loader lands.")]
+    pub catalog_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LoadAudioModelParams {
+    #[schemars(description = "Model id to register under (e.g. 'whisper-large-v3-turbo')")]
+    pub model_id: String,
+    #[schemars(description = "Filesystem path to the encoder ONNX")]
+    pub encoder_path: String,
+    #[schemars(description = "Filesystem path to the decoder ONNX (decoder_model_merged.onnx for KV-cache)")]
+    pub decoder_path: String,
+    #[schemars(description = "Filesystem path to the tokenizer (tokenizer.json)")]
+    pub tokenizer_path: String,
+    #[schemars(description = "Optional catalog id. If set, family / max_audio_seconds / whisper_variant are read from the catalog.")]
+    pub catalog_id: Option<String>,
+    #[schemars(description = "Required if catalog_id is not provided. One of: 'moonshine', 'whisper', 'parakeet', 'canary'")]
+    pub family: Option<String>,
+    #[schemars(description = "Max audio duration the encoder accepts (default 30s)")]
+    pub max_audio_seconds: Option<u32>,
+    #[schemars(description = "Required for family='whisper'. One of: 'distil-en', 'distil-large-v3', 'large-v3-turbo'")]
+    pub whisper_variant: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LoadVideoModelParams {
+    #[schemars(description = "Model id to register under")]
+    pub model_id: String,
+    #[schemars(description = "Filesystem path to the ONNX file")]
+    pub path: String,
+    #[schemars(description = "Optional catalog id. Wave-1 RPC stub: returns -32004 — catalog is empty pending license clearance + ONNX export (tools/video-export).")]
+    pub catalog_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListMemoryRecordsParams {
+    #[schemars(description = "Agent DID to scope the listing to")]
+    pub agent_did: String,
+    #[schemars(description = "Max records to return (default 50)")]
+    pub limit: Option<u32>,
+    #[schemars(description = "Filter by record kind: 'granted' | 'recalled' | 'self_noted' | 'archived'")]
+    pub kind: Option<String>,
+}
+
+// ─── Operability inspection params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetValidatorStateParams {
+    #[schemars(description = "Hex-encoded 32-byte validator address (with or without 0x prefix)")]
+    pub address: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListValidatorsParams {
+    #[schemars(description = "Optional status filter: 'Active' | 'Candidate' | 'PendingActive' | 'PendingExit' | 'Exited' | 'Jailed'")]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TrainingTaskIdParams {
+    #[schemars(description = "Tenzro Train task id (run identifier)")]
+    pub task_id: String,
+}
+
 // ─── Workflow stack params ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2198,6 +2600,99 @@ pub struct FeeRoutePayoutsParams {
     pub fee_route_id: String,
     #[schemars(description = "Gross amount in wei (decimal string — u128)")]
     pub gross_wei: String,
+}
+
+// ─── Tool output structs (MCP 2025-06-18 structuredContent + outputSchema) ───
+//
+// Each `#[tool]` handler that returns `Result<Json<T>, ErrorData>` makes
+// `T: JsonSchema` available to the rmcp macro, which then emits the schema
+// into the tool's `outputSchema` field in `tools/list`. The runtime wraps
+// the value in `CallToolResult::structured(value)` — that constructor sets
+// both `structuredContent` (typed) and `content[0]: text` (stringified
+// summary for clients that haven't upgraded), exactly as the 2025-06-18
+// spec requires.
+
+/// Output of `get_balance` — TNZO balance for a Tenzro account.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct GetBalanceOutput {
+    /// Hex-encoded account address (with `0x` prefix).
+    pub address: String,
+    /// Account balance in TNZO base units (wei, 10^18 per TNZO).
+    /// Decimal string to avoid JSON precision loss for u128 values.
+    pub balance_wei: String,
+}
+
+/// Output of `create_wallet` — newly generated keypair.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct CreateWalletOutput {
+    /// Hex-encoded address derived from the public key (with `0x` prefix).
+    pub address: String,
+    /// Hex-encoded raw public key bytes (with `0x` prefix).
+    pub public_key: String,
+    /// Key scheme — either `"Ed25519"` or `"Secp256k1"`.
+    pub key_type: String,
+    /// Operator note. The private key is NOT returned by this tool —
+    /// callers that need a signing key must use the wallet provisioning
+    /// flow rather than this raw keypair generator.
+    pub note: String,
+}
+
+/// Output of `send_transaction` — passthrough envelope from
+/// `tenzro_signAndSendTransaction` / `eth_sendRawTransaction`. The exact
+/// shape is determined by the underlying RPC; common fields include
+/// `tx_hash`, `block_hash`, `block_height`, `status`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SendTransactionOutput {
+    /// Underlying RPC result envelope verbatim.
+    pub result: serde_json::Value,
+}
+
+/// Output of `request_faucet` — testnet TNZO grant.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct RequestFaucetOutput {
+    /// `true` on grant; `false` if rate-limited or if the transfer failed.
+    pub success: bool,
+    /// Hex-encoded transaction hash on success; empty string otherwise.
+    pub tx_hash: String,
+    /// Human-readable amount granted, e.g. `"100 TNZO"`. Empty when
+    /// `success = false`.
+    pub amount: String,
+    /// Hex-encoded recipient address (with `0x` prefix).
+    pub recipient: String,
+    /// Set when `success = false`. Either a rate-limit notice
+    /// ("Rate limited. Try again in N seconds.") or a transfer-error
+    /// message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Generic passthrough envelope for MCP tools that surface arbitrary
+/// JSON returned by the underlying JSON-RPC layer or upstream HTTP API.
+///
+/// Per the MCP 2025-06-18 spec, every `#[tool]` handler must return a
+/// schema-bearing typed value so the rmcp router can populate
+/// `outputSchema` on `tools/list` and emit `structuredContent` on
+/// `tools/call`. For tools whose underlying response shape is determined
+/// by an external surface (the Tenzro JSON-RPC dispatcher, an L1
+/// blockchain RPC, or a SaaS API), `RpcPassthroughOutput` carries the
+/// raw `serde_json::Value` verbatim under a single `result` field.
+///
+/// Tools with a stable, fully-typed response shape (e.g. `get_balance`,
+/// `create_wallet`) define their own dedicated `*Output` struct instead.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct RpcPassthroughOutput {
+    /// Underlying response payload verbatim.
+    pub result: serde_json::Value,
+}
+
+/// Generic plain-text envelope for MCP tools that surface a single
+/// human-readable status line (errors, "not found", informational
+/// notices). Use this where the tool has nothing to return except a
+/// short message.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct TextOutput {
+    /// Human-readable message.
+    pub message: String,
 }
 
 #[derive(Clone)]
@@ -2330,14 +2825,23 @@ async fn rpc_dispatch(node: &Arc<TenzroNode>, method: &str, params: serde_json::
     }
 }
 
-fn json_result(value: serde_json::Value) -> std::result::Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&value).unwrap(),
-    )]))
+/// Wrap a `serde_json::Value` in the typed `RpcPassthroughOutput`
+/// envelope so the rmcp router can populate both `structuredContent`
+/// (typed) and `content[0]: text` (stringified summary) per the MCP
+/// 2025-06-18 spec. Used by tools whose underlying RPC/API returns
+/// arbitrary JSON.
+fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
-fn text_result(text: impl Into<String>) -> std::result::Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(text.into())]))
+/// Wrap a plain status string in the typed `RpcPassthroughOutput`
+/// envelope under a `{"message": ...}` field. Used for short
+/// human-readable notices ("not found", error summaries) where the
+/// tool has no structured payload to return.
+fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    Ok(Json(RpcPassthroughOutput {
+        result: serde_json::json!({ "message": text.into() }),
+    }))
 }
 
 /// Map a short-form capability name (matching the JSON-RPC and CLI
@@ -2402,7 +2906,7 @@ impl TenzroMcpServer {
     async fn get_balance(
         &self,
         Parameters(params): Parameters<GetBalanceParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<GetBalanceOutput>, ErrorData> {
         let addr_hex = params.address.strip_prefix("0x").unwrap_or(&params.address);
         let address = parse_address(&params.address)?;
 
@@ -2413,9 +2917,9 @@ impl TenzroMcpServer {
             0
         };
 
-        json_result(serde_json::json!({
-            "address": format!("0x{}", addr_hex),
-            "balance_wei": balance.to_string(),
+        Ok(Json(GetBalanceOutput {
+            address: format!("0x{}", addr_hex),
+            balance_wei: balance.to_string(),
         }))
     }
 
@@ -2423,7 +2927,7 @@ impl TenzroMcpServer {
     async fn create_wallet(
         &self,
         Parameters(params): Parameters<CreateWalletParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<CreateWalletOutput>, ErrorData> {
         use tenzro_crypto::{KeyPair, KeyType};
 
         let key_type = match params.key_type.as_deref().unwrap_or("ed25519") {
@@ -2449,11 +2953,11 @@ impl TenzroMcpServer {
             KeyType::Secp256k1 => "Secp256k1",
         };
 
-        json_result(serde_json::json!({
-            "address": format!("0x{}", hex::encode(address.as_bytes())),
-            "public_key": format!("0x{}", hex::encode(public_key.as_bytes())),
-            "key_type": key_type_str,
-            "note": "Store the private key securely. This keypair can be used for transactions on the Tenzro ledger.",
+        Ok(Json(CreateWalletOutput {
+            address: format!("0x{}", hex::encode(address.as_bytes())),
+            public_key: format!("0x{}", hex::encode(public_key.as_bytes())),
+            key_type: key_type_str.to_string(),
+            note: "Store the private key securely. This keypair can be used for transactions on the Tenzro ledger.".to_string(),
         }))
     }
 
@@ -2463,7 +2967,7 @@ impl TenzroMcpServer {
     async fn send_transaction(
         &self,
         Parameters(params): Parameters<SendTransactionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<SendTransactionOutput>, ErrorData> {
         let chain_id = params.chain_id.unwrap_or(1337);
         let gas_limit = params.gas_limit.unwrap_or(21000);
         let gas_price = params.gas_price.unwrap_or(1_000_000_000);
@@ -2491,7 +2995,7 @@ impl TenzroMcpServer {
             let result = rpc_dispatch(&self.node, "tenzro_signAndSendTransaction", send_params)
                 .await
                 .map_err(|e| err_internal(format!("signAndSendTransaction failed: {}", e)))?;
-            return json_result(result);
+            return Ok(Json(SendTransactionOutput { result }));
         }
 
         // Path B: pre-signed — caller supplies signature + public_key + timestamp.
@@ -2534,14 +3038,14 @@ impl TenzroMcpServer {
         let result = rpc_dispatch(&self.node, "eth_sendRawTransaction", raw_params)
             .await
             .map_err(|e| err_internal(format!("eth_sendRawTransaction failed: {}", e)))?;
-        json_result(result)
+        Ok(Json(SendTransactionOutput { result }))
     }
 
     #[tool(description = "Request testnet TNZO tokens from the faucet (100 TNZO per request, 24-hour cooldown per address)")]
     async fn request_faucet(
         &self,
         Parameters(params): Parameters<RequestFaucetParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RequestFaucetOutput>, ErrorData> {
         let faucet_addr_str = self
             .web_state
             .faucet_address
@@ -2566,10 +3070,16 @@ impl TenzroMcpServer {
                 let elapsed = now - last;
                 if elapsed < self.web_state.faucet_cooldown_secs as i64 {
                     let remaining = self.web_state.faucet_cooldown_secs as i64 - elapsed;
-                    return text_result(format!(
-                        "Rate limited. Try again in {} seconds.",
-                        remaining
-                    ));
+                    return Ok(Json(RequestFaucetOutput {
+                        success: false,
+                        tx_hash: String::new(),
+                        amount: String::new(),
+                        recipient: format!("0x{}", addr_hex),
+                        error: Some(format!(
+                            "Rate limited. Try again in {} seconds.",
+                            remaining
+                        )),
+                    }));
                 }
             }
         }
@@ -2585,10 +3095,16 @@ impl TenzroMcpServer {
                     let elapsed = now - last_ts;
                     if elapsed < self.web_state.faucet_cooldown_secs as i64 {
                         let remaining = self.web_state.faucet_cooldown_secs as i64 - elapsed;
-                        return text_result(format!(
-                            "Rate limited. Try again in {} seconds.",
-                            remaining
-                        ));
+                        return Ok(Json(RequestFaucetOutput {
+                            success: false,
+                            tx_hash: String::new(),
+                            amount: String::new(),
+                            recipient: format!("0x{}", addr_hex),
+                            error: Some(format!(
+                                "Rate limited. Try again in {} seconds.",
+                                remaining
+                            )),
+                        }));
                     }
                 }
             }
@@ -2630,15 +3146,22 @@ impl TenzroMcpServer {
                     let _ = storage.put("metadata", faucet_key.as_bytes(), &now.to_le_bytes());
                 }
 
-                json_result(serde_json::json!({
-                    "success": true,
-                    "tx_hash": tx_hash,
-                    "amount": format!("{} TNZO", amount_base),
-                    "recipient": format!("0x{}", addr_hex),
+                Ok(Json(RequestFaucetOutput {
+                    success: true,
+                    tx_hash,
+                    amount: format!("{} TNZO", amount_base),
+                    recipient: format!("0x{}", addr_hex),
+                    error: None,
                 }))
             }
             Err(e) => {
-                text_result(format!("Faucet transfer failed: {}", e))
+                Ok(Json(RequestFaucetOutput {
+                    success: false,
+                    tx_hash: String::new(),
+                    amount: String::new(),
+                    recipient: format!("0x{}", addr_hex),
+                    error: Some(format!("Faucet transfer failed: {}", e)),
+                }))
             }
         }
     }
@@ -2649,7 +3172,7 @@ impl TenzroMcpServer {
     async fn register_identity(
         &self,
         Parameters(params): Parameters<RegisterIdentityParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let registry = self
             .node
             .identity_registry()
@@ -2739,7 +3262,7 @@ impl TenzroMcpServer {
     async fn resolve_did(
         &self,
         Parameters(params): Parameters<ResolveDidParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let registry = self
             .node
             .identity_registry()
@@ -2784,7 +3307,7 @@ impl TenzroMcpServer {
     async fn forget_identity(
         &self,
         Parameters(params): Parameters<ResolveDidParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let registry = self
             .node
             .identity_registry()
@@ -2804,7 +3327,7 @@ impl TenzroMcpServer {
     #[tool(description = "List all Tenzro agent public signing keys as an RFC 7517 JWK Set. Mirrors GET /.well-known/jwks.json. External RFC 9421 verifiers (Visa TAP, Mastercard, Stripe MPP, AP2, x402) use this to resolve `keyid` parameters.")]
     async fn list_agent_jwks(
         &self,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let registry = self
             .node
             .identity_registry()
@@ -2824,7 +3347,7 @@ impl TenzroMcpServer {
     async fn get_agent_jwk(
         &self,
         Parameters(params): Parameters<GetAgentJwkParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_payments::rfc9421::AgentRegistryClient;
 
         let registry = self
@@ -2852,11 +3375,23 @@ impl TenzroMcpServer {
         json_result(value)
     }
 
+    #[tool(description = "Read the current UTC-day spend window for a machine agent. Mirrors `tenzro_getAgentDailySpend`: the handler resets the window if the last_reset crossed UTC midnight before returning. Returns {agent_did, current_daily_spend, max_daily_spend, remaining, last_reset}. Use to enforce the runtime SpendingPolicy ceiling (defence-in-depth on top of the on-chain ERC-7579 spending-limit validator).")]
+    async fn get_agent_daily_spend(
+        &self,
+        Parameters(params): Parameters<GetAgentDailySpendParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::json!({ "agent_did": params.agent_did });
+        let result = rpc_dispatch(&self.node, "tenzro_getAgentDailySpend", req)
+            .await
+            .map_err(|e| err_internal(format!("getAgentDailySpend failed: {}", e)))?;
+        json_result(result)
+    }
+
     #[tool(description = "Set the delegation scope for a machine identity, defining spending limits, allowed operations, payment protocols, and chains the agent may use")]
     async fn set_delegation_scope(
         &self,
         Parameters(params): Parameters<SetDelegationScopeParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let registry = self
             .node
             .identity_registry()
@@ -2912,7 +3447,7 @@ impl TenzroMcpServer {
     async fn exchange_token(
         &self,
         Parameters(params): Parameters<ExchangeTokenParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let engine = self
             .node
             .auth_engine()
@@ -2955,7 +3490,7 @@ impl TenzroMcpServer {
     async fn introspect_token(
         &self,
         Parameters(params): Parameters<IntrospectTokenParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let engine = self
             .node
             .auth_engine()
@@ -2974,7 +3509,7 @@ impl TenzroMcpServer {
     #[tool(description = "RFC 8414 / RFC 9728 OAuth Authorization Server / Protected Resource Metadata. Returns the same metadata document the AS publishes at `GET /.well-known/openid-configuration`, augmented with AAP-specific extensions (authorization_details_types_supported, aap_claims_supported, dpop_signing_alg_values_supported).")]
     async fn oauth_discovery(
         &self,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let engine = self
             .node
             .auth_engine()
@@ -3017,7 +3552,7 @@ impl TenzroMcpServer {
     async fn join_as_participant(
         &self,
         Parameters(params): Parameters<JoinAsMicroNodeParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let display_name = params.display_name
             .unwrap_or_else(|| "Tenzro Participant".to_string());
         let origin = params.origin.unwrap_or_else(|| "mcp".to_string());
@@ -3138,7 +3673,7 @@ impl TenzroMcpServer {
     async fn create_payment_challenge(
         &self,
         Parameters(params): Parameters<CreatePaymentChallengeParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let gateway = self
             .node
             .payment_gateway()
@@ -3182,7 +3717,7 @@ impl TenzroMcpServer {
     async fn verify_payment(
         &self,
         Parameters(params): Parameters<VerifyPaymentParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let gateway = self
             .node
             .payment_gateway()
@@ -3258,7 +3793,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(description = "List the payment protocols supported by this Tenzro node, including MPP (session-based streaming), x402 (stateless one-shot), and native TNZO transfers")]
-    async fn list_payment_protocols(&self) -> std::result::Result<CallToolResult, ErrorData> {
+    async fn list_payment_protocols(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let gateway = self.node.payment_gateway();
 
         let registered = if let Some(gw) = gateway {
@@ -3320,7 +3855,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(description = "List the x402 scheme backends registered on this node. Each scheme corresponds to a different verification path under the x402 protocol: 'tenzro-hybrid' (Ed25519 hybrid sig over canonical preimage), 'exact-eip3009' (USDC EIP-3009 meta-tx via CDP facilitator), 'permit2' (Uniswap Permit2 via CDP facilitator), 'erc7710' (delegation redemption). Use the returned ids in the 'extra.scheme' field of an x402 PaymentRequirement.")]
-    async fn list_x402_schemes(&self) -> std::result::Result<CallToolResult, ErrorData> {
+    async fn list_x402_schemes(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let server = match self.node.x402_server() {
             Some(s) => s,
             None => {
@@ -3362,7 +3897,7 @@ impl TenzroMcpServer {
     async fn list_providers(
         &self,
         Parameters(params): Parameters<ListProvidersParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut result: Vec<serde_json::Value> = Vec::new();
 
@@ -3420,7 +3955,7 @@ impl TenzroMcpServer {
     async fn list_models(
         &self,
         Parameters(params): Parameters<ListModelsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let catalog = get_model_catalog();
         let hf_downloader = self.node.hf_downloader.as_ref();
 
@@ -3524,11 +4059,11 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Invoke Tenzro Cortex recurrent-depth reasoning. Executes a recurrent-depth transformer (OpenMythos-style) through a registered Cortex worker, charging TNZO based on tokens_in, tokens_out, and loops_used. Returns the reasoning output along with a signed CortexReceipt binding input/output commitments, weights hash, runtime hash, loops_used, and worker DID. Use tier='fast|standard|deep|institutional' to select the reasoning depth budget. Positioning: Cortex reasons. Praecise governs. Tenzro settles. (Praecise is an open AI governance framework by Ipnops — integrated with, but not owned by, Tenzro.)")]
+    #[tool(description = "Invoke Tenzro Cortex recurrent-depth reasoning. Executes a recurrent-depth transformer (OpenMythos-style) through a registered Cortex worker, charging TNZO based on tokens_in, tokens_out, and loops_used. Returns the reasoning output along with a signed CortexReceipt binding input/output commitments, weights hash, runtime hash, loops_used, and worker DID. Use tier='fast|standard|deep|institutional' to select the reasoning depth budget.")]
     async fn cortex_reason(
         &self,
         Parameters(params): Parameters<CortexReasonParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_types::cortex::{
             AttestationRequirement, CortexRequest, ReasoningBudget, ReasoningTier,
         };
@@ -3656,7 +4191,7 @@ impl TenzroMcpServer {
     async fn chat_completion(
         &self,
         Parameters(params): Parameters<ChatCompletionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let model = params.model;
         let message = params.message;
         let temperature = params.temperature;
@@ -3772,7 +4307,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(description = "List all model service endpoints with their API and MCP URLs, model details, and status")]
-    async fn list_model_endpoints(&self) -> std::result::Result<CallToolResult, ErrorData> {
+    async fn list_model_endpoints(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let services = self.node.list_model_services();
 
         if services.is_empty() {
@@ -3815,7 +4350,7 @@ impl TenzroMcpServer {
     async fn bridge_tokens(
         &self,
         Parameters(params): Parameters<BridgeTokensParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let router = self
             .node
             .bridge_router()
@@ -3856,7 +4391,7 @@ impl TenzroMcpServer {
     async fn get_bridge_routes(
         &self,
         Parameters(params): Parameters<GetBridgeRoutesParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let router = self
             .node
             .bridge_router()
@@ -3888,7 +4423,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(description = "List all registered bridge adapters (LayerZero, Chainlink CCIP, deBridge, Canton)")]
-    async fn list_bridge_adapters(&self) -> std::result::Result<CallToolResult, ErrorData> {
+    async fn list_bridge_adapters(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let router = self.node.bridge_router();
 
         if let Some(r) = router {
@@ -3912,7 +4447,7 @@ impl TenzroMcpServer {
     async fn debridge_search_tokens(
         &self,
         Parameters(params): Parameters<DebridgeSearchTokensParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut args = serde_json::json!({
             "query": params.query,
         });
@@ -3920,24 +4455,24 @@ impl TenzroMcpServer {
             args["chainId"] = serde_json::json!(cid);
         }
         match debridge_mcp_call("search_tokens", args).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&result).unwrap_or_default())])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Ok(result) => Ok(Json(RpcPassthroughOutput { result })),
+            Err(e) => Ok(Json(RpcPassthroughOutput { result: serde_json::json!({ "error": e }) })),
         }
     }
 
     #[tool(description = "Get all blockchain networks supported by deBridge DLN for cross-chain transfers.")]
-    async fn debridge_get_chains(&self) -> std::result::Result<CallToolResult, ErrorData> {
+    async fn debridge_get_chains(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         match debridge_mcp_call("get_supported_chains", serde_json::json!({})).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&result).unwrap_or_default())])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Ok(result) => Ok(Json(RpcPassthroughOutput { result })),
+            Err(e) => Ok(Json(RpcPassthroughOutput { result: serde_json::json!({ "error": e }) })),
         }
     }
 
     #[tool(description = "Get deBridge operational instructions and guidance for cross-chain transfers.")]
-    async fn debridge_get_instructions(&self) -> std::result::Result<CallToolResult, ErrorData> {
+    async fn debridge_get_instructions(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         match debridge_mcp_call("get_instructions", serde_json::json!({})).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&result).unwrap_or_default())])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Ok(result) => Ok(Json(RpcPassthroughOutput { result })),
+            Err(e) => Ok(Json(RpcPassthroughOutput { result: serde_json::json!({ "error": e }) })),
         }
     }
 
@@ -3945,7 +4480,7 @@ impl TenzroMcpServer {
     async fn debridge_create_tx(
         &self,
         Parameters(params): Parameters<DebridgeCreateTxParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut args = serde_json::json!({
             "srcChainId": params.src_chain_id,
             "dstChainId": params.dst_chain_id,
@@ -3958,8 +4493,8 @@ impl TenzroMcpServer {
             args["senderAddress"] = serde_json::json!(sender);
         }
         match debridge_mcp_call("create_tx", args).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&result).unwrap_or_default())])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Ok(result) => Ok(Json(RpcPassthroughOutput { result })),
+            Err(e) => Ok(Json(RpcPassthroughOutput { result: serde_json::json!({ "error": e }) })),
         }
     }
 
@@ -3967,7 +4502,7 @@ impl TenzroMcpServer {
     async fn debridge_same_chain_swap(
         &self,
         Parameters(params): Parameters<DebridgeSameChainSwapParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut args = serde_json::json!({
             "chainId": params.chain_id,
             "tokenIn": params.token_in,
@@ -3978,15 +4513,15 @@ impl TenzroMcpServer {
             args["senderAddress"] = serde_json::json!(sender);
         }
         match debridge_mcp_call("transaction_same_chain_swap", args).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&result).unwrap_or_default())])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Ok(result) => Ok(Json(RpcPassthroughOutput { result })),
+            Err(e) => Ok(Json(RpcPassthroughOutput { result: serde_json::json!({ "error": e }) })),
         }
     }
 
     // ─── Network & Blocks ───
 
     #[tool(description = "Get the current status of the Tenzro node including health, block height, peer count, uptime, and role")]
-    async fn get_node_status(&self) -> std::result::Result<CallToolResult, ErrorData> {
+    async fn get_node_status(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let status = self.node.status().await;
         json_result(serde_json::json!({
             "state": status.state,
@@ -4002,7 +4537,7 @@ impl TenzroMcpServer {
     async fn get_block(
         &self,
         Parameters(params): Parameters<GetBlockParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         if let Some(storage) = self.node.storage() {
             use tenzro_storage::KvStore;
             let key = params.height.to_be_bytes();
@@ -4030,7 +4565,7 @@ impl TenzroMcpServer {
     async fn get_block_range(
         &self,
         Parameters(params): Parameters<GetBlockRangeParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::block_store::BlockStoreImpl;
         use tenzro_storage::traits::BlockStore;
         use tenzro_types::primitives::BlockHeight;
@@ -4126,7 +4661,7 @@ impl TenzroMcpServer {
     async fn get_fee_market(
         &self,
         Parameters(params): Parameters<GetFeeMarketParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let vm = self
             .node
             .vm_runtime()
@@ -4176,7 +4711,7 @@ impl TenzroMcpServer {
     #[tool(description = "Return the canonical Tenzro Cross-VM SVM-native program ID and 4 instruction discriminators (bridge_to_evm, bridge_from_evm, register_token_pointer, transfer_cross_vm). Use this to construct SVM Instructions targeting the Tenzro Cross-VM native program from any SVM client.")]
     async fn get_svm_cross_vm_program_info(
         &self,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         json_result(serde_json::json!({
             "program_id": {
                 "hex": "5c03dd6cf580ecafb5ca11a9e1d6448176bb1dfa9d4886c65d9024df77542695",
@@ -4213,7 +4748,7 @@ impl TenzroMcpServer {
     async fn get_transaction(
         &self,
         Parameters(params): Parameters<GetTransactionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let hash_str = params.tx_hash.strip_prefix("0x").unwrap_or(&params.tx_hash);
         // Validate hex (reject malformed input early) but use the hex string
         // itself as the storage key — the event loop indexes transactions under
@@ -4254,7 +4789,7 @@ impl TenzroMcpServer {
     async fn verify_zk_proof(
         &self,
         Parameters(params): Parameters<VerifyZkProofParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         if params.circuit_id.is_empty() {
             return json_result(serde_json::json!({
                 "valid": false,
@@ -4348,7 +4883,7 @@ impl TenzroMcpServer {
     async fn verify_vrf_proof(
         &self,
         Parameters(params): Parameters<VerifyVrfProofParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_crypto::vrf;
 
         let pk_bytes = match hex::decode(params.pubkey.strip_prefix("0x").unwrap_or(&params.pubkey)) {
@@ -4412,7 +4947,7 @@ impl TenzroMcpServer {
     async fn generate_vrf_proof(
         &self,
         Parameters(params): Parameters<GenerateVrfProofParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_crypto::vrf;
 
         let sk_bytes = match hex::decode(params.secret_key.strip_prefix("0x").unwrap_or(&params.secret_key)) {
@@ -4462,7 +4997,7 @@ impl TenzroMcpServer {
     async fn stake_tokens(
         &self,
         Parameters(params): Parameters<StakeTokensParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let staking = self.node.staking().ok_or_else(|| err_internal("Staking not initialized"))?;
 
         let provider_type = match params.provider_type.to_lowercase().as_str() {
@@ -4522,7 +5057,7 @@ impl TenzroMcpServer {
     async fn unstake_tokens(
         &self,
         Parameters(params): Parameters<UnstakeTokensParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let staking = self.node.staking().ok_or_else(|| err_internal("Staking not initialized"))?;
         let address = parse_address(&params.address)?;
 
@@ -4553,7 +5088,7 @@ impl TenzroMcpServer {
     async fn register_provider(
         &self,
         Parameters(params): Parameters<RegisterProviderParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let provider_type = match params.provider_type.to_lowercase().as_str() {
             "validator" => tenzro_types::token::ProviderType::Validator,
             "model_provider" | "modelprovider" | "inference" => tenzro_types::token::ProviderType::ModelProvider,
@@ -4605,7 +5140,7 @@ impl TenzroMcpServer {
     async fn get_provider_stats(
         &self,
         Parameters(params): Parameters<GetProviderStatsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let models_served = self.node.served_models.len();
         let total_inferences = self.node.transaction_history.read().len();
 
@@ -4656,7 +5191,7 @@ impl TenzroMcpServer {
     async fn post_task(
         &self,
         Parameters(params): Parameters<PostTaskParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_types::{TaskInfo, TaskType, TaskPriority};
         use tenzro_storage::{CF_TASKS, KvStore};
 
@@ -4730,7 +5265,7 @@ impl TenzroMcpServer {
     async fn list_tasks(
         &self,
         Parameters(params): Parameters<ListTasksParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_types::TaskInfo;
         use tenzro_storage::{CF_TASKS, KvStore};
 
@@ -4808,7 +5343,7 @@ impl TenzroMcpServer {
     async fn quote_task(
         &self,
         Parameters(params): Parameters<QuoteTaskParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_types::TaskQuote;
         use tenzro_storage::{CF_TASKS, KvStore};
 
@@ -4864,7 +5399,7 @@ impl TenzroMcpServer {
     async fn register_agent_template(
         &self,
         Parameters(params): Parameters<RegisterAgentTemplateParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_types::{AgentTemplate, AgentTemplateType, AgentPricingModel};
         use tenzro_storage::{CF_AGENT_TEMPLATES, KvStore};
 
@@ -4974,7 +5509,7 @@ impl TenzroMcpServer {
     async fn list_agent_templates(
         &self,
         Parameters(params): Parameters<ListAgentTemplatesParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_types::{AgentTemplate, AgentPricingModel};
         use tenzro_storage::{CF_AGENT_TEMPLATES, KvStore};
 
@@ -5060,10 +5595,11 @@ impl TenzroMcpServer {
     async fn run_agent_template(
         &self,
         Parameters(params): Parameters<RunAgentTemplateParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use crate::commission_policy::{settle_invocation_fee, CommissionError};
         use tenzro_storage::{CF_AGENTS, CF_AGENT_TEMPLATES, KvStore};
-        use tenzro_types::agent_template::{AgentTemplate, AGENT_MARKETPLACE_COMMISSION_BPS};
+        use tenzro_types::agent_template::AgentTemplate;
+        use tenzro_types::marketplace::MARKETPLACE_COMMISSION_BPS;
 
         let max_iterations = params.max_iterations.unwrap_or(1) as usize;
         let dry_run = params.dry_run.unwrap_or(false);
@@ -5196,7 +5732,7 @@ impl TenzroMcpServer {
             "steps_failed": report.steps_failed,
             "total_value_dispatched": report.total_value_dispatched.to_string(),
             "fee_paid": fee.to_string(),
-            "commission_bps": AGENT_MARKETPLACE_COMMISSION_BPS,
+            "commission_bps": MARKETPLACE_COMMISSION_BPS,
             "network_commission": commission.to_string(),
             "creator_share": creator_share.to_string(),
             "payer_wallet": payer_hex,
@@ -5214,7 +5750,7 @@ impl TenzroMcpServer {
     async fn spawn_agent(
         &self,
         Parameters(params): Parameters<SpawnAgentParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let runtime = self.node.agent_runtime()
             .ok_or_else(|| err_internal("Agent runtime not available"))?;
         let caps = params.capabilities.unwrap_or_default();
@@ -5233,7 +5769,7 @@ impl TenzroMcpServer {
     async fn run_agent_task(
         &self,
         Parameters(params): Parameters<RunAgentTaskParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let runtime = self.node.agent_runtime()
             .ok_or_else(|| err_internal("Agent runtime not available"))?;
         let inference_url = params.inference_url
@@ -5252,7 +5788,7 @@ impl TenzroMcpServer {
     async fn create_swarm(
         &self,
         Parameters(params): Parameters<CreateSwarmParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_types::agent::SwarmConfig;
         let swarm_mgr = self.node.swarm_manager()
             .ok_or_else(|| err_internal("Swarm manager not available"))?;
@@ -5285,7 +5821,7 @@ impl TenzroMcpServer {
     async fn get_swarm_status(
         &self,
         Parameters(params): Parameters<GetSwarmStatusParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let swarm_mgr = self.node.swarm_manager()
             .ok_or_else(|| err_internal("Swarm manager not available"))?;
         let status = swarm_mgr.get_swarm_status(&params.swarm_id)
@@ -5297,7 +5833,7 @@ impl TenzroMcpServer {
     async fn terminate_swarm(
         &self,
         Parameters(params): Parameters<TerminateSwarmParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let swarm_mgr = self.node.swarm_manager()
             .ok_or_else(|| err_internal("Swarm manager not available"))?;
         swarm_mgr.terminate_swarm(&params.swarm_id)
@@ -5315,7 +5851,7 @@ impl TenzroMcpServer {
     async fn list_proposals(
         &self,
         Parameters(params): Parameters<ListProposalsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let governance = self.node.governance()
             .ok_or_else(|| err_internal("Governance not available"))?;
         let proposals = if let Some(status_str) = params.status.as_deref() {
@@ -5343,7 +5879,7 @@ impl TenzroMcpServer {
     async fn vote_on_proposal(
         &self,
         Parameters(params): Parameters<VoteOnProposalParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let addr = parse_address(&params.voter_address)
             .map_err(|e| err_internal(format!("Invalid voter address: {}", e)))?;
         let governance = self.node.governance()
@@ -5368,7 +5904,7 @@ impl TenzroMcpServer {
     async fn create_proposal(
         &self,
         Parameters(params): Parameters<CreateProposalParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let addr = parse_address(&params.proposer_address)
             .map_err(|e| err_internal(format!("Invalid proposer address: {}", e)))?;
         let governance = self.node.governance()
@@ -5413,7 +5949,7 @@ impl TenzroMcpServer {
     async fn get_voting_power(
         &self,
         Parameters(params): Parameters<GetVotingPowerParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let addr = parse_address(&params.address)
             .map_err(|e| err_internal(format!("Invalid address: {}", e)))?;
         let staking = self.node.staking()
@@ -5431,7 +5967,7 @@ impl TenzroMcpServer {
     async fn delegate_voting_power(
         &self,
         Parameters(params): Parameters<DelegateVotingPowerParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let from = parse_address(&params.from_address)
             .map_err(|e| err_internal(format!("Invalid from_address: {}", e)))?;
         let to = parse_address(&params.to_address)
@@ -5460,7 +5996,7 @@ impl TenzroMcpServer {
     async fn token_balance(
         &self,
         Parameters(params): Parameters<TokenBalanceParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let addr = parse_address(&params.address)
             .map_err(|e| err_internal(format!("Invalid address: {}", e)))?;
         let token = self.node.token()
@@ -5476,7 +6012,7 @@ impl TenzroMcpServer {
     async fn total_supply(
         &self,
         Parameters(_params): Parameters<TotalSupplyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let token = self.node.token()
             .ok_or_else(|| err_internal("Token not available"))?;
         let supply_wei = token.total_supply();
@@ -5491,7 +6027,7 @@ impl TenzroMcpServer {
     async fn list_canton_domains(
         &self,
         Parameters(_params): Parameters<ListCantonDomainsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         json_result(serde_json::json!({
             "status": "canton_not_configured",
             "domains": [],
@@ -5503,7 +6039,7 @@ impl TenzroMcpServer {
     async fn list_daml_contracts(
         &self,
         Parameters(params): Parameters<ListDamlContractsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         json_result(serde_json::json!({
             "status": "canton_not_configured",
             "domain_id": params.domain_id,
@@ -5518,7 +6054,7 @@ impl TenzroMcpServer {
     async fn submit_daml_command(
         &self,
         Parameters(params): Parameters<SubmitDamlCommandParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         json_result(serde_json::json!({
             "status": "canton_not_configured",
             "domain_id": params.domain_id,
@@ -5538,7 +6074,7 @@ impl TenzroMcpServer {
     async fn settle_payment(
         &self,
         Parameters(params): Parameters<SettlePaymentParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payer = parse_address(&params.payer)
             .map_err(|e| err_internal(format!("Invalid payer address: {}", e)))?;
         let payee = parse_address(&params.payee)
@@ -5598,7 +6134,7 @@ impl TenzroMcpServer {
     async fn create_escrow(
         &self,
         Parameters(params): Parameters<CreateEscrowParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let _ = parse_address(&params.payer)
             .map_err(|e| err_internal(format!("Invalid payer address: {}", e)))?;
         let _ = parse_address(&params.payee)
@@ -5674,7 +6210,7 @@ impl TenzroMcpServer {
     async fn release_escrow(
         &self,
         Parameters(params): Parameters<ReleaseEscrowParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let _ = parse_address(&params.payer)
             .map_err(|e| err_internal(format!("Invalid payer address: {}", e)))?;
         let escrow_id_bytes = hex::decode(params.escrow_id.trim_start_matches("0x"))
@@ -5737,7 +6273,7 @@ impl TenzroMcpServer {
     async fn refund_escrow(
         &self,
         Parameters(params): Parameters<RefundEscrowParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let _ = parse_address(&params.payer)
             .map_err(|e| err_internal(format!("Invalid payer address: {}", e)))?;
         let escrow_id_bytes = hex::decode(params.escrow_id.trim_start_matches("0x"))
@@ -5788,7 +6324,7 @@ impl TenzroMcpServer {
     async fn open_payment_channel(
         &self,
         Parameters(params): Parameters<OpenPaymentChannelParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let sender = parse_address(&params.sender)
             .map_err(|e| err_internal(format!("Invalid sender address: {}", e)))?;
         let recipient = parse_address(&params.recipient)
@@ -5812,7 +6348,7 @@ impl TenzroMcpServer {
     async fn close_payment_channel(
         &self,
         Parameters(params): Parameters<ClosePaymentChannelParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chan_mgr = self.node.channel_manager()
             .ok_or_else(|| err_internal("Channel manager not available"))?;
         chan_mgr.close_channel(&params.channel_id)
@@ -5831,7 +6367,7 @@ impl TenzroMcpServer {
     async fn download_model(
         &self,
         Parameters(params): Parameters<DownloadModelParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let model_id = params.model_id.clone();
         let entry = get_model_by_id(&model_id)
             .ok_or_else(|| err_internal(format!("Model '{}' not found in catalog", model_id)))?;
@@ -5913,7 +6449,7 @@ impl TenzroMcpServer {
     async fn serve_model_mcp(
         &self,
         Parameters(params): Parameters<ServeModelMcpParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let model_id = &params.model_id;
         let entry = get_model_by_id(model_id)
             .ok_or_else(|| err_internal(format!("Model '{}' not found in catalog", model_id)))?;
@@ -5962,7 +6498,7 @@ impl TenzroMcpServer {
     async fn stop_model(
         &self,
         Parameters(params): Parameters<StopModelParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let model_id = &params.model_id;
         if let Some(runtime) = &self.node.model_runtime {
             runtime.unload_model(model_id)
@@ -5983,7 +6519,7 @@ impl TenzroMcpServer {
     async fn delete_model_mcp(
         &self,
         Parameters(params): Parameters<DeleteModelParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let model_id = &params.model_id;
         if let Some(runtime) = &self.node.model_runtime
             && runtime.is_loaded(model_id) {
@@ -6007,7 +6543,7 @@ impl TenzroMcpServer {
     async fn get_download_progress(
         &self,
         Parameters(params): Parameters<GetDownloadProgressParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         match self.node.model_downloads.get(&params.model_id) {
             Some(status) => {
                 json_result(serde_json::json!({
@@ -6031,7 +6567,7 @@ impl TenzroMcpServer {
     async fn set_provider_schedule(
         &self,
         Parameters(params): Parameters<SetProviderScheduleParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let _addr = parse_address(&params.provider_address)
             .map_err(|e| err_internal(format!("Invalid provider address: {}", e)))?;
         let schedule_val = params.schedule;
@@ -6057,7 +6593,7 @@ impl TenzroMcpServer {
     async fn get_provider_schedule(
         &self,
         Parameters(params): Parameters<GetProviderScheduleParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let _addr = parse_address(&params.provider_address)
             .map_err(|e| err_internal(format!("Invalid provider address: {}", e)))?;
         let schedule = self.node.provider_schedule.read();
@@ -6069,7 +6605,7 @@ impl TenzroMcpServer {
     async fn set_provider_pricing(
         &self,
         Parameters(params): Parameters<SetProviderPricingParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let _addr = parse_address(&params.provider_address)
             .map_err(|e| err_internal(format!("Invalid provider address: {}", e)))?;
         let input_wei: u128 = params.input_price_per_token_wei.parse().map_err(|_| {
@@ -6099,7 +6635,7 @@ impl TenzroMcpServer {
     async fn get_provider_pricing(
         &self,
         Parameters(params): Parameters<GetProviderPricingParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let _addr = parse_address(&params.provider_address)
             .map_err(|e| err_internal(format!("Invalid provider address: {}", e)))?;
         let pricing = self.node.provider_pricing.read();
@@ -6109,11 +6645,11 @@ impl TenzroMcpServer {
 
     // ─── Agent Advanced Tools ───
 
-    #[tool(description = "Register a new AI agent identity on the Tenzro Network. Two modes: (1) provisioner — node provisions a server-side hybrid wallet (FROST Ed25519 + ML-DSA-65), returns the classical_public_key + pq_verifying_key_len; (2) BYOK — caller supplies both `public_key` (32B Ed25519) and `pq_public_key` (1952B ML-DSA-65) hex, registration is self-custodial. Returns agent_id, wallet_address, tenzro_did, registration_fee, and `byok` flag.")]
+    #[tool(description = "Register a new AI agent identity on the Tenzro Network. Two modes: (1) provisioner — node provisions a server-side hybrid wallet (FROST Ed25519 + ML-DSA-65 + BLS12-381), returns the classical_public_key + pq_verifying_key_len + bls_verifying_key_len; (2) BYOK — caller supplies `public_key` (32B Ed25519), `pq_public_key` (1952B ML-DSA-65), and `bls_public_key` (48B BLS12-381 G1) hex, registration is self-custodial. Returns agent_id, wallet_address, tenzro_did, registration_fee, and `byok` flag.")]
     async fn register_agent(
         &self,
         Parameters(params): Parameters<RegisterAgentParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_types::agent::Capability;
 
         let creator = parse_address(&params.creator)?;
@@ -6138,58 +6674,68 @@ impl TenzroMcpServer {
             err_internal("Agent runtime not initialized")
         })?;
 
-        // BYOK path: both keys supplied → no server-side wallet provisioning.
-        // Half-supplied is rejected to avoid mixed custody.
-        match (params.public_key.as_deref(), params.pq_public_key.as_deref()) {
-            (Some(_), None) | (None, Some(_)) => {
-                return Err(err_internal(
-                    "BYOK registration requires BOTH `public_key` and `pq_public_key` (Ed25519 + ML-DSA-65)",
-                ));
+        // BYOK path: all three keys supplied → no server-side wallet provisioning.
+        // Partial-supply is rejected to avoid mixed custody.
+        let pk_param = params.public_key.as_deref();
+        let pq_param = params.pq_public_key.as_deref();
+        let bls_param = params.bls_public_key.as_deref();
+        let any_byok = pk_param.is_some() || pq_param.is_some() || bls_param.is_some();
+        let all_byok = pk_param.is_some() && pq_param.is_some() && bls_param.is_some();
+        if any_byok && !all_byok {
+            return Err(err_internal(
+                "BYOK registration requires ALL of `public_key`, `pq_public_key`, and `bls_public_key` (Ed25519 + ML-DSA-65 + BLS12-381 G1)",
+            ));
+        }
+        if let (Some(pk_hex), Some(pq_hex), Some(bls_hex)) = (pk_param, pq_param, bls_param) {
+            let strip_0x = |s: &str| s.strip_prefix("0x").unwrap_or(s).to_string();
+            let pk_bytes = hex::decode(strip_0x(pk_hex))
+                .map_err(|e| err_internal(format!("public_key is not valid hex: {}", e)))?;
+            if pk_bytes.len() != 32 {
+                return Err(err_internal(format!(
+                    "public_key must be 32 bytes (Ed25519), got {}", pk_bytes.len()
+                )));
             }
-            (Some(pk_hex), Some(pq_hex)) => {
-                let strip_0x = |s: &str| s.strip_prefix("0x").unwrap_or(s).to_string();
-                let pk_bytes = hex::decode(strip_0x(pk_hex))
-                    .map_err(|e| err_internal(format!("public_key is not valid hex: {}", e)))?;
-                if pk_bytes.len() != 32 {
-                    return Err(err_internal(format!(
-                        "public_key must be 32 bytes (Ed25519), got {}", pk_bytes.len()
-                    )));
-                }
-                let pq_bytes = hex::decode(strip_0x(pq_hex))
-                    .map_err(|e| err_internal(format!("pq_public_key is not valid hex: {}", e)))?;
-                if pq_bytes.len() != 1952 {
-                    return Err(err_internal(format!(
-                        "pq_public_key must be 1952 bytes (ML-DSA-65), got {}", pq_bytes.len()
-                    )));
-                }
-
-                let agent = agent_runtime
-                    .register_agent_with_keys(
-                        params.name.clone(),
-                        creator,
-                        capabilities,
-                        false,
-                        0,
-                        pk_bytes,
-                        pq_bytes,
-                    )
-                    .await
-                    .map_err(|e| err_internal(format!("BYOK agent registration failed: {}", e)))?;
-
-                return json_result(serde_json::json!({
-                    "agent_id": agent.identity.agent_id,
-                    "name": agent.identity.name,
-                    "creator": format!("{}", agent.identity.creator),
-                    "wallet_address": format!("{}", agent.wallet_address),
-                    "capabilities": agent.capabilities.len(),
-                    "status": format!("{:?}", agent.status),
-                    "created_at": agent.created_at.to_rfc3339(),
-                    "tenzro_did": agent.tenzro_did,
-                    "registration_fee": agent.registration_fee.to_string(),
-                    "byok": true,
-                }));
+            let pq_bytes = hex::decode(strip_0x(pq_hex))
+                .map_err(|e| err_internal(format!("pq_public_key is not valid hex: {}", e)))?;
+            if pq_bytes.len() != 1952 {
+                return Err(err_internal(format!(
+                    "pq_public_key must be 1952 bytes (ML-DSA-65), got {}", pq_bytes.len()
+                )));
             }
-            (None, None) => { /* fall through to provisioner path */ }
+            let bls_bytes = hex::decode(strip_0x(bls_hex))
+                .map_err(|e| err_internal(format!("bls_public_key is not valid hex: {}", e)))?;
+            if bls_bytes.len() != 48 {
+                return Err(err_internal(format!(
+                    "bls_public_key must be 48 bytes (BLS12-381 G1 compressed), got {}", bls_bytes.len()
+                )));
+            }
+
+            let agent = agent_runtime
+                .register_agent_with_keys(
+                    params.name.clone(),
+                    creator,
+                    capabilities,
+                    false,
+                    0,
+                    pk_bytes,
+                    pq_bytes,
+                    bls_bytes,
+                )
+                .await
+                .map_err(|e| err_internal(format!("BYOK agent registration failed: {}", e)))?;
+
+            return json_result(serde_json::json!({
+                "agent_id": agent.identity.agent_id,
+                "name": agent.identity.name,
+                "creator": format!("{}", agent.identity.creator),
+                "wallet_address": format!("{}", agent.wallet_address),
+                "capabilities": agent.capabilities.len(),
+                "status": format!("{:?}", agent.status),
+                "created_at": agent.created_at.to_rfc3339(),
+                "tenzro_did": agent.tenzro_did,
+                "registration_fee": agent.registration_fee.to_string(),
+                "byok": true,
+            }));
         }
 
         let agent = agent_runtime
@@ -6217,7 +6763,7 @@ impl TenzroMcpServer {
     async fn send_agent_message(
         &self,
         Parameters(params): Parameters<SendAgentMessageParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_types::agent::{AgentMessage, AgentMessageType};
 
         let agent_runtime = self.node.agent_runtime().ok_or_else(|| {
@@ -6304,7 +6850,7 @@ impl TenzroMcpServer {
     async fn delegate_task(
         &self,
         Parameters(params): Parameters<DelegateTaskParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         Err(err_internal(format!(
             "delegate_task requires network consensus — not available on local node (delegator={}, delegate={}, task={}, budget_wei={:?})",
             params.delegator_did, params.delegate_did, params.task, params.max_budget_wei
@@ -6324,7 +6870,7 @@ impl TenzroMcpServer {
     async fn pause_agent(
         &self,
         Parameters(params): Parameters<PauseAgentParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         Err(err_internal(format!(
             "pause_agent requires network consensus — sign and submit a PauseAgent transaction via tenzro_signAndSendTransaction (agent={}, controller={}, reason={}). Gas: 60000.",
             params.agent_did, params.controller_did, params.reason
@@ -6335,7 +6881,7 @@ impl TenzroMcpServer {
     async fn quarantine_agent(
         &self,
         Parameters(params): Parameters<QuarantineAgentParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         Err(err_internal(format!(
             "quarantine_agent requires network consensus — sign and submit a QuarantineAgent transaction via tenzro_signAndSendTransaction (agent={}, controller={}, reason={}, evidence={:?}). Gas: 90000.",
             params.agent_did, params.controller_did, params.reason, params.evidence_hash
@@ -6346,7 +6892,7 @@ impl TenzroMcpServer {
     async fn terminate_agent(
         &self,
         Parameters(params): Parameters<TerminateAgentParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let slash_bps = params.slash_bps.unwrap_or(0);
         if slash_bps > 10_000 {
             return Err(err_internal(format!(
@@ -6371,7 +6917,7 @@ impl TenzroMcpServer {
     async fn post_agent_bond(
         &self,
         Parameters(params): Parameters<PostAgentBondParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let _amount = params.amount.parse::<u128>().map_err(|e| {
             err_internal(format!("invalid amount '{}': {}", params.amount, e))
         })?;
@@ -6385,7 +6931,7 @@ impl TenzroMcpServer {
     async fn get_agent_bond(
         &self,
         Parameters(params): Parameters<GetAgentBondParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let bond_manager = self.node.bond_manager().ok_or_else(|| {
             err_internal("BondManager not initialized on this node")
         })?;
@@ -6409,7 +6955,7 @@ impl TenzroMcpServer {
     async fn file_insurance_claim(
         &self,
         Parameters(params): Parameters<FileInsuranceClaimParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let amount_requested = params.amount_requested.parse::<u128>().map_err(|e| {
             err_internal(format!("invalid amount_requested '{}': {}", params.amount_requested, e))
         })?;
@@ -6453,11 +6999,485 @@ impl TenzroMcpServer {
         }))
     }
 
+    #[tool(description = "Grant a memory to an agent on the Tenzro Network. Embeds the text via the configured TextEmbeddingRuntime and writes to both the Lance vector index and the Tantivy BM25 index. Returns the persisted MemoryRecord including its UUID.")]
+    async fn memory_grant(
+        &self,
+        Parameters(params): Parameters<MemoryGrantParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let runtime = self
+            .node
+            .agent_runtime()
+            .ok_or_else(|| err_internal("Agent runtime not initialized"))?;
+        let mgr = runtime
+            .memory_manager()
+            .ok_or_else(|| err_internal("Memory manager not initialized"))?
+            .clone();
+        let kind_s = params.kind.as_deref().unwrap_or("granted");
+        let source_s = params.source.as_deref().unwrap_or("controller");
+        let kind = tenzro_agent::memory::MemoryKind::parse(kind_s)
+            .ok_or_else(|| err_internal(format!("invalid kind: {}", kind_s)))?;
+        let source = tenzro_agent::memory::MemorySource::parse(source_s)
+            .ok_or_else(|| err_internal(format!("invalid source: {}", source_s)))?;
+        let metadata = params.metadata.unwrap_or_else(|| serde_json::json!({}));
+        let record = mgr
+            .grant(params.agent_did, kind, source, params.text, metadata)
+            .await
+            .map_err(|e| err_internal(format!("memory.grant: {}", e)))?;
+        json_result(serde_json::json!({
+            "id": record.id,
+            "agent_did": record.agent_did,
+            "created_at_ms": record.created_at_ms,
+            "kind": record.kind.as_str(),
+            "source": record.source.as_str(),
+            "text": record.text,
+            "metadata": record.metadata,
+            "da_pointer": record.da_pointer,
+            "has_embedding": record.embedding.is_some(),
+        }))
+    }
+
+    #[tool(description = "Recall memories for an agent. Mode 'hybrid' (default) merges Lance vector kNN and Tantivy BM25 via Reciprocal Rank Fusion (k=60); 'vector' or 'text' restrict to one backend. Returns ranked MemoryRecord stubs (no embeddings).")]
+    async fn memory_recall(
+        &self,
+        Parameters(params): Parameters<MemoryRecallParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let runtime = self
+            .node
+            .agent_runtime()
+            .ok_or_else(|| err_internal("Agent runtime not initialized"))?;
+        let mgr = runtime
+            .memory_manager()
+            .ok_or_else(|| err_internal("Memory manager not initialized"))?
+            .clone();
+        let k = params.k.unwrap_or(10) as usize;
+        let mode_s = params.mode.as_deref().unwrap_or("hybrid");
+        let modes = match mode_s {
+            "vector" => tenzro_agent::memory::SearchModes::VECTOR,
+            "text" => tenzro_agent::memory::SearchModes::TEXT,
+            "hybrid" => tenzro_agent::memory::SearchModes::HYBRID,
+            other => return Err(err_internal(format!("invalid mode: {}", other))),
+        };
+        let hits = mgr
+            .recall(params.agent_did, params.query, k, modes)
+            .await
+            .map_err(|e| err_internal(format!("memory.recall: {}", e)))?;
+        let records: Vec<serde_json::Value> = hits
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "agent_did": r.agent_did,
+                    "created_at_ms": r.created_at_ms,
+                    "kind": r.kind.as_str(),
+                    "source": r.source.as_str(),
+                    "text": r.text,
+                    "metadata": r.metadata,
+                    "da_pointer": r.da_pointer,
+                    "has_embedding": r.embedding.is_some(),
+                })
+            })
+            .collect();
+        json_result(serde_json::json!({
+            "count": records.len(),
+            "records": records,
+        }))
+    }
+
+    #[tool(description = "Archive a memory record. Pushes the canonical payload to the configured DA backend, then rewrites the on-tier rows with kind='archived' and the resulting DaPointer attached. Frees hot search budget; payload is fetchable on demand via the pointer.")]
+    async fn memory_archive(
+        &self,
+        Parameters(params): Parameters<MemoryArchiveParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let runtime = self
+            .node
+            .agent_runtime()
+            .ok_or_else(|| err_internal("Agent runtime not initialized"))?;
+        let mgr = runtime
+            .memory_manager()
+            .ok_or_else(|| err_internal("Memory manager not initialized"))?
+            .clone();
+        let archived = mgr
+            .archive(&params.record_id, &params.agent_did)
+            .await
+            .map_err(|e| err_internal(format!("memory.archive: {}", e)))?;
+        json_result(serde_json::json!({
+            "id": archived.id,
+            "agent_did": archived.agent_did,
+            "created_at_ms": archived.created_at_ms,
+            "kind": archived.kind.as_str(),
+            "source": archived.source.as_str(),
+            "text": archived.text,
+            "metadata": archived.metadata,
+            "da_pointer": archived.da_pointer,
+            "has_embedding": archived.embedding.is_some(),
+        }))
+    }
+
+    #[tool(description = "List newest-first memories for an agent. Optional `kind` filter ('granted' | 'recalled' | 'self_noted' | 'archived'). Pure read against the on-tier text index. Use memory_recall for query-driven hybrid retrieval.")]
+    async fn list_memory_records(
+        &self,
+        Parameters(params): Parameters<ListMemoryRecordsParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut payload = serde_json::json!({ "agent_did": params.agent_did });
+        if let Some(l) = params.limit {
+            payload["limit"] = serde_json::json!(l);
+        }
+        if let Some(k) = params.kind {
+            payload["kind"] = serde_json::json!(k);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_listMemoryRecords", payload)
+            .await
+            .map_err(|e| err_internal(format!("listMemoryRecords failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Show the local iroh endpoint id, Pkarr relay URL, and ALPNs registered on the shared router. Returns 'iroh transport not enabled' when the node was started without NodeConfig::iroh.")]
+    async fn iroh_get_info(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let resolver = self
+            .node
+            .iroh_resolver
+            .clone()
+            .ok_or_else(|| err_internal("iroh transport not enabled on this node"))?;
+        let id = resolver.endpoint().id();
+        let cfg = self.node.config().iroh.as_ref();
+        let mut alpns = vec!["iroh-blobs"];
+        if self.node.iroh_a2a_dispatcher.is_some() {
+            alpns.push("tenzro/a2a");
+        }
+        json_result(serde_json::json!({
+            "endpoint_id": id.to_string(),
+            "endpoint_id_hex": hex::encode(id.as_bytes()),
+            "pkarr_relay_url": cfg.and_then(|c| c.pkarr_relay_url.as_ref()).map(|u| u.to_string()),
+            "publish_to_n0_default_discovery": cfg.map(|c| c.publish_to_n0_default_discovery),
+            "docs_enabled": cfg.map(|c| c.enable_docs),
+            "bound_alpns": alpns,
+        }))
+    }
+
+    #[tool(description = "Publish raw bytes to the shared iroh-blobs store. Returns a content-addressed `tenzro://blob/<blake3-hex>` URI that any iroh peer can fetch (subject to NAT/discovery reachability).")]
+    async fn iroh_publish_blob(
+        &self,
+        Parameters(params): Parameters<IrohPublishBlobParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        use base64::Engine as _;
+        use tenzro_iroh::IrohResolver as _;
+        let resolver = self
+            .node
+            .iroh_resolver
+            .clone()
+            .ok_or_else(|| err_internal("iroh transport not enabled on this node"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&params.bytes_b64)
+            .map_err(|e| err_internal(format!("bytes_b64 not valid base64: {e}")))?;
+        let size = bytes.len();
+        let uri = resolver
+            .publish_bytes(bytes::Bytes::from(bytes))
+            .await
+            .map_err(|e| err_internal(format!("iroh publish_bytes: {e}")))?;
+        json_result(serde_json::json!({
+            "tenzro_uri": uri.to_string(),
+            "size_bytes": size,
+        }))
+    }
+
+    #[tool(description = "Fetch a content-addressed `tenzro://blob|model|gradient|shard|receipt/...` URI from the local iroh-blobs store (auto-populates from peers as needed). Returns base64-encoded bytes plus the parsed URI and size.")]
+    async fn iroh_fetch_blob(
+        &self,
+        Parameters(params): Parameters<IrohFetchBlobParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        use base64::Engine as _;
+        use tenzro_iroh::IrohResolver as _;
+        let resolver = self
+            .node
+            .iroh_resolver
+            .clone()
+            .ok_or_else(|| err_internal("iroh transport not enabled on this node"))?;
+        let uri = tenzro_types::tenzro_uri::TenzroUri::parse(&params.tenzro_uri)
+            .map_err(|e| err_internal(format!("parse tenzro_uri: {e}")))?;
+        let bytes = resolver
+            .fetch_bytes(&uri)
+            .await
+            .map_err(|e| err_internal(format!("iroh fetch_bytes: {e}")))?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        json_result(serde_json::json!({
+            "tenzro_uri": uri.to_string(),
+            "size_bytes": bytes.len(),
+            "bytes_b64": b64,
+        }))
+    }
+
+    // ---- Operability inspection surface (read-only) -------------------
+
+    #[tool(description = "Fetch a single validator's registry entry by hex-encoded 32-byte address (with or without 0x prefix). Returns null when the address is not registered. Read-only — validators self-register via the staking transaction path.")]
+    async fn get_validator_state(
+        &self,
+        Parameters(params): Parameters<GetValidatorStateParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "address": params.address });
+        let result = rpc_dispatch(&self.node, "tenzro_getValidatorState", payload)
+            .await
+            .map_err(|e| err_internal(format!("getValidatorState failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List validators in the on-chain registry, optionally filtered by status ('Active' | 'Candidate' | 'PendingActive' | 'PendingExit' | 'Exited' | 'Jailed'). Each entry carries base58 address, Ed25519 + ML-DSA-65 + BLS12-381 pubkeys, self_stake (u128 decimal string), and epoch lifecycle markers.")]
+    async fn list_validators(
+        &self,
+        Parameters(params): Parameters<ListValidatorsParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = match params.status {
+            Some(s) => serde_json::json!({ "status": s }),
+            None => serde_json::json!({}),
+        };
+        let result = rpc_dispatch(&self.node, "tenzro_listValidators", payload)
+            .await
+            .map_err(|e| err_internal(format!("listValidators failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List only currently-Active validators. Convenience over list_validators with status='Active'. Useful for SRE dashboards that need the current committee size and stake distribution.")]
+    async fn list_active_validators(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_listActiveValidators", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listActiveValidators failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List every active Tenzro Train run this node is syncing. Each run carries task_id, status (Pending/Active/Completed/Failed/Cancelled), current_round, state_root, enrolled_trainers, and (once terminal) the sealed receipt. Read-only — safe for monitoring agents.")]
+    async fn training_list_runs(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_training_listRuns", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("training.listRuns failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Look up a single Tenzro Train run by task_id. Returns the full read-side view (task_spec, status, current_round, state_root, enrolled_trainers, metadata, receipt-if-terminal). Returns JSON-RPC -32602 when the run is unknown.")]
+    async fn training_get_run(
+        &self,
+        Parameters(params): Parameters<TrainingTaskIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "task_id": params.task_id });
+        let result = rpc_dispatch(&self.node, "tenzro_training_getRun", payload)
+            .await
+            .map_err(|e| err_internal(format!("training.getRun failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch the sealed receipt for a finalized Tenzro Train run. Returns null when the run is still active. Persisted under CF_TRAINING_RECEIPTS — carries final_state_root, rounds_completed, witness_committees, optional manifest_hash, sealed_at_ms.")]
+    async fn training_get_receipt(
+        &self,
+        Parameters(params): Parameters<TrainingTaskIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "task_id": params.task_id });
+        let result = rpc_dispatch(&self.node, "tenzro_training_getReceipt", payload)
+            .await
+            .map_err(|e| err_internal(format!("training.getReceipt failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch the installed sealed-shard manifest for a Confidential-tier Tenzro Train task. Returns null when no manifest has been installed (Open and Verified tiers never have a manifest). Manifest binds each trainer's encrypted shard, HPKE-wrapped data key, and enclave attestation.")]
+    async fn training_get_sealed_manifest(
+        &self,
+        Parameters(params): Parameters<TrainingTaskIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "task_id": params.task_id });
+        let result = rpc_dispatch(&self.node, "tenzro_training_getSealedManifest", payload)
+            .await
+            .map_err(|e| err_internal(format!("training.getSealedManifest failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ---- Spec 7: adaptive burn-rate governance dial -------------------
+
+    #[tool(description = "Show the current adaptive burn-rate config — base/local/paymaster burn bps with their treasury complements. Paymaster is locked at 100% burn. The dial moves only via on-chain governance proposals (see adaptive_burn_get_recommendation).")]
+    async fn adaptive_burn_get_config(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(&self.node, "tenzro_getBurnRateConfig", serde_json::json!({})).await?;
+        json_result(v)
+    }
+
+    #[tool(description = "Show the latest supply-side metrics snapshot — block height, circulating supply, rolling-window epoch delta, burn/emission breakdown. Drives the recommendation engine.")]
+    async fn adaptive_burn_get_metrics(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(&self.node, "tenzro_getSupplyMetrics", serde_json::json!({})).await?;
+        json_result(v)
+    }
+
+    #[tool(description = "Show the current adaptive-burn recommendation — action (NoChange / IncreaseBurnPct / DecreaseBurnPct / AlarmHighInflation / AlarmHighDeflation), magnitude bps, and whether it's above the auto-proposal floor. Pure function of metrics + targets, no side effects.")]
+    async fn adaptive_burn_get_recommendation(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(&self.node, "tenzro_getBurnRateRecommendation", serde_json::json!({})).await?;
+        json_result(v)
+    }
+
+    #[tool(description = "List pending and historical adaptive-burn governance proposals. Wave 1 returns an empty list — the auto-proposal generator + governance executor wiring lands alongside the EIP-1559 fee-market consumer.")]
+    async fn adaptive_burn_list_proposals(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(&self.node, "tenzro_listAdaptiveBurnProposals", serde_json::json!({})).await?;
+        json_result(v)
+    }
+
+    // ---- Spec 10: SeedAgent treasury allocation -----------------------
+
+    #[tool(description = "Show the genesis SeedAgent treasury earmark — total TNZO allocation, draw-down to date, decay schedule, seed-agent count, surplus burn bps at sunset. The earmark funds protocol-owned bootstrap agents for the first 12 months.")]
+    async fn seed_agent_get_earmark(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(&self.node, "tenzro_getTreasuryEarmark", serde_json::json!({})).await?;
+        json_result(v)
+    }
+
+    #[tool(description = "Fetch a SeedAgent governance charter by 32-byte id. Charter enumerates OperationKind (InferenceConsumer / TaskMarketplaceConsumer / etc.), spend caps, throughput target, counterparty filter, and sunset deadline.")]
+    async fn seed_agent_get_charter(
+        &self,
+        Parameters(params): Parameters<SeedAgentCharterParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_getSeedAgentCharter",
+            serde_json::json!({ "charter_id": params.charter_id }),
+        ).await?;
+        json_result(v)
+    }
+
+    #[tool(description = "List every SeedAgent governance charter registered on this node.")]
+    async fn seed_agent_list_charters(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(&self.node, "tenzro_listSeedAgentCharters", serde_json::json!({})).await?;
+        json_result(v)
+    }
+
+    #[tool(description = "List provisioned SeedAgent records. Each record carries agent_did, controller_did, status (Active/Paused/Quarantined/Terminated), allocation drawn, and optional bond id. Filter by charter_id to scope to one charter's roster.")]
+    async fn seed_agent_list(
+        &self,
+        Parameters(params): Parameters<SeedAgentListParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let body = match params.charter_id {
+            Some(id) => serde_json::json!({ "charter_id": id }),
+            None => serde_json::json!({}),
+        };
+        let v = rpc_dispatch(&self.node, "tenzro_listSeedAgents", body).await?;
+        json_result(v)
+    }
+
+    #[tool(description = "Get network activity counters (inference / settlement / bridge / ERC-7683). exclude_seed=true filters out flows where either side `is_seed_agent`, isolating organic activity from protocol bootstrap traffic.")]
+    async fn seed_agent_get_network_activity(
+        &self,
+        Parameters(params): Parameters<SeedAgentActivityParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut body = serde_json::Map::new();
+        if let Some(w) = params.window {
+            body.insert("window".to_string(), serde_json::Value::String(w));
+        }
+        if let Some(b) = params.exclude_seed {
+            body.insert("exclude_seed".to_string(), serde_json::Value::Bool(b));
+        }
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_getNetworkActivity",
+            serde_json::Value::Object(body),
+        ).await?;
+        json_result(v)
+    }
+
+    // ---- Spec 4: ERC-7683 cross-chain intent settler ------------------
+
+    #[tool(description = "Fetch a single Tenzro7683Order envelope by 32-byte order_id. Envelope is persisted in CF_SETTLEMENTS under the `7683_origin:` keyspace. Order state machine: Open → AwaitingProof → Settled / Refunded / ForceRefundEligible.")]
+    async fn erc7683_get_order(
+        &self,
+        Parameters(params): Parameters<Erc7683OrderIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_get7683Order",
+            serde_json::json!({ "order_id": params.order_id }),
+        ).await?;
+        json_result(v)
+    }
+
+    #[tool(description = "Paginated scan over persisted ERC-7683 orders in the `7683_origin:` keyspace. Optional state filter (open / awaiting_proof / settled / refunded / force_refund_eligible) and CAIP-2 dest_chain filter.")]
+    async fn erc7683_list_orders(
+        &self,
+        Parameters(params): Parameters<Erc7683ListOrdersParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut body = serde_json::Map::new();
+        if let Some(s) = params.state {
+            body.insert("state".to_string(), serde_json::Value::String(s));
+        }
+        if let Some(dc) = params.dest_chain {
+            body.insert("dest_chain".to_string(), serde_json::Value::from(dc));
+        }
+        if let Some(l) = params.limit {
+            body.insert("limit".to_string(), serde_json::Value::from(l));
+        }
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_list7683Orders",
+            serde_json::Value::Object(body),
+        ).await?;
+        json_result(v)
+    }
+
+    #[tool(description = "Destination-side commit of an ERC-7683 FillRecord (single-shot per order_id — re-submission returns -32010 OrderAlreadyFilled). Required fields: order_id, origin_chain_id, origin_settler, filler, recipient (32-byte), fill_tx_hash, filled_at_ms, proof_route, outputs[].")]
+    async fn erc7683_record_fill(
+        &self,
+        Parameters(params): Parameters<Erc7683RecordFillParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let body = serde_json::json!({
+            "order_id": params.order_id,
+            "origin_chain_id": params.origin_chain_id,
+            "origin_settler": params.origin_settler,
+            "filler": params.filler,
+            "recipient": params.recipient,
+            "fill_tx_hash": params.fill_tx_hash,
+            "filled_at_ms": params.filled_at_ms,
+            "proof_route": params.proof_route,
+            "outputs": params.outputs,
+        });
+        let v = rpc_dispatch(&self.node, "tenzro_recordFill7683", body).await?;
+        json_result(v)
+    }
+
+    #[tool(description = "Fetch a single ERC-7683 FillRecord by (order_id, origin_chain_id). Returns the record JSON, or -32000 if no fill has been recorded.")]
+    async fn erc7683_get_fill(
+        &self,
+        Parameters(params): Parameters<Erc7683GetFillParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(
+            &self.node,
+            "tenzro_getFill7683",
+            serde_json::json!({
+                "order_id": params.order_id,
+                "origin_chain_id": params.origin_chain_id,
+            }),
+        ).await?;
+        json_result(v)
+    }
+
+    #[tool(description = "List every recorded destination-side FillRecord on this node. Cardinality is bounded — registry holds at most one FillRecord per cross-chain order ever filled here.")]
+    async fn erc7683_list_fills(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let v = rpc_dispatch(&self.node, "tenzro_listFills7683", serde_json::json!({})).await?;
+        json_result(v)
+    }
+
     #[tool(description = "Discover available AI models on the Tenzro Network. Filter by category, serving status, or max price. Returns model IDs, providers, pricing, and endpoints.")]
     async fn discover_models(
         &self,
         Parameters(params): Parameters<DiscoverModelsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         Err(err_internal(format!(
             "discover_models requires network gossip — not available on local node (category={:?}, serving_only={:?}, max_price_wei={:?})",
             params.category, params.serving_only, params.max_price_wei
@@ -6468,7 +7488,7 @@ impl TenzroMcpServer {
     async fn discover_agents(
         &self,
         Parameters(params): Parameters<DiscoverAgentsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let limit = params.limit.unwrap_or(20).min(500);
         let cap_filter = params.capability.as_ref().map(|s| s.to_lowercase());
         let type_filter = params.agent_type.as_ref().map(|s| s.to_lowercase());
@@ -6570,7 +7590,7 @@ impl TenzroMcpServer {
     // JSON-RPC for capability discovery and attestation inspection.
 
     #[tool(description = "List all registered capabilities on this Tenzro node. Returns each capability with the count of agents that have it, the count of attestations, and the list of agent IDs supporting that capability. Use to discover what specialized work the local agent runtime can route.")]
-    async fn list_capabilities(&self) -> std::result::Result<CallToolResult, ErrorData> {
+    async fn list_capabilities(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let runtime = self.node.agent_runtime().ok_or_else(|| {
             err_internal("agent runtime not initialized — capabilities unavailable")
         })?;
@@ -6600,7 +7620,7 @@ impl TenzroMcpServer {
     async fn get_capability_attestations(
         &self,
         Parameters(params): Parameters<GetCapabilityAttestationsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let capability = parse_capability_short(&params.capability);
         let verified_only = params.verified_only.unwrap_or(false);
 
@@ -6632,7 +7652,7 @@ impl TenzroMcpServer {
     async fn get_agent_capability_attestations(
         &self,
         Parameters(params): Parameters<GetAgentCapabilityAttestationsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let runtime = self.node.agent_runtime().ok_or_else(|| {
             err_internal("agent runtime not initialized — capabilities unavailable")
         })?;
@@ -6661,7 +7681,7 @@ impl TenzroMcpServer {
     async fn find_best_agent_for_capability(
         &self,
         Parameters(params): Parameters<FindBestAgentForCapabilityParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let capability = parse_capability_short(&params.capability);
 
         let runtime = self.node.agent_runtime().ok_or_else(|| {
@@ -6684,7 +7704,7 @@ impl TenzroMcpServer {
     async fn get_task(
         &self,
         Parameters(params): Parameters<GetTaskParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         Err(err_internal(format!(
             "get_task requires network consensus — not available on local node (task_id={})",
             params.task_id
@@ -6695,7 +7715,7 @@ impl TenzroMcpServer {
     async fn cancel_task(
         &self,
         Parameters(params): Parameters<CancelTaskParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         Err(err_internal(format!(
             "cancel_task requires network consensus — not available on local node (task_id={}, requester={})",
             params.task_id, params.requester_address
@@ -6706,7 +7726,7 @@ impl TenzroMcpServer {
     async fn assign_task(
         &self,
         Parameters(params): Parameters<AssignTaskParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         Err(err_internal(format!(
             "assign_task requires network consensus — not available on local node (task_id={}, agent_did={})",
             params.task_id, params.agent_did
@@ -6717,7 +7737,7 @@ impl TenzroMcpServer {
     async fn complete_task(
         &self,
         Parameters(params): Parameters<CompleteTaskParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         Err(err_internal(format!(
             "complete_task requires network consensus — not available on local node (task_id={}, agent_did={}, result_size={}, has_proof={})",
             params.task_id, params.agent_did, params.result.to_string().len(), params.proof_hex.is_some()
@@ -6730,7 +7750,7 @@ impl TenzroMcpServer {
     async fn get_agent_template(
         &self,
         Parameters(params): Parameters<GetAgentTemplateParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_AGENT_TEMPLATES, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
@@ -6768,7 +7788,7 @@ impl TenzroMcpServer {
     async fn download_agent_template(
         &self,
         Parameters(params): Parameters<DownloadAgentTemplateParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         Err(err_internal(format!(
             "download_agent_template requires network consensus — not available on local node (template_id={}, controller={}, has_overrides={})",
             params.template_id, params.controller_did, params.config_overrides.is_some()
@@ -6779,7 +7799,7 @@ impl TenzroMcpServer {
     async fn update_agent_template(
         &self,
         Parameters(params): Parameters<UpdateAgentTemplateParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         Err(err_internal(format!(
             "update_agent_template requires network consensus — not available on local node (template_id={}, description={:?}, version={:?}, status={:?}, tags={:?})",
             params.template_id, params.description, params.version, params.status, params.tags
@@ -6792,7 +7812,7 @@ impl TenzroMcpServer {
     async fn create_token(
         &self,
         Parameters(params): Parameters<CreateTokenParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_token::{TokenDefinition, TokenType, cross_vm::{VmAddresses, TokenPermissions, TokenMetadata, TokenId}};
 
         let registry = self.node.token_registry().ok_or_else(|| err_internal_data("Token registry not initialized"))?;
@@ -6882,7 +7902,7 @@ impl TenzroMcpServer {
     async fn get_token_info(
         &self,
         Parameters(params): Parameters<GetTokenInfoParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let registry = self.node.token_registry().ok_or_else(|| err_internal_data("Token registry not initialized"))?;
 
         let def = if let Some(ref symbol) = params.symbol {
@@ -6942,7 +7962,7 @@ impl TenzroMcpServer {
     async fn list_tokens(
         &self,
         Parameters(params): Parameters<ListTokensParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let registry = self.node.token_registry().ok_or_else(|| err_internal_data("Token registry not initialized"))?;
 
         let vm_filter = params.vm_type.as_deref().and_then(|s| match s.to_lowercase().as_str() {
@@ -6979,7 +7999,7 @@ impl TenzroMcpServer {
     async fn deploy_contract(
         &self,
         Parameters(params): Parameters<DeployContractParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_vm::{ContractDeployment, VmType};
 
         let vm_type = match params.vm_type.to_lowercase().as_str() {
@@ -7053,7 +8073,7 @@ impl TenzroMcpServer {
     async fn cross_vm_transfer(
         &self,
         Parameters(params): Parameters<CrossVmTransferParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let registry = self.node.token_registry().ok_or_else(|| err_internal_data("Token registry not initialized"))?;
         let token = self.node.token().ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
 
@@ -7112,7 +8132,7 @@ impl TenzroMcpServer {
     async fn wrap_tnzo(
         &self,
         Parameters(params): Parameters<WrapTnzoParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let token = self.node.token().ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
 
         let addr_hex = params.address.strip_prefix("0x").unwrap_or(&params.address);
@@ -7149,7 +8169,7 @@ impl TenzroMcpServer {
     async fn get_token_balance(
         &self,
         Parameters(params): Parameters<GetTokenBalanceParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let token = self.node.token().ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
 
         let addr_hex = params.address.strip_prefix("0x").unwrap_or(&params.address);
@@ -7190,7 +8210,7 @@ impl TenzroMcpServer {
     async fn set_username(
         &self,
         Parameters(params): Parameters<SetUsernameParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let registry = self.node.identity_registry().ok_or_else(|| err_internal_data("Identity registry not initialized"))?;
 
         registry.register_username(&params.did, &params.username).map_err(|e| ErrorData {
@@ -7210,7 +8230,7 @@ impl TenzroMcpServer {
     async fn resolve_username(
         &self,
         Parameters(params): Parameters<ResolveUsernameParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let registry = self.node.identity_registry().ok_or_else(|| err_internal_data("Identity registry not initialized"))?;
 
         match registry.resolve_username(&params.username) {
@@ -7232,7 +8252,7 @@ impl TenzroMcpServer {
     async fn get_skill_usage(
         &self,
         Parameters(params): Parameters<GetSkillUsageParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_SKILLS, CF_METADATA, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal_data("Storage not available"))?;
@@ -7267,7 +8287,7 @@ impl TenzroMcpServer {
     async fn get_tool_usage(
         &self,
         Parameters(params): Parameters<GetToolUsageParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_TOOLS, CF_METADATA, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal_data("Storage not available"))?;
@@ -7304,7 +8324,7 @@ impl TenzroMcpServer {
     async fn spawn_agent_from_template(
         &self,
         Parameters(params): Parameters<SpawnAgentFromTemplateParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_AGENTS, KvStore};
 
         let kit = self.node.agent_kit().ok_or_else(|| err_internal_data("AgentKit runtime not initialized"))?.clone();
@@ -7349,7 +8369,7 @@ impl TenzroMcpServer {
     async fn rate_agent_template(
         &self,
         Parameters(params): Parameters<RateAgentTemplateParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_AGENT_TEMPLATES, CF_METADATA, KvStore};
 
         if params.rating < 1 || params.rating > 5 {
@@ -7423,7 +8443,7 @@ impl TenzroMcpServer {
     async fn search_agent_templates(
         &self,
         Parameters(params): Parameters<SearchAgentTemplatesParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_AGENT_TEMPLATES, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal_data("Storage not available"))?;
@@ -7460,7 +8480,7 @@ impl TenzroMcpServer {
     async fn get_agent_template_stats(
         &self,
         Parameters(params): Parameters<GetAgentTemplateStatsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_AGENT_TEMPLATES, CF_METADATA, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal_data("Storage not available"))?;
@@ -7508,7 +8528,7 @@ impl TenzroMcpServer {
     async fn create_nft_collection(
         &self,
         Parameters(params): Parameters<CreateNftCollectionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_NFTS, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
@@ -7569,7 +8589,7 @@ impl TenzroMcpServer {
     async fn mint_nft(
         &self,
         Parameters(params): Parameters<MintNftParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_NFTS, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
@@ -7629,7 +8649,7 @@ impl TenzroMcpServer {
     async fn transfer_nft(
         &self,
         Parameters(params): Parameters<TransferNftParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_NFTS, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
@@ -7678,7 +8698,7 @@ impl TenzroMcpServer {
     async fn get_nft_info(
         &self,
         Parameters(params): Parameters<GetNftInfoParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_NFTS, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
@@ -7712,7 +8732,7 @@ impl TenzroMcpServer {
     async fn list_nft_collections(
         &self,
         Parameters(params): Parameters<ListNftCollectionsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_NFTS, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
@@ -7763,7 +8783,7 @@ impl TenzroMcpServer {
     async fn register_nft_pointer(
         &self,
         Parameters(params): Parameters<RegisterNftPointerParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_NFTS, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
@@ -7813,7 +8833,7 @@ impl TenzroMcpServer {
     async fn bridge_quote(
         &self,
         Parameters(params): Parameters<BridgeQuoteParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let router = self
             .node
             .bridge_router()
@@ -7876,7 +8896,7 @@ impl TenzroMcpServer {
     async fn bridge_with_hook(
         &self,
         Parameters(params): Parameters<BridgeWithHookParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let router = self
             .node
             .bridge_router()
@@ -7933,7 +8953,7 @@ impl TenzroMcpServer {
     async fn crosschain_mint(
         &self,
         Parameters(params): Parameters<CrosschainMintParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_METADATA, KvStore};
 
         let token = self.node.token().ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
@@ -7989,7 +9009,7 @@ impl TenzroMcpServer {
     async fn crosschain_burn(
         &self,
         Parameters(params): Parameters<CrosschainBurnParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_METADATA, KvStore};
 
         let token = self.node.token().ok_or_else(|| err_internal_data("TNZO token not initialized"))?;
@@ -8043,7 +9063,7 @@ impl TenzroMcpServer {
     async fn authorize_crosschain_bridge(
         &self,
         Parameters(params): Parameters<AuthorizeCrosschainBridgeParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_METADATA, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
@@ -8085,7 +9105,7 @@ impl TenzroMcpServer {
     async fn check_compliance(
         &self,
         Parameters(params): Parameters<CheckComplianceParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_COMPLIANCE, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
@@ -8160,7 +9180,7 @@ impl TenzroMcpServer {
     async fn register_compliance(
         &self,
         Parameters(params): Parameters<RegisterComplianceParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_COMPLIANCE, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
@@ -8200,7 +9220,7 @@ impl TenzroMcpServer {
     async fn freeze_address(
         &self,
         Parameters(params): Parameters<FreezeAddressParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_COMPLIANCE, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
@@ -8239,7 +9259,7 @@ impl TenzroMcpServer {
     async fn get_events(
         &self,
         Parameters(params): Parameters<GetEventsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_EVENTS, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
@@ -8320,7 +9340,7 @@ impl TenzroMcpServer {
     async fn subscribe_events(
         &self,
         Parameters(params): Parameters<SubscribeEventsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use tenzro_storage::{CF_METADATA, KvStore};
 
         let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
@@ -8359,67 +9379,376 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Register a webhook URL for event notifications. The Tenzro node will POST JSON event payloads to the registered URL when matching events occur. Each POST includes an HMAC-SHA256 signature in the X-Tenzro-Signature header for verification.")]
+    #[tool(description = "Register a webhook URL for event notifications. The Tenzro node will POST JSON event payloads to the registered URL when matching events occur. Each POST includes an HMAC-SHA256 signature in the X-Tenzro-Signature header for verification. URL must be `https://`; secret must be at least 16 characters.")]
     async fn register_webhook(
         &self,
         Parameters(params): Parameters<RegisterWebhookParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
-        use tenzro_storage::{CF_WEBHOOKS, KvStore};
-
-        let storage = self.node.storage().ok_or_else(|| err_internal("Storage not available"))?;
-
-        // Validate URL
-        if !params.url.starts_with("https://") {
-            return Err(ErrorData {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("Webhook URL must use HTTPS"),
-                data: None,
-            });
-        }
-
-        if params.secret.len() < 16 {
-            return Err(ErrorData {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("Webhook secret must be at least 16 characters"),
-                data: None,
-            });
-        }
-
-        let webhook_id = uuid::Uuid::new_v4().to_string();
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        // Hash the secret for storage (don't store plaintext)
-        let secret_hash = tenzro_crypto::hash::sha256(params.secret.as_bytes());
-
-        let webhook = serde_json::json!({
-            "webhook_id": webhook_id,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut req = serde_json::json!({
             "url": params.url,
-            "event_types": params.event_types.as_deref().unwrap_or(&[]),
-            "addresses": params.addresses.as_deref().unwrap_or(&[]),
-            "secret_hash": hex::encode(secret_hash.as_bytes()),
-            "created_at": now,
-            "active": true,
-            "delivery_count": 0,
-            "last_delivered_at": null,
+            "secret": params.secret,
         });
+        if let Some(types) = params.event_types {
+            req["event_types"] = serde_json::json!(types);
+        }
+        if let Some(addrs) = params.addresses {
+            req["addresses"] = serde_json::json!(addrs);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_registerWebhook", req)
+            .await
+            .map_err(|e| err_internal(format!("registerWebhook failed: {}", e)))?;
+        json_result(result)
+    }
 
-        let key = format!("webhook:{}", webhook_id).into_bytes();
-        let value = serde_json::to_vec(&webhook).map_err(|e| err_internal(format!("Serialization error: {}", e)))?;
-        storage.put(CF_WEBHOOKS, &key, &value)
-            .map_err(|e| err_internal(format!("Storage error: {}", e)))?;
+    #[tool(description = "List every registered webhook. Returns each webhook's id, url, active flag, event_types/addresses filters, and delivery counters (total_deliveries, failed_deliveries). Secret hashes are NOT returned — secrets are write-only.")]
+    async fn list_webhooks(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_listWebhooks", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listWebhooks failed: {}", e)))?;
+        json_result(result)
+    }
 
-        json_result(serde_json::json!({
-            "webhook_id": webhook_id,
-            "url": params.url,
-            "event_types": params.event_types.as_deref().unwrap_or(&[]),
-            "addresses": params.addresses.as_deref().unwrap_or(&[]),
-            "status": "registered",
-            "note": "Events will be POSTed to the URL with HMAC-SHA256 signature in X-Tenzro-Signature header"
-        }))
+    #[tool(description = "Delete a webhook by id. Returns JSON-RPC error `-32602` if the id is unknown.")]
+    async fn delete_webhook(
+        &self,
+        Parameters(params): Parameters<DeleteWebhookParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_deleteWebhook",
+            serde_json::json!({ "webhook_id": params.webhook_id }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("deleteWebhook failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── SLA Fault Detector ───
+
+    #[tool(description = "Issue a VRF-bound SLA liveness probe to a ModelProvider / TeeProvider DID and broadcast it on the `tenzro/sla` gossipsub topic. Validator-only — on a non-validator node this returns `-32000 SlaManager not initialized`. The probe is addressed by a 32-byte VRF output (`challenge_nonce`). `deadline_ms` is a Unix-millisecond timestamp; if the provider does not respond before this deadline the probe is counted as missed against the fault-detector's slash threshold.")]
+    async fn sla_issue_probe(
+        &self,
+        Parameters(params): Parameters<SlaIssueProbeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_slaIssueProbe",
+            serde_json::json!({
+                "provider_did": params.provider_did,
+                "epoch": params.epoch,
+                "round": params.round,
+                "deadline_ms": params.deadline_ms,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("slaIssueProbe failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List every in-flight SLA probe awaiting a response, regardless of issuer. Returns `{count, probes: [...]}` with `challenge_nonce`, `provider_did`, `epoch`, `round`, `deadline_ms`, and `issuer` for each probe. Used by operators to spot stuck probes whose deadline has already elapsed without a matching response.")]
+    async fn sla_list_outstanding_probes(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_slaListOutstandingProbes",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("slaListOutstandingProbes failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read the SLA fault-detector parameters this validator is using: `slash_threshold` (number of missed probes before slashing fires for a provider), `slash_amount_wei` (per-crossing slash amount in wei, decimal string), and this validator's `vrf_pubkey` (0x-prefixed hex).")]
+    async fn sla_get_params(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_slaGetParams", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("slaGetParams failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Snapshot (State Sync) ───
+
+    #[tool(description = "List local snapshots available for state-sync. Per-chunk hashes are elided for compactness — use `get_snapshot_manifest` to fetch the full manifest with `chunk_hashes_hex[]`. Returns `{snapshots: [{height, state_root_hex, num_chunks, created_at, format}, ...]}`.")]
+    async fn list_snapshots(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_listSnapshots", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listSnapshots failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch the full snapshot manifest at `height`, including per-chunk SHA-256 hashes used to verify chunks before applying. Returns JSON-RPC error `-32004 no snapshot at height` if no snapshot exists at that height. The manifest contains `state_root_hex` which the caller MUST verify against a trusted QC at the same height before offering this manifest to another node.")]
+    async fn get_snapshot_manifest(
+        &self,
+        Parameters(params): Parameters<SnapshotManifestParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getSnapshotManifest",
+            serde_json::json!({ "height": params.height }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getSnapshotManifest failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch one chunk of a local snapshot by `(height, chunk_index)`. The returned `data_b64` is the base64-encoded chunk bytes; verify against `manifest.chunk_hashes_hex[chunk_index]` before applying. Returns `{height, chunk_index, data_b64}`.")]
+    async fn get_snapshot_chunk(
+        &self,
+        Parameters(params): Parameters<SnapshotChunkParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getSnapshotChunk",
+            serde_json::json!({
+                "height": params.height,
+                "chunk_index": params.chunk_index,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getSnapshotChunk failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Register an inbound snapshot manifest received from a peer. **The caller MUST verify `state_root_hex` against a trusted QC at the same height before invoking** — this RPC only registers the offer and provisions the spool directory; it does not itself validate the manifest against chain state. Returns `{accepted: true, height, num_chunks}`.")]
+    async fn offer_snapshot(
+        &self,
+        Parameters(params): Parameters<OfferSnapshotParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_offerSnapshot",
+            serde_json::json!({
+                "height": params.height,
+                "state_root_hex": params.state_root_hex,
+                "num_chunks": params.num_chunks,
+                "chunk_hashes_hex": params.chunk_hashes_hex,
+                "created_at": params.created_at,
+                "format": params.format,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("offerSnapshot failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Write one inbound snapshot chunk. The chunk's SHA-256 is verified against `manifest.chunk_hashes_hex[chunk_index]` before any disk write. On the final chunk, all chunks are decoded and atomically committed via `write_batch_sync`; `complete` will be `true` on that call. Returns `{complete, height, chunk_index}`.")]
+    async fn apply_snapshot_chunk(
+        &self,
+        Parameters(params): Parameters<ApplySnapshotChunkParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_applySnapshotChunk",
+            serde_json::json!({
+                "height": params.height,
+                "chunk_index": params.chunk_index,
+                "data_b64": params.data_b64,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("applySnapshotChunk failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── EIP-7702 Tools (Set EOA Account Code helpers) ───
+
+    #[tool(description = "Compute the secp256k1 signing hash for an EIP-7702 authorization tuple `(chain_id, delegate_address, nonce)`. The returned `signing_hash` is what the EOA's secp256k1 private key signs client-side; full preimage is `MAGIC(0x05) || rlp([chain_id, delegate_address, nonce])`. Returns `{signing_hash, signing_data, magic_byte}`.")]
+    async fn eip7702_signing_hash(
+        &self,
+        Parameters(params): Parameters<Eip7702SigningHashParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_eip7702SigningHash",
+            serde_json::json!({
+                "chain_id": params.chain_id,
+                "delegate_address": params.delegate_address,
+                "nonce": params.nonce,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("eip7702SigningHash failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Build the 23-byte EIP-7702 delegation designator (`0xef0100 || delegate_address`) that gets written into the EOA's code slot once an authorization is accepted. Returns `{designator, length: 23, prefix: '0xef0100', delegate_address}`.")]
+    async fn eip7702_build_designator(
+        &self,
+        Parameters(params): Parameters<Eip7702BuildDesignatorParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_eip7702BuildDesignator",
+            serde_json::json!({
+                "delegate_address": params.delegate_address,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("eip7702BuildDesignator failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Decode an account's `code` (hex with or without 0x prefix) and extract the delegate address if it is a valid EIP-7702 designator. Returns `{is_designator: false, delegate_address: null}` for code that is not a 23-byte 7702 designator.")]
+    async fn eip7702_parse_designator(
+        &self,
+        Parameters(params): Parameters<Eip7702ParseDesignatorParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_eip7702ParseDesignator",
+            serde_json::json!({ "code": params.code }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("eip7702ParseDesignator failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read static metadata about the EIP-7702 support surface — tx type (0x04), magic byte (0x05), designator prefix (0xef0100), designator length (23 bytes), signing scheme (secp256k1), and operator notes on the current transaction-side integration state.")]
+    async fn eip7702_protocol_info(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_eip7702ProtocolInfo",
+            serde_json::Value::Null,
+        )
+        .await
+        .map_err(|e| err_internal(format!("eip7702ProtocolInfo failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Auth-engine Approval Workflow Tools ───
+
+    #[tool(description = "List every approval in `Pending` state for the given approver DID. Lazy-expires stale records server-side before returning, so the caller never sees expired entries. Returns `{approver_did, count, pending: [{approval_id, requester_did, approver_did, created_at_ms, expires_at_ms, status, decided_at_ms, summary, action}]}`. Requires AuthEngine to be initialised on the node.")]
+    async fn list_pending_approvals(
+        &self,
+        Parameters(params): Parameters<ListPendingApprovalsParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listPendingApprovals",
+            serde_json::json!({ "approver_did": params.approver_did }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listPendingApprovals failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch a single approval record by id. The engine lazy-transitions an expired `Pending` record to `Expired` on this read path, so a returned `Pending` record is guaranteed to still be live. Returns the full record JSON; returns -32000 if id is unknown. Requires AuthEngine to be initialised on the node.")]
+    async fn get_approval(
+        &self,
+        Parameters(params): Parameters<GetApprovalParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getApproval",
+            serde_json::json!({ "approval_id": params.approval_id }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getApproval failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Decide a pending approval — `decision` is 'approved' or 'denied'. When `approver_did` is supplied, the engine refuses to apply the decision unless the record's approver_did matches (cross-approver tampering defence). Mismatch returns JSON-RPC -32001 (forbidden). Returns the updated approval record. Requires AuthEngine to be initialised on the node.")]
+    async fn decide_approval(
+        &self,
+        Parameters(params): Parameters<DecideApprovalParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut req = serde_json::json!({
+            "approval_id": params.approval_id,
+            "decision": params.decision,
+        });
+        if let Some(did) = params.approver_did {
+            req["approver_did"] = serde_json::Value::String(did);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_decideApproval", req)
+            .await
+            .map_err(|e| err_internal(format!("decideApproval failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Escrow + Dispute Inspection Tools ───
+
+    #[tool(description = "Read a single escrow record by its 32-byte escrow_id (hex, with or without 0x prefix). Returns `{escrow_id, payer, payee, amount, asset_id, status, created_at, expires_at, release_conditions}`. Requires EscrowManager to be initialised.")]
+    async fn get_escrow(
+        &self,
+        Parameters(params): Parameters<GetEscrowParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getEscrow",
+            serde_json::json!({ "escrow_id": params.escrow_id }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getEscrow failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List every escrow funded by the given payer address. Returns `{payer, count, escrows: [...]}`. Backed by the `escrow_payer:` secondary index in CF_SETTLEMENTS. Requires EscrowManager.")]
+    async fn list_escrows_by_payer(
+        &self,
+        Parameters(params): Parameters<ListEscrowsByPayerParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listEscrowsByPayer",
+            serde_json::json!({ "payer": params.payer }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listEscrowsByPayer failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List every escrow held for the given payee address. Returns `{payee, count, escrows: [...]}`. Backed by the `escrow_payee:` secondary index in CF_SETTLEMENTS. Requires EscrowManager.")]
+    async fn list_escrows_by_payee(
+        &self,
+        Parameters(params): Parameters<ListEscrowsByPayeeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listEscrowsByPayee",
+            serde_json::json!({ "payee": params.payee }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listEscrowsByPayee failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch a single channel dispute by id. Returns the full ChannelDispute (challenger, evidence blobs, status, opened_at / timeout_at / resolved_at, resolution). Returns -32004 if no dispute with that id exists. Requires ChannelManager.")]
+    async fn get_dispute(
+        &self,
+        Parameters(params): Parameters<GetDisputeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getDispute",
+            serde_json::json!({ "dispute_id": params.dispute_id }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getDispute failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List every dispute (open or historical) attached to a channel. Returns `{channel_id, count, disputes: [...]}`. Empty list is not an error — a channel with no disputes returns count: 0. Requires ChannelManager.")]
+    async fn list_disputes_by_channel(
+        &self,
+        Parameters(params): Parameters<ListDisputesByChannelParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listDisputesByChannel",
+            serde_json::json!({ "channel_id": params.channel_id }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listDisputesByChannel failed: {}", e)))?;
+        json_result(result)
     }
 
     // ─── Crypto Tools ───
@@ -8428,7 +9757,7 @@ impl TenzroMcpServer {
     async fn sign_message(
         &self,
         Parameters(params): Parameters<SignMessageParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let key_type = params.key_type.as_deref().unwrap_or("ed25519");
         let result = rpc_dispatch(&self.node,"tenzro_signMessage", serde_json::json!({
             "private_key": params.private_key,
@@ -8442,7 +9771,7 @@ impl TenzroMcpServer {
     async fn verify_signature(
         &self,
         Parameters(params): Parameters<VerifySignatureParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_verifySignature", serde_json::json!({
             "public_key": params.public_key,
             "message_hex": params.message_hex,
@@ -8455,7 +9784,7 @@ impl TenzroMcpServer {
     async fn encrypt_data(
         &self,
         Parameters(params): Parameters<EncryptDataParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_encrypt", serde_json::json!({
             "key_hex": params.key_hex,
             "plaintext_hex": params.plaintext_hex,
@@ -8467,7 +9796,7 @@ impl TenzroMcpServer {
     async fn decrypt_data(
         &self,
         Parameters(params): Parameters<DecryptDataParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_decrypt", serde_json::json!({
             "key_hex": params.key_hex,
             "ciphertext_hex": params.ciphertext_hex,
@@ -8480,7 +9809,7 @@ impl TenzroMcpServer {
     async fn derive_key(
         &self,
         Parameters(params): Parameters<DeriveKeyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_deriveKey", serde_json::json!({
             "password": params.password,
         })).await.map_err(|e| err_internal(format!("deriveKey failed: {}", e)))?;
@@ -8491,7 +9820,7 @@ impl TenzroMcpServer {
     async fn generate_keypair(
         &self,
         Parameters(params): Parameters<GenerateKeypairParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_generateKeypair", serde_json::json!({
             "key_type": params.key_type,
         })).await.map_err(|e| err_internal(format!("generateKeypair failed: {}", e)))?;
@@ -8502,7 +9831,7 @@ impl TenzroMcpServer {
     async fn hash_sha256(
         &self,
         Parameters(params): Parameters<HashSha256Params>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_hashSha256", serde_json::json!({
             "data_hex": params.data_hex,
         })).await.map_err(|e| err_internal(format!("hashSha256 failed: {}", e)))?;
@@ -8513,7 +9842,7 @@ impl TenzroMcpServer {
     async fn hash_keccak256(
         &self,
         Parameters(params): Parameters<HashKeccak256Params>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_hashKeccak256", serde_json::json!({
             "data_hex": params.data_hex,
         })).await.map_err(|e| err_internal(format!("hashKeccak256 failed: {}", e)))?;
@@ -8524,7 +9853,7 @@ impl TenzroMcpServer {
     async fn x25519_key_exchange(
         &self,
         Parameters(params): Parameters<X25519KeyExchangeParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_x25519KeyExchange", serde_json::json!({
             "private_key_hex": params.private_key_hex,
             "public_key_hex": params.public_key_hex,
@@ -8538,7 +9867,7 @@ impl TenzroMcpServer {
     async fn detect_tee(
         &self,
         Parameters(_params): Parameters<DetectTeeParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_detectTee", serde_json::json!({}))
             .await.map_err(|e| err_internal(format!("detectTee failed: {}", e)))?;
         json_result(result)
@@ -8548,7 +9877,7 @@ impl TenzroMcpServer {
     async fn get_tee_attestation(
         &self,
         Parameters(params): Parameters<GetTeeAttestationParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_getAttestation", serde_json::json!({
             "tee_type": params.tee_type,
         })).await.map_err(|e| err_internal(format!("getAttestation failed: {}", e)))?;
@@ -8559,7 +9888,7 @@ impl TenzroMcpServer {
     async fn verify_tee_attestation(
         &self,
         Parameters(params): Parameters<VerifyTeeAttestationParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_verifyTeeAttestation", serde_json::json!({
             "attestation": params.attestation,
             "tee_type": params.tee_type,
@@ -8571,7 +9900,7 @@ impl TenzroMcpServer {
     async fn seal_data(
         &self,
         Parameters(params): Parameters<SealDataParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_sealData", serde_json::json!({
             "data_hex": params.data_hex,
             "key_id": params.key_id,
@@ -8583,7 +9912,7 @@ impl TenzroMcpServer {
     async fn unseal_data(
         &self,
         Parameters(params): Parameters<UnsealDataParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_unsealData", serde_json::json!({
             "sealed_hex": params.sealed_hex,
             "key_id": params.key_id,
@@ -8595,7 +9924,7 @@ impl TenzroMcpServer {
     async fn list_tee_providers(
         &self,
         Parameters(_params): Parameters<ListTeeProvidersParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_listTeeProviders", serde_json::json!({}))
             .await.map_err(|e| err_internal(format!("listTeeProviders failed: {}", e)))?;
         json_result(result)
@@ -8607,7 +9936,7 @@ impl TenzroMcpServer {
     async fn create_zk_proof(
         &self,
         Parameters(params): Parameters<CreateZkProofParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut payload = params.witness;
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("circuit_id".to_string(), serde_json::Value::String(params.circuit_id));
@@ -8623,7 +9952,7 @@ impl TenzroMcpServer {
     async fn list_zk_circuits(
         &self,
         Parameters(_params): Parameters<ListZkCircuitsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_listCircuits", serde_json::json!({}))
             .await.map_err(|e| err_internal(format!("listCircuits failed: {}", e)))?;
         json_result(result)
@@ -8635,7 +9964,7 @@ impl TenzroMcpServer {
     async fn create_mpc_wallet(
         &self,
         Parameters(params): Parameters<CreateMpcWalletParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_createMpcWallet", serde_json::json!({
             "threshold": params.threshold.unwrap_or(2),
             "total_shares": params.total_shares.unwrap_or(3),
@@ -8648,7 +9977,7 @@ impl TenzroMcpServer {
     async fn export_keystore(
         &self,
         Parameters(params): Parameters<ExportKeystoreParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_exportKeystore", serde_json::json!({
             "wallet_id": params.wallet_id,
             "password": params.password,
@@ -8660,7 +9989,7 @@ impl TenzroMcpServer {
     async fn import_keystore(
         &self,
         Parameters(params): Parameters<ImportKeystoreParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_importKeystore", serde_json::json!({
             "keystore_json": params.keystore_json,
             "password": params.password,
@@ -8672,7 +10001,7 @@ impl TenzroMcpServer {
     async fn get_key_shares(
         &self,
         Parameters(params): Parameters<GetKeySharesParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_getKeyShares", serde_json::json!({
             "wallet_id": params.wallet_id,
         })).await.map_err(|e| err_internal(format!("getKeyShares failed: {}", e)))?;
@@ -8683,7 +10012,7 @@ impl TenzroMcpServer {
     async fn rotate_keys(
         &self,
         Parameters(params): Parameters<RotateKeysParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_rotateKeys", serde_json::json!({
             "wallet_id": params.wallet_id,
         })).await.map_err(|e| err_internal(format!("rotateKeys failed: {}", e)))?;
@@ -8694,7 +10023,7 @@ impl TenzroMcpServer {
     async fn set_spending_limits(
         &self,
         Parameters(params): Parameters<SetSpendingLimitsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_setSpendingLimits", serde_json::json!({
             "wallet_id": params.wallet_id,
             "daily_limit": params.daily_limit,
@@ -8707,7 +10036,7 @@ impl TenzroMcpServer {
     async fn get_spending_limits(
         &self,
         Parameters(params): Parameters<GetSpendingLimitsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_getSpendingLimits", serde_json::json!({
             "wallet_id": params.wallet_id,
         })).await.map_err(|e| err_internal(format!("getSpendingLimits failed: {}", e)))?;
@@ -8718,7 +10047,7 @@ impl TenzroMcpServer {
     async fn authorize_session(
         &self,
         Parameters(params): Parameters<AuthorizeSessionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_authorizeSession", serde_json::json!({
             "wallet_id": params.wallet_id,
             "duration_secs": params.duration_secs,
@@ -8731,7 +10060,7 @@ impl TenzroMcpServer {
     async fn revoke_session(
         &self,
         Parameters(params): Parameters<RevokeSessionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_revokeSession", serde_json::json!({
             "session_id": params.session_id,
         })).await.map_err(|e| err_internal(format!("revokeSession failed: {}", e)))?;
@@ -8744,7 +10073,7 @@ impl TenzroMcpServer {
     async fn register_app(
         &self,
         Parameters(params): Parameters<RegisterAppParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_registerApp", serde_json::json!({
             "name": params.name,
             "master_wallet_address": params.master_wallet_address,
@@ -8756,7 +10085,7 @@ impl TenzroMcpServer {
     async fn create_user_wallet(
         &self,
         Parameters(params): Parameters<CreateUserWalletParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_createUserWallet", serde_json::json!({
             "app_id": params.app_id,
             "label": params.label,
@@ -8769,7 +10098,7 @@ impl TenzroMcpServer {
     async fn fund_user_wallet(
         &self,
         Parameters(params): Parameters<FundUserWalletParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         // Validate wei amount before dispatch
         let _: u128 = params.amount_wei.parse().map_err(|_| err_internal(
             "amount_wei must be a wei decimal string (e.g. '5000000000000000000' for 5 TNZO)"
@@ -8786,7 +10115,7 @@ impl TenzroMcpServer {
     async fn list_user_wallets(
         &self,
         Parameters(params): Parameters<ListUserWalletsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_listUserWallets", serde_json::json!({
             "app_id": params.app_id,
         })).await.map_err(|e| err_internal(format!("listUserWallets failed: {}", e)))?;
@@ -8797,7 +10126,7 @@ impl TenzroMcpServer {
     async fn sponsor_transaction(
         &self,
         Parameters(params): Parameters<SponsorTransactionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_sponsorTransaction", serde_json::json!({
             "master_address": params.master_address,
             "user_tx": params.user_tx,
@@ -8809,7 +10138,7 @@ impl TenzroMcpServer {
     async fn get_usage_stats(
         &self,
         Parameters(params): Parameters<GetUsageStatsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_getUsageStats", serde_json::json!({
             "app_id": params.app_id,
         })).await.map_err(|e| err_internal(format!("getUsageStats failed: {}", e)))?;
@@ -8822,7 +10151,7 @@ impl TenzroMcpServer {
     async fn encode_function(
         &self,
         Parameters(params): Parameters<EncodeFunctionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_encodeFunction", serde_json::json!({
             "function_sig": params.function_sig,
             "args": params.args,
@@ -8834,7 +10163,7 @@ impl TenzroMcpServer {
     async fn decode_result(
         &self,
         Parameters(params): Parameters<DecodeResultParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_decodeResult", serde_json::json!({
             "data_hex": params.data_hex,
             "output_types": params.output_types,
@@ -8848,7 +10177,7 @@ impl TenzroMcpServer {
     async fn ap2_sign_mandate(
         &self,
         Parameters(params): Parameters<Ap2SignMandateParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_ap2SignMandate", serde_json::json!({
             "mandate_kind": params.mandate_kind,
             "mandate": params.mandate,
@@ -8861,7 +10190,7 @@ impl TenzroMcpServer {
     async fn ap2_verify_mandate(
         &self,
         Parameters(params): Parameters<Ap2VerifyMandateParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_ap2VerifyMandate", serde_json::json!({
             "vdc": params.vdc,
         })).await.map_err(|e| err_internal(format!("ap2VerifyMandate failed: {}", e)))?;
@@ -8872,7 +10201,7 @@ impl TenzroMcpServer {
     async fn ap2_validate_mandate_pair(
         &self,
         Parameters(params): Parameters<Ap2ValidateMandatePairParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_ap2ValidateMandatePair", serde_json::json!({
             "checkout_vdc": params.checkout_vdc,
             "payment_vdc": params.payment_vdc,
@@ -8882,7 +10211,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(description = "Return AP2 protocol metadata: version, supported mandate types, supported VC formats, and issuer DID methods recognized by this node.")]
-    async fn ap2_protocol_info(&self) -> std::result::Result<CallToolResult, ErrorData> {
+    async fn ap2_protocol_info(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_ap2ProtocolInfo", serde_json::json!({}))
             .await.map_err(|e| err_internal(format!("ap2ProtocolInfo failed: {}", e)))?;
         json_result(result)
@@ -8893,7 +10222,7 @@ impl TenzroMcpServer {
     #[tool(description = "ABI-encode IdentityRegistry.register() (ERC-8004 v0.6+ no-arg overload — caller becomes agent owner; registry allocates a sequential uint256 agentId). Returns hex calldata.")]
     async fn erc8004_encode_register(
         &self,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRegister", serde_json::json!({}))
             .await.map_err(|e| err_internal(format!("erc8004EncodeRegister failed: {}", e)))?;
         json_result(result)
@@ -8903,7 +10232,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_register_with_uri(
         &self,
         Parameters(params): Parameters<Erc8004EncodeRegisterWithUriParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRegisterWithUri", serde_json::json!({
             "agent_uri": params.agent_uri,
         })).await.map_err(|e| err_internal(format!("erc8004EncodeRegisterWithUri failed: {}", e)))?;
@@ -8914,7 +10243,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_register_with_metadata(
         &self,
         Parameters(params): Parameters<Erc8004EncodeRegisterWithMetadataParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let metadata: Vec<serde_json::Value> = params.metadata.iter()
             .map(|e| serde_json::json!({ "key": e.key, "value": e.value }))
             .collect();
@@ -8929,7 +10258,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_get_agent(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetAgentParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetAgent", serde_json::json!({
             "agent_id": params.agent_id,
         })).await.map_err(|e| err_internal(format!("erc8004EncodeGetAgent failed: {}", e)))?;
@@ -8940,7 +10269,7 @@ impl TenzroMcpServer {
     async fn erc8004_decode_get_agent(
         &self,
         Parameters(params): Parameters<Erc8004DecodeGetAgentParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004DecodeGetAgent", serde_json::json!({
             "return_data": params.return_data,
         })).await.map_err(|e| err_internal(format!("erc8004DecodeGetAgent failed: {}", e)))?;
@@ -8951,7 +10280,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_set_agent_uri(
         &self,
         Parameters(params): Parameters<Erc8004EncodeSetAgentUriParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeSetAgentURI", serde_json::json!({
             "agent_id": params.agent_id,
             "metadata_uri": params.metadata_uri,
@@ -8963,7 +10292,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_set_agent_wallet(
         &self,
         Parameters(params): Parameters<Erc8004EncodeSetAgentWalletParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeSetAgentWallet", serde_json::json!({
             "agent_id": params.agent_id,
             "new_wallet": params.new_wallet,
@@ -8977,7 +10306,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_set_metadata(
         &self,
         Parameters(params): Parameters<Erc8004EncodeSetMetadataParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeSetMetadata", serde_json::json!({
             "agent_id": params.agent_id,
             "metadata_key": params.metadata_key,
@@ -8990,7 +10319,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_get_metadata(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetMetadataParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetMetadata", serde_json::json!({
             "agent_id": params.agent_id,
             "metadata_key": params.metadata_key,
@@ -9002,7 +10331,7 @@ impl TenzroMcpServer {
     async fn erc8004_decode_get_metadata(
         &self,
         Parameters(params): Parameters<Erc8004DecodeGetMetadataParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004DecodeGetMetadata", serde_json::json!({
             "return_data": params.return_data,
         })).await.map_err(|e| err_internal(format!("erc8004DecodeGetMetadata failed: {}", e)))?;
@@ -9013,7 +10342,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_get_agent_uri(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetAgentUriParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetAgentURI", serde_json::json!({
             "agent_id": params.agent_id,
         })).await.map_err(|e| err_internal(format!("erc8004EncodeGetAgentURI failed: {}", e)))?;
@@ -9024,7 +10353,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_get_agent_wallet(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetAgentWalletParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetAgentWallet", serde_json::json!({
             "agent_id": params.agent_id,
         })).await.map_err(|e| err_internal(format!("erc8004EncodeGetAgentWallet failed: {}", e)))?;
@@ -9035,7 +10364,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_feedback(
         &self,
         Parameters(params): Parameters<Erc8004EncodeFeedbackParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeFeedback", serde_json::json!({
             "subject_agent_id": params.subject_agent_id,
             "rating": params.rating,
@@ -9048,7 +10377,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_get_feedback(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetFeedbackParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetFeedback", serde_json::json!({
             "subject_agent_id": params.subject_agent_id,
             "index": params.index,
@@ -9060,7 +10389,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_get_feedback_count(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetFeedbackCountParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetFeedbackCount", serde_json::json!({
             "subject_agent_id": params.subject_agent_id,
         })).await.map_err(|e| err_internal(format!("erc8004EncodeGetFeedbackCount failed: {}", e)))?;
@@ -9071,7 +10400,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_revoke_feedback(
         &self,
         Parameters(params): Parameters<Erc8004EncodeRevokeFeedbackParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeRevokeFeedback", serde_json::json!({
             "agent_id": params.agent_id,
             "feedback_id": params.feedback_id,
@@ -9083,7 +10412,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_append_response(
         &self,
         Parameters(params): Parameters<Erc8004EncodeAppendResponseParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeAppendResponse", serde_json::json!({
             "agent_id": params.agent_id,
             "feedback_id": params.feedback_id,
@@ -9096,7 +10425,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_is_feedback_revoked(
         &self,
         Parameters(params): Parameters<Erc8004EncodeIsFeedbackRevokedParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeIsFeedbackRevoked", serde_json::json!({
             "agent_id": params.agent_id,
             "feedback_id": params.feedback_id,
@@ -9108,7 +10437,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_get_feedback_responses(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetFeedbackResponsesParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetFeedbackResponses", serde_json::json!({
             "agent_id": params.agent_id,
             "feedback_id": params.feedback_id,
@@ -9120,7 +10449,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_validation_request(
         &self,
         Parameters(params): Parameters<Erc8004EncodeValidationRequestParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeValidationRequest", serde_json::json!({
             "validator_address": params.validator_address,
             "agent_id": params.agent_id,
@@ -9134,7 +10463,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_validation_response(
         &self,
         Parameters(params): Parameters<Erc8004EncodeValidationResponseParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeValidationResponse", serde_json::json!({
             "request_hash": params.request_hash,
             "response": params.response,
@@ -9149,7 +10478,7 @@ impl TenzroMcpServer {
     async fn erc8004_encode_get_validation(
         &self,
         Parameters(params): Parameters<Erc8004EncodeGetValidationParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_erc8004EncodeGetValidation", serde_json::json!({
             "request_hash": params.request_hash,
         })).await.map_err(|e| err_internal(format!("erc8004EncodeGetValidation failed: {}", e)))?;
@@ -9162,7 +10491,7 @@ impl TenzroMcpServer {
     async fn wormhole_chain_id(
         &self,
         Parameters(params): Parameters<WormholeChainIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_wormholeChainId", serde_json::json!({
             "chain": params.chain,
         })).await.map_err(|e| err_internal(format!("wormholeChainId failed: {}", e)))?;
@@ -9173,7 +10502,7 @@ impl TenzroMcpServer {
     async fn wormhole_parse_vaa_id(
         &self,
         Parameters(params): Parameters<WormholeParseVaaIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_wormholeParseVaaId", serde_json::json!({
             "vaa_id": params.vaa_id,
         })).await.map_err(|e| err_internal(format!("wormholeParseVaaId failed: {}", e)))?;
@@ -9184,7 +10513,7 @@ impl TenzroMcpServer {
     async fn wormhole_bridge(
         &self,
         Parameters(params): Parameters<WormholeBridgeParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_wormholeBridge", serde_json::json!({
             "source_chain": params.source_chain,
             "dest_chain": params.dest_chain,
@@ -9199,7 +10528,7 @@ impl TenzroMcpServer {
     // ─── TNZO CCT (Chainlink Cross-Chain Token) Tools ───────────────────────
 
     #[tool(description = "List all TNZO CCT pools in the canonical mainnet registry (Ethereum LockRelease; Base/Arbitrum/Optimism/Solana BurnMint).")]
-    async fn cct_list_pools(&self) -> std::result::Result<CallToolResult, ErrorData> {
+    async fn cct_list_pools(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_cctListPools", serde_json::json!({}))
             .await.map_err(|e| err_internal(format!("cctListPools failed: {}", e)))?;
         json_result(result)
@@ -9209,7 +10538,7 @@ impl TenzroMcpServer {
     async fn cct_get_pool(
         &self,
         Parameters(params): Parameters<CctGetPoolParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_cctGetPool", serde_json::json!({
             "chain": params.chain,
         })).await.map_err(|e| err_internal(format!("cctGetPool failed: {}", e)))?;
@@ -9222,7 +10551,7 @@ impl TenzroMcpServer {
     async fn list_forecast_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listForecastModels", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("listForecastModels failed: {}", e)))?;
@@ -9233,10 +10562,33 @@ impl TenzroMcpServer {
     async fn list_forecast_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listForecastCatalog", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("listForecastCatalog failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Load a forecast (timeseries) ONNX model into the node's runtime. The file at `path` must be a valid ONNX export. Pass `context_length` and `max_horizon` to match the export. For multi-output graphs (TimesFM 2.5 transformers export), set `output_name` to select the prediction tensor and `batch_size=2` to satisfy the export's flip-invariance averaging.")]
+    async fn load_forecast_model(
+        &self,
+        Parameters(params): Parameters<LoadForecastModelParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut payload = serde_json::json!({
+            "model_id": params.model_id,
+            "path": params.path,
+            "context_length": params.context_length,
+            "max_horizon": params.max_horizon,
+        });
+        if let Some(o) = params.output_name {
+            payload["output_name"] = serde_json::json!(o);
+        }
+        if let Some(b) = params.batch_size {
+            payload["batch_size"] = serde_json::json!(b);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_loadForecastModel", payload)
+            .await
+            .map_err(|e| err_internal(format!("loadForecastModel failed: {}", e)))?;
         json_result(result)
     }
 
@@ -9244,7 +10596,7 @@ impl TenzroMcpServer {
     async fn unload_forecast_model(
         &self,
         Parameters(params): Parameters<ModelIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_unloadForecastModel",
@@ -9259,7 +10611,7 @@ impl TenzroMcpServer {
     async fn forecast(
         &self,
         Parameters(params): Parameters<ForecastParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut payload = serde_json::json!({
             "model_id": params.model_id,
             "history": params.history,
@@ -9283,7 +10635,7 @@ impl TenzroMcpServer {
     async fn list_vision_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listVisionModels", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("listVisionModels failed: {}", e)))?;
@@ -9294,10 +10646,37 @@ impl TenzroMcpServer {
     async fn list_vision_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listVisionCatalog", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("listVisionCatalog failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Load a vision encoder ONNX into the node. Either pass `catalog_id` to inherit input_size/embedding_dim/normalization from the curated catalog, or set them explicitly. Returns when the ORT session is ready.")]
+    async fn load_vision_model(
+        &self,
+        Parameters(params): Parameters<LoadVisionModelParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut payload = serde_json::json!({
+            "model_id": params.model_id,
+            "path": params.path,
+        });
+        if let Some(c) = params.catalog_id {
+            payload["catalog_id"] = serde_json::json!(c);
+        }
+        if let Some(s) = params.input_size {
+            payload["input_size"] = serde_json::json!(s);
+        }
+        if let Some(d) = params.embedding_dim {
+            payload["embedding_dim"] = serde_json::json!(d);
+        }
+        if let Some(n) = params.normalization {
+            payload["normalization"] = serde_json::json!(n);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_loadVisionModel", payload)
+            .await
+            .map_err(|e| err_internal(format!("loadVisionModel failed: {}", e)))?;
         json_result(result)
     }
 
@@ -9305,7 +10684,7 @@ impl TenzroMcpServer {
     async fn unload_vision_model(
         &self,
         Parameters(params): Parameters<ModelIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_unloadVisionModel",
@@ -9320,15 +10699,15 @@ impl TenzroMcpServer {
     async fn vision_embed(
         &self,
         Parameters(params): Parameters<VisionEmbedParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({
             "model_id": params.model_id,
             "image_base64": params.image_base64,
             "normalize": params.normalize.unwrap_or(false),
         });
-        let result = rpc_dispatch(&self.node, "tenzro_visionEmbed", payload)
+        let result = rpc_dispatch(&self.node, "tenzro_imageEmbed", payload)
             .await
-            .map_err(|e| err_internal(format!("visionEmbed failed: {}", e)))?;
+            .map_err(|e| err_internal(format!("imageEmbed failed: {}", e)))?;
         json_result(result)
     }
 
@@ -9336,14 +10715,14 @@ impl TenzroMcpServer {
     async fn vision_similarity(
         &self,
         Parameters(params): Parameters<VisionSimilarityParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({
             "image_embedding": params.image_embedding,
             "text_embedding": params.text_embedding,
         });
-        let result = rpc_dispatch(&self.node, "tenzro_visionSimilarity", payload)
+        let result = rpc_dispatch(&self.node, "tenzro_imageTextSimilarity", payload)
             .await
-            .map_err(|e| err_internal(format!("visionSimilarity failed: {}", e)))?;
+            .map_err(|e| err_internal(format!("imageTextSimilarity failed: {}", e)))?;
         json_result(result)
     }
 
@@ -9353,7 +10732,7 @@ impl TenzroMcpServer {
     async fn list_text_embedding_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_listTextEmbeddingModels",
@@ -9368,7 +10747,7 @@ impl TenzroMcpServer {
     async fn list_text_embedding_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_listTextEmbeddingCatalog",
@@ -9379,11 +10758,29 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
+    #[tool(description = "Load a text-embedding ONNX model. Wave-1: the underlying RPC handler returns JSON-RPC -32004 until the ONNX loader for this modality lands. Exposed for surface symmetry; agents should branch on the catalog (which ships empty in wave 1) rather than calling this blind.")]
+    async fn load_text_embedding_model(
+        &self,
+        Parameters(params): Parameters<LoadTextEmbeddingModelParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut payload = serde_json::json!({
+            "model_id": params.model_id,
+            "path": params.path,
+        });
+        if let Some(c) = params.catalog_id {
+            payload["catalog_id"] = serde_json::json!(c);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_loadTextEmbeddingModel", payload)
+            .await
+            .map_err(|e| err_internal(format!("loadTextEmbeddingModel failed: {}", e)))?;
+        json_result(result)
+    }
+
     #[tool(description = "Unload a registered text-embedding model, freeing its ORT session.")]
     async fn unload_text_embedding_model(
         &self,
         Parameters(params): Parameters<ModelIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_unloadTextEmbeddingModel",
@@ -9398,7 +10795,7 @@ impl TenzroMcpServer {
     async fn text_embed(
         &self,
         Parameters(params): Parameters<TextEmbedParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut payload = serde_json::json!({
             "model_id": params.model_id,
             "inputs": params.inputs,
@@ -9419,7 +10816,7 @@ impl TenzroMcpServer {
     async fn list_segmentation_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_listSegmentationModels",
@@ -9434,7 +10831,7 @@ impl TenzroMcpServer {
     async fn list_segmentation_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_listSegmentationCatalog",
@@ -9445,11 +10842,33 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
+    #[tool(description = "Load a segmenter ONNX (SAM 2 base/large, EdgeSAM, MobileSAM). Wave-1: the underlying RPC handler returns JSON-RPC -32004 until the ONNX loader for this modality lands. Exposed for surface symmetry — agents should branch on the catalog status before calling.")]
+    async fn load_segmentation_model(
+        &self,
+        Parameters(params): Parameters<LoadSegmentationModelParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut payload = serde_json::json!({
+            "model_id": params.model_id,
+            "encoder_path": params.encoder_path,
+            "decoder_path": params.decoder_path,
+        });
+        if let Some(f) = params.family {
+            payload["family"] = serde_json::json!(f);
+        }
+        if let Some(c) = params.catalog_id {
+            payload["catalog_id"] = serde_json::json!(c);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_loadSegmentationModel", payload)
+            .await
+            .map_err(|e| err_internal(format!("loadSegmentationModel failed: {}", e)))?;
+        json_result(result)
+    }
+
     #[tool(description = "Unload a registered segmenter, freeing its ORT session.")]
     async fn unload_segmentation_model(
         &self,
         Parameters(params): Parameters<ModelIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_unloadSegmentationModel",
@@ -9464,7 +10883,7 @@ impl TenzroMcpServer {
     async fn segment(
         &self,
         Parameters(params): Parameters<SegmentParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({
             "model_id": params.model_id,
             "image_base64": params.image_base64,
@@ -9482,7 +10901,7 @@ impl TenzroMcpServer {
     async fn list_detection_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_listDetectionModels",
@@ -9497,7 +10916,7 @@ impl TenzroMcpServer {
     async fn list_detection_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_listDetectionCatalog",
@@ -9508,11 +10927,32 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
+    #[tool(description = "Load a detector ONNX (RF-DETR, D-FINE). Wave-1: the underlying RPC handler returns JSON-RPC -32004 until the ONNX loader for this modality lands. Exposed for surface symmetry.")]
+    async fn load_detection_model(
+        &self,
+        Parameters(params): Parameters<LoadDetectionModelParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut payload = serde_json::json!({
+            "model_id": params.model_id,
+            "path": params.path,
+        });
+        if let Some(f) = params.family {
+            payload["family"] = serde_json::json!(f);
+        }
+        if let Some(c) = params.catalog_id {
+            payload["catalog_id"] = serde_json::json!(c);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_loadDetectionModel", payload)
+            .await
+            .map_err(|e| err_internal(format!("loadDetectionModel failed: {}", e)))?;
+        json_result(result)
+    }
+
     #[tool(description = "Unload a registered detector, freeing its ORT session.")]
     async fn unload_detection_model(
         &self,
         Parameters(params): Parameters<ModelIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_unloadDetectionModel",
@@ -9527,7 +10967,7 @@ impl TenzroMcpServer {
     async fn detect(
         &self,
         Parameters(params): Parameters<DetectParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut payload = serde_json::json!({
             "model_id": params.model_id,
             "image_base64": params.image_base64,
@@ -9547,7 +10987,7 @@ impl TenzroMcpServer {
     async fn list_audio_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listAudioModels", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("listAudioModels failed: {}", e)))?;
@@ -9558,10 +10998,39 @@ impl TenzroMcpServer {
     async fn list_audio_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listAudioCatalog", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("listAudioCatalog failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Load an ASR ONNX model (Moonshine, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT-v3, Canary-1B-Flash). Either pass `catalog_id` to inherit `family` / `max_audio_seconds` / `whisper_variant` from the catalog, or set them explicitly. The transcriber lands in a follow-up wave — today, `transcribe` returns ProviderNotAvailable; loading is wired for end-to-end testing once the transcriber arrives.")]
+    async fn load_audio_model(
+        &self,
+        Parameters(params): Parameters<LoadAudioModelParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut payload = serde_json::json!({
+            "model_id": params.model_id,
+            "encoder_path": params.encoder_path,
+            "decoder_path": params.decoder_path,
+            "tokenizer_path": params.tokenizer_path,
+        });
+        if let Some(c) = params.catalog_id {
+            payload["catalog_id"] = serde_json::json!(c);
+        }
+        if let Some(f) = params.family {
+            payload["family"] = serde_json::json!(f);
+        }
+        if let Some(m) = params.max_audio_seconds {
+            payload["max_audio_seconds"] = serde_json::json!(m);
+        }
+        if let Some(w) = params.whisper_variant {
+            payload["whisper_variant"] = serde_json::json!(w);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_loadAudioModel", payload)
+            .await
+            .map_err(|e| err_internal(format!("loadAudioModel failed: {}", e)))?;
         json_result(result)
     }
 
@@ -9569,7 +11038,7 @@ impl TenzroMcpServer {
     async fn unload_audio_model(
         &self,
         Parameters(params): Parameters<ModelIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_unloadAudioModel",
@@ -9584,7 +11053,7 @@ impl TenzroMcpServer {
     async fn transcribe(
         &self,
         Parameters(params): Parameters<TranscribeParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut payload = serde_json::json!({
             "model_id": params.model_id,
             "audio_base64": params.audio_base64,
@@ -9608,7 +11077,7 @@ impl TenzroMcpServer {
     async fn list_video_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listVideoModels", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("listVideoModels failed: {}", e)))?;
@@ -9619,10 +11088,28 @@ impl TenzroMcpServer {
     async fn list_video_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listVideoCatalog", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("listVideoCatalog failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Load a video encoder ONNX. Wave-1: the underlying RPC handler returns JSON-RPC -32004 — the video catalog ships empty pending license clearance + ONNX export. Until a native encoder lands, agents should pool per-frame vision_embed instead.")]
+    async fn load_video_model(
+        &self,
+        Parameters(params): Parameters<LoadVideoModelParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut payload = serde_json::json!({
+            "model_id": params.model_id,
+            "path": params.path,
+        });
+        if let Some(c) = params.catalog_id {
+            payload["catalog_id"] = serde_json::json!(c);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_loadVideoModel", payload)
+            .await
+            .map_err(|e| err_internal(format!("loadVideoModel failed: {}", e)))?;
         json_result(result)
     }
 
@@ -9630,7 +11117,7 @@ impl TenzroMcpServer {
     async fn unload_video_model(
         &self,
         Parameters(params): Parameters<ModelIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_unloadVideoModel",
@@ -9645,7 +11132,7 @@ impl TenzroMcpServer {
     async fn video_embed(
         &self,
         Parameters(params): Parameters<VideoEmbedParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut payload = serde_json::json!({
             "model_id": params.model_id,
             "video_base64": params.video_base64,
@@ -9671,7 +11158,7 @@ impl TenzroMcpServer {
     async fn get_workflow(
         &self,
         Parameters(params): Parameters<WorkflowIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({ "workflow_id": params.workflow_id });
         let result = rpc_dispatch(&self.node, "tenzro_getWorkflow", payload)
             .await
@@ -9683,7 +11170,7 @@ impl TenzroMcpServer {
     async fn list_workflows_by_creator(
         &self,
         Parameters(params): Parameters<CreatorDidParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({ "creator_did": params.creator_did });
         let result = rpc_dispatch(&self.node, "tenzro_listWorkflowsByCreator", payload)
             .await
@@ -9695,7 +11182,7 @@ impl TenzroMcpServer {
     async fn list_workflows_by_participant(
         &self,
         Parameters(params): Parameters<DidParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({ "did": params.did });
         let result = rpc_dispatch(&self.node, "tenzro_listWorkflowsByParticipant", payload)
             .await
@@ -9707,7 +11194,7 @@ impl TenzroMcpServer {
     async fn list_workflows_by_status(
         &self,
         Parameters(params): Parameters<WorkflowStatusParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({ "status": params.status });
         let result = rpc_dispatch(&self.node, "tenzro_listWorkflowsByStatus", payload)
             .await
@@ -9719,7 +11206,7 @@ impl TenzroMcpServer {
     async fn get_workflow_lifecycle(
         &self,
         Parameters(params): Parameters<WorkflowIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({ "workflow_id": params.workflow_id });
         let result = rpc_dispatch(&self.node, "tenzro_getWorkflowLifecycle", payload)
             .await
@@ -9731,7 +11218,7 @@ impl TenzroMcpServer {
     async fn get_obligation(
         &self,
         Parameters(params): Parameters<ObligationIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({ "obligation_id": params.obligation_id });
         let result = rpc_dispatch(&self.node, "tenzro_getObligation", payload)
             .await
@@ -9743,7 +11230,7 @@ impl TenzroMcpServer {
     async fn get_approval_gate(
         &self,
         Parameters(params): Parameters<ApprovalGateIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({ "gate_id": params.gate_id });
         let result = rpc_dispatch(&self.node, "tenzro_getApprovalGate", payload)
             .await
@@ -9755,7 +11242,7 @@ impl TenzroMcpServer {
     async fn get_approval_request(
         &self,
         Parameters(params): Parameters<ApprovalRequestIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({ "request_id": params.request_id });
         let result = rpc_dispatch(&self.node, "tenzro_getApprovalRequest", payload)
             .await
@@ -9767,7 +11254,7 @@ impl TenzroMcpServer {
     async fn get_privacy_domain(
         &self,
         Parameters(params): Parameters<PrivacyDomainIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({ "domain_id": params.domain_id });
         let result = rpc_dispatch(&self.node, "tenzro_getPrivacyDomain", payload)
             .await
@@ -9779,7 +11266,7 @@ impl TenzroMcpServer {
     async fn list_privacy_domains_for_did(
         &self,
         Parameters(params): Parameters<DidParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({ "did": params.did });
         let result = rpc_dispatch(&self.node, "tenzro_listPrivacyDomainsForDid", payload)
             .await
@@ -9791,7 +11278,7 @@ impl TenzroMcpServer {
     async fn get_workflow_receipt(
         &self,
         Parameters(params): Parameters<WorkflowReceiptIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({ "receipt_id": params.receipt_id });
         let result = rpc_dispatch(&self.node, "tenzro_getWorkflowReceipt", payload)
             .await
@@ -9803,7 +11290,7 @@ impl TenzroMcpServer {
     async fn list_workflow_receipts(
         &self,
         Parameters(params): Parameters<WorkflowReceiptListParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({
             "workflow_id": params.workflow_id,
             "max": params.max,
@@ -9818,7 +11305,7 @@ impl TenzroMcpServer {
     async fn get_fee_route(
         &self,
         Parameters(params): Parameters<FeeRouteIdParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({ "fee_route_id": params.fee_route_id });
         let result = rpc_dispatch(&self.node, "tenzro_getFeeRoute", payload)
             .await
@@ -9827,7 +11314,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(description = "List every registered fee route. Each route has a label, splits in bps, and a derived 32-byte id used by Workflow.fee_route.")]
-    async fn list_fee_routes(&self) -> std::result::Result<CallToolResult, ErrorData> {
+    async fn list_fee_routes(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listFeeRoutes", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("listFeeRoutes failed: {}", e)))?;
@@ -9838,7 +11325,7 @@ impl TenzroMcpServer {
     async fn compute_fee_route_payouts(
         &self,
         Parameters(params): Parameters<FeeRoutePayoutsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let payload = serde_json::json!({
             "fee_route_id": params.fee_route_id,
             "gross_wei": params.gross_wei,
@@ -9852,7 +11339,7 @@ impl TenzroMcpServer {
     #[tool(description = "Snapshot of workflow operational metrics (workflows/obligations/approvals partitioned by status, signature totals, canton-mirror count, fee routes, privacy domains). Returns the same data as the /metrics scrape, but as typed JSON.")]
     async fn get_workflow_operational_metrics(
         &self,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(
             &self.node,
             "tenzro_getWorkflowOperationalMetrics",
@@ -9942,38 +11429,50 @@ impl ServerHandler for TenzroMcpServer {
              • forecast — Run a univariate timeseries forecast (TimesFM 2.5)\n\
              • list_forecast_models — List loaded forecast models\n\
              • list_forecast_catalog — Browse curated forecast catalog\n\
+             • load_forecast_model — Register a forecast ONNX from disk\n\
              • unload_forecast_model — Drop a forecast model\n\n\
              Multi-modal AI — Vision:\n\
              • vision_embed — Image → dense feature vector (DINOv3, SigLIP2, CLIP)\n\
              • vision_similarity — Cosine similarity between image & text embeddings\n\
              • list_vision_models — List loaded vision encoders\n\
              • list_vision_catalog — Browse curated vision encoder catalog\n\
+             • load_vision_model — Register a vision encoder ONNX from disk\n\
              • unload_vision_model — Drop a vision encoder\n\n\
              Multi-modal AI — Text Embeddings:\n\
              • text_embed — Strings → dense vectors (Qwen3-Embedding, EmbeddingGemma, BGE-M3)\n\
              • list_text_embedding_models — List loaded text encoders\n\
              • list_text_embedding_catalog — Browse curated text-embedding catalog\n\
+             • load_text_embedding_model — Register a text encoder ONNX (wave-1 stub)\n\
              • unload_text_embedding_model — Drop a text encoder\n\n\
              Multi-modal AI — Segmentation:\n\
              • segment — Prompt-driven mask segmentation (SAM 2, EdgeSAM, MobileSAM)\n\
              • list_segmentation_models — List loaded segmenters\n\
              • list_segmentation_catalog — Browse curated segmentation catalog\n\
+             • load_segmentation_model — Register a segmenter ONNX (wave-1 stub)\n\
              • unload_segmentation_model — Drop a segmenter\n\n\
              Multi-modal AI — Detection:\n\
              • detect — Object detection (RF-DETR, D-FINE)\n\
              • list_detection_models — List loaded detectors\n\
              • list_detection_catalog — Browse curated detection catalog\n\
+             • load_detection_model — Register a detector ONNX (wave-1 stub)\n\
              • unload_detection_model — Drop a detector\n\n\
              Multi-modal AI — Audio (ASR, scaffolding — ORT-backed transcribers ship next wave):\n\
              • transcribe — Speech-to-text (catalog: Whisper, Distil-Whisper, Moonshine, Parakeet, Canary; today returns ProviderNotAvailable)\n\
              • list_audio_models — List loaded ASR models\n\
              • list_audio_catalog — Browse curated ASR catalog\n\
+             • load_audio_model — Register an ASR ONNX (encoder+decoder+tokenizer)\n\
              • unload_audio_model — Drop an ASR model\n\n\
              Multi-modal AI — Video:\n\
              • video_embed — Clip-level video embedding (wave-1 catalog empty pending license clearance)\n\
              • list_video_models — List loaded video encoders\n\
              • list_video_catalog — Browse curated video catalog (empty wave 1)\n\
+             • load_video_model — Register a video encoder ONNX (wave-1 stub)\n\
              • unload_video_model — Drop a video encoder\n\n\
+             Agent Memory:\n\
+             • memory_grant — Add a memory (vector + BM25 indexed) for an agent\n\
+             • memory_recall — Hybrid (RRF k=60) / vector / BM25 retrieval\n\
+             • memory_archive — Push payload to DA backend, rewrite on-tier row with pointer\n\
+             • list_memory_records — Newest-first listing, optional kind filter\n\n\
              Task Marketplace:\n\
              • post_task — Post a new AI task to the decentralized marketplace\n\
              • list_tasks — Browse and filter open tasks\n\
