@@ -2,7 +2,7 @@
 
 
 def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
-    """Build the A2A Agent Card with all 31 skills."""
+    """Build the A2A Agent Card with all 40 skills."""
     return {
         "name": "Tenzro Network Agent",
         "description": (
@@ -429,6 +429,34 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "outputModes": ["application/json"],
             },
             {
+                "id": "approval",
+                "name": "Auth-Engine Approval Workflow",
+                "description": (
+                    "Asynchronous request -> review -> decide loop for sensitive "
+                    "actions that need out-of-band human (or higher-privilege "
+                    "machine) signoff. List pending approval requests for an "
+                    "approver DID, fetch a single approval record by id, or "
+                    "apply a final decision (approved / denied). Lazy expiry "
+                    "runs on every read path so callers never see stale "
+                    "pending records. When approver_did is supplied on decide, "
+                    "the engine refuses to apply the decision unless the "
+                    "record's approver_did matches (cross-approver tampering "
+                    "defence -- mismatch returns JSON-RPC -32001 forbidden)."
+                ),
+                "tags": [
+                    "approval", "auth-engine", "out-of-band", "human-in-the-loop",
+                    "workflow", "decision",
+                ],
+                "examples": [
+                    "List pending approvals for did:tenzro:human:alice",
+                    "Fetch approval record by id (metadata.approval_id)",
+                    "Approve request (metadata.approval_id, decision=approved, approver_did)",
+                    "Deny request (metadata.approval_id, decision=denied, approver_did)",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
                 "id": "join",
                 "name": "Join as MicroNode",
                 "description": (
@@ -698,6 +726,185 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "Get privacy domain 0x… (members, frozen, envelope policy)",
                     "Snapshot of workflow operational metrics (statuses, sigs, mirror count)",
                     "Mirror workflow 0x… to canton synchronizer canton-mainnet",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "agent-memory",
+                "name": "Agent Memory Tier",
+                "description": (
+                    "Persistent, queryable memory for Tenzro agents. Lance "
+                    "vector kNN + Tantivy BM25 with Reciprocal Rank Fusion "
+                    "(k=60) hybrid recall. Memories can be granted to an "
+                    "agent, recalled by natural-language query, and archived "
+                    "to the configured DA backend (frees hot search budget; "
+                    "payload remains fetchable via the returned DaPointer). "
+                    "Operations: memory.grant, memory.recall, memory.archive."
+                ),
+                "tags": [
+                    "memory", "vector-search", "bm25", "rrf", "lance",
+                    "tantivy", "agent-state", "rag", "da-archive",
+                ],
+                "examples": [
+                    "Grant memory: 'remember that the deploy host is gke-tc' to did:tenzro:machine:ops-1",
+                    "Recall (hybrid mode, k=10) memories about 'deploy host' for did:tenzro:machine:ops-1",
+                    "Recall (vector mode) semantically-similar memories for did:tenzro:machine:ops-1",
+                    "Recall (text mode) BM25-matched memories for did:tenzro:machine:ops-1",
+                    "Archive memory 9f3c…a0 to free hot index budget",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "adaptive-burn",
+                "name": "Adaptive Burn-Rate Governance Dial",
+                "description": (
+                    "Read-side surface for the adaptive burn-rate dial "
+                    "(Spec 7). Exposes the current BurnRateConfig (base / "
+                    "local / paymaster bps with treasury complements; "
+                    "paymaster locked at 100% burn), the latest "
+                    "SupplyMetricsSnapshot (rolling-window epoch delta, "
+                    "burn + emission breakdowns), and the pure-function "
+                    "BurnRateRecommendation (NoChange / IncreaseBurnPct / "
+                    "DecreaseBurnPct / AlarmHighInflation / "
+                    "AlarmHighDeflation with magnitude bps capped at the "
+                    "normal / alarm ceiling). The dial moves only via "
+                    "on-chain governance proposals; the auto-proposal "
+                    "generator + EIP-1559 fee-market consumer wiring "
+                    "lands in a follow-up wave."
+                ),
+                "tags": [
+                    "adaptive-burn", "governance", "tokenomics",
+                    "supply", "burn-rate", "eip-1559", "spec-7",
+                ],
+                "examples": [
+                    "Get the current burn-rate config and target band",
+                    "Get the latest supply-metrics snapshot",
+                    "Get the current burn-rate recommendation (action + magnitude bps)",
+                    "List pending adaptive-burn governance proposals",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "seed-agent",
+                "name": "SeedAgent Treasury Earmark",
+                "description": (
+                    "SeedAgent treasury allocation surface (Spec 10). "
+                    "Exposes the genesis-funded TreasuryEarmark singleton "
+                    "(initial / remaining / drawn TNZO, decay schedule, "
+                    "sunset surplus burn bps), the governance-signed "
+                    "Charter registry (OperationKind set + spend caps + "
+                    "counterparty filter + throughput target + sunset), "
+                    "the per-DID SeedAgentRecord roster (status: Active / "
+                    "Paused / Quarantined / Terminated; allocation drawn; "
+                    "optional bond id), and the network-activity counters "
+                    "with `exclude_seed` filter to isolate organic flows "
+                    "from protocol-owned bootstrap traffic during the "
+                    "12-month earmark window."
+                ),
+                "tags": [
+                    "seed-agent", "treasury", "earmark", "charter",
+                    "bootstrap", "spec-10", "governance",
+                ],
+                "examples": [
+                    "Show the SeedAgent treasury earmark (allocation remaining, decay schedule, agent count)",
+                    "List every SeedAgent governance charter",
+                    "Fetch SeedAgent charter 0x… (operations, spend caps, sunset)",
+                    "List provisioned seed agents under charter 0x…",
+                    "Get 24h network activity with exclude_seed=true",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "erc7683",
+                "name": "ERC-7683 Cross-Chain Intents",
+                "description": (
+                    "ERC-7683 cross-chain intent settler surface (Spec "
+                    "4). Origin-side reads against the Tenzro7683Order "
+                    "envelope persisted under the `7683_origin:` "
+                    "keyspace, with the OrderState machine Open → "
+                    "AwaitingProof → Settled / Refunded / "
+                    "ForceRefundEligible. Destination-side commit of "
+                    "FillRecord (single-shot per order_id; duplicate "
+                    "returns JSON-RPC -32010 OrderAlreadyFilled) plus "
+                    "fill read endpoints. ProofRoute is one of "
+                    "LayerZero / Wormhole / DeBridge / Hyperlane."
+                ),
+                "tags": [
+                    "erc-7683", "cross-chain", "intent", "settler",
+                    "fill", "spec-4", "layerzero", "wormhole",
+                    "debridge", "hyperlane",
+                ],
+                "examples": [
+                    "Get ERC-7683 order 0x… (state, dest_chain, outputs)",
+                    "List open ERC-7683 orders bound for dest_chain=8453",
+                    "Record fill for order 0x… (origin_chain, filler, proof_route, outputs[])",
+                    "Get fill record for order 0x… origin_chain=1",
+                    "List every recorded ERC-7683 fill on this node",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "operability",
+                "name": "Operability Inspection",
+                "description": (
+                    "Read-only inspection surface for SREs, operator "
+                    "dashboards, and monitoring agents. Validator "
+                    "registry reads (get_validator_state by address, "
+                    "list_validators with optional status filter, "
+                    "list_active_validators for the current committee — "
+                    "each entry carries base58 address, Ed25519 + "
+                    "ML-DSA-65 + BLS12-381 pubkeys, self_stake u128 "
+                    "decimal, registered/activated/exited/jailed "
+                    "epoch markers, optional tee_attestation_hash). "
+                    "Tenzro Train inspection (training_list_runs, "
+                    "training_get_run, training_get_receipt, "
+                    "training_get_sealed_manifest) — read-side view "
+                    "of every active run, sealed receipts for "
+                    "finalized runs, and Confidential-tier sealed-shard "
+                    "manifests. SLA fault-detector inspection "
+                    "(sla_get_params for the slash threshold, slash "
+                    "amount in wei, and validator VRF public key; "
+                    "sla_list_outstanding_probes for every in-flight "
+                    "probe awaiting a response, used to spot probes "
+                    "whose deadline has elapsed without a matching "
+                    "response). Validator nodes can additionally issue "
+                    "VRF-bound liveness probes (sla_issue_probe) "
+                    "against ModelProvider / TeeProvider DIDs. "
+                    "State-sync snapshot inspection (list_snapshots, "
+                    "get_snapshot_manifest by height, get_snapshot_chunk "
+                    "by (height, chunk_index)) for operators bootstrapping "
+                    "new nodes or auditing state-root continuity; the "
+                    "offer/apply write surface is also exposed but the "
+                    "caller MUST verify state_root_hex against a trusted "
+                    "QC at the same height before invoking. Safe to "
+                    "expose to monitoring agents — no key material "
+                    "returned."
+                ),
+                "tags": [
+                    "operability", "sre", "monitoring", "validator",
+                    "registry", "training", "tenzro-train", "inspection",
+                    "sla", "fault-detector", "probe", "snapshot",
+                    "state-sync", "read-only",
+                ],
+                "examples": [
+                    "Show the current active validator set with stake",
+                    "Get validator state for address 0x…",
+                    "List jailed validators",
+                    "List every active Tenzro Train run",
+                    "Get Tenzro Train run task-abc123 (status, current_round, state_root)",
+                    "Fetch the sealed receipt for finalized run task-abc123",
+                    "Fetch the sealed-shard manifest for Confidential-tier run task-xyz789",
+                    "Show this validator's SLA fault-detector parameters (slash threshold, slash amount, VRF pubkey)",
+                    "List every in-flight SLA probe across the network",
+                    "Issue an SLA liveness probe to provider did:tenzro:machine:abc for epoch 42 round 3 with deadline +5s",
+                    "List local state-sync snapshots",
+                    "Fetch the snapshot manifest at height 5000 (state_root_hex, chunk_hashes_hex)",
+                    "Fetch chunk 0 of the snapshot at height 5000",
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],

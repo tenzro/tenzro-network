@@ -1,14 +1,15 @@
 //! Marketplace commission policy.
 //!
-//! Single source of truth for the paid-template invocation fee split:
-//! the network commission goes to the treasury, the remainder goes to
-//! the template's `creator_wallet`. Used by both the JSON-RPC handler
-//! (`tenzro_runAgentTemplate`) and the MCP `run_agent_template` tool —
-//! before this module they each held their own near-identical inline
-//! split + transfer sequence, which made it easy for the two paths to
-//! drift apart.
+//! Single source of truth for paid-invocation fee splits across all
+//! three Tenzro marketplaces (agent templates, skills, tools): the
+//! network commission goes to the treasury, the remainder goes to the
+//! creator's `creator_wallet`. Used by the JSON-RPC handlers
+//! (`tenzro_runAgentTemplate`, `tenzro_useSkill`, `tenzro_useTool`)
+//! and the MCP `run_agent_template` tool — before this module they
+//! each held their own near-identical inline split + transfer
+//! sequence, which made it easy for the paths to drift apart.
 //!
-//! The split itself stays in `tenzro_types::agent_template`
+//! The split itself stays in `tenzro_types::marketplace`
 //! ([`split_marketplace_fee`]) so that crates outside `tenzro-node`
 //! (CLI, SDKs, agent-kit) can reason about commission math without
 //! pulling in the full node. This module is the *settlement* path:
@@ -29,9 +30,8 @@
 //! and `crates/tenzro-node/src/{rpc,mcp/server}.rs` for call sites.
 
 use tenzro_token::TnzoToken;
-use tenzro_types::agent_template::{
-    split_marketplace_fee, AgentTemplate, AGENT_MARKETPLACE_COMMISSION_BPS,
-};
+use tenzro_types::agent_template::AgentTemplate;
+use tenzro_types::marketplace::{split_marketplace_fee, MARKETPLACE_COMMISSION_BPS};
 use tenzro_types::primitives::Address;
 
 /// Outcome of a successful commission settlement on a paid template
@@ -76,22 +76,24 @@ pub enum CommissionError {
     TransferFailed(String),
 }
 
-/// Settle the commission split for a paid template invocation.
+/// Marketplace-agnostic settlement primitive. Splits `fee` using
+/// [`MARKETPLACE_COMMISSION_BPS`] and moves the two halves on the live
+/// TNZO ledger. Used by all three marketplace surfaces (agent
+/// templates, skills, tools) via thin wrappers.
 ///
-/// Returns [`Ok(None)`] for free templates or a zero-fee invocation —
-/// the caller should treat that as "no settlement happened, proceed
-/// with execution." Returns [`Ok(Some(receipt))`] when both transfers
-/// succeed; the caller should record the numbers in the run report and
-/// pass `receipt.creator_share` to `AgentTemplate::record_invocation`.
+/// Returns [`Ok(None)`] for a zero `fee` — the caller should treat
+/// that as "no settlement happened, proceed with execution." Returns
+/// [`Ok(Some(receipt))`] when both transfers succeed; the caller
+/// should record the numbers in its per-marketplace report.
 ///
-/// `payer_wallet` is the **address as a string** so both call sites
-/// (RPC and MCP) can pass their already-parsed parameter without
-/// re-parsing here. `parse` is the per-call-site address parser
-/// (rpc.rs uses `parse_address` returning `JsonRpcError`; mcp/server.rs
-/// uses a different one returning `ErrorData`). Returning the parsed
-/// `Address` from `parse` makes the policy transport-agnostic.
-pub fn settle_invocation_fee<F>(
-    template: &AgentTemplate,
+/// `payer_wallet` is the **address as a string** so each call site can
+/// pass its already-parsed parameter without re-parsing here. `parse`
+/// is the per-call-site address parser (rpc.rs uses `parse_address`
+/// returning `JsonRpcError`; mcp/server.rs uses one returning
+/// `ErrorData`). Returning the parsed `Address` from `parse` makes the
+/// policy transport-agnostic.
+pub fn settle_paid_invocation<F>(
+    creator_wallet: Option<Address>,
     fee: u128,
     payer_wallet: Option<&str>,
     token: Option<&TnzoToken>,
@@ -100,13 +102,11 @@ pub fn settle_invocation_fee<F>(
 where
     F: FnOnce(&str) -> Result<Address, String>,
 {
-    if template.pricing.is_free() || fee == 0 {
+    if fee == 0 {
         return Ok(None);
     }
 
-    let creator_wallet = template
-        .creator_wallet
-        .ok_or(CommissionError::MissingCreatorWallet)?;
+    let creator_wallet = creator_wallet.ok_or(CommissionError::MissingCreatorWallet)?;
 
     let payer_str = payer_wallet.ok_or(CommissionError::MissingPayerWallet)?;
     let payer = parse(payer_str)
@@ -117,8 +117,7 @@ where
         .treasury_address_ref()
         .ok_or(CommissionError::TreasuryUnavailable)?;
 
-    let (commission, creator_share) =
-        split_marketplace_fee(fee, AGENT_MARKETPLACE_COMMISSION_BPS);
+    let (commission, creator_share) = split_marketplace_fee(fee, MARKETPLACE_COMMISSION_BPS);
 
     if commission > 0 {
         token
@@ -138,6 +137,26 @@ where
         treasury,
         creator_wallet,
     }))
+}
+
+/// Settle the commission split for a paid template invocation. Thin
+/// wrapper around [`settle_paid_invocation`] that short-circuits free
+/// templates (whose pricing is encoded as `AgentPricingModel::Free`
+/// rather than a zero numeric fee, so we need the type-level check).
+pub fn settle_invocation_fee<F>(
+    template: &AgentTemplate,
+    fee: u128,
+    payer_wallet: Option<&str>,
+    token: Option<&TnzoToken>,
+    parse: F,
+) -> Result<Option<CommissionReceipt>, CommissionError>
+where
+    F: FnOnce(&str) -> Result<Address, String>,
+{
+    if template.pricing.is_free() {
+        return Ok(None);
+    }
+    settle_paid_invocation(template.creator_wallet, fee, payer_wallet, token, parse)
 }
 
 #[cfg(test)]
@@ -236,7 +255,7 @@ mod tests {
         assert_eq!(
             receipt.commission, 500,
             "5% of 10_000 commission, with current bps = {}",
-            AGENT_MARKETPLACE_COMMISSION_BPS
+            MARKETPLACE_COMMISSION_BPS
         );
         assert_eq!(receipt.creator_share, 9_500);
 

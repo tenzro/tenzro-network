@@ -9,6 +9,21 @@
 //!
 //! QUIC keeps using `libp2p::quic` which is rustls-backed under the hood and
 //! inherits the same `aws-lc-rs` provider.
+//!
+//! # Relationship to `SwarmBuilder`
+//!
+//! The production swarm in [`crate::service::run_event_loop`] uses
+//! `libp2p::SwarmBuilder` rather than calling [`build_transport`] directly.
+//! That migration was required for Circuit-Relay v2 / AutoNAT v2 / DCUtR:
+//! `SwarmBuilder::with_relay_client()` both adds the relay-client behaviour
+//! and wraps the transport with a `/p2p-circuit` dialer, which the
+//! hand-rolled `Swarm::new(transport, behaviour, ...)` path cannot express.
+//!
+//! [`build_transport`] remains the right entry point when a caller needs
+//! the *raw* PQ-hybrid transport stack without the swarm builder — for
+//! example a standalone dial-probe utility, an external tool that runs
+//! libp2p but not the full Tenzro behaviour, or [`TenzroNetwork::new`]
+//! (which targets the no-NAT-traversal test path).
 
 use crate::error::{NetworkError, Result};
 use libp2p::{

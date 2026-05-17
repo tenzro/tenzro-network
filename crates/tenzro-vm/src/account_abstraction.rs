@@ -97,8 +97,9 @@
 //!
 //! entry_point.validate_user_op(&user_op)?;
 //!
-//! // Process bundle of operations
-//! let receipts = entry_point.handle_ops(vec![user_op]);
+//! // Process bundle of operations (async — handle_ops dispatches to the VM runtime
+//! // when one is attached via `with_runtime`).
+//! // let receipts = entry_point.handle_ops(vec![user_op]).await;
 //! # Ok(())
 //! # }
 //! ```
@@ -107,14 +108,23 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 use tracing::info;
 
 use tenzro_crypto::hash::keccak256;
+use tenzro_storage::{KvStore, CF_AGENTS};
 
 use crate::error::VmError;
-use crate::traits::VmState;
+use crate::runtime::MultiVmRuntime;
+use crate::state_adapter::StateAdapter;
+use crate::traits::{VmState, VmType};
+use crate::types::VmTransaction;
+
+/// Persistence prefix for per-sender AA nonces in `CF_AGENTS`.
+/// Layout: `aa/nonce/{20-byte sender hex}` -> 8-byte big-endian u64.
+const AA_NONCE_PREFIX: &str = "aa/nonce/";
 
 /// Gas penalty threshold for v0.8: if unused gas is below this value, no penalty applies.
 const GAS_PENALTY_THRESHOLD: u64 = 40_000;
@@ -562,7 +572,16 @@ pub struct UserOpReceipt {
 /// All UserOps go through the EntryPoint, which handles validation, execution,
 /// and payment. In v0.8, the EntryPoint carries a `chain_id` for EIP-712
 /// domain separator computation and uses the 40,000 gas penalty threshold.
-#[derive(Debug)]
+///
+/// Gas accounting collapses to the EVM balance: the smart account's EVM
+/// balance is debited for `gas_used * gas_price` after a successful UserOp,
+/// rather than maintaining a separate per-account deposit pool. The legacy
+/// `deposit_to` / `get_deposit` / EntryPoint-side balance tracking has been
+/// removed — the account balance held in `VmState` is the single source of
+/// truth for whether a UserOp can pay for itself.
+///
+/// `Debug` is implemented manually because `Arc<MultiVmRuntime>` and
+/// `Arc<dyn KvStore>` don't implement `Debug` themselves.
 pub struct EntryPoint {
     /// EntryPoint contract address
     pub address: Vec<u8>,
@@ -573,11 +592,10 @@ pub struct EntryPoint {
     /// Supported account factory addresses
     pub supported_account_factories: Vec<Vec<u8>>,
 
-    /// Nonces for each account
+    /// Nonces for each account. Persisted to `CF_AGENTS` under the
+    /// `aa/nonce/` prefix when `storage` is set, hydrated on construction
+    /// via `hydrate_nonces()`.
     pub nonces: DashMap<Vec<u8>, u64>,
-
-    /// Deposits for each account (for gas payment)
-    pub deposits: DashMap<Vec<u8>, u128>,
 
     /// Total operations processed
     pub total_ops_processed: AtomicU64,
@@ -586,7 +604,39 @@ pub struct EntryPoint {
     /// route to installed validators in priority order before falling back to
     /// the legacy length-only signature check. When unset, the legacy check
     /// applies (used by the existing test suite and non-modular accounts).
-    pub validator_registry: Option<std::sync::Arc<crate::aa_validators::ValidatorRegistry>>,
+    pub validator_registry: Option<Arc<crate::aa_validators::ValidatorRegistry>>,
+
+    /// Optional VM runtime used to actually execute UserOp `call_data` against
+    /// the smart account. When unset, `handle_single_op` falls back to a
+    /// no-op execution path that only validates and charges gas — useful for
+    /// unit tests that don't need real EVM execution.
+    pub runtime: Option<Arc<MultiVmRuntime>>,
+
+    /// Optional persistent storage backend for nonces and receipts. When
+    /// set, `handle_single_op` writes the post-execution nonce through to
+    /// `CF_AGENTS` and indexes the receipt under `aa/receipt/{op_hash_hex}`.
+    pub storage: Option<Arc<dyn KvStore>>,
+
+    /// Receipts indexed by UserOp hash. Populated on every `handle_single_op`
+    /// call. Bounded by caller (the bundler / RPC layer is responsible for
+    /// pruning old entries); the EntryPoint itself does not evict.
+    pub receipts: DashMap<Vec<u8>, UserOpReceipt>,
+}
+
+impl std::fmt::Debug for EntryPoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EntryPoint")
+            .field("address", &self.address)
+            .field("chain_id", &self.chain_id)
+            .field("supported_account_factories", &self.supported_account_factories)
+            .field("nonces", &self.nonces)
+            .field("total_ops_processed", &self.total_ops_processed)
+            .field("validator_registry", &self.validator_registry.is_some())
+            .field("runtime", &self.runtime.is_some())
+            .field("storage", &self.storage.is_some())
+            .field("receipts_len", &self.receipts.len())
+            .finish()
+    }
 }
 
 impl EntryPoint {
@@ -597,9 +647,11 @@ impl EntryPoint {
             chain_id: 1337,
             supported_account_factories: Vec::new(),
             nonces: DashMap::new(),
-            deposits: DashMap::new(),
             total_ops_processed: AtomicU64::new(0),
             validator_registry: None,
+            runtime: None,
+            storage: None,
+            receipts: DashMap::new(),
         }
     }
 
@@ -609,7 +661,7 @@ impl EntryPoint {
     /// reference modules.
     pub fn with_validator_registry(
         mut self,
-        registry: std::sync::Arc<crate::aa_validators::ValidatorRegistry>,
+        registry: Arc<crate::aa_validators::ValidatorRegistry>,
     ) -> Self {
         self.validator_registry = Some(registry);
         self
@@ -619,6 +671,115 @@ impl EntryPoint {
     pub fn with_chain_id(mut self, chain_id: u64) -> Self {
         self.chain_id = chain_id;
         self
+    }
+
+    /// Attach the multi-VM runtime that will execute UserOp `call_data`.
+    /// When set, `handle_single_op` synthesizes a `VmTransaction` from the
+    /// UserOp and runs it through `MultiVmRuntime::execute_transaction`.
+    /// Without this, the EntryPoint only validates and charges gas.
+    pub fn with_runtime(mut self, runtime: Arc<MultiVmRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// Attach a persistent storage backend. Nonces are written through to
+    /// `CF_AGENTS` under the `aa/nonce/` prefix on every successful UserOp;
+    /// receipts are also persisted under `aa/receipt/`. The caller should
+    /// invoke `hydrate_nonces()` after construction to restore in-memory
+    /// state from storage.
+    pub fn with_storage(mut self, storage: Arc<dyn KvStore>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    /// Restore the in-memory nonce table from storage. Iterates all keys
+    /// under the `aa/nonce/` prefix in `CF_AGENTS` and decodes the trailing
+    /// 20-byte sender from the hex-encoded suffix. No-op when storage is
+    /// not attached.
+    pub fn hydrate_nonces(&self) -> Result<usize, AccountAbstractionError> {
+        let Some(storage) = self.storage.as_ref() else {
+            return Ok(0);
+        };
+        let prefix = AA_NONCE_PREFIX.as_bytes();
+        let keys = storage
+            .get_keys_with_prefix(CF_AGENTS, prefix)
+            .map_err(|e| AccountAbstractionError::InvalidUserOp(format!(
+                "hydrate_nonces: list keys failed: {e}"
+            )))?;
+        let mut count = 0usize;
+        for key in keys {
+            // key = "aa/nonce/{hex}"; strip the prefix, decode hex.
+            let suffix = match std::str::from_utf8(&key[prefix.len()..]) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let sender = match hex::decode(suffix) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let value = match storage.get(CF_AGENTS, &key) {
+                Ok(Some(v)) => v,
+                _ => continue,
+            };
+            if value.len() != 8 {
+                continue;
+            }
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&value);
+            let nonce = u64::from_be_bytes(buf);
+            self.nonces.insert(sender, nonce);
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Persist a sender's nonce to storage. No-op when storage is not
+    /// attached. Errors are logged but do not fail the UserOp — the
+    /// in-memory state still reflects the increment.
+    fn persist_nonce(&self, sender: &[u8], nonce: u64) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let key = format!("{}{}", AA_NONCE_PREFIX, hex::encode(sender));
+        if let Err(e) = storage.put(CF_AGENTS, key.as_bytes(), &nonce.to_be_bytes()) {
+            tracing::warn!(
+                sender = %hex::encode(sender),
+                nonce,
+                error = %e,
+                "failed to persist AA nonce"
+            );
+        }
+    }
+
+    /// Persist a receipt to storage under `aa/receipt/{op_hash_hex}`. No-op
+    /// when storage is not attached.
+    fn persist_receipt(&self, receipt: &UserOpReceipt) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let key = format!("aa/receipt/{}", hex::encode(&receipt.user_op_hash));
+        let value = match serde_json::to_vec(receipt) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to serialize AA receipt");
+                return;
+            }
+        };
+        if let Err(e) = storage.put(CF_AGENTS, key.as_bytes(), &value) {
+            tracing::warn!(error = %e, "failed to persist AA receipt");
+        }
+    }
+
+    /// Look up a previously processed UserOp receipt by hash. Checks the
+    /// in-memory cache first, then storage if attached.
+    pub fn get_receipt(&self, op_hash: &[u8]) -> Option<UserOpReceipt> {
+        if let Some(r) = self.receipts.get(op_hash) {
+            return Some(r.clone());
+        }
+        let storage = self.storage.as_ref()?;
+        let key = format!("aa/receipt/{}", hex::encode(op_hash));
+        let bytes = storage.get(CF_AGENTS, key.as_bytes()).ok().flatten()?;
+        serde_json::from_slice::<UserOpReceipt>(&bytes).ok()
     }
 
     /// Add a supported account factory
@@ -642,35 +803,6 @@ impl EntryPoint {
         let current = *entry;
         *entry += 1;
         current
-    }
-
-    /// Deposit funds for an account
-    pub fn deposit_to(&self, account: Vec<u8>, amount: u128) {
-        self.deposits
-            .entry(account)
-            .and_modify(|balance| *balance = balance.saturating_add(amount))
-            .or_insert(amount);
-    }
-
-    /// Get the deposit balance for an account
-    pub fn get_deposit(&self, account: &[u8]) -> u128 {
-        self.deposits
-            .get(account)
-            .map(|d| *d)
-            .unwrap_or(0)
-    }
-
-    /// Deduct from an account's deposit
-    fn deduct_deposit(&self, account: &[u8], amount: u128) -> Result<(), AccountAbstractionError> {
-        let mut entry = self.deposits.entry(account.to_vec()).or_insert(0);
-        if *entry < amount {
-            return Err(AccountAbstractionError::InsufficientBalance {
-                required: amount,
-                available: *entry,
-            });
-        }
-        *entry = entry.saturating_sub(amount);
-        Ok(())
     }
 
     /// Validate a UserOperation
@@ -734,17 +866,11 @@ impl EntryPoint {
             return Err(AccountAbstractionError::InvalidSignature);
         }
 
-        // Validate sufficient balance
-        let max_cost = op.max_gas_cost();
-        if !op.has_paymaster() {
-            let deposit = self.get_deposit(&op.sender);
-            if deposit < max_cost {
-                return Err(AccountAbstractionError::InsufficientBalance {
-                    required: max_cost,
-                    available: deposit,
-                });
-            }
-        }
+        // Balance sufficiency is verified at execution time against the
+        // smart-account's EVM balance in `VmState` (the single source of
+        // truth post-Phase B Thread 3c). The legacy EntryPoint-side deposit
+        // check has been removed because account balance lives in the
+        // unified `VmState`, not in a parallel deposit pool.
 
         // Validate account creation (v0.8: factory field must be a valid address)
         if op.is_account_creation()
@@ -777,91 +903,187 @@ impl EntryPoint {
         })
     }
 
-    /// Handle a bundle of UserOperations
+    /// Handle a bundle of UserOperations.
     ///
-    /// This is the main entry point for processing operations.
-    /// It validates, executes, and settles payment for each operation.
-    pub fn handle_ops(&self, ops: Vec<UserOperation>) -> Vec<UserOpReceipt> {
-        let mut receipts = Vec::new();
-
+    /// This is the main entry point for processing operations. It validates,
+    /// executes, and settles payment for each operation in order. Async
+    /// because each call dispatches to `MultiVmRuntime::execute_transaction`,
+    /// which is itself async. UserOps within a bundle execute sequentially —
+    /// each UserOp's nonce increment must be visible to the next.
+    pub async fn handle_ops(&self, ops: Vec<UserOperation>) -> Vec<UserOpReceipt> {
+        let mut receipts = Vec::with_capacity(ops.len());
         for op in ops {
-            let receipt = self.handle_single_op(op);
+            let receipt = self.handle_single_op(op).await;
             receipts.push(receipt);
         }
-
         receipts
     }
 
-    /// Handle a single UserOperation
-    fn handle_single_op(&self, op: UserOperation) -> UserOpReceipt {
+    /// Handle a single UserOperation end-to-end: validate → execute → charge gas.
+    ///
+    /// Execution flow:
+    /// 1. Validate the UserOp (nonce, signature via validator registry, gas limits).
+    /// 2. Synthesize a `VmTransaction` with `to = sender` (smart-account self-call)
+    ///    and `data = call_data`, dispatch through `MultiVmRuntime` if attached.
+    ///    Without a runtime, treat execution as a no-op success — useful for
+    ///    unit tests of the validation/accounting pipeline.
+    /// 3. Apply v0.8 gas penalty: if unused gas < 40,000, charge actual gas;
+    ///    otherwise charge the full limit.
+    /// 4. Debit `gas_used * gas_price` from the smart account's EVM balance
+    ///    (no separate deposit pool). Paymaster-sponsored ops skip the debit
+    ///    on the sender's side; the paymaster integration lands in a follow-up.
+    /// 5. On success, increment + persist nonce, persist receipt.
+    pub async fn handle_single_op(&self, op: UserOperation) -> UserOpReceipt {
         let op_hash = op.hash(self.chain_id, &self.address);
 
-        // Phase 1: Validation
-        let validation_result = self.validate_user_op(&op);
-        if let Err(e) = validation_result {
+        // Phase 1: Validation. Failures short-circuit with a failure receipt
+        // and DO NOT increment the nonce — replay protection only kicks in
+        // for accepted UserOps.
+        if let Err(e) = self.validate_user_op(&op) {
             tracing::error!("UserOp validation failed: {}", e);
-            return UserOpReceipt {
-                user_op_hash: op_hash,
+            let receipt = UserOpReceipt {
+                user_op_hash: op_hash.clone(),
                 success: false,
                 gas_used: 0,
                 actual_gas_cost: 0,
                 logs: vec![format!("Validation failed: {}", e).into_bytes()],
             };
+            self.receipts.insert(op_hash.clone(), receipt.clone());
+            self.persist_receipt(&receipt);
+            return receipt;
         }
 
-        // Phase 2: Execution (simplified - would call actual contract code)
-        let execution_gas = op.call_gas_limit;
-        let verification_gas = op.verification_gas_limit;
-        let mut total_gas = execution_gas
-            .saturating_add(verification_gas)
-            .saturating_add(op.pre_verification_gas);
+        // Phase 2: Execution. Build a synthetic VmTransaction targeting the
+        // smart account itself; the account's contract code is responsible
+        // for unpacking call_data into the actual operation (transfer, call,
+        // batch, etc.). The signature on the inner VmTransaction is None
+        // because admission has already verified the UserOp signature via
+        // the validator registry — `MultiVmRuntime::execute_transaction`
+        // accepts unsigned txs from internal sources (line 248-253 of
+        // runtime.rs).
+        let (exec_success, exec_gas_used, exec_logs) = match self.runtime.as_ref() {
+            Some(runtime) => {
+                let tx = VmTransaction {
+                    from: op.sender.clone(),
+                    to: Some(op.sender.clone()),
+                    value: 0,
+                    data: op.call_data.clone(),
+                    gas_limit: op.call_gas_limit,
+                    gas_price: op.max_fee_per_gas,
+                    nonce: op.nonce,
+                    vm_type: VmType::Evm,
+                    chain_id: self.chain_id,
+                    signature: None,
+                    public_key: None,
+                    signing_digest: None,
+                };
 
-        // v0.8: include paymaster gas limits when a paymaster is present
-        if op.has_paymaster() {
-            total_gas = total_gas
-                .saturating_add(op.paymaster_verification_gas_limit)
-                .saturating_add(op.paymaster_post_op_gas_limit);
-        }
+                let mut state = match self.storage.as_ref() {
+                    Some(s) => StateAdapter::with_storage(s.clone()),
+                    None => StateAdapter::new(),
+                };
 
-        // Phase 3: Payment
-        // v0.8 gas penalty: if unused gas is below GAS_PENALTY_THRESHOLD (40,000),
-        // no gas penalty is applied — the user is charged only for gas actually used.
+                match runtime.execute_transaction(&tx, &mut state).await {
+                    Ok(result) => {
+                        let logs: Vec<Vec<u8>> = result
+                            .logs
+                            .iter()
+                            .map(|l| l.data.clone())
+                            .collect();
+                        (result.success, result.gas_used, logs)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            sender = %hex::encode(&op.sender),
+                            error = %e,
+                            "UserOp execution failed"
+                        );
+                        (false, 0u64, vec![format!("Execution failed: {}", e).into_bytes()])
+                    }
+                }
+            }
+            None => {
+                // No runtime attached — accounting-only path. Charge as if
+                // the call ran to completion at the verification + pre +
+                // call gas limits.
+                let mut total_gas = op
+                    .call_gas_limit
+                    .saturating_add(op.verification_gas_limit)
+                    .saturating_add(op.pre_verification_gas);
+                if op.has_paymaster() {
+                    total_gas = total_gas
+                        .saturating_add(op.paymaster_verification_gas_limit)
+                        .saturating_add(op.paymaster_post_op_gas_limit);
+                }
+                (true, total_gas, vec![b"UserOp executed (no runtime)".to_vec()])
+            }
+        };
+
+        // Phase 3: Gas accounting with v0.8 penalty rule. When the unused
+        // gas is below GAS_PENALTY_THRESHOLD (40,000), the user pays only
+        // for actual gas consumed; otherwise they pay the full limit as
+        // a penalty for over-reserving.
         let gas_limit = op.total_gas_limit();
-        let unused_gas = gas_limit.saturating_sub(total_gas);
+        let unused_gas = gas_limit.saturating_sub(exec_gas_used);
         let chargeable_gas = if unused_gas < GAS_PENALTY_THRESHOLD {
-            // No penalty: charge only actual gas used
-            total_gas
+            exec_gas_used
         } else {
-            // Charge the full gas limit (penalty for large unused gas)
             gas_limit
         };
 
-        let actual_gas_price = op.max_fee_per_gas; // Simplified: use max fee
-        let actual_gas_cost = (chargeable_gas as u128) * actual_gas_price;
+        let actual_gas_price = op.max_fee_per_gas;
+        let actual_gas_cost = (chargeable_gas as u128).saturating_mul(actual_gas_price);
 
-        let payment_result = if op.has_paymaster() {
-            // Paymaster pays
-            Ok(())
-        } else {
-            // Account pays from deposit
-            self.deduct_deposit(&op.sender, actual_gas_cost)
-        };
-
-        let success = payment_result.is_ok();
+        // Phase 4: Payment. Debit the smart account's EVM balance unless a
+        // paymaster is sponsoring. The paymaster payment path is wired in a
+        // follow-up that adds `Paymaster::validate_paymaster_op` integration
+        // here; for now, paymaster-sponsored ops skip the sender debit.
+        let mut success = exec_success;
+        if success && !op.has_paymaster() {
+            if let Some(runtime) = self.runtime.as_ref() {
+                let mut state = match self.storage.as_ref() {
+                    Some(s) => StateAdapter::with_storage(s.clone()),
+                    None => StateAdapter::new(),
+                };
+                let _ = runtime; // state created independently; runtime owns no state
+                let current_balance = state.get_balance(&op.sender);
+                if current_balance < actual_gas_cost {
+                    tracing::warn!(
+                        sender = %hex::encode(&op.sender),
+                        required = actual_gas_cost,
+                        available = current_balance,
+                        "UserOp post-execution balance check failed"
+                    );
+                    success = false;
+                } else {
+                    state.set_balance(&op.sender, current_balance - actual_gas_cost);
+                    if let Err(e) = state.commit() {
+                        tracing::error!(error = %e, "AA balance commit failed");
+                        success = false;
+                    }
+                }
+            }
+        }
 
         if success {
-            // Increment nonce on success
-            self.increment_nonce(&op.sender);
+            // Replay protection: increment + persist nonce only on accepted
+            // UserOps. Failed validation/execution leaves the nonce intact
+            // so the user can retry with a corrected op.
+            let new_nonce = self.increment_nonce(&op.sender) + 1;
+            self.persist_nonce(&op.sender, new_nonce);
             self.total_ops_processed.fetch_add(1, Ordering::Relaxed);
         }
 
-        UserOpReceipt {
-            user_op_hash: op_hash,
+        let receipt = UserOpReceipt {
+            user_op_hash: op_hash.clone(),
             success,
-            gas_used: total_gas,
+            gas_used: exec_gas_used,
             actual_gas_cost,
-            logs: vec![b"UserOp executed".to_vec()],
-        }
+            logs: exec_logs,
+        };
+        self.receipts.insert(op_hash, receipt.clone());
+        self.persist_receipt(&receipt);
+        receipt
     }
 
     /// Get statistics about the EntryPoint
@@ -869,7 +1091,6 @@ impl EntryPoint {
         EntryPointStats {
             total_ops_processed: self.total_ops_processed.load(Ordering::Relaxed),
             total_accounts: self.nonces.len(),
-            total_deposited: self.deposits.iter().map(|entry| *entry.value()).sum(),
         }
     }
 }
@@ -879,7 +1100,6 @@ impl EntryPoint {
 pub struct EntryPointStats {
     pub total_ops_processed: u64,
     pub total_accounts: usize,
-    pub total_deposited: u128,
 }
 
 /// Account Factory for creating smart contract wallets
@@ -917,6 +1137,7 @@ impl AccountFactory {
             nonce: 0,
             is_deployed: true,
             modules: Vec::new(),
+            validator_modules: std::collections::BTreeMap::new(),
         };
 
         self.deployed_accounts.insert(address, account.clone());
@@ -974,8 +1195,21 @@ pub struct SmartAccount {
     /// Whether the account is deployed on-chain
     pub is_deployed: bool,
 
-    /// Installed modules
+    /// Legacy in-account module enum (`AccountModule::SocialRecovery` /
+    /// `SessionKey` / `SpendingLimit` / `Batching`). Retained for the
+    /// non-modular smart-account path; ERC-7579 modular accounts use
+    /// [`Self::validator_modules`] instead.
     pub modules: Vec<AccountModule>,
+
+    /// ERC-7579 installed validator modules, keyed by 20-byte module address.
+    /// Mirrors the on-chain account state set by `installModule(uint256 typeId,
+    /// address module, bytes initData)`. The associated `ValidatorRegistry`
+    /// holds the live `Arc<dyn IValidator>` instance — this map records the
+    /// `(typeId, address, initData, priority)` triple so the account can
+    /// re-issue installs to fresh registries (e.g. on rehydration) and answer
+    /// `isModuleInstalled`.
+    #[serde(default)]
+    pub validator_modules: std::collections::BTreeMap<[u8; 20], crate::erc7579::ValidatorModuleConfig>,
 }
 
 impl SmartAccount {
@@ -1016,6 +1250,76 @@ impl SmartAccount {
                 None
             })
             .collect()
+    }
+
+    // ---------------------------------------------------------------------
+    // ERC-7579 modular validator installation
+    // ---------------------------------------------------------------------
+
+    /// Install an ERC-7579 validator module record on this account.
+    ///
+    /// The actual `Arc<dyn IValidator>` lives in the
+    /// [`crate::aa_validators::ValidatorRegistry`]; this method just records
+    /// the on-account `(typeId, address, initData, priority)` triple per
+    /// ERC-7579 §3.2.
+    ///
+    /// `owner_authorized` enforces the custody invariant from
+    /// `feedback_custody_enforce_at_signing_time`: pre-recovery (i.e. before
+    /// any `SocialRecoveryValidator` is installed), only the root key may
+    /// install validators. After recovery is installed, callers must instead
+    /// use [`Self::install_validator_module_with_recovery`] with proof from
+    /// the recovery quorum.
+    pub fn install_validator_module(
+        &mut self,
+        config: crate::erc7579::ValidatorModuleConfig,
+        owner_authorized: bool,
+    ) -> Result<(), crate::aa_validators::ValidatorError> {
+        if !owner_authorized {
+            return Err(crate::aa_validators::ValidatorError::InvalidInput(
+                "install_validator_module: owner key required pre-recovery; \
+                 use install_validator_module_with_recovery once a SocialRecovery \
+                 validator is installed"
+                    .into(),
+            ));
+        }
+        self.validator_modules.insert(config.module_address, config);
+        Ok(())
+    }
+
+    /// Install an ERC-7579 validator module on a recovery-protected account.
+    ///
+    /// `recovery_authorized = true` represents proof that the recovery quorum
+    /// has signed off on the install (the caller — typically the
+    /// `SocialRecoveryValidator` itself — is responsible for verifying the
+    /// guardian quorum signature before invoking this method). The boolean
+    /// gate is the account-side enforcement; the cryptographic check lives in
+    /// the validator module.
+    pub fn install_validator_module_with_recovery(
+        &mut self,
+        config: crate::erc7579::ValidatorModuleConfig,
+        recovery_authorized: bool,
+    ) -> Result<(), crate::aa_validators::ValidatorError> {
+        if !recovery_authorized {
+            return Err(crate::aa_validators::ValidatorError::InvalidInput(
+                "install_validator_module_with_recovery: recovery quorum \
+                 authorisation required"
+                    .into(),
+            ));
+        }
+        self.validator_modules.insert(config.module_address, config);
+        Ok(())
+    }
+
+    /// Uninstall an ERC-7579 validator module record. Returns `true` iff a
+    /// module was previously installed at `module_address`.
+    pub fn uninstall_validator_module(&mut self, module_address: &[u8; 20]) -> bool {
+        self.validator_modules.remove(module_address).is_some()
+    }
+
+    /// `true` iff an ERC-7579 validator module is installed at
+    /// `module_address` on this account.
+    pub fn is_validator_installed(&self, module_address: &[u8; 20]) -> bool {
+        self.validator_modules.contains_key(module_address)
     }
 }
 
@@ -1400,20 +1704,6 @@ mod tests {
     }
 
     #[test]
-    fn test_deposit_and_balance() {
-        let entry_point = EntryPoint::new(vec![0x01; 20]);
-        let account = vec![0x02; 20];
-
-        assert_eq!(entry_point.get_deposit(&account), 0);
-
-        entry_point.deposit_to(account.clone(), 1_000_000_000);
-        assert_eq!(entry_point.get_deposit(&account), 1_000_000_000);
-
-        entry_point.deposit_to(account.clone(), 500_000_000);
-        assert_eq!(entry_point.get_deposit(&account), 1_500_000_000);
-    }
-
-    #[test]
     fn test_account_factory() {
         let factory = AccountFactory::new(vec![0x01; 20]);
         let owner = vec![0x02; 20];
@@ -1462,12 +1752,10 @@ mod tests {
         let entry_point = EntryPoint::new(vec![0x01; 20]);
         let sender = vec![0x02; 20];
 
-        // Deposit funds
-        entry_point.deposit_to(sender.clone(), 10_000_000_000_000_000);
-
         let user_op = test_user_op(sender.clone(), 0);
 
-        // Should validate successfully
+        // Should validate successfully — balance check happens at execution
+        // time in `handle_single_op`, not in `validate_user_op`.
         assert!(entry_point.validate_user_op(&user_op).is_ok());
 
         // Invalid nonce should fail
@@ -1486,17 +1774,17 @@ mod tests {
         assert!(entry_point.validate_user_op(&invalid_op).is_err());
     }
 
-    #[test]
-    fn test_handle_ops() {
+    #[tokio::test]
+    async fn test_handle_ops_no_runtime() {
+        // Without a VM runtime attached, handle_ops follows the
+        // accounting-only path: validates, charges gas at the full call/
+        // verification/pre-verification limit, increments nonce.
         let entry_point = EntryPoint::new(vec![0x01; 20]);
         let sender = vec![0x02; 20];
 
-        // Deposit sufficient funds
-        entry_point.deposit_to(sender.clone(), 100_000_000_000_000_000);
-
         let user_op = test_user_op(sender.clone(), 0);
 
-        let receipts = entry_point.handle_ops(vec![user_op]);
+        let receipts = entry_point.handle_ops(vec![user_op]).await;
         assert_eq!(receipts.len(), 1);
         assert!(receipts[0].success);
         assert_eq!(receipts[0].gas_used, 171_000);
@@ -1803,9 +2091,6 @@ mod tests {
         let entry_point = EntryPoint::new(vec![0x01; 20]);
         let sender = vec![0x02; 20];
 
-        // Deposit funds
-        entry_point.deposit_to(sender.clone(), 10_000_000_000_000_000);
-
         let user_op = test_user_op(sender.clone(), 0);
 
         let result = entry_point.simulate_user_op(&user_op);
@@ -1825,27 +2110,21 @@ mod tests {
         assert_eq!(config.mempool_capacity, 10_000);
     }
 
-    #[test]
-    fn test_entry_point_stats() {
+    #[tokio::test]
+    async fn test_entry_point_stats() {
         let entry_point = EntryPoint::new(vec![0x01; 20]);
         let sender1 = vec![0x02; 20];
         let sender2 = vec![0x03; 20];
 
-        // Add deposits
-        entry_point.deposit_to(sender1.clone(), 5_000_000_000_000_000);
-        entry_point.deposit_to(sender2.clone(), 3_000_000_000_000_000);
-
-        // Process operations
+        // Process operations on the no-runtime accounting path
         let user_op1 = test_user_op(sender1.clone(), 0);
         let user_op2 = test_user_op(sender2.clone(), 0);
 
-        entry_point.handle_ops(vec![user_op1, user_op2]);
+        entry_point.handle_ops(vec![user_op1, user_op2]).await;
 
         let stats = entry_point.get_stats();
         assert_eq!(stats.total_ops_processed, 2);
         assert_eq!(stats.total_accounts, 2);
-        // Total deposited minus gas costs
-        assert!(stats.total_deposited < 8_000_000_000_000_000);
     }
 
     #[test]
@@ -1972,24 +2251,20 @@ mod tests {
         assert_eq!(ep2.chain_id, 42161);
     }
 
-    #[test]
-    fn test_gas_penalty_threshold_below() {
-        // When unused gas < 40,000, only actual gas is charged (no penalty)
+    #[tokio::test]
+    async fn test_gas_penalty_threshold_below() {
+        // When unused gas < 40,000, only actual gas is charged (no penalty).
+        // No-runtime path so the gas-used equals the full reserved limit.
         let entry_point = EntryPoint::new(vec![0x01; 20]);
         let sender = vec![0x02; 20];
 
-        // Deposit a large amount
-        entry_point.deposit_to(sender.clone(), 1_000_000_000_000_000_000);
-
         // total_gas_limit = 100_000 + 50_000 + 21_000 = 171_000
-        // gas_used (in handle_single_op) = same 171_000 (simplified)
-        // unused = 0, which is < 40,000 => no penalty, charge only actual gas
+        // gas_used = same 171_000 (no-runtime path), unused = 0 < 40_000
         let user_op = test_user_op(sender.clone(), 0);
 
-        let receipts = entry_point.handle_ops(vec![user_op]);
+        let receipts = entry_point.handle_ops(vec![user_op]).await;
         assert!(receipts[0].success);
-        // actual_gas_cost should be gas_used * max_fee_per_gas
-        // gas_used = 171_000, unused = 0 < 40_000 => chargeable = 171_000
+        // actual_gas_cost = gas_used * max_fee_per_gas = 171_000 * 1e9
         assert_eq!(receipts[0].actual_gas_cost, 171_000 * 1_000_000_000);
     }
 

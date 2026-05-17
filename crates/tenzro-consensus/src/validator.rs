@@ -8,6 +8,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 use tenzro_crypto::pq::ML_DSA_65_VK_LEN;
 use tenzro_crypto::PublicKey;
+
+/// BLS12-381 G1-compressed public key length (`min_pk` scheme used by
+/// `tenzro_crypto::bls`). Every validator MUST advertise a BLS verifying key
+/// for HotStuff-2 vote-signature aggregation.
+pub const BLS_G1_COMPRESSED_LEN: usize = 48;
 use tenzro_types::primitives::{Address, Hash, Timestamp};
 use tenzro_types::tee::{AttestationReport, AttestationResult};
 
@@ -30,6 +35,25 @@ where
     Ok(bytes)
 }
 
+/// Deserialize a BLS12-381 G1-compressed verifying key, rejecting any byte
+/// string that does not match the 48-byte length. Every validator in the
+/// active set MUST advertise a well-formed BLS key for HotStuff-2 vote
+/// aggregation per ROADMAP B.1.
+fn deserialize_bls_verifying_key<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let bytes = Vec::<u8>::deserialize(deserializer)?;
+    if bytes.len() != BLS_G1_COMPRESSED_LEN {
+        return Err(serde::de::Error::custom(format!(
+            "validator BLS verifying key has wrong length: expected {} bytes (BLS12-381 G1 compressed), got {}",
+            BLS_G1_COMPRESSED_LEN,
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
+}
+
 /// Information about a validator
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatorInfo {
@@ -44,6 +68,17 @@ pub struct ValidatorInfo {
     /// must advertise a hybrid key per the Wave 3d migration.
     #[serde(deserialize_with = "deserialize_pq_verifying_key")]
     pub pq_public_key: Vec<u8>,
+
+    /// Validator's BLS12-381 G1-compressed verifying key (48 bytes, `min_pk`
+    /// scheme). Mandatory: every validator MUST advertise a BLS key for
+    /// HotStuff-2 vote-signature aggregation per ROADMAP B.1. The aggregation
+    /// is the third signature leg alongside the per-vote Ed25519 + ML-DSA-65
+    /// `CompositeSignature` — BLS provides O(1) bandwidth and verification
+    /// CPU savings on the QC path; Composite preserves the PQ-hybrid property
+    /// per individual vote (Composite is pre-quantum on its classical leg
+    /// only, BLS12-381 itself is pre-quantum, hence we keep both).
+    #[serde(deserialize_with = "deserialize_bls_verifying_key")]
+    pub bls_public_key: Vec<u8>,
 
     /// Stake amount (voting power)
     pub stake: u128,
@@ -69,14 +104,20 @@ impl ValidatorInfo {
     ///
     /// # Panics
     ///
-    /// Panics if `pq_public_key.len() != ML_DSA_65_VK_LEN` (1952 bytes). The PQ
-    /// verifying key is mandatory in the Wave 3d hybrid signing world; there is
-    /// no fallback path. Construct the key via `MlDsaSigningKey::generate()` and
-    /// pass `key.verifying_key_bytes().to_vec()`.
+    /// Panics if:
+    /// - `pq_public_key.len() != ML_DSA_65_VK_LEN` (1952 bytes), or
+    /// - `bls_public_key.len() != BLS_G1_COMPRESSED_LEN` (48 bytes).
+    ///
+    /// Both keys are mandatory; there is no fallback path. Construct the PQ
+    /// key via `MlDsaSigningKey::generate()` and pass
+    /// `key.verifying_key_bytes().to_vec()`. Construct the BLS key via
+    /// `tenzro_crypto::bls::BlsKeyPair::generate()` and pass
+    /// `keypair.public_key().to_bytes().to_vec()`.
     pub fn new(
         address: Address,
         public_key: PublicKey,
         pq_public_key: Vec<u8>,
+        bls_public_key: Vec<u8>,
         stake: u128,
     ) -> Self {
         assert_eq!(
@@ -86,10 +127,18 @@ impl ValidatorInfo {
             ML_DSA_65_VK_LEN,
             pq_public_key.len()
         );
+        assert_eq!(
+            bls_public_key.len(),
+            BLS_G1_COMPRESSED_LEN,
+            "validator BLS verifying key has wrong length: expected {} bytes (BLS12-381 G1 compressed), got {}",
+            BLS_G1_COMPRESSED_LEN,
+            bls_public_key.len()
+        );
         Self {
             address,
             public_key,
             pq_public_key,
+            bls_public_key,
             stake,
             tee_attestation: None,
             tee_attestation_result: None,
@@ -104,7 +153,7 @@ impl ValidatorInfo {
     pub fn composite_public_key(&self) -> tenzro_crypto::composite::CompositePublicKey {
         tenzro_crypto::composite::CompositePublicKey::new(
             self.public_key.clone(),
-            Some(self.pq_public_key.clone()),
+            self.pq_public_key.clone(),
         )
     }
 
@@ -217,6 +266,25 @@ impl ValidatorSet {
     /// Returns the validator with the given address
     pub fn get_by_address(&self, address: &Address) -> Option<&ValidatorInfo> {
         self.validators.iter().find(|v| &v.address == address)
+    }
+
+    /// Returns the position of a validator in `self.validators` matching the
+    /// given address, or `None` if not present.
+    ///
+    /// This is the canonical "validator index" used for bitmap-based BLS
+    /// signer encoding in [`crate::voter::QuorumCertificate::signer_bitmap`].
+    /// The index is stable for the lifetime of the validator set (i.e. the
+    /// duration of one epoch); a new epoch may renumber.
+    pub fn index_of(&self, address: &Address) -> Option<usize> {
+        self.validators.iter().position(|v| &v.address == address)
+    }
+
+    /// Returns the validators slice in canonical order (insertion / epoch
+    /// order). The position of each entry in this slice is the bit index used
+    /// by [`crate::voter::QuorumCertificate::signer_bitmap`] when verifying
+    /// the BLS aggregate.
+    pub fn active_validators(&self) -> &[ValidatorInfo] {
+        &self.validators
     }
 
     /// Returns the number of validators
@@ -390,8 +458,12 @@ impl EquivocationDetector {
                 // slashing evidence.
                 let placeholder_sig = tenzro_crypto::composite::CompositeSignature::new(
                     Vec::new(),
-                    None,
+                    Vec::new(),
                 );
+                // BLS signature follows the same stand-in rationale as the
+                // composite sig + public key above — `EquivocationEvidence::is_valid`
+                // only inspects view/voter/block_hash/vote_type.
+                let placeholder_bls = vote.bls_signature.clone();
                 let vote1 = Vote::new(
                     vote.view,
                     vote.height,
@@ -399,6 +471,7 @@ impl EquivocationDetector {
                     vote.voter,
                     placeholder_sig,
                     vote.public_key.clone(),
+                    placeholder_bls,
                     existing_type,
                     vote.high_qc_view,
                 );
@@ -573,6 +646,7 @@ impl ProposerElection for ReputationProposer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tenzro_crypto::bls::BlsKeyPair;
     use tenzro_crypto::pq::MlDsaSigningKey;
     use tenzro_crypto::{KeyPair, KeyType};
 
@@ -584,10 +658,12 @@ mod tests {
         addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
         let address = Address::new(addr_bytes);
         let pq = MlDsaSigningKey::generate();
+        let bls = BlsKeyPair::generate().unwrap();
         ValidatorInfo::new(
             address,
             keypair.public_key().clone(),
             pq.verifying_key_bytes().to_vec(),
+            bls.public_key().to_bytes().to_vec(),
             stake,
         )
     }
@@ -653,9 +729,14 @@ mod tests {
 
         let placeholder_pk = CompositePublicKey::new(
             validator.public_key.clone(),
-            Some(validator.pq_public_key.clone()),
+            validator.pq_public_key.clone(),
         );
-        let placeholder_sig = CompositeSignature::new(vec![0u8; 64], Some(vec![0u8; 3309]));
+        let placeholder_sig = CompositeSignature::new(vec![0u8; 64], vec![0u8; 3309]);
+        // EquivocationDetector::check_vote inspects view/voter/block_hash/vote_type
+        // only, so a real BLS signature over arbitrary bytes is enough — the
+        // detector never re-verifies it.
+        let placeholder_bls_kp = BlsKeyPair::generate().unwrap();
+        let placeholder_bls = placeholder_bls_kp.sign(b"__placeholder__");
 
         let vote1 = Vote::new(
             1,
@@ -664,6 +745,7 @@ mod tests {
             validator.address,
             placeholder_sig.clone(),
             placeholder_pk.clone(),
+            placeholder_bls.clone(),
             VoteType::Prepare,
             0,
         );
@@ -687,6 +769,7 @@ mod tests {
             validator.address,
             placeholder_sig.clone(),
             placeholder_pk.clone(),
+            placeholder_bls.clone(),
             VoteType::Prepare,
             0,
         );
@@ -713,9 +796,11 @@ mod tests {
 
         let placeholder_pk = CompositePublicKey::new(
             validator.public_key.clone(),
-            Some(validator.pq_public_key.clone()),
+            validator.pq_public_key.clone(),
         );
-        let placeholder_sig = CompositeSignature::new(vec![0u8; 64], Some(vec![0u8; 3309]));
+        let placeholder_sig = CompositeSignature::new(vec![0u8; 64], vec![0u8; 3309]);
+        let placeholder_bls_kp = BlsKeyPair::generate().unwrap();
+        let placeholder_bls = placeholder_bls_kp.sign(b"__placeholder__");
 
         // Add votes for views 1, 2, 3
         for view in 1..=3 {
@@ -726,6 +811,7 @@ mod tests {
                 validator.address,
                 placeholder_sig.clone(),
                 placeholder_pk.clone(),
+                placeholder_bls.clone(),
                 VoteType::Prepare,
                 0,
             );

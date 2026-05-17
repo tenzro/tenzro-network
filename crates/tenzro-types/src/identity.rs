@@ -1,8 +1,5 @@
 //! Identity types for the Tenzro Decentralized Identity Protocol (TDIP)
 //!
-//! TDIP is the primary identity standard. PDIS remains fully supported
-//! as a secondary standard.
-//!
 //! This module defines foundation types used by the `tenzro-identity` crate
 //! and throughout the Tenzro Network for unified human and machine identity.
 
@@ -75,12 +72,22 @@ impl std::fmt::Display for PaymentProtocolId {
     }
 }
 
-/// Type of identity in the Tenzro Decentralized Identity Protocol
+/// Type of identity in the Tenzro Decentralized Identity Protocol.
+///
+/// The protocol recognises three identity classes — the enum collapses
+/// the two machine classes into a single tag, distinguished at runtime
+/// by the `controller_did` field on `IdentityData::Machine`:
+///
+/// - **Human** (`did:tenzro:human:{uuid}`)
+/// - **Delegated agent** — machine with a human controller
+///   (`did:tenzro:machine:{controller}:{uuid}`)
+/// - **Autonomous agent** — machine with no controller
+///   (`did:tenzro:machine:{uuid}`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IdentityType {
-    /// Human identity (formerly PDIS-1 Guardian)
+    /// Human identity
     Human,
-    /// Machine/Agent identity (formerly PDIS-2 Agent)
+    /// Machine/Agent identity (delegated or autonomous)
     Machine,
 }
 

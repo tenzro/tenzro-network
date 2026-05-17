@@ -1,14 +1,26 @@
-"""Vision trainer adapter (Phase 1 stub).
+"""Vision trainer adapter — ViT-B/16 family.
 
-A small ViT-style classifier for end-to-end loop tests. Production
-deployments should override :func:`build_adapter` with a real ViT-L/14 or
-ConvNeXt backbone, with shards exposed as image-tensor archives.
+This is the real inner-loop driver for ViT-class image training under
+Decoupled DiLoCo. The default backbone is **timm ViT-B/16**
+(``vit_base_patch16_224``), which is the architecture family our
+inference-side vision encoders share — DINOv3 ViT-B/16, SigLIP2-base, and
+CLIP ViT-B/16 in ``crates/tenzro-model/src/catalog.rs`` all use the
+same ViT-B/16 backbone. A trained outer-gradient root can be slotted
+directly into the serving fleet's image-encoder slot.
+
+Other catalog-member ViT sizes (ViT-S/16, ViT-L/16) drop in by changing
+``architecture.metadata.timm_model``.
+
+Wraps cleanly under :class:`torch.distributed.fsdp.FullyShardedDataParallel`
+(FSDP2) when the caller has initialized a process group — see
+``TRAIN.md §6.3``. Plain DDP and single-GPU paths work out of the box.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable
 
 try:
@@ -22,71 +34,96 @@ except ImportError:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 
-class _TinyViT(nn.Module if nn is not None else object):  # type: ignore[misc]
-    """Patch-embedded ViT for tiny RGB inputs (32×32)."""
+# Default backbone for the vision adapter — ``vit_base_patch16_224`` is the
+# architecture family of the inference-side ViT-B/16 encoders in the
+# Tenzro vision catalog (DINOv3 ViT-B/16, SigLIP2-base, CLIP ViT-B/16).
+DEFAULT_TIMM_MODEL = "vit_base_patch16_224"
 
-    def __init__(
-        self,
-        img_size: int = 32,
-        patch: int = 4,
-        d_model: int = 192,
-        num_layers: int = 4,
-        num_heads: int = 4,
-        num_classes: int = 10,
-    ):
-        super().__init__()
-        if img_size % patch != 0:
-            raise ValueError("img_size must be divisible by patch")
-        self.patch = patch
-        self.proj = nn.Conv2d(3, d_model, kernel_size=patch, stride=patch)
-        n_tokens = (img_size // patch) ** 2 + 1
-        self.cls = nn.Parameter(torch.zeros(1, 1, d_model))
-        self.pos = nn.Parameter(torch.zeros(1, n_tokens, d_model))
-        nn.init.trunc_normal_(self.pos, std=0.02)
-        layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=num_heads, batch_first=True, activation="gelu"
-        )
-        self.blocks = nn.TransformerEncoder(layer, num_layers=num_layers)
-        self.head = nn.Linear(d_model, num_classes)
-
-    def forward(self, imgs: "torch.Tensor") -> "torch.Tensor":
-        x = self.proj(imgs).flatten(2).transpose(1, 2)
-        b = x.shape[0]
-        x = torch.cat([self.cls.expand(b, -1, -1), x], dim=1) + self.pos
-        x = self.blocks(x)
-        return self.head(x[:, 0])
+# ImageNet-1k mean/std — the right normalization for any ImageNet-pretrained
+# ViT (``vit_base_patch16_224`` ships with these). DINOv3/SigLIP2/CLIP have
+# their own normalization stats; override via ``architecture.metadata.mean``
+# and ``architecture.metadata.std`` (3 floats each) when fine-tuning from
+# those checkpoints.
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 @dataclass
 class VisionAdapter:
-    _model: "_TinyViT"
-    _optimizer: "torch.optim.Optimizer"
-    img_size: int = 32
-    batch_size: int = 8
-    num_classes: int = 10
+    """Real timm-backed ViT adapter.
 
-    def model(self) -> "torch.nn.Module":
+    Loads the backbone once at construction; ``shard_batches`` walks an
+    ImageFolder-style shard (``<root>/<class_name>/*.{jpg,jpeg,png,webp}``),
+    decodes images with Pillow, resizes/center-crops to ``img_size``, applies
+    ImageNet normalization, and yields ``(images, labels)`` batches. Standard
+    cross-entropy classification loss.
+    """
+
+    _model: "nn.Module"
+    _optimizer: "torch.optim.Optimizer"
+    img_size: int = 224
+    batch_size: int = 8
+    device: str = "cpu"
+    mean: tuple[float, float, float] = IMAGENET_MEAN
+    std: tuple[float, float, float] = IMAGENET_STD
+    _class_to_idx: dict[str, int] = field(default_factory=dict)
+
+    def model(self) -> "nn.Module":
         return self._model
 
     def optimizer(self) -> "torch.optim.Optimizer":
         return self._optimizer
 
     def shard_batches(self, shard_uri: str) -> Iterable[object]:
-        # In-memory synthetic batches keyed off a stable shard hash.
         if torch is None:
             raise RuntimeError("PyTorch is required")
-        if not shard_uri.startswith(("file://", "synth://")):
+        # Resolve the shard URI. Confidential-tier shards arrive
+        # pre-decrypted as `file://` pointers into an enclave-private
+        # tmpfs; see `tenzro_trainer.confidential.unwrap_shard`.
+        if shard_uri.startswith("file://"):
+            root = Path(shard_uri[len("file://") :])
+        elif shard_uri.startswith(("ipfs://", "ar://", "https://", "http://")):
             raise NotImplementedError(
-                f"vision adapter only supports synth:// or file:// in Phase 1: {shard_uri}"
+                f"remote shard scheme not supported in reference trainer "
+                f"(fetch upstream, expose as file:// or via the confidential "
+                f"unwrap helper): {shard_uri}"
             )
+        else:
+            root = Path(shard_uri)
+
+        if not root.is_dir():
+            raise ValueError(
+                f"vision shard {root!r} must be an ImageFolder-style directory "
+                f"(<root>/<class_name>/*.{{jpg,jpeg,png,webp}})"
+            )
+
+        samples = _scan_image_folder(root, self._class_to_idx)
+        if not samples:
+            raise ValueError(f"vision shard {root!r} contains no images")
+        log.info(
+            "vision shard %r: %d images across %d classes",
+            str(root),
+            len(samples),
+            len(self._class_to_idx),
+        )
+
+        # Reseed deterministically so a single shard always yields the same
+        # batch sequence across resumes — the outer-loop syncer assumes
+        # inner steps are reproducible given (shard_uri, step_count).
         rng = torch.Generator()
-        rng.manual_seed(abs(hash(shard_uri)) % (2**32))
+        rng.manual_seed(0)
+        n = len(samples)
         while True:
-            x = torch.randn(
-                self.batch_size, 3, self.img_size, self.img_size, generator=rng
-            )
-            y = torch.randint(0, self.num_classes, (self.batch_size,), generator=rng)
-            yield x, y
+            offsets = torch.randint(0, n, (self.batch_size,), generator=rng).tolist()
+            imgs = []
+            labels = []
+            for o in offsets:
+                path, label = samples[o]
+                imgs.append(_load_and_preprocess(path, self.img_size, self.mean, self.std))
+                labels.append(label)
+            x = torch.stack(imgs)
+            y = torch.tensor(labels, dtype=torch.long)
+            yield x.to(self.device), y.to(self.device)
 
     def compute_loss(self, batch: object) -> "torch.Tensor":
         if torch is None:
@@ -96,38 +133,151 @@ class VisionAdapter:
         return torch.nn.functional.cross_entropy(logits, y)
 
 
+def _scan_image_folder(
+    root: Path, class_to_idx: dict[str, int]
+) -> list[tuple[Path, int]]:
+    """Walk an ImageFolder-style directory; populate ``class_to_idx`` in place.
+
+    Subdirectory names (sorted lexicographically) are class labels. The
+    ``class_to_idx`` mapping is built on first scan and reused on
+    subsequent shards so label IDs are stable across shards of the same
+    dataset.
+    """
+    exts = {".jpg", ".jpeg", ".png", ".webp"}
+    classes = sorted(p.name for p in root.iterdir() if p.is_dir())
+    if not classes:
+        return []
+    for c in classes:
+        class_to_idx.setdefault(c, len(class_to_idx))
+    samples: list[tuple[Path, int]] = []
+    for c in classes:
+        idx = class_to_idx[c]
+        for p in sorted((root / c).iterdir()):
+            if p.suffix.lower() in exts and p.is_file():
+                samples.append((p, idx))
+    return samples
+
+
+def _load_and_preprocess(
+    path: Path,
+    img_size: int,
+    mean: tuple[float, float, float],
+    std: tuple[float, float, float],
+) -> "torch.Tensor":
+    """Decode → resize-shortest → center-crop → normalize → CHW float tensor."""
+    try:
+        from PIL import Image
+    except ImportError as e:
+        raise ImportError(
+            "The vision adapter requires the `Pillow` package. "
+            "Install with: `pip install tenzro-trainer[vision]`"
+        ) from e
+
+    img = Image.open(path).convert("RGB")
+    # Resize so the shortest side == img_size, then center-crop to square.
+    w, h = img.size
+    if w < h:
+        new_w, new_h = img_size, int(round(h * img_size / w))
+    else:
+        new_w, new_h = int(round(w * img_size / h)), img_size
+    img = img.resize((new_w, new_h), Image.BICUBIC)
+    left = (new_w - img_size) // 2
+    top = (new_h - img_size) // 2
+    img = img.crop((left, top, left + img_size, top + img_size))
+
+    # PIL → CHW float tensor in [0, 1], then ImageNet-normalize.
+    t = torch.from_numpy(_pil_to_array(img)).permute(2, 0, 1).contiguous().float() / 255.0
+    mean_t = torch.tensor(mean, dtype=t.dtype).view(3, 1, 1)
+    std_t = torch.tensor(std, dtype=t.dtype).view(3, 1, 1)
+    return (t - mean_t) / std_t
+
+
+def _pil_to_array(img: Any) -> Any:
+    """PIL Image → numpy uint8 array, lazy-import numpy."""
+    import numpy as np
+
+    return np.asarray(img, dtype="uint8")
+
+
 def build_adapter(
     architecture: dict[str, Any],
     hyperparams: dict[str, Any] | None = None,
 ) -> VisionAdapter:
+    """Construct a timm ViT-B/16 (or other catalog-family ViT) adapter.
+
+    Reads ``architecture.metadata.timm_model`` (default ``vit_base_patch16_224``),
+    ``architecture.metadata.num_classes`` (default 1000 — ImageNet-1k),
+    ``architecture.metadata.img_size`` (default 224),
+    ``architecture.metadata.pretrained`` (default ``True`` — fine-tune from
+    ImageNet weights), and optional ``architecture.metadata.mean`` / ``std``
+    (3-float tuples; override for DINOv3/SigLIP2/CLIP normalization).
+
+    Hyperparams accepted:
+
+    * ``learning_rate`` (default 3e-5 — fine-tune scale for pretrained ViT)
+    * ``weight_decay`` (default 0.05 — standard ViT recipe)
+    * ``batch_size`` (default 8)
+    * ``device`` (default ``"cuda"`` if available else ``"cpu"``)
+    """
     if torch is None:
         raise RuntimeError("PyTorch is required")
+    try:
+        import timm
+    except ImportError as e:
+        raise ImportError(
+            "The vision adapter requires the `timm` package. "
+            "Install with: `pip install tenzro-trainer[vision]`"
+        ) from e
+
     md = (architecture or {}).get("metadata") or {}
     hp = hyperparams or {}
-    model = _TinyViT(
-        img_size=int(md.get("img_size", 32)),
-        patch=int(md.get("patch", 4)),
-        d_model=int(md.get("d_model", 192)),
-        num_layers=int(md.get("num_layers", 4)),
-        num_heads=int(md.get("num_heads", 4)),
-        num_classes=int(md.get("num_classes", 10)),
+    timm_model = str(md.get("timm_model") or DEFAULT_TIMM_MODEL)
+    num_classes = int(md.get("num_classes", 1000))
+    img_size = int(md.get("img_size", 224))
+    pretrained = bool(md.get("pretrained", True))
+    mean = tuple(md.get("mean", IMAGENET_MEAN))  # type: ignore[assignment]
+    std = tuple(md.get("std", IMAGENET_STD))  # type: ignore[assignment]
+    if len(mean) != 3 or len(std) != 3:
+        raise ValueError(
+            f"vision adapter: mean/std must be 3-tuples, got mean={mean}, std={std}"
+        )
+    device = str(hp.get("device") or ("cuda" if torch.cuda.is_available() else "cpu"))
+
+    log.info(
+        "loading timm vision backbone %r (num_classes=%d, img_size=%d, pretrained=%s, device=%s) ...",
+        timm_model,
+        num_classes,
+        img_size,
+        pretrained,
+        device,
     )
+    model = timm.create_model(
+        timm_model,
+        pretrained=pretrained,
+        num_classes=num_classes,
+        img_size=img_size,
+    ).to(device)
+
     opt = torch.optim.AdamW(
         model.parameters(),
-        lr=float(hp.get("learning_rate", 3e-4)),
+        lr=float(hp.get("learning_rate", 3e-5)),
+        weight_decay=float(hp.get("weight_decay", 0.05)),
         betas=(0.9, 0.95),
     )
     log.info(
-        "built vision adapter (stub): %d params",
+        "built vision adapter %r: %d params",
+        timm_model,
         sum(p.numel() for p in model.parameters()),
     )
     return VisionAdapter(
         _model=model,
         _optimizer=opt,
-        img_size=int(md.get("img_size", 32)),
+        img_size=img_size,
         batch_size=int(hp.get("batch_size", 8)),
-        num_classes=int(md.get("num_classes", 10)),
+        device=device,
+        mean=mean,  # type: ignore[arg-type]
+        std=std,  # type: ignore[arg-type]
     )
 
 
-__all__ = ["VisionAdapter", "build_adapter"]
+__all__ = ["VisionAdapter", "build_adapter", "DEFAULT_TIMM_MODEL"]

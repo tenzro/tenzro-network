@@ -297,6 +297,15 @@ pub struct SyncRound {
     pub syncer_signature: Signature,
     /// When this round status was published.
     pub published_at: Timestamp,
+    /// No-Endorsement-Certificate carry-forward witnesses.
+    ///
+    /// `None` for normal rounds. `Some(sigs)` when the witness committee
+    /// could not assemble a 2f+1 quorum within `grace_window_ms` — each
+    /// committee member publishes a signed "no-quorum" cert and the run
+    /// advances to `round + 1` carrying forward the prior `state_root`
+    /// (which is set to the previous round's state root, or `Hash::zero()`
+    /// for round 0 NEC).
+    pub no_quorum_witnesses: Option<Vec<Signature>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -349,6 +358,104 @@ pub struct TrainingReceipt {
     pub finalized_at: Timestamp,
     /// Syncer signature over the canonical bytes of all fields above.
     pub syncer_signature: Signature,
+}
+
+// ---------------------------------------------------------------------------
+// Confidential tier — sealed-shard manifest
+// ---------------------------------------------------------------------------
+
+/// One per-trainer sealed-shard record in a [`SealedDatasetManifest`].
+///
+/// The sponsor (data owner) shards the dataset offline, generates a fresh
+/// AES-256-GCM data key per shard, encrypts the shard with that key, and
+/// publishes the encrypted shards to a content-addressed object store. The
+/// data keys are then wrapped one-per-trainer using each enrolled trainer's
+/// **attested enclave public key** (HPKE / ECIES / vendor sealing key — the
+/// concrete construction is encoded in `wrap_alg`). The wrapped key envelope
+/// is what lives on-chain alongside the manifest.
+///
+/// At trainer side, the enclave unwraps the data key with its sealing private
+/// key (which never leaves the TEE) and decrypts the assigned shard inside
+/// the enclave. The host OS never sees the data key or cleartext.
+///
+/// `enclave_pubkey` and `enclave_measurements` are bound into the envelope so
+/// the syncer can verify at enrollment that the trainer's TEE attestation
+/// matches the recipient the sponsor sealed to. A mismatch means the trainer
+/// presented a different enclave than the one the sponsor wrapped to —
+/// enrollment is rejected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SealedShardEnvelope {
+    /// Trainer DID this envelope is intended for. Acts as the recipient
+    /// selector when the trainer fetches the manifest.
+    pub trainer_did: String,
+    /// Index of the shard this envelope unlocks. Trainers are typically
+    /// assigned one shard per round (or a fixed shard for the run).
+    pub shard_index: u32,
+    /// SHA-256 of the encrypted shard bytes. Trainer pulls the shard by
+    /// this hash and verifies before decrypting.
+    pub shard_ciphertext_hash: Hash,
+    /// Size of the encrypted shard in bytes.
+    pub shard_ciphertext_bytes: u64,
+    /// The encrypted data key (wrapped to `enclave_pubkey`). Opaque bytes
+    /// in the format dictated by `wrap_alg`.
+    pub wrapped_data_key: Vec<u8>,
+    /// Key-wrap algorithm identifier. Phase 4 ships `"hpke-x25519-hkdf-sha256-aes-256-gcm"`
+    /// (RFC 9180 base mode). Other identifiers reserved for vendor sealing
+    /// (e.g. `"intel-tdx-sealing"`, `"sev-snp-sealing"`).
+    pub wrap_alg: String,
+    /// The trainer's attested enclave public key the sponsor wrapped to.
+    /// Format depends on `wrap_alg`; for HPKE-X25519 this is the 32-byte
+    /// X25519 pubkey. Must match the pubkey carried in the trainer's
+    /// per-round [`TrainingAttestation`] for enrollment to succeed.
+    pub enclave_pubkey: Vec<u8>,
+    /// The trainer's attested enclave measurements (program/firmware hashes)
+    /// the sponsor sealed against. Must match the trainer's TEE attestation
+    /// at enrollment. Format is vendor-specific (e.g. TDX MRTD + RTMR0..3,
+    /// SEV-SNP measurement, Nitro PCR set). Stored as a hex string blob so
+    /// the protocol layer stays vendor-agnostic.
+    pub enclave_measurements_hex: String,
+    /// AES-GCM authentication tag is included in `wrapped_data_key` per
+    /// HPKE Base mode; no separate field needed.
+    pub created_at: Timestamp,
+}
+
+/// Per-task sealed-shard manifest. Posted by the Confidential-tier sponsor
+/// alongside the task spec, persisted under `manifest:<task_id>` in
+/// `CF_TRAINING_RUNS`, and referenced from `TrainingTaskSpec::dataset_ref`
+/// as `tee://<sha256(manifest_canonical)>`.
+///
+/// The manifest's `manifest_hash` is the content-addressed handle: trainers
+/// fetch the manifest by hash, the syncer verifies the hash matches what's
+/// referenced in `dataset_ref`. Once enrollment closes, the manifest is
+/// effectively immutable — adding a new trainer requires a new manifest
+/// version and a re-attestation round.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SealedDatasetManifest {
+    /// Task this manifest belongs to.
+    pub task_id: String,
+    /// Sponsor DID that signed the manifest.
+    pub sponsor_did: String,
+    /// SHA-256 over the canonical serialization of all envelopes
+    /// (sorted by `(shard_index, trainer_did)`). Self-referential: not
+    /// signed into the manifest itself; recomputed by readers and matched
+    /// against `dataset_ref`.
+    pub manifest_hash: Hash,
+    /// One envelope per (trainer, shard) tuple. Order is normalized to
+    /// `(shard_index, trainer_did)` ascending.
+    pub envelopes: Vec<SealedShardEnvelope>,
+    /// Sponsor signature over `(task_id || sponsor_did || envelopes)`
+    /// canonical bytes. Verifies sponsor authorship of the manifest.
+    pub sponsor_signature: Signature,
+    pub created_at: Timestamp,
+}
+
+impl SealedDatasetManifest {
+    /// Look up the envelope addressed to a specific trainer. Returns `None`
+    /// if no envelope exists (which means the trainer is not authorized to
+    /// participate at the Confidential tier for this task).
+    pub fn envelope_for(&self, trainer_did: &str) -> Option<&SealedShardEnvelope> {
+        self.envelopes.iter().find(|e| e.trainer_did == trainer_did)
+    }
 }
 
 // ---------------------------------------------------------------------------

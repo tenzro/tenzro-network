@@ -150,6 +150,7 @@ pub mod engine;
 pub mod error;
 pub mod escrow;
 pub mod fee_collector;
+pub mod intent_7683_fills;
 pub mod kill_switch;
 pub mod micropayments;
 
@@ -162,6 +163,7 @@ pub use engine::{
 pub use error::{Result, SettlementError};
 pub use escrow::{EscrowAccount, EscrowManager, EscrowStats, EscrowStatus};
 pub use fee_collector::{CollectionStats, FeeCollector, FeeRecord, PeriodStats};
+pub use intent_7683_fills::Spec4FillRegistry;
 pub use kill_switch::{KillSwitchStats, KillSwitchStore};
 pub use micropayments::{
     ChannelDispute, ChannelManager, ChannelState, ChannelStats, ChannelStatus, ChannelStorage,

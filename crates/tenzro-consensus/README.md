@@ -162,19 +162,29 @@ use tenzro_consensus::{
     EpochManager, ValidatorInfo,
 };
 use tenzro_crypto::{KeyPair, KeyType};
+use tenzro_crypto::pq::MlDsaSigningKey;
+use tenzro_crypto::bls::BlsKeyPair;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let keypair = KeyPair::generate(KeyType::Ed25519)?;
+    let pq_key = MlDsaSigningKey::generate()?;
+    let bls_key = BlsKeyPair::generate()?;
     let address = keypair.address_32();
 
     let validators = vec![
-        ValidatorInfo::new(address, keypair.public_key().clone(), 1000),
+        ValidatorInfo::new(
+            address,
+            keypair.public_key().clone(),
+            pq_key.verifying_key_bytes().to_vec(),
+            bls_key.public_key().to_bytes().to_vec(),
+            1000,
+        ),
     ];
 
     let epoch_manager = EpochManager::new(validators, 10000)?;
     let config = ConsensusConfig::default();
-    let mut engine = HotStuff2Engine::new(keypair, config, epoch_manager);
+    let mut engine = HotStuff2Engine::new(keypair, pq_key, bls_key, config, epoch_manager);
 
     engine.start().await?;
 

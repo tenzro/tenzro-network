@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use std::sync::Arc;
@@ -755,6 +755,110 @@ pub async fn health(
         version: state.node_version.clone(),
         verification_service,
     })
+}
+
+/// Readiness endpoint for K8s readinessProbe / load-balancer gating.
+///
+/// Returns HTTP 200 with `ready: true` only when this node has caught up
+/// to the network on both block height and consensus view. Returns HTTP
+/// 503 with `ready: false` and a `reason` string otherwise — matches the
+/// CometBFT / Solana / Aptos pattern of separating liveness (`/health`)
+/// from production-traffic readiness (`/ready`).
+///
+/// Tolerances:
+///   * `block_lag_tolerance = 5`  — typical mempool churn
+///   * `view_lag_tolerance  = 2`  — leaves headroom for one timeout round
+///
+/// When network tip is unknown (no fresh peer status), readiness gates
+/// purely on `peer_count >= 1`, so a fresh testnet bootstrap can come up.
+pub async fn ready(
+    State(state): State<Arc<WebState>>,
+) -> (StatusCode, Json<ReadyResponse>) {
+    const BLOCK_LAG_TOLERANCE: u64 = 5;
+    const VIEW_LAG_TOLERANCE: u64 = 2;
+
+    let Some(ref node) = state.node else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ReadyResponse {
+                ready: false,
+                block_height: 0,
+                network_tip: None,
+                block_lag: None,
+                high_qc_view: 0,
+                peer_count: 0,
+                reason: "node not initialized".to_string(),
+            }),
+        );
+    };
+
+    let node_status = node.status().await;
+    let block_height = node_status.block_height;
+    let peer_count = node_status.peer_count;
+    let network_tip = node.network_tip();
+    let high_qc_view = node
+        .consensus()
+        .map(|c| c.high_qc_view())
+        .unwrap_or(0);
+
+    // Compute block lag against network tip if available.
+    let block_lag = network_tip.map(|tip| tip.saturating_sub(block_height));
+
+    // Gating logic.
+    let (ready, reason) = if peer_count == 0 {
+        (false, "no peers".to_string())
+    } else if let Some(tip) = network_tip {
+        let lag = tip.saturating_sub(block_height);
+        if lag > BLOCK_LAG_TOLERANCE {
+            (
+                false,
+                format!(
+                    "block lag {} > tolerance {} (local {} vs network {})",
+                    lag, BLOCK_LAG_TOLERANCE, block_height, tip
+                ),
+            )
+        } else {
+            // Block height caught up; check consensus view freshness.
+            // Without per-peer view-tip gossip we can't bound view lag
+            // precisely — the conservative check is `high_qc_view + view_lag
+            // >= local_height`, since under a healthy chain every committed
+            // block carries a QC view ≥ block height.
+            if high_qc_view + VIEW_LAG_TOLERANCE < block_height {
+                (
+                    false,
+                    format!(
+                        "high_qc_view {} lags block_height {} by > {}",
+                        high_qc_view, block_height, VIEW_LAG_TOLERANCE
+                    ),
+                )
+            } else {
+                (true, "caught up".to_string())
+            }
+        }
+    } else {
+        // No fresh peer status — bootstrap or isolated node. Allow Ready
+        // as long as we have at least one peer to gossip with.
+        (true, "no network tip yet, peer present".to_string())
+    };
+
+    let status_code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status_code,
+        Json(ReadyResponse {
+            ready,
+            block_height,
+            network_tip,
+            block_lag,
+            high_qc_view,
+            peer_count,
+            reason,
+        }),
+    )
 }
 
 /// Node status endpoint

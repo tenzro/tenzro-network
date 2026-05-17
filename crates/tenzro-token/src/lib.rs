@@ -50,6 +50,7 @@ pub mod registry;
 pub mod erc7802;
 pub mod erc3643;
 pub mod bond;
+pub mod compute_bond;
 pub mod burn_quota;
 pub mod adaptive_burn;
 pub mod seed_agent;
@@ -85,6 +86,11 @@ pub use bond::{
     ClaimRecord, ClaimStatus, InsurancePoolState,
     derive_bond_vault_address, derive_insurance_pool_address, derive_claim_id,
     DEFAULT_COOLDOWN_MS, DEFAULT_MIN_RESIDUAL, DEFAULT_MAX_SINGLE_SLASH_BPS,
+};
+pub use compute_bond::{
+    ComputeBondManager, ComputeBondState, ComputeBondStatus, ComputeBondEvent,
+    derive_compute_bond_vault_address,
+    DEFAULT_COMPUTE_BOND_COOLDOWN_MS, DEFAULT_COMPUTE_BOND_MIN,
 };
 pub use burn_quota::{
     BurnQuota, BurnQuotaManager, RefillReceipt,

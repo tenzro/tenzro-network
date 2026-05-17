@@ -190,10 +190,10 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0
 
 The agent marketplace supports both free (community) and paid (creator-tied) templates end-to-end:
 
-- **Creator identity binding (optional):** at registration, a creator may bind a template to a `did:tenzro:` or `did:pdis:` identity via `creator_did`. The binding is immutable post-registration.
+- **Creator identity binding (optional):** at registration, a creator may bind a template to any TDIP identity class — human (`did:tenzro:human:{uuid}`), delegated agent (`did:tenzro:machine:{controller}:{uuid}`), or autonomous agent (`did:tenzro:machine:{uuid}`) — via `creator_did`. The binding is immutable post-registration.
 - **Creator payout wallet (mandatory for paid pricing):** any non-`Free` `pricing` requires `creator_wallet`. Registration fails if the wallet is missing. `tenzro_runAgentTemplate` routes the creator share to this address.
 - **Pricing models** (`AgentPricingModel`): `Free`, `PerExecution { price }`, `PerToken { price_per_token }`, `Subscription { monthly_rate }`, `RevenueShare { creator_share_bps }`. Compact string form accepted by the RPC: `"free"`, `"per_execution:<u128>"`, `"per_token:<u128>"`, `"subscription:<u128>"`, `"revenue_share:<bps>"`.
-- **Network commission:** `AGENT_MARKETPLACE_COMMISSION_BPS = 500` (5%). On every paid invocation of `tenzro_runAgentTemplate`:
+- **Network commission:** `MARKETPLACE_COMMISSION_BPS = 500` (5%). On every paid invocation of `tenzro_runAgentTemplate`, `tenzro_useSkill`, and `tenzro_useTool`:
   - `payer_wallet` is debited the full `fee_paid`
   - `commission = fee_paid * 500 / 10_000` is credited to the network treasury
   - `creator_share = fee_paid - commission` is credited to `creator_wallet`

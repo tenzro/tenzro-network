@@ -26,7 +26,8 @@ use commands::{
     AuthCommand,
     X402Command, ReputationCommand, ApprovalCommand, DisputeCommand, ProvenanceCommand,
     BondCommand, InsuranceCommand, CapabilityCommand,
-    ValidatorCommand,
+    ValidatorCommand, MemoryCommand, IrohCommand,
+    AdaptiveBurnCommand, SeedAgentCommand, Erc7683Command, Erc7579Command, PqHybridCommand,
 };
 
 /// Tenzro Network CLI — node operation, wallet management, provider tools
@@ -84,7 +85,7 @@ enum Command {
     #[command(subcommand)]
     Inference(InferenceCommand),
 
-    /// Identity management commands (TDIP + PDIS)
+    /// Identity management commands (TDIP)
     #[command(subcommand)]
     Identity(IdentityCommand),
 
@@ -275,6 +276,34 @@ enum Command {
     #[command(subcommand)]
     Validator(ValidatorCommand),
 
+    /// Agent memory tier: grant, recall (vector / text / hybrid RRF k=60), archive, list
+    #[command(subcommand)]
+    Memory(MemoryCommand),
+
+    /// Iroh content-addressed transport: info, endpoint-id, alpns, publish, fetch
+    #[command(subcommand)]
+    Iroh(IrohCommand),
+
+    /// Adaptive-burn governance dial: config, metrics, recommendation, proposals
+    #[command(subcommand)]
+    AdaptiveBurn(AdaptiveBurnCommand),
+
+    /// SeedAgent treasury / charter / registry (Spec 10): earmark, charter(s), list, activity
+    #[command(subcommand)]
+    SeedAgent(SeedAgentCommand),
+
+    /// ERC-7683 cross-chain intent settler (Spec 4): get / list / record-fill / get-fill / list-fills
+    #[command(subcommand)]
+    Erc7683(Erc7683Command),
+
+    /// ERC-7579 modular validator modules: install / uninstall / is-installed (smart account custody)
+    #[command(subcommand)]
+    Erc7579(Erc7579Command),
+
+    /// PQ-hybrid signing helpers: info / send / inspect (Ed25519 + ML-DSA-65 composite)
+    #[command(subcommand)]
+    PqHybrid(PqHybridCommand),
+
     /// Interactive chat with AI models
     Chat(ChatCmd),
 
@@ -427,6 +456,13 @@ async fn main() -> Result<()> {
         Command::Insurance(cmd) => cmd.execute().await?,
         Command::Capability(cmd) => cmd.execute().await?,
         Command::Validator(cmd) => cmd.execute().await?,
+        Command::Memory(cmd) => cmd.execute().await?,
+        Command::Iroh(cmd) => cmd.execute().await?,
+        Command::AdaptiveBurn(cmd) => cmd.execute().await?,
+        Command::SeedAgent(cmd) => cmd.execute().await?,
+        Command::Erc7683(cmd) => cmd.execute().await?,
+        Command::Erc7579(cmd) => cmd.execute().await?,
+        Command::PqHybrid(cmd) => cmd.execute().await?,
         Command::Faucet(cmd) => execute_faucet(cmd).await?,
         Command::Chat(cmd) => execute_chat(cmd).await?,
         Command::Hardware(cmd) => commands::hardware::execute(&cmd.format).await?,

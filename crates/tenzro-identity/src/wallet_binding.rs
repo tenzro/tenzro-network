@@ -27,6 +27,11 @@ pub struct WalletBinding {
     /// Mandatory under the Wave 3d hybrid migration — every wallet carries
     /// a PQ key, so identities bound to a wallet inherit it directly.
     pub pq_verifying_key: Vec<u8>,
+    /// The wallet's BLS12-381 G1-compressed verifying key (`min_pk` scheme,
+    /// exactly 48 bytes). Mandatory under ROADMAP B.1 — every wallet
+    /// carries a BLS key so the identity inherits the public key needed for
+    /// HotStuff-2 vote aggregation when the identity stakes as a validator.
+    pub bls_verifying_key: Vec<u8>,
 }
 
 /// Binds MPC wallets to TDIP identities
@@ -81,6 +86,7 @@ impl WalletBinder {
         addr_bytes[..len].copy_from_slice(&src[..len]);
 
         let pq_verifying_key = wallet.pq_verifying_key_bytes();
+        let bls_verifying_key = wallet.bls_verifying_key_bytes().to_vec();
         let public_key = wallet.public_key.to_bytes();
         let key_type = match wallet.public_key.key_type() {
             tenzro_crypto::KeyType::Ed25519 => "Ed25519".to_string(),
@@ -93,6 +99,7 @@ impl WalletBinder {
             public_key,
             key_type,
             pq_verifying_key,
+            bls_verifying_key,
         })
     }
 

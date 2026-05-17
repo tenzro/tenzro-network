@@ -65,6 +65,7 @@ pub mod aa_webauthn_validator;
 pub mod aa_delegation_validator;
 pub mod aa_tee_bound_validator;
 pub mod aa_bootstrap_paymaster;
+pub mod erc7579;
 pub mod cross_vm_bridge;
 
 // Re-export commonly used types
@@ -128,6 +129,19 @@ pub use aa_tee_bound_validator::{
 };
 pub use aa_bootstrap_paymaster::{
     AgentRegistryLookup, BootstrapPaymasterError, TnzoBootstrapPaymaster,
+};
+pub use erc7579::{
+    create_session_key_validator_precompile, create_social_recovery_validator_precompile,
+    create_spending_limit_validator_precompile, GuardianSignature, SessionKeyConfig,
+    SessionKeySignaturePayload, SessionKeyValidator, SocialRecoveryConfig,
+    SocialRecoverySignaturePayload, SocialRecoveryValidator, SpendingLimitConfig,
+    SpendingLimitSignaturePayload, SpendingLimitValidator, ValidatorModuleConfig,
+    ValidatorModuleMap, MODULE_TYPE_VALIDATOR, PRECOMPILE_SESSION_KEY_VALIDATOR,
+    PRECOMPILE_SOCIAL_RECOVERY_VALIDATOR, PRECOMPILE_SPENDING_LIMIT_VALIDATOR,
+    SELECTOR_INSTALL_MODULE as ERC7579_SELECTOR_INSTALL_MODULE,
+    SELECTOR_IS_MODULE_INSTALLED as ERC7579_SELECTOR_IS_MODULE_INSTALLED,
+    SELECTOR_UNINSTALL_MODULE as ERC7579_SELECTOR_UNINSTALL_MODULE,
+    SELECTOR_VALIDATE_USER_OP as ERC7579_SELECTOR_VALIDATE_USER_OP,
 };
 
 /// VM module version

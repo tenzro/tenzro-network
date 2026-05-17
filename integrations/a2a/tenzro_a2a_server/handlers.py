@@ -21,8 +21,8 @@ def _extract_address(text: str) -> str | None:
 
 
 def _extract_did(text: str) -> str | None:
-    """Extract a did:tenzro:... or did:pdis:... identifier."""
-    m = re.search(r"did:(tenzro|pdis):\S+", text)
+    """Extract a did:tenzro:... identifier."""
+    m = re.search(r"did:tenzro:\S+", text)
     return m.group(0).rstrip("?.!,;") if m else None
 
 

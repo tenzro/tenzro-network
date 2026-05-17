@@ -48,30 +48,30 @@ pub struct A2aState {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct JsonRpcRequest {
-    jsonrpc: String,
-    method: String,
+pub(crate) struct JsonRpcRequest {
+    pub(crate) jsonrpc: String,
+    pub(crate) method: String,
     #[serde(default)]
-    params: serde_json::Value,
-    id: serde_json::Value,
+    pub(crate) params: serde_json::Value,
+    pub(crate) id: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
-struct JsonRpcResponse {
-    jsonrpc: String,
+pub(crate) struct JsonRpcResponse {
+    pub(crate) jsonrpc: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<serde_json::Value>,
+    pub(crate) result: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<JsonRpcError>,
-    id: serde_json::Value,
+    pub(crate) error: Option<JsonRpcError>,
+    pub(crate) id: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
-struct JsonRpcError {
-    code: i32,
-    message: String,
+pub(crate) struct JsonRpcError {
+    pub(crate) code: i32,
+    pub(crate) message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<serde_json::Value>,
+    pub(crate) data: Option<serde_json::Value>,
 }
 
 impl JsonRpcResponse {
@@ -99,6 +99,14 @@ impl JsonRpcResponse {
 
     fn method_not_found(id: serde_json::Value) -> Self {
         Self::error(id, -32601, "Method not found")
+    }
+
+    /// JSON-RPC 2.0 `-32700` Parse error envelope with `id = null` per
+    /// spec §5.1 ("If there was an error in detecting the id ... it MUST
+    /// be Null"). Used by the iroh-transport adapter when the request
+    /// body isn't valid JSON.
+    pub(crate) fn parse_error(msg: impl Into<String>) -> Self {
+        Self::error(serde_json::Value::Null, -32700, msg)
     }
 
     fn invalid_params(id: serde_json::Value, msg: impl Into<String>) -> Self {
@@ -247,32 +255,41 @@ async fn jsonrpc_handler(
     State(state): State<Arc<A2aState>>,
     Json(req): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
+    Json(dispatch_jsonrpc(&state, req))
+}
+
+/// Transport-agnostic JSON-RPC 2.0 dispatch.
+///
+/// Both the HTTPS axum route (`jsonrpc_handler`) and the iroh-transport
+/// adapter (`crate::a2a::iroh_transport::IrohA2aDispatcher`) call this
+/// function so the wire format is identical regardless of how the request
+/// arrived. The function never panics — JSON-level errors are returned as
+/// JSON-RPC `error` envelopes.
+pub(crate) fn dispatch_jsonrpc(state: &Arc<A2aState>, req: JsonRpcRequest) -> JsonRpcResponse {
     if req.jsonrpc != "2.0" {
-        return Json(JsonRpcResponse::error(
+        return JsonRpcResponse::error(
             req.id,
             -32600,
             "Invalid JSON-RPC version, expected 2.0",
-        ));
+        );
     }
 
-    let response = match req.method.as_str() {
-        "message/send" | "tasks/send" => handle_send_message(&state, req.params, req.id.clone()),
-        "tasks/get" => handle_get_task(&state, req.params, req.id.clone()),
-        "tasks/list" => handle_list_tasks(&state, req.params, req.id.clone()),
-        "tasks/cancel" => handle_cancel_task(&state, req.params, req.id.clone()),
+    match req.method.as_str() {
+        "message/send" | "tasks/send" => handle_send_message(state, req.params, req.id.clone()),
+        "tasks/get" => handle_get_task(state, req.params, req.id.clone()),
+        "tasks/list" => handle_list_tasks(state, req.params, req.id.clone()),
+        "tasks/cancel" => handle_cancel_task(state, req.params, req.id.clone()),
         // AP2 (Agent Payments Protocol) methods
-        "payments/create" => handle_ap2_create(&state, req.params, req.id.clone()),
-        "payments/authorize" => handle_ap2_authorize(&state, req.params, req.id.clone()),
-        "payments/execute" => handle_ap2_execute(&state, req.params, req.id.clone()),
-        "payments/status" => handle_ap2_status(&state, req.params, req.id.clone()),
-        "payments/cancel" => handle_ap2_cancel(&state, req.params, req.id.clone()),
+        "payments/create" => handle_ap2_create(state, req.params, req.id.clone()),
+        "payments/authorize" => handle_ap2_authorize(state, req.params, req.id.clone()),
+        "payments/execute" => handle_ap2_execute(state, req.params, req.id.clone()),
+        "payments/status" => handle_ap2_status(state, req.params, req.id.clone()),
+        "payments/cancel" => handle_ap2_cancel(state, req.params, req.id.clone()),
         _ => {
             warn!("A2A: unknown method: {}", req.method);
             JsonRpcResponse::method_not_found(req.id.clone())
         }
-    };
-
-    Json(response)
+    }
 }
 
 /// SSE streaming endpoint at `POST /a2a/stream`
@@ -2237,6 +2254,29 @@ fn handle_bridge_query(_state: &A2aState) -> String {
 // Server startup
 // ---------------------------------------------------------------------------
 
+/// Build the shared A2A state.
+///
+/// Lifted out of `start_a2a_server_with_shutdown` so the HTTPS axum surface
+/// and the iroh-transport adapter ([`crate::a2a::iroh_transport::IrohA2aDispatcher`])
+/// can share the same `TaskManager` and `AgentCard` instance — A2A tasks
+/// created over either transport land in the same task table.
+pub fn build_a2a_state(
+    listen_addr: &str,
+    node: Arc<TenzroNode>,
+    web_state: Arc<WebState>,
+) -> Arc<A2aState> {
+    let role = format!("{:?}", node.config().role);
+    let agent_card = agent_card::build_agent_card(listen_addr, &role);
+
+    Arc::new(A2aState {
+        node,
+        _web_state: web_state,
+        task_manager: TaskManager::new(),
+        agent_card,
+        payment_verifier: Arc::new(x402_extension::UnimplementedSchemeVerifier::new()),
+    })
+}
+
 /// Start the A2A protocol server
 /// Public API method for external use without shutdown signal
 pub async fn start_a2a_server(
@@ -2245,26 +2285,19 @@ pub async fn start_a2a_server(
     web_state: Arc<WebState>,
 ) -> crate::error::Result<()> {
     let (_keep_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
-    start_a2a_server_with_shutdown(listen_addr, node, web_state, shutdown_rx).await
+    let state = build_a2a_state(&listen_addr, node, web_state);
+    start_a2a_server_with_shutdown(listen_addr, state, shutdown_rx).await
 }
 
-/// Start the A2A protocol server with graceful shutdown support
+/// Start the A2A protocol server with graceful shutdown support.
+///
+/// Takes a pre-built `Arc<A2aState>` so the same state can be shared with
+/// the iroh-transport adapter (see [`build_a2a_state`]).
 pub async fn start_a2a_server_with_shutdown(
     listen_addr: String,
-    node: Arc<TenzroNode>,
-    web_state: Arc<WebState>,
+    state: Arc<A2aState>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> crate::error::Result<()> {
-    let role = format!("{:?}", node.config().role);
-    let agent_card = agent_card::build_agent_card(&listen_addr, &role);
-
-    let state = Arc::new(A2aState {
-        node,
-        _web_state: web_state,
-        task_manager: TaskManager::new(),
-        agent_card,
-        payment_verifier: Arc::new(x402_extension::UnimplementedSchemeVerifier::new()),
-    });
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

@@ -6,12 +6,14 @@
 //!
 //! # Overview
 //!
-//! TDIP is the primary identity standard. PDIS (Personal Decentralized Identity
-//! Standard) remains fully supported as a secondary standard:
+//! TDIP is the identity standard for the Tenzro Network. It recognises
+//! three identity classes:
 //!
-//! - **Human identities** (`did:tenzro:human:{uuid}`) — KYC-tiered, credential-holding
-//! - **Machine identities** (`did:tenzro:machine:{controller}:{uuid}`) — delegated, scoped
-//! - **Autonomous machines** (`did:tenzro:machine:{uuid}`) — self-sovereign
+//! - **Human** (`did:tenzro:human:{uuid}`) — KYC-tiered, credential-holding
+//! - **Delegated agent** (`did:tenzro:machine:{controller}:{uuid}`) — machine
+//!   under a human controller, scoped by `DelegationScope`
+//! - **Autonomous agent** (`did:tenzro:machine:{uuid}`) — self-sovereign machine,
+//!   no controller
 //!
 //! # Key Features
 //!
@@ -22,7 +24,6 @@
 //!   payment protocol restrictions and chain allowlists
 //! - **Auto-provisioned wallets** — Every identity gets an MPC wallet automatically
 //! - **Cascading revocation** — Revoking a human revokes all controlled machines
-//! - **Backward compatibility** — Parses legacy `did:pdis:guardian:` and `did:pdis:agent:` formats
 //!
 //! # Examples
 //!
@@ -57,6 +58,7 @@
 //! # }
 //! ```
 
+pub mod car;
 pub mod credential;
 pub mod delegation;
 pub mod did;
@@ -71,6 +73,7 @@ pub mod w3c;
 pub mod wallet_binding;
 
 // Re-export commonly used types
+pub use car::IdentityCarBundle;
 pub use credential::{
     sign_credential_hybrid, CredentialProof, TenzroCredentialType, VerifiableCredential,
 };

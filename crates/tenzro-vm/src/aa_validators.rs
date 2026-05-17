@@ -230,7 +230,9 @@ pub trait IValidator: Send + Sync {
 
 /// A module installed on a specific account. Priority controls the order in
 /// which the registry walks installed validators on `validate_user_op` —
-/// lower numbers run first. The first non-failing validator wins.
+/// lower numbers run first. **All installed validators must approve**
+/// (AND-combiner); priority only governs evaluation order so cheap checks
+/// short-circuit on failure before expensive ones run.
 pub struct InstalledModule {
     pub account: Vec<u8>,
     pub module_type: ModuleType,
@@ -491,9 +493,22 @@ impl ValidatorRegistry {
             .collect()
     }
 
-    /// Walk installed validators in priority order; the first one to return
-    /// a non-failure `ValidationData` wins. If the account has no validators
-    /// installed, returns `Err(ValidatorError::NoValidatorInstalled)`.
+    /// Walk installed validators in priority order. **All installed validators
+    /// must approve** for the user op to be considered valid (AND-combiner). If
+    /// any validator returns `ValidationData::failure()`, the combined result
+    /// is failure. If all approve, the returned `ValidationData` is the
+    /// **intersection** of their `(valid_after, valid_until)` time windows —
+    /// `valid_after` = max of all module's `valid_after`, `valid_until` =
+    /// min of all module's non-zero `valid_until`. The aggregator field is
+    /// kept from the highest-priority module.
+    ///
+    /// AND semantics are mandatory: each validator encodes a distinct security
+    /// invariant (signature scheme, scope check, spending limit, …) and they
+    /// must all hold simultaneously. OR semantics would let an attacker who
+    /// controls only one validator's signing path bypass the others.
+    ///
+    /// If the account has no validators installed, returns
+    /// `Err(ValidatorError::NoValidatorInstalled)`.
     ///
     /// This is the routing entry point invoked by `EntryPoint::validate_user_op`.
     pub fn validate_user_op(
@@ -508,24 +523,34 @@ impl ValidatorRegistry {
             });
         }
 
-        let mut last_failure: Option<ValidationData> = None;
+        let mut combined_aggregator: Option<Vec<u8>> = None;
+        let mut combined_valid_after: u64 = 0;
+        let mut combined_valid_until: u64 = 0; // 0 = no upper bound
         for v in validators {
-            match v.module.validate_user_op(op, op_hash) {
-                Ok(data) if !data.is_failure() => return Ok(data),
-                Ok(failure) => {
-                    last_failure = Some(failure);
-                }
-                Err(e) => {
-                    // A hard error (e.g. malformed sig encoding) propagates
-                    // immediately — different modules may legitimately accept
-                    // different sig formats so we don't try to interpret it
-                    // as a "soft" failure.
-                    return Err(e);
-                }
+            let data = v.module.validate_user_op(op, op_hash)?;
+            if data.is_failure() {
+                return Ok(ValidationData::failure());
+            }
+            if combined_aggregator.is_none() {
+                combined_aggregator = Some(data.aggregator.clone());
+            }
+            // valid_after: latest of all
+            if data.valid_after > combined_valid_after {
+                combined_valid_after = data.valid_after;
+            }
+            // valid_until: earliest non-zero of all
+            if data.valid_until != 0
+                && (combined_valid_until == 0 || data.valid_until < combined_valid_until)
+            {
+                combined_valid_until = data.valid_until;
             }
         }
 
-        Ok(last_failure.unwrap_or_else(ValidationData::failure))
+        Ok(ValidationData {
+            aggregator: combined_aggregator.unwrap_or_else(|| vec![0u8; 20]),
+            valid_after: combined_valid_after,
+            valid_until: combined_valid_until,
+        })
     }
 }
 
@@ -837,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_priority_order_short_circuits() {
+    fn validate_and_combiner_all_accept_succeeds() {
         let reg = ValidatorRegistry::new();
         let account = vec![0x01; 20];
 
@@ -857,10 +882,11 @@ mod tests {
 
         let op = dummy_user_op(account.clone(), vec![0x42; 32]);
         let hash = [0u8; 32];
-        // Both accept; A has lower priority so it must run first and succeed.
+        // Both accept; AND-combiner returns success.
         let data = reg.validate_user_op(&op, &hash).unwrap();
         assert!(!data.is_failure());
 
+        // Priority order is preserved in the listing (cheap checks first).
         let listed = reg.list_for_account(&account);
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].module.module_address(), mod_a_addr);
@@ -927,11 +953,11 @@ mod tests {
         )
         .unwrap();
 
-        // Attach the registry to a fresh EntryPoint and fund the account.
+        // Attach the registry to a fresh EntryPoint. Balance is no longer
+        // tracked at the EntryPoint level — execution-time VmState owns it.
         let entry_point = EntryPoint::new(vec![0xEE; 20])
             .with_chain_id(1337)
             .with_validator_registry(Arc::clone(&reg));
-        entry_point.deposit_to(account.clone(), u128::MAX / 2);
 
         // (a) Non-empty sig: NoOp accepts → EntryPoint validate succeeds.
         let mut op = dummy_user_op(account.clone(), vec![0xAA; 65]);
@@ -946,7 +972,6 @@ mod tests {
         // (c) For an account with NO installed validator, EntryPoint falls
         // back to the legacy length check (non-empty sig is enough).
         let other = vec![0x02; 20];
-        entry_point.deposit_to(other.clone(), u128::MAX / 2);
         let op2 = dummy_user_op(other, vec![0xBB; 65]);
         entry_point.validate_user_op(&op2).unwrap();
     }

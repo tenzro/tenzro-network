@@ -1095,23 +1095,16 @@ AgentRuntimeConfig {
 
 ### 12.1 Overview
 
-Tenzro Decentralized Identity Protocol (TDIP) provides a unified decentralized identity system for both humans and machines. TDIP is the primary identity standard on the Tenzro Network. PDIS (Personal Decentralized Identity Standard) remains fully supported as a secondary standard — both `did:tenzro:` and `did:pdis:` DID formats are parsed and interoperable.
+Tenzro Decentralized Identity Protocol (TDIP) provides a unified decentralized identity system for the Tenzro Network. The protocol recognises **three identity classes** — humans, delegated agents (machines under a human controller), and autonomous agents (self-sovereign machines) — all under a single `did:tenzro:` namespace.
 
-Every identity — human or machine — receives an auto-provisioned MPC wallet, a set of verifiable credentials, and W3C DID Document representation.
+Every identity receives an auto-provisioned MPC wallet, a set of verifiable credentials, and W3C DID Document representation.
 
 ### 12.2 DID Formats
 
-**TDIP DIDs (primary):**
 ```
-did:tenzro:human:{uuid}                    — Human identity
-did:tenzro:machine:{controller}:{uuid}     — Controlled machine identity
-did:tenzro:machine:{uuid}                  — Autonomous machine identity
-```
-
-**PDIS DIDs (secondary, fully supported):**
-```
-did:pdis:guardian:{uuid}                   — PDIS-1 Guardian (maps to human)
-did:pdis:agent:{controller}:{uuid}         — PDIS-2 Agent (maps to controlled machine)
+did:tenzro:human:{uuid}                    — Human identity (KYC-tiered)
+did:tenzro:machine:{controller}:{uuid}     — Delegated agent (machine under a human controller)
+did:tenzro:machine:{uuid}                  — Autonomous agent (self-sovereign machine, no controller)
 ```
 
 ### 12.3 Unified Identity Type
@@ -1779,8 +1772,7 @@ These primitives compose through TDIP delegation scopes — every runtime check 
 - ~~Ship Plonky3 STARK verifier and AIR circuits~~ — **DONE**: KoalaBear field, Poseidon2 + FRI, three AIRs (inference / settlement / identity), generic `verify_proof_envelope` dispatcher, on-chain `ZkCommitmentRegistry` + O(1) precompile
 
 ### Phase 2: Identity & Payments
-- ~~Implement Tenzro Decentralized Identity Protocol (TDIP)~~ — **DONE**: unified human/machine identity, W3C DID, verifiable credentials, delegation scopes
-- ~~Implement PDIS as secondary standard~~ — **DONE**: full `did:pdis:` format support alongside `did:tenzro:`
+- ~~Implement Tenzro Decentralized Identity Protocol (TDIP)~~ — **DONE**: three identity classes (human / delegated agent / autonomous agent), W3C DID, verifiable credentials, delegation scopes
 - ~~Implement MPP and x402 payment protocols~~ — **DONE**: HTTP 402 challenge/credential/receipt flows
 - ~~Implement Tempo network integration~~ — **DONE**: TempoBridgeAdapter, Tip20Token, TempoParticipant
 - ~~Implement identity-bound payments~~ — **DONE**: delegation scope enforcement on payments

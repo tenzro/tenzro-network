@@ -4,9 +4,11 @@ use rmcp::{
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
     model::*,
-    tool, tool_handler, tool_router, ServerHandler,
+    tool, tool_handler, tool_router, Json, ServerHandler,
 };
 use serde::Deserialize;
+
+use super::server::RpcPassthroughOutput;
 
 // ─── Tool parameter structs ───
 
@@ -133,14 +135,14 @@ fn err_internal(msg: impl Into<String>) -> ErrorData {
     ErrorData::internal_error(msg.into(), None)
 }
 
-fn json_result(value: serde_json::Value) -> std::result::Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&value).unwrap(),
-    )]))
+fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
-fn text_result(text: impl Into<String>) -> std::result::Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(text.into())]))
+fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    Ok(Json(RpcPassthroughOutput {
+        result: serde_json::json!({ "message": text.into() }),
+    }))
 }
 
 #[tool_router]
@@ -203,7 +205,7 @@ impl SolanaMcpServer {
     async fn solana_swap(
         &self,
         Parameters(params): Parameters<SwapParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let slippage = params.slippage_bps.unwrap_or(50);
         let url = format!(
             "https://api.jup.ag/swap/v1/quote?inputMint={}&outputMint={}&amount={}&slippageBps={}",
@@ -249,7 +251,7 @@ impl SolanaMcpServer {
     async fn solana_get_price(
         &self,
         Parameters(params): Parameters<GetPriceParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let url = format!(
             "https://api.jup.ag/price/v3?ids={}",
             params.token_id
@@ -294,7 +296,7 @@ impl SolanaMcpServer {
     async fn solana_stake(
         &self,
         Parameters(params): Parameters<StakeParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let lamports = (params.amount_sol * 1_000_000_000.0) as u64;
         let result = serde_json::json!({
             "action": "stake_sol",
@@ -337,7 +339,7 @@ impl SolanaMcpServer {
     async fn solana_get_yield(
         &self,
         Parameters(params): Parameters<GetYieldParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let protocols = serde_json::json!([
             {
                 "protocol": "marinade",
@@ -417,7 +419,7 @@ impl SolanaMcpServer {
     async fn solana_get_balance(
         &self,
         Parameters(params): Parameters<GetBalanceParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_result = self
             .rpc_call("getBalance", serde_json::json!([params.address]))
             .await?;
@@ -441,7 +443,7 @@ impl SolanaMcpServer {
     async fn solana_get_token_accounts(
         &self,
         Parameters(params): Parameters<GetTokenAccountsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_result = self
             .rpc_call(
                 "getTokenAccountsByOwner",
@@ -473,7 +475,7 @@ impl SolanaMcpServer {
     async fn solana_transfer(
         &self,
         Parameters(params): Parameters<TransferParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let lamports: u64 = params
             .amount_lamports
             .parse()
@@ -505,7 +507,7 @@ impl SolanaMcpServer {
     async fn solana_get_token_info(
         &self,
         Parameters(params): Parameters<GetTokenInfoParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let url = "https://token.jup.ag/strict";
         let resp = self
             .http
@@ -581,7 +583,7 @@ impl SolanaMcpServer {
     async fn solana_get_nft(
         &self,
         Parameters(params): Parameters<GetNftParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let api_key = std::env::var("HELIUS_API_KEY").unwrap_or_default();
         if api_key.is_empty() {
             let result = serde_json::json!({
@@ -640,7 +642,7 @@ impl SolanaMcpServer {
     async fn solana_get_nfts_by_owner(
         &self,
         Parameters(params): Parameters<GetNftsByOwnerParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let api_key = std::env::var("HELIUS_API_KEY").unwrap_or_default();
         if api_key.is_empty() {
             let limit = params.limit.unwrap_or(20);
@@ -725,7 +727,7 @@ impl SolanaMcpServer {
     #[tool(description = "Get the current slot height of the Solana network")]
     async fn solana_get_slot(
         &self,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_result = self
             .rpc_call("getSlot", serde_json::json!([]))
             .await?;
@@ -745,7 +747,7 @@ impl SolanaMcpServer {
     #[tool(description = "Get the current transactions per second (TPS) on the Solana network by sampling recent performance data")]
     async fn solana_get_tps(
         &self,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_result = self
             .rpc_call(
                 "getRecentPerformanceSamples",
@@ -794,7 +796,7 @@ impl SolanaMcpServer {
     async fn solana_get_transaction(
         &self,
         Parameters(params): Parameters<GetTransactionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_result = self
             .rpc_call(
                 "getTransaction",
@@ -831,7 +833,7 @@ impl SolanaMcpServer {
     async fn solana_resolve_domain(
         &self,
         Parameters(params): Parameters<ResolveDomainParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let domain = params.domain.trim_end_matches(".sol");
         let url = format!(
             "https://sns-sdk-proxy.bonfida.workers.dev/resolve/{}",

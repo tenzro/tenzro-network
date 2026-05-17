@@ -2228,6 +2228,13 @@ impl NativeExecutor {
                 payload.pq_pubkey.len()
             )));
         }
+        // BLS12-381 G1-compressed (`min_pk` scheme) — mandatory third leg.
+        if payload.bls_pubkey.len() != 48 {
+            return Err(VmError::InvalidTransaction(format!(
+                "bls_pubkey must be 48 bytes (BLS12-381 G1-compressed, min_pk), got {}",
+                payload.bls_pubkey.len()
+            )));
+        }
         if payload.metadata_uri.len() > 256 {
             return Err(VmError::InvalidTransaction(format!(
                 "metadata_uri exceeds 256 bytes (got {})",
@@ -2257,14 +2264,15 @@ impl NativeExecutor {
         state.set_nonce(&tx.from, old_nonce + 1);
 
         // Log layout: `from(32) || stake_le(16) || consensus_pubkey(32) ||
-        //              pq_pubkey_len_le(4) || pq_pubkey || withdrawal(32) ||
-        //              metadata_uri_len_le(4) || metadata_uri`
+        //              bls_pubkey(48) || pq_pubkey_len_le(4) || pq_pubkey ||
+        //              withdrawal(32) || metadata_uri_len_le(4) || metadata_uri`
         let mut log_data = Vec::with_capacity(
-            32 + 16 + 32 + 4 + payload.pq_pubkey.len() + 32 + 4 + payload.metadata_uri.len(),
+            32 + 16 + 32 + 48 + 4 + payload.pq_pubkey.len() + 32 + 4 + payload.metadata_uri.len(),
         );
         log_data.extend_from_slice(&tx.from);
         log_data.extend_from_slice(&payload.self_stake.to_le_bytes());
         log_data.extend_from_slice(&payload.consensus_pubkey);
+        log_data.extend_from_slice(&payload.bls_pubkey);
         log_data.extend_from_slice(&(payload.pq_pubkey.len() as u32).to_le_bytes());
         log_data.extend_from_slice(&payload.pq_pubkey);
         log_data.extend_from_slice(payload.withdrawal_address.as_bytes());
@@ -2890,6 +2898,9 @@ struct RefundEscrowPayload {
 ///
 /// `consensus_pubkey` is the 32-byte Ed25519 BFT signing key. `pq_pubkey` is
 /// the 1952-byte ML-DSA-65 verifying key (FIPS 204) — mandatory hybrid PQ.
+/// `bls_pubkey` is the 48-byte BLS12-381 G1-compressed verifying key
+/// (`min_pk` scheme) — mandatory third leg, used by HotStuff-2 to aggregate
+/// per-vote signatures into a single QC-level aggregate.
 /// `withdrawal_address` is the `Address` rewards/return-of-stake settle to.
 /// `metadata_uri` is an optional ≤256-byte off-chain pointer (e.g. moniker,
 /// website, contact).
@@ -2897,6 +2908,7 @@ struct RefundEscrowPayload {
 struct ValidatorRegisterPayload {
     consensus_pubkey: Vec<u8>,
     pq_pubkey: Vec<u8>,
+    bls_pubkey: Vec<u8>,
     withdrawal_address: Address,
     self_stake: u128,
     #[serde(default)]

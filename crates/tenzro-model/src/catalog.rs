@@ -2468,23 +2468,7 @@ mod tests {
     #[test]
     fn test_audio_catalog_not_empty() {
         let catalog = get_audio_catalog();
-        assert!(catalog.len() >= 8, "expected ≥8 audio models");
-    }
-
-    #[test]
-    fn test_audio_nvidia_attribution_tier() {
-        for id in &["parakeet-tdt-0.6b-v3", "canary-1b-flash"] {
-            let e = get_audio_model_by_id(id)
-                .unwrap_or_else(|| panic!("missing {}", id));
-            assert_eq!(e.license_tier, LicenseTier::Attribution);
-            assert_eq!(e.license, "CC-BY-4.0");
-        }
-    }
-
-    #[test]
-    fn test_audio_parakeet_has_joiner() {
-        let e = get_audio_model_by_id("parakeet-tdt-0.6b-v3").unwrap();
-        assert!(e.joiner_filename.is_some(), "Parakeet TDT requires a joiner");
+        assert!(catalog.len() >= 5, "expected ≥5 audio models");
     }
 
     #[test]

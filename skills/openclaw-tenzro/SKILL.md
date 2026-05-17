@@ -1362,14 +1362,14 @@ curl -X POST https://rpc.tenzro.network \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
-    "method": "tenzro_submitQuote",
+    "method": "tenzro_quoteTask",
     "params": {
       "task_id": "uuid-...",
+      "provider": "0x<provider-address>",
       "price": "40000000000000000000",
-      "model_id": "gemma4-9b",
+      "model_id": "qwen3-0.6b",
       "estimated_duration_secs": 30,
-      "confidence": 95,
-      "notes": "Can complete this in ~30 seconds"
+      "confidence": 95
     },
     "id": 1
   }'
@@ -1870,7 +1870,7 @@ Falls back to `tenzro_participate` on older nodes.
 
 1. Call `tenzro_postTask` with title, description, task type, max price, and input
 2. Check task status via `tenzro_getTask` — status starts as `open`
-3. Providers submit quotes via `tenzro_submitQuote`; task transitions to `assigned` when accepted
+3. Providers submit quotes via `tenzro_quoteTask`; task transitions to `assigned` when the poster calls `tenzro_assignTask`
 4. Track completion via `tenzro_getTask` — status becomes `completed` with output populated
 5. Cancel if needed via `tenzro_cancelTask` (only while `open` or `assigned`)
 
@@ -1989,9 +1989,9 @@ If the Tenzro node has MCP enabled (port 3001), you can use the Model Context Pr
 - `list_tasks` — List marketplace tasks with optional filters (status, type, max_price, limit, offset)
 - `get_task` — Get full details of a specific task by ID
 - `cancel_task` — Cancel an open task posted by the caller
-- `submit_quote` — Submit a fulfillment quote for an open task (price, model, estimated duration)
+- `quote_task` — Submit a fulfillment quote for an open task (price, model, confidence, estimated duration)
 - `assign_task` — Assign a task to a specific provider/agent
-- `complete_task` — Submit the result for a completed task
+- `complete_task` — Submit the output for a completed task (triggers on-chain TNZO settlement)
 - `update_task` — Update an existing task
 
 **Tokens & Contracts:**

@@ -29,7 +29,10 @@
 
 use crate::error::{CryptoError, Result};
 use ml_dsa::signature::{Keypair, Signer, Verifier};
-use ml_dsa::{B32, KeyGen, MlDsa65, Signature as MlDsaSignature, VerifyingKey as MlDsaVerifyingKey};
+use ml_dsa::{
+    B32, MlDsa65, Signature as MlDsaSignature, SigningKey as MlDsaSigningKeyInner,
+    VerifyingKey as MlDsaVerifyingKey,
+};
 use ml_kem::{
     kem::{Decapsulate, Encapsulate, Kem, KeyExport},
     Ciphertext as MlKemCiphertext,
@@ -135,8 +138,8 @@ impl MlDsaSigningKey {
 
     fn from_seed_bytes(seed: Zeroizing<[u8; ML_DSA_65_SEED_LEN]>) -> Self {
         let xi = B32::from(*seed);
-        let kp = <MlDsa65 as KeyGen>::from_seed(&xi);
-        let verifying_key_bytes = kp.verifying_key().encode().to_vec();
+        let sk = MlDsaSigningKeyInner::<MlDsa65>::from_seed(&xi);
+        let verifying_key_bytes = sk.verifying_key().encode().to_vec();
         Self {
             seed,
             verifying_key_bytes,
@@ -155,11 +158,11 @@ impl MlDsaSigningKey {
 
     /// Sign `msg` and return the encoded signature (3309 bytes, FIPS 204 §4 Table 2).
     pub fn sign(&self, msg: &[u8]) -> Vec<u8> {
-        // Re-derive the expanded SigningKey from the seed each call. This is
+        // Re-derive the SigningKey from the seed each call. This is
         // ~ms-class work and keeps the in-memory secret surface to 32 bytes.
         let xi = B32::from(*self.seed);
-        let kp = <MlDsa65 as KeyGen>::from_seed(&xi);
-        let sig: MlDsaSignature<MlDsa65> = kp.sign(msg);
+        let sk = MlDsaSigningKeyInner::<MlDsa65>::from_seed(&xi);
+        let sig: MlDsaSignature<MlDsa65> = sk.sign(msg);
         sig.encode().to_vec()
     }
 }

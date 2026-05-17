@@ -13,7 +13,7 @@ use tenzro_bridge::BridgeRouter;
 use tenzro_bridge::chainlink_ccip::{ChainlinkCcipAdapter, CcipConfig, FeeToken};
 use tenzro_bridge::debridge::{DeBridgeAdapter, DeBridgeConfig};
 use tenzro_bridge::layerzero::{LayerZeroAdapter, LayerZeroConfig};
-use tenzro_bridge::evm_signer::EvmSignerConfig;
+use tenzro_bridge::evm_signer::{EvmSignerConfig, EvmTransactionSigner};
 use tenzro_consensus::{
     open_default_file_store, ConsensusEngine, ConsensusOutMessage, EquivocationEvidence,
     EpochManager, HotStuff2Engine, SlashingCallback, ValidatorInfo,
@@ -32,7 +32,7 @@ use tenzro_payments::traits::PaymentGateway as PaymentGatewayTrait;
 use tenzro_payments::x402::server::X402PaymentServer;
 use tenzro_settlement::{
     BatchProcessor, ChannelManager, EscrowManager, FeeCollector, RocksDbChannelStorage,
-    SettlementConfig, SettlementEngine,
+    SettlementConfig, SettlementEngine, Spec4FillRegistry,
 };
 use tenzro_storage::{KvStore, RocksDbStore, StorageConfig, CF_MODELS, CF_SKILLS, CF_TOOLS, CF_AGENT_TEMPLATES, CF_MODEL_SERVICES};
 use tenzro_tee::{detect_tee, TeeProvider, TeeRegistry};
@@ -796,6 +796,33 @@ pub struct TenzroNode {
     /// post-block scan dispatch from VM-emitted bond logs. Persists to
     /// CF_AGENTS via `BondManager::with_storage`.
     bond_manager: Option<Arc<tenzro_token::bond::BondManager>>,
+    /// ComputeBond surety primitive (Phase A #153). Single source of
+    /// truth for provider compute-bond state. Consulted by
+    /// `handle_register_provider` to enforce minimum-bond admission, and
+    /// by the bond RPCs (`tenzro_postComputeBond`, `tenzro_getComputeBond`,
+    /// `tenzro_listComputeBonds`, `tenzro_increaseComputeBond`,
+    /// `tenzro_withdrawComputeBond`). Persists to CF_PROVIDERS via
+    /// `ComputeBondManager::with_storage`.
+    compute_bond_manager: Option<Arc<tenzro_token::compute_bond::ComputeBondManager>>,
+    /// SLA fault detector (Phase B Thread 5). Owns the validator's VRF
+    /// signing key (byte-shared with the validator's Ed25519 identity per
+    /// RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI), issues VRF-stamped probes
+    /// to providers, and escalates persistent misses to compute-bond
+    /// slashing via [`crate::sla_slashing_bridge::ComputeBondSlashingBridge`].
+    /// `Some` only on validator-role nodes (slashing authority requires
+    /// consensus participation); `None` on ModelProvider / TeeProvider /
+    /// LightClient. The probe scheduler, gossipsub `tenzro/sla` topic, and
+    /// `tenzro_sla_*` RPC handlers consult this field.
+    sla_manager: Option<Arc<tenzro_model::SlaManager>>,
+    /// In-flight SLA probes awaiting provider response. Keyed by
+    /// `challenge_nonce` (32 bytes hex-encoded for DashMap key ergonomics).
+    /// Populated by `tenzro_slaIssueProbe` immediately before broadcasting
+    /// the probe over `tenzro/sla`; drained by the gossipsub subscriber when
+    /// a matching `SlaResponse` arrives, or by a periodic timeout sweeper
+    /// that scores no-shows as `SlaResult::Missed` past `deadline_ms`.
+    /// Empty on non-validator nodes.
+    sla_outstanding_probes:
+        Arc<DashMap<String, tenzro_model::SlaProbe>>,
     /// Workflow runtime — typed mirror of the privileged-VM workflow
     /// selectors (`0x01000040`–`0x0100004B`). Bundles `WorkflowManager`
     /// (workflows / obligations / approvals / lifecycle) and
@@ -815,6 +842,29 @@ pub struct TenzroNode {
     /// plan into the consensus `EpochManager`'s pending queues.
     /// Persists to CF_TOKENS via `ValidatorRegistry::with_storage`.
     validator_registry: Option<Arc<tenzro_token::validator_registry::ValidatorRegistry>>,
+    /// ERC-7579 modular validator registry for ERC-4337 smart-account UserOps
+    /// (Phase B Thread 3 / B.3.5). Distinct from `validator_registry` above
+    /// (which tracks consensus validators). This holds per-account
+    /// `IValidator` modules — `DelegationScopeValidator`, `WebAuthnValidator`,
+    /// `TeeBoundValidator` — and is the AND-combiner consulted by
+    /// `EntryPoint::validate_user_op` before bundling. Constructed in
+    /// `init_ai_infrastructure` once `identity_registry` and `agent_runtime`
+    /// are up so the bound `IdentityScopeOracle` can do a fresh
+    /// `IdentityRegistry::resolve(did)` on every validation. Wave-1 in-memory
+    /// only; later wave will rebuild the per-account install set from
+    /// on-chain `InstalledModule` logs on restart.
+    aa_validator_registry: Option<Arc<tenzro_vm::aa_validators::ValidatorRegistry>>,
+    /// Shared `IdentityScopeOracle` consulted by every installed
+    /// `DelegationScopeValidator` (Phase B Thread 3 / B.3.5). Held on Node
+    /// so #164 (per-machine validator install) can clone the same Arc into
+    /// each newly installed validator without re-binding the registry.
+    identity_scope_oracle: Option<Arc<crate::delegation_scope_oracle::IdentityScopeOracle>>,
+    /// ERC-4337 v0.8 EntryPoint singleton (Phase B Thread 3c / #165). Wired
+    /// to `aa_validator_registry` for signature validation and to
+    /// `vm_runtime` for actual UserOp execution. Persists nonces +
+    /// receipts to `CF_AGENTS` under the `aa/nonce/` and `aa/receipt/`
+    /// prefixes. Backed by the same `RocksDbStore` as the rest of the node.
+    aa_entry_point: Option<Arc<tenzro_vm::EntryPoint>>,
     /// BurnQuota singleton (Agent-Swarm Spec 3 — wave 1). Tracks the
     /// protocol-side TNZO budget the stablecoin paymaster will draw from
     /// once the dual-rail-gas paymaster + oracle + AMM swap loop lands.
@@ -850,6 +900,13 @@ pub struct TenzroNode {
     settlement: Option<Arc<SettlementEngine>>,
     channel_manager: Option<Arc<ChannelManager>>,
     escrow_manager: Option<Arc<EscrowManager>>,
+    /// ERC-7683 destination-side fill registry (Agent-Swarm Spec 4). The
+    /// idempotency guard for `fill(originData)`: refuses to record a second
+    /// fill for an `order_id` already filled on this Tenzro replica.
+    /// Persisted to `CF_SETTLEMENTS / 7683_dest:<order_id>` so the guard
+    /// survives restart. Initialized alongside `escrow_manager` in
+    /// `init_settlement` since both share the settlements column family.
+    spec4_fill_registry: Option<Arc<Spec4FillRegistry>>,
     /// Kill-switch receipt store (Agent-Swarm Spec 1). Records every
     /// `KillSwitchPause`/`KillSwitchQuarantine`/`KillSwitchTerminate` log
     /// emitted by the VM so that read-RPCs can list receipts by agent or
@@ -906,6 +963,24 @@ pub struct TenzroNode {
     /// persistence to CF_TRAINING_RUNS / CF_TRAINING_RECEIPTS once storage
     /// is available.
     pub training_runtime: Arc<tenzro_training::TrainingRuntime>,
+
+    /// Shared iroh endpoint resolver (Phase C1, #219). Constructed at node
+    /// startup when `NodeConfig::iroh` is `Some`; held here so every
+    /// consumer (training `GradientPayloadStore`, storage
+    /// `IrohBlobsDaBackend`, direct `tenzro://blob/<hash>` URI fetches)
+    /// shares the same endpoint, ALPN, and hash space.
+    pub iroh_resolver: Option<Arc<tenzro_iroh::IrohBackedResolver>>,
+
+    /// Deferred A2A JSON-RPC dispatcher over iroh — Phase D2 (#223).
+    ///
+    /// Registered on the iroh router at bind time (in `init_ai_infrastructure`)
+    /// because `iroh::Router::spawn` sets ALPNs once and a second router
+    /// would overwrite them. The backing dispatcher (which needs
+    /// `Arc<TenzroNode>` for `A2aState`) is installed later from `main.rs`
+    /// once `Arc::new(node)` exists. Until that happens, the dispatcher
+    /// returns a JSON-RPC `-32603` "dispatcher not yet bound" envelope to
+    /// connecting peers.
+    pub iroh_a2a_dispatcher: Option<Arc<tenzro_iroh::DeferredJsonRpcDispatcher>>,
 
     // Identity & Payments (TDIP + MPP/x402)
     identity_registry: Option<Arc<IdentityRegistry>>,
@@ -981,6 +1056,23 @@ pub struct TenzroNode {
     // Event loop
     event_loop_tx: Option<mpsc::Sender<NodeEvent>>,
 
+    /// Cosmos-style snapshot ABCI store. Persists every
+    /// [`crate::snapshot::SNAPSHOT_INTERVAL_BLOCKS`] finalized blocks under
+    /// `<data_dir>/snapshots/<height>/`. Serves the four
+    /// `tenzro_listSnapshots` / `tenzro_getSnapshotChunk` /
+    /// `tenzro_offerSnapshot` / `tenzro_applySnapshotChunk` RPCs and the
+    /// `--state-sync-from <peer>` bootstrap path. `None` when storage isn't
+    /// initialised yet.
+    snapshot_store: Option<Arc<crate::snapshot::SnapshotStore>>,
+
+    /// Optional peer JSON-RPC URL for state-sync bootstrap. Set via
+    /// [`TenzroNode::set_state_sync_peer`] (typically from `--state-sync-from`)
+    /// before [`TenzroNode::start`] runs. When set, the start sequence
+    /// fetches the highest snapshot from the peer and commits it to the
+    /// live KV store between [`init_storage`] and [`init_network`],
+    /// skipping block replay from genesis.
+    state_sync_peer: Option<String>,
+
     /// Live chain tip height — shared with EventLoop for lock-free RPC reads.
     ///
     /// The EventLoop updates this atomically on every finalized block (both local
@@ -1055,100 +1147,12 @@ pub(crate) enum NodeState {
     Stopped,
 }
 
-/// Load the validator's ML-DSA-65 post-quantum signing key from
-/// `{data_dir}/validator_pq_key`, or generate and persist a new one if the
-/// file does not exist.
-///
-/// The persisted file is exactly the 32-byte ML-DSA seed; the verifying key
-/// (1952 bytes) is rederived deterministically. This pairs with the
-/// classical Ed25519 keypair persisted at `validator_key` to form the
-/// hybrid signing identity required by the consensus engine.
-fn load_or_generate_validator_pq_key(
-    data_dir: &std::path::Path,
-) -> Result<tenzro_crypto::pq::MlDsaSigningKey> {
-    use tenzro_crypto::pq::MlDsaSigningKey;
-    let key_path = data_dir.join("validator_pq_key");
-    if key_path.exists() {
-        match std::fs::read(&key_path) {
-            Ok(bytes) => match MlDsaSigningKey::from_seed(&bytes) {
-                Ok(k) => {
-                    info!(
-                        "Loaded persistent validator PQ keypair from {}",
-                        key_path.display()
-                    );
-                    return Ok(k);
-                }
-                Err(e) => {
-                    warn!("Failed to decode validator PQ keypair: {} — generating new", e)
-                }
-            },
-            Err(e) => {
-                warn!("Failed to read validator PQ keypair: {} — generating new", e)
-            }
-        }
-    }
-    let key = MlDsaSigningKey::generate();
-    if let Some(parent) = key_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    if let Err(e) = std::fs::write(&key_path, key.seed_bytes()) {
-        warn!("Failed to persist validator PQ keypair: {}", e);
-    } else {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                &key_path,
-                std::fs::Permissions::from_mode(0o600),
-            );
-        }
-        info!(
-            "Generated and saved validator PQ keypair to {}",
-            key_path.display()
-        );
-    }
-    Ok(key)
-}
-
-/// Load the validator keypair from `{data_dir}/validator_key`, or generate and
-/// persist a new one if the file does not exist.  Uses the same pattern as
-/// `load_or_generate_keypair()` in tenzro-network/src/service.rs.
-fn load_or_generate_validator_keypair(data_dir: &std::path::Path) -> Result<KeyPair> {
-    let key_path = data_dir.join("validator_key");
-    if key_path.exists() {
-        match std::fs::read(&key_path) {
-            Ok(bytes) => {
-                match KeyPair::from_bytes(KeyType::Ed25519, &bytes) {
-                    Ok(kp) => {
-                        info!("Loaded persistent validator keypair from {}", key_path.display());
-                        return Ok(kp);
-                    }
-                    Err(e) => warn!("Failed to decode validator keypair: {} — generating new", e),
-                }
-            }
-            Err(e) => warn!("Failed to read validator keypair: {} — generating new", e),
-        }
-    }
-    let keypair = KeyPair::generate(KeyType::Ed25519)
-        .map_err(|e| NodeError::Other(format!("Crypto error: {}", e)))?;
-    if let Some(parent) = key_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    if let Err(e) = std::fs::write(&key_path, keypair.to_bytes()) {
-        warn!("Failed to persist validator keypair: {}", e);
-    } else {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                &key_path,
-                std::fs::Permissions::from_mode(0o600),
-            );
-        }
-        info!("Generated and saved validator keypair to {}", key_path.display());
-    }
-    Ok(keypair)
-}
+// Validator key persistence lives in the `keygen` module. The running
+// node never generates keys on `start` — it loads existing files and
+// fails loud if any are missing. Generation is gated behind the
+// explicit `tenzro-node init` operator subcommand. See `keygen.rs`
+// for the rationale (universal production-BFT norm: zero major 2026
+// BFT L1 does silent daemon-side auto-keygen on start).
 
 impl TenzroNode {
     /// Create a new Tenzro Network node
@@ -1188,8 +1192,14 @@ impl TenzroNode {
             token: None,
             staking: None,
             bond_manager: None,
+            compute_bond_manager: None,
+            sla_manager: None,
+            sla_outstanding_probes: Arc::new(DashMap::new()),
             workflow_runtime: None,
             validator_registry: None,
+            aa_validator_registry: None,
+            identity_scope_oracle: None,
+            aa_entry_point: None,
             burn_quota_manager: None,
             burn_rate_manager: None,
             seed_agent_manager: None,
@@ -1199,6 +1209,7 @@ impl TenzroNode {
             settlement: None,
             channel_manager: None,
             escrow_manager: None,
+            spec4_fill_registry: None,
             kill_switch_store: None,
             batch_processor: None,
             fee_collector: None,
@@ -1221,6 +1232,8 @@ impl TenzroNode {
             audio_runtime: Arc::new(AudioRuntime::new()),
             video_runtime: Arc::new(VideoRuntime::new()),
             training_runtime: Arc::new(tenzro_training::TrainingRuntime::new()),
+            iroh_resolver: None,
+            iroh_a2a_dispatcher: None,
             identity_registry: None,
             payment_gateway: None,
             x402_server: None,
@@ -1239,6 +1252,8 @@ impl TenzroNode {
             health_monitor,
             metrics,
             event_loop_tx: None,
+            snapshot_store: None,
+            state_sync_peer: None,
             chain_tip: Arc::new(AtomicU64::new(0)),
             peer_status,
             provider_schedule: Arc::new(RwLock::new(ProviderSchedule::default())),
@@ -1351,6 +1366,40 @@ impl TenzroNode {
 
         // 1. Initialize storage
         self.init_storage().await?;
+
+        // 1b. State-sync bootstrap (optional). If a peer URL was set on the
+        //     config via `set_state_sync_peer`, fetch the highest snapshot
+        //     from that peer and commit it to the live KV store before
+        //     consensus comes up. This skips block replay and lets a fresh
+        //     validator catch up to the chain tip in minutes.
+        if let Some(peer_url) = self.state_sync_peer.clone() {
+            match self.snapshot_store.as_ref() {
+                Some(store) => {
+                    info!(peer = %peer_url, "Starting state-sync bootstrap from peer");
+                    match crate::snapshot::bootstrap_from_peer(
+                        store.clone(),
+                        &peer_url,
+                        0,
+                    )
+                    .await
+                    {
+                        Ok(m) => info!(
+                            height = m.height,
+                            num_chunks = m.num_chunks,
+                            state_root = %m.state_root_hex,
+                            "State-sync bootstrap complete"
+                        ),
+                        Err(e) => warn!(
+                            error = %e,
+                            "State-sync bootstrap failed; continuing with normal block replay"
+                        ),
+                    }
+                }
+                None => warn!(
+                    "State-sync requested but snapshot store unavailable; skipping"
+                ),
+            }
+        }
 
         // 2. Initialize network
         self.init_network().await?;
@@ -1603,12 +1652,16 @@ impl TenzroNode {
         self.admission = None;
         self.identity_registry = None;
         self.agent_runtime = None;
+        self.aa_validator_registry = None;
+        self.aa_entry_point = None;
+        self.identity_scope_oracle = None;
         self.inference_router = None;
         self.provider_manager = None;
         self.model_registry = None;
         self.settlement = None;
         self.channel_manager = None;
         self.escrow_manager = None;
+        self.spec4_fill_registry = None;
         self.kill_switch_store = None;
         self.auth_engine = None;
         self.treasury = None;
@@ -1638,6 +1691,17 @@ impl TenzroNode {
             metrics.peer_count as usize,
         );
 
+        let (iroh_enabled, iroh_endpoint_id, iroh_alpns) = match &self.iroh_resolver {
+            Some(resolver) => {
+                let mut alpns = vec!["iroh-blobs".to_string()];
+                if self.iroh_a2a_dispatcher.is_some() {
+                    alpns.push("tenzro/a2a".to_string());
+                }
+                (true, Some(resolver.endpoint().id().to_string()), alpns)
+            }
+            None => (false, None, Vec::new()),
+        };
+
         NodeStatus {
             state: format!("{:?}", state),
             role: self.config.role,
@@ -1648,6 +1712,9 @@ impl TenzroNode {
             data_dir: self.config.data_dir.clone(),
             tee_capable: self.tee_provider.is_some(),
             tee_vendor: self.tee_provider.as_ref().map(|p| p.vendor()),
+            iroh_enabled,
+            iroh_endpoint_id,
+            iroh_alpns,
         }
     }
 
@@ -1691,8 +1758,19 @@ impl TenzroNode {
             }
         }
 
-        self.storage = Some(store);
+        self.storage = Some(store.clone());
         self.health_monitor.mark_healthy("storage");
+
+        // Initialize the snapshot ABCI store on top of the live KV store.
+        // Snapshots land in `<data_dir>/snapshots/` and are produced
+        // periodically by the EventLoop's finality subscriber once the
+        // node is fully started.
+        let kv: Arc<dyn tenzro_storage::KvStore> = store.clone();
+        let snapshot_store = Arc::new(crate::snapshot::SnapshotStore::new(
+            &self.config.data_dir,
+            kv,
+        )?);
+        self.snapshot_store = Some(snapshot_store);
 
         Ok(())
     }
@@ -1890,6 +1968,28 @@ impl TenzroNode {
         };
         self.bond_manager = Some(bond_manager);
 
+        // Initialize ComputeBond manager (Phase A #153). Persists to
+        // CF_PROVIDERS. Consulted by `handle_register_provider` to gate
+        // admission on a minimum compute bond, and by the per-provider
+        // ComputeBond RPCs (post / get / list / increase / withdraw).
+        let compute_bond_manager = if let Some(storage) = &self.storage {
+            match tenzro_token::compute_bond::ComputeBondManager::with_storage(
+                storage.clone() as Arc<dyn KvStore>,
+            ) {
+                Ok(m) => Arc::new(m),
+                Err(e) => {
+                    warn!(
+                        "ComputeBondManager hydration failed ({}), falling back to in-memory",
+                        e
+                    );
+                    Arc::new(tenzro_token::compute_bond::ComputeBondManager::new())
+                }
+            }
+        } else {
+            Arc::new(tenzro_token::compute_bond::ComputeBondManager::new())
+        };
+        self.compute_bond_manager = Some(compute_bond_manager);
+
         // Initialize permissionless ValidatorRegistry. Persists to
         // CF_TOKENS so candidate / active / pending-exit / jailed state
         // survives restarts. The post-block scan in EventLoop drives the
@@ -2082,9 +2182,17 @@ impl TenzroNode {
     async fn init_consensus(&mut self) -> Result<()> {
         info!("Initializing consensus engine...");
 
-        let keypair = load_or_generate_validator_keypair(&self.config.data_dir)?;
-        let pq_signing_key = load_or_generate_validator_pq_key(&self.config.data_dir)?;
+        // Load validator key material from disk. The node binary on
+        // `start` strictly LOADS — never generates — to keep a
+        // misconfigured / empty / re-mounted volume fail-loud rather
+        // than fail-silent. `KeyMissing` errors here are actionable:
+        // the operator runs `tenzro-node init` to provision the
+        // three keys, then re-starts. See `keygen.rs`.
+        let keypair = crate::keygen::load_validator_keypair(&self.config.data_dir)?;
+        let pq_signing_key = crate::keygen::load_validator_pq_key(&self.config.data_dir)?;
         let local_pq_vk = pq_signing_key.verifying_key_bytes().to_vec();
+        let bls_signing_key = crate::keygen::load_validator_bls_key(&self.config.data_dir)?;
+        let local_bls_vk = bls_signing_key.public_key().to_bytes().to_vec();
 
         // Build a sibling `InMemoryHybridSigner` from the same key material
         // so webhook-sourced TDIP revocation paths (e.g. Stripe SPT
@@ -2179,6 +2287,29 @@ impl TenzroNode {
                         )));
                     }
 
+                    // Decode mandatory BLS12-381 G1-compressed verifying key
+                    // (`min_pk` scheme) for HotStuff-2 vote aggregation. This
+                    // validator entry is rejected if the BLS key is missing
+                    // or wrong-length.
+                    let bls_hex = gv
+                        .bls_public_key
+                        .strip_prefix("0x")
+                        .unwrap_or(&gv.bls_public_key);
+                    let bls_bytes = hex::decode(bls_hex).map_err(|e| {
+                        NodeError::Config(format!(
+                            "Invalid genesis validator bls_public_key for '{}': {}",
+                            gv.public_key, e
+                        ))
+                    })?;
+                    if bls_bytes.len() != 48 {
+                        return Err(NodeError::Config(format!(
+                            "Genesis validator bls_public_key for '{}' has wrong length: \
+                             expected 48 bytes for BLS12-381 G1 (min_pk compressed), got {}",
+                            gv.public_key,
+                            bls_bytes.len()
+                        )));
+                    }
+
                     // Derive the 32-byte address by taking the 20-byte crypto
                     // address (Keccak-256 of pubkey, last 20 bytes) and
                     // left-padding into a 32-byte slot — same convention as
@@ -2187,7 +2318,7 @@ impl TenzroNode {
                     let mut addr_bytes = [0u8; 32];
                     addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
                     let v_address = Address::new(addr_bytes);
-                    out.push(ValidatorInfo::new(v_address, pk, pq_bytes, gv.stake as u128));
+                    out.push(ValidatorInfo::new(v_address, pk, pq_bytes, bls_bytes, gv.stake as u128));
                 }
                 if !out
                     .iter()
@@ -2211,6 +2342,7 @@ impl TenzroNode {
                     address,
                     keypair.public_key().clone(),
                     local_pq_vk.clone(),
+                    local_bls_vk.clone(),
                     1000,
                 )]
             }
@@ -2230,6 +2362,7 @@ impl TenzroNode {
                     v.address,
                     v.public_key.as_bytes().to_vec(),
                     v.pq_public_key.clone(),
+                    v.bls_public_key.clone(),
                     v.address, // withdrawal == operator address by default at genesis
                     v.stake,
                     String::new(),
@@ -2261,8 +2394,13 @@ impl TenzroNode {
 
         // Create consensus engine with slashing callback wired to StakingManager
         let consensus_config = self.config.consensus.clone().unwrap_or_default();
-        let mut engine =
-            HotStuff2Engine::new(keypair, pq_signing_key, consensus_config, epoch_manager);
+        let mut engine = HotStuff2Engine::new(
+            keypair,
+            pq_signing_key,
+            bls_signing_key,
+            consensus_config,
+            epoch_manager,
+        );
 
         // Stash the local validator address so the inbound consensus
         // gossipsub bridge (wired in `start()`) can drop self-broadcasts
@@ -2459,6 +2597,26 @@ impl TenzroNode {
             Arc::new(EscrowManager::new(balances))
         };
         self.escrow_manager = Some(escrow_manager);
+
+        // Spec4FillRegistry — ERC-7683 destination-side idempotency guard.
+        // Sits in CF_SETTLEMENTS alongside the escrow records under the
+        // dedicated `7683_dest:<order_id>` keyspace; the open-side envelopes
+        // are under `7683_origin:` and managed elsewhere. The registry is
+        // a denormalized query cache + write-through persistence layer —
+        // the fund movement (pulling outputs from the solver, crediting
+        // the recipient) happens in the destination settler precompile
+        // against VM state. The registry only enforces "filled at most
+        // once per order_id".
+        let spec4_fill_registry = if let Some(ref storage) = self.storage {
+            let reg = Spec4FillRegistry::with_storage(
+                storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+            );
+            info!("Spec4FillRegistry initialized with persistent storage (CF_SETTLEMENTS / 7683_dest:)");
+            Arc::new(reg)
+        } else {
+            Arc::new(Spec4FillRegistry::new())
+        };
+        self.spec4_fill_registry = Some(spec4_fill_registry);
 
         // KillSwitchStore — write-through to CF_SETTLEMENTS for kill-switch
         // receipts (Agent-Swarm Spec 1). Hydrates `by_agent`/`by_controller`
@@ -2769,6 +2927,166 @@ impl TenzroNode {
         } else {
             Arc::new(SwarmManager::new(agent_runtime.clone()))
         };
+        // Tenzro iroh endpoint (Phase C1, #219) — single resolver shared
+        // across the training `GradientPayloadStore`, the storage
+        // `IrohBlobsDaBackend`, agent-memory archival (Phase D1, #222), and
+        // direct `tenzro://blob/<hash>` URI fetches. Construction is opt-in
+        // via `NodeConfig::iroh`; when absent the node runs without an iroh
+        // data plane (inline DA fallback only).
+        //
+        // Bound here — before the agent-memory tier and the training runtime —
+        // so downstream consumers in this function can detect `self.iroh_resolver`
+        // and prefer the iroh-blobs DA backend over `InlineFallbackBackend`.
+        //
+        // Per the locked model statement (2026-05-17): the resolver runs
+        // **alongside** libp2p, not in place of it. libp2p remains the
+        // control plane (gossipsub, kademlia, consensus dispatch); iroh
+        // is the bulk-transfer data plane.
+        if let Some(iroh_cfg) = self.config.iroh.clone() {
+            // Phase C2 (#220): anchor the iroh endpoint to the node's TDIP
+            // Ed25519 seed so the resulting iroh `EndpointId` is byte-identical
+            // to the node DID's public key. Pkarr records published to the
+            // Tenzro-operated relay (see `iroh_cfg.pkarr_relay_url`) are
+            // therefore signed by the on-chain identity key — no extra
+            // attestation layer needed.
+            let cfg = match crate::keygen::load_validator_keypair(&self.config.data_dir) {
+                Ok(keypair) => {
+                    let seed_bytes = keypair.secret_key().as_bytes();
+                    if seed_bytes.len() == 32 {
+                        let mut seed = [0u8; 32];
+                        seed.copy_from_slice(seed_bytes);
+                        iroh_cfg.with_secret_key_seed(seed)
+                    } else {
+                        tracing::warn!(
+                            "Validator Ed25519 seed has unexpected length {} (want 32); \
+                             binding iroh endpoint with a fresh ephemeral key — \
+                             discovery will not be TDIP-anchored",
+                            seed_bytes.len()
+                        );
+                        iroh_cfg
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Could not load validator keypair ({}); binding iroh endpoint \
+                         with a fresh ephemeral key — discovery will not be TDIP-anchored",
+                        e
+                    );
+                    iroh_cfg
+                }
+            };
+            // Phase D2 (#223): construct a deferred A2A dispatcher now so the
+            // `tenzro/a2a` ALPN is registered on the iroh router at bind time.
+            // The real backing dispatcher (which needs `Arc<TenzroNode>` for
+            // `A2aState`) gets installed in `main.rs` after `Arc::new(node)`.
+            // Until then, the dispatcher returns a JSON-RPC `-32603` envelope
+            // — peers see a defined response rather than a hung stream.
+            let a2a_deferred = Arc::new(tenzro_iroh::DeferredJsonRpcDispatcher::new("a2a"));
+            self.iroh_a2a_dispatcher = Some(a2a_deferred.clone());
+
+            let a2a_dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> = a2a_deferred;
+
+            match tenzro_iroh::IrohBackedResolver::bind_with_jsonrpc(
+                &cfg,
+                Some(a2a_dispatcher),
+                None, // MCP-over-iroh deferred — see Phase D2 follow-up
+            )
+            .await
+            {
+                Ok(resolver) => {
+                    if cfg.pkarr_relay_url.is_some() && cfg.secret_key_seed.is_some() {
+                        info!(
+                            pkarr_relay = %cfg.pkarr_relay_url.as_ref().unwrap(),
+                            "Tenzro iroh resolver bound (TDIP-anchored, Pkarr discovery via Tenzro relay, A2A ALPN registered)"
+                        );
+                    } else if cfg.secret_key_seed.is_some() {
+                        info!(
+                            "Tenzro iroh resolver bound (TDIP-anchored, n0-dns discovery only, A2A ALPN registered)"
+                        );
+                    } else {
+                        info!(
+                            "Tenzro iroh resolver bound (ephemeral key, in-memory blob store, A2A ALPN registered)"
+                        );
+                    }
+                    self.iroh_resolver = Some(resolver);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Iroh resolver bind failed ({}); continuing without iroh data plane",
+                        e
+                    );
+                    // Bind failed — drop the deferred dispatcher handle since
+                    // no router will ever call into it.
+                    self.iroh_a2a_dispatcher = None;
+                }
+            }
+        }
+
+        // Phase B agent memory tier: Lance vector + Tantivy BM25 + DA archive,
+        // rooted at `{data_dir}/agent_memory/`. The text-embedding runtime is
+        // shared across the node so any model loaded via
+        // `tenzro_loadTextEmbeddingModel` becomes addressable for `memory.grant`
+        // by setting `MemoryManagerConfig::embedder_model_id`.
+        //
+        // The embedding dim is fixed at table-creation time and must equal the
+        // dim of the embedder. We default to 1024 (Qwen3-Embedding 0.6B,
+        // BGE-M3, Snowflake Arctic Embed L). Operators with a different
+        // default model should provision a fresh `agent_memory/` directory.
+        let memory_root = self.config.data_dir.join("agent_memory");
+        let embedding_dim: usize = 1024;
+        match (
+            tenzro_agent::memory::LanceVectorBackend::new(&memory_root, embedding_dim).await,
+            tenzro_agent::memory::TantivyTextBackend::new(&memory_root),
+        ) {
+            (Ok(vec_backend), Ok(text_backend)) => {
+                // Phase D1 (#222): prefer iroh-blobs as the DA backend for
+                // agent-memory archival when the iroh resolver is bound — the
+                // canonical archive payload becomes a BLAKE3-addressed blob
+                // reachable from any node via `tenzro://memory/<did>/<uuid>`
+                // (resolved against the same iroh endpoint). Falls back to
+                // `InlineFallbackBackend` when iroh is disabled so the agent
+                // memory tier still works on minimal nodes.
+                let da: Arc<dyn tenzro_storage::da::DaBackend> =
+                    if let Some(ref resolver) = self.iroh_resolver {
+                        info!(
+                            "Agent memory tier wired with iroh-blobs DA backend (Phase D1)"
+                        );
+                        tenzro_iroh::IrohBlobsDaBackend::arc(resolver.clone())
+                    } else {
+                        Arc::new(tenzro_storage::da::InlineFallbackBackend::new())
+                    };
+                let mgr = Arc::new(tenzro_agent::memory::MemoryManager::new(
+                    Arc::new(vec_backend),
+                    Arc::new(text_backend),
+                    da,
+                    Some(self.text_embedding_runtime.clone()),
+                    tenzro_agent::memory::MemoryManagerConfig::default(),
+                ));
+                if agent_runtime.set_memory_manager(mgr) {
+                    info!(
+                        "Agent memory tier initialized at {:?} (dim={})",
+                        memory_root, embedding_dim
+                    );
+                } else {
+                    tracing::warn!(
+                        "Agent memory tier already attached to runtime; skipping"
+                    );
+                }
+            }
+            (Err(e), _) => {
+                tracing::warn!(
+                    "Agent memory tier disabled (Lance backend init failed): {}",
+                    e
+                );
+            }
+            (_, Err(e)) => {
+                tracing::warn!(
+                    "Agent memory tier disabled (Tantivy backend init failed): {}",
+                    e
+                );
+            }
+        }
+
         self.agent_runtime = Some(agent_runtime);
         self.swarm_manager = Some(swarm_mgr);
         info!("Swarm manager initialized");
@@ -3242,6 +3560,173 @@ impl TenzroNode {
             }
         }
 
+        // ═══════════════════════════════════════════════════════════════════════
+        // SLA fault detector (Phase B Thread 5). Validators only — slashing
+        // authority requires consensus participation. Re-loads the persisted
+        // Ed25519 seed from `{data_dir}/validator_key` (the same bytes that
+        // back the validator's HotStuff-2 signing key — RFC 9381 ECVRF over
+        // Curve25519 is byte-compatible with Ed25519 keys, so the same 32-byte
+        // seed serves both consensus signing and VRF probe stamping). The
+        // bridge translates the async `ProviderSlashingCallback` trait to the
+        // synchronous `ComputeBondManager` API and stamps audit-trail events
+        // with the latest finalized height pulled from the consensus engine.
+        // ═══════════════════════════════════════════════════════════════════════
+        if matches!(self.config.role, NetworkRole::Validator) {
+            if let (Some(consensus), Some(bonds)) =
+                (self.consensus.clone(), self.compute_bond_manager.clone())
+            {
+                let keypair = crate::keygen::load_validator_keypair(&self.config.data_dir)?;
+                let seed_bytes = keypair.secret_key().as_bytes();
+                if seed_bytes.len() != 32 {
+                    return Err(NodeError::Other(format!(
+                        "Validator Ed25519 seed has unexpected length {} (want 32)",
+                        seed_bytes.len()
+                    )));
+                }
+                let mut seed = [0u8; 32];
+                seed.copy_from_slice(seed_bytes);
+                let vrf_secret = tenzro_crypto::vrf::VrfSecretKey(seed);
+                let issuer = keypair.address();
+
+                let height_fn: crate::sla_slashing_bridge::BlockHeightFn = {
+                    let consensus = consensus.clone();
+                    Arc::new(move || consensus.current_finalized_height().0)
+                };
+                let bridge = Arc::new(
+                    crate::sla_slashing_bridge::ComputeBondSlashingBridge::new(bonds, height_fn),
+                );
+                let sla_manager = Arc::new(
+                    tenzro_model::SlaManager::new(issuer, vrf_secret, bridge),
+                );
+                self.sla_manager = Some(sla_manager.clone());
+
+                // Subscribe to `tenzro/sla` so provider responses flow into
+                // `apply_response`. Custom-topic transport with bincode payload
+                // mirrors the agent-messaging pattern (no MessagePayload variant
+                // explosion, no cross-crate type leak of tenzro-model into
+                // tenzro-network). Outstanding probes are correlated by their
+                // 32-byte challenge_nonce (hex-encoded for DashMap key).
+                if let Some(network) = self.network.clone() {
+                    let outstanding = self.sla_outstanding_probes.clone();
+                    let mgr = sla_manager.clone();
+                    tokio::spawn(async move {
+                        match network.subscribe("tenzro/sla").await {
+                            Ok(mut rx) => {
+                                info!("SLA: subscribed to tenzro/sla");
+                                while let Some(msg) = rx.recv().await {
+                                    let data = match msg.payload {
+                                        tenzro_network::MessagePayload::Custom { data, .. } => data,
+                                        _ => continue,
+                                    };
+                                    let response: tenzro_model::SlaResponse =
+                                        match bincode::deserialize(&data) {
+                                            Ok(r) => r,
+                                            Err(e) => {
+                                                tracing::debug!(
+                                                    error = %e,
+                                                    "Ignoring non-SlaResponse payload on tenzro/sla"
+                                                );
+                                                continue;
+                                            }
+                                        };
+                                    let nonce_hex = hex::encode(response.challenge_nonce);
+                                    let probe = match outstanding.remove(&nonce_hex) {
+                                        Some((_, p)) => p,
+                                        None => {
+                                            tracing::debug!(
+                                                provider = %response.provider_did,
+                                                nonce = %nonce_hex,
+                                                "SLA response references unknown probe — likely \
+                                                 issued by a different validator; dropping"
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    let received_at_ms = chrono::Utc::now().timestamp_millis();
+                                    match mgr
+                                        .apply_response(&probe, Some(&response), received_at_ms)
+                                        .await
+                                    {
+                                        Ok(result) => {
+                                            tracing::info!(
+                                                provider = %probe.provider_did,
+                                                epoch = probe.epoch,
+                                                round = probe.round,
+                                                result = result.as_reason(),
+                                                "Applied SLA probe response"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                provider = %probe.provider_did,
+                                                error = %e,
+                                                "SLA apply_response failed"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to subscribe to tenzro/sla gossipsub topic: {}",
+                                    e
+                                );
+                            }
+                        }
+                    });
+                }
+                info!(
+                    "SLA fault detector wired: VRF-stamped probes → ComputeBond slashing"
+                );
+            }
+        }
+
+        // Tenzro Train protocol runtime — write-through to CF_TRAINING_RUNS /
+        // CF_TRAINING_RECEIPTS and rehydrate active syncer state on boot.
+        // Terminal runs (completed/failed) are skipped during hydration; only
+        // in-flight runs are restored so trainers can re-enroll and resume.
+        //
+        // When the iroh resolver is bound, the runtime is constructed with
+        // `IrohGradientStore` as its `GradientPayloadStore` so outer-gradient
+        // bulk transfer flows through iroh-blobs (the gossiped envelope on
+        // `tenzro/training` carries only the SHA-256 hash; the safetensors
+        // bytes ride iroh-blobs via the shared resolver — see Phase B1, #216).
+        if let Some(ref storage) = self.storage {
+            let mut training_runtime = tenzro_training::TrainingRuntime::with_storage(
+                storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+            );
+            if let Some(ref resolver) = self.iroh_resolver {
+                training_runtime = training_runtime.with_payload_store(
+                    tenzro_iroh::IrohGradientStore::arc(resolver.clone()),
+                );
+                info!(
+                    "TrainingRuntime wired with iroh-blobs GradientPayloadStore (Phase B1)"
+                );
+                training_runtime = training_runtime.with_sealed_shard_store(
+                    tenzro_iroh::IrohSealedShardStore::arc(resolver.clone()),
+                );
+                info!(
+                    "TrainingRuntime wired with iroh-blobs SealedShardStore (Phase B2)"
+                );
+            }
+            let training_runtime = Arc::new(training_runtime);
+            match training_runtime.hydrate() {
+                Ok(restored) => {
+                    info!(
+                        restored,
+                        "Tenzro Train runtime initialized (CF_TRAINING_RUNS hydrated)"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "TrainingRuntime hydration failed ({}); continuing with empty syncer set",
+                        e
+                    );
+                }
+            }
+            self.training_runtime = training_runtime;
+        }
+
         self.health_monitor.mark_healthy("ai");
 
         Ok(())
@@ -3462,6 +3947,83 @@ impl TenzroNode {
         }
     }
 
+    /// Builds an `EvmTransactionSigner` from a [`BridgeAdapterConfig`],
+    /// dispatching between TEE-sealed and raw-key paths based on the
+    /// `tee_sealed` flag. Returns `None` when neither a sealed key is
+    /// requested nor a raw private key is available — the adapter then
+    /// runs in quote-only mode.
+    ///
+    /// Errors and missing-key conditions are logged at the call site so
+    /// that adapter init can keep going (e.g., LayerZero stays quote-only
+    /// while CCIP gets a working signer).
+    async fn build_bridge_signer(
+        adapter_name: &str,
+        cfg: &crate::config::BridgeAdapterConfig,
+    ) -> Option<EvmTransactionSigner> {
+        if cfg.tee_sealed {
+            let label = cfg.tee_label_bytes();
+            match EvmTransactionSigner::with_tee_sealed(
+                &label,
+                cfg.chain_id,
+                cfg.rpc_url.clone(),
+            )
+            .await
+            {
+                Ok(signer) => {
+                    info!(
+                        "{} signer configured (TEE-sealed): chain_id={}, sender={}, label={:?}",
+                        adapter_name,
+                        cfg.chain_id,
+                        signer.sender_address(),
+                        String::from_utf8_lossy(&label)
+                    );
+                    Some(signer)
+                }
+                Err(e) => {
+                    warn!(
+                        "{} TEE-sealed signer build failed: {} — adapter will be quote-only \
+                         (no raw-key fallback when tee_sealed=true)",
+                        adapter_name, e
+                    );
+                    None
+                }
+            }
+        } else {
+            match cfg.resolve_private_key() {
+                Ok(Some(pk_hex)) => {
+                    let signer_cfg =
+                        EvmSignerConfig::custom(pk_hex, cfg.chain_id, cfg.rpc_url.clone());
+                    match signer_cfg.build() {
+                        Ok(signer) => {
+                            info!(
+                                "{} signer configured (raw key): chain_id={}, sender={}",
+                                adapter_name,
+                                cfg.chain_id,
+                                signer.sender_address()
+                            );
+                            Some(signer)
+                        }
+                        Err(e) => {
+                            warn!(
+                                "{} raw-key signer build failed: {} — adapter will be quote-only",
+                                adapter_name, e
+                            );
+                            None
+                        }
+                    }
+                }
+                Ok(None) => {
+                    info!("{} adapter registered without signer (quote-only)", adapter_name);
+                    None
+                }
+                Err(e) => {
+                    warn!("{} signer config error: {}", adapter_name, e);
+                    None
+                }
+            }
+        }
+    }
+
     async fn init_bridge(&mut self) -> Result<()> {
         info!("Initializing bridge router...");
 
@@ -3487,26 +4049,8 @@ impl TenzroNode {
                 );
                 let mut adapter = LayerZeroAdapter::new(lz_config);
 
-                match lz_cfg.resolve_private_key() {
-                    Ok(Some(pk_hex)) => {
-                        let signer_cfg = EvmSignerConfig::custom(
-                            pk_hex,
-                            lz_cfg.chain_id,
-                            lz_cfg.rpc_url.clone(),
-                        );
-                        match signer_cfg.build() {
-                            Ok(signer) => {
-                                info!(
-                                    "LayerZero signer configured: chain_id={}, sender={}",
-                                    lz_cfg.chain_id, signer.sender_address()
-                                );
-                                adapter = adapter.with_signer(signer);
-                            }
-                            Err(e) => warn!("LayerZero signer build failed: {} — adapter will be quote-only", e),
-                        }
-                    }
-                    Ok(None) => info!("LayerZero adapter registered without signer (quote-only)"),
-                    Err(e) => warn!("LayerZero signer config error: {}", e),
+                if let Some(signer) = Self::build_bridge_signer("LayerZero", lz_cfg).await {
+                    adapter = adapter.with_signer(signer);
                 }
 
                 bridge_router.register_adapter("layerzero", Box::new(adapter)).await;
@@ -3520,26 +4064,8 @@ impl TenzroNode {
                     CcipConfig::ethereum_mainnet(FeeToken::Native),
                 );
 
-                match ccip_cfg.resolve_private_key() {
-                    Ok(Some(pk_hex)) => {
-                        let signer_cfg = EvmSignerConfig::custom(
-                            pk_hex,
-                            ccip_cfg.chain_id,
-                            ccip_cfg.rpc_url.clone(),
-                        );
-                        match signer_cfg.build() {
-                            Ok(signer) => {
-                                info!(
-                                    "CCIP signer configured: chain_id={}, sender={}",
-                                    ccip_cfg.chain_id, signer.sender_address()
-                                );
-                                adapter = adapter.with_signer(signer);
-                            }
-                            Err(e) => warn!("CCIP signer build failed: {} — adapter will be quote-only", e),
-                        }
-                    }
-                    Ok(None) => info!("CCIP adapter registered without signer (quote-only)"),
-                    Err(e) => warn!("CCIP signer config error: {}", e),
+                if let Some(signer) = Self::build_bridge_signer("CCIP", ccip_cfg).await {
+                    adapter = adapter.with_signer(signer);
                 }
 
                 bridge_router.register_adapter("ccip", Box::new(adapter)).await;
@@ -3557,26 +4083,8 @@ impl TenzroNode {
                 );
                 let mut adapter = DeBridgeAdapter::new(debridge_config);
 
-                match db_cfg.resolve_private_key() {
-                    Ok(Some(pk_hex)) => {
-                        let signer_cfg = EvmSignerConfig::custom(
-                            pk_hex,
-                            db_cfg.chain_id,
-                            db_cfg.rpc_url.clone(),
-                        );
-                        match signer_cfg.build() {
-                            Ok(signer) => {
-                                info!(
-                                    "deBridge signer configured: chain_id={}, sender={}",
-                                    db_cfg.chain_id, signer.sender_address()
-                                );
-                                adapter = adapter.with_signer(signer);
-                            }
-                            Err(e) => warn!("deBridge signer build failed: {} — adapter will be quote-only", e),
-                        }
-                    }
-                    Ok(None) => info!("deBridge adapter registered without signer (quote-only)"),
-                    Err(e) => warn!("deBridge signer config error: {}", e),
+                if let Some(signer) = Self::build_bridge_signer("deBridge", db_cfg).await {
+                    adapter = adapter.with_signer(signer);
                 }
 
                 bridge_router.register_adapter("debridge", Box::new(adapter)).await;
@@ -3804,11 +4312,110 @@ impl TenzroNode {
         {
             let kit = tenzro_agent_kit::AgentKit::new(
                 rpc_url.clone(),
-                identity_registry,
-                agent_runtime,
+                identity_registry.clone(),
+                agent_runtime.clone(),
             );
             self.agent_kit = Some(Arc::new(kit));
             info!("AgentKit runtime initialized");
+
+            // Phase B Thread 3 / B.3.5 — AA validator registry + IdentityScopeOracle.
+            // The oracle does a fresh `IdentityRegistry::resolve(did)` on every
+            // `lookup`, so a `DelegationScope` revoked between install time and
+            // signing time fails the validator at signing time (the literal
+            // B.3.5 acceptance criterion). Same `(identity_registry,
+            // agent_runtime)` Arcs as AgentKit — same guarantees apply.
+            //
+            // The registry is in-memory in this wave: per-account installs are
+            // re-built from on-chain `InstalledModule` logs in the wave that
+            // wires `EntryPoint` through the EVM execution path (#165).
+            let scope_oracle = Arc::new(
+                crate::delegation_scope_oracle::IdentityScopeOracle::new(
+                    identity_registry,
+                    agent_runtime,
+                ),
+            );
+            let aa_registry = Arc::new(
+                tenzro_vm::aa_validators::ValidatorRegistry::new(),
+            );
+
+            // Seed the ERC-7484 attestation gate for our `DelegationScopeValidator`
+            // module address. Without this, every `aa_registry.install(...)` for
+            // the validator would fail with `ModuleNotAttested`. The attester
+            // address is the all-zero placeholder for the protocol-issued
+            // attestation; in production, on-chain `attestModule` calls from
+            // approved auditors land here via the EVM execution path (#165).
+            let dsv_address =
+                crate::delegation_scope_oracle::delegation_scope_validator_module_address();
+            aa_registry.attestations().attest(
+                tenzro_vm::aa_validators::ModuleAttestation {
+                    module_address: dsv_address,
+                    module_type: tenzro_vm::aa_validators::ModuleType::Validator,
+                    registry: *aa_registry.trusted_registry(),
+                    attester: [0u8; 20],
+                    attestation_data: b"tenzro-protocol-attestation".to_vec(),
+                    revoked: false,
+                },
+            );
+
+            self.identity_scope_oracle = Some(scope_oracle.clone());
+            self.aa_validator_registry = Some(aa_registry.clone());
+            info!(
+                dsv_address = %hex::encode(dsv_address),
+                "AA ValidatorRegistry + IdentityScopeOracle initialized; DelegationScopeValidator attested (Phase B B.3.5)"
+            );
+
+            // Phase B Thread 3c / #165 — wire the ERC-4337 v0.8 EntryPoint
+            // singleton. Bound to the AA registry (validator dispatch) and the
+            // multi-VM runtime (UserOp `call_data` execution). Storage backs
+            // nonce + receipt persistence to `CF_AGENTS` under `aa/nonce/` and
+            // `aa/receipt/` prefixes; `hydrate_nonces()` restores the in-memory
+            // nonce table on every node restart so replay protection survives.
+            //
+            // Address `0x4337084d9e255ff0702461cf8895ce9e3b5ff108` is the
+            // canonical ERC-4337 v0.8 EntryPoint deployment address — used here
+            // as the EIP-712 verifying-contract field for UserOp hashing so
+            // off-chain bundlers / SDKs that expect the same address sign
+            // hashes that match what the node will verify.
+            if let Some(ref vm_runtime) = self.vm_runtime {
+                let chain_id = self
+                    .config
+                    .genesis
+                    .as_ref()
+                    .map(|g| g.chain_id)
+                    .unwrap_or(1337);
+                let ep_address: Vec<u8> = hex::decode(
+                    "4337084d9e255ff0702461cf8895ce9e3b5ff108",
+                )
+                .expect("hardcoded EntryPoint address is valid hex");
+                let mut entry_point = tenzro_vm::EntryPoint::new(ep_address)
+                    .with_chain_id(chain_id)
+                    .with_validator_registry(aa_registry.clone())
+                    .with_runtime(vm_runtime.clone());
+                if let Some(ref storage) = self.storage {
+                    entry_point = entry_point.with_storage(
+                        storage.clone() as Arc<dyn KvStore>,
+                    );
+                    match entry_point.hydrate_nonces() {
+                        Ok(restored) => info!(
+                            restored_nonces = restored,
+                            "EntryPoint nonces hydrated from CF_AGENTS"
+                        ),
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "EntryPoint nonce hydration failed; starting with empty nonce table"
+                        ),
+                    }
+                }
+                self.aa_entry_point = Some(Arc::new(entry_point));
+                info!(
+                    chain_id = chain_id,
+                    "ERC-4337 v0.8 EntryPoint initialized (Phase B Thread 3c / #165)"
+                );
+            } else {
+                tracing::warn!(
+                    "EntryPoint not initialized: vm_runtime unavailable"
+                );
+            }
         } else {
             tracing::warn!(
                 "AgentKit not initialized: identity_registry or agent_runtime unavailable"
@@ -4078,7 +4685,79 @@ impl TenzroNode {
         let event_loop = event_loop.with_agent_discovery(self.network_agents.clone());
 
         // Wire network_providers map for gossipsub-discovered provider merging
-        let event_loop = event_loop.with_provider_discovery(self.network_providers.clone());
+        let mut event_loop = event_loop.with_provider_discovery(self.network_providers.clone());
+
+        // Wire provider announcement broadcast context. Only providers (model
+        // / TEE / storage / validator) self-announce; light clients stay
+        // anonymous on this topic. Hardware is detected once at startup; the
+        // served-models snapshot is re-read from the live `Arc<DashMap>` at
+        // each tick.
+        if matches!(
+            self.config.role,
+            tenzro_types::NetworkRole::Validator
+                | tenzro_types::NetworkRole::ModelProvider
+                | tenzro_types::NetworkRole::TeeProvider
+                | tenzro_types::NetworkRole::StorageProvider
+        ) {
+            let mut hardware = tenzro_types::HardwareCapabilities::detect();
+            // `config.tee_enabled` is the operator's intent; presence of an
+            // initialized `tee_provider` means the runtime probe at startup
+            // succeeded. Both must hold before we advertise TEE availability
+            // to peers.
+            hardware.tee_available = self.config.tee_enabled && self.tee_provider.is_some();
+
+            let provider_address = self
+                .identity_registry
+                .as_ref()
+                .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+                .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
+                .unwrap_or_default();
+
+            let (provider_type, capabilities): (&str, Vec<String>) = match self.config.role {
+                tenzro_types::NetworkRole::ModelProvider => (
+                    "llm",
+                    vec!["inference".to_string()],
+                ),
+                tenzro_types::NetworkRole::TeeProvider => (
+                    "tee",
+                    vec!["tee-attestation".to_string(), "confidential-compute".to_string()],
+                ),
+                tenzro_types::NetworkRole::StorageProvider => (
+                    "storage",
+                    vec!["storage".to_string()],
+                ),
+                tenzro_types::NetworkRole::Validator => (
+                    "general",
+                    vec!["consensus".to_string(), "inference".to_string()],
+                ),
+                _ => ("general", Vec::new()),
+            };
+
+            let rpc_endpoint = self
+                .config
+                .external_rpc_addr
+                .clone()
+                .unwrap_or_else(|| format!("http://{}", self.config.rpc_addr));
+
+            let ctx = crate::event_loop::ProviderAnnouncementContext {
+                hardware,
+                geography: self.config.geography.clone(),
+                provider_address,
+                provider_type: provider_type.to_string(),
+                capabilities,
+                rpc_endpoint,
+                ttl_secs: 120,
+            };
+            event_loop = event_loop.with_provider_announcement(ctx);
+        }
+
+        // Wire the snapshot ABCI store so the finality hook produces a
+        // state-sync snapshot every SNAPSHOT_INTERVAL_BLOCKS blocks.
+        let event_loop = if let Some(ref s) = self.snapshot_store {
+            event_loop.with_snapshot_store(s.clone())
+        } else {
+            event_loop
+        };
 
         // Wire kill-switch dependencies (post-execute scan side-effects:
         // lifecycle FSM, stake freeze/slash, cascade traversal, receipt
@@ -4160,6 +4839,13 @@ impl TenzroNode {
         // Wire the shared RemoteWorkerRegistry so the event loop can ingest verified
         // Cortex advertisements received over the tenzro/cortex gossipsub topic.
         let event_loop = event_loop.with_cortex_registry(self.remote_cortex_workers.clone());
+
+        // Wire the shared TrainingRuntime so the event loop can dispatch
+        // OuterGradient / SyncRound payloads received over the tenzro/training
+        // and tenzro/training/syncer gossipsub topics into the local syncer
+        // state. accept_outer_gradient dedups by trainer_did, so re-receiving
+        // a self-published gradient is a no-op.
+        let event_loop = event_loop.with_training_runtime(self.training_runtime.clone());
 
         // Store the event sender for RPC to submit transactions
         self.event_loop_tx = Some(event_loop.event_sender());
@@ -4401,44 +5087,44 @@ impl TenzroNode {
                 info!("Status broadcast wired (every 10s on tenzro/status)");
             }
 
-            // Wire inbound consensus: subscribe to gossipsub consensus topic and dispatch
-            // proposals + votes into the local HotStuff-2 engine.
+            // Wire inbound consensus: subscribe to the consensus-direct
+            // request-response overlay (#144) and dispatch proposals +
+            // votes into the local HotStuff-2 engine.
             //
-            // Without this bridge, every validator only sees its own self-vote produced
-            // by `consensus.on_proposal()`. Quorum threshold (2f+1 = 3 of 4) can never be
-            // reached, so block height stays at 0 forever. The outbound side already
-            // exists (event_loop.rs:849-907) — this is the missing inbound counterpart.
+            // Without this bridge, every validator only sees its own
+            // self-vote produced by `consensus.on_proposal()`. Quorum
+            // threshold (2f+1 = 3 of 4) can never be reached, so block
+            // height stays at 0 forever. The outbound side lives in
+            // `event_loop.rs::outbound_consensus`, which now calls
+            // `network.broadcast_to_validators(consensus_msg)`.
             //
-            // Gossipsub echoes our own broadcasts back to us. We filter those by
-            // comparing proposer/voter against `local_validator_address` to avoid:
-            //   - re-invoking `on_proposal()` on our own block (would generate a
-            //     duplicate vote and could trip phase-state assertions),
-            //   - re-feeding our own vote into the collector (the collector would
-            //     dedupe but we'd still pay deserialization cost on every echo).
+            // The overlay does NOT echo our own broadcasts back to us
+            // (the dispatch loop in `service.rs` skips `local_peer_id`),
+            // but a defense-in-depth self-loop filter on `local_addr`
+            // remains — peers may forward our messages on rare paths,
+            // and the cost of an extra address compare is negligible
+            // compared to the deserialization cost of the embedded
+            // signatures.
             if let (Some(consensus), Some(local_addr)) =
                 (self.consensus.clone(), self.local_validator_address)
             {
                 let net_consensus = network.clone();
                 tokio::spawn(async move {
-                    let mut rx = match net_consensus.subscribe("tenzro/consensus").await {
+                    let mut rx = match net_consensus.subscribe_consensus_direct().await {
                         Ok(rx) => rx,
                         Err(e) => {
                             tracing::warn!(
                                 error = %e,
-                                "Failed to subscribe to consensus gossipsub topic"
+                                "Failed to subscribe to consensus-direct overlay"
                             );
                             return;
                         }
                     };
                     tracing::info!(
                         local = %hex::encode(local_addr.as_bytes()),
-                        "Consensus inbound: subscribed to tenzro/consensus"
+                        "Consensus inbound: subscribed to consensus-direct overlay"
                     );
-                    while let Some(msg) = rx.recv().await {
-                        let consensus_msg = match msg.payload {
-                            tenzro_network::MessagePayload::Consensus(c) => c,
-                            _ => continue,
-                        };
+                    while let Some(consensus_msg) = rx.recv().await {
                         match consensus_msg {
                             tenzro_network::ConsensusMessage::Proposal {
                                 block,
@@ -4542,6 +5228,7 @@ impl TenzroNode {
                                 high_qc_view,
                                 signature,
                                 public_key,
+                                bls_signature,
                             } => {
                                 let voter_addr = match hex::decode(&voter)
                                     .ok()
@@ -4585,6 +5272,18 @@ impl TenzroNode {
                                             continue;
                                         }
                                     };
+                                let bls_sig =
+                                    match tenzro_crypto::bls::BlsSignature::from_bytes(&bls_signature) {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                voter = %hex::encode(voter_addr.as_bytes()),
+                                                error = %e,
+                                                "Dropping vote: failed to decode BLS signature (expected 96 bytes)"
+                                            );
+                                            continue;
+                                        }
+                                    };
                                 let cons_vote_type = match vote_type {
                                     tenzro_network::VoteType::Prevote => {
                                         tenzro_consensus::VoteType::Prepare
@@ -4600,6 +5299,7 @@ impl TenzroNode {
                                     voter_addr,
                                     sig,
                                     pk,
+                                    bls_sig,
                                     cons_vote_type,
                                     high_qc_view,
                                 );
@@ -4746,7 +5446,7 @@ impl TenzroNode {
                         }
                     }
                 });
-                info!("Consensus inbound wired to gossipsub (tenzro/consensus)");
+                info!("Consensus inbound wired to consensus-direct overlay");
             } else {
                 // Non-validator nodes (LightClient, ModelProvider without consensus)
                 // skip this wiring entirely — they have nothing to vote with.
@@ -4872,6 +5572,62 @@ impl TenzroNode {
                 topic = tenzro_cortex::CORTEX_TOPIC,
                 "Cortex discovery wired to gossipsub"
             );
+
+            // Wire Tenzro Train cross-syncer gossipsub bridge: subscribe to both
+            // training topics and forward opaque payloads to the event loop for
+            // decode + ingestion. `OuterGradient` payloads arrive on
+            // `tenzro/training` and are dispatched into the local syncer's
+            // `accept_outer_gradient` path (idempotent on `trainer_did`).
+            // `SyncRound` payloads arrive on `tenzro/training/syncer` and
+            // are recorded as informational state-root observations.
+            for topic in [
+                tenzro_training::TRAINING_TOPIC,
+                tenzro_training::TRAINING_SYNCER_TOPIC,
+            ] {
+                let event_tx_training = event_loop.event_sender();
+                let net_training = network.clone();
+                let topic_owned = topic.to_string();
+                tokio::spawn(async move {
+                    match net_training.subscribe(&topic_owned).await {
+                        Ok(mut rx) => {
+                            tracing::info!(
+                                topic = %topic_owned,
+                                "Tenzro Train: subscribed to gossipsub topic"
+                            );
+                            while let Some(msg) = rx.recv().await {
+                                if let tenzro_network::MessagePayload::Custom { topic, data } =
+                                    msg.payload
+                                {
+                                    if topic != topic_owned {
+                                        continue;
+                                    }
+                                    if let Err(e) = event_tx_training
+                                        .send(NodeEvent::TrainingGossipReceived {
+                                            topic: topic.clone(),
+                                            bytes: data,
+                                        })
+                                        .await
+                                    {
+                                        tracing::error!(
+                                            "Failed to forward training gossip to event loop: {}",
+                                            e
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                topic = %topic_owned,
+                                error = %e,
+                                "Failed to subscribe to training gossipsub topic"
+                            );
+                        }
+                    }
+                });
+            }
+            info!("Tenzro Train discovery wired to gossipsub (tenzro/training + tenzro/training/syncer)");
         }
 
         // Spawn the event loop in the background
@@ -5024,6 +5780,22 @@ impl TenzroNode {
         self.storage.as_ref()
     }
 
+    /// Returns the Cosmos-style snapshot ABCI store if initialized.
+    ///
+    /// Used by the four snapshot RPCs and by the EventLoop's periodic
+    /// snapshot producer.
+    pub fn snapshot_store(&self) -> Option<&Arc<crate::snapshot::SnapshotStore>> {
+        self.snapshot_store.as_ref()
+    }
+
+    /// Set the state-sync peer URL. Must be called BEFORE
+    /// [`TenzroNode::start`]; the start sequence checks this field
+    /// between `init_storage` and `init_network` and, if set, fetches
+    /// the highest snapshot from that peer's JSON-RPC endpoint.
+    pub fn set_state_sync_peer(&mut self, peer_url: String) {
+        self.state_sync_peer = Some(peer_url);
+    }
+
     /// Returns the consensus engine if initialized.
     ///
     /// RPC handlers use this to inspect the in-flight mempool — e.g.
@@ -5089,6 +5861,14 @@ impl TenzroNode {
         self.escrow_manager.as_ref()
     }
 
+    /// Returns the ERC-7683 destination-side fill registry if initialized
+    /// (Agent-Swarm Spec 4). Used by the destination settler precompile and
+    /// the `tenzro_recordFill7683` / `tenzro_getFill7683` /
+    /// `tenzro_listFills7683` RPCs.
+    pub fn spec4_fill_registry(&self) -> Option<&Arc<Spec4FillRegistry>> {
+        self.spec4_fill_registry.as_ref()
+    }
+
     /// Returns the kill-switch receipt store if initialized.
     pub fn kill_switch_store(&self) -> Option<&Arc<tenzro_settlement::KillSwitchStore>> {
         self.kill_switch_store.as_ref()
@@ -5097,6 +5877,30 @@ impl TenzroNode {
     /// Returns the AgentBond surety manager if initialized (Agent-Swarm Spec 9).
     pub fn bond_manager(&self) -> Option<&Arc<tenzro_token::bond::BondManager>> {
         self.bond_manager.as_ref()
+    }
+
+    /// Returns the ComputeBond surety manager if initialized (Phase A #153).
+    pub fn compute_bond_manager(
+        &self,
+    ) -> Option<&Arc<tenzro_token::compute_bond::ComputeBondManager>> {
+        self.compute_bond_manager.as_ref()
+    }
+
+    /// Returns the SLA fault detector if initialized. `Some` only on
+    /// validator-role nodes — the slashing authority requires consensus
+    /// participation. Read by the `tenzro_sla*` RPC handlers.
+    pub fn sla_manager(&self) -> Option<&Arc<tenzro_model::SlaManager>> {
+        self.sla_manager.as_ref()
+    }
+
+    /// Returns the in-flight SLA probe correlator. Always present; empty on
+    /// non-validator nodes. Probes inserted here by `tenzro_slaIssueProbe`
+    /// are removed by the `tenzro/sla` gossipsub subscriber when a matching
+    /// `SlaResponse` arrives.
+    pub fn sla_outstanding_probes(
+        &self,
+    ) -> &Arc<DashMap<String, tenzro_model::SlaProbe>> {
+        &self.sla_outstanding_probes
     }
 
     /// Returns the WorkflowRuntime if initialized — typed mirror of the
@@ -5110,6 +5914,38 @@ impl TenzroNode {
         &self,
     ) -> Option<&Arc<tenzro_token::validator_registry::ValidatorRegistry>> {
         self.validator_registry.as_ref()
+    }
+
+    /// Returns the ERC-7579 AA modular validator registry if initialized
+    /// (Phase B Thread 3 / B.3.5). Distinct from `validator_registry()`
+    /// (consensus validators). Used by #164 to install
+    /// `DelegationScopeValidator` per machine identity, and by #165 to
+    /// route inbound AA UserOps through `EntryPoint::validate_user_op`.
+    pub fn aa_validator_registry(
+        &self,
+    ) -> Option<&Arc<tenzro_vm::aa_validators::ValidatorRegistry>> {
+        self.aa_validator_registry.as_ref()
+    }
+
+    /// Returns the ERC-4337 v0.8 EntryPoint singleton if initialized
+    /// (Phase B Thread 3c / #165). Wired to `aa_validator_registry()` for
+    /// signature validation and to `vm_runtime` for actual UserOp
+    /// execution. Used by the `eth_sendUserOperation` /
+    /// `eth_estimateUserOperationGas` / `eth_getUserOperationReceipt` /
+    /// `eth_supportedEntryPoints` JSON-RPC handlers.
+    pub fn aa_entry_point(&self) -> Option<&Arc<tenzro_vm::EntryPoint>> {
+        self.aa_entry_point.as_ref()
+    }
+
+    /// Returns the shared `IdentityScopeOracle` if initialized
+    /// (Phase B Thread 3 / B.3.5). Bound into every
+    /// `DelegationScopeValidator` installed in `aa_validator_registry()`
+    /// so revoked / expired `DelegationScope` fails the validator at
+    /// signing time.
+    pub fn identity_scope_oracle(
+        &self,
+    ) -> Option<&Arc<crate::delegation_scope_oracle::IdentityScopeOracle>> {
+        self.identity_scope_oracle.as_ref()
     }
 
     /// Returns the BurnQuota manager if initialized (Agent-Swarm Spec 3 wave 1).
@@ -6147,4 +6983,18 @@ pub struct NodeStatus {
     pub tee_capable: bool,
     /// TEE vendor for this node, if any (`None` on commodity hardware).
     pub tee_vendor: Option<tenzro_types::tee::TeeVendor>,
+    /// Whether the iroh QUIC + Pkarr substrate is bound on this node
+    /// (controlled by `NodeConfig::iroh`). When `true`, the node serves
+    /// the `iroh-blobs` data plane and (for the A2A dispatcher) the
+    /// `tenzro/a2a` ALPN alongside its HTTPS surfaces.
+    pub iroh_enabled: bool,
+    /// Iroh `EndpointId` in z-base-32 form (matches the format printed by
+    /// `iroh node id`). `None` when iroh is not enabled. When the node was
+    /// started with a TDIP-anchored secret key seed, the byte-decoded form
+    /// of this value is identical to the node's Ed25519 validator public key.
+    pub iroh_endpoint_id: Option<String>,
+    /// ALPNs registered on the shared iroh router. Empty when iroh is not
+    /// enabled. Includes `iroh-blobs` always; `tenzro/a2a` once the A2A
+    /// dispatcher has been wired in `main.rs`.
+    pub iroh_alpns: Vec<String>,
 }

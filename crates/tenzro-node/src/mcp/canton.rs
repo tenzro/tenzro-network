@@ -18,9 +18,11 @@ use rmcp::{
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
     model::*,
-    tool, tool_handler, tool_router, ServerHandler,
+    tool, tool_handler, tool_router, Json, ServerHandler,
 };
 use serde::Deserialize;
+
+use super::server::RpcPassthroughOutput;
 
 // ─── Tool parameter structs ───
 
@@ -172,18 +174,18 @@ fn err_invalid_params(msg: impl Into<String>) -> ErrorData {
     }
 }
 
-fn json_result(value: serde_json::Value) -> std::result::Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&value).unwrap(),
-    )]))
+fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
 /// Wrap a plain-text status string as a successful tool result.
 ///
 /// Used by tools that return a simple confirmation message rather than
 /// structured JSON (e.g. operational POST endpoints with empty 200 responses).
-fn text_result(text: impl Into<String>) -> std::result::Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(text.into())]))
+fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    Ok(Json(RpcPassthroughOutput {
+        result: serde_json::json!({ "message": text.into() }),
+    }))
 }
 
 // ─── Canton MCP Server ───
@@ -413,7 +415,7 @@ impl CantonMcpServer {
     async fn canton_submit_command(
         &self,
         Parameters(params): Parameters<CantonSubmitCommandParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         // Parse arguments JSON string into a Value
         let arguments: serde_json::Value = serde_json::from_str(&params.arguments)
             .map_err(|e| err_invalid_params(format!("Invalid JSON arguments: {}", e)))?;
@@ -479,7 +481,7 @@ impl CantonMcpServer {
     async fn canton_list_contracts(
         &self,
         Parameters(params): Parameters<CantonListContractsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let body = serde_json::json!({
             "filter": {
                 "filtersByParty": {
@@ -520,7 +522,7 @@ impl CantonMcpServer {
     async fn canton_get_events(
         &self,
         Parameters(params): Parameters<CantonGetEventsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let body = serde_json::json!({
             "contractId": params.contract_id,
             "requestingParties": params.requesting_parties,
@@ -541,7 +543,7 @@ impl CantonMcpServer {
     async fn canton_get_transaction(
         &self,
         Parameters(params): Parameters<CantonGetTransactionParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         // Canton 3.5 unified the per-id update lookup at /v2/updates/update-by-id.
         // Both transaction-by-id and transaction-tree-by-id were removed.
         let body = serde_json::json!({
@@ -568,7 +570,7 @@ impl CantonMcpServer {
     async fn canton_allocate_party(
         &self,
         Parameters(params): Parameters<CantonAllocatePartyParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         // Canton 3.5: party allocation moved to POST /v2/parties.
         // The `displayName` field was removed; only `partyIdHint` is supported.
         let body = serde_json::json!({
@@ -597,7 +599,7 @@ impl CantonMcpServer {
     async fn canton_list_parties(
         &self,
         #[allow(unused)] Parameters(_params): Parameters<CantonListPartiesParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         // Canton 3.5: GET /v2/parties replaces POST /v2/party-management/list-known-parties.
         let response = self
             .ledger_get("/parties")
@@ -621,7 +623,7 @@ impl CantonMcpServer {
     async fn canton_list_domains(
         &self,
         #[allow(unused)] Parameters(_params): Parameters<CantonListDomainsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let response = self
             .admin_get("/admin/domain/list-connected")
             .await;
@@ -655,7 +657,7 @@ impl CantonMcpServer {
     async fn canton_get_health(
         &self,
         #[allow(unused)] Parameters(_params): Parameters<CantonGetHealthParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         // Try the health endpoint first
         let health = self
             .admin_get("/admin/health")
@@ -685,7 +687,7 @@ impl CantonMcpServer {
     async fn canton_get_balance(
         &self,
         Parameters(params): Parameters<CantonGetBalanceParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         // Query active Holding contracts for the party (CIP-56 standard)
         // Canton 3.x JSON Ledger API v2 uses identifierFilter wrapping templateFilter
         let body = serde_json::json!({
@@ -762,7 +764,7 @@ impl CantonMcpServer {
     async fn canton_transfer(
         &self,
         Parameters(params): Parameters<CantonTransferParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let command_id = format!("tenzro-mcp-transfer-{}", uuid::Uuid::new_v4());
 
         // Create a transfer command using the Splice.Amulet transfer template
@@ -805,7 +807,7 @@ impl CantonMcpServer {
     async fn canton_create_asset(
         &self,
         Parameters(params): Parameters<CantonCreateAssetParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         // Validate asset type
         let asset_type_lower = params.asset_type.to_lowercase();
         let valid_types = ["bond", "equity", "repo", "custom"];
@@ -884,7 +886,7 @@ impl CantonMcpServer {
     async fn canton_dvp_settle(
         &self,
         Parameters(params): Parameters<CantonDvpSettleParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let command_id = format!("tenzro-mcp-dvp-{}", uuid::Uuid::new_v4());
 
         // Exercise the DvP Settle choice on the asset contract.
@@ -934,7 +936,7 @@ impl CantonMcpServer {
     async fn canton_upload_dar(
         &self,
         Parameters(params): Parameters<CantonUploadDarParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         use base64::Engine;
 
         let dar_bytes = base64::engine::general_purpose::STANDARD
@@ -994,7 +996,7 @@ impl CantonMcpServer {
     async fn canton_reconnect_synchronizer(
         &self,
         Parameters(params): Parameters<CantonReconnectSynchronizerParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let endpoint = format!(
             "/admin/participant/synchronizer/{}/reconnect",
             params.synchronizer_alias
@@ -1016,7 +1018,7 @@ impl CantonMcpServer {
     async fn canton_get_fee_schedule(
         &self,
         Parameters(params): Parameters<CantonGetFeeScheduleParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let endpoint = format!(
             "/admin/synchronizer/{}/fee-schedule",
             params.synchronizer_id

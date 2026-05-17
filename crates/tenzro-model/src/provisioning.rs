@@ -11,71 +11,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-/// Hardware capabilities used for model provisioning decisions
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HardwareCapabilities {
-    /// Available RAM in GB
-    pub ram_gb: u32,
-    /// Available VRAM in GB (0 if no GPU)
-    pub vram_gb: u32,
-    /// Available disk space in GB
-    pub disk_gb: u32,
-    /// Whether TEE is available
-    pub tee_available: bool,
-    /// CPU architecture
-    pub cpu_arch: String,
-    /// Number of CPU cores
-    pub cpu_cores: u32,
-}
-
-impl Default for HardwareCapabilities {
-    fn default() -> Self {
-        Self {
-            ram_gb: 8,
-            vram_gb: 0,
-            disk_gb: 50,
-            tee_available: false,
-            cpu_arch: std::env::consts::ARCH.to_string(),
-            cpu_cores: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4),
-        }
-    }
-}
-
-impl HardwareCapabilities {
-    /// Detect hardware capabilities from the current system
-    pub fn detect() -> Self {
-        let mut caps = Self::default();
-
-        // Detect RAM
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
-                for line in meminfo.lines() {
-                    if line.starts_with("MemTotal:") {
-                        if let Some(kb_str) = line.split_whitespace().nth(1) {
-                            if let Ok(kb) = kb_str.parse::<u64>() {
-                                caps.ram_gb = (kb / 1_048_576) as u32;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            use std::process::Command;
-            if let Ok(output) = Command::new("sysctl").arg("-n").arg("hw.memsize").output()
-                && let Ok(bytes_str) = String::from_utf8(output.stdout)
-                && let Ok(bytes) = bytes_str.trim().parse::<u64>()
-            {
-                caps.ram_gb = (bytes / 1_073_741_824) as u32;
-            }
-        }
-
-        caps
-    }
-}
+// `HardwareCapabilities` lives in `tenzro-types` so that `tenzro-network`
+// (which has no dependency on `tenzro-model`) can carry it on the
+// `ProviderAnnouncementMessage` wire format. We re-export it here so existing
+// `provisioning::HardwareCapabilities` paths in this crate keep resolving.
+pub use tenzro_types::HardwareCapabilities;
 
 /// A model that has been recommended for provisioning
 #[derive(Debug, Clone, Serialize, Deserialize)]

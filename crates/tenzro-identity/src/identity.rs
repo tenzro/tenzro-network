@@ -16,6 +16,14 @@ use tenzro_types::primitives::Address;
 /// FIPS-204 ML-DSA-65 verifying key length (bytes).
 pub const ML_DSA_65_VERIFYING_KEY_LEN: usize = 1952;
 
+/// BLS12-381 G1-compressed verifying key length (bytes), `min_pk` scheme.
+///
+/// Used for HotStuff-2 vote-signature aggregation per ROADMAP B.1. Every
+/// identity carries this alongside the classical Ed25519 + ML-DSA-65 hybrid
+/// so its wallet-bound validator key can be promoted to a HotStuff-2
+/// aggregator slot without an out-of-band key handshake.
+pub const BLS_G1_COMPRESSED_LEN: usize = 48;
+
 /// Deserialize and length-validate an ML-DSA-65 verifying key.
 ///
 /// Wave 3d hybrid migration: every identity carries a mandatory PQ verifying
@@ -30,6 +38,27 @@ where
         return Err(serde::de::Error::custom(format!(
             "ML-DSA-65 verifying key must be exactly {} bytes, got {}",
             ML_DSA_65_VERIFYING_KEY_LEN,
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
+}
+
+/// Deserialize and length-validate a BLS12-381 G1-compressed verifying key.
+///
+/// HotStuff-2 BLS aggregation requires the validator's BLS public key to be
+/// known at identity-resolution time. Reject any payload whose length doesn't
+/// match exactly so a peer can't substitute a malformed key that would later
+/// cause an aggregate signature verification panic.
+fn validate_bls_verifying_key<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let bytes: Vec<u8> = Vec::deserialize(deserializer)?;
+    if bytes.len() != BLS_G1_COMPRESSED_LEN {
+        return Err(serde::de::Error::custom(format!(
+            "BLS12-381 G1-compressed verifying key must be exactly {} bytes, got {}",
+            BLS_G1_COMPRESSED_LEN,
             bytes.len()
         )));
     }
@@ -137,7 +166,7 @@ pub enum IdentityData {
     },
 }
 
-/// A unified Tenzro identity — replaces GuardianIdentity + PdisAgentIdentity
+/// A unified Tenzro identity
 ///
 /// Represents both human and machine identities in a single type.
 /// Every identity has an auto-provisioned MPC wallet, a set of public keys,
@@ -167,6 +196,17 @@ pub struct TenzroIdentity {
     /// stored / network-received identities cannot carry a malformed PQ key.
     #[serde(deserialize_with = "validate_pq_verifying_key")]
     pub pq_verifying_key: Vec<u8>,
+    /// BLS12-381 G1-compressed verifying key (48 bytes, `min_pk` scheme) bound
+    /// to this identity's wallet.
+    ///
+    /// Mandatory under ROADMAP B.1: every identity exposes a BLS public key so
+    /// the corresponding signing key can sign HotStuff-2 votes that aggregate
+    /// into a single threshold signature per QC. The signing key lives in the
+    /// wallet keystore alongside the Ed25519 + ML-DSA-65 hybrid.
+    ///
+    /// Length-validated on deserialization to be exactly 48 bytes.
+    #[serde(deserialize_with = "validate_bls_verifying_key")]
+    pub bls_verifying_key: Vec<u8>,
     /// Verifiable credentials held by this identity
     pub credentials: Vec<VerifiableCredential>,
     /// W3C DID service endpoints
@@ -338,6 +378,11 @@ impl TenzroIdentity {
     pub fn pq_verifying_key_bytes(&self) -> &[u8] {
         &self.pq_verifying_key
     }
+
+    /// Returns the bytes of the bound BLS12-381 G1-compressed verifying key.
+    pub fn bls_verifying_key_bytes(&self) -> &[u8] {
+        &self.bls_verifying_key
+    }
 }
 
 /// Validates a username against the Tenzro naming rules.
@@ -396,6 +441,14 @@ mod tests {
             .to_vec()
     }
 
+    fn test_bls_vk() -> Vec<u8> {
+        tenzro_crypto::bls::BlsKeyPair::generate()
+            .unwrap()
+            .public_key()
+            .to_bytes()
+            .to_vec()
+    }
+
     fn make_test_human() -> TenzroIdentity {
         TenzroIdentity {
             did: TenzroDid::new_human(),
@@ -414,6 +467,7 @@ mod tests {
             wallet_address: Address::new([0u8; 32]),
             wallet_id: "wallet-1".to_string(),
             pq_verifying_key: test_pq_vk(),
+            bls_verifying_key: test_bls_vk(),
             credentials: Vec::new(),
             services: Vec::new(),
             created_at: Utc::now(),
@@ -445,6 +499,7 @@ mod tests {
             wallet_address: Address::new([1u8; 32]),
             wallet_id: "wallet-2".to_string(),
             pq_verifying_key: test_pq_vk(),
+            bls_verifying_key: test_bls_vk(),
             credentials: Vec::new(),
             services: Vec::new(),
             created_at: Utc::now(),

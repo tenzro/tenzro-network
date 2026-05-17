@@ -12,13 +12,18 @@
 //!    aggregation + outer-step to the Python reference trainer over JSON-RPC.
 //! 4. The Python trainer returns post-step parameter hashes, the syncer
 //!    builds a [`SyncRound`] with `state_root`, signs it, and broadcasts on
-//!    gossip topic `tenzro/training/syncer/1.0.0`.
+//!    gossip topic `tenzro/training/syncer`.
 //!
 //! At run completion the syncer calls [`finalize_run`](SyncerState::finalize_run)
 //! which builds and persists a [`TrainingReceipt`].
 
 use crate::commitments::{compute_run_root, compute_state_root};
+use crate::confidential::{
+    validate_confidential_enrollment, verify_manifest_binding, SealedManifestStore,
+    SealedShardStore,
+};
 use crate::error::{Result, TrainingError};
+use crate::payload_store::GradientPayloadStore;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -26,9 +31,51 @@ use std::sync::Arc;
 use tenzro_storage::{KvStore, CF_TRAINING_RECEIPTS, CF_TRAINING_RUNS};
 use tenzro_types::primitives::{Hash, Timestamp};
 use tenzro_types::training::{
-    FragmentQuorumStatus, OuterGradient, SyncRound, TrainingReceipt, TrainingRun,
-    TrainingRunStatus, TrainingTaskSpec, TrainingTier,
+    AggregationRule, FragmentQuorumStatus, OuterGradient, SealedDatasetManifest, SyncRound,
+    TrainingAttestation, TrainingReceipt, TrainingRun, TrainingRunStatus, TrainingTaskSpec,
+    TrainingTier,
 };
+
+/// Tier × aggregation-rule policy.
+///
+/// `Mean` is universally available (it is not Byzantine-robust, but the Open
+/// tier already relies on stake bonding + redundant assignment, so Mean is the
+/// natural choice). Every Byzantine-robust rule requires at least `Verified`
+/// tier — without TEE attestation there is no way for the syncer to bind a
+/// gradient to a specific trainer's program/data, which makes a defense like
+/// Krum or coordinate-median meaningless: an adversary just submits gradients
+/// from sybil DIDs until they form the cluster.
+///
+/// Returns the minimum tier required to use `rule`.
+pub fn min_tier_for_rule(rule: AggregationRule) -> TrainingTier {
+    match rule {
+        AggregationRule::Mean => TrainingTier::Open,
+        AggregationRule::TrimmedMean { .. }
+        | AggregationRule::CoordinateMedian
+        | AggregationRule::Krum { .. } => TrainingTier::Verified,
+    }
+}
+
+fn tier_rank(tier: TrainingTier) -> u8 {
+    match tier {
+        TrainingTier::Open => 0,
+        TrainingTier::Verified => 1,
+        TrainingTier::Confidential => 2,
+    }
+}
+
+/// Reject a task spec whose aggregation rule is not permitted by its tier.
+pub fn validate_aggregation_for_tier(spec: &TrainingTaskSpec) -> Result<()> {
+    let required = min_tier_for_rule(spec.aggregation);
+    if tier_rank(spec.tier) < tier_rank(required) {
+        return Err(TrainingError::AggregationRuleTierMismatch {
+            rule: spec.aggregation,
+            required,
+            actual: spec.tier,
+        });
+    }
+    Ok(())
+}
 
 /// Per-fragment buffer of outer gradients accepted so far for the current
 /// round. Keyed by fragment id.
@@ -193,20 +240,97 @@ impl SyncerState {
             state_root,
             syncer_signature: tenzro_types::primitives::Signature::default(),
             published_at: Timestamp::now(),
+            no_quorum_witnesses: None,
         };
         Ok(sync_round)
     }
 
-    /// Advance to the next round. Records the previous round's state root
-    /// in the run and clears that round's buffers.
+    /// Build a No-Endorsement-Certificate sync round for `round`. Used when
+    /// the witness committee cannot assemble a quorum within
+    /// `grace_window_ms` — the run carries forward the prior `state_root`
+    /// (or `Hash::zero()` for round 0). The caller provides each committee
+    /// member's signature over [`crate::commitments::sync_round_signing_bytes`].
+    pub fn build_nec_sync_round(
+        &self,
+        round: u32,
+        witnesses: Vec<tenzro_types::primitives::Signature>,
+    ) -> Result<SyncRound> {
+        let run = self.run.read();
+        let carry_forward = if round == 0 {
+            Hash::zero()
+        } else {
+            run.round_state_roots
+                .get((round - 1) as usize)
+                .copied()
+                .ok_or_else(|| {
+                    TrainingError::Internal(format!(
+                        "NEC for round {} but prior round's state_root is missing",
+                        round
+                    ))
+                })?
+        };
+        Ok(SyncRound {
+            task_id: self.task_spec.task_id.clone(),
+            round,
+            fragment_quorums: HashMap::new(),
+            state_root: carry_forward,
+            syncer_signature: tenzro_types::primitives::Signature::default(),
+            published_at: Timestamp::now(),
+            no_quorum_witnesses: Some(witnesses),
+        })
+    }
+
+    /// Advance to the next round. Records the round's state root in the run
+    /// and clears its buffers.
+    ///
+    /// # Idempotency (multi-syncer witness committee)
+    ///
+    /// Under the k-of-N witness-committee design, multiple witnesses may race
+    /// to submit a finalize for the same `(round, state_root)`. This method
+    /// is **idempotent under repeated valid submissions** and **rejects
+    /// conflicts**:
+    ///
+    /// - `round == current_round`: first writer wins, round advances.
+    /// - `round < current_round` and `state_root` matches the previously
+    ///   recorded root: returns `Ok(())` (redundant witness submission).
+    /// - `round < current_round` and `state_root` differs from the recorded
+    ///   root: returns
+    ///   [`TrainingError::ConflictingFinalize`](crate::error::TrainingError::ConflictingFinalize)
+    ///   so the node layer can surface a fork-detection event.
+    /// - `round > current_round`: returns
+    ///   [`TrainingError::InvalidRound`](crate::error::TrainingError::InvalidRound)
+    ///   (premature, must catch up first).
     pub fn finalize_round(&self, round: u32, state_root: Hash) -> Result<()> {
         let mut run = self.run.write();
-        if round != run.current_round {
+        // Idempotent / conflict path: round already finalized.
+        if round < run.current_round {
+            let prior = run
+                .round_state_roots
+                .get(round as usize)
+                .copied()
+                .ok_or_else(|| {
+                    TrainingError::Internal(format!(
+                        "round {} is below current_round {} but missing from state-root log",
+                        round, run.current_round
+                    ))
+                })?;
+            if prior == state_root {
+                return Ok(());
+            }
+            return Err(TrainingError::ConflictingFinalize {
+                task_id: self.task_spec.task_id.clone(),
+                round,
+                expected: prior,
+                got: state_root,
+            });
+        }
+        if round > run.current_round {
             return Err(TrainingError::InvalidRound {
                 expected: run.current_round,
                 got: round,
             });
         }
+        // round == current_round: advance.
         run.round_state_roots.push(state_root);
         run.current_round = round + 1;
         run.last_update = Timestamp::now();
@@ -265,6 +389,21 @@ impl SyncerState {
 pub struct TrainingRuntime {
     /// Active syncer states, keyed by task_id.
     pub syncers: DashMap<String, Arc<SyncerState>>,
+    /// Per-task sealed-shard manifests for Confidential-tier runs. Loaded
+    /// on demand at task registration and hydrated on startup. Empty for
+    /// Open / Verified tier tasks.
+    pub manifests: Arc<SealedManifestStore>,
+    /// Content-addressed publish/fetch surface for outer-gradient
+    /// safetensors payloads. `None` means no networked adapter is wired —
+    /// callers that need bulk payload distribution should attach an
+    /// implementation (the in-memory default, or `tenzro-iroh`'s
+    /// `IrohGradientStore`, Phase B1 #216).
+    payload_store: Option<Arc<dyn GradientPayloadStore>>,
+    /// Content-addressed publish/fetch surface for Confidential-tier
+    /// sealed shard ciphertexts (Phase B2, #217). `None` means no networked
+    /// adapter is wired — Open / Verified tier runs do not need it. Phase B2
+    /// ships `IrohSealedShardStore` in `tenzro-iroh`.
+    sealed_shard_store: Option<Arc<dyn SealedShardStore>>,
     storage: Option<Arc<dyn KvStore>>,
 }
 
@@ -272,6 +411,9 @@ impl Default for TrainingRuntime {
     fn default() -> Self {
         Self {
             syncers: DashMap::new(),
+            manifests: Arc::new(SealedManifestStore::new()),
+            payload_store: None,
+            sealed_shard_store: None,
             storage: None,
         }
     }
@@ -288,13 +430,50 @@ impl TrainingRuntime {
     pub fn with_storage(storage: Arc<dyn KvStore>) -> Self {
         Self {
             syncers: DashMap::new(),
+            manifests: Arc::new(SealedManifestStore::with_storage(storage.clone())),
+            payload_store: None,
+            sealed_shard_store: None,
             storage: Some(storage),
         }
     }
 
-    /// Hydrate active runs from storage at node startup.
-    /// Returns the number of runs restored.
+    /// Attach a content-addressed payload store (builder). Consumed by the
+    /// gossip → fetch → aggregate path: when an [`OuterGradient`] arrives,
+    /// the syncer fetches the safetensors payload from this store before
+    /// running aggregation.
+    pub fn with_payload_store(mut self, store: Arc<dyn GradientPayloadStore>) -> Self {
+        self.payload_store = Some(store);
+        self
+    }
+
+    /// Borrow the wired payload store, if any.
+    pub fn payload_store(&self) -> Option<&Arc<dyn GradientPayloadStore>> {
+        self.payload_store.as_ref()
+    }
+
+    /// Attach a content-addressed sealed-shard ciphertext store (builder).
+    /// Phase B2 (#217): the sponsor publishes ciphertexts to this store and
+    /// announces a [`SealedDatasetManifest`] via gossip; trainers fetch
+    /// shard ciphertexts via this store keyed on `shard_ciphertext_hash`.
+    pub fn with_sealed_shard_store(mut self, store: Arc<dyn SealedShardStore>) -> Self {
+        self.sealed_shard_store = Some(store);
+        self
+    }
+
+    /// Borrow the wired sealed-shard store, if any.
+    pub fn sealed_shard_store(&self) -> Option<&Arc<dyn SealedShardStore>> {
+        self.sealed_shard_store.as_ref()
+    }
+
+    /// Hydrate active runs and sealed manifests from storage at node
+    /// startup. Returns the number of runs restored. Manifest hydration
+    /// errors are logged but do not abort run hydration.
     pub fn hydrate(&self) -> Result<usize> {
+        // Manifests first — runs may reference them at admission time.
+        match self.manifests.hydrate() {
+            Ok(n) => tracing::info!(restored = n, "Hydrated sealed-shard manifests"),
+            Err(e) => tracing::warn!(error = %e, "Failed to hydrate sealed manifests"),
+        }
         let storage = match &self.storage {
             Some(s) => s,
             None => return Ok(0),
@@ -331,10 +510,82 @@ impl TrainingRuntime {
     }
 
     /// Register a new training run (sponsor + syncer election complete).
+    ///
+    /// Rejects task specs that violate the tier × aggregation-rule policy
+    /// (see [`min_tier_for_rule`]) and Confidential-tier specs whose
+    /// `dataset_ref` is not a `tee://<manifest_hash>` URI. This is the
+    /// single admission point — hydrated runs are trusted because they
+    /// were validated at original registration time, and the spec is
+    /// immutable on a registered run.
     pub fn register_run(&self, state: Arc<SyncerState>) -> Result<()> {
+        validate_aggregation_for_tier(&state.task_spec)?;
+        if state.task_spec.tier == TrainingTier::Confidential
+            && crate::confidential::parse_tee_dataset_ref(&state.task_spec.dataset_ref).is_none()
+        {
+            return Err(TrainingError::InvalidTaskSpec(format!(
+                "Confidential-tier task {} must use a tee:// dataset_ref, got '{}'",
+                state.task_spec.task_id, state.task_spec.dataset_ref
+            )));
+        }
         let task_id = state.task_spec.task_id.clone();
         self.persist_run(&state)?;
         self.syncers.insert(task_id, state);
+        Ok(())
+    }
+
+    /// Install a sealed-shard manifest for a Confidential-tier task. The
+    /// manifest's hash must match the `tee://` reference in the task spec;
+    /// a mismatch is rejected. Returns the canonical (hash-stamped) copy.
+    pub fn install_sealed_manifest(
+        &self,
+        manifest: SealedDatasetManifest,
+    ) -> Result<Arc<SealedDatasetManifest>> {
+        let task_id = manifest.task_id.clone();
+        let state = self
+            .syncers
+            .get(&task_id)
+            .ok_or_else(|| TrainingError::TaskNotFound(task_id.clone()))?
+            .clone();
+        // Stamp the canonical hash before binding-check so the sponsor's
+        // free-form input is normalized to the deterministic value.
+        let mut normalized = manifest;
+        normalized.manifest_hash =
+            crate::confidential::compute_manifest_hash(&normalized.envelopes);
+        verify_manifest_binding(&task_id, &state.task_spec.dataset_ref, &normalized)?;
+        self.manifests.put(normalized)
+    }
+
+    /// Enroll a trainer with Confidential-tier policy enforced. The caller
+    /// supplies the trainer's attestation and the enclave-bound key /
+    /// measurements the syncer's TEE verifier extracted from the
+    /// attestation report. Open/Verified tier callers can pass empty
+    /// `trainer_enclave_pubkey` and `trainer_measurements_hex` — the
+    /// validator short-circuits on tier.
+    pub fn enroll_trainer(
+        &self,
+        task_id: &str,
+        trainer_did: String,
+        trainer_attestation: Option<&TrainingAttestation>,
+        trainer_enclave_pubkey: &[u8],
+        trainer_measurements_hex: &str,
+    ) -> Result<()> {
+        let state = self
+            .syncers
+            .get(task_id)
+            .ok_or_else(|| TrainingError::TaskNotFound(task_id.to_string()))?
+            .clone();
+        let manifest = self.manifests.get(task_id);
+        validate_confidential_enrollment(
+            task_id,
+            state.task_spec.tier,
+            manifest.as_deref(),
+            &trainer_did,
+            trainer_attestation,
+            trainer_enclave_pubkey,
+            trainer_measurements_hex,
+        )?;
+        state.enroll_trainer(trainer_did)?;
+        self.persist_run(&state)?;
         Ok(())
     }
 
@@ -390,6 +641,44 @@ impl TrainingRuntime {
             .iter()
             .map(|kv| kv.value().run.read().clone())
             .collect()
+    }
+
+    /// Compute the witness committee for `(task_id, round)` given chain
+    /// entropy plumbed by the caller (the finalized block hash at round
+    /// start). Uses the run's enrolled validator-eligible syncer set as the
+    /// universe. Returns the committee DIDs in canonical (ascending-score)
+    /// order, or an empty Vec if the task is unknown.
+    ///
+    /// The committee size is [`crate::committee::recommended_committee_size`]
+    /// of the enrolled set: `min(5, max(3, n/5))`.
+    pub fn witness_committee(
+        &self,
+        task_id: &str,
+        round: u32,
+        chain_entropy: Hash,
+    ) -> Vec<String> {
+        let state = match self.syncers.get(task_id) {
+            Some(s) => s.clone(),
+            None => return Vec::new(),
+        };
+        let validators = state.run.read().trainers.clone();
+        let k = crate::committee::recommended_committee_size(validators.len());
+        crate::committee::select_witness_committee(task_id, round, chain_entropy, &validators, k)
+    }
+
+    /// Check whether `local_did` is a witness for `(task_id, round)`.
+    /// Consumed by the gossip listener to decide active-coordinate vs.
+    /// passive-observe behavior.
+    pub fn is_local_node_in_committee(
+        &self,
+        local_did: &str,
+        task_id: &str,
+        round: u32,
+        chain_entropy: Hash,
+    ) -> bool {
+        self.witness_committee(task_id, round, chain_entropy)
+            .iter()
+            .any(|d| d == local_did)
     }
 }
 
@@ -469,6 +758,101 @@ mod tests {
     }
 
     #[test]
+    fn finalize_round_idempotent_on_matching_resubmit() {
+        // Two witnesses race to finalize the same (round, state_root).
+        // First wins, second sees the matching root and returns Ok.
+        let state = SyncerState::new(
+            dummy_task(),
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        let root = Hash::from_bytes(&[7u8; 32]).unwrap();
+        state.finalize_round(0, root).unwrap();
+        // Re-submit the same root: idempotent Ok.
+        state.finalize_round(0, root).unwrap();
+        let run = state.run.read();
+        assert_eq!(run.current_round, 1);
+        assert_eq!(run.round_state_roots, vec![root]);
+    }
+
+    #[test]
+    fn finalize_round_rejects_conflicting_root() {
+        // A second witness submits a different state_root for an already
+        // finalized round — surfaces as ConflictingFinalize for fork
+        // detection.
+        let state = SyncerState::new(
+            dummy_task(),
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        let root_a = Hash::from_bytes(&[7u8; 32]).unwrap();
+        let root_b = Hash::from_bytes(&[8u8; 32]).unwrap();
+        state.finalize_round(0, root_a).unwrap();
+        let err = state.finalize_round(0, root_b);
+        assert!(matches!(
+            err,
+            Err(TrainingError::ConflictingFinalize { round: 0, .. })
+        ));
+        // Run state must not advance further.
+        let run = state.run.read();
+        assert_eq!(run.current_round, 1);
+        assert_eq!(run.round_state_roots, vec![root_a]);
+    }
+
+    #[test]
+    fn finalize_round_rejects_premature_round() {
+        let state = SyncerState::new(
+            dummy_task(),
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        let root = Hash::from_bytes(&[7u8; 32]).unwrap();
+        // current_round is 0; submitting for 1 is premature.
+        let err = state.finalize_round(1, root);
+        assert!(matches!(
+            err,
+            Err(TrainingError::InvalidRound {
+                expected: 0,
+                got: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn build_nec_sync_round_carries_forward_prior_root() {
+        let state = SyncerState::new(
+            dummy_task(),
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        // Finalize round 0 normally.
+        let r0 = Hash::from_bytes(&[7u8; 32]).unwrap();
+        state.finalize_round(0, r0).unwrap();
+        // Round 1 fails to assemble quorum; build a NEC for round 1.
+        let nec = state
+            .build_nec_sync_round(1, vec![tenzro_types::primitives::Signature::default(); 3])
+            .unwrap();
+        assert_eq!(nec.round, 1);
+        assert_eq!(nec.state_root, r0);
+        assert!(nec.no_quorum_witnesses.is_some());
+        assert_eq!(nec.no_quorum_witnesses.unwrap().len(), 3);
+        assert!(nec.fragment_quorums.is_empty());
+    }
+
+    #[test]
+    fn build_nec_sync_round_for_round_zero_uses_zero_root() {
+        let state = SyncerState::new(
+            dummy_task(),
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        let nec = state
+            .build_nec_sync_round(0, vec![tenzro_types::primitives::Signature::default(); 3])
+            .unwrap();
+        assert_eq!(nec.state_root, Hash::zero());
+    }
+
+    #[test]
     fn runtime_persists_and_hydrates_runs() {
         let storage: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
         let runtime = TrainingRuntime::with_storage(storage.clone());
@@ -483,5 +867,140 @@ mod tests {
         let restored = runtime2.hydrate().unwrap();
         assert_eq!(restored, 1);
         assert!(runtime2.syncers.contains_key("task-1"));
+    }
+
+    #[test]
+    fn open_tier_with_mean_admits() {
+        let runtime = TrainingRuntime::new();
+        let mut spec = dummy_task();
+        spec.tier = TrainingTier::Open;
+        spec.aggregation = AggregationRule::Mean;
+        let state = Arc::new(SyncerState::new(
+            spec,
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        ));
+        runtime.register_run(state).unwrap();
+    }
+
+    #[test]
+    fn open_tier_with_krum_rejected() {
+        let runtime = TrainingRuntime::new();
+        let mut spec = dummy_task();
+        spec.tier = TrainingTier::Open;
+        spec.aggregation = AggregationRule::Krum { f: 1 };
+        let state = Arc::new(SyncerState::new(
+            spec,
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        ));
+        let err = runtime.register_run(state);
+        assert!(matches!(
+            err,
+            Err(TrainingError::AggregationRuleTierMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn verified_tier_admits_all_rules() {
+        let rules = [
+            AggregationRule::Mean,
+            AggregationRule::TrimmedMean { alpha_bps: 1000 },
+            AggregationRule::CoordinateMedian,
+            AggregationRule::Krum { f: 1 },
+        ];
+        for (i, rule) in rules.into_iter().enumerate() {
+            let runtime = TrainingRuntime::new();
+            let mut spec = dummy_task();
+            spec.task_id = format!("task-v{}", i);
+            spec.tier = TrainingTier::Verified;
+            spec.aggregation = rule;
+            let state = Arc::new(SyncerState::new(
+                spec,
+                "did:tenzro:machine:syncer".into(),
+                Address::new([9u8; 32]),
+            ));
+            runtime.register_run(state).unwrap();
+        }
+    }
+
+    #[test]
+    fn confidential_tier_admits_byzantine_rules() {
+        let runtime = TrainingRuntime::new();
+        let mut spec = dummy_task();
+        spec.tier = TrainingTier::Confidential;
+        spec.aggregation = AggregationRule::CoordinateMedian;
+        // Confidential-tier specs must bind to a sealed-shard manifest via
+        // a `tee://<hex>` dataset_ref — see `register_run`.
+        spec.dataset_ref = format!("tee://{}", hex::encode([0u8; 32]));
+        let state = Arc::new(SyncerState::new(
+            spec,
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        ));
+        runtime.register_run(state).unwrap();
+    }
+
+    #[test]
+    fn witness_committee_selects_from_enrolled_set() {
+        // quorum=10 keeps the run in Enrolling until all 10 are in, so we
+        // can populate the full set without flipping to Training mid-loop
+        // (which would close enrollment).
+        let mut spec = dummy_task();
+        spec.trainer_count = 10;
+        spec.quorum = 10;
+        let state = Arc::new(SyncerState::new(
+            spec,
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        ));
+        for i in 0..10 {
+            state
+                .enroll_trainer(format!("did:tenzro:machine:t{:02}", i))
+                .unwrap();
+        }
+        let runtime = TrainingRuntime::new();
+        runtime.register_run(state).unwrap();
+        let entropy = Hash::from_bytes(&[42u8; 32]).unwrap();
+        let committee = runtime.witness_committee("task-1", 0, entropy);
+        // n=10 → recommended size clamped to 3.
+        assert_eq!(committee.len(), 3);
+        // Every member is from the enrolled set.
+        for did in &committee {
+            assert!(did.starts_with("did:tenzro:machine:t"));
+        }
+        // Deterministic: re-querying with the same entropy yields the same
+        // committee.
+        let committee2 = runtime.witness_committee("task-1", 0, entropy);
+        assert_eq!(committee, committee2);
+    }
+
+    #[test]
+    fn witness_committee_empty_for_unknown_task() {
+        let runtime = TrainingRuntime::new();
+        let entropy = Hash::from_bytes(&[42u8; 32]).unwrap();
+        assert!(runtime
+            .witness_committee("does-not-exist", 0, entropy)
+            .is_empty());
+    }
+
+    #[test]
+    fn min_tier_classification() {
+        assert_eq!(
+            min_tier_for_rule(AggregationRule::Mean),
+            TrainingTier::Open
+        );
+        assert_eq!(
+            min_tier_for_rule(AggregationRule::TrimmedMean { alpha_bps: 1000 }),
+            TrainingTier::Verified
+        );
+        assert_eq!(
+            min_tier_for_rule(AggregationRule::CoordinateMedian),
+            TrainingTier::Verified
+        );
+        assert_eq!(
+            min_tier_for_rule(AggregationRule::Krum { f: 1 }),
+            TrainingTier::Verified
+        );
     }
 }

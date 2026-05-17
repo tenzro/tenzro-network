@@ -20,7 +20,6 @@ Agents are first-class citizens on the network, with identity anchored in the Te
 - **Message Routing** — Local message delivery with mpsc channels, optional gossipsub transport for cross-node messaging
 - **Swarm Coordination** — Multi-agent swarm management with shared state and broadcast tasks
 - **Durable State** — Write-through persistence to RocksDB (CF_AGENTS) for agent identity, lifecycle, spawn tree, and swarm state; hydration on startup restores all agents and swarms
-- **PDIS Support** — Supports PDIS agent and guardian identities (secondary standard)
 
 ## Key Types
 
@@ -55,7 +54,6 @@ Agents are first-class citizens on the network, with identity anchored in the Te
 ### Identity
 - **RegisteredAgent** — Agent identity with wallet ID, capabilities, status, TDIP DID, and registration fee
 - **AgentStatus** — Created, Active, Suspended, Terminated
-- **PdisRegistry** — PDIS guardian and agent identity support (secondary standard)
 
 ## Usage
 

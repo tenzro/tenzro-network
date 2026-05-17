@@ -27,6 +27,10 @@ pub enum TrainCommand {
     SubmitGradient(TrainSubmitGradientCmd),
     /// Finalize the current round (syncer flow)
     FinalizeRound(TrainFinalizeRoundCmd),
+    /// Install a sponsor's sealed-shard manifest for a Confidential-tier run
+    InstallSealedManifest(TrainInstallSealedManifestCmd),
+    /// Look up the installed sealed-shard manifest for a task
+    GetSealedManifest(TrainGetSealedManifestCmd),
 }
 
 impl TrainCommand {
@@ -39,6 +43,8 @@ impl TrainCommand {
             Self::EnrollTrainer(c) => c.execute().await,
             Self::SubmitGradient(c) => c.execute().await,
             Self::FinalizeRound(c) => c.execute().await,
+            Self::InstallSealedManifest(c) => c.execute().await,
+            Self::GetSealedManifest(c) => c.execute().await,
         }
     }
 }
@@ -242,6 +248,19 @@ pub struct TrainEnrollCmd {
     /// Trainer DID (`did:tenzro:machine:...`)
     #[arg(long)]
     trainer_did: String,
+    /// Path to JSON file containing a `TrainingAttestation`
+    /// (required for Confidential tier)
+    #[arg(long)]
+    attestation: Option<String>,
+    /// Hex-encoded enclave public key the trainer's TEE exposes
+    /// (required for Confidential tier; must match what the sponsor
+    /// sealed the trainer's shard envelope to)
+    #[arg(long)]
+    enclave_pubkey: Option<String>,
+    /// Hex-encoded enclave measurements (e.g. concatenated MRTD / MRENCLAVE
+    /// / measurement registers); required for Confidential tier
+    #[arg(long)]
+    measurements_hex: Option<String>,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -251,15 +270,27 @@ impl TrainEnrollCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
 
+        let mut params = serde_json::json!({
+            "task_id": self.task_id,
+            "trainer_did": self.trainer_did,
+        });
+        if let Some(att_path) = &self.attestation {
+            let text = std::fs::read_to_string(att_path)
+                .map_err(|e| anyhow!("read attestation file '{}': {}", att_path, e))?;
+            let attestation: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| anyhow!("parse attestation JSON: {}", e))?;
+            params["attestation"] = attestation;
+        }
+        if let Some(pk) = &self.enclave_pubkey {
+            params["enclave_pubkey"] = serde_json::Value::String(pk.clone());
+        }
+        if let Some(m) = &self.measurements_hex {
+            params["measurements_hex"] = serde_json::Value::String(m.clone());
+        }
+
         let rpc = RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc
-            .call(
-                "tenzro_training_enrollTrainer",
-                serde_json::json!({
-                    "task_id": self.task_id,
-                    "trainer_did": self.trainer_did,
-                }),
-            )
+            .call("tenzro_training_enrollTrainer", params)
             .await?;
 
         output::print_success("Trainer enrolled!");
@@ -370,6 +401,88 @@ impl TrainFinalizeRoundCmd {
         if let Some(state_root) = result.get("state_root") {
             output::print_field("State root", &serde_json::to_string(state_root)?);
         }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Install sealed-shard manifest (Confidential tier — sponsor flow)
+// ---------------------------------------------------------------------------
+
+/// Install a sponsor's sealed-shard manifest for a Confidential-tier
+/// training run. The manifest must already be bound to the task spec's
+/// `dataset_ref` (`tee://<hex>`); the syncer recomputes the canonical
+/// manifest hash and rejects with `SealedManifestHashMismatch` if it
+/// doesn't match.
+#[derive(Debug, Parser)]
+pub struct TrainInstallSealedManifestCmd {
+    /// Path to a JSON file containing a `SealedDatasetManifest`
+    #[arg(long)]
+    manifest: String,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl TrainInstallSealedManifestCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let text = std::fs::read_to_string(&self.manifest)
+            .map_err(|e| anyhow!("read manifest file '{}': {}", self.manifest, e))?;
+        let manifest: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| anyhow!("parse manifest JSON: {}", e))?;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_training_installSealedManifest",
+                serde_json::json!({ "manifest": manifest }),
+            )
+            .await?;
+
+        output::print_success("Sealed manifest installed!");
+        if let Some(h) = result.get("manifest_hash") {
+            output::print_field("Manifest hash", &serde_json::to_string(h)?);
+        }
+        if let Some(envs) = result.get("envelopes").and_then(|v| v.as_array()) {
+            output::print_field("Envelopes", &envs.len().to_string());
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Get sealed-shard manifest
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Parser)]
+pub struct TrainGetSealedManifestCmd {
+    /// Task ID
+    #[arg(long)]
+    task_id: String,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl TrainGetSealedManifestCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_training_getSealedManifest",
+                serde_json::json!({ "task_id": self.task_id }),
+            )
+            .await?;
+
+        if result.is_null() {
+            output::print_info("No sealed manifest installed for this task.");
+            return Ok(());
+        }
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }

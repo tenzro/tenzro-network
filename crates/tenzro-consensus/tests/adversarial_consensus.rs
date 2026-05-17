@@ -13,6 +13,7 @@ use tenzro_consensus::{
     FinalityTracker, HotStuff2Engine, QuorumCertificate, SlashingCallback, ValidatorInfo,
     ValidatorSet, Vote, VoteCollector, VoteType,
 };
+use tenzro_crypto::bls::{BlsKeyPair, BlsSecretKey};
 use tenzro_crypto::composite::{CompositeSignature, HybridSigner, InMemoryHybridSigner};
 use tenzro_crypto::pq::MlDsaSigningKey;
 use tenzro_crypto::signatures::Ed25519SignerImpl;
@@ -29,6 +30,9 @@ struct TestValidator {
     keypair: KeyPair,
     /// PQ seed bytes so the keypair can be rebuilt at engine-construction time.
     pq_seed: Vec<u8>,
+    /// BLS secret-key bytes so the keypair can be rebuilt at engine-construction time.
+    bls_sk_bytes: [u8; 32],
+    bls: BlsKeyPair,
     signer: InMemoryHybridSigner,
     info: ValidatorInfo,
     address: Address,
@@ -50,10 +54,13 @@ fn create_test_validator_set(n: usize) -> Vec<TestValidator> {
             let pq = MlDsaSigningKey::generate();
             let pq_seed = pq.seed_bytes().to_vec();
             let pq_vk = pq.verifying_key_bytes().to_vec();
+            let bls = BlsKeyPair::generate().unwrap();
+            let bls_sk_bytes = bls.secret_key().to_bytes();
             let info = ValidatorInfo::new(
                 address,
                 keypair.public_key().clone(),
                 pq_vk,
+                bls.public_key().to_bytes().to_vec(),
                 1000,
             );
             let classical = Ed25519SignerImpl::new(
@@ -64,6 +71,8 @@ fn create_test_validator_set(n: usize) -> Vec<TestValidator> {
             TestValidator {
                 keypair,
                 pq_seed,
+                bls_sk_bytes,
+                bls,
                 signer,
                 info,
                 address,
@@ -80,9 +89,11 @@ fn sign_vote(
     voter_address: Address,
     vote_type: VoteType,
     signer: &InMemoryHybridSigner,
+    bls: &BlsKeyPair,
 ) -> Vote {
     // Build an unsigned vote first so we can compute the payload.
-    let placeholder_sig = CompositeSignature::new(Vec::new(), None);
+    let placeholder_sig = CompositeSignature::new(Vec::new(), Vec::new());
+    let placeholder_bls = bls.sign(b"__placeholder__");
     let pk = signer.public_key().clone();
     let unsigned = Vote::new(
         view,
@@ -91,21 +102,26 @@ fn sign_vote(
         voter_address,
         placeholder_sig,
         pk.clone(),
+        placeholder_bls.clone(),
         vote_type,
         0,
     );
     let payload = unsigned.signing_payload();
     let sig = signer.sign(&payload).unwrap();
-    Vote::new(
+    let mut vote = Vote::new(
         view,
         height,
         block_hash,
         voter_address,
         sig,
         pk,
+        placeholder_bls,
         vote_type,
         0,
-    )
+    );
+    let bls_payload = tenzro_consensus::bls_payload_for_vote(&vote);
+    vote.bls_signature = bls.sign(&bls_payload);
+    vote
 }
 
 /// Create a minimal valid test block at the given height/view/proposer.
@@ -182,7 +198,7 @@ fn test_four_node_consensus_happy_path() {
 
     // -- PREPARE phase: all 4 validators vote --------------------------------
     for (i, v) in validators.iter().enumerate() {
-        let vote = sign_vote(view, height, block_hash, v.address, VoteType::Prepare, &v.signer);
+        let vote = sign_vote(view, height, block_hash, v.address, VoteType::Prepare, &v.signer, &v.bls);
         let result = collector.add_vote(vote).unwrap();
         if i < 2 {
             // Quorum threshold for n=4 is 3 (f=1, 2f+1=3).
@@ -202,7 +218,7 @@ fn test_four_node_consensus_happy_path() {
     // -- COMMIT phase: all 4 validators vote ---------------------------------
     let mut commit_qc: Option<QuorumCertificate> = None;
     for (i, v) in validators.iter().enumerate() {
-        let vote = sign_vote(view, height, block_hash, v.address, VoteType::Commit, &v.signer);
+        let vote = sign_vote(view, height, block_hash, v.address, VoteType::Commit, &v.signer, &v.bls);
         let result = collector.add_vote(vote).unwrap();
         if i == 2 {
             assert!(result.is_some(), "Commit QC should form on third vote");
@@ -240,6 +256,7 @@ fn test_byzantine_validator_equivocation_detected() {
         validators[0].address,
         VoteType::Prepare,
         &validators[0].signer,
+        &validators[0].bls,
     );
     let res = collector.add_vote(vote_a);
     assert!(res.is_ok());
@@ -256,6 +273,7 @@ fn test_byzantine_validator_equivocation_detected() {
         validators[0].address,
         VoteType::Prepare,
         &validators[0].signer,
+        &validators[0].bls,
     );
     let res = collector.add_vote(vote_b);
     assert!(res.is_err());
@@ -295,7 +313,11 @@ fn test_consensus_with_one_byzantine_node() {
     // Byzantine node sends a vote with an invalid (garbage) signature but
     // with the real validator's hybrid public key embedded — this exercises
     // the hybrid signature verification path.
-    let bad_sig = CompositeSignature::new(vec![0u8; 64], Some(vec![0u8; 3309]));
+    let bad_sig = CompositeSignature::new(vec![0u8; 64], vec![0u8; 3309]);
+    // Real BLS signature over a garbage payload — the BLS leg verifies under the
+    // collector's aggregator only when re-signed over the canonical QC payload,
+    // so this still drives the hybrid verification path to reject.
+    let bad_bls = validators[0].bls.sign(b"__garbage_payload__");
     let bad_vote = Vote::new(
         view,
         height,
@@ -303,6 +325,7 @@ fn test_consensus_with_one_byzantine_node() {
         validators[0].address,
         bad_sig,
         validators[0].signer.public_key().clone(),
+        bad_bls,
         VoteType::Prepare,
         0,
     );
@@ -311,7 +334,7 @@ fn test_consensus_with_one_byzantine_node() {
 
     // Honest nodes 1, 2, 3 send valid votes.
     for (i, v) in validators.iter().enumerate().skip(1) {
-        let vote = sign_vote(view, height, block_hash, v.address, VoteType::Prepare, &v.signer);
+        let vote = sign_vote(view, height, block_hash, v.address, VoteType::Prepare, &v.signer, &v.bls);
         let result = collector.add_vote(vote).unwrap();
         if i == 3 {
             // Third honest vote (indices 1,2,3) should form quorum.
@@ -336,7 +359,8 @@ fn test_consensus_fails_with_too_many_byzantine() {
 
     // Byzantine nodes 0 and 1 send garbage signatures.
     for v in &validators[..2] {
-        let bad_sig = CompositeSignature::new(vec![0u8; 64], Some(vec![0u8; 3309]));
+        let bad_sig = CompositeSignature::new(vec![0u8; 64], vec![0u8; 3309]);
+        let bad_bls = v.bls.sign(b"__garbage_payload__");
         let bad_vote = Vote::new(
             view,
             height,
@@ -344,6 +368,7 @@ fn test_consensus_fails_with_too_many_byzantine() {
             v.address,
             bad_sig,
             v.signer.public_key().clone(),
+            bad_bls,
             VoteType::Prepare,
             0,
         );
@@ -354,7 +379,7 @@ fn test_consensus_fails_with_too_many_byzantine() {
     // Honest nodes 2 and 3 send valid votes.
     let mut last_result = None;
     for v in &validators[2..] {
-        let vote = sign_vote(view, height, block_hash, v.address, VoteType::Prepare, &v.signer);
+        let vote = sign_vote(view, height, block_hash, v.address, VoteType::Prepare, &v.signer, &v.bls);
         last_result = Some(collector.add_vote(vote).unwrap());
     }
 
@@ -391,7 +416,10 @@ async fn test_view_change_on_timeout() {
         KeyPair::from_bytes(validators[0].keypair.key_type(), &validators[0].keypair.to_bytes())
             .unwrap();
     let engine_pq = MlDsaSigningKey::from_seed(&validators[0].pq_seed).unwrap();
-    let mut engine = HotStuff2Engine::new(engine_keypair, engine_pq, config, epoch_manager);
+    let engine_bls =
+        BlsKeyPair::from_secret_key(BlsSecretKey::from_bytes(&validators[0].bls_sk_bytes).unwrap());
+    let mut engine =
+        HotStuff2Engine::new(engine_keypair, engine_pq, engine_bls, config, epoch_manager);
 
     engine.start().await.unwrap();
 
@@ -441,7 +469,10 @@ async fn test_non_leader_proposal_rejected() {
 
     let epoch_manager2 = EpochManager::new(infos, 10_000).unwrap();
     let engine_pq = MlDsaSigningKey::from_seed(&non_leader.pq_seed).unwrap();
-    let mut engine = HotStuff2Engine::new(engine_keypair, engine_pq, config, epoch_manager2);
+    let engine_bls =
+        BlsKeyPair::from_secret_key(BlsSecretKey::from_bytes(&non_leader.bls_sk_bytes).unwrap());
+    let mut engine =
+        HotStuff2Engine::new(engine_keypair, engine_pq, engine_bls, config, epoch_manager2);
     engine.start().await.unwrap();
 
     // Attempt to propose (the public propose_block checks is_leader first).
@@ -469,6 +500,7 @@ fn test_votes_from_non_validators_rejected() {
     let outsider_pq = MlDsaSigningKey::generate();
     let outsider_signer =
         InMemoryHybridSigner::new(Box::new(outsider_classical), outsider_pq);
+    let outsider_bls = BlsKeyPair::generate().unwrap();
 
     let vote = sign_vote(
         0,
@@ -477,6 +509,7 @@ fn test_votes_from_non_validators_rejected() {
         outsider_addr,
         VoteType::Prepare,
         &outsider_signer,
+        &outsider_bls,
     );
 
     let res = collector.add_vote(vote);
@@ -505,6 +538,7 @@ fn test_duplicate_votes_ignored() {
         validators[0].address,
         VoteType::Prepare,
         &validators[0].signer,
+        &validators[0].bls,
     );
 
     // First submission succeeds.
@@ -592,6 +626,9 @@ fn test_finality_notification_on_commit() {
         VoteType::Commit,
         vec![], // votes elided for brevity
         3000,
+        // FinalityTracker doesn't run BLS verification — placeholders are sound here.
+        [0u8; 96],
+        Vec::new(),
     );
 
     finality.finalize_block(block.clone(), qc.clone()).unwrap();
@@ -623,8 +660,11 @@ async fn test_slashing_callback_invoked_on_equivocation() {
 
     let epoch_manager = EpochManager::new(infos, 10_000).unwrap();
     let engine_pq = MlDsaSigningKey::from_seed(&validators[0].pq_seed).unwrap();
-    let mut engine = HotStuff2Engine::new(engine_keypair, engine_pq, config, epoch_manager)
-        .with_slashing_callback(mock_slasher.clone());
+    let engine_bls =
+        BlsKeyPair::from_secret_key(BlsSecretKey::from_bytes(&validators[0].bls_sk_bytes).unwrap());
+    let mut engine =
+        HotStuff2Engine::new(engine_keypair, engine_pq, engine_bls, config, epoch_manager)
+            .with_slashing_callback(mock_slasher.clone());
 
     engine.start().await.unwrap();
 
@@ -640,6 +680,7 @@ async fn test_slashing_callback_invoked_on_equivocation() {
         validators[1].address,
         VoteType::Prepare,
         &validators[1].signer,
+        &validators[1].bls,
     );
     let _ = engine.on_vote(&vote_a).await;
 
@@ -654,6 +695,7 @@ async fn test_slashing_callback_invoked_on_equivocation() {
         validators[1].address,
         VoteType::Prepare,
         &validators[1].signer,
+        &validators[1].bls,
     );
     let res = engine.on_vote(&vote_b).await;
 
@@ -714,7 +756,7 @@ fn test_consensus_resumes_after_view_change() {
     // Collect 3 votes (quorum) for the prepare phase.
     let mut prepare_qc = None;
     for v in validators.iter().take(3) {
-        let vote = sign_vote(view, height, block_hash, v.address, VoteType::Prepare, &v.signer);
+        let vote = sign_vote(view, height, block_hash, v.address, VoteType::Prepare, &v.signer, &v.bls);
         if let Some(qc) = collector.add_vote(vote).unwrap() {
             prepare_qc = Some(qc);
         }
@@ -727,7 +769,7 @@ fn test_consensus_resumes_after_view_change() {
     // Collect 3 commit votes.
     let mut commit_qc = None;
     for v in validators.iter().take(3) {
-        let vote = sign_vote(view, height, block_hash, v.address, VoteType::Commit, &v.signer);
+        let vote = sign_vote(view, height, block_hash, v.address, VoteType::Commit, &v.signer, &v.bls);
         if let Some(qc) = collector.add_vote(vote).unwrap() {
             commit_qc = Some(qc);
         }
@@ -786,6 +828,7 @@ fn test_wrong_key_vote_rejected() {
         validators[0].address,
         VoteType::Prepare,
         &validators[1].signer, // wrong signer!
+        &validators[1].bls,    // wrong bls!
     );
 
     let res = collector.add_vote(vote);
@@ -812,6 +855,8 @@ fn test_sequential_block_finalization() {
             VoteType::Commit,
             vec![],
             3000,
+            [0u8; 96],
+            Vec::new(),
         );
         finality.finalize_block(block, qc).unwrap();
 
@@ -839,6 +884,8 @@ fn test_duplicate_finalization_rejected() {
         VoteType::Commit,
         vec![],
         3000,
+        [0u8; 96],
+        Vec::new(),
     );
     finality.finalize_block(block1.clone(), qc1.clone()).unwrap();
 
@@ -862,14 +909,14 @@ fn test_multi_view_consensus() {
 
         // Prepare phase.
         for v in validators.iter().take(3) {
-            let vote = sign_vote(view, height, block_hash, v.address, VoteType::Prepare, &v.signer);
+            let vote = sign_vote(view, height, block_hash, v.address, VoteType::Prepare, &v.signer, &v.bls);
             let _ = collector.add_vote(vote).unwrap();
         }
 
         // Commit phase.
         let mut commit_qc = None;
         for v in validators.iter().take(3) {
-            let vote = sign_vote(view, height, block_hash, v.address, VoteType::Commit, &v.signer);
+            let vote = sign_vote(view, height, block_hash, v.address, VoteType::Commit, &v.signer, &v.bls);
             if let Some(qc) = collector.add_vote(vote).unwrap() {
                 commit_qc = Some(qc);
             }

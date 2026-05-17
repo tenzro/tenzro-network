@@ -85,11 +85,12 @@ crates/tenzro-node/data/
 .docker/
 
 # Terraform
-deploy/terraform/terraform.tfvars
-deploy/terraform/.terraform/
-deploy/terraform/.terraform.lock.hcl
-deploy/terraform/tfplan
-deploy/terraform/*.tfstate
+deploy/terraform/**/terraform.tfvars
+deploy/terraform/**/.terraform/
+deploy/terraform/**/.terraform.lock.hcl
+deploy/terraform/**/tfplan
+deploy/terraform/**/*.tfstate
+deploy/terraform/**/*.tfstate.backup
 deploy/terraform/*.tfstate.backup
 
 # Kubernetes secrets (never commit)

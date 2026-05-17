@@ -17,8 +17,23 @@ use tenzro_crypto::composite::{
     StandardHybridVerifier,
 };
 use tenzro_crypto::PublicKey;
+use tenzro_storage::kv::{KvStore, CF_AGENTS};
+use tenzro_storage::{
+    compute_commitment, InlineFallbackBackend, ReceiptEnvelope, ReceiptKind, ReceiptStorageMode,
+    ReceiptSummary,
+};
 use tenzro_types::{AgentIdentity, AgentMessage, AgentMessageType};
 use tracing::{debug, info, warn};
+
+/// RocksDB key prefix for persisted agent-message receipts. Lives in
+/// [`CF_AGENTS`] alongside the agent / lifecycle / spawn-tree records.
+/// Layout: `message:<agent_id>:<timestamp_ms_be>:<message_id>` so a
+/// per-agent prefix scan returns chronologically-ordered receipts.
+const MESSAGE_KEY_PREFIX: &[u8] = b"message:";
+
+/// DA namespace used when offloading agent-message receipts via the
+/// inline-fallback backend.
+const AGENT_MESSAGE_DA_NAMESPACE: &[u8] = b"tenzro/agent_message";
 
 /// Default message queue capacity per agent
 const DEFAULT_QUEUE_CAPACITY: usize = 1000;
@@ -544,6 +559,17 @@ pub struct MessageRouter {
     local_resolver: Option<Arc<LocalPublicKeyResolver>>,
     /// Counter of messages rejected due to invalid signatures (CRITICAL #54)
     rejected_signature_count: Arc<Mutex<u64>>,
+    /// Optional persistent storage. When `Some`, every accepted agent message
+    /// is wrapped in a [`ReceiptEnvelope`] (kind = `AgentMessage`,
+    /// storage_mode = `OffloadedDA`) and written to [`CF_AGENTS`] under
+    /// `message:<agent_id>:<timestamp_ms_be>:<message_id>`. The full message
+    /// payload lives in the DA backend (inline-fallback by default, mirrored
+    /// to `CF_METADATA / da_fallback:<locator>` for cross-restart durability).
+    storage: Option<Arc<dyn KvStore>>,
+    /// DA backend used to offload agent-message payloads. Always present; when
+    /// `storage` is also wired, the backend shares that `KvStore` so payloads
+    /// survive restarts.
+    da_backend: Arc<InlineFallbackBackend>,
     /// Configuration
     config: MessageRouterConfig,
 }
@@ -583,8 +609,35 @@ impl MessageRouter {
             key_resolver,
             local_resolver: Some(local),
             rejected_signature_count: Arc::new(Mutex::new(0)),
+            storage: None,
+            da_backend: Arc::new(InlineFallbackBackend::new()),
             config,
         }
+    }
+
+    /// Wires a durable [`KvStore`] for agent-message receipt persistence.
+    ///
+    /// Subsequent accepted messages are wrapped in a [`ReceiptEnvelope`]
+    /// (kind = [`ReceiptKind::AgentMessage`], storage_mode =
+    /// [`ReceiptStorageMode::OffloadedDA`]) and written to [`CF_AGENTS`]
+    /// under `message:<agent_id>:<timestamp_ms_be>:<message_id>`. The DA
+    /// backend (always [`InlineFallbackBackend`] until external DA layers
+    /// land) shares the same `KvStore` so offloaded payloads survive
+    /// restarts via `CF_METADATA / da_fallback:<locator>`.
+    ///
+    /// Without this call the router is in-memory only — useful for unit
+    /// tests and trusted single-process deployments where the `history`
+    /// DashMap suffices.
+    pub fn with_storage(mut self, storage: Arc<dyn KvStore>) -> Self {
+        let da = Arc::new(InlineFallbackBackend::new().with_storage(storage.clone()));
+        self.storage = Some(storage);
+        self.da_backend = da;
+        self
+    }
+
+    /// Access the DA backend used for agent-message receipt offload.
+    pub fn da_backend(&self) -> Arc<InlineFallbackBackend> {
+        self.da_backend.clone()
     }
 
     /// Replaces the public-key resolver used for verifying inbound
@@ -869,10 +922,10 @@ impl MessageRouter {
             // hybrid verifier checks each leg independently and requires
             // BOTH to verify.
             let composite_pk =
-                CompositePublicKey::new(keys.classical, Some(keys.pq_verifying_key));
+                CompositePublicKey::new(keys.classical, keys.pq_verifying_key);
             let composite_sig = CompositeSignature {
                 classical: classical_bytes,
-                pq: Some(pq_bytes),
+                pq: pq_bytes,
             };
             let verifier = StandardHybridVerifier::new(composite_pk);
             let hash = message.hash();
@@ -914,13 +967,13 @@ impl MessageRouter {
     ) -> Result<()> {
         let message_hash = message.hash();
         let composite = signer.sign(message_hash.as_bytes())?;
-        let pq_bytes = composite.pq.ok_or_else(|| {
-            AgentError::CryptoError(
+        if composite.pq.is_empty() {
+            return Err(AgentError::CryptoError(
                 "hybrid signer produced no PQ signature leg".to_string(),
-            )
-        })?;
+            ));
+        }
         message.signature = Some(composite.classical);
-        message.pq_signature = Some(pq_bytes);
+        message.pq_signature = Some(composite.pq);
         Ok(())
     }
 
@@ -1052,16 +1105,111 @@ impl MessageRouter {
         }
     }
 
-    /// Adds a message to history
+    /// Adds a message to in-memory history and (when wired) persists an
+    /// [`ReceiptEnvelope`] for it to RocksDB.
+    ///
+    /// The in-memory `history` DashMap is the fast read path. When
+    /// [`Self::with_storage`] is configured, the message is additionally
+    /// wrapped in a [`ReceiptKind::AgentMessage`] /
+    /// [`ReceiptStorageMode::OffloadedDA`] envelope: the bincode-serialized
+    /// payload is submitted to the DA backend, and the resulting envelope
+    /// (commitment + summary + DA pointer) is written to [`CF_AGENTS`] under
+    /// `message:<agent_id>:<timestamp_ms_be>:<message_id>`. Persistence
+    /// failures are logged at `warn` rather than propagated — message
+    /// delivery is the contract on this hot path; durable receipt logging
+    /// is a side-effect that must not break delivery.
     fn add_to_history(&self, agent_id: &str, message: AgentMessage) {
         if let Some(mut history) = self.history.get_mut(agent_id) {
-            history.value_mut().push(message);
+            history.value_mut().push(message.clone());
 
             // Trim history if it gets too large
             if history.value().len() > 10000 {
                 history.value_mut().drain(0..1000);
             }
         }
+
+        if let Some(storage) = &self.storage {
+            if let Err(e) = self.persist_message_receipt(agent_id, &message, storage) {
+                warn!(
+                    "Failed to persist agent-message receipt for {} / msg {}: {}",
+                    agent_id, message.message_id, e
+                );
+            }
+        }
+    }
+
+    /// Wraps a message in a [`ReceiptEnvelope`] and writes it to RocksDB.
+    fn persist_message_receipt(
+        &self,
+        agent_id: &str,
+        message: &AgentMessage,
+        storage: &Arc<dyn KvStore>,
+    ) -> Result<()> {
+        // Canonical payload: bincode-serialize the full message (signatures
+        // included so verifiers can re-check the chain of custody).
+        let payload = bincode::serialize(message).map_err(|e| {
+            AgentError::SerializationError(format!(
+                "Failed to serialize agent message for receipt: {}",
+                e
+            ))
+        })?;
+
+        let summary = ReceiptSummary {
+            // 32-byte digest of the message_id keeps the on-chain summary
+            // shape uniform across receipt kinds.
+            receipt_id: compute_commitment(message.message_id.as_bytes()),
+            payer: Some(message.from.agent_id.clone()),
+            payee: Some(message.to.agent_id.clone()),
+            amount_wei: None,
+            timestamp: message.timestamp,
+            principal_chain_summary: None,
+        };
+
+        let kind = ReceiptKind::AgentMessage;
+        debug_assert_eq!(kind.default_mode(), ReceiptStorageMode::OffloadedDA);
+
+        let commitment = compute_commitment(&payload);
+        let pointer = self
+            .da_backend
+            .submit_sync(AGENT_MESSAGE_DA_NAMESPACE, &payload);
+        let envelope = ReceiptEnvelope::offloaded(kind, summary, pointer, commitment);
+
+        envelope.validate().map_err(|e| {
+            AgentError::SerializationError(format!(
+                "AgentMessage receipt envelope invalid: {}",
+                e
+            ))
+        })?;
+
+        let value = bincode::serialize(&envelope).map_err(|e| {
+            AgentError::SerializationError(format!(
+                "Failed to serialize agent-message receipt envelope: {}",
+                e
+            ))
+        })?;
+
+        // Key layout: `message:<agent_id>:<ts_ms_be>:<message_id>`. Big-endian
+        // timestamp keeps a per-agent prefix scan chronologically ordered.
+        let mut key = Vec::with_capacity(
+            MESSAGE_KEY_PREFIX.len()
+                + agent_id.len()
+                + 1
+                + 8
+                + 1
+                + message.message_id.len(),
+        );
+        key.extend_from_slice(MESSAGE_KEY_PREFIX);
+        key.extend_from_slice(agent_id.as_bytes());
+        key.push(b':');
+        key.extend_from_slice(&(message.timestamp.0 as u64).to_be_bytes());
+        key.push(b':');
+        key.extend_from_slice(message.message_id.as_bytes());
+
+        storage
+            .put(CF_AGENTS, &key, &value)
+            .map_err(|e| AgentError::StorageError(format!("Failed to persist receipt: {}", e)))?;
+
+        Ok(())
     }
 
     /// Processes messages with registered handlers

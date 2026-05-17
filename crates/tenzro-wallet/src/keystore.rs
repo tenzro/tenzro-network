@@ -19,6 +19,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tenzro_crypto::bls::{BlsKeyPair, BlsSecretKey};
 use tenzro_crypto::encryption::SymmetricKey;
 use tenzro_crypto::frost::PublicKeyPackage;
 use tenzro_crypto::pq::MlDsaSigningKey;
@@ -57,6 +58,23 @@ struct EncryptedPqSeed {
     /// Wallet ID this seed belongs to.
     wallet_id: WalletId,
     /// AES-256-GCM ciphertext over the 32-byte FIPS 204 seed.
+    encrypted_seed: Vec<u8>,
+    /// Salt for the Argon2id KDF.
+    salt: [u8; 32],
+}
+
+/// Encrypted BLS12-381 signing-key storage entry.
+///
+/// Persists the 32-byte secret-key scalar sealed with the same Argon2id-
+/// derived key as the classical shares. The on-disk file is
+/// `<wallet_id>.bls.json`. The corresponding 48-byte G1-compressed public
+/// key is bound to the wallet's identity at registration so the chain knows
+/// which BLS pubkey to verify the validator's HotStuff-2 votes against.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncryptedBlsSeed {
+    /// Wallet ID this seed belongs to.
+    wallet_id: WalletId,
+    /// AES-256-GCM ciphertext over the 32-byte BLS12-381 secret key bytes.
     encrypted_seed: Vec<u8>,
     /// Salt for the Argon2id KDF.
     salt: [u8; 32],
@@ -254,6 +272,11 @@ impl Keystore {
             std::fs::remove_file(&pq_path)?;
         }
 
+        let bls_path = self.get_bls_keystore_path(wallet_id);
+        if bls_path.exists() {
+            std::fs::remove_file(&bls_path)?;
+        }
+
         self.cache.remove(wallet_id);
         Ok(())
     }
@@ -269,8 +292,9 @@ impl Keystore {
             if path.extension().and_then(|s| s.to_str()) == Some("json")
                 && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
             {
-                // Skip ML-DSA-65 sealed-seed companion files (`<id>.pq.json`).
-                if stem.ends_with(".pq") {
+                // Skip ML-DSA-65 sealed-seed companion files (`<id>.pq.json`)
+                // and BLS12-381 sealed-seed companion files (`<id>.bls.json`).
+                if stem.ends_with(".pq") || stem.ends_with(".bls") {
                     continue;
                 }
                 wallet_ids.push(WalletId::from_string(stem.to_string()));
@@ -280,7 +304,7 @@ impl Keystore {
         Ok(wallet_ids)
     }
 
-    /// Change password for a wallet (FROST bundle + PQ seed).
+    /// Change password for a wallet (FROST bundle + PQ seed + BLS seed).
     pub fn change_password(
         &mut self,
         wallet_id: &WalletId,
@@ -294,6 +318,12 @@ impl Keystore {
         if pq_path.exists() {
             let pq_key = self.load_pq_seed(wallet_id, old_password)?;
             self.store_pq_seed(wallet_id, &pq_key, new_password)?;
+        }
+
+        let bls_path = self.get_bls_keystore_path(wallet_id);
+        if bls_path.exists() {
+            let bls_key = self.load_bls_seed(wallet_id, old_password)?;
+            self.store_bls_seed(wallet_id, &bls_key, new_password)?;
         }
 
         Ok(())
@@ -314,6 +344,12 @@ impl Keystore {
     fn get_pq_keystore_path(&self, wallet_id: &WalletId) -> PathBuf {
         self.storage_path
             .join(format!("{}.pq.json", wallet_id.as_str()))
+    }
+
+    /// Get the file path for a wallet's BLS12-381 sealed seed.
+    fn get_bls_keystore_path(&self, wallet_id: &WalletId) -> PathBuf {
+        self.storage_path
+            .join(format!("{}.bls.json", wallet_id.as_str()))
     }
 
     /// Persist the wallet's ML-DSA-65 signing seed sealed with `password`.
@@ -379,6 +415,70 @@ impl Keystore {
         })
     }
 
+    /// Persist the wallet's BLS12-381 secret-key scalar sealed with `password`.
+    pub fn store_bls_seed(
+        &mut self,
+        wallet_id: &WalletId,
+        bls_signing_key: &BlsKeyPair,
+        password: &str,
+    ) -> Result<()> {
+        let salt = Self::generate_salt();
+        let encryption_key = Self::derive_key(password, &salt)?;
+
+        let seed_bytes = bls_signing_key.secret_key().to_bytes();
+        let encrypted_seed = encryption_key
+            .encrypt(&seed_bytes)
+            .map_err(|e| WalletError::EncryptionError(e.to_string()))?;
+
+        let entry = EncryptedBlsSeed {
+            wallet_id: wallet_id.clone(),
+            encrypted_seed,
+            salt,
+        };
+
+        let path = self.get_bls_keystore_path(wallet_id);
+        let json = serde_json::to_string(&entry)
+            .map_err(|e| WalletError::SerializationError(e.to_string()))?;
+        std::fs::write(&path, json)?;
+        Ok(())
+    }
+
+    /// Load and decrypt the wallet's BLS12-381 keypair.
+    pub fn load_bls_seed(
+        &mut self,
+        wallet_id: &WalletId,
+        password: &str,
+    ) -> Result<BlsKeyPair> {
+        let path = self.get_bls_keystore_path(wallet_id);
+        if !path.exists() {
+            return Err(WalletError::KeystoreError(format!(
+                "Wallet {} has no BLS12-381 seed in keystore — every wallet must \
+                 carry a BLS key for HotStuff-2 vote aggregation",
+                wallet_id
+            )));
+        }
+
+        let json = std::fs::read_to_string(&path)?;
+        let entry: EncryptedBlsSeed = serde_json::from_str(&json)
+            .map_err(|e| WalletError::SerializationError(e.to_string()))?;
+
+        let decryption_key = Self::derive_key(password, &entry.salt)?;
+        let seed_bytes = decryption_key.decrypt(&entry.encrypted_seed).map_err(|e| {
+            WalletError::KeystoreError(format!(
+                "Failed to decrypt BLS12-381 seed (wrong password?): {}",
+                e
+            ))
+        })?;
+
+        let secret = BlsSecretKey::from_bytes(&seed_bytes).map_err(|e| {
+            WalletError::KeystoreError(format!(
+                "Decrypted bytes are not a valid BLS12-381 secret key: {}",
+                e
+            ))
+        })?;
+        Ok(BlsKeyPair::from_secret_key(secret))
+    }
+
     /// Generate a random salt.
     fn generate_salt() -> [u8; 32] {
         let mut salt = [0u8; 32];
@@ -410,6 +510,106 @@ impl Keystore {
 
         SymmetricKey::from_bytes(&key_bytes)
             .map_err(|e| WalletError::KeystoreError(e.to_string()))
+    }
+
+    /// Read the three encrypted keystore files for `wallet_id` as raw bytes,
+    /// without decrypting them.
+    ///
+    /// Returned map keys are the on-disk filenames (`<id>.json`,
+    /// `<id>.pq.json`, `<id>.bls.json`); values are the verbatim ciphertext
+    /// blobs as written by `store_shares` / `store_pq_seed` / `store_bls_seed`.
+    ///
+    /// Used by the identity CAR export (C.6) so users can move their wallet
+    /// across machines without ever decrypting their key material in transit —
+    /// the recipient supplies the password locally at import time. All three
+    /// files are required; if any of them is missing the call errors out
+    /// rather than silently producing an incomplete bundle.
+    pub fn export_encrypted_wallet_files(
+        &self,
+        wallet_id: &WalletId,
+    ) -> Result<HashMap<String, Vec<u8>>> {
+        let mut out = HashMap::with_capacity(3);
+        for path in [
+            self.get_keystore_path(wallet_id),
+            self.get_pq_keystore_path(wallet_id),
+            self.get_bls_keystore_path(wallet_id),
+        ] {
+            if !path.exists() {
+                return Err(WalletError::KeystoreError(format!(
+                    "Wallet {} is missing keystore file {} — cannot export an \
+                     incomplete bundle",
+                    wallet_id,
+                    path.display()
+                )));
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| {
+                    WalletError::KeystoreError(format!(
+                        "Keystore path {} has no valid file name",
+                        path.display()
+                    ))
+                })?
+                .to_string();
+            let bytes = std::fs::read(&path)?;
+            out.insert(name, bytes);
+        }
+        Ok(out)
+    }
+
+    /// Write encrypted keystore files into this keystore, byte-for-byte.
+    ///
+    /// `files` is the map returned by `export_encrypted_wallet_files` on the
+    /// source machine. Filenames are validated to match the
+    /// `<wallet_id>.json` / `<wallet_id>.pq.json` / `<wallet_id>.bls.json`
+    /// scheme before writing, so a malicious bundle cannot drop arbitrary
+    /// files into the keystore directory or overwrite siblings.
+    ///
+    /// Refuses to overwrite an existing wallet of the same ID — callers must
+    /// `delete_wallet` first if they really mean to clobber.
+    pub fn import_encrypted_wallet_files(
+        &mut self,
+        wallet_id: &WalletId,
+        files: &HashMap<String, Vec<u8>>,
+    ) -> Result<()> {
+        let id = wallet_id.as_str();
+        let expected = [
+            format!("{}.json", id),
+            format!("{}.pq.json", id),
+            format!("{}.bls.json", id),
+        ];
+
+        for name in &expected {
+            if !files.contains_key(name) {
+                return Err(WalletError::KeystoreError(format!(
+                    "Bundle for {} is missing expected file {}",
+                    id, name
+                )));
+            }
+            let target = self.storage_path.join(name);
+            if target.exists() {
+                return Err(WalletError::KeystoreError(format!(
+                    "Refusing to overwrite existing keystore file {} — delete \
+                     the wallet first if you really mean to import over it",
+                    target.display()
+                )));
+            }
+        }
+
+        for (name, bytes) in files {
+            if !expected.iter().any(|e| e == name) {
+                return Err(WalletError::KeystoreError(format!(
+                    "Bundle contains unexpected file name {} (expected one of \
+                     {:?}) — refusing to write outside the wallet's own files",
+                    name, expected
+                )));
+            }
+            let target = self.storage_path.join(name);
+            std::fs::write(&target, bytes)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -456,6 +656,7 @@ mod tests {
         let original = provisioner.provision_wallet().unwrap();
         let pubkey_package = original.frost_pubkey_package().unwrap().clone();
         let pq_key = original.pq_signing_key().unwrap().clone();
+        let bls_key = original.bls_signing_key().unwrap().clone();
         let original_pk = original.public_key.clone();
         let wallet_id = original.wallet_id.clone();
         let address = original.address;
@@ -465,11 +666,13 @@ mod tests {
             .store_shares(&wallet_id, &pubkey_package, &key_shares, "pw")
             .unwrap();
         keystore.store_pq_seed(&wallet_id, &pq_key, "pw").unwrap();
+        keystore.store_bls_seed(&wallet_id, &bls_key, "pw").unwrap();
         keystore.clear_cache();
         drop(original);
 
         let (loaded_pkg, loaded_shares) = keystore.load_shares(&wallet_id, "pw").unwrap();
         let loaded_pq = keystore.load_pq_seed(&wallet_id, "pw").unwrap();
+        let loaded_bls = keystore.load_bls_seed(&wallet_id, "pw").unwrap();
         assert_eq!(loaded_shares.len(), 3);
         assert_eq!(loaded_pkg.threshold, 2);
         assert_eq!(loaded_pkg.total, 3);
@@ -486,6 +689,7 @@ mod tests {
             loaded_shares,
             loaded_pkg,
             loaded_pq,
+            loaded_bls,
         )
         .unwrap();
 
@@ -548,6 +752,72 @@ mod tests {
     }
 
     #[test]
+    fn test_export_import_encrypted_wallet_files_round_trip() {
+        use crate::mpc_signing::MpcSigner;
+        use crate::wallet::MpcWallet;
+        use tenzro_types::primitives::Address;
+
+        // Source keystore: provision + persist a wallet.
+        let src_dir = TempDir::new().unwrap();
+        let mut src = Keystore::new(src_dir.path()).unwrap();
+        let provisioner = WalletProvisioner::new();
+        let original = provisioner.provision_wallet().unwrap();
+        let pubkey_package = original.frost_pubkey_package().unwrap().clone();
+        let pq_key = original.pq_signing_key().unwrap().clone();
+        let bls_key = original.bls_signing_key().unwrap().clone();
+        let wallet_id = original.wallet_id.clone();
+        let original_pk = original.public_key.clone();
+
+        src.store_shares(&wallet_id, &pubkey_package, &original.key_shares, "pw")
+            .unwrap();
+        src.store_pq_seed(&wallet_id, &pq_key, "pw").unwrap();
+        src.store_bls_seed(&wallet_id, &bls_key, "pw").unwrap();
+        drop(original);
+
+        let bundle = src.export_encrypted_wallet_files(&wallet_id).unwrap();
+        assert_eq!(bundle.len(), 3);
+        assert!(bundle.contains_key(&format!("{}.json", wallet_id.as_str())));
+        assert!(bundle.contains_key(&format!("{}.pq.json", wallet_id.as_str())));
+        assert!(bundle.contains_key(&format!("{}.bls.json", wallet_id.as_str())));
+
+        // Destination keystore: import the bundle.
+        let dst_dir = TempDir::new().unwrap();
+        let mut dst = Keystore::new(dst_dir.path()).unwrap();
+        dst.import_encrypted_wallet_files(&wallet_id, &bundle).unwrap();
+
+        // Importing twice must refuse — we don't silently overwrite.
+        let dup = dst.import_encrypted_wallet_files(&wallet_id, &bundle);
+        assert!(dup.is_err(), "duplicate import must error");
+
+        // Rehydrate from the imported files and sign — proves bytes are intact.
+        let (loaded_pkg, loaded_shares) = dst.load_shares(&wallet_id, "pw").unwrap();
+        let loaded_pq = dst.load_pq_seed(&wallet_id, "pw").unwrap();
+        let loaded_bls = dst.load_bls_seed(&wallet_id, "pw").unwrap();
+
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[..20].copy_from_slice(
+            loaded_pkg
+                .group_public_key
+                .as_public_key()
+                .to_address()
+                .as_bytes(),
+        );
+        let restored = MpcWallet::new(
+            wallet_id,
+            Address::new(addr_bytes),
+            loaded_shares,
+            loaded_pkg,
+            loaded_pq,
+            loaded_bls,
+        )
+        .unwrap();
+
+        let sig = MpcSigner::sign(&restored, b"car export round-trip").unwrap();
+        tenzro_crypto::signatures::verify(&original_pk, b"car export round-trip", &sig)
+            .unwrap();
+    }
+
+    #[test]
     fn test_change_password() {
         let temp_dir = TempDir::new().unwrap();
         let mut keystore = Keystore::new(temp_dir.path()).unwrap();
@@ -555,6 +825,7 @@ mod tests {
         let provisioner = WalletProvisioner::new();
         let wallet = provisioner.provision_wallet().unwrap();
         let pq_key = wallet.pq_signing_key().unwrap().clone();
+        let bls_key = wallet.bls_signing_key().unwrap().clone();
 
         keystore
             .store_shares(
@@ -566,6 +837,9 @@ mod tests {
             .unwrap();
         keystore
             .store_pq_seed(&wallet.wallet_id, &pq_key, "old-password")
+            .unwrap();
+        keystore
+            .store_bls_seed(&wallet.wallet_id, &bls_key, "old-password")
             .unwrap();
 
         keystore

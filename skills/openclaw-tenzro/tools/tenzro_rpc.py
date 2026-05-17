@@ -32,7 +32,7 @@ Usage:
     python tenzro_rpc.py list_tasks
     python tenzro_rpc.py get_task <task_id>
     python tenzro_rpc.py cancel_task <task_id>
-    python tenzro_rpc.py submit_quote <task_id> 40000000000000000000 gemma4-9b 30
+    python tenzro_rpc.py quote_task <task_id> 0xprovider 40000000000000000000 qwen3-0.6b 90 30
     python tenzro_rpc.py list_agent_templates
     python tenzro_rpc.py register_agent_template "Code Reviewer" "Reviews code" specialist "You are..."
     python tenzro_rpc.py get_agent_template <template_id>
@@ -952,22 +952,31 @@ def cancel_task(task_id: str) -> dict:
     return _rpc("tenzro_cancelTask", {"task_id": task_id})
 
 
-def submit_quote(task_id: str, price_wei: int, model_id: str = None,
-                 estimated_time_secs: int = None) -> dict:
-    """Submit a quote for a task as a provider/agent.
+def quote_task(task_id: str, provider: str, price_wei: int,
+               model_id: str = None, confidence: int = None,
+               estimated_duration_secs: int = None) -> dict:
+    """Submit a quote for an open task as a provider/agent.
 
     price_wei: amount in wei (10^-18 TNZO), sent as decimal string
     to preserve full u128 precision over JSON.
+
+    provider: the address that will execute the task. Required.
+
+    confidence: 0-100, the provider's self-assessed confidence in
+    delivering at the quoted price (default 80 server-side).
     """
     params = {
         "task_id": task_id,
+        "provider": provider,
         "price": str(price_wei),
     }
     if model_id:
         params["model_id"] = model_id
-    if estimated_time_secs is not None:
-        params["estimated_time"] = estimated_time_secs
-    return _rpc("tenzro_submitQuote", params)
+    if confidence is not None:
+        params["confidence"] = confidence
+    if estimated_duration_secs is not None:
+        params["estimated_duration_secs"] = estimated_duration_secs
+    return _rpc("tenzro_quoteTask", params)
 
 
 # ── Agent Template Marketplace ───────────────────────────────────
@@ -1817,23 +1826,32 @@ def get_event_status() -> dict:
     return _rpc("tenzro_getEventStatus")
 
 
-def register_webhook(url: str, filter: dict = None,
-                     secret: str = "",
-                     confirmed_delivery: bool = False) -> dict:
+def register_webhook(url: str,
+                     event_types: list = None,
+                     addresses: list = None,
+                     secret: str = "") -> dict:
     """Register a webhook for real-time event delivery.
 
+    The node enforces: url must be `https://`; if `secret` is provided it
+    must be at least 16 characters. When `addresses` is non-empty, the
+    node only delivers events whose `addresses` array intersects this
+    list — use this for per-tenant / per-user webhook subscriptions.
+
     url: HTTPS endpoint to receive POST callbacks
-    filter: optional event filter dict
-    secret: optional HMAC secret for verifying webhook payloads
-    confirmed_delivery: if True, retry delivery until confirmed
+    event_types: optional list of event type names to subscribe to
+        (e.g. ["transfer", "settlement"]); omit for all event types
+    addresses: optional list of addresses to filter by; omit for no
+        restriction
+    secret: optional HMAC-SHA256 secret (≥16 characters when provided)
+        for verifying webhook payload signatures
     """
     params = {"url": url}
-    if filter:
-        params["filter"] = filter
+    if event_types:
+        params["event_types"] = event_types
+    if addresses:
+        params["addresses"] = addresses
     if secret:
         params["secret"] = secret
-    if confirmed_delivery:
-        params["confirmed_delivery"] = confirmed_delivery
     return _rpc("tenzro_registerWebhook", params)
 
 
@@ -1848,6 +1866,175 @@ def delete_webhook(webhook_id: str) -> dict:
     webhook_id: the webhook ID to remove
     """
     return _rpc("tenzro_deleteWebhook", {"webhook_id": webhook_id})
+
+
+# ── SLA Fault Detector ──────────────────────────────────────────
+
+
+def sla_issue_probe(provider_did: str, epoch: int, round_: int,
+                    deadline_ms: int) -> dict:
+    """Issue a VRF-bound liveness probe to a provider DID.
+
+    Validator-only. Computes a VRF output over (provider_did, epoch,
+    round), registers the probe in the validator's outstanding-probe
+    map, and broadcasts it on the `tenzro/sla` gossipsub topic.
+
+    On a non-validator node this returns JSON-RPC error
+    `-32000 SlaManager not initialized`.
+
+    provider_did: DID of the ModelProvider / TeeProvider being probed
+    epoch: validator epoch the probe is issued in
+    round_: probe round within the epoch
+    deadline_ms: Unix-millisecond timestamp by which the provider must
+        respond before the probe is considered missed
+    """
+    return _rpc("tenzro_slaIssueProbe", {
+        "provider_did": provider_did,
+        "epoch": epoch,
+        "round": round_,
+        "deadline_ms": deadline_ms,
+    })
+
+
+def sla_list_outstanding_probes() -> dict:
+    """List every in-flight probe awaiting a response from any
+    provider, regardless of issuer. Used by operators to spot probes
+    whose `deadline_ms` has already elapsed without a matching
+    response.
+    """
+    return _rpc("tenzro_slaListOutstandingProbes")
+
+
+def sla_get_params() -> dict:
+    """Read the fault-detector parameters this validator is using.
+
+    Returns:
+        - slash_threshold: number of missed probes before slashing
+          fires for a provider
+        - slash_amount_wei: per-crossing slash amount in wei (decimal
+          string)
+        - vrf_pubkey: 0x-prefixed hex of this validator's VRF public
+          key
+    """
+    return _rpc("tenzro_slaGetParams")
+
+
+# ── Snapshot (State Sync) ───────────────────────────────────────
+
+
+def list_snapshots() -> dict:
+    """List local snapshots (summary only, per-chunk hashes elided).
+
+    Use `get_snapshot_manifest(height)` to fetch the full manifest
+    including per-chunk SHA-256 hashes needed for verification.
+
+    Returns: { "snapshots": [ {height, state_root_hex, num_chunks, ...} ] }
+    """
+    return _rpc("tenzro_listSnapshots")
+
+
+def get_snapshot_manifest(height: int) -> dict:
+    """Fetch the full manifest for the snapshot at `height`, including
+    per-chunk SHA-256 hashes.
+
+    Returns the node's JSON-RPC error `-32004 no snapshot at height` if
+    no snapshot exists at that height.
+
+    Returns: SnapshotManifest with `height`, `state_root_hex`,
+    `num_chunks`, `chunk_hashes_hex[]`, `created_at`, `format`.
+    """
+    return _rpc("tenzro_getSnapshotManifest", {"height": int(height)})
+
+
+def get_snapshot_chunk(height: int, chunk_index: int) -> dict:
+    """Fetch one chunk by (height, chunk_index). The returned `data_b64`
+    is the base64-encoded chunk bytes; verify against
+    `manifest.chunk_hashes_hex[chunk_index]` before applying.
+
+    Returns: { "height", "chunk_index", "data_b64" }
+    """
+    return _rpc("tenzro_getSnapshotChunk", {
+        "height": int(height),
+        "chunk_index": int(chunk_index),
+    })
+
+
+def offer_snapshot(manifest: dict) -> dict:
+    """Register an inbound manifest from a peer.
+
+    IMPORTANT: The caller MUST verify `manifest.state_root_hex` against
+    a trusted QC at the same height before invoking this. This RPC just
+    registers the offer and provisions the spool directory; it does not
+    itself validate the manifest against chain state.
+
+    Returns: { "accepted": true, "height", "num_chunks" }
+    """
+    return _rpc("tenzro_offerSnapshot", manifest)
+
+
+def apply_snapshot_chunk(height: int, chunk_index: int,
+                         data_b64: str) -> dict:
+    """Write one inbound chunk. The chunk's SHA-256 is verified against
+    `manifest.chunk_hashes_hex[chunk_index]` before any disk write. On
+    the final chunk, all chunks are decoded and atomically committed
+    via `write_batch_sync`; `complete` will be `true` on that call.
+
+    Returns: { "complete": bool, "height", "chunk_index" }
+    """
+    return _rpc("tenzro_applySnapshotChunk", {
+        "height": int(height),
+        "chunk_index": int(chunk_index),
+        "data_b64": data_b64,
+    })
+
+
+# ── EIP-7702 (Set EOA Account Code) ─────────────────────────────
+
+
+def eip7702_signing_hash(chain_id: int, delegate_address: str,
+                         nonce: int) -> dict:
+    """Compute the secp256k1 signing hash for an EIP-7702 authorization
+    tuple (chain_id, delegate_address, nonce).
+
+    The returned `signing_hash` is what the EOA's secp256k1 private key
+    signs client-side. The full preimage is
+    `MAGIC(0x05) || rlp([chain_id, delegate_address, nonce])`.
+
+    Returns: { "signing_hash", "signing_data", "magic_byte": "0x05" }
+    """
+    return _rpc("tenzro_eip7702SigningHash", {
+        "chain_id": int(chain_id),
+        "delegate_address": delegate_address,
+        "nonce": int(nonce),
+    })
+
+
+def eip7702_build_designator(delegate_address: str) -> dict:
+    """Build the 23-byte EIP-7702 delegation designator
+    (`0xef0100 || delegate_address`) that gets written into the EOA's
+    code slot once an authorization is accepted.
+
+    Returns: { "designator", "length": 23, "prefix": "0xef0100",
+               "delegate_address" }
+    """
+    return _rpc("tenzro_eip7702BuildDesignator", {
+        "delegate_address": delegate_address,
+    })
+
+
+def eip7702_parse_designator(code: str) -> dict:
+    """Decode an account's `code` (hex with or without 0x prefix) and
+    extract the delegate address if it's a valid EIP-7702 designator.
+
+    Returns: { "is_designator": bool, "delegate_address": str | None }
+    """
+    return _rpc("tenzro_eip7702ParseDesignator", {"code": code})
+
+
+def eip7702_protocol_info() -> dict:
+    """Read static metadata about the EIP-7702 support surface (tx type,
+    magic byte, designator layout, signing scheme)."""
+    return _rpc("tenzro_eip7702ProtocolInfo")
 
 
 # ── Tools Registry ──────────────────────────────────────────────
@@ -1988,22 +2175,30 @@ def update_skill(skill_id: str, description: str = None,
 # ── Task Marketplace (Extended) ─────────────────────────────────
 
 
-def assign_task(task_id: str, provider: str) -> dict:
+def assign_task(task_id: str, provider: str, quoted_price_wei: int = None) -> dict:
     """Assign a task to a specific provider/agent.
 
     task_id: the task to assign
-    provider: provider address or agent ID to assign to
+    provider: provider address (hex) the task is assigned to
+    quoted_price_wei: optional — locks this price (as a decimal string)
+    on the task envelope; settled to the provider at `complete_task`.
+    Omit to settle at `max_price`.
     """
-    return _rpc("tenzro_assignTask", [{"task_id": task_id, "provider": provider}])
+    params = {"task_id": task_id, "provider": provider}
+    if quoted_price_wei is not None:
+        params["quoted_price"] = str(quoted_price_wei)
+    return _rpc("tenzro_assignTask", [params])
 
 
-def complete_task(task_id: str, result: str) -> dict:
-    """Submit the result for a completed task.
+def complete_task(task_id: str, output: str) -> dict:
+    """Submit the output for a completed task.
 
     task_id: the task being completed
-    result: result data or output text
+    output: result data or output text — the live RPC handler
+    reads `output` (not `result`); passing the wrong key silently
+    completes the task with an empty output and still settles funds.
     """
-    return _rpc("tenzro_completeTask", [{"task_id": task_id, "result": result}])
+    return _rpc("tenzro_completeTask", [{"task_id": task_id, "output": output}])
 
 
 def update_task(task_id: str, status: str = None,
@@ -2162,6 +2357,88 @@ def fund_agent(agent_id: str, amount_wei: int) -> dict:
     return _rpc("tenzro_fundAgent", {
         "agent_id": agent_id,
         "amount": str(amount_wei),
+    })
+
+
+def list_agent_jwks() -> dict:
+    """List the public JWK Set published by this node (RFC 7517 / RFC 9421
+    keyid resolution).
+
+    Each entry's `kid` is the canonical RFC 9421 keyid in the form
+    `<did>#<key_fragment>` and resolves directly via `get_agent_jwk`.
+    JSON-RPC mirror of `GET /.well-known/jwks.json`.
+    """
+    return _rpc("tenzro_listAgentJwks")
+
+
+def get_agent_jwk(keyid: str) -> dict:
+    """Look up a single JWK by `kid` (RFC 9421 keyid resolution).
+
+    keyid: typically `<did>#<key_fragment>`, or bare `did:tenzro:...`
+    to return the first compatible key.
+    """
+    return _rpc("tenzro_getAgentJwk", [keyid])
+
+
+def get_agent_daily_spend(agent_did: str) -> dict:
+    """Get the daily spend summary for a machine DID. Triggers a UTC-midnight
+    window reset if the wall-clock has rolled since the last recorded
+    transaction.
+
+    agent_did: the agent's DID
+
+    Returns `{agent_did, current_daily_spend, max_daily_spend, remaining,
+    last_reset}`.
+    """
+    return _rpc("tenzro_getAgentDailySpend", {"agent_did": agent_did})
+
+
+def get_capability_attestations(capability: str,
+                                 verified_only: bool = False) -> dict:
+    """Fetch every capability attestation registered on this node for
+    `capability`.
+
+    capability: short-form tag (`nlp`, `vision`, `code`, `data`,
+        `blockchain`, `smart_contract`, `api_integration`,
+        `coordination`) or any custom-capability name registered by
+        an agent.
+    verified_only: when True, the node re-runs query-time signature +
+        expiry checks before returning (defence in depth on top of
+        submit-time verification per #52).
+
+    Returns `{capability, verified_only, attestations: [...], total}`.
+    """
+    return _rpc("tenzro_getCapabilityAttestations", {
+        "capability": capability,
+        "verified_only": verified_only,
+    })
+
+
+def get_agent_capability_attestations(agent_id: str) -> dict:
+    """Fetch every capability attestation issued for a specific agent.
+
+    agent_id: the agent ID to look up
+
+    Returns `{agent_id, capabilities, attestations: [...],
+    total_attestations, registered_address}`.
+    """
+    return _rpc("tenzro_getAgentCapabilityAttestations", {
+        "agent_id": agent_id,
+    })
+
+
+def find_best_agent_for_capability(capability: str) -> dict:
+    """Pick the "best" agent on this node for `capability`. Selection
+    prefers the most recent TEE-backed attestation, falling back to any
+    agent that has registered the capability.
+
+    capability: short-form tag or custom-capability name.
+
+    Returns `{capability, best_agent, total_candidates}` where
+    `best_agent` is the chosen agent_id or None.
+    """
+    return _rpc("tenzro_findBestAgentForCapability", {
+        "capability": capability,
     })
 
 
@@ -4232,6 +4509,15 @@ def decide_approval(approval_id, decision, approver_did):
     })
 
 
+def get_approval(approval_id):
+    """Fetch a single approval record by id.
+
+    The engine lazy-transitions an expired `Pending` record to `Expired`
+    on this read path, so a returned `Pending` record is guaranteed to
+    still be live. Returns JSON-RPC `-32000` if the id is unknown."""
+    return _rpc("tenzro_getApproval", {"approval_id": approval_id})
+
+
 def exchange_token(
     subject_token,
     child_bearer_did,
@@ -4606,6 +4892,56 @@ def wormhole_bridge(source_chain: str, dest_chain: str, asset: str,
     })
 
 
+# ── Iroh (Content-Addressed Transport) ────────────────────────────
+#
+# Wraps the tenzro_iroh_* JSON-RPC namespace. The same shared
+# IrohBackedResolver backs the storage DA backend, training gradient
+# distribution, sealed-shard distribution, model-weight peer fetch,
+# the agent-memory archive DA path, and A2A-over-iroh.
+
+
+def iroh_get_info() -> dict:
+    """Return endpoint id, Pkarr relay, docs flag, and bound ALPNs."""
+    return _rpc("tenzro_iroh_getInfo", {})
+
+
+def iroh_get_endpoint_id() -> dict:
+    """Return just the iroh EndpointId (z-base-32 + 32-byte hex)."""
+    return _rpc("tenzro_iroh_getEndpointId", {})
+
+
+def iroh_list_alpns() -> dict:
+    """List ALPNs bound on the shared iroh router."""
+    return _rpc("tenzro_iroh_listAlpns", {})
+
+
+def iroh_publish_blob(data: bytes) -> dict:
+    """Publish raw bytes as a tenzro://blob/<blake3-hex> URI.
+
+    `data` is base64-encoded on the wire; the response includes
+    `tenzro_uri`, `blake3_hex`, and `size_bytes`.
+    """
+    import base64
+    b64 = base64.b64encode(data).decode("ascii")
+    return _rpc("tenzro_iroh_publishBlob", {"bytes_b64": b64})
+
+
+def iroh_fetch_blob(tenzro_uri: str) -> bytes:
+    """Fetch a tenzro://{blob,model,gradient,shard,receipt}/... URI to bytes.
+
+    Returns the decoded payload (the base64 envelope on the wire is
+    unwrapped here so callers get raw bytes back).
+    """
+    import base64
+    resp = _rpc("tenzro_iroh_fetchBlob", {"tenzro_uri": tenzro_uri})
+    return base64.b64decode(resp.get("bytes_b64", ""))
+
+
+def iroh_resolve(tenzro_uri: str) -> bytes:
+    """Alias for iroh_fetch_blob for code that thinks of the URI as a name."""
+    return iroh_fetch_blob(tenzro_uri)
+
+
 # ── CCT (Chainlink Cross-Chain Token) Pool Registry ──────────────
 
 
@@ -4660,20 +4996,27 @@ def list_vision_models() -> dict:
 
 def vision_embed(model_id: str, image_b64: str,
                  normalize: bool = True) -> dict:
-    """Embed a base64-encoded image with the named vision encoder."""
-    return _rpc("tenzro_visionEmbed", {
+    """Embed a base64-encoded image with the named vision encoder.
+
+    Returns a dense embedding vector (e.g. 768-dim for DINOv3-base).
+    """
+    return _rpc("tenzro_imageEmbed", {
         "model_id": model_id,
-        "image_b64": image_b64,
+        "image_base64": image_b64,
         "normalize": normalize,
     })
 
 
-def vision_similarity(model_id: str, image_b64: str, text: str) -> dict:
-    """Cosine similarity between an image embedding and a text prompt."""
-    return _rpc("tenzro_visionSimilarity", {
-        "model_id": model_id,
-        "image_b64": image_b64,
-        "text": text,
+def vision_similarity(image_embedding: list, text_embedding: list) -> dict:
+    """Pure cosine similarity between two embeddings.
+
+    Pass two vectors of identical dimension — typically an image embedding
+    from `vision_embed` and a text embedding from the matching text encoder
+    (CLIP / SigLIP text tower). No model is loaded — pure math.
+    """
+    return _rpc("tenzro_imageTextSimilarity", {
+        "image_embedding": image_embedding,
+        "text_embedding": text_embedding,
     })
 
 
@@ -4786,6 +5129,185 @@ def video_embed(model_id: str, video_b64: str,
         "video_b64": video_b64,
         "frame_stride": frame_stride,
     })
+
+
+# Multi-modal load / unload --------------------------------------------
+#
+# Symmetric load/unload pair per modality. `load_*_model` registers an
+# ONNX file with the node's runtime; `unload_*_model` drops the ORT
+# session. For wave-1 stubbed modalities (text-embed, segmentation,
+# detection, video) the underlying RPC handler returns JSON-RPC -32004
+# until the ONNX loader for that modality lands — wrappers are exposed
+# for surface symmetry so agent code can detect availability uniformly.
+
+
+def load_forecast_model(model_id: str, path: str, context_length: int,
+                        max_horizon: int, output_name: str = None,
+                        batch_size: int = None) -> dict:
+    """Load a forecast (timeseries) ONNX. For TimesFM 2.5 transformers export pass output_name + batch_size=2."""
+    params = {
+        "model_id": model_id,
+        "path": path,
+        "context_length": context_length,
+        "max_horizon": max_horizon,
+    }
+    if output_name is not None:
+        params["output_name"] = output_name
+    if batch_size is not None:
+        params["batch_size"] = batch_size
+    return _rpc("tenzro_loadForecastModel", params)
+
+
+def unload_forecast_model(model_id: str) -> dict:
+    """Drop a registered forecast model from the node."""
+    return _rpc("tenzro_unloadForecastModel", {"model_id": model_id})
+
+
+def load_vision_model(model_id: str, path: str, catalog_id: str = None,
+                      input_size: int = None, embedding_dim: int = None,
+                      normalization: str = None) -> dict:
+    """Load a vision encoder ONNX. Pass catalog_id to inherit input_size/embedding_dim/normalization."""
+    params = {"model_id": model_id, "path": path}
+    if catalog_id is not None: params["catalog_id"] = catalog_id
+    if input_size is not None: params["input_size"] = input_size
+    if embedding_dim is not None: params["embedding_dim"] = embedding_dim
+    if normalization is not None: params["normalization"] = normalization
+    return _rpc("tenzro_loadVisionModel", params)
+
+
+def unload_vision_model(model_id: str) -> dict:
+    """Drop a registered vision encoder."""
+    return _rpc("tenzro_unloadVisionModel", {"model_id": model_id})
+
+
+def load_text_embedding_model(model_id: str, path: str,
+                              catalog_id: str = None) -> dict:
+    """Load a text-embedding ONNX. Wave-1 stub: returns -32004 until ONNX loader lands."""
+    params = {"model_id": model_id, "path": path}
+    if catalog_id is not None: params["catalog_id"] = catalog_id
+    return _rpc("tenzro_loadTextEmbeddingModel", params)
+
+
+def unload_text_embedding_model(model_id: str) -> dict:
+    """Drop a registered text encoder."""
+    return _rpc("tenzro_unloadTextEmbeddingModel", {"model_id": model_id})
+
+
+def load_segmentation_model(model_id: str, encoder_path: str,
+                            decoder_path: str, family: str = None,
+                            catalog_id: str = None) -> dict:
+    """Load a segmenter (SAM 2 / EdgeSAM / MobileSAM). Wave-1 stub."""
+    params = {
+        "model_id": model_id,
+        "encoder_path": encoder_path,
+        "decoder_path": decoder_path,
+    }
+    if family is not None: params["family"] = family
+    if catalog_id is not None: params["catalog_id"] = catalog_id
+    return _rpc("tenzro_loadSegmentationModel", params)
+
+
+def unload_segmentation_model(model_id: str) -> dict:
+    """Drop a registered segmenter."""
+    return _rpc("tenzro_unloadSegmentationModel", {"model_id": model_id})
+
+
+def load_detection_model(model_id: str, path: str, family: str = None,
+                         catalog_id: str = None) -> dict:
+    """Load a detector (RF-DETR / D-FINE). Wave-1 stub."""
+    params = {"model_id": model_id, "path": path}
+    if family is not None: params["family"] = family
+    if catalog_id is not None: params["catalog_id"] = catalog_id
+    return _rpc("tenzro_loadDetectionModel", params)
+
+
+def unload_detection_model(model_id: str) -> dict:
+    """Drop a registered detector."""
+    return _rpc("tenzro_unloadDetectionModel", {"model_id": model_id})
+
+
+def load_audio_model(model_id: str, encoder_path: str, decoder_path: str,
+                     tokenizer_path: str, catalog_id: str = None,
+                     family: str = None, max_audio_seconds: int = None,
+                     whisper_variant: str = None) -> dict:
+    """Load an ASR model. Pass catalog_id to inherit family/max_audio_seconds/whisper_variant."""
+    params = {
+        "model_id": model_id,
+        "encoder_path": encoder_path,
+        "decoder_path": decoder_path,
+        "tokenizer_path": tokenizer_path,
+    }
+    if catalog_id is not None: params["catalog_id"] = catalog_id
+    if family is not None: params["family"] = family
+    if max_audio_seconds is not None: params["max_audio_seconds"] = max_audio_seconds
+    if whisper_variant is not None: params["whisper_variant"] = whisper_variant
+    return _rpc("tenzro_loadAudioModel", params)
+
+
+def unload_audio_model(model_id: str) -> dict:
+    """Drop a registered ASR model."""
+    return _rpc("tenzro_unloadAudioModel", {"model_id": model_id})
+
+
+def load_video_model(model_id: str, path: str,
+                     catalog_id: str = None) -> dict:
+    """Load a video encoder ONNX. Wave-1 stub: catalog ships empty pending license clearance."""
+    params = {"model_id": model_id, "path": path}
+    if catalog_id is not None: params["catalog_id"] = catalog_id
+    return _rpc("tenzro_loadVideoModel", params)
+
+
+def unload_video_model(model_id: str) -> dict:
+    """Drop a registered video encoder."""
+    return _rpc("tenzro_unloadVideoModel", {"model_id": model_id})
+
+
+# Agent memory tier ----------------------------------------------------
+
+
+def memory_grant(agent_did: str, text: str, kind: str = "granted",
+                 source: str = "controller", metadata: dict = None) -> dict:
+    """Grant a memory to an agent. Embeds via TextEmbeddingRuntime + writes to Lance + Tantivy."""
+    params = {
+        "agent_did": agent_did,
+        "text": text,
+        "kind": kind,
+        "source": source,
+    }
+    if metadata is not None:
+        params["metadata"] = metadata
+    return _rpc("tenzro_memoryGrant", params)
+
+
+def memory_recall(agent_did: str, query: str, mode: str = "hybrid",
+                  limit: int = 10, kind: str = None) -> dict:
+    """Recall memories via vector kNN / BM25 / hybrid RRF (k=60). mode in {'vector','text','hybrid'}."""
+    params = {
+        "agent_did": agent_did,
+        "query": query,
+        "mode": mode,
+        "limit": limit,
+    }
+    if kind is not None:
+        params["kind"] = kind
+    return _rpc("tenzro_memoryRecall", params)
+
+
+def memory_archive(agent_did: str, record_id: str) -> dict:
+    """Archive a memory: pushes payload to DA backend, rewrites on-tier row as kind='archived' + pointer."""
+    return _rpc("tenzro_memoryArchive", {
+        "agent_did": agent_did,
+        "record_id": record_id,
+    })
+
+
+def list_memory_records(agent_did: str, limit: int = None,
+                        kind: str = None) -> dict:
+    """List newest-first memories for an agent; optional kind filter."""
+    params = {"agent_did": agent_did}
+    if limit is not None: params["limit"] = limit
+    if kind is not None: params["kind"] = kind
+    return _rpc("tenzro_listMemoryRecords", params)
 
 
 # ── AgentBond (Spec 9) ────────────────────────────────────────────
@@ -5051,6 +5573,89 @@ def get_network_activity(window: str = None,
     return _rpc("tenzro_getNetworkActivity", params)
 
 
+# ── ERC-7683 cross-chain intents (Spec 4) ─────────────────────────
+
+
+def get_7683_order(order_id: str) -> dict:
+    """Fetch a Tenzro7683Order envelope by 32-byte hex `order_id`.
+
+    Returns the persisted envelope from the `7683_origin:` keyspace.
+    Order state machine: Open → AwaitingProof → Settled / Refunded /
+    ForceRefundEligible.
+    """
+    return _rpc("tenzro_get7683Order", {"order_id": order_id})
+
+
+def list_7683_orders(state: str = None,
+                     dest_chain: int = None,
+                     limit: int = None) -> dict:
+    """Paginated scan of persisted ERC-7683 cross-chain orders.
+
+    `state` filters by one of: open, awaiting_proof, settled, refunded,
+    force_refund_eligible. `dest_chain` is the CAIP-2 numeric destination
+    chain id. Returns `{ orders: [...], count: N }`.
+    """
+    params: dict = {}
+    if state is not None:
+        params["state"] = state
+    if dest_chain is not None:
+        params["dest_chain"] = dest_chain
+    if limit is not None:
+        params["limit"] = limit
+    return _rpc("tenzro_list7683Orders", params)
+
+
+def record_fill_7683(order_id: str,
+                     origin_chain_id: int,
+                     origin_settler: str,
+                     filler: str,
+                     recipient: str,
+                     fill_tx_hash: str,
+                     filled_at_ms: int,
+                     proof_route: str,
+                     outputs: list) -> dict:
+    """Destination-side commit of an ERC-7683 FillRecord.
+
+    `proof_route` is one of: layerzero, wormhole, debridge, hyperlane.
+    `outputs` is a list of `{ token, amount, recipient, chain_id }`.
+    Single-shot per `order_id` — duplicate returns JSON-RPC -32010
+    (OrderAlreadyFilled).
+    """
+    return _rpc("tenzro_recordFill7683", {
+        "order_id": order_id,
+        "origin_chain_id": origin_chain_id,
+        "origin_settler": origin_settler,
+        "filler": filler,
+        "recipient": recipient,
+        "fill_tx_hash": fill_tx_hash,
+        "filled_at_ms": filled_at_ms,
+        "proof_route": proof_route,
+        "outputs": outputs,
+    })
+
+
+def get_fill_7683(order_id: str, origin_chain_id: int) -> dict:
+    """Fetch a FillRecord by (order_id, origin_chain_id).
+
+    Returns the record JSON, or JSON-RPC -32000 if no fill has been
+    recorded for this order.
+    """
+    return _rpc("tenzro_getFill7683", {
+        "order_id": order_id,
+        "origin_chain_id": origin_chain_id,
+    })
+
+
+def list_fills_7683() -> dict:
+    """List every recorded destination-side FillRecord on this node.
+
+    Returns `{ fills: [...], count: N }` with no pagination — the
+    registry is bounded (one FillRecord per cross-chain order ever
+    filled here).
+    """
+    return _rpc("tenzro_listFills7683", {})
+
+
 # ── Escrow listing ────────────────────────────────────────────────
 
 
@@ -5275,6 +5880,77 @@ def list_disputes_by_channel(channel_id: str) -> dict:
     return _rpc("tenzro_listDisputesByChannel", {"channel_id": channel_id})
 
 
+# ── Validator registry (read-only) ────────────────────────────────
+
+
+def get_validator_state(address: str) -> dict:
+    """Fetch a single validator's registry entry by 32-byte address.
+
+    `address` is hex-encoded (with or without `0x` prefix) on the request
+    path. The response's `address` / `withdrawal_address` are
+    base58-encoded; pubkeys are plain hex without `0x`. Returns `null`
+    if the address is not registered.
+    """
+    return _rpc("tenzro_getValidatorState", {"address": address})
+
+
+def list_validators(status: str = None) -> dict:
+    """List validators, optionally filtered by status.
+
+    Status is one of: Active / Candidate / PendingActive / PendingExit
+    / Exited / Jailed. Returns `{ count, validators: [...] }`.
+    """
+    params = {"status": status} if status else {}
+    return _rpc("tenzro_listValidators", params)
+
+
+def list_active_validators() -> dict:
+    """List only the currently-Active validators producing blocks.
+
+    Convenience over `list_validators("Active")`. Returns the same
+    `{ count, validators: [...] }` shape.
+    """
+    return _rpc("tenzro_listActiveValidators", {})
+
+
+# ── Tenzro Train read-side inspection ─────────────────────────────
+
+
+def training_list_runs() -> dict:
+    """List every active training run this node is syncing.
+
+    Returns `{ runs: [...] }`. Each run carries task_id, current_round,
+    state_root, status, enrolled_trainers, and timestamps.
+    """
+    return _rpc("tenzro_training_listRuns", {})
+
+
+def training_get_run(task_id: str) -> dict:
+    """Look up a single training run by task_id.
+
+    Throws JSON-RPC -32602 if the run is unknown.
+    """
+    return _rpc("tenzro_training_getRun", {"task_id": task_id})
+
+
+def training_get_receipt(task_id: str) -> dict:
+    """Fetch the sealed receipt for a finalized training run.
+
+    Returns `null` when the run is still active (no receipt has been
+    written yet).
+    """
+    return _rpc("tenzro_training_getReceipt", {"task_id": task_id})
+
+
+def training_get_sealed_manifest(task_id: str) -> dict:
+    """Fetch the installed sealed-shard manifest for a Confidential-tier task.
+
+    Returns `null` when no manifest has been installed (Open and Verified
+    tiers never have a manifest).
+    """
+    return _rpc("tenzro_training_getSealedManifest", {"task_id": task_id})
+
+
 # ── CLI ───────────────────────────────────────────────────────────
 
 COMMANDS = {
@@ -5367,10 +6043,13 @@ COMMANDS = {
     ),
     "get_task": lambda args: get_task(args[0]),
     "cancel_task": lambda args: cancel_task(args[0]),
-    "submit_quote": lambda args: submit_quote(
-        args[0], int(args[1]),
-        args[2] if len(args) > 2 else None,
-        int(args[3]) if len(args) > 3 else None,
+    "quote_task": lambda args: quote_task(
+        args[0],                                                 # task_id
+        args[1],                                                 # provider address
+        int(args[2]),                                            # price_wei
+        args[3] if len(args) > 3 else None,                      # model_id
+        int(args[4]) if len(args) > 4 else None,                 # confidence
+        int(args[5]) if len(args) > 5 else None,                 # estimated_duration_secs
     ),
     # Agent Templates
     "list_agent_templates": lambda args: list_agent_templates(
@@ -5686,11 +6365,37 @@ COMMANDS = {
     "get_event_status": lambda args: get_event_status(),
     "register_webhook": lambda args: register_webhook(
         args[0],
-        None,
-        args[1] if len(args) > 1 else "",
+        args[1] if len(args) > 1 else None,
+        args[2] if len(args) > 2 else None,
+        args[3] if len(args) > 3 else "",
     ),
     "list_webhooks": lambda args: list_webhooks(),
     "delete_webhook": lambda args: delete_webhook(args[0]),
+    # SLA Fault Detector
+    "sla_issue_probe": lambda args: sla_issue_probe(
+        args[0], int(args[1]), int(args[2]), int(args[3]),
+    ),
+    "sla_list_outstanding_probes": lambda args: sla_list_outstanding_probes(),
+    "sla_get_params": lambda args: sla_get_params(),
+    # Snapshot (State Sync)
+    "list_snapshots": lambda args: list_snapshots(),
+    "get_snapshot_manifest": lambda args: get_snapshot_manifest(int(args[0])),
+    "get_snapshot_chunk": lambda args: get_snapshot_chunk(
+        int(args[0]), int(args[1]),
+    ),
+    "offer_snapshot": lambda args: offer_snapshot(
+        args[0] if isinstance(args[0], dict) else json.loads(args[0]),
+    ),
+    "apply_snapshot_chunk": lambda args: apply_snapshot_chunk(
+        int(args[0]), int(args[1]), args[2],
+    ),
+    # ── EIP-7702 ──
+    "eip7702_signing_hash": lambda args: eip7702_signing_hash(
+        int(args[0]), args[1], int(args[2]),
+    ),
+    "eip7702_build_designator": lambda args: eip7702_build_designator(args[0]),
+    "eip7702_parse_designator": lambda args: eip7702_parse_designator(args[0]),
+    "eip7702_protocol_info": lambda args: eip7702_protocol_info(),
     # ── Ecosystem: Solana ──
     "solana_swap": lambda args: solana_swap(
         args[0], args[1], int(args[2]),
@@ -5937,6 +6642,7 @@ COMMANDS = {
     "revoke_did": lambda args: revoke_did(args[0], args[1] if len(args) > 1 else "revoked"),
     "list_pending_approvals": lambda args: list_pending_approvals(args[0]),
     "decide_approval": lambda args: decide_approval(args[0], args[1], args[2]),
+    "get_approval": lambda args: get_approval(args[0]),
     # ── AP2 (Agent Payments Protocol) ──
     "ap2_protocol_info": lambda args: ap2_protocol_info(),
     "ap2_sign_mandate": lambda args: ap2_sign_mandate(
@@ -6033,7 +6739,7 @@ COMMANDS = {
         args[0], args[1],
         args[2].lower() != "false" if len(args) > 2 else True,
     ),
-    "vision_similarity": lambda args: vision_similarity(args[0], args[1], args[2]),
+    "vision_similarity": lambda args: vision_similarity(json.loads(args[0]), json.loads(args[1])),
     "list_text_embedding_catalog": lambda args: list_text_embedding_catalog(),
     "list_text_embedding_models": lambda args: list_text_embedding_models(),
     "text_embed": lambda args: text_embed(
@@ -6062,6 +6768,70 @@ COMMANDS = {
     "video_embed": lambda args: video_embed(
         args[0], args[1],
         int(args[2]) if len(args) > 2 else 30,
+    ),
+    # ── Multi-modal load / unload (surface symmetry) ──
+    "load_forecast_model": lambda args: load_forecast_model(
+        args[0], args[1], int(args[2]), int(args[3]),
+        args[4] if len(args) > 4 and args[4] else None,
+        int(args[5]) if len(args) > 5 and args[5] else None,
+    ),
+    "unload_forecast_model": lambda args: unload_forecast_model(args[0]),
+    "load_vision_model": lambda args: load_vision_model(
+        args[0], args[1],
+        catalog_id=args[2] if len(args) > 2 and args[2] else None,
+        input_size=int(args[3]) if len(args) > 3 and args[3] else None,
+        embedding_dim=int(args[4]) if len(args) > 4 and args[4] else None,
+        normalization=args[5] if len(args) > 5 and args[5] else None,
+    ),
+    "unload_vision_model": lambda args: unload_vision_model(args[0]),
+    "load_text_embedding_model": lambda args: load_text_embedding_model(
+        args[0], args[1],
+        catalog_id=args[2] if len(args) > 2 and args[2] else None,
+    ),
+    "unload_text_embedding_model": lambda args: unload_text_embedding_model(args[0]),
+    "load_segmentation_model": lambda args: load_segmentation_model(
+        args[0], args[1], args[2],
+        family=args[3] if len(args) > 3 and args[3] else None,
+        catalog_id=args[4] if len(args) > 4 and args[4] else None,
+    ),
+    "unload_segmentation_model": lambda args: unload_segmentation_model(args[0]),
+    "load_detection_model": lambda args: load_detection_model(
+        args[0], args[1],
+        family=args[2] if len(args) > 2 and args[2] else None,
+        catalog_id=args[3] if len(args) > 3 and args[3] else None,
+    ),
+    "unload_detection_model": lambda args: unload_detection_model(args[0]),
+    "load_audio_model": lambda args: load_audio_model(
+        args[0], args[1], args[2], args[3],
+        catalog_id=args[4] if len(args) > 4 and args[4] else None,
+        family=args[5] if len(args) > 5 and args[5] else None,
+        max_audio_seconds=int(args[6]) if len(args) > 6 and args[6] else None,
+        whisper_variant=args[7] if len(args) > 7 and args[7] else None,
+    ),
+    "unload_audio_model": lambda args: unload_audio_model(args[0]),
+    "load_video_model": lambda args: load_video_model(
+        args[0], args[1],
+        catalog_id=args[2] if len(args) > 2 and args[2] else None,
+    ),
+    "unload_video_model": lambda args: unload_video_model(args[0]),
+    # ── Agent memory tier ──
+    "memory_grant": lambda args: memory_grant(
+        args[0], args[1],
+        kind=args[2] if len(args) > 2 and args[2] else "granted",
+        source=args[3] if len(args) > 3 and args[3] else "controller",
+        metadata=json.loads(args[4]) if len(args) > 4 and args[4] else None,
+    ),
+    "memory_recall": lambda args: memory_recall(
+        args[0], args[1],
+        mode=args[2] if len(args) > 2 and args[2] else "hybrid",
+        limit=int(args[3]) if len(args) > 3 and args[3] else 10,
+        kind=args[4] if len(args) > 4 and args[4] else None,
+    ),
+    "memory_archive": lambda args: memory_archive(args[0], args[1]),
+    "list_memory_records": lambda args: list_memory_records(
+        args[0],
+        limit=int(args[1]) if len(args) > 1 and args[1] else None,
+        kind=args[2] if len(args) > 2 and args[2] else None,
     ),
     # ── AgentBond (Spec 9) ──
     "get_agent_bond": lambda args: get_agent_bond(args[0]),
@@ -6100,9 +6870,38 @@ COMMANDS = {
         args[0] if args else None,
         args[1].lower() == "true" if len(args) > 1 else False,
     ),
+    # ── ERC-7683 cross-chain intent settler (Spec 4) ──
+    "get_7683_order": lambda args: get_7683_order(args[0]),
+    "list_7683_orders": lambda args: list_7683_orders(
+        state=args[0] if len(args) > 0 and args[0] else None,
+        dest_chain=int(args[1]) if len(args) > 1 and args[1] else None,
+        limit=int(args[2]) if len(args) > 2 and args[2] else None,
+    ),
+    "record_fill_7683": lambda args: record_fill_7683(
+        order_id=args[0],
+        origin_chain_id=int(args[1]),
+        origin_settler=args[2],
+        filler=args[3],
+        recipient=args[4],
+        fill_tx_hash=args[5],
+        filled_at_ms=int(args[6]),
+        proof_route=args[7],
+        outputs=json.loads(args[8]),
+    ),
+    "get_fill_7683": lambda args: get_fill_7683(args[0], int(args[1])),
+    "list_fills_7683": lambda args: list_fills_7683(),
     # ── Escrow listing ──
     "list_escrows_by_payer": lambda args: list_escrows_by_payer(args[0]),
     "list_escrows_by_payee": lambda args: list_escrows_by_payee(args[0]),
+    # ── Validator registry (read-only) ──
+    "get_validator_state": lambda args: get_validator_state(args[0]),
+    "list_validators": lambda args: list_validators(args[0] if args else None),
+    "list_active_validators": lambda args: list_active_validators(),
+    # ── Tenzro Train (read-side inspection) ──
+    "training_list_runs": lambda args: training_list_runs(),
+    "training_get_run": lambda args: training_get_run(args[0]),
+    "training_get_receipt": lambda args: training_get_receipt(args[0]),
+    "training_get_sealed_manifest": lambda args: training_get_sealed_manifest(args[0]),
     # ── Burn quota & mempool (Specs 3 + 6) ──
     "get_burn_quota": lambda args: get_burn_quota(),
     "get_mempool_stats": lambda args: get_mempool_stats(),
@@ -6135,6 +6934,18 @@ COMMANDS = {
     "get_provenance": lambda args: get_provenance(args[0]),
     "get_dispute": lambda args: get_dispute(args[0]),
     "list_disputes_by_channel": lambda args: list_disputes_by_channel(args[0]),
+    # ── Agent JWKs, daily spend, capability attestations ──
+    "list_agent_jwks": lambda args: list_agent_jwks(),
+    "get_agent_jwk": lambda args: get_agent_jwk(args[0]),
+    "get_agent_daily_spend": lambda args: get_agent_daily_spend(args[0]),
+    "get_capability_attestations": lambda args: get_capability_attestations(
+        args[0],
+        args[1].lower() == "true" if len(args) > 1 else False,
+    ),
+    "get_agent_capability_attestations": lambda args:
+        get_agent_capability_attestations(args[0]),
+    "find_best_agent_for_capability": lambda args:
+        find_best_agent_for_capability(args[0]),
 }
 
 

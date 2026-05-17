@@ -320,7 +320,7 @@ The Python trainer is a thin agent that:
 2. Subscribes to the `tenzro/training` gossip topic.
 3. On task assignment, downloads the dataset shard, runs H inner SGD steps with the appropriate inner optimizer, and emits its outer gradient as a safetensors blob.
 4. Submits the safetensors blob + signature to the Rust syncer over JSON-RPC (`tenzro_training_submitOuterGradient`).
-5. Listens for round-completion events on `tenzro/training/syncer/1.0.0` and pulls updated fragments back from the syncer.
+5. Listens for round-completion events on `tenzro/training/syncer` and pulls updated fragments back from the syncer.
 
 The trainer can run anywhere Python + PyTorch run, including inside a TEE (Verified / Confidential tiers). The Rust syncer never touches a tensor; it only verifies signatures, runs the chosen aggregation rule over decoded `ndarray` views, applies the outer optimizer, and commits the result on-chain.
 
@@ -328,7 +328,7 @@ The trainer can run anywhere Python + PyTorch run, including inside a TEE (Verif
 
 - **`tenzro-types`** — add `TrainingTask`, `OuterGradient`, `TrainingReceipt`, `ArchitectureSpec`, `TrainingTier` types.
 - **`tenzro-storage`** — add `CF_TRAINING_RUNS`, `CF_TRAINING_RECEIPTS` column families.
-- **`tenzro-network`** — add gossipsub topic `tenzro/training` for outer gradient broadcast and `tenzro/training/syncer/1.0.0` for syncer state roots.
+- **`tenzro-network`** — add gossipsub topic `tenzro/training` for outer gradient broadcast and `tenzro/training/syncer` for syncer state roots.
 - **`tenzro-token`** — add `TrainerCapability` to staking; add `SyncerCapability` for elected syncers.
 - **`tenzro-vm`** — add precompile `0x1008` (TRAINING_VERIFY) for fraud-proof verification on-chain. Phase 1 ships the precompile shell; Phase 2 lights up full re-aggregation verification.
 - **`tenzro-node`** — RPC namespace `tenzro_training_*`: `postTrainingTask`, `enrollTrainer`, `submitOuterGradient`, `getTrainingRun`, `getTrainingReceipt`, `challengeStateRoot`.

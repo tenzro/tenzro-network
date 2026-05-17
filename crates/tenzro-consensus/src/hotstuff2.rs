@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::time::sleep;
+use tenzro_crypto::bls::BlsKeyPair;
 use tenzro_crypto::composite::{CompositePublicKey, HybridSigner, InMemoryHybridSigner};
 use tenzro_crypto::pq::MlDsaSigningKey;
 use tenzro_crypto::signatures::Ed25519SignerImpl;
@@ -40,10 +41,15 @@ use tenzro_types::primitives::{Address, BlockHeight, Hash};
 use tenzro_types::transaction::{Transaction, SignedTransaction};
 
 /// Cap on the exponent applied to [`ViewChangeTimer::on_timeout`]. With
-/// `backoff_multiplier = 2.0`, a cap of 4 means the backoff saturates at
-/// `base × 2^4 = 16×` base before being clamped further by `max_timeout`.
-/// See `ViewChangeTimer::on_timeout` for the rationale (task #164).
-const MAX_BACKOFF_EXPONENT: u32 = 4;
+/// `backoff_multiplier = 2.0` and `base_timeout = 1000ms`, a cap of 3 yields
+/// the schedule `1s → 2s → 4s → 8s` (saturated). Short cap matches Aptos
+/// AptosBFTv4 / CometBFT production tuning — long view timeouts on a
+/// multi-region fleet cause a pacemaker race where the proposer's block
+/// reaches nearby peers in time but distant peers (cross-Pacific RTT
+/// ~180ms) have already timed out and broadcast `TimeoutMsg`. The
+/// `max_timeout` constant in `HotStuff2Engine::new` provides an absolute
+/// 8-second ceiling on top of this exponent cap.
+const MAX_BACKOFF_EXPONENT: u32 = 3;
 
 /// Trait for providing the current state root to the block proposer.
 ///
@@ -262,6 +268,13 @@ pub struct HotStuff2Engine {
     /// classical-only fallback.
     pq_signing_key: Arc<MlDsaSigningKey>,
 
+    /// Node's BLS12-381 (min_pk) keypair. Used for the third signature leg
+    /// emitted with every vote (`Vote.bls_signature`); per-vote BLS sigs at a
+    /// given (view, height, block, vote_type) aggregate into the QC's
+    /// `bls_aggregate` 96-byte G2 point. Mandatory — there is no fallback to
+    /// classical-only or hybrid-only QCs.
+    bls_signing_key: Arc<BlsKeyPair>,
+
     /// Cached composite public key (classical + ML-DSA-65 verifying key) that
     /// is embedded into every vote this node casts. Validators receiving the
     /// vote bind this against the registered hybrid key for the voter address.
@@ -396,11 +409,14 @@ impl HotStuff2Engine {
     ///
     /// `keypair` is the classical Ed25519 keypair (for the address and the
     /// classical leg of the composite signature). `pq_signing_key` is the
-    /// ML-DSA-65 (FIPS 204) signing key for the post-quantum leg. Both are
-    /// **mandatory** under Wave 3d — there is no classical-only fallback path.
+    /// ML-DSA-65 (FIPS 204) signing key for the post-quantum leg.
+    /// `bls_signing_key` is the BLS12-381 (min_pk) keypair for the third leg
+    /// that aggregates into the QC `bls_aggregate`. All three are **mandatory**
+    /// — there is no classical-only or hybrid-only fallback path.
     pub fn new(
         keypair: KeyPair,
         pq_signing_key: MlDsaSigningKey,
+        bls_signing_key: BlsKeyPair,
         config: ConsensusConfig,
         epoch_manager: EpochManager,
     ) -> Self {
@@ -419,14 +435,18 @@ impl HotStuff2Engine {
         let initial_height = finality_tracker.finalized_height() + 1u64;
         let view_state = ViewState::new(0, initial_height);
 
-        // Create view timer with base timeout from config and max of 60 seconds
+        // Create view timer with base timeout from config and an absolute
+        // 8-second ceiling. The exponent cap (`MAX_BACKOFF_EXPONENT = 3`)
+        // alone yields `base × 2^3 = 8×` base; for the default 1s base this
+        // is 8s. The explicit `max_timeout` here is the safety floor in case
+        // a deployment overrides `view_timeout_ms` upward.
         let base_timeout = config.view_timeout();
-        let max_timeout = Duration::from_secs(60);
+        let max_timeout = Duration::from_secs(8);
         let view_timer = ViewChangeTimer::new(base_timeout, max_timeout);
 
         let composite_public_key = CompositePublicKey::new(
             keypair.public_key().clone(),
-            Some(pq_signing_key.verifying_key_bytes().to_vec()),
+            pq_signing_key.verifying_key_bytes().to_vec(),
         );
 
         // Resolve proposer-election strategy from config. The `Reputation`
@@ -449,6 +469,7 @@ impl HotStuff2Engine {
         Self {
             keypair: Arc::new(keypair),
             pq_signing_key: Arc::new(pq_signing_key),
+            bls_signing_key: Arc::new(bls_signing_key),
             composite_public_key,
             address,
             config,
@@ -543,6 +564,56 @@ impl HotStuff2Engine {
     /// `tenzro_getMempoolLane`) without going through this engine.
     pub fn mempool(&self) -> &Arc<Mempool> {
         &self.mempool
+    }
+
+    /// Snapshot of the highest view at which this replica has observed a
+    /// Prepare QC. Monotonic; 0 means "no QC observed yet" (genesis).
+    ///
+    /// Used by the HTTP `/ready` endpoint to gate liveness on consensus
+    /// progress: a pod that has caught up on block height but whose
+    /// `high_qc_view` lags the network is still mid-bootstrap and must
+    /// not be marked Ready.
+    pub fn high_qc_view(&self) -> u64 {
+        *self.high_qc_view.read()
+    }
+
+    /// Snapshot of the local view counter. Read-only — use carefully
+    /// (the view advances asynchronously as messages arrive).
+    pub fn current_view(&self) -> u64 {
+        self.view_state.read().view
+    }
+
+    /// Returns `true` if this replica is the elected leader for *any* of
+    /// the next `lookahead_views` consecutive views. Used by the
+    /// `tenzro_gracefulExit` admin RPC to wait until we can step down
+    /// without forcing a TC round on the next leader rotation.
+    ///
+    /// Conservative: if leader election fails for any view in the window
+    /// (e.g. validator set unknown), returns `true` so the operator
+    /// keeps waiting rather than exiting blindly.
+    pub fn is_leader_in_next_views(&self, lookahead_views: u64) -> bool {
+        let base_view = self.view_state.read().view;
+        let validator_set = self.validator_set();
+        let epoch = self.epoch_manager.current_epoch().number;
+        let finalized_height = self.finality_tracker.finalized_height();
+        let prev_block_id = self
+            .finality_tracker
+            .get_finalized_hash(finalized_height)
+            .map(|h| h.0)
+            .unwrap_or([0u8; 32]);
+
+        for offset in 0..lookahead_views {
+            let view = base_view.saturating_add(offset);
+            match self
+                .proposer_election
+                .select_leader(view, epoch, prev_block_id, &validator_set)
+            {
+                Ok(leader) if leader == self.address => return true,
+                Ok(_) => continue,
+                Err(_) => return true, // conservative
+            }
+        }
+        false
     }
 
     /// Sends a message to the outbound gossipsub channel.
@@ -1093,7 +1164,7 @@ impl HotStuff2Engine {
         };
 
         let placeholder_sig =
-            tenzro_crypto::composite::CompositeSignature::new(Vec::new(), None);
+            tenzro_crypto::composite::CompositeSignature::new(Vec::new(), Vec::new());
         let unsigned = crate::timeout::TimeoutMsg::new(
             view,
             high_qc_view,
@@ -1305,7 +1376,7 @@ impl HotStuff2Engine {
         view: u64,
     ) -> Result<crate::timeout::NoEndorsementMsg> {
         let placeholder_sig =
-            tenzro_crypto::composite::CompositeSignature::new(Vec::new(), None);
+            tenzro_crypto::composite::CompositeSignature::new(Vec::new(), Vec::new());
         let unsigned = crate::timeout::NoEndorsementMsg::new(
             view,
             self.address,
@@ -1463,16 +1534,26 @@ impl HotStuff2Engine {
                     block_hash = %block_hash,
                     "Idempotent vote retry — reusing persisted signature"
                 );
-                return Ok(Vote::new(
+                // BLS is deterministic over (signing_key, message), so
+                // re-signing the BLS leg here is equivalent to persisting
+                // and replaying it — the wire bytes are byte-identical.
+                // We rebuild the Vote with a placeholder BLS sig first to
+                // construct the canonical bls payload, then replace.
+                let placeholder_bls = self.bls_signing_key.sign(b"__placeholder__");
+                let mut reused = Vote::new(
                     view,
                     height,
                     block_hash,
                     self.address,
                     signature,
                     self.composite_public_key.clone(),
+                    placeholder_bls,
                     vote_type,
                     high_qc_view,
-                ));
+                );
+                let bls_payload = crate::voter::bls_payload_for_vote(&reused);
+                reused.bls_signature = self.bls_signing_key.sign(&bls_payload);
+                return Ok(reused);
             }
             VrsDecision::Sign => {
                 // Fall through to sign + persist + return.
@@ -1482,7 +1563,8 @@ impl HotStuff2Engine {
         // Step 2: Build the unsigned vote (placeholder signature) so we can
         // compute the canonical signing payload — this MUST match what
         // VoteCollector::add_vote feeds to StandardHybridVerifier.
-        let placeholder_sig = tenzro_crypto::composite::CompositeSignature::new(Vec::new(), None);
+        let placeholder_sig = tenzro_crypto::composite::CompositeSignature::new(Vec::new(), Vec::new());
+        let placeholder_bls = self.bls_signing_key.sign(b"__placeholder__");
         let unsigned_vote = Vote::new(
             view,
             height,
@@ -1490,6 +1572,7 @@ impl HotStuff2Engine {
             self.address,
             placeholder_sig,
             self.composite_public_key.clone(),
+            placeholder_bls,
             vote_type,
             high_qc_view,
         );
@@ -1532,16 +1615,26 @@ impl HotStuff2Engine {
         };
         self.vote_state_store.record(&new_state)?;
 
-        Ok(Vote::new(
+        // Step 5: BLS-sign the canonical QC payload (per
+        // `bls_payload_for_vote`). BLS is deterministic over (sk, message)
+        // so this is safe to compute after the hybrid persist — equivocation
+        // is governed by the hybrid persist gate above; the BLS leg is
+        // re-derivable on a clean retry.
+        let placeholder_bls_final = self.bls_signing_key.sign(b"__placeholder__");
+        let mut signed_vote = Vote::new(
             view,
             height,
             block_hash,
             self.address,
             signature,
             self.composite_public_key.clone(),
+            placeholder_bls_final,
             vote_type,
             high_qc_view,
-        ))
+        );
+        let bls_payload = crate::voter::bls_payload_for_vote(&signed_vote);
+        signed_vote.bls_signature = self.bls_signing_key.sign(&bls_payload);
+        Ok(signed_vote)
     }
 
     /// Handles the prepare phase
@@ -2689,6 +2782,7 @@ impl Clone for HotStuff2Engine {
         Self {
             keypair: self.keypair.clone(),
             pq_signing_key: self.pq_signing_key.clone(),
+            bls_signing_key: self.bls_signing_key.clone(),
             composite_public_key: self.composite_public_key.clone(),
             address: self.address,
             config: self.config.clone(),
@@ -2735,10 +2829,12 @@ mod tests {
                 addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
                 let address = tenzro_types::primitives::Address::new(addr_bytes);
                 let pq = MlDsaSigningKey::generate();
+                let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
                 ValidatorInfo::new(
                     address,
                     keypair.public_key().clone(),
                     pq.verifying_key_bytes().to_vec(),
+                    bls.public_key().to_bytes().to_vec(),
                     1000 * (i as u128 + 1),
                 )
             })
@@ -2850,10 +2946,11 @@ mod tests {
 
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let pq = MlDsaSigningKey::generate();
+        let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
         let config = ConsensusConfig::default();
         let validators = create_test_validators(4);
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
-        let engine = HotStuff2Engine::new(keypair, pq, config, epoch_manager)
+        let engine = HotStuff2Engine::new(keypair, pq, bls, config, epoch_manager)
             .with_vote_state_store(store);
 
         // Storage tip is height=0 (nothing finalized) — exactly the testnet
@@ -2907,10 +3004,11 @@ mod tests {
 
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let pq = MlDsaSigningKey::generate();
+        let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
         let config = ConsensusConfig::default();
         let validators = create_test_validators(4);
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
-        let engine = HotStuff2Engine::new(keypair, pq, config, epoch_manager)
+        let engine = HotStuff2Engine::new(keypair, pq, bls, config, epoch_manager)
             .with_vote_state_store(store);
 
         // Storage tip is 29988 (just-finalized at the moment of the previous vote).
@@ -2939,11 +3037,12 @@ mod tests {
     async fn test_hotstuff2_creation() {
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let pq = MlDsaSigningKey::generate();
+        let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
         let config = ConsensusConfig::default();
         let validators = create_test_validators(4);
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
 
-        let engine = HotStuff2Engine::new(keypair, pq, config, epoch_manager);
+        let engine = HotStuff2Engine::new(keypair, pq, bls, config, epoch_manager);
         assert_eq!(engine.finalized_height().await, BlockHeight::from(0));
     }
 
@@ -2951,6 +3050,7 @@ mod tests {
     async fn test_leader_selection() {
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let pq = MlDsaSigningKey::generate();
+        let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
         let crypto_addr = keypair.address();
         let mut addr_bytes = [0u8; 32];
         addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
@@ -2961,6 +3061,7 @@ mod tests {
                 address,
                 keypair.public_key().clone(),
                 pq.verifying_key_bytes().to_vec(),
+                bls.public_key().to_bytes().to_vec(),
                 1000,
             ),
             create_test_validators(3)[0].clone(),
@@ -2969,7 +3070,7 @@ mod tests {
         let config = ConsensusConfig::default();
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
 
-        let engine = HotStuff2Engine::new(keypair, pq, config, epoch_manager);
+        let engine = HotStuff2Engine::new(keypair, pq, bls, config, epoch_manager);
         let leader = engine.get_leader().unwrap();
 
         // Leader should be one of the validators
@@ -2983,6 +3084,7 @@ mod tests {
         let mut validators = create_test_validators(extra + 1);
         let local_keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let local_pq = MlDsaSigningKey::generate();
+        let local_bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
         let local_crypto_addr = local_keypair.address();
         let mut local_addr_bytes = [0u8; 32];
         local_addr_bytes[..20].copy_from_slice(local_crypto_addr.as_bytes());
@@ -2991,13 +3093,14 @@ mod tests {
             local_address,
             local_keypair.public_key().clone(),
             local_pq.verifying_key_bytes().to_vec(),
+            local_bls.public_key().to_bytes().to_vec(),
             1000,
         );
         let proposer_addr = validators[1].address;
 
         let config = ConsensusConfig::default();
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
-        let mut engine = HotStuff2Engine::new(local_keypair, local_pq, config, epoch_manager);
+        let mut engine = HotStuff2Engine::new(local_keypair, local_pq, local_bls, config, epoch_manager);
 
         // Wire a synthetic genesis block at height 0 so EIP-1559
         // `validate_base_fee` can re-derive the child's base fee from a
@@ -3137,6 +3240,7 @@ mod tests {
         // so the peer's keypair stays in scope for the test to sign with.
         let local_keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let local_pq = MlDsaSigningKey::generate();
+        let local_bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
         let local_crypto_addr = local_keypair.address();
         let mut local_addr_bytes = [0u8; 32];
         local_addr_bytes[..20].copy_from_slice(local_crypto_addr.as_bytes());
@@ -3145,11 +3249,13 @@ mod tests {
             local_address,
             local_keypair.public_key().clone(),
             local_pq.verifying_key_bytes().to_vec(),
+            local_bls.public_key().to_bytes().to_vec(),
             1000,
         );
 
         let peer_keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let peer_pq = MlDsaSigningKey::generate();
+        let peer_bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
         let peer_crypto_addr = peer_keypair.address();
         let mut peer_addr_bytes = [0u8; 32];
         peer_addr_bytes[..20].copy_from_slice(peer_crypto_addr.as_bytes());
@@ -3158,6 +3264,7 @@ mod tests {
             peer_address,
             peer_keypair.public_key().clone(),
             peer_pq.verifying_key_bytes().to_vec(),
+            peer_bls.public_key().to_bytes().to_vec(),
             2000,
         );
 
@@ -3170,17 +3277,19 @@ mod tests {
             addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
             let addr = tenzro_types::primitives::Address::new(addr_bytes);
             let pq = MlDsaSigningKey::generate();
+            let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
             validators.push(ValidatorInfo::new(
                 addr,
                 kp.public_key().clone(),
                 pq.verifying_key_bytes().to_vec(),
+                bls.public_key().to_bytes().to_vec(),
                 1000 * (i as u128 + 1),
             ));
         }
 
         let config = ConsensusConfig::default();
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
-        let mut engine = HotStuff2Engine::new(local_keypair, local_pq, config, epoch_manager);
+        let mut engine = HotStuff2Engine::new(local_keypair, local_pq, local_bls, config, epoch_manager);
 
         // Wire a synthetic genesis block at height 0 so EIP-1559
         // `validate_base_fee` can re-derive the child's base fee.
@@ -3227,9 +3336,9 @@ mod tests {
 
         let composite_pk = CompositePublicKey::new(
             peer_keypair.public_key().clone(),
-            Some(peer_pq.verifying_key_bytes().to_vec()),
+            peer_pq.verifying_key_bytes().to_vec(),
         );
-        let placeholder = CompositeSignature::new(Vec::new(), None);
+        let placeholder = CompositeSignature::new(Vec::new(), Vec::new());
         let unsigned = crate::timeout::TimeoutMsg::new(
             view,
             high_qc_view,
@@ -3263,9 +3372,9 @@ mod tests {
 
         let composite_pk = CompositePublicKey::new(
             peer_keypair.public_key().clone(),
-            Some(peer_pq.verifying_key_bytes().to_vec()),
+            peer_pq.verifying_key_bytes().to_vec(),
         );
-        let placeholder = CompositeSignature::new(Vec::new(), None);
+        let placeholder = CompositeSignature::new(Vec::new(), Vec::new());
         let unsigned = crate::timeout::NoEndorsementMsg::new(
             view,
             peer_address,
@@ -3361,7 +3470,7 @@ mod tests {
     /// without going through the gossip layer.
     async fn build_test_engine_with_all_signers() -> (
         HotStuff2Engine,
-        Vec<(KeyPair, MlDsaSigningKey, tenzro_types::primitives::Address)>,
+        Vec<(KeyPair, MlDsaSigningKey, tenzro_crypto::bls::BlsKeyPair, tenzro_types::primitives::Address)>,
     ) {
         let mut peers = Vec::new();
         let mut validators = Vec::new();
@@ -3369,6 +3478,7 @@ mod tests {
         // Local validator (index 0).
         let local_kp = KeyPair::generate(KeyType::Ed25519).unwrap();
         let local_pq = MlDsaSigningKey::generate();
+        let local_bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
         let local_crypto_addr = local_kp.address();
         let mut local_addr_bytes = [0u8; 32];
         local_addr_bytes[..20].copy_from_slice(local_crypto_addr.as_bytes());
@@ -3377,6 +3487,7 @@ mod tests {
             local_addr,
             local_kp.public_key().clone(),
             local_pq.verifying_key_bytes().to_vec(),
+            local_bls.public_key().to_bytes().to_vec(),
             1000,
         ));
 
@@ -3384,6 +3495,7 @@ mod tests {
         for i in 0..3 {
             let kp = KeyPair::generate(KeyType::Ed25519).unwrap();
             let pq = MlDsaSigningKey::generate();
+            let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
             let crypto_addr = kp.address();
             let mut addr_bytes = [0u8; 32];
             addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
@@ -3392,17 +3504,21 @@ mod tests {
                 addr,
                 kp.public_key().clone(),
                 pq.verifying_key_bytes().to_vec(),
+                bls.public_key().to_bytes().to_vec(),
                 1000 * (i as u128 + 2),
             ));
-            peers.push((kp, pq, addr));
+            peers.push((kp, pq, bls, addr));
         }
 
         let local_kp_for_engine =
             KeyPair::from_bytes(local_kp.key_type(), &local_kp.to_bytes()).unwrap();
         let local_pq_for_engine = MlDsaSigningKey::from_seed(local_pq.seed_bytes()).unwrap();
+        let local_bls_for_engine = tenzro_crypto::bls::BlsKeyPair::from_secret_key(
+            tenzro_crypto::bls::BlsSecretKey::from_bytes(&local_bls.secret_key().to_bytes()).unwrap(),
+        );
         let config = ConsensusConfig::default();
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
-        let mut engine = HotStuff2Engine::new(local_kp_for_engine, local_pq_for_engine, config, epoch_manager);
+        let mut engine = HotStuff2Engine::new(local_kp_for_engine, local_pq_for_engine, local_bls_for_engine, config, epoch_manager);
 
         // Wire a synthetic genesis block at height 0 so EIP-1559
         // `validate_base_fee` can re-derive the child's base fee. See
@@ -3433,7 +3549,7 @@ mod tests {
         use tenzro_types::primitives::{BlockHeight, Hash};
 
         let (engine, peers) = build_test_engine_with_all_signers().await;
-        let proposer_addr = peers[0].2;
+        let proposer_addr = peers[0].3;
 
         // Local view 0; proposer jumps to view 5 with no TC.
         {
@@ -3471,7 +3587,7 @@ mod tests {
         use tenzro_types::primitives::{BlockHeight, Hash};
 
         let (engine, peers) = build_test_engine_with_all_signers().await;
-        let proposer_addr = peers[0].2;
+        let proposer_addr = peers[0].3;
 
         // Local view 0; proposer jumps to view 5 with a TC at view 4 signed
         // by 3 of 4 validators (2f+1 with f=1).
@@ -3486,7 +3602,7 @@ mod tests {
         // peers, then assemble into a TC.
         let tc_view = 4u64;
         let mut signers: Vec<crate::timeout::TcSigner> = Vec::new();
-        for (kp, pq, addr) in peers.iter() {
+        for (kp, pq, _bls, addr) in peers.iter() {
             let msg = peer_sign_timeout_with_hqc(tc_view, 0, *addr, kp, pq);
             signers.push(crate::timeout::TcSigner {
                 voter: msg.voter,
@@ -3507,7 +3623,7 @@ mod tests {
         // f+1 attestation. Engine local high_qc_view is 0 < 4, consistent
         // with "no QC observed" so the NEC will be accepted.
         let mut nec_signers: Vec<crate::timeout::NecSigner> = Vec::new();
-        for (kp, pq, addr) in peers.iter().take(2) {
+        for (kp, pq, _bls, addr) in peers.iter().take(2) {
             let nec_msg = peer_sign_no_endorsement(tc_view, *addr, kp, pq);
             nec_signers.push(crate::timeout::NecSigner {
                 voter: nec_msg.voter,
@@ -3548,7 +3664,7 @@ mod tests {
         use tenzro_types::primitives::{BlockHeight, Hash};
 
         let (engine, peers) = build_test_engine_with_all_signers().await;
-        let proposer_addr = peers[0].2;
+        let proposer_addr = peers[0].3;
 
         {
             let mut state = engine.view_state.write();
@@ -3561,7 +3677,7 @@ mod tests {
         // because tc.view + 1 (= 4) != proposal_view (= 5).
         let tc_view = 3u64;
         let mut signers: Vec<crate::timeout::TcSigner> = Vec::new();
-        for (kp, pq, addr) in peers.iter() {
+        for (kp, pq, _bls, addr) in peers.iter() {
             let msg = peer_sign_timeout_with_hqc(tc_view, 0, *addr, kp, pq);
             signers.push(crate::timeout::TcSigner {
                 voter: msg.voter,
@@ -3604,7 +3720,7 @@ mod tests {
         use tenzro_types::primitives::{BlockHeight, Hash};
 
         let (engine, peers) = build_test_engine_with_all_signers().await;
-        let proposer_addr = peers[0].2;
+        let proposer_addr = peers[0].3;
 
         {
             let mut state = engine.view_state.write();
@@ -3615,7 +3731,7 @@ mod tests {
 
         // Only 1 signer — far below 2f+1 = 3 for a 4-validator set.
         let tc_view = 4u64;
-        let (kp, pq, addr) = &peers[0];
+        let (kp, pq, _bls, addr) = &peers[0];
         let msg = peer_sign_timeout_with_hqc(tc_view, 0, *addr, kp, pq);
         let signers = vec![crate::timeout::TcSigner {
             voter: msg.voter,

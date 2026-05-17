@@ -1,4 +1,5 @@
-//! HuggingFace Hub download integration.
+//! HuggingFace Hub download integration with optional peer-fetch over the
+//! `tenzro://blob/<blake3>` / `tenzro://model/<id>@<blake3>` URI scheme.
 //!
 //! Downloads model artifacts from HuggingFace Hub via direct HTTPS to the
 //! HF CDN, with progress tracking and local file management. Supports two
@@ -16,11 +17,40 @@
 //! `is_downloaded`, `downloaded_size`, `verify_download` with size
 //! tolerance). New modality runtimes use [`HfArtifactDownloader::download`]
 //! directly to access the full single-file / bundle artifact shape.
+//!
+//! # Peer fetch over `tenzro://` (Phase B3, #218)
+//!
+//! When a [`BlobFetcher`] is wired via
+//! [`HfArtifactDownloader::with_blob_fetcher`] (typically
+//! `tenzro_iroh::IrohBackedResolver` adapted on the node side) and an
+//! [`ArtifactSpec`] carries a `tenzro_uri` peer hint, the downloader tries
+//! the peer fetch *first* and falls back to the HF CDN on any error
+//! (missing blob, BLAKE3 mismatch, transport failure). Optional
+//! `sha256_hex` is checked end-to-end against the fetched bytes as a
+//! defense-in-depth layer on top of iroh-blobs' own BLAKE3 verification
+//! — same belt-and-braces discipline as
+//! [`crate::payload_store::verify_payload`] in `tenzro-training` and
+//! [`tenzro_training::verify_shard_ciphertext`] in `tenzro-iroh`'s sealed
+//! shard store.
+//!
+//! When a download completes via the HF CDN path *and* a fetcher is
+//! wired, the downloader opportunistically publishes the bytes via
+//! [`BlobFetcher::publish`] so neighbour nodes can subsequently fetch by
+//! content hash without re-pulling from HF — Phase B1's
+//! `IrohGradientStore` and Phase B2's `IrohSealedShardStore` follow the
+//! same pattern for gradients and sealed shards respectively.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::watch;
-use tracing::{info, warn, error};
+use tracing::{debug, error, info, warn};
+
+use tenzro_types::tenzro_uri::TenzroUri;
 
 use crate::catalog::HfModelEntry;
 use crate::error::{ModelError, Result};
@@ -60,6 +90,28 @@ impl std::fmt::Display for DownloadState {
     }
 }
 
+/// Per-file peer-fetch hint for the `tenzro://` distribution path.
+///
+/// When [`HfArtifactDownloader`] is wired with a [`BlobFetcher`], any file
+/// that carries a `PeerHint` is fetched from peers via the URI first; the
+/// HF CDN is only contacted if the peer fetch fails (missing blob, hash
+/// mismatch, transport error). The optional `sha256_hex` is verified
+/// end-to-end against the fetched bytes as a defense-in-depth check on
+/// top of iroh-blobs' own BLAKE3 transport verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerHint {
+    /// `tenzro://` URI naming the blob. Typically a `tenzro://blob/<blake3>`
+    /// or `tenzro://model/<id>@<blake3>` form. The transport layer maps
+    /// this to its content-addressed locator (BLAKE3 for iroh-blobs).
+    pub tenzro_uri: TenzroUri,
+    /// Optional canonical SHA-256 of the file bytes. When present, the
+    /// downloader verifies it against the fetched payload regardless of
+    /// transport (peer-fetch *or* HF CDN). Mismatch on the peer path
+    /// triggers fallback to HF; mismatch on HF surfaces as
+    /// [`ModelError::ChecksumMismatch`].
+    pub sha256_hex: Option<String>,
+}
+
 /// Specification of an artifact to download from HuggingFace Hub.
 ///
 /// `SingleFile` is a single file (GGUF, single-file ONNX) saved as
@@ -75,6 +127,9 @@ pub enum ArtifactSpec {
         /// File extension to use locally (no leading dot). The download
         /// destination is `<storage_path>/<model_id>.<extension>`.
         extension: String,
+        /// Optional `tenzro://` peer-fetch hint. When wired with a
+        /// [`BlobFetcher`], the downloader prefers this over HF CDN.
+        peer_hint: Option<PeerHint>,
     },
     /// Multi-file bundle — `<storage_path>/<dir_name>/<file1>`, …
     /// All files are downloaded into the same local directory, named
@@ -87,7 +142,33 @@ pub enum ArtifactSpec {
         files: Vec<String>,
         /// Local directory name (relative to storage_path).
         dir_name: String,
+        /// Per-file peer-fetch hints. When present, the entry for
+        /// `files[i]` is `peer_hints[i]`. Length-equal-to-`files` when
+        /// non-empty (caller's contract); shorter / mismatched lengths
+        /// are tolerated as "no hint for that file".
+        peer_hints: Vec<Option<PeerHint>>,
     },
+}
+
+/// Transport-agnostic interface for fetching and publishing bytes by
+/// `tenzro://` URI. Implemented by `tenzro_iroh::IrohBackedResolver` on the
+/// node side — kept as a trait here so `tenzro-model` stays free of any
+/// `tenzro-iroh` (or iroh) runtime dependency.
+///
+/// `fetch` returns the raw blob bytes. `publish` ingests bytes and
+/// returns the resulting `tenzro://blob/<hash>` URI so neighbours can
+/// re-fetch the same payload by content hash.
+///
+/// Errors are surfaced as plain `String` to keep the trait
+/// cross-crate-friendly without forcing a shared error type — the caller
+/// logs the message and falls back to the HF CDN on any error.
+#[async_trait]
+pub trait BlobFetcher: Send + Sync {
+    /// Fetch the bytes named by `uri` from a peer.
+    async fn fetch(&self, uri: &TenzroUri) -> std::result::Result<Bytes, String>;
+    /// Publish `bytes` to the blob store, returning a content-addressed
+    /// `tenzro://blob/<hash>` URI.
+    async fn publish(&self, bytes: Bytes) -> std::result::Result<TenzroUri, String>;
 }
 
 /// Generic artifact downloader for HuggingFace Hub.
@@ -96,8 +177,15 @@ pub enum ArtifactSpec {
 /// [`ArtifactSpec`] so callers can request single-file (GGUF, single-file
 /// ONNX) or multi-file (Whisper-style ONNX bundle) artifacts through a
 /// single API.
+///
+/// When wired with [`HfArtifactDownloader::with_blob_fetcher`], any
+/// artifact whose spec carries a [`PeerHint`] is fetched over
+/// `tenzro://` first and only falls back to the HF CDN on failure.
+/// Successful HF downloads are opportunistically published via
+/// [`BlobFetcher::publish`] so neighbours can avoid re-pulling.
 pub struct HfArtifactDownloader {
     storage_path: PathBuf,
+    blob_fetcher: Option<Arc<dyn BlobFetcher>>,
 }
 
 /// Manages downloading GGUF models from HuggingFace Hub.
@@ -293,7 +381,22 @@ impl HfDownloader {
 impl HfArtifactDownloader {
     /// Create a new artifact downloader rooted at `storage_path`.
     pub fn new(storage_path: PathBuf) -> Self {
-        Self { storage_path }
+        Self {
+            storage_path,
+            blob_fetcher: None,
+        }
+    }
+
+    /// Attach a [`BlobFetcher`] so the downloader can fetch and publish
+    /// over `tenzro://` URIs. Returns `self` for builder-style chaining.
+    pub fn with_blob_fetcher(mut self, fetcher: Arc<dyn BlobFetcher>) -> Self {
+        self.blob_fetcher = Some(fetcher);
+        self
+    }
+
+    /// Returns true if a [`BlobFetcher`] is wired.
+    pub fn has_blob_fetcher(&self) -> bool {
+        self.blob_fetcher.is_some()
     }
 
     /// Get the storage root.
@@ -352,15 +455,20 @@ impl HfArtifactDownloader {
         })?;
 
         match spec {
-            ArtifactSpec::SingleFile { filename, extension } => {
+            ArtifactSpec::SingleFile {
+                filename,
+                extension,
+                peer_hint,
+            } => {
                 let dest_path = self
                     .storage_path
                     .join(format!("{}.{}", model_id, extension));
                 let tmp_path = dest_path.with_extension(format!("{}.tmp", extension));
-                download_one_file(
+                self.fetch_one_file(
                     model_id,
                     repo,
                     filename,
+                    peer_hint.as_ref(),
                     total_size_hint,
                     &dest_path,
                     &tmp_path,
@@ -369,7 +477,11 @@ impl HfArtifactDownloader {
                 .await?;
                 Ok(dest_path)
             }
-            ArtifactSpec::Bundle { files, dir_name } => {
+            ArtifactSpec::Bundle {
+                files,
+                dir_name,
+                peer_hints,
+            } => {
                 let dest_dir = self.storage_path.join(dir_name);
                 let tmp_dir = self
                     .storage_path
@@ -392,7 +504,7 @@ impl HfArtifactDownloader {
                 let n = files.len() as u64;
                 let per_file_hint = if n > 0 { total_size_hint / n } else { 0 };
 
-                for filename in files {
+                for (idx, filename) in files.iter().enumerate() {
                     let file_dest = tmp_dir.join(filename);
                     if let Some(parent) = file_dest.parent() {
                         std::fs::create_dir_all(parent).map_err(|e| {
@@ -414,10 +526,12 @@ impl HfArtifactDownloader {
                             format!("{}.tmp", cur)
                         }
                     });
-                    download_one_file(
+                    let file_hint = peer_hints.get(idx).and_then(|h| h.as_ref());
+                    self.fetch_one_file(
                         &format!("{}/{}", model_id, filename),
                         repo,
                         filename,
+                        file_hint,
                         per_file_hint,
                         &file_dest,
                         &file_tmp,
@@ -461,6 +575,213 @@ impl HfArtifactDownloader {
             }
         }
     }
+
+    /// Fetch a single file from a peer first (when a hint is present and
+    /// a [`BlobFetcher`] is wired), falling back to the HF CDN on any
+    /// peer-side failure. On HF success, the bytes are opportunistically
+    /// published so neighbours can fetch by content hash next time.
+    ///
+    /// `sha256_hex` (when present in the hint) is verified against the
+    /// fetched bytes regardless of which path served them — the HF CDN
+    /// itself doesn't carry a SHA-256 commitment, so this is the only
+    /// way to detect corruption on the HF path.
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_one_file(
+        &self,
+        progress_label: &str,
+        hf_repo: &str,
+        hf_filename: &str,
+        peer_hint: Option<&PeerHint>,
+        total_bytes_hint: u64,
+        dest_path: &Path,
+        tmp_path: &Path,
+        progress_tx: &watch::Sender<DownloadProgress>,
+    ) -> Result<()> {
+        // Peer-fetch path — only when a fetcher AND a hint are both present.
+        if let (Some(fetcher), Some(hint)) = (self.blob_fetcher.as_ref(), peer_hint) {
+            debug!(
+                target: "tenzro_model::peer_fetch",
+                "{}: trying peer fetch via {}",
+                progress_label, hint.tenzro_uri
+            );
+            match fetcher.fetch(&hint.tenzro_uri).await {
+                Ok(bytes) => {
+                    // Defense-in-depth SHA-256 check on top of the
+                    // transport's own BLAKE3 verification.
+                    if let Some(expected_sha) = hint.sha256_hex.as_deref()
+                        && let Err(e) = verify_sha256(&bytes, expected_sha)
+                    {
+                        warn!(
+                            target: "tenzro_model::peer_fetch",
+                            "{}: peer fetch SHA-256 mismatch ({}), falling back to HF CDN",
+                            progress_label, e
+                        );
+                    } else {
+                        // Write peer bytes to disk and return early.
+                        write_bytes_atomic(
+                            progress_label,
+                            &bytes,
+                            dest_path,
+                            tmp_path,
+                            progress_tx,
+                        )
+                        .await?;
+                        info!(
+                            "{}: served from peer ({} bytes via {})",
+                            progress_label,
+                            bytes.len(),
+                            hint.tenzro_uri
+                        );
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        target: "tenzro_model::peer_fetch",
+                        "{}: peer fetch failed ({}), falling back to HF CDN",
+                        progress_label, e
+                    );
+                }
+            }
+        }
+
+        // HF CDN fallback (or primary, when no peer hint).
+        download_one_file(
+            progress_label,
+            hf_repo,
+            hf_filename,
+            total_bytes_hint,
+            dest_path,
+            tmp_path,
+            progress_tx,
+        )
+        .await?;
+
+        // SHA-256 verification on the HF path (only when the spec
+        // committed a hash up front).
+        if let Some(expected_sha) = peer_hint.and_then(|h| h.sha256_hex.as_deref()) {
+            match tokio::fs::read(dest_path).await {
+                Ok(bytes) => {
+                    if let Err(e) = verify_sha256(&bytes, expected_sha) {
+                        error!(
+                            "{}: HF CDN download failed SHA-256 verification ({})",
+                            progress_label, e
+                        );
+                        let _ = std::fs::remove_file(dest_path);
+                        return Err(ModelError::ChecksumMismatch {
+                            expected: expected_sha.to_string(),
+                            actual: e,
+                        });
+                    }
+                }
+                Err(e) => {
+                    return Err(ModelError::DownloadError(format!(
+                        "Failed to re-read {} for SHA-256 check: {}",
+                        dest_path.display(),
+                        e
+                    )));
+                }
+            }
+        }
+
+        // Opportunistic publish so neighbours can fetch from us next time.
+        if let Some(fetcher) = self.blob_fetcher.as_ref() {
+            match tokio::fs::read(dest_path).await {
+                Ok(bytes) => {
+                    let bytes = Bytes::from(bytes);
+                    match fetcher.publish(bytes.clone()).await {
+                        Ok(uri) => debug!(
+                            target: "tenzro_model::peer_fetch",
+                            "{}: published to peer store as {}",
+                            progress_label, uri
+                        ),
+                        Err(e) => debug!(
+                            target: "tenzro_model::peer_fetch",
+                            "{}: opportunistic publish failed ({}), not fatal",
+                            progress_label, e
+                        ),
+                    }
+                }
+                Err(e) => debug!(
+                    target: "tenzro_model::peer_fetch",
+                    "{}: skipped publish (read failed: {})",
+                    progress_label, e
+                ),
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Verify that `bytes` hash to `expected_hex` under SHA-256. Returns the
+/// actual hex on mismatch.
+fn verify_sha256(bytes: &[u8], expected_hex: &str) -> std::result::Result<(), String> {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let actual = hex::encode(hasher.finalize());
+    if actual.eq_ignore_ascii_case(expected_hex) {
+        Ok(())
+    } else {
+        Err(actual)
+    }
+}
+
+/// Write `bytes` to `dest_path` via a tmp-rename, emitting two progress
+/// frames (0% → 100%). Used by the peer-fetch path which delivers the
+/// payload as a single in-memory buffer.
+async fn write_bytes_atomic(
+    progress_label: &str,
+    bytes: &[u8],
+    dest_path: &Path,
+    tmp_path: &Path,
+    progress_tx: &watch::Sender<DownloadProgress>,
+) -> Result<()> {
+    if let Some(parent) = dest_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ModelError::DownloadError(format!(
+                "Failed to create dest parent {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
+
+    let total = bytes.len() as u64;
+    let _ = progress_tx.send(DownloadProgress {
+        model_id: progress_label.to_string(),
+        status: DownloadState::Downloading,
+        progress_percent: 0.0,
+        downloaded_bytes: 0,
+        total_bytes: total,
+    });
+
+    tokio::fs::write(tmp_path, bytes).await.map_err(|e| {
+        ModelError::DownloadError(format!(
+            "Failed to write peer payload to {}: {}",
+            tmp_path.display(),
+            e
+        ))
+    })?;
+
+    std::fs::rename(tmp_path, dest_path).map_err(|e| {
+        ModelError::DownloadError(format!(
+            "Failed to rename {} -> {}: {}",
+            tmp_path.display(),
+            dest_path.display(),
+            e
+        ))
+    })?;
+
+    let _ = progress_tx.send(DownloadProgress {
+        model_id: progress_label.to_string(),
+        status: DownloadState::Completed,
+        progress_percent: 100.0,
+        downloaded_bytes: total,
+        total_bytes: total,
+    });
+
+    Ok(())
 }
 
 /// Stream a single HF Hub file to disk via a tmp-rename. Shared between
@@ -623,6 +944,7 @@ mod tests {
         let spec = ArtifactSpec::SingleFile {
             filename: "model.onnx".to_string(),
             extension: "onnx".to_string(),
+            peer_hint: None,
         };
         assert_eq!(
             dl.artifact_path("dinov3-base", &spec),
@@ -636,6 +958,7 @@ mod tests {
         let spec = ArtifactSpec::Bundle {
             files: vec!["encoder.onnx".to_string(), "decoder.onnx".to_string()],
             dir_name: "whisper-large-v3-turbo".to_string(),
+            peer_hints: Vec::new(),
         };
         assert_eq!(
             dl.artifact_path("whisper-large-v3-turbo", &spec),
@@ -650,6 +973,7 @@ mod tests {
         let spec = ArtifactSpec::Bundle {
             files: vec!["a.onnx".to_string(), "b.onnx".to_string()],
             dir_name: "bundle".to_string(),
+            peer_hints: Vec::new(),
         };
         assert!(!dl.is_downloaded("bundle", &spec));
 
@@ -661,5 +985,39 @@ mod tests {
 
         std::fs::write(dir.join("b.onnx"), b"b").unwrap();
         assert!(dl.is_downloaded("bundle", &spec));
+    }
+
+    #[test]
+    fn verify_sha256_roundtrip_and_mismatch() {
+        let bytes = b"hello world";
+        let mut h = Sha256::new();
+        h.update(bytes);
+        let expected = hex::encode(h.finalize());
+        assert!(verify_sha256(bytes, &expected).is_ok());
+
+        let wrong = "0".repeat(64);
+        let err = verify_sha256(bytes, &wrong).unwrap_err();
+        assert_eq!(err.len(), 64);
+        assert_ne!(err, wrong);
+    }
+
+    #[test]
+    fn artifact_spec_carries_peer_hint() {
+        let hint = PeerHint {
+            tenzro_uri: TenzroUri::Blob {
+                hash: "a".repeat(64),
+                provider_hint: None,
+            },
+            sha256_hex: Some("b".repeat(64)),
+        };
+        let spec = ArtifactSpec::SingleFile {
+            filename: "model.onnx".to_string(),
+            extension: "onnx".to_string(),
+            peer_hint: Some(hint.clone()),
+        };
+        match spec {
+            ArtifactSpec::SingleFile { peer_hint, .. } => assert_eq!(peer_hint, Some(hint)),
+            _ => panic!("wrong variant"),
+        }
     }
 }

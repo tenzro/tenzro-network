@@ -226,10 +226,11 @@ impl TenzroWalletService {
         addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
         let address = Address::new(addr_bytes);
 
-        // Load the ML-DSA-65 signing key persisted alongside the classical
-        // bundle. We reuse the existing keystore lock guard so we never
-        // double-acquire `self.keystore`.
+        // Load the ML-DSA-65 + BLS12-381 signing keys persisted alongside
+        // the classical bundle. We reuse the existing keystore lock guard so
+        // we never double-acquire `self.keystore`.
         let pq_signing_key = keystore.load_pq_seed(wallet_id, password)?;
+        let bls_signing_key = keystore.load_bls_seed(wallet_id, password)?;
         drop(keystore);
 
         let wallet = MpcWallet::new(
@@ -238,6 +239,7 @@ impl TenzroWalletService {
             key_shares,
             pubkey_package,
             pq_signing_key,
+            bls_signing_key,
         )?;
 
         warn!(
@@ -248,7 +250,8 @@ impl TenzroWalletService {
         Ok(wallet)
     }
 
-    /// Store a wallet to keystore (FROST bundle + PQ signing seed).
+    /// Store a wallet to keystore (FROST bundle + PQ signing seed + BLS
+    /// signing seed).
     async fn store_wallet_to_keystore(
         &self,
         wallet: &MpcWallet,
@@ -268,7 +271,34 @@ impl TenzroWalletService {
         // cannot happen on the provisioning / re-encryption path.
         let pq_key = wallet.pq_signing_key()?;
         keystore.store_pq_seed(&wallet.wallet_id, pq_key, password)?;
+        // Mandatory BLS leg — persist the 32-byte BLS12-381 secret key bytes
+        // sealed under the same key.
+        let bls_key = wallet.bls_signing_key()?;
+        keystore.store_bls_seed(&wallet.wallet_id, bls_key, password)?;
         Ok(())
+    }
+
+    /// Read the three encrypted keystore files for `wallet_id` as raw bytes
+    /// (no decryption). Used by the identity CAR export flow (C.6) to ship a
+    /// wallet across machines without ever exposing the password in transit.
+    pub async fn export_encrypted_wallet_files(
+        &self,
+        wallet_id: &WalletId,
+    ) -> Result<std::collections::HashMap<String, Vec<u8>>> {
+        let keystore = self.keystore.lock().await;
+        keystore.export_encrypted_wallet_files(wallet_id)
+    }
+
+    /// Write encrypted keystore files received from another node (C.6 import).
+    /// Refuses to overwrite an existing wallet of the same ID — callers must
+    /// delete first if they really mean to clobber.
+    pub async fn import_encrypted_wallet_files(
+        &self,
+        wallet_id: &WalletId,
+        files: &std::collections::HashMap<String, Vec<u8>>,
+    ) -> Result<()> {
+        let mut keystore = self.keystore.lock().await;
+        keystore.import_encrypted_wallet_files(wallet_id, files)
     }
 
     /// Get wallet by ID (from cache or keystore)

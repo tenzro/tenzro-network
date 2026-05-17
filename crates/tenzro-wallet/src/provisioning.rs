@@ -10,6 +10,7 @@
 
 use crate::error::{Result, WalletError};
 use crate::wallet::{KeyShare, MpcWallet, WalletId};
+use tenzro_crypto::bls::BlsKeyPair;
 use tenzro_crypto::frost::keygen_with_trusted_dealer;
 use tenzro_crypto::pq::MlDsaSigningKey;
 use tenzro_types::primitives::Address;
@@ -137,12 +138,17 @@ impl WalletProvisioner {
         // Mandatory PQ leg.
         let pq_signing_key = MlDsaSigningKey::generate();
 
+        // Mandatory BLS leg for HotStuff-2 vote aggregation.
+        let bls_signing_key = BlsKeyPair::generate()
+            .map_err(|e| WalletError::ProvisioningFailed(e.to_string()))?;
+
         let wallet = MpcWallet::new(
             wallet_id.clone(),
             address,
             key_shares,
             pubkey_pkg,
             pq_signing_key,
+            bls_signing_key,
         )?;
 
         info!(

@@ -132,19 +132,29 @@ impl ChannelStorage for InMemoryChannelStorage {
 /// RocksDB-backed channel storage.
 ///
 /// Persists channels and disputes to `CF_CHANNELS` under the prefixes:
-/// - `channel:<channel_id>` — full [`MicropaymentChannel`] record (JSON)
-/// - `dispute:<dispute_id>` — full [`ChannelDispute`] record (JSON)
+/// - `channel:<channel_id>` — [`tenzro_storage::ReceiptEnvelope`] wrapping a
+///   [`MicropaymentChannel`] (Spec 7 / Tasks #147 + #150).
+///   `kind = ReceiptKind::SettlementChannel`, `storage_mode = OffloadedDA`
+///   per `ReceiptKind::default_mode()`. The canonical payload is
+///   `serde_json::to_vec(&MicropaymentChannel)` and the DA payload itself
+///   lives in the configured DA backend (defaults to
+///   [`tenzro_storage::InlineFallbackBackend`] until EigenDA / Celestia /
+///   Avail adapters land).
+/// - `dispute:<dispute_id>` — full [`ChannelDispute`] record (JSON, not
+///   wrapped — disputes are not channel-update receipts).
 ///
 /// All writes go through [`KvStore::write_batch_sync`] for atomic, fsync'd
 /// durability. Hydration scans both prefixes on construction.
 pub struct RocksDbChannelStorage {
     storage: Arc<dyn tenzro_storage::KvStore>,
+    da_backend: Arc<tenzro_storage::InlineFallbackBackend>,
 }
 
 impl std::fmt::Debug for RocksDbChannelStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RocksDbChannelStorage")
             .field("storage", &"<dyn KvStore>")
+            .field("da_backend", &self.da_backend)
             .finish()
     }
 }
@@ -154,10 +164,32 @@ impl RocksDbChannelStorage {
     const CHANNEL_PREFIX: &'static [u8] = b"channel:";
     /// Dispute record key prefix
     const DISPUTE_PREFIX: &'static [u8] = b"dispute:";
+    /// DA namespace under which channel-update payloads are submitted.
+    const CHANNEL_DA_NAMESPACE: &'static [u8] = b"tenzro/settlement_channel";
 
-    /// Creates a new RocksDB-backed channel storage adapter.
+    /// Creates a new RocksDB-backed channel storage adapter with a default
+    /// in-process [`InlineFallbackBackend`] for DA submission.
     pub fn new(storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            da_backend: Arc::new(tenzro_storage::InlineFallbackBackend::new()),
+        }
+    }
+
+    /// Creates an adapter wired to a specific [`InlineFallbackBackend`] —
+    /// lets callers share a single DA store across multiple persistence
+    /// adapters in the same process.
+    pub fn with_da_backend(
+        storage: Arc<dyn tenzro_storage::KvStore>,
+        da_backend: Arc<tenzro_storage::InlineFallbackBackend>,
+    ) -> Self {
+        Self { storage, da_backend }
+    }
+
+    /// Returns a clone of the DA backend handle so other components (e.g. a
+    /// `tenzro_node` startup wiring) can fetch raw payloads by pointer.
+    pub fn da_backend(&self) -> Arc<tenzro_storage::InlineFallbackBackend> {
+        self.da_backend.clone()
     }
 
     fn channel_key(channel_id: &str) -> Vec<u8> {
@@ -167,12 +199,80 @@ impl RocksDbChannelStorage {
     fn dispute_key(dispute_id: &str) -> Vec<u8> {
         [Self::DISPUTE_PREFIX, dispute_id.as_bytes()].concat()
     }
+
+    /// Build the offloaded `ReceiptEnvelope` for a channel record.
+    fn build_envelope(
+        &self,
+        channel: &MicropaymentChannel,
+    ) -> Result<tenzro_storage::ReceiptEnvelope> {
+        let payload = serde_json::to_vec(channel).map_err(|e| {
+            SettlementError::StorageError(format!("Failed to serialize channel: {}", e))
+        })?;
+        let summary = tenzro_storage::ReceiptSummary {
+            receipt_id: tenzro_storage::compute_commitment(channel.channel_id.as_bytes()),
+            payer: Some(format!("{}", channel.payer)),
+            payee: Some(format!("{}", channel.payee)),
+            amount_wei: Some(channel.spent),
+            timestamp: channel.opened_at,
+            principal_chain_summary: None,
+        };
+        let kind = tenzro_storage::ReceiptKind::SettlementChannel;
+        debug_assert_eq!(
+            kind.default_mode(),
+            tenzro_storage::ReceiptStorageMode::OffloadedDA
+        );
+        let commitment = tenzro_storage::compute_commitment(&payload);
+        let pointer = self
+            .da_backend
+            .submit_sync(Self::CHANNEL_DA_NAMESPACE, &payload);
+        Ok(tenzro_storage::ReceiptEnvelope::offloaded(
+            kind, summary, pointer, commitment,
+        ))
+    }
+
+    /// Decode an envelope's payload back into a `MicropaymentChannel`. The
+    /// payload may be `inline_payload` (impossible for the SettlementChannel
+    /// kind under default mode but supported for hand-built fixtures) or
+    /// fetched from the DA backend by pointer.
+    fn unwrap_envelope(
+        &self,
+        envelope: &tenzro_storage::ReceiptEnvelope,
+    ) -> Result<MicropaymentChannel> {
+        envelope.validate().map_err(|e| {
+            SettlementError::StorageError(format!("invalid channel envelope: {}", e))
+        })?;
+        let payload_owned;
+        let payload: &[u8] = if let Some(p) = envelope.inline_payload.as_ref() {
+            p
+        } else {
+            let pointer = envelope.da_pointer.as_ref().ok_or_else(|| {
+                SettlementError::StorageError(
+                    "channel envelope missing both inline payload and da pointer".into(),
+                )
+            })?;
+            payload_owned = self
+                .da_backend
+                .fetch_sync(pointer)
+                .map_err(|e| SettlementError::StorageError(e.to_string()))?;
+            &payload_owned
+        };
+        let actual = tenzro_storage::compute_commitment(payload);
+        if actual != envelope.commitment {
+            return Err(SettlementError::StorageError(format!(
+                "channel envelope commitment mismatch: declared {}, computed {}",
+                envelope.commitment, actual
+            )));
+        }
+        serde_json::from_slice(payload)
+            .map_err(|e| SettlementError::StorageError(format!("decode channel: {}", e)))
+    }
 }
 
 impl ChannelStorage for RocksDbChannelStorage {
     fn persist_channel(&self, channel: &MicropaymentChannel) -> Result<()> {
-        let value = serde_json::to_vec(channel).map_err(|e| {
-            SettlementError::StorageError(format!("Failed to serialize channel: {}", e))
+        let envelope = self.build_envelope(channel)?;
+        let value = serde_json::to_vec(&envelope).map_err(|e| {
+            SettlementError::StorageError(format!("Failed to serialize channel envelope: {}", e))
         })?;
         self.storage
             .write_batch_sync(vec![tenzro_storage::WriteOp::Put {
@@ -189,9 +289,16 @@ impl ChannelStorage for RocksDbChannelStorage {
             .get(tenzro_storage::CF_CHANNELS, &Self::channel_key(channel_id))
             .map_err(|e| SettlementError::StorageError(e.to_string()))?
         {
-            Some(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|e| SettlementError::StorageError(format!("decode channel: {}", e))),
+            Some(bytes) => {
+                let envelope: tenzro_storage::ReceiptEnvelope = serde_json::from_slice(&bytes)
+                    .map_err(|e| {
+                        SettlementError::StorageError(format!(
+                            "decode channel envelope: {}",
+                            e
+                        ))
+                    })?;
+                self.unwrap_envelope(&envelope).map(Some)
+            }
             None => Ok(None),
         }
     }
@@ -209,9 +316,12 @@ impl ChannelStorage for RocksDbChannelStorage {
                 .get(tenzro_storage::CF_CHANNELS, &key)
                 .map_err(|e| SettlementError::StorageError(e.to_string()))?
             {
-                match serde_json::from_slice::<MicropaymentChannel>(&bytes) {
-                    Ok(c) => channels.push(c),
-                    Err(e) => warn!("skip undecodable channel record: {}", e),
+                match serde_json::from_slice::<tenzro_storage::ReceiptEnvelope>(&bytes) {
+                    Ok(envelope) => match self.unwrap_envelope(&envelope) {
+                        Ok(c) => channels.push(c),
+                        Err(e) => warn!("skip undecodable channel envelope payload: {}", e),
+                    },
+                    Err(e) => warn!("skip undecodable channel envelope: {}", e),
                 }
             }
         }

@@ -27,10 +27,13 @@ dependencies = [
 [project.optional-dependencies]
 hivemind = ["hivemind>=1.1.10"]
 language = ["transformers>=4.45", "datasets>=2.20", "tokenizers>=0.19"]
-vision = ["torchvision>=0.19", "Pillow>=10.0"]
+vision = ["timm>=1.0", "Pillow>=10.0"]
 timeseries = ["pandas>=2.2"]
+# Confidential-tier shard unwrap (HPKE per RFC 9180 + AES-256-GCM).
+# Runs inside the trainer's TEE enclave; never on the syncer side.
+confidential = ["pyhpke>=0.5", "cryptography>=42.0"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
-all = ["tenzro-trainer[hivemind,language,vision,timeseries]"]
+all = ["tenzro-trainer[hivemind,language,vision,timeseries,confidential]"]
 
 [project.scripts]
 tenzro-trainer = "tenzro_trainer.cli:main"

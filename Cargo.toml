@@ -23,8 +23,10 @@ members = [
     "crates/tenzro-workflow",
     "crates/tenzro-cortex",
     "crates/tenzro-training",
+    "crates/tenzro-iroh",
     "crates/tenzro-node",
     "crates/tenzro-cli",
+    "tools/genkeys",
 ]
 
 [workspace.package]
@@ -60,6 +62,7 @@ tenzro-bridge = { path = "crates/tenzro-bridge" }
 tenzro-events = { path = "crates/tenzro-events" }
 tenzro-cortex = { path = "crates/tenzro-cortex" }
 tenzro-training = { path = "crates/tenzro-training" }
+tenzro-iroh = { path = "crates/tenzro-iroh" }
 tenzro-identity = { path = "crates/tenzro-identity" }
 tenzro-payments = { path = "crates/tenzro-payments" }
 tenzro-agent-kit = { path = "crates/tenzro-agent-kit" }
@@ -94,8 +97,8 @@ aes-gcm = "0.10"
 x25519-dalek = { version = "2", features = ["serde", "static_secrets"] }
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
-frost-ed25519 = "2.1"
-frost-secp256k1 = "2.1"
+frost-ed25519 = "3"
+frost-secp256k1 = "3"
 blst = "0.3"
 argon2 = "0.5"
 subtle = "2.6"
@@ -109,8 +112,8 @@ curve25519-dalek = { version = "4", features = ["alloc"] }
 # ml-dsa pulls signature 3.0.0-rc which exposes rand_core 0.10's TryCryptoRng;
 # tenzro-crypto adapts a TryRng→OsRng inside `pq` so callers don't see the new traits.
 ml-kem = { version = "0.3.0-rc.2", features = ["getrandom"] }
-ml-dsa = ">=0.1.0-rc.8"
-slh-dsa = "0.2.0-rc.4"
+ml-dsa = "0.1.0-rc.11"
+slh-dsa = "0.2.0-rc.5"
 rand_core = "0.10"
 getrandom = { version = "0.3", features = ["std"] }
 
@@ -138,6 +141,23 @@ lru = "0.12"
 # Storage
 rocksdb = "0.22"
 
+# Data availability backends (feature-gated in tenzro-storage)
+celestia-rpc = "1.0.0"
+celestia-types = "1.0.0"
+
+# Iroh — QUIC-native content-addressed transport (n0-computer, Apache-2.0).
+# Used via the new tenzro-iroh crate for blob distribution (model weights,
+# outer gradients, sealed shards, DA receipts, agent memory archives) and
+# CRDT documents (sealed-dataset manifests, agent template registry).
+# Companion crates pin iroh =1.0.0-rc.0 exactly — keep these in lockstep
+# when upgrading the RC. All Apache-2.0.
+iroh = "=1.0.0-rc.0"
+iroh-base = "=1.0.0-rc.0"
+iroh-blobs = "0.101"
+iroh-docs = "0.99"
+iroh-gossip = "0.99"
+irpc = "0.15"
+
 # Logging & tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -148,8 +168,19 @@ libc = "0.2"
 # Compression
 zstd = "0.13"
 
+# CARv1 (Content Addressable aRchive) for portable identity export bundles
+# (C.6). We roll a minimal ~40-LOC CARv1 writer directly on top of `cid` +
+# `multihash` + `serde_ipld_dagcbor` rather than pulling in the heavier
+# `iroh-car` dep (last released Oct 2024). DAG-CBOR is the IPLD codec.
+serde_ipld_dagcbor = "0.6"
+cid = "0.11"
+multihash = "0.19"
+multihash-codetable = { version = "0.2", features = ["sha2"] }
+unsigned-varint = "0.8"
+
 # Misc
 bytes = "1"
+url = { version = "2", features = ["serde"] }
 hex = "0.4"
 bs58 = "0.5"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -263,6 +294,19 @@ realfft = "3.4"
 # the Dockerfile installs `ffmpeg` as a system package. `tempfile` lets us
 # hand a path to the CLI without exposing AVIO callbacks for in-memory bytes.
 tempfile = "3"
+
+# Agent memory tier (Phase B): Lance-backed vector store + Tantivy BM25
+# full-text index, hybrid recall via Reciprocal Rank Fusion (k=60). Lives in
+# `crates/tenzro-agent/src/memory/`. Lance writes Apache Arrow RecordBatches
+# under `{data_dir}/agent_memory/agent_memory_vector.lance`; Tantivy writes
+# its inverted index under `{data_dir}/agent_memory/agent_memory_text/`.
+lancedb = "0.29"
+tantivy = "0.26"
+arrow = "58"
+arrow-array = "58"
+arrow-schema = "58"
+futures-util = "0.3"
+bitflags = "2"
 
 [profile.release]
 opt-level = 3

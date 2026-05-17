@@ -391,11 +391,12 @@ impl PaymentProtocol for X402PaymentServer {
         let composite = hybrid.sign(&message).map_err(|e| {
             PaymentError::CredentialError(format!("Failed to hybrid-sign credential: {}", e))
         })?;
-        let pq_signature = composite.pq.clone().ok_or_else(|| {
-            PaymentError::CredentialError(
+        if composite.pq.is_empty() {
+            return Err(PaymentError::CredentialError(
                 "Hybrid signer produced no PQ leg for x402 credential".to_string(),
-            )
-        })?;
+            ));
+        }
+        let pq_signature = composite.pq.clone();
 
         let mut extra = HashMap::new();
         extra.insert(

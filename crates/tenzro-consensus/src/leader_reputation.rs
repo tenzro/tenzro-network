@@ -571,6 +571,7 @@ pub type SharedLeaderReputation = Arc<LeaderReputation>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tenzro_crypto::bls::BlsKeyPair;
     use tenzro_crypto::pq::MlDsaSigningKey;
     use tenzro_crypto::{KeyPair, KeyType};
 
@@ -584,10 +585,12 @@ mod tests {
         let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let address = convert_address(keypair.address());
         let pq = MlDsaSigningKey::generate();
+        let bls = BlsKeyPair::generate().unwrap();
         ValidatorInfo::new(
             address,
             keypair.public_key().clone(),
             pq.verifying_key_bytes().to_vec(),
+            bls.public_key().to_bytes().to_vec(),
             stake,
         )
     }

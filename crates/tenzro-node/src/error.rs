@@ -78,6 +78,25 @@ pub enum NodeError {
     #[error("Invalid transaction: {0}")]
     InvalidTransaction(String),
 
+    /// A required validator key file is missing on disk. The node
+    /// binary on `start` never generates validator keys (see
+    /// `keygen.rs` for the rationale); operators must run
+    /// `tenzro-node init` to provision them explicitly.
+    #[error("Validator {kind} not found at {path}: {hint}")]
+    KeyMissing {
+        kind: &'static str,
+        path: String,
+        hint: &'static str,
+    },
+
+    /// `tenzro-node init` refused to overwrite existing validator
+    /// key files. Pass `--force` to rotate; doing so abandons the
+    /// previous validator identity and any bonded stake.
+    #[error(
+        "validator key file(s) already exist: {0} — refusing to overwrite without --force"
+    )]
+    KeysAlreadyExist(String),
+
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

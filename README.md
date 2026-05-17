@@ -69,7 +69,7 @@ For the full ecosystem context — what AP2, x402, ERC-8004, and CIP-56 are doin
    +----------+--------+---------------+-----------+------------+
 ```
 
-## Workspace — 23 Crates
+## Workspace — 24 Crates
 
 | Crate | Description |
 |-------|-------------|
@@ -77,7 +77,8 @@ For the full ecosystem context — what AP2, x402, ERC-8004, and CIP-56 are doin
 | **tenzro-crypto** | Ed25519, Secp256k1, AES-256-GCM, X25519, BLS12-381, FROST-Ed25519 threshold signatures (RFC 9591), VRF (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI) |
 | **tenzro-tee** | TEE abstraction: Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC with X.509 cert chain verification |
 | **tenzro-zk** | Plonky3 STARKs over the KoalaBear field (Poseidon2 + FRI), three pre-built AIRs (inference / settlement / identity), no trusted setup, post-quantum sound |
-| **tenzro-network** | libp2p P2P networking: gossipsub, Kademlia DHT, peer management, rate limiting |
+| **tenzro-network** | libp2p P2P networking (control plane): gossipsub, Kademlia DHT, peer management, rate limiting, Identify + AutoNAT v2 + Circuit-Relay v2 + DCUtR for permissionless NAT traversal |
+| **tenzro-iroh** | iroh data plane (content-addressed transport): `IrohBackedResolver` over QUIC + iroh-blobs, DA backend, gradient store, sealed-shard store, A2A-over-iroh on the `tenzro/a2a` ALPN. Resolves `tenzro://{blob,gradient,shard,manifest,memory}/...`. TDIP-anchored Pkarr discovery (EndpointId byte-identical to TDIP key) |
 | **tenzro-storage** | RocksDB with column families, Merkle Patricia Trie, snapshots, fsync durability |
 | **tenzro-wallet** | FROST-Ed25519 (RFC 9591) 2-of-3 threshold wallets + ML-DSA-65 hybrid PQ leg, Argon2id keystore, transaction builder, nonce management, key zeroization |
 | **tenzro-auth** | Authentication engine: AAP (Agent Authentication Protocol), DPoP, RAR (Rich Authorization Requests) |
@@ -368,8 +369,7 @@ kubectl apply -f deploy/kubernetes/
 | [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) | Protocol specification — architecture, consensus, multi-VM execution, identity, payments, settlement, agents, training, and the concrete Rust implementation |
 | [`docs/FOUNDATION.md`](docs/FOUNDATION.md) | Tenzro Foundation: governance structure, treasury, grant programs, ecosystem stewardship |
 | [`docs/TOKENOMICS.md`](docs/TOKENOMICS.md) | TNZO token economics: supply, fee model, staking, rewards (testnet phase) |
-| [`docs/TDIP.md`](docs/TDIP.md) | Tenzro Decentralized Identity Protocol — unified human/machine identity over W3C DID |
-| [`docs/PDIS-TENZRO.md`](docs/PDIS-TENZRO.md) | Personal Data and Identity Standard — Tenzro profile (secondary identity standard, fully interoperable with TDIP) |
+| [`docs/TDIP.md`](docs/TDIP.md) | Tenzro Decentralized Identity Protocol — unified human/machine identity over W3C DID (three identity classes: human / delegated agent / autonomous agent) |
 | [`docs/TRAIN.md`](docs/TRAIN.md) | Tenzro Train — decentralized training protocol layer + Python reference trainer |
 | [`docs/GUIDE.md`](docs/GUIDE.md) | Operator and developer guide: build, run, deploy, troubleshoot |
 | [`docs/landscape-2026.md`](docs/landscape-2026.md) | 2026 ecosystem context: AP2, x402, ERC-8004, CIP-56 across EVM/SVM/Canton |

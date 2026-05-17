@@ -125,6 +125,7 @@ pub mod registry;
 pub mod routing;
 pub mod runtime;
 pub mod segmentation_runtime;
+pub mod sla;
 pub mod text_embedding_runtime;
 pub mod ts_runtime;
 pub mod usage;
@@ -154,7 +155,8 @@ pub use catalog::{
     get_video_model_by_id, get_vision_catalog, get_vision_model_by_id,
 };
 pub use hf_download::{
-    ArtifactSpec, DownloadProgress, DownloadState, HfArtifactDownloader, HfDownloader,
+    ArtifactSpec, BlobFetcher, DownloadProgress, DownloadState, HfArtifactDownloader,
+    HfDownloader, PeerHint,
 };
 pub use runtime::{
     ChatMessage, ChatWithToolsResult, GenerationConfig, HardwareInfo, InferenceResult,
@@ -184,8 +186,8 @@ pub use detection_runtime::{
     StubDetector,
 };
 pub use audio_runtime::{
-    AudioRuntime, StubTranscriber, TranscribeConfig, TranscribeResult, Transcriber,
-    TranscriptSegment,
+    AudioRuntime, MoonshineTranscriber, TranscribeConfig, TranscribeResult, Transcriber,
+    TranscriptSegment, WhisperFamily, WhisperTranscriber,
 };
 pub use video_runtime::{
     StubVideoEncoder, VideoEmbedConfig, VideoEmbedResult, VideoEncoder, VideoRuntime,
@@ -194,6 +196,11 @@ pub use video_runtime::{
 pub use provenance::{
     hash_content, verify_manifest, Ed25519ProvenanceSigner, ProvenanceError, ProvenanceSigner,
     ProvenanceStore, SharedProvenanceSigner, ASSERTION_AI_GENERATED, ASSERTION_DEEPFAKE,
+};
+pub use sla::{
+    response_signing_payload as sla_response_signing_payload, ProviderSlashingCallback, SlaManager,
+    SlaProbe, SlaResponse, SlaResult, DEFAULT_SLA_SLASH_AMOUNT, DEFAULT_SLA_SLASH_THRESHOLD,
+    SLA_PROBE_DOMAIN, SLA_RESPONSE_DOMAIN,
 };
 
 #[cfg(test)]

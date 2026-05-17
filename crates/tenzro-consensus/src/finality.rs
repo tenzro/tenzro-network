@@ -317,6 +317,8 @@ mod tests {
     }
 
     fn create_test_qc(view: u64, height: u64) -> QuorumCertificate {
+        // Fork-choice tests don't verify the BLS aggregate; placeholder bytes
+        // are fine because none of these QCs flow through `verify_bls_aggregate`.
         QuorumCertificate::new(
             view,
             BlockHeight::from(height),
@@ -324,6 +326,8 @@ mod tests {
             VoteType::Commit,
             vec![],
             0,
+            [0u8; 96],
+            Vec::new(),
         )
     }
 
@@ -436,6 +440,8 @@ mod tests {
             VoteType::Prepare,
             vec![],
             0,
+            [0u8; 96],
+            Vec::new(),
         );
         assert!(fork_choice.record_qc(qc_v5));
 
@@ -447,6 +453,8 @@ mod tests {
             VoteType::Commit,
             vec![],
             0,
+            [0u8; 96],
+            Vec::new(),
         );
         assert!(fork_choice.record_qc(qc_v9));
         assert_eq!(fork_choice.get_qc(&block.hash()).unwrap().view, 9);
@@ -459,6 +467,8 @@ mod tests {
             VoteType::Prepare,
             vec![],
             0,
+            [0u8; 96],
+            Vec::new(),
         );
         assert!(!fork_choice.record_qc(qc_v5_again));
         assert_eq!(fork_choice.get_qc(&block.hash()).unwrap().view, 9);
@@ -478,6 +488,8 @@ mod tests {
             VoteType::Prepare,
             vec![],
             0,
+            [0u8; 96],
+            Vec::new(),
         );
 
         // Block is not added — record_qc must return false

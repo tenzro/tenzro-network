@@ -55,6 +55,7 @@ base64 = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true }
 rand = { workspace = true }
+ed25519-dalek = { workspace = true }
 
 [[bench]]
 name = "vm_benchmarks"

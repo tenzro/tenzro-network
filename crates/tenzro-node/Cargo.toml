@@ -30,6 +30,7 @@ tenzro-training = { workspace = true }
 tenzro-settlement = { workspace = true }
 tenzro-bridge = { workspace = true }
 tenzro-agent-kit = { workspace = true }
+tenzro-iroh = { workspace = true }
 tenzro-auth = { workspace = true }
 tenzro-workflow = { workspace = true }
 async-trait = { workspace = true }
@@ -50,6 +51,7 @@ toml = { workspace = true }
 libp2p = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
+bytes = { workspace = true }
 bincode = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }

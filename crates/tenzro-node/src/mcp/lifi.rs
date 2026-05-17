@@ -4,9 +4,11 @@ use rmcp::{
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
     model::*,
-    tool, tool_handler, tool_router, ServerHandler,
+    tool, tool_handler, tool_router, Json, ServerHandler,
 };
 use serde::Deserialize;
+
+use super::server::RpcPassthroughOutput;
 
 const LIFI_API_URL: &str = "https://li.quest/v1";
 
@@ -128,10 +130,8 @@ fn err_internal(msg: impl Into<String>) -> ErrorData {
     ErrorData::internal_error(msg.into(), None)
 }
 
-fn json_result(value: serde_json::Value) -> std::result::Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&value).unwrap(),
-    )]))
+fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    Ok(Json(RpcPassthroughOutput { result: value }))
 }
 
 #[tool_router]
@@ -217,7 +217,7 @@ impl LifiMcpServer {
     async fn lifi_get_chains(
         &self,
         #[allow(unused)] Parameters(_params): Parameters<GetChainsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let data = self.api_get("/chains", &[]).await?;
 
         let chains = data
@@ -239,7 +239,7 @@ impl LifiMcpServer {
     async fn lifi_get_tokens(
         &self,
         Parameters(params): Parameters<GetTokensParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut query = Vec::new();
         let chains_str;
         if let Some(ref chains) = params.chains {
@@ -265,7 +265,7 @@ impl LifiMcpServer {
     async fn lifi_get_token(
         &self,
         Parameters(params): Parameters<GetTokenParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let chain_str = params.chain_id.to_string();
         let query = [
             ("chain", chain_str.as_str()),
@@ -287,7 +287,7 @@ impl LifiMcpServer {
     async fn lifi_get_tools(
         &self,
         #[allow(unused)] Parameters(_params): Parameters<GetToolsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let data = self.api_get("/tools", &[]).await?;
 
         let bridges = data.get("bridges").cloned().unwrap_or(serde_json::json!([]));
@@ -311,7 +311,7 @@ impl LifiMcpServer {
     async fn lifi_get_connections(
         &self,
         Parameters(params): Parameters<GetConnectionsParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let from_chain_str = params.from_chain.to_string();
         let to_chain_str = params.to_chain.to_string();
         let mut query = vec![
@@ -350,7 +350,7 @@ impl LifiMcpServer {
     async fn lifi_get_quote(
         &self,
         Parameters(params): Parameters<GetQuoteParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let from_chain_str = params.from_chain.to_string();
         let to_chain_str = params.to_chain.to_string();
         let slippage = params.slippage.unwrap_or(0.03);
@@ -386,7 +386,7 @@ impl LifiMcpServer {
     async fn lifi_get_routes(
         &self,
         Parameters(params): Parameters<GetRoutesParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let slippage = params.slippage.unwrap_or(0.03);
 
         let body = serde_json::json!({
@@ -427,7 +427,7 @@ impl LifiMcpServer {
     async fn lifi_get_status(
         &self,
         Parameters(params): Parameters<GetStatusParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut query = vec![("txHash", params.tx_hash.as_str())];
 
         let bridge_str;
@@ -468,7 +468,7 @@ impl LifiMcpServer {
     async fn lifi_get_gas_prices(
         &self,
         Parameters(params): Parameters<GetGasPricesParams>,
-    ) -> std::result::Result<CallToolResult, ErrorData> {
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut query = Vec::new();
         let chains_str;
         if let Some(ref chains) = params.chains {

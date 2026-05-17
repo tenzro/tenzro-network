@@ -464,6 +464,53 @@ impl IntelTdxProvider {
         Ok(vec![])
     }
 
+    /// Returns the 48-byte MRTD (SHA-384 of the initial Trust Domain state)
+    /// from a freshly generated TD quote.
+    ///
+    /// MRTD is set by the VMM at TD launch and cannot be changed thereafter
+    /// without re-launching the TD with different boot media. This makes it
+    /// suitable as input keying material for measurement-bound key derivation
+    /// — the same TD image redeploys to the same MRTD; tampering produces a
+    /// different MRTD; another tenant's TD on the same physical host has a
+    /// different MRTD.
+    ///
+    /// Unlike SEV-SNP's `SNP_GET_DERIVED_KEY`, TDX has no hardware-mediated
+    /// KDF — callers MUST run the returned MRTD through HKDF-SHA256 with
+    /// per-key salts to produce isolated key material.
+    ///
+    /// # Errors
+    ///
+    /// - [`TeeError::NotAvailable`] when not on Linux or `/dev/tdx_guest` is
+    ///   absent (no simulation fallback per Tenzro's no-simulation-on-testnet
+    ///   policy).
+    /// - [`TeeError::AttestationGenerationFailed`] when quote generation or
+    ///   parsing fails.
+    pub async fn platform_measurement(&self) -> Result<[u8; 48]> {
+        if !self.available {
+            return Err(TeeError::not_available("Intel TDX not available"));
+        }
+        if self.simulate {
+            return Err(TeeError::not_available(
+                "Intel TDX simulation mode cannot supply real platform measurement",
+            ));
+        }
+
+        // Use a fixed nonce — we are extracting MRTD, not proving freshness.
+        // The MRTD is independent of report_data so any value works.
+        let nonce = [0u8; 64];
+        let quote = self.generate_td_quote(&nonce).await?;
+        let parsed = self.parse_quote(&quote)?;
+        if parsed.mr_td.len() != 48 {
+            return Err(TeeError::AttestationGenerationFailed(format!(
+                "MRTD wrong length: {} (expected 48)",
+                parsed.mr_td.len()
+            )));
+        }
+        let mut out = [0u8; 48];
+        out.copy_from_slice(&parsed.mr_td);
+        Ok(out)
+    }
+
     /// Generates a TD Quote (simulated or real).
     ///
     /// Attempts configfs-tsm first (preferred), falls back to TDREPORT + QE.

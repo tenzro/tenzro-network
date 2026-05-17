@@ -1,0 +1,19 @@
+[package]
+name = "tenzro-genkeys"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Offline validator-key generator for the GCE Phase A deploy. Produces Ed25519 + ML-DSA-65 + libp2p seeds plus a complete genesis-prod.toml in one shot."
+publish = false
+
+[[bin]]
+name = "tenzro-genkeys"
+path = "src/main.rs"
+
+[dependencies]
+tenzro-crypto = { workspace = true }
+libp2p = { workspace = true }
+hex = "0.4"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"

@@ -132,8 +132,8 @@ pub mod capabilities;
 pub mod error;
 pub mod identity;
 pub mod lifecycle;
+pub mod memory;
 pub mod messaging;
-pub mod pdis;
 pub mod runtime;
 pub mod swarm;
 pub mod transactions;
@@ -152,29 +152,19 @@ pub use capabilities::{AttestationConfig, CapabilityAttestation, CapabilityRegis
 pub use error::{AgentError, Result};
 pub use identity::{AgentIdentityManager, AgentStatus, RegisteredAgent};
 pub use lifecycle::{AgentLifecycle, AgentLifecycleEvent, AgentLifecycleInfo, AgentState, HeartbeatConfig};
+pub use memory::{
+    LanceVectorBackend, MemoryError, MemoryFilter, MemoryKind, MemoryManager,
+    MemoryManagerConfig, MemoryRecord, MemorySource, SearchModes, TantivyTextBackend,
+};
 pub use messaging::{
     EchoMessageHandler, GossipsubTransport, MessageHandler, MessageRouter, MessageRouterConfig,
     NetworkTransport, RateLimitConfig,
-};
-
-pub use pdis::{
-    CredentialType, DelegationScope, DidResolutionResult, GuardianIdentity, IdentityStatus,
-    InheritedCredential, KycTier, PdisAgentIdentity, PdisRegistry, TimeBound,
 };
 
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentTransactionRecord, RuntimeStatistics};
 pub use transactions::{
     AgentTransaction, AgentTransactionExecutor, AgentTransactionResult, TransactionSubmitter,
 };
-
-// Re-export tenzro-identity types for the migration path
-pub mod tip {
-    //! Tenzro Decentralized Identity Protocol (TDIP) types — the successor to PDIS.
-    //!
-    //! Consumers should migrate from `tenzro_agent::pdis::*` to `tenzro_agent::tip::*`
-    //! (or depend on `tenzro-identity` directly).
-    pub use tenzro_identity::*;
-}
 
 #[cfg(test)]
 mod tests {

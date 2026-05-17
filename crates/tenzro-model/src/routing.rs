@@ -696,12 +696,30 @@ impl InferenceRouter {
                 body["max_tokens"] = serde_json::json!(mt);
             }
 
+            // Pre-serialize the request body so we can record the exact
+            // wire-level byte count consumed at the provider's HTTP boundary.
+            // This is the `bytes_in` side of UsageRecord (from the provider's
+            // perspective — bytes received from the consumer).
+            let body_bytes = match serde_json::to_vec(&body) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(
+                        "Failed to serialize inference request body: {}",
+                        e
+                    );
+                    excluded_providers.push(provider_address);
+                    continue;
+                }
+            };
+            let bytes_in = body_bytes.len() as u64;
+
             // Send HTTP request
             let start = std::time::Instant::now();
             let result = self
                 .http_client
                 .post(&chat_url)
-                .json(&body)
+                .header("content-type", "application/json")
+                .body(body_bytes)
                 .send()
                 .await;
 
@@ -714,10 +732,17 @@ impl InferenceRouter {
                     self.provider_manager
                         .record_success(&provider_address, elapsed_ms);
 
-                    // Parse OpenAI-compatible response
-                    let resp_body: serde_json::Value = resp.json().await.map_err(|e| {
-                        ModelError::InferenceError(format!("Failed to parse response: {}", e))
+                    // Read the raw response bytes first so we can record the
+                    // wire-level `bytes_out` count, then parse the JSON.
+                    let resp_bytes = resp.bytes().await.map_err(|e| {
+                        ModelError::InferenceError(format!("Failed to read response body: {}", e))
                     })?;
+                    let bytes_out = resp_bytes.len() as u64;
+
+                    let resp_body: serde_json::Value =
+                        serde_json::from_slice(&resp_bytes).map_err(|e| {
+                            ModelError::InferenceError(format!("Failed to parse response: {}", e))
+                        })?;
 
                     let output_text = resp_body["choices"]
                         .get(0)
@@ -772,6 +797,8 @@ impl InferenceRouter {
                             provider_address,
                             input_tokens,
                             output_tokens,
+                            bytes_in,
+                            bytes_out,
                             price,
                             elapsed_ms,
                         );

@@ -27,10 +27,6 @@
 //! - **Receipts bind execution to weights**: every inference produces a
 //!   signed [`tenzro_types::cortex::CortexReceipt`] carrying input/output
 //!   commitments, weights hash, runtime hash, loops used, and worker DID.
-//!
-//! Positioning: **Cortex reasons. Praecise governs. Tenzro settles.**
-//! (Praecise is an open AI governance framework by Ipnops, used — not
-//! owned — by Tenzro.)
 
 pub mod advertisement;
 pub mod attestation;

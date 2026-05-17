@@ -130,6 +130,14 @@ mod tests {
             .to_vec()
     }
 
+    fn test_bls_vk() -> Vec<u8> {
+        tenzro_crypto::bls::BlsKeyPair::generate()
+            .unwrap()
+            .public_key()
+            .to_bytes()
+            .to_vec()
+    }
+
     fn make_test_identity() -> TenzroIdentity {
         TenzroIdentity {
             did: TenzroDid::parse("did:tenzro:human:test-id").unwrap(),
@@ -156,6 +164,7 @@ mod tests {
             wallet_address: Address::new([0u8; 32]),
             wallet_id: "wallet-1".to_string(),
             pq_verifying_key: test_pq_vk(),
+            bls_verifying_key: test_bls_vk(),
             credentials: Vec::new(),
             services: vec![ServiceEndpoint {
                 id: "inference".to_string(),
@@ -217,6 +226,7 @@ mod tests {
             wallet_address: Address::new([0u8; 32]),
             wallet_id: "wallet-2".to_string(),
             pq_verifying_key: test_pq_vk(),
+            bls_verifying_key: test_bls_vk(),
             credentials: Vec::new(),
             services: Vec::new(),
             created_at: Utc::now(),

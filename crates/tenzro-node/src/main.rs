@@ -1,6 +1,6 @@
 //! Tenzro Network Node - Full node binary
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -35,9 +35,31 @@ struct Cli {
     #[arg(short, long, value_name = "ROLE")]
     role: Option<String>,
 
-    /// Network listen address
-    #[arg(short, long, value_name = "ADDR")]
-    listen_addr: Option<String>,
+    /// libp2p multiaddrs to listen on. Comma-separated.
+    /// When omitted, the node listens on BOTH `/ip4/0.0.0.0/tcp/9000` and
+    /// `/ip4/0.0.0.0/udp/9000/quic-v1` — the universal default that lets any
+    /// device (cloud VM, home WiFi, mobile, RasPi) reach this node over
+    /// whichever transport NAT permits. QUIC also gives observed_addr a
+    /// stable listening UDP port (structural port-reuse) which Identify
+    /// then advertises correctly to peers.
+    ///
+    /// Pass explicit multiaddrs to override (e.g. when binding to a specific
+    /// interface, using non-standard ports, or adding WebRTC/WebTransport).
+    /// Only full libp2p multiaddrs are accepted — host:port shorthand is not
+    /// supported.
+    #[arg(short, long, value_name = "ADDRS", value_delimiter = ',')]
+    listen_addr: Vec<String>,
+
+    /// Public libp2p multiaddrs this node advertises to peers via Identify.
+    /// Comma-separated. Required on cloud deployments that bind to `0.0.0.0`,
+    /// where the network layer hides raw listen-addr enumeration to avoid
+    /// leaking the docker0 bridge / private VPC interfaces. Validator nodes
+    /// should pass their GCE-allocated external IP here, e.g.
+    /// `/ip4/34.123.45.67/tcp/9000`. Multiple entries allow advertising both
+    /// TCP and QUIC. Leave unset for nodes behind NAT; AutoNAT v2 will
+    /// discover an external address dynamically once that path lands.
+    #[arg(long, value_name = "ADDRS")]
+    external_p2p_addr: Option<String>,
 
     /// Bootstrap nodes (comma-separated multiaddrs)
     #[arg(short, long, value_name = "NODES")]
@@ -51,8 +73,12 @@ struct Cli {
     #[arg(long, value_name = "FORMAT", default_value = "text")]
     log_format: String,
 
-    /// RPC listen address
-    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8545")]
+    /// RPC listen address. Defaults to `0.0.0.0:8545` so that a freshly
+    /// launched validator participates in the open RPC layer alongside its
+    /// consensus role. Override with `--rpc-addr 127.0.0.1:8545` for a
+    /// loopback-only node (typical for provider/TEE roles operated behind
+    /// a trusted controller).
+    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:8545")]
     rpc_addr: String,
 
     /// Web API listen address
@@ -109,6 +135,114 @@ struct Cli {
     /// Example: `--external-mcp-addr https://mcp.tenzro.network/mcp`
     #[arg(long, value_name = "URL")]
     external_mcp_addr: Option<String>,
+
+    /// State-sync bootstrap: fetch the highest snapshot from the given
+    /// peer's RPC endpoint, verify chunk hashes against the manifest, and
+    /// commit it to the local KV store before starting consensus. Skips
+    /// block replay from genesis. Used to bring a fresh / wedged validator
+    /// online quickly. The caller is responsible for verifying the
+    /// snapshot's `state_root_hex` against a trusted QC out of band.
+    /// Example: `--state-sync-from https://rpc.tenzro.network`
+    #[arg(long, value_name = "URL")]
+    state_sync_from: Option<String>,
+
+    /// Optional subcommand. When omitted, the binary runs as a full node
+    /// using the top-level flags above. Subcommands are administrative
+    /// helpers that talk to a *running* node over its JSON-RPC and exit.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// Administrative subcommands. Each subcommand either provisions
+/// local state or talks to a running node over JSON-RPC.
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Generate the validator's three signing keys (Ed25519 +
+    /// ML-DSA-65 + BLS12-381) and persist them under `--data-dir`.
+    ///
+    /// This is the **only** path that creates validator key
+    /// material — the running node binary on `start` strictly loads
+    /// existing files and errors loud if any are missing. The reason
+    /// is universal in 2026 production BFT: silent daemon-side
+    /// auto-keygen on a misconfigured / empty / re-mounted volume
+    /// silently forks a fresh validator identity, after which any
+    /// bonded stake is bonded to a dead pubkey. Aptos, Sui, Cosmos /
+    /// CometBFT, Solana, Monad, Ethereum CL clients (Lighthouse /
+    /// Prysm / Teku), Celestia, Babylon, and Berachain all require
+    /// an explicit operator-invoked keygen step for this reason.
+    ///
+    /// `init` writes three files under `--data-dir`, each `0o600` on
+    /// Unix: `validator_key`, `validator_pq_key`, `validator_bls_key`.
+    /// It then prints the three public keys in a ready-to-paste
+    /// `[[validators]]` TOML stanza suitable for genesis v3 assembly.
+    ///
+    /// Refuses to overwrite existing key files. Pass `--force` to
+    /// rotate; doing so abandons the previous validator identity and
+    /// any bonded stake, so use it deliberately.
+    #[command(name = "init")]
+    Init {
+        /// Data directory where the three validator key files are
+        /// written. Defaults to `./data` to match the node's own
+        /// default `data_dir`.
+        #[arg(long, value_name = "DIR", default_value = "./data")]
+        data_dir: PathBuf,
+
+        /// Genesis stake to print in the emitted `[[validators]]`
+        /// stanza. Does not write anything on-chain — this is purely
+        /// a convenience for the operator assembling genesis.toml.
+        #[arg(long, default_value_t = 1_000_000)]
+        stake: u64,
+
+        /// Overwrite existing validator key files if present. Rotating
+        /// keys this way abandons the previous validator identity and
+        /// any bonded stake; use only when you know what you're doing.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+
+        /// Output format for the generated pubkeys. `toml` (default)
+        /// emits a ready-to-paste `[[validators]]` stanza; `json`
+        /// emits a machine-readable object with the three pubkey
+        /// fields and their hex encodings.
+        #[arg(long, value_name = "FORMAT", default_value = "toml")]
+        format: String,
+    },
+
+    /// Ask the running node to step down gracefully.
+    ///
+    /// Calls `tenzro_gracefulExit` on the local RPC. The node waits until
+    /// it is **not** the elected HotStuff-2 leader for any of the next
+    /// `--lookahead-views` views, then triggers its existing shutdown
+    /// path (the in-process `NodeEvent::Shutdown` plus the 5-second
+    /// drain in `main()`).
+    ///
+    /// Intended for K8s `preStop` hooks and systemd `ExecStop=` units —
+    /// a 0 exit means the node accepted the request, not that the
+    /// process has already died. Wait on the process or the pod
+    /// terminationGracePeriodSeconds for the actual exit.
+    #[command(name = "graceful-exit")]
+    GracefulExit {
+        /// JSON-RPC endpoint of the running node.
+        #[arg(long, value_name = "URL", default_value = "http://127.0.0.1:8545")]
+        rpc_url: String,
+
+        /// How many forward views must clear of this node being leader
+        /// before stand-down. 5 covers a full HotStuff-2 round of
+        /// proposer rotation under normal conditions.
+        #[arg(long, default_value_t = 5)]
+        lookahead_views: u64,
+
+        /// Cap on how long to wait for leader rotation. Defaults to
+        /// 60s, which comfortably exceeds typical view durations even
+        /// under timeout-driven view changes.
+        #[arg(long, default_value_t = 60)]
+        max_wait_secs: u64,
+
+        /// Skip the leader-clearance check entirely and trigger
+        /// shutdown immediately. Use only when you know the node is
+        /// not currently producing or about to produce a block.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
 }
 
 #[tokio::main(worker_threads = 2)]
@@ -117,6 +251,12 @@ async fn main() -> Result<()> {
 
     // Initialize logging
     init_logging(&cli.log_level, &cli.log_format)?;
+
+    // Administrative subcommands run as one-shot RPC clients against a
+    // *running* node and exit — they do not boot a node themselves.
+    if let Some(cmd) = cli.command {
+        return run_subcommand(cmd).await;
+    }
 
     // Install aws-lc-rs as the process-wide rustls CryptoProvider before any
     // TLS-using subsystem (reqwest, axum-rustls, libp2p TLS, hyper-rustls)
@@ -178,6 +318,10 @@ async fn main() -> Result<()> {
 
     // Create and start the node
     let mut node = TenzroNode::new(config.clone()).await?;
+    if let Some(peer) = cli.state_sync_from.clone() {
+        info!(peer = %peer, "State-sync requested via --state-sync-from");
+        node.set_state_sync_peer(peer);
+    }
     node.start().await?;
 
     // Construct the Stripe SPT ceiling-resolver cache adapter once (if a
@@ -432,19 +576,37 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Start A2A protocol server
+    // Build the shared A2A state once so the HTTPS axum surface and the
+    // iroh-transport surface (Phase D2, #223) operate against the **same**
+    // `TaskManager` — tasks created over either transport land in the same
+    // table.
     let a2a_addr = config.a2a_addr.clone();
-    let a2a_node = node_arc.clone();
-    let a2a_web_state = web_state;
-    let mut a2a_shutdown_rx = shutdown_tx.subscribe();
+    let a2a_state = a2a::server::build_a2a_state(&a2a_addr, node_arc.clone(), web_state);
+
+    // Phase D2 (#223): install the iroh-side A2A dispatcher. The iroh
+    // router registered the `tenzro/a2a` ALPN at bind time backed by a
+    // deferred dispatcher (see `init_ai_infrastructure`); now that we
+    // have the shared `Arc<A2aState>`, swap the real one in. Peers that
+    // connected before this point received `-32603` "dispatcher not yet
+    // bound" envelopes — after this swap they get the full A2A surface.
+    if let Some(deferred) = node_arc.iroh_a2a_dispatcher.as_ref() {
+        let dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> =
+            Arc::new(a2a::iroh_transport::IrohA2aDispatcher::new(a2a_state.clone()));
+        deferred.set(dispatcher);
+        info!("A2A dispatcher installed on iroh transport (ALPN tenzro/a2a, Phase D2)");
+    }
+
+    let a2a_shutdown_rx = shutdown_tx.subscribe();
+    let a2a_addr_https = a2a_addr.clone();
     let mut a2a_handle = tokio::spawn(async move {
-        tokio::select! {
-            result = a2a::server::start_a2a_server(a2a_addr, a2a_node, a2a_web_state) => {
-                if let Err(e) = result { error!("A2A server error: {}", e); }
-            }
-            _ = async { let _ = a2a_shutdown_rx.recv().await; } => {
-                info!("A2A server shutting down");
-            }
+        if let Err(e) = a2a::server::start_a2a_server_with_shutdown(
+            a2a_addr_https,
+            a2a_state,
+            a2a_shutdown_rx,
+        )
+        .await
+        {
+            error!("A2A server error: {}", e);
         }
     });
 
@@ -612,6 +774,159 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Dispatch an administrative subcommand. Each variant is a one-shot
+/// JSON-RPC call against a running node; the function returns the exit
+/// status for the process.
+async fn run_subcommand(cmd: Command) -> Result<()> {
+    match cmd {
+        Command::Init {
+            data_dir,
+            stake,
+            force,
+            format,
+        } => run_init(data_dir, stake, force, format),
+        Command::GracefulExit {
+            rpc_url,
+            lookahead_views,
+            max_wait_secs,
+            force,
+        } => run_graceful_exit(rpc_url, lookahead_views, max_wait_secs, force).await,
+    }
+}
+
+/// `tenzro-node init` — generate and persist the validator's three
+/// signing keys (Ed25519 + ML-DSA-65 + BLS12-381) under `data_dir`,
+/// then print the resulting public keys for genesis assembly.
+///
+/// This is the only path in the binary that creates validator key
+/// material. The running node strictly loads and errors on missing
+/// keys — see `keygen.rs` for the rationale.
+fn run_init(
+    data_dir: PathBuf,
+    stake: u64,
+    force: bool,
+    format: String,
+) -> Result<()> {
+    info!(
+        data_dir = %data_dir.display(),
+        stake,
+        force,
+        format = %format,
+        "Generating validator keyset"
+    );
+
+    let keyset = tenzro_node::keygen::generate_and_persist_keyset(&data_dir, force)?;
+    let pubs = keyset.pubkeys();
+
+    // Always log a short summary to stderr so operators see what was
+    // written even if they pipe stdout into a genesis-builder script.
+    info!(
+        ed25519_pubkey_hex = %hex::encode(&pubs.ed25519),
+        bls_pubkey_hex = %hex::encode(&pubs.bls12_381_g1),
+        "Validator keyset generated; secret files written to {} with mode 0o600",
+        data_dir.display(),
+    );
+
+    match format.to_lowercase().as_str() {
+        "json" => {
+            let v = serde_json::json!({
+                "data_dir": data_dir.display().to_string(),
+                "stake": stake,
+                "validator": {
+                    "public_key": format!("0x{}", hex::encode(&pubs.ed25519)),
+                    "pq_public_key": format!("0x{}", hex::encode(&pubs.ml_dsa_65)),
+                    "bls_public_key": format!("0x{}", hex::encode(&pubs.bls12_381_g1)),
+                    "stake": stake,
+                },
+                "files": {
+                    "ed25519": data_dir.join("validator_key").display().to_string(),
+                    "ml_dsa_65": data_dir.join("validator_pq_key").display().to_string(),
+                    "bls12_381": data_dir.join("validator_bls_key").display().to_string(),
+                },
+            });
+            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+        }
+        // Default: TOML stanza ready to paste into genesis.toml.
+        _ => {
+            println!("{}", pubs.to_genesis_toml(stake));
+        }
+    }
+
+    Ok(())
+}
+
+/// `tenzro-node graceful-exit` — call `tenzro_gracefulExit` on the
+/// running node's JSON-RPC. The RPC handler waits until this replica is
+/// no longer the elected leader for the next `lookahead_views` views,
+/// then triggers the in-process `NodeEvent::Shutdown`. We print the
+/// JSON response and exit 0 if the call succeeded — actual process
+/// termination on the server is asynchronous (5s drain in `main()`).
+async fn run_graceful_exit(
+    rpc_url: String,
+    lookahead_views: u64,
+    max_wait_secs: u64,
+    force: bool,
+) -> Result<()> {
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tenzro_gracefulExit",
+        "params": {
+            "lookahead_views": lookahead_views,
+            "max_wait_secs": max_wait_secs,
+            "force": force,
+        },
+    });
+
+    info!(
+        rpc_url = %rpc_url,
+        lookahead_views,
+        max_wait_secs,
+        force,
+        "Sending graceful-exit request"
+    );
+
+    // The RPC handler blocks for up to `max_wait_secs` waiting for
+    // leader rotation, so the HTTP timeout must comfortably exceed it.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(max_wait_secs.saturating_add(30)))
+        .build()
+        .map_err(|e| error::NodeError::Other(format!("reqwest client build: {}", e)))?;
+
+    let resp = client
+        .post(&rpc_url)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| error::NodeError::Other(format!("RPC POST {}: {}", rpc_url, e)))?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| error::NodeError::Other(format!("RPC response decode: {}", e)))?;
+
+    if !status.is_success() {
+        error!(http_status = %status, body = %body, "graceful-exit RPC returned non-2xx");
+        return Err(error::NodeError::Other(format!(
+            "graceful-exit RPC HTTP {}: {}",
+            status, body
+        )));
+    }
+    if let Some(err) = body.get("error") {
+        error!(error = %err, "graceful-exit RPC returned JSON-RPC error");
+        return Err(error::NodeError::Other(format!(
+            "graceful-exit RPC error: {}",
+            err
+        )));
+    }
+
+    let result = body.get("result").cloned().unwrap_or(serde_json::Value::Null);
+    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+    info!("graceful-exit accepted by node; process will exit after server drain");
+    Ok(())
+}
+
 /// Initialize logging with the specified level and format
 fn init_logging(log_level: &str, log_format: &str) -> Result<()> {
     let level = match log_level.to_lowercase().as_str() {
@@ -714,23 +1029,47 @@ fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
         }
     }
 
-    if let Some(listen_addr) = &cli.listen_addr {
-        if let Ok(addr) = listen_addr.parse::<libp2p::Multiaddr>() {
-            config.network.listen_addresses = vec![addr];
-            info!("Listen address override: {}", listen_addr);
-        } else {
-            // Try as host:port format
-            let tcp_addr = format!("/ip4/{}/tcp/{}",
-                listen_addr.split(':').next().unwrap_or("0.0.0.0"),
-                listen_addr.split(':').nth(1).unwrap_or("9000")
-            );
-            if let Ok(addr) = tcp_addr.parse::<libp2p::Multiaddr>() {
-                config.network.listen_addresses = vec![addr];
-                info!("Listen address override: {}", tcp_addr);
-            } else {
-                return Err(error::NodeError::Config(format!("Invalid listen address: {}", listen_addr)));
+    // When --listen-addr is omitted, NetworkConfig::default() already provides
+    // both TCP and QUIC on port 9000 (the universal default). Any explicit
+    // entries replace that default wholesale — no merging, no shims.
+    if !cli.listen_addr.is_empty() {
+        let mut addrs = Vec::with_capacity(cli.listen_addr.len());
+        for entry in &cli.listen_addr {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                continue;
             }
+            let addr = trimmed.parse::<libp2p::Multiaddr>().map_err(|e| {
+                error::NodeError::Config(format!(
+                    "Invalid --listen-addr multiaddr '{}': {}",
+                    trimmed, e
+                ))
+            })?;
+            addrs.push(addr);
         }
+        if !addrs.is_empty() {
+            info!(
+                "Listen addresses override: {} entries ({})",
+                addrs.len(),
+                addrs
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            config.network.listen_addresses = addrs;
+        }
+    } else {
+        info!(
+            "Using default listen addresses (TCP+QUIC): {}",
+            config
+                .network
+                .listen_addresses
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     if let Some(boot_nodes) = &cli.boot_nodes {
@@ -749,6 +1088,37 @@ fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
         if !addrs.is_empty() {
             config.network.boot_nodes = addrs;
             info!("Boot nodes override: {} nodes", config.network.boot_nodes.len());
+        }
+    }
+
+    // Public addresses this node advertises to peers via Identify. Each
+    // entry is registered with the swarm via `add_external_address` and is
+    // the only thing other peers see (the underlying listener enumeration is
+    // hidden — see `tenzro-network/src/behaviour.rs::TenzroBehaviour::new`).
+    if let Some(external_p2p_addr) = &cli.external_p2p_addr {
+        let mut addrs = Vec::new();
+        for entry in external_p2p_addr.split(',') {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match trimmed.parse::<libp2p::Multiaddr>() {
+                Ok(addr) => addrs.push(addr),
+                Err(e) => {
+                    tracing::warn!(
+                        "Skipping invalid --external-p2p-addr entry '{}': {}",
+                        trimmed,
+                        e
+                    );
+                }
+            }
+        }
+        if !addrs.is_empty() {
+            info!(
+                "External p2p addresses to advertise: {} entries",
+                addrs.len()
+            );
+            config.network.external_addresses = addrs;
         }
     }
 

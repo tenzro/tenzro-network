@@ -8,8 +8,17 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tenzro_storage::kv::{KvStore, WriteOp, CF_MODELS};
+use tenzro_storage::{
+    compute_commitment, InlineFallbackBackend, ReceiptEnvelope, ReceiptKind, ReceiptStorageMode,
+    ReceiptSummary,
+};
 use tenzro_types::primitives::{Address, Timestamp};
 use tracing::{debug, info, warn};
+
+/// DA namespace used when offloading inference receipts via the inline-fallback
+/// backend. Stable string; if the operator wires in a real DA backend later the
+/// namespace stays the same so receipts indexed by namespace remain comparable.
+const INFERENCE_DA_NAMESPACE: &[u8] = b"tenzro/inference";
 
 /// Prefix for usage records in storage
 const USAGE_RECORD_PREFIX: &[u8] = b"model_usage:";
@@ -36,6 +45,12 @@ pub struct UsageRecord {
     pub input_tokens: u32,
     /// Number of output tokens
     pub output_tokens: u32,
+    /// Bytes received from the consumer (request body size at the HTTP boundary).
+    /// Used for marketplace bandwidth accounting alongside token counts.
+    pub bytes_in: u64,
+    /// Bytes sent back to the consumer (response body size at the HTTP boundary).
+    /// Used for marketplace bandwidth accounting alongside token counts.
+    pub bytes_out: u64,
     /// Cost in smallest TNZO unit
     pub cost: u64,
     /// Latency in milliseconds
@@ -51,6 +66,8 @@ impl UsageRecord {
         provider_id: Address,
         input_tokens: u32,
         output_tokens: u32,
+        bytes_in: u64,
+        bytes_out: u64,
         cost: u64,
         latency_ms: u64,
     ) -> Self {
@@ -63,6 +80,8 @@ impl UsageRecord {
             provider_id,
             input_tokens,
             output_tokens,
+            bytes_in,
+            bytes_out,
             cost,
             latency_ms,
             timestamp,
@@ -72,6 +91,11 @@ impl UsageRecord {
     /// Total tokens (input + output)
     pub fn total_tokens(&self) -> u32 {
         self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    /// Total bytes (in + out) at the HTTP boundary
+    pub fn total_bytes(&self) -> u64 {
+        self.bytes_in.saturating_add(self.bytes_out)
     }
 }
 
@@ -90,6 +114,10 @@ pub struct ModelUsageStats {
     pub total_cost: u64,
     /// Sum of all latencies for calculating average
     pub total_latency_ms: u64,
+    /// Total bytes received from consumers across all inferences
+    pub total_bytes_in: u64,
+    /// Total bytes sent back to consumers across all inferences
+    pub total_bytes_out: u64,
     /// Timestamp of first inference
     pub first_inference: Option<Timestamp>,
     /// Timestamp of last inference
@@ -128,6 +156,11 @@ impl ModelUsageStats {
         }
     }
 
+    /// Total bytes (in + out) at the HTTP boundary across all inferences
+    pub fn total_bytes(&self) -> u64 {
+        self.total_bytes_in.saturating_add(self.total_bytes_out)
+    }
+
     /// Updates stats with a new usage record
     fn update(&mut self, record: &UsageRecord) {
         self.inference_count = self.inference_count.saturating_add(1);
@@ -139,6 +172,8 @@ impl ModelUsageStats {
             .saturating_add(record.output_tokens as u64);
         self.total_cost = self.total_cost.saturating_add(record.cost);
         self.total_latency_ms = self.total_latency_ms.saturating_add(record.latency_ms);
+        self.total_bytes_in = self.total_bytes_in.saturating_add(record.bytes_in);
+        self.total_bytes_out = self.total_bytes_out.saturating_add(record.bytes_out);
 
         if self.first_inference.is_none() {
             self.first_inference = Some(record.timestamp);
@@ -162,6 +197,10 @@ pub struct ProviderUsageStats {
     pub total_revenue: u64,
     /// Sum of all latencies
     pub total_latency_ms: u64,
+    /// Total bytes received from consumers across all inferences served
+    pub total_bytes_in: u64,
+    /// Total bytes sent back to consumers across all inferences served
+    pub total_bytes_out: u64,
     /// Timestamp of first inference served
     pub first_inference: Option<Timestamp>,
     /// Timestamp of last inference served
@@ -200,6 +239,11 @@ impl ProviderUsageStats {
         }
     }
 
+    /// Total bytes (in + out) at the HTTP boundary across all inferences served
+    pub fn total_bytes(&self) -> u64 {
+        self.total_bytes_in.saturating_add(self.total_bytes_out)
+    }
+
     /// Updates stats with a new usage record
     fn update(&mut self, record: &UsageRecord) {
         self.inference_count = self.inference_count.saturating_add(1);
@@ -211,6 +255,8 @@ impl ProviderUsageStats {
             .saturating_add(record.output_tokens as u64);
         self.total_revenue = self.total_revenue.saturating_add(record.cost);
         self.total_latency_ms = self.total_latency_ms.saturating_add(record.latency_ms);
+        self.total_bytes_in = self.total_bytes_in.saturating_add(record.bytes_in);
+        self.total_bytes_out = self.total_bytes_out.saturating_add(record.bytes_out);
 
         if self.first_inference.is_none() {
             self.first_inference = Some(record.timestamp);
@@ -232,6 +278,10 @@ pub struct GlobalUsageStats {
     pub total_cost: u64,
     /// Sum of all latencies across all requests
     pub total_latency_ms: u64,
+    /// Total bytes received from consumers across the entire network
+    pub total_bytes_in: u64,
+    /// Total bytes sent back to consumers across the entire network
+    pub total_bytes_out: u64,
     /// Number of unique models that have been used
     pub unique_models: u64,
     /// Number of unique providers that have served requests
@@ -266,6 +316,11 @@ impl GlobalUsageStats {
         }
     }
 
+    /// Total bytes (in + out) at the HTTP boundary network-wide
+    pub fn total_bytes(&self) -> u64 {
+        self.total_bytes_in.saturating_add(self.total_bytes_out)
+    }
+
     /// Updates global stats with a new usage record
     fn update(&mut self, record: &UsageRecord) {
         self.total_inference_count = self.total_inference_count.saturating_add(1);
@@ -277,6 +332,8 @@ impl GlobalUsageStats {
             .saturating_add(record.output_tokens as u64);
         self.total_cost = self.total_cost.saturating_add(record.cost);
         self.total_latency_ms = self.total_latency_ms.saturating_add(record.latency_ms);
+        self.total_bytes_in = self.total_bytes_in.saturating_add(record.bytes_in);
+        self.total_bytes_out = self.total_bytes_out.saturating_add(record.bytes_out);
 
         if self.first_inference.is_none() {
             self.first_inference = Some(record.timestamp);
@@ -289,6 +346,14 @@ impl GlobalUsageStats {
 ///
 /// Tracks per-model, per-provider, and global usage statistics with RocksDB persistence.
 /// All statistics are kept in-memory for fast access and periodically synced to disk.
+///
+/// Per-record persistence wraps each `UsageRecord` in a [`ReceiptEnvelope`]
+/// with `kind = Inference` and `storage_mode = OffloadedDA`. The bincode
+/// payload is submitted to the configured DA backend (currently always
+/// [`InlineFallbackBackend`] until external DA layers land); only the envelope
+/// (commitment + summary + DA pointer) is persisted under
+/// `model_usage:<record_id>` in `CF_MODELS`. Aggregated stats remain plain
+/// bincode — they are not receipts.
 #[derive(Clone)]
 pub struct UsageTracker {
     /// Per-model statistics cache
@@ -303,6 +368,11 @@ pub struct UsageTracker {
     max_recent_records: usize,
     /// Optional persistent storage backend
     storage: Option<Arc<dyn KvStore>>,
+    /// DA backend used to offload inference-receipt payloads. Always present;
+    /// defaults to a fresh in-process [`InlineFallbackBackend`] when no
+    /// explicit backend is wired. When `with_storage()` is used, the backend
+    /// shares that `KvStore` so offloaded payloads survive restarts.
+    da_backend: Arc<InlineFallbackBackend>,
 }
 
 impl UsageTracker {
@@ -315,13 +385,17 @@ impl UsageTracker {
             recent_records: Arc::new(parking_lot::RwLock::new(Vec::new())),
             max_recent_records: 1000,
             storage: None,
+            da_backend: Arc::new(InlineFallbackBackend::new()),
         }
     }
 
     /// Creates a new usage tracker with RocksDB persistence
     ///
-    /// Loads existing stats from storage on initialization.
+    /// Loads existing stats from storage on initialization. The DA backend
+    /// shares the same `KvStore` so offloaded inference payloads survive
+    /// restarts via `CF_METADATA / da_fallback:<locator>`.
     pub fn with_storage(storage: Arc<dyn KvStore>) -> Result<Self> {
+        let da_backend = Arc::new(InlineFallbackBackend::new().with_storage(storage.clone()));
         let tracker = Self {
             model_stats: Arc::new(DashMap::new()),
             provider_stats: Arc::new(DashMap::new()),
@@ -329,12 +403,20 @@ impl UsageTracker {
             recent_records: Arc::new(parking_lot::RwLock::new(Vec::new())),
             max_recent_records: 1000,
             storage: Some(storage.clone()),
+            da_backend,
         };
 
         // Load existing stats from storage
         tracker.load_from_storage()?;
 
         Ok(tracker)
+    }
+
+    /// Access the DA backend used for inference-receipt offload. Exposed so
+    /// hydration / fetch RPCs that need to dereference offloaded payloads can
+    /// use the same in-process backend instance.
+    pub fn da_backend(&self) -> Arc<InlineFallbackBackend> {
+        self.da_backend.clone()
     }
 
     /// Sets the maximum number of recent records to keep in memory
@@ -349,11 +431,13 @@ impl UsageTracker {
     /// to storage if configured.
     pub fn record_usage(&self, record: UsageRecord) -> Result<()> {
         debug!(
-            "Recording usage: model={}, provider={}, tokens={}/{}, cost={}, latency={}ms",
+            "Recording usage: model={}, provider={}, tokens={}/{}, bytes={}/{}, cost={}, latency={}ms",
             record.model_id,
             record.provider_id,
             record.input_tokens,
             record.output_tokens,
+            record.bytes_in,
+            record.bytes_out,
             record.cost,
             record.latency_ms
         );
@@ -455,11 +539,53 @@ impl UsageTracker {
             .collect()
     }
 
-    /// Persists a usage record to storage
+    /// Persists a usage record to storage as an offloaded inference receipt.
+    ///
+    /// The bincode-serialized `UsageRecord` is the canonical payload. It is
+    /// submitted to the inference DA backend (currently always
+    /// [`InlineFallbackBackend`]) which returns a [`tenzro_storage::DaPointer`].
+    /// Only the [`ReceiptEnvelope`] (commitment + summary + pointer) is
+    /// serialized to RocksDB under `model_usage:<record_id>` — the bulk
+    /// payload lives in the DA backend (and, when the backend is wired with a
+    /// `KvStore`, mirrored to `CF_METADATA / da_fallback:<locator>` for
+    /// cross-restart durability).
     fn persist_record(&self, record: &UsageRecord, storage: &Arc<dyn KvStore>) -> Result<()> {
         let key = [USAGE_RECORD_PREFIX, record.record_id.as_bytes()].concat();
-        let value = bincode::serialize(record)
-            .map_err(|e| ModelError::SerializationError(format!("Failed to serialize usage record: {}", e)))?;
+
+        let payload = bincode::serialize(record).map_err(|e| {
+            ModelError::SerializationError(format!("Failed to serialize usage record: {}", e))
+        })?;
+
+        let summary = ReceiptSummary {
+            // Hash the record_id string so the on-chain summary carries a
+            // 32-byte digest (the rest of the protocol indexes receipts by
+            // Hash, not by free-form string).
+            receipt_id: compute_commitment(record.record_id.as_bytes()),
+            payer: None,
+            payee: Some(format!("{}", record.provider_id)),
+            amount_wei: Some(record.cost as u128),
+            timestamp: record.timestamp,
+            principal_chain_summary: None,
+        };
+
+        let kind = ReceiptKind::Inference;
+        debug_assert_eq!(kind.default_mode(), ReceiptStorageMode::OffloadedDA);
+
+        let commitment = compute_commitment(&payload);
+        let pointer = self.da_backend.submit_sync(INFERENCE_DA_NAMESPACE, &payload);
+        let envelope = ReceiptEnvelope::offloaded(kind, summary, pointer, commitment);
+
+        // Belt-and-suspenders: refuse to persist a malformed envelope.
+        envelope.validate().map_err(|e| {
+            ModelError::SerializationError(format!("Inference receipt envelope invalid: {}", e))
+        })?;
+
+        let value = bincode::serialize(&envelope).map_err(|e| {
+            ModelError::SerializationError(format!(
+                "Failed to serialize inference receipt envelope: {}",
+                e
+            ))
+        })?;
 
         storage
             .put(CF_MODELS, &key, &value)
@@ -675,6 +801,8 @@ mod tests {
             Address::zero(),
             100,
             50,
+            512,
+            2048,
             1000,
             250,
         );
@@ -683,6 +811,9 @@ mod tests {
         assert_eq!(record.input_tokens, 100);
         assert_eq!(record.output_tokens, 50);
         assert_eq!(record.total_tokens(), 150);
+        assert_eq!(record.bytes_in, 512);
+        assert_eq!(record.bytes_out, 2048);
+        assert_eq!(record.total_bytes(), 2560);
         assert_eq!(record.cost, 1000);
         assert_eq!(record.latency_ms, 250);
     }
@@ -696,6 +827,8 @@ mod tests {
             Address::zero(),
             100,
             50,
+            500,
+            1500,
             1000,
             200,
         );
@@ -705,6 +838,8 @@ mod tests {
         assert_eq!(stats.total_input_tokens, 100);
         assert_eq!(stats.total_output_tokens, 50);
         assert_eq!(stats.total_cost, 1000);
+        assert_eq!(stats.total_bytes_in, 500);
+        assert_eq!(stats.total_bytes_out, 1500);
         assert_eq!(stats.avg_latency_ms(), 200);
 
         let record2 = UsageRecord::new(
@@ -712,6 +847,8 @@ mod tests {
             Address::zero(),
             200,
             100,
+            1000,
+            3000,
             2000,
             300,
         );
@@ -721,6 +858,9 @@ mod tests {
         assert_eq!(stats.total_input_tokens, 300);
         assert_eq!(stats.total_output_tokens, 150);
         assert_eq!(stats.total_cost, 3000);
+        assert_eq!(stats.total_bytes_in, 1500);
+        assert_eq!(stats.total_bytes_out, 4500);
+        assert_eq!(stats.total_bytes(), 6000);
         assert_eq!(stats.avg_latency_ms(), 250);
         assert_eq!(stats.avg_cost(), 1500);
     }
@@ -735,6 +875,8 @@ mod tests {
             provider,
             100,
             50,
+            512,
+            2048,
             1000,
             200,
         );
@@ -742,6 +884,9 @@ mod tests {
 
         assert_eq!(stats.inference_count, 1);
         assert_eq!(stats.total_revenue, 1000);
+        assert_eq!(stats.total_bytes_in, 512);
+        assert_eq!(stats.total_bytes_out, 2048);
+        assert_eq!(stats.total_bytes(), 2560);
         assert_eq!(stats.avg_revenue(), 1000);
     }
 
@@ -754,6 +899,8 @@ mod tests {
             Address::zero(),
             100,
             50,
+            512,
+            2048,
             1000,
             200,
         );
@@ -764,6 +911,8 @@ mod tests {
             Address::zero(),
             200,
             100,
+            1024,
+            4096,
             2000,
             300,
         );
@@ -774,11 +923,15 @@ mod tests {
         assert_eq!(global.total_inference_count, 2);
         assert_eq!(global.unique_models, 2);
         assert_eq!(global.total_tokens(), 450);
+        assert_eq!(global.total_bytes_in, 1536);
+        assert_eq!(global.total_bytes_out, 6144);
+        assert_eq!(global.total_bytes(), 7680);
 
         // Check model stats
         let model_a_stats = tracker.get_model_stats("model-a").unwrap();
         assert_eq!(model_a_stats.inference_count, 1);
         assert_eq!(model_a_stats.total_tokens(), 150);
+        assert_eq!(model_a_stats.total_bytes(), 2560);
 
         // Check recent records
         let recent = tracker.get_recent_usage(10);
@@ -795,6 +948,8 @@ mod tests {
             Address::zero(),
             100,
             50,
+            512,
+            2048,
             1000,
             200,
         );
@@ -806,9 +961,13 @@ mod tests {
         // Should load stats from storage
         let global = tracker2.get_global_stats();
         assert_eq!(global.total_inference_count, 1);
+        assert_eq!(global.total_bytes_in, 512);
+        assert_eq!(global.total_bytes_out, 2048);
 
         let model_stats = tracker2.get_model_stats("model-a").unwrap();
         assert_eq!(model_stats.inference_count, 1);
+        assert_eq!(model_stats.total_bytes_in, 512);
+        assert_eq!(model_stats.total_bytes_out, 2048);
     }
 
     #[test]
@@ -821,6 +980,8 @@ mod tests {
                 Address::zero(),
                 100,
                 50,
+                512,
+                2048,
                 1000,
                 200,
             );
@@ -841,6 +1002,8 @@ mod tests {
             Address::zero(),
             100,
             50,
+            512,
+            2048,
             1000,
             200,
         );
@@ -863,6 +1026,8 @@ mod tests {
             Address::zero(),
             100,
             50,
+            512,
+            2048,
             1000,
             200,
         );
@@ -873,6 +1038,8 @@ mod tests {
             Address::zero(),
             200,
             100,
+            1024,
+            4096,
             2000,
             300,
         );
@@ -892,12 +1059,16 @@ mod tests {
         stats.total_output_tokens = u64::MAX - 50;
         stats.total_cost = u64::MAX - 1000;
         stats.total_latency_ms = u64::MAX - 200;
+        stats.total_bytes_in = u64::MAX - 512;
+        stats.total_bytes_out = u64::MAX - 2048;
 
         let record = UsageRecord::new(
             "test".to_string(),
             Address::zero(),
             100,
             50,
+            1024,
+            4096,
             1000,
             200,
         );
@@ -910,5 +1081,7 @@ mod tests {
         assert_eq!(stats.total_output_tokens, u64::MAX);
         assert_eq!(stats.total_cost, u64::MAX);
         assert_eq!(stats.total_latency_ms, u64::MAX);
+        assert_eq!(stats.total_bytes_in, u64::MAX);
+        assert_eq!(stats.total_bytes_out, u64::MAX);
     }
 }

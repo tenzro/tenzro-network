@@ -54,6 +54,13 @@ pub mod bond;
 pub mod insurance;
 pub mod capability;
 pub mod validator;
+pub mod memory;
+pub mod iroh;
+pub mod adaptive_burn;
+pub mod seed_agent;
+pub mod erc7683;
+pub mod erc7579;
+pub mod pq_hybrid;
 
 // Re-export command types
 pub use node::NodeCommand;
@@ -109,3 +116,10 @@ pub use bond::BondCommand;
 pub use insurance::InsuranceCommand;
 pub use capability::CapabilityCommand;
 pub use validator::ValidatorCommand;
+pub use memory::MemoryCommand;
+pub use iroh::IrohCommand;
+pub use adaptive_burn::AdaptiveBurnCommand;
+pub use seed_agent::SeedAgentCommand;
+pub use erc7683::Erc7683Command;
+pub use erc7579::Erc7579Command;
+pub use pq_hybrid::PqHybridCommand;

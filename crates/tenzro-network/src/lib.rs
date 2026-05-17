@@ -65,6 +65,7 @@
 pub mod behaviour;
 pub mod block_sync_proto;
 pub mod config;
+pub mod consensus_direct_proto;
 pub mod discovery;
 pub mod error;
 pub mod gossip;
@@ -81,6 +82,10 @@ pub use block_sync_proto::{
     BlockSyncBehaviour, BlockSyncError, BlockSyncRequest, BlockSyncResponse,
     BLOCK_SYNC_PROTOCOL, MAX_BLOCKS_PER_RANGE, MAX_BLOCK_HASHES_PER_REQUEST,
     MAX_INBOUND_STREAMS_PER_PEER, MAX_INFLIGHT_REQUESTS_PER_PEER,
+};
+pub use consensus_direct_proto::{
+    ConsensusDirectBehaviour, ConsensusDirectError, ConsensusDirectRequest,
+    ConsensusDirectResponse, CONSENSUS_DIRECT_PROTOCOL,
 };
 pub use config::NetworkConfig;
 pub use discovery::{BootstrapConfig, DiscoveryConfig, ProviderType};

@@ -338,12 +338,19 @@ class TestTaskMarketplace(unittest.TestCase):
         self.assertEqual(result["status"], "cancelled")
 
     @patch("tenzro_rpc.requests.post")
-    def test_submit_quote(self, mock_post):
+    def test_quote_task(self, mock_post):
         mock_post.return_value = _mock_rpc_response({
             "task_id": "task-123",
             "status": "quoted",
         })
-        result = tenzro_rpc.submit_quote("task-123", 40 * 10**18, "gemma4-9b", 30)
+        result = tenzro_rpc.quote_task(
+            "task-123",
+            "0x" + "ab" * 20,
+            40 * 10**18,
+            "qwen3-0.6b",
+            90,
+            30,
+        )
         self.assertEqual(result["status"], "quoted")
 
 
@@ -981,11 +988,16 @@ class TestCLIDispatch(unittest.TestCase):
             "register_identity", "resolve_did", "resolve_did_document",
             "set_username", "resolve_username", "revoke_did", "forget_identity",
             "set_delegation", "verify_zk_proof",
+            # Auth-engine approval workflow
+            "list_pending_approvals", "get_approval", "decide_approval",
+            # Escrow + dispute inspection (secondary indices)
+            "get_escrow", "list_escrows_by_payer", "list_escrows_by_payee",
+            "get_dispute", "list_disputes_by_channel",
             "verify_transaction", "verify_settlement", "verify_inference",
             "total_supply", "token_balance", "chat",
             "list_model_endpoints", "list_models",
             "create_payment", "verify_payment",
-            "post_task", "list_tasks", "get_task", "cancel_task", "submit_quote",
+            "post_task", "list_tasks", "get_task", "cancel_task", "quote_task",
             "list_agent_templates", "register_agent_template", "get_agent_template",
             "spawn_agent_from_template", "rate_agent_template",
             "search_agent_templates", "get_agent_template_stats",
@@ -1013,6 +1025,14 @@ class TestCLIDispatch(unittest.TestCase):
             # Events & Webhooks
             "get_events", "get_event_status",
             "register_webhook", "list_webhooks", "delete_webhook",
+            # SLA Fault Detector
+            "sla_issue_probe", "sla_list_outstanding_probes", "sla_get_params",
+            # Snapshot (State Sync)
+            "list_snapshots", "get_snapshot_manifest", "get_snapshot_chunk",
+            "offer_snapshot", "apply_snapshot_chunk",
+            # EIP-7702 (Set EOA Account Code)
+            "eip7702_signing_hash", "eip7702_build_designator",
+            "eip7702_parse_designator", "eip7702_protocol_info",
             # AP2 (Agent Payments Protocol)
             "ap2_protocol_info", "ap2_sign_mandate", "ap2_verify_mandate",
             "ap2_validate_mandate_pair", "ap2_create_session",
@@ -1041,6 +1061,11 @@ class TestCLIDispatch(unittest.TestCase):
             "wormhole_bridge",
             # CCT pool registry
             "cct_list_pools", "cct_get_pool",
+            # Agent JWKs, daily spend, capability attestations
+            "list_agent_jwks", "get_agent_jwk", "get_agent_daily_spend",
+            "get_capability_attestations",
+            "get_agent_capability_attestations",
+            "find_best_agent_for_capability",
         ]
         for cmd in expected:
             self.assertIn(cmd, tenzro_rpc.COMMANDS, f"Missing command: {cmd}")

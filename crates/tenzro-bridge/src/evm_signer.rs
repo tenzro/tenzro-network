@@ -5,20 +5,64 @@
 //! on-chain transactions.
 
 use crate::error::{BridgeError, Result};
-use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
+use k256::ecdsa::{RecoveryId, Signature, SigningKey, signature::hazmat::PrehashSigner};
 use reqwest::Client;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tenzro_tee::SealedSecp256k1Key;
 use tracing::{debug, info};
+
+/// Backing key material for an [`EvmTransactionSigner`].
+///
+/// Two variants:
+///
+/// - [`SignerBackend::RawKey`] — secp256k1 private key sitting in process
+///   memory. Used for development, local testing, and any deployment that
+///   has not (or cannot) provision a TEE. Documented as **dev-only** for
+///   production bridge custody.
+/// - [`SignerBackend::SealedKey`] — secp256k1 key derived inside an AMD
+///   SEV-SNP or Intel TDX enclave via [`SealedSecp256k1Key`]. The private
+///   scalar lives in `Zeroizing<[u8; 32]>` inside the wrapper and is
+///   reproducible only inside the same VM image (measurement-bound).
+///
+/// Both variants expose the same `sign_prehash` interface and produce the
+/// same 20-byte Ethereum address derivation (Keccak-256 of the uncompressed
+/// secp256k1 public key tail), so the surrounding RLP / nonce / gas logic
+/// is identical.
+pub enum SignerBackend {
+    /// In-memory secp256k1 key (dev / non-TEE deployments).
+    RawKey(SigningKey),
+    /// TEE-sealed secp256k1 key (production bridge custody).
+    SealedKey(SealedSecp256k1Key),
+}
+
+impl SignerBackend {
+    /// Signs a 32-byte digest, returning the ECDSA signature plus recovery
+    /// id needed to construct the Ethereum `v`.
+    fn sign_prehash(&self, digest: &[u8; 32]) -> Result<(Signature, RecoveryId)> {
+        match self {
+            SignerBackend::RawKey(sk) => sk
+                .sign_prehash(digest)
+                .map_err(|e| BridgeError::AdapterError(format!("Signing failed: {}", e))),
+            SignerBackend::SealedKey(sealed) => sealed
+                .sign_prehash(digest)
+                .map_err(|e| BridgeError::AdapterError(format!("Sealed signing failed: {}", e))),
+        }
+    }
+}
 
 /// EVM transaction signer for bridge operations
 ///
 /// Signs EIP-1559 (type 2) transactions using secp256k1 and submits them
 /// via `eth_sendRawTransaction`. Handles nonce management and gas estimation.
+///
+/// The underlying key may be a raw in-memory `SigningKey` (dev) or a
+/// TEE-sealed key derived inside SEV-SNP / TDX (production). See
+/// [`SignerBackend`].
 pub struct EvmTransactionSigner {
-    /// Secp256k1 signing key
-    signing_key: SigningKey,
-    /// Sender address (derived from signing key)
+    /// Backing key material — raw or TEE-sealed.
+    backend: SignerBackend,
+    /// Sender address (derived from the backend's public key)
     sender_address: [u8; 20],
     /// EVM chain ID
     chain_id: u64,
@@ -33,7 +77,12 @@ pub struct EvmTransactionSigner {
 }
 
 impl EvmTransactionSigner {
-    /// Creates a new EVM transaction signer
+    /// Creates a new EVM transaction signer from a raw 32-byte private key.
+    ///
+    /// **Dev / non-TEE only.** For production bridge custody, use
+    /// [`Self::with_sealed_key`] or [`Self::with_tee_sealed`] so the
+    /// private scalar is bound to a TEE measurement and not retained in
+    /// plain process memory.
     ///
     /// # Arguments
     /// * `private_key` - 32-byte secp256k1 private key
@@ -52,20 +101,84 @@ impl EvmTransactionSigner {
         let mut sender_address = [0u8; 20];
         sender_address.copy_from_slice(&address_hash[12..]);
 
+        Ok(Self::with_backend(
+            SignerBackend::RawKey(signing_key),
+            sender_address,
+            chain_id,
+            rpc_url,
+        ))
+    }
+
+    /// Creates a new EVM transaction signer wrapping a TEE-sealed key.
+    ///
+    /// The sealed key was derived inside the enclave via
+    /// [`SealedSecp256k1Key::derive_from_snp`],
+    /// [`SealedSecp256k1Key::derive_from_tdx`], or
+    /// [`SealedSecp256k1Key::derive_auto`]. The 20-byte sender address is
+    /// taken directly from the sealed key's public-side metadata; no
+    /// secret material crosses this API.
+    pub fn with_sealed_key(
+        sealed: SealedSecp256k1Key,
+        chain_id: u64,
+        rpc_url: String,
+    ) -> Self {
+        let sender_address = sealed.address();
+        Self::with_backend(
+            SignerBackend::SealedKey(sealed),
+            sender_address,
+            chain_id,
+            rpc_url,
+        )
+    }
+
+    /// Convenience: auto-detect the available TEE (SEV-SNP preferred,
+    /// then TDX), derive a sealed bridge signer key, and return a ready
+    /// signer.
+    ///
+    /// Returns `BridgeError::ConfigurationError` if no TEE is available
+    /// — there is **no simulation fallback** per testnet policy.
+    pub async fn with_tee_sealed(
+        label: &[u8],
+        chain_id: u64,
+        rpc_url: String,
+    ) -> Result<Self> {
+        let sealed = SealedSecp256k1Key::derive_auto(label).await.map_err(|e| {
+            BridgeError::ConfigurationError(format!(
+                "TEE-sealed bridge key derivation failed: {}",
+                e
+            ))
+        })?;
+        Ok(Self::with_sealed_key(sealed, chain_id, rpc_url))
+    }
+
+    /// Internal constructor — assembles the rest of the signer state once
+    /// the backend and sender address are known.
+    fn with_backend(
+        backend: SignerBackend,
+        sender_address: [u8; 20],
+        chain_id: u64,
+        rpc_url: String,
+    ) -> Self {
         let http_client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| Client::new());
 
-        Ok(Self {
-            signing_key,
+        Self {
+            backend,
             sender_address,
             chain_id,
             rpc_url,
             http_client,
             nonce: AtomicU64::new(0),
             nonce_synced: std::sync::atomic::AtomicBool::new(false),
-        })
+        }
+    }
+
+    /// Returns whether the underlying key is TEE-sealed (production
+    /// posture) or a raw in-memory key (dev posture).
+    pub fn is_tee_sealed(&self) -> bool {
+        matches!(self.backend, SignerBackend::SealedKey(_))
     }
 
     /// Returns the sender address as a hex string (0x-prefixed)
@@ -321,11 +434,8 @@ impl EvmTransactionSigner {
 
         let msg_hash = keccak256(&signing_input);
 
-        // Sign the hash with secp256k1
-        let (signature, recovery_id) = self
-            .signing_key
-            .sign_prehash(&msg_hash)
-            .map_err(|e| BridgeError::AdapterError(format!("Signing failed: {}", e)))?;
+        // Sign the hash with secp256k1 (raw or TEE-sealed backend)
+        let (signature, recovery_id) = self.backend.sign_prehash(&msg_hash)?;
 
         let sig_bytes = signature.to_bytes();
         let r = &sig_bytes[..32];
@@ -598,6 +708,40 @@ mod tests {
 
         let signer = config.build().unwrap();
         assert!(signer.sender_address().starts_with("0x"));
+    }
+
+    #[tokio::test]
+    async fn test_with_tee_sealed_off_hardware_returns_error() {
+        // On dev hardware (no /dev/sev-guest, no /dev/tdx_guest), the
+        // TEE-sealed constructor must fail loudly rather than fall back
+        // to a fabricated key. This is the no-simulation policy.
+        let result = EvmTransactionSigner::with_tee_sealed(
+            b"tenzro/bridge/evm-signer",
+            1,
+            "http://localhost:8545".to_string(),
+        )
+        .await;
+        assert!(result.is_err(), "must error off-hardware, not silently fall back");
+        let err = result.err().unwrap();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("TEE-sealed bridge key derivation failed"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_raw_key_signer_is_not_tee_sealed() {
+        // RawKey path should report itself as non-TEE for posture telemetry.
+        let private_key = [0x01u8; 32];
+        let signer = EvmTransactionSigner::new(
+            &private_key,
+            1,
+            "http://localhost:8545".to_string(),
+        )
+        .unwrap();
+        assert!(!signer.is_tee_sealed(), "RawKey backend must not report TEE-sealed");
     }
 
     #[test]

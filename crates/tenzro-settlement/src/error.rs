@@ -33,6 +33,12 @@ pub enum SettlementError {
     #[error("Escrow already released: {0}")]
     EscrowAlreadyReleased(String),
 
+    /// ERC-7683 destination-side fill rejected because a prior fill is already
+    /// recorded for this `order_id`. The 7683 spec requires destination
+    /// settlers to enforce single-shot fills; the carried hex is the order ID.
+    #[error("ERC-7683 order already filled: {0}")]
+    OrderAlreadyFilled(String),
+
     /// Invalid proof provided
     #[error("Invalid proof: {0}")]
     InvalidProof(String),

@@ -160,21 +160,6 @@ impl AgentPricingModel {
     }
 }
 
-/// Tenzro Network takes this commission (in basis points) on every paid
-/// agent invocation — 500 bps = 5%. The remainder is routed to the
-/// template `creator_wallet`; the commission flows to the network treasury.
-pub const AGENT_MARKETPLACE_COMMISSION_BPS: u16 = 500;
-
-/// Splits `fee` into `(network_commission, creator_share)` using `commission_bps`.
-/// Uses saturating arithmetic. `commission_bps` is capped at 10_000.
-pub fn split_marketplace_fee(fee: u128, commission_bps: u16) -> (u128, u128) {
-    let bps = (commission_bps as u128).min(10_000);
-    let commission = fee.saturating_mul(bps) / 10_000u128;
-    let creator_share = fee.saturating_sub(commission);
-    (commission, creator_share)
-}
-
-
 /// An agent template published to the Tenzro Network marketplace
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentTemplate {
@@ -808,31 +793,6 @@ mod execution_spec_tests {
             "system prompt".to_string(),
         );
         assert!(tmpl.execution_spec.is_none());
-    }
-
-    #[test]
-    fn marketplace_fee_split_is_exact_at_5_percent() {
-        let (commission, creator) =
-            split_marketplace_fee(1_000_000_000_000_000_000u128, AGENT_MARKETPLACE_COMMISSION_BPS);
-        assert_eq!(commission, 50_000_000_000_000_000u128); // 5% of 1 TNZO
-        assert_eq!(creator, 950_000_000_000_000_000u128); // 95% of 1 TNZO
-        assert_eq!(commission + creator, 1_000_000_000_000_000_000u128);
-    }
-
-    #[test]
-    fn marketplace_fee_split_handles_zero() {
-        let (commission, creator) =
-            split_marketplace_fee(0, AGENT_MARKETPLACE_COMMISSION_BPS);
-        assert_eq!(commission, 0);
-        assert_eq!(creator, 0);
-    }
-
-    #[test]
-    fn marketplace_fee_split_caps_bps_at_10000() {
-        // 20_000 bps is invalid; helper should cap at 10_000 (100%)
-        let (commission, creator) = split_marketplace_fee(1_000u128, 20_000);
-        assert_eq!(commission, 1_000);
-        assert_eq!(creator, 0);
     }
 
     #[test]

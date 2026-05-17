@@ -393,13 +393,172 @@ Before going live on mainnet:
 
 ---
 
-## 11. Reference
+## 11. Iroh data plane
+
+Iroh is the QUIC-native content-addressed transport that serves bulk payloads
+(model weights, outer gradients, sealed dataset shards, agent-memory archives).
+It complements the libp2p control plane — small reliable broadcasts continue
+to flow over gossipsub/Kademlia.
+
+### Config
+
+```toml
+[iroh]
+enable = true
+# Optional: pin Pkarr relay for TDIP-anchored discovery.
+# Default is the n0 relay, which is fine for local dev.
+pkarr_relay_url = "https://relay.pkarr.org"
+# Optional: 32-byte hex seed. Default derives EndpointId from the TDIP key,
+# so the iroh EndpointId is byte-identical to your validator's Ed25519 key.
+secret_key_seed = "<32-byte-hex>"
+```
+
+Or the CLI shorthand:
+
+```bash
+tenzro-node --role validator --iroh.enable
+```
+
+### What you get
+
+- `IrohBlobsDaBackend` becomes the `DaBackend` for offloaded receipts
+  (SettlementChannel, Inference, AgentMessage). InlineFallback remains the
+  safe default for receipts with `default_mode() = Inline`.
+- `IrohGradientStore` handles `OuterGradient` distribution for trainers.
+- `IrohSealedShardStore` distributes Confidential-tier dataset shards.
+- `IrohBlobFetcher` makes `HfArtifactDownloader` peer-first — HuggingFace Hub
+  is the fallback, not the default.
+- `MemoryManager::archive()` writes to iroh-blobs instead of inline storage.
+- A2A traffic over the `tenzro/a2a` ALPN on the shared router.
+
+### Operational notes
+
+- One `IrohBackedResolver` per node — never instantiate two. The same endpoint
+  is shared by every consumer above.
+- The transport is hidden behind the `tenzro://` scheme. The string `iroh://`
+  must not appear in operator runbooks, dashboards, or log queries.
+- iroh-blobs verifies BLAKE3 end-to-end on every transfer — there is no extra
+  hash-check work required at the application layer.
+
+---
+
+## 12. NAT traversal
+
+Tenzro nodes form a mesh across home wifi, mobile tethers, residential ISPs,
+and corporate NATs without any per-node external-address configuration. The
+stack is Identify observed-address tally + AutoNAT v2 + Circuit-Relay v2 +
+DCUtR.
+
+### Listen addresses
+
+By default `tenzro-node` binds **both** of:
+
+- `/ip4/0.0.0.0/tcp/9000`
+- `/ip4/0.0.0.0/udp/9000/quic-v1`
+
+This is the universal transport set. QUIC's structural port-reuse gives
+Identify `observed_addr` a stable listening UDP port for AutoNAT v2 dial-back
+probes, which is what makes hole punching reliable.
+
+To override:
+
+```bash
+tenzro-node --listen-addr /ip4/0.0.0.0/tcp/9000,/ip4/0.0.0.0/udp/9000/quic-v1
+```
+
+`--listen-addr` accepts a comma-separated list of full libp2p multiaddrs.
+
+### Behaviour role split
+
+- **Validators** with a confirmed public address run the *server* halves
+  (`relay::Behaviour`, `autonat::v2::server::Behaviour`). They serve as relay
+  hops and dial-back probes for the rest of the network.
+- **Joiner-class roles** (LightClient, ModelProvider, TeeProvider) run the
+  *client* halves (`relay::client::Behaviour`, `autonat::v2::client::Behaviour`,
+  `dcutr::Behaviour`).
+
+The defaults are role-aware: `enable_relay = true` for validators,
+`enable_hole_punching = true` for every role.
+
+### Cloud firewalls
+
+This part is an operator runbook, not a protocol design issue. Open both ports
+on every provider you use:
+
+- **GCE**: VPC firewall rule allowing TCP/9000 and UDP/9000 from `0.0.0.0/0`.
+- **EC2**: Security group with the same rules.
+- **Azure**: NSG rules.
+- **GKE**: NetworkPolicy if you use one; otherwise nothing extra.
+- **COS (GKE Container-Optimized OS)**: COS defaults to `DROP` for everything
+  except `lo`, `icmp`, `tcp:22`, and ESTABLISHED. Append an `ACCEPT` rule for
+  TCP/9000 and UDP/9000 via cloud-init `runcmd:` — see
+  `deploy/kubernetes/cloud-init.yaml`.
+
+### Bootstrap addresses
+
+Advertise bootstrap peers in **both** forms so dialers can pick whichever
+their NAT permits:
+
+```
+/ip4/<ip>/tcp/9000/p2p/<peer-id>
+/ip4/<ip>/udp/9000/quic-v1/p2p/<peer-id>
+```
+
+Pass to joiners via `--boot-nodes a,b,c,d`.
+
+---
+
+## 13. Intel Tiber Trust Authority
+
+Tiber is the hosted attestation alternative to native Intel PCS verification.
+The node fetches a nonce, posts a TDX quote, and receives a signed EAT (Entity
+Attestation Token) as a JWT. Use this when you do not want to ship the PCS
+certificate chain yourself or when you want a vendor-attested appraisal
+alongside your own.
+
+### Enabling
+
+Build with the `intel-tiber` feature (implies `intel-tdx`):
+
+```bash
+cargo build --release --bin tenzro-node --features intel-tiber
+```
+
+### Round trip
+
+```
+GET  https://api.trustauthority.intel.com/appraisal/v2/nonce
+POST https://api.trustauthority.intel.com/appraisal/v2/attest  { quote, nonce }
+→ JWT (PS384 or RS256)
+```
+
+The node verifies the JWT against Tiber's JWKS. To defend against
+open-redirect attacks on a passive verifier, `TiberJwksPin::AllowedHosts`
+locks the `jku` header to a configurable allow-list. The default allow-list
+contains only Intel-published hosts.
+
+### Regional endpoints
+
+Two regions are wired today via the `TIBER_API_URL_US` and `TIBER_API_URL_EU`
+constants — pick the one that matches your data-residency posture.
+
+### Claims surfaced
+
+The verified `TiberClaims` projected into `AttestationResult` include
+`tdx_mrtd`, `tdx_rtmr0..3`, `tdx_mrsignerseam`, `tdx_seamsvn`,
+`attester_tcb_status`, `dbgstat`, and `attester_advisory_ids`. The result is
+marked `valid = true` only when `attester_tcb_status == "OK"` and
+`dbgstat == "disabled"`. `details["verification_method"] = "intel_tiber"`
+lets downstream consumers distinguish a Tiber appraisal from native PCS.
+
+---
+
+## 14. Reference
 
 - **QuickStart**: `crates/tenzro-node/QUICKSTART.md`
 - **Architecture**: `crates/tenzro-node/ARCHITECTURE.md`
+- **Reference builds**: `docs/operators/REFERENCE_BUILDS.md`
 - **Kubernetes manifests**: `deploy/kubernetes/`
 - **Terraform (GKE)**: `deploy/terraform/`
 - **Monitoring**: `deploy/monitoring/`
-- **Tokenomics**: `../TOKENOMICS.md`
-- **Specification**: `../SPECIFICATION.md`
 - **GitHub**: https://github.com/tenzro/tenzro-network

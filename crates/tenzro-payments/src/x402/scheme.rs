@@ -256,10 +256,10 @@ impl SchemeBackend for TenzroHybridBackend {
         let classical_pk = extract_classical_public_key(credential)?;
 
         let composite_pk =
-            CompositePublicKey::new(classical_pk, Some(credential.pq_public_key.clone()));
+            CompositePublicKey::new(classical_pk, credential.pq_public_key.clone());
         let composite_sig = CompositeSignature::new(
             credential.signature.clone(),
-            Some(credential.pq_signature.clone()),
+            credential.pq_signature.clone(),
         );
 
         let verifier = StandardHybridVerifier::new(composite_pk);
