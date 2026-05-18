@@ -21,17 +21,21 @@ pub struct TenzroIrohConfig {
     /// when `pkarr_relay_url` is `None`, the n0 default is the only publisher.
     pub publish_to_n0_default_discovery: bool,
 
-    /// Tenzro-operated Pkarr relay URL — Phase C2 (#220).
+    /// Tenzro-operated Pkarr relay URL.
     ///
-    /// When set (e.g. `https://pkarr.tenzro.network/pkarr`), the iroh
-    /// endpoint publishes its addressing record (`SignedPacket`) to this
-    /// relay *in addition to* or *instead of* the n0 default
-    /// (`dns.iroh.link/pkarr`), depending on
-    /// [`Self::publish_to_n0_default_discovery`]. The relay accepts records
-    /// signed by the iroh `SecretKey` returned by
+    /// When set (e.g. `https://pkarr.tenzro.network`), the iroh endpoint
+    /// publishes its addressing record (`SignedPacket`) to this relay *in
+    /// addition to* or *instead of* the n0 default (`dns.iroh.link/pkarr`),
+    /// depending on [`Self::publish_to_n0_default_discovery`]. The relay
+    /// accepts records signed by the iroh `SecretKey` returned by
     /// [`crate::tdip::derive_iroh_secret_key_from_ed25519`], which is the
     /// same 32-byte Ed25519 seed used by the node's TDIP identity — so the
     /// iroh `EndpointId` is provably anchored to the node's DID.
+    ///
+    /// The URL is the relay's HTTP base; iroh's `PkarrPublisher`/`PkarrResolver`
+    /// append `/<z32_key>` internally per the Pkarr relay HTTP spec served
+    /// by the upstream `pkarr-relay` binary (`pubky/pkarr` crate). Do not
+    /// suffix `/pkarr` — the relay binary serves PUT/GET at the root.
     ///
     /// Leave as `None` for local development and tests; the endpoint then
     /// falls back to n0-dns alone.
@@ -79,10 +83,34 @@ impl TenzroIrohConfig {
     }
 
     /// Direct the endpoint to publish its addressing record to a
-    /// Tenzro-operated Pkarr relay (e.g. `https://pkarr.tenzro.network/pkarr`).
+    /// Tenzro-operated Pkarr relay (e.g. `https://pkarr.tenzro.network`).
     pub fn with_pkarr_relay_url(mut self, url: Url) -> Self {
         self.pkarr_relay_url = Some(url);
         self
+    }
+}
+
+impl Default for TenzroIrohConfig {
+    /// Production default — TDIP-anchored, publishing to the Tenzro-operated
+    /// Pkarr relay (`https://pkarr.tenzro.network`), with the n0 fallback
+    /// disabled so discovery cannot leak off-network.
+    ///
+    /// The `data_dir` is set to `./data/iroh` and is expected to be
+    /// overridden by the caller (e.g. `tenzro-node` rebases it under the
+    /// node's `--data-dir`). `secret_key_seed` stays `None` here and is
+    /// populated by `tenzro-node` at startup from the validator/identity
+    /// keypair so the iroh `EndpointId` is byte-identical to the node DID.
+    fn default() -> Self {
+        Self {
+            data_dir: PathBuf::from("./data/iroh"),
+            publish_to_n0_default_discovery: false,
+            pkarr_relay_url: Some(
+                Url::parse("https://pkarr.tenzro.network")
+                    .expect("pkarr.tenzro.network is a valid URL"),
+            ),
+            secret_key_seed: None,
+            enable_docs: true,
+        }
     }
 }
 
@@ -102,12 +130,25 @@ mod tests {
 
     #[test]
     fn builder_methods_set_pkarr_and_seed() {
-        let url = Url::parse("https://pkarr.tenzro.network/pkarr").unwrap();
+        let url = Url::parse("https://pkarr.tenzro.network").unwrap();
         let seed = [7u8; 32];
         let cfg = TenzroIrohConfig::with_data_dir(PathBuf::from("/tmp"))
             .with_pkarr_relay_url(url.clone())
             .with_secret_key_seed(seed);
         assert_eq!(cfg.pkarr_relay_url, Some(url));
         assert_eq!(cfg.secret_key_seed, Some(seed));
+    }
+
+    #[test]
+    fn default_points_at_tenzro_pkarr_relay_and_skips_n0_fallback() {
+        let cfg = TenzroIrohConfig::default();
+        assert_eq!(
+            cfg.pkarr_relay_url,
+            Some(Url::parse("https://pkarr.tenzro.network").unwrap())
+        );
+        assert!(!cfg.publish_to_n0_default_discovery);
+        assert!(cfg.enable_docs);
+        assert!(cfg.secret_key_seed.is_none());
+        assert_eq!(cfg.data_dir, PathBuf::from("./data/iroh"));
     }
 }

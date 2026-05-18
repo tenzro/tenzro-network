@@ -700,8 +700,11 @@ pub(crate) async fn handle_request(
         // (training), `IrohSealedShardStore` (confidential), and the
         // memory-archive DA path — see `crates/tenzro-iroh/src/lib.rs`.
         "tenzro_iroh_getEndpointId" => handle_iroh_get_endpoint_id(node).await,
-        "tenzro_iroh_getInfo" | "tenzro_iroh_getConfig" => handle_iroh_get_info(node).await,
-        "tenzro_iroh_listAlpns" => handle_iroh_list_alpns(node).await,
+        "tenzro_iroh_getInfo"
+        | "tenzro_iroh_getConfig"
+        | "tenzro_irohStatus"
+        | "tenzro_irohInfo" => handle_iroh_get_info(node).await,
+        "tenzro_iroh_listAlpns" | "tenzro_irohListAlpns" => handle_iroh_list_alpns(node).await,
         "tenzro_iroh_publishBlob" => handle_iroh_publish_blob(node, request.params).await,
         "tenzro_iroh_fetchBlob" => handle_iroh_fetch_blob(node, request.params).await,
         "tenzro_iroh_resolveTenzroUri" => {
@@ -4912,19 +4915,20 @@ async fn handle_list_memory_records(
 // memory-archive DA, A2A-over-iroh) consume the same resolver — see
 // `crates/tenzro-iroh/src/lib.rs` rustdoc.
 //
-// Every endpoint requires the node to have been started with
-// `NodeConfig::iroh = Some(...)`; otherwise we return `-32004`
-// "iroh transport not enabled" so clients can distinguish from a
-// transient error.
+// The iroh data plane is always bound at startup. The only case in which
+// `iroh_resolver` is `None` is when the initial bind failed (e.g. local
+// UDP socket conflict, OS-level transport error). Clients receive `-32004`
+// "iroh transport not bound" so the failure is distinguishable from a
+// transient request-level error.
 
 fn iroh_resolver_or_err(
     node: &Arc<TenzroNode>,
 ) -> std::result::Result<Arc<tenzro_iroh::IrohBackedResolver>, JsonRpcError> {
     node.iroh_resolver.clone().ok_or_else(|| JsonRpcError {
         code: -32004,
-        message: "iroh transport not enabled on this node".to_string(),
+        message: "iroh transport not bound on this node".to_string(),
         data: Some(serde_json::json!({
-            "hint": "start tenzro-node with `iroh` set in config.toml or pass --enable-iroh"
+            "hint": "iroh failed to bind at startup; check node logs for the bind error"
         })),
     })
 }
@@ -4973,12 +4977,8 @@ async fn handle_iroh_get_info(
 ) -> std::result::Result<Value, JsonRpcError> {
     let resolver = iroh_resolver_or_err(node)?;
     let id = resolver.endpoint().id();
-    let cfg = node.config().iroh.as_ref();
-    let pkarr_relay = cfg
-        .and_then(|c| c.pkarr_relay_url.as_ref())
-        .map(|u| u.to_string());
-    let publish_to_n0 = cfg.map(|c| c.publish_to_n0_default_discovery);
-    let docs_enabled = cfg.map(|c| c.enable_docs);
+    let cfg = &node.config().iroh;
+    let pkarr_relay = cfg.pkarr_relay_url.as_ref().map(|u| u.to_string());
     let mut alpns = vec!["iroh-blobs"];
     if node.iroh_a2a_dispatcher.is_some() {
         alpns.push("tenzro/a2a");
@@ -4987,8 +4987,8 @@ async fn handle_iroh_get_info(
         "endpoint_id": id.to_string(),
         "endpoint_id_hex": hex::encode(id.as_bytes()),
         "pkarr_relay_url": pkarr_relay,
-        "publish_to_n0_default_discovery": publish_to_n0,
-        "docs_enabled": docs_enabled,
+        "publish_to_n0_default_discovery": cfg.publish_to_n0_default_discovery,
+        "docs_enabled": cfg.enable_docs,
         "bound_alpns": alpns,
     }))
 }

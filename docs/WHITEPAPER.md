@@ -8,7 +8,7 @@
 
 ## Abstract
 
-**Tenzro Network** is an AI-Native, Agentic, Tokenized Settlement Layer — a decentralized protocol designed for the AI age, where agents and autonomous systems are first-class participants. The network provides two core capabilities: access to **intelligence** (AI models for inference) and access to **security** (TEE enclaves for key management, custody, and confidential computing). Providers, validators, and nodes earn by securing the network, providing intelligence (AI models), and providing security (TEE enclaves).
+**Tenzro Network** is an AI-Native, Agentic, Tokenized Settlement Layer — a decentralized protocol designed for the AI age, where agents and autonomous systems are first-class participants alongside humans. It is the **reference implementation of the Open Agent Network (OAN)**, the protocol family (TNIP-001..022) for a hybrid human + agent coexisting network stewarded by the Tenzro Foundation. Tenzro Network is the first protocol where the full agent loop — discover model, discover skill, discover task, access resource, pay for it — is wire-level, not application-level, and it is fully usable today with the latest protocol support. The network provides two core capabilities: access to **intelligence** (AI models for inference) and access to **security** (TEE enclaves for key management, custody, and confidential computing). Providers, validators, and nodes earn by securing the network, providing intelligence (AI models), and providing security (TEE enclaves).
 
 **Tenzro Ledger** is the purpose-built Layer 1 settlement layer for humans and agents, providing verifiable, on-chain primitives for the AI age: **identity** (TDIP: Tenzro Decentralized Identity Protocol for humans and machines), **security** (TEE-weighted consensus with hardware attestations), **verification** (dual ZK + TEE proof systems), and **settlement** (micropayment channels, escrow, batch processing). All fees and settlements are denominated in **TNZO**, the governance token of the Tenzro Network protocol.
 
@@ -56,7 +56,9 @@ Existing blockchains were designed for financial transactions. They can transfer
 
 ### 1.2 The Tenzro Solution
 
-**Tenzro Network** is the protocol layer designed for the AI age. It provides two core capabilities to participants:
+**Tenzro Network** is the protocol layer designed for the AI age, and the reference implementation of the **Open Agent Network (OAN)** — the standards family (TNIP-001..022) that defines the wire format for a hybrid human + agent coexisting network. OAN provides the full governance framework; Tenzro Network ships the working implementation. Specification and implementation evolve together, the wire stays open for other implementations, and conformance is demonstrated by the running network. The combined effect is the first protocol where an agent can discover a model, discover a skill, discover a task, access a resource, and pay for it through a single decentralized protocol surface — with one identity, one wallet, and one settlement substrate.
+
+It provides two core capabilities to participants:
 
 1. **Access to Intelligence:** A decentralized marketplace where providers serve AI models and users discover and consume inference through a chat interface (like ChatGPT/Claude). Settlements happen on-chain with micropayment channels for per-token billing.
 
@@ -99,11 +101,17 @@ Verifiability is not optional. Inference results, settlements, and identity clai
 
 ## 2. Architecture Overview
 
-### 2.1 Tenzro Network and Tenzro Ledger
+### 2.1 OAN, Tenzro Network, and Tenzro Ledger
 
-**Tenzro Network** is the overall protocol/platform designed for the AI age, enabling agents and autonomous systems to participate as first-class economic actors. The Network provides:
+Three entities, three roles. They are distinct, and the naming matters.
+
+**Open Agent Network (OAN)** is the standards family for a hybrid human + agent coexisting network — the specification surface (TNIP-001..022) covering substrate primitives (Resolver, Skills, Mesh, Discover, Validation, Federation), composition layers (Handles, Compute, Memory, Credentials, Auth), and the identity tier (Identity, Delegation, Knowledge, Marketplace, Consensus, plus chain-specific bindings to Tenzro, Tempo, Canton, EVM, Solana, and x402). OAN is stewarded by the Tenzro Foundation and provides the full governance framework: specifications, conformance criteria, and reference implementation, all evolving together. The wire is open for any conformant implementation.
+
+**Tenzro Network** is OAN's reference implementation — the overall protocol/platform designed for the AI age, enabling agents and autonomous systems to participate as first-class economic actors alongside humans. The Network provides:
 - Access to **intelligence** (decentralized AI model marketplace)
 - Access to **security** (TEE enclaves for custody, key management, confidential computing)
+
+Tenzro Network is the first protocol where the full agent loop — discover model, discover skill, discover task, access resource, pay for it — is wire-level, not application-level. It is fully usable today with the latest protocol support, demonstrating conformance to every OAN layer end-to-end.
 
 **Tenzro Ledger** is the Layer 1 blockchain that provides the settlement layer for the Network. The Ledger offers purpose-built primitives for the AI age:
 - **Identity:** TDIP (Tenzro Decentralized Identity Protocol) for unified human/machine identity

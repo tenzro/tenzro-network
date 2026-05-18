@@ -528,20 +528,22 @@ pub struct NodeConfig {
     #[serde(default)]
     pub geography: Option<String>,
 
-    /// Tenzro iroh integration (Phase C1, #219). When `Some`, the node
-    /// constructs a single `IrohBackedResolver` at startup and shares it
-    /// across every consumer that needs an iroh endpoint: the training
-    /// `GradientPayloadStore`, the storage `IrohBlobsDaBackend`, and any
-    /// direct `tenzro://blob/<hash>` URI fetches. When `None`, the node
-    /// runs with the inline DA fallback and no `GradientPayloadStore`.
+    /// Tenzro iroh integration. The node always constructs a single
+    /// `IrohBackedResolver` at startup and shares it across every consumer
+    /// that needs an iroh endpoint: the training `GradientPayloadStore`,
+    /// the storage `IrohBlobsDaBackend`, agent-memory archival, and any
+    /// direct `tenzro://blob/<hash>` URI fetches.
     ///
-    /// The resolver binds **alongside** libp2p — it does not replace the
+    /// The default (`TenzroIrohConfig::default()`) anchors discovery to the
+    /// Tenzro-operated Pkarr relay (`https://pkarr.tenzro.network`) with
+    /// the n0 fallback disabled so discovery cannot leak off-network. The
+    /// resolver binds **alongside** libp2p — it does not replace the
     /// libp2p control plane. Per the locked model statement (2026-05-17):
     /// "Tenzro uses Iroh as a performance-oriented P2P data plane while
     /// retaining libp2p-style interoperability for decentralized
     /// coordination."
     #[serde(default)]
-    pub iroh: Option<tenzro_iroh::TenzroIrohConfig>,
+    pub iroh: tenzro_iroh::TenzroIrohConfig,
 }
 
 impl Default for NodeConfig {
@@ -600,7 +602,7 @@ impl NodeConfig {
             external_rpc_addr: None,
             external_mcp_addr: None,
             geography: None,
-            iroh: None,
+            iroh: tenzro_iroh::TenzroIrohConfig::default(),
         }
     }
 
@@ -635,7 +637,7 @@ impl NodeConfig {
             external_rpc_addr: None,
             external_mcp_addr: None,
             geography: None,
-            iroh: None,
+            iroh: tenzro_iroh::TenzroIrohConfig::default(),
         }
     }
 
@@ -670,7 +672,7 @@ impl NodeConfig {
             external_rpc_addr: None,
             external_mcp_addr: None,
             geography: None,
-            iroh: None,
+            iroh: tenzro_iroh::TenzroIrohConfig::default(),
         }
     }
 
@@ -705,7 +707,7 @@ impl NodeConfig {
             external_rpc_addr: None,
             external_mcp_addr: None,
             geography: None,
-            iroh: None,
+            iroh: tenzro_iroh::TenzroIrohConfig::default(),
         }
     }
 
