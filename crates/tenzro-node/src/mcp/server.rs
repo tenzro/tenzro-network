@@ -7131,7 +7131,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Show the local iroh endpoint id, Pkarr relay URL, and ALPNs registered on the shared router. Returns 'iroh transport not enabled' when the node was started without NodeConfig::iroh.")]
+    #[tool(description = "Show the local iroh endpoint id, Pkarr relay URL, and ALPNs registered on the shared router. Returns an internal error iff the iroh transport failed to bind at startup.")]
     async fn iroh_get_info(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -7139,9 +7139,9 @@ impl TenzroMcpServer {
             .node
             .iroh_resolver
             .clone()
-            .ok_or_else(|| err_internal("iroh transport not enabled on this node"))?;
+            .ok_or_else(|| err_internal("iroh transport not bound on this node"))?;
         let id = resolver.endpoint().id();
-        let cfg = self.node.config().iroh.as_ref();
+        let cfg = &self.node.config().iroh;
         let mut alpns = vec!["iroh-blobs"];
         if self.node.iroh_a2a_dispatcher.is_some() {
             alpns.push("tenzro/a2a");
@@ -7149,9 +7149,9 @@ impl TenzroMcpServer {
         json_result(serde_json::json!({
             "endpoint_id": id.to_string(),
             "endpoint_id_hex": hex::encode(id.as_bytes()),
-            "pkarr_relay_url": cfg.and_then(|c| c.pkarr_relay_url.as_ref()).map(|u| u.to_string()),
-            "publish_to_n0_default_discovery": cfg.map(|c| c.publish_to_n0_default_discovery),
-            "docs_enabled": cfg.map(|c| c.enable_docs),
+            "pkarr_relay_url": cfg.pkarr_relay_url.as_ref().map(|u| u.to_string()),
+            "publish_to_n0_default_discovery": cfg.publish_to_n0_default_discovery,
+            "docs_enabled": cfg.enable_docs,
             "bound_alpns": alpns,
         }))
     }

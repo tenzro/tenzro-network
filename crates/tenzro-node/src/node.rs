@@ -2942,83 +2942,92 @@ impl TenzroNode {
         // **alongside** libp2p, not in place of it. libp2p remains the
         // control plane (gossipsub, kademlia, consensus dispatch); iroh
         // is the bulk-transfer data plane.
-        if let Some(iroh_cfg) = self.config.iroh.clone() {
-            // Phase C2 (#220): anchor the iroh endpoint to the node's TDIP
-            // Ed25519 seed so the resulting iroh `EndpointId` is byte-identical
-            // to the node DID's public key. Pkarr records published to the
-            // Tenzro-operated relay (see `iroh_cfg.pkarr_relay_url`) are
-            // therefore signed by the on-chain identity key — no extra
-            // attestation layer needed.
-            let cfg = match crate::keygen::load_validator_keypair(&self.config.data_dir) {
-                Ok(keypair) => {
-                    let seed_bytes = keypair.secret_key().as_bytes();
-                    if seed_bytes.len() == 32 {
-                        let mut seed = [0u8; 32];
-                        seed.copy_from_slice(seed_bytes);
-                        iroh_cfg.with_secret_key_seed(seed)
-                    } else {
-                        tracing::warn!(
-                            "Validator Ed25519 seed has unexpected length {} (want 32); \
-                             binding iroh endpoint with a fresh ephemeral key — \
-                             discovery will not be TDIP-anchored",
-                            seed_bytes.len()
-                        );
-                        iroh_cfg
-                    }
-                }
-                Err(e) => {
+        // Iroh data plane is always bound. The default Pkarr relay
+        // (`https://pkarr.tenzro.network`) is operator-deployed; on a
+        // dev/laptop node without DNS access the bind still succeeds because
+        // PkarrPublisher tolerates a transient relay outage and the local
+        // endpoint stays usable for direct dials.
+        //
+        // Rebase iroh's blob/docs storage under the node's `--data-dir` so
+        // operators only have to manage one data root.
+        let mut iroh_cfg = self.config.iroh.clone();
+        iroh_cfg.data_dir = self.config.data_dir.join("iroh");
+
+        // Anchor the iroh endpoint to the node's TDIP Ed25519 seed so the
+        // resulting iroh `EndpointId` is byte-identical to the node DID's
+        // public key. Pkarr records published to the Tenzro-operated relay
+        // are therefore signed by the on-chain identity key — no extra
+        // attestation layer needed.
+        let cfg = match crate::keygen::load_validator_keypair(&self.config.data_dir) {
+            Ok(keypair) => {
+                let seed_bytes = keypair.secret_key().as_bytes();
+                if seed_bytes.len() == 32 {
+                    let mut seed = [0u8; 32];
+                    seed.copy_from_slice(seed_bytes);
+                    iroh_cfg.with_secret_key_seed(seed)
+                } else {
                     tracing::warn!(
-                        "Could not load validator keypair ({}); binding iroh endpoint \
-                         with a fresh ephemeral key — discovery will not be TDIP-anchored",
-                        e
+                        "Validator Ed25519 seed has unexpected length {} (want 32); \
+                         binding iroh endpoint with a fresh ephemeral key — \
+                         discovery will not be TDIP-anchored",
+                        seed_bytes.len()
                     );
                     iroh_cfg
                 }
-            };
-            // Phase D2 (#223): construct a deferred A2A dispatcher now so the
-            // `tenzro/a2a` ALPN is registered on the iroh router at bind time.
-            // The real backing dispatcher (which needs `Arc<TenzroNode>` for
-            // `A2aState`) gets installed in `main.rs` after `Arc::new(node)`.
-            // Until then, the dispatcher returns a JSON-RPC `-32603` envelope
-            // — peers see a defined response rather than a hung stream.
-            let a2a_deferred = Arc::new(tenzro_iroh::DeferredJsonRpcDispatcher::new("a2a"));
-            self.iroh_a2a_dispatcher = Some(a2a_deferred.clone());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Could not load validator keypair ({}); binding iroh endpoint \
+                     with a fresh ephemeral key — discovery will not be TDIP-anchored",
+                    e
+                );
+                iroh_cfg
+            }
+        };
 
-            let a2a_dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> = a2a_deferred;
+        // Construct a deferred A2A dispatcher now so the `tenzro/a2a` ALPN is
+        // registered on the iroh router at bind time. The real backing
+        // dispatcher (which needs `Arc<TenzroNode>` for `A2aState`) gets
+        // installed in `main.rs` after `Arc::new(node)`. Until then, the
+        // dispatcher returns a JSON-RPC `-32603` envelope — peers see a
+        // defined response rather than a hung stream.
+        let a2a_deferred = Arc::new(tenzro_iroh::DeferredJsonRpcDispatcher::new("a2a"));
+        self.iroh_a2a_dispatcher = Some(a2a_deferred.clone());
 
-            match tenzro_iroh::IrohBackedResolver::bind_with_jsonrpc(
-                &cfg,
-                Some(a2a_dispatcher),
-                None, // MCP-over-iroh deferred — see Phase D2 follow-up
-            )
-            .await
-            {
-                Ok(resolver) => {
-                    if cfg.pkarr_relay_url.is_some() && cfg.secret_key_seed.is_some() {
-                        info!(
-                            pkarr_relay = %cfg.pkarr_relay_url.as_ref().unwrap(),
-                            "Tenzro iroh resolver bound (TDIP-anchored, Pkarr discovery via Tenzro relay, A2A ALPN registered)"
-                        );
-                    } else if cfg.secret_key_seed.is_some() {
-                        info!(
-                            "Tenzro iroh resolver bound (TDIP-anchored, n0-dns discovery only, A2A ALPN registered)"
-                        );
-                    } else {
-                        info!(
-                            "Tenzro iroh resolver bound (ephemeral key, in-memory blob store, A2A ALPN registered)"
-                        );
-                    }
-                    self.iroh_resolver = Some(resolver);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Iroh resolver bind failed ({}); continuing without iroh data plane",
-                        e
+        let a2a_dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> = a2a_deferred;
+
+        match tenzro_iroh::IrohBackedResolver::bind_with_jsonrpc(
+            &cfg,
+            Some(a2a_dispatcher),
+            None, // MCP-over-iroh deferred — rmcp StreamableHttpService too deep
+        )
+        .await
+        {
+            Ok(resolver) => {
+                if cfg.pkarr_relay_url.is_some() && cfg.secret_key_seed.is_some() {
+                    info!(
+                        pkarr_relay = %cfg.pkarr_relay_url.as_ref().unwrap(),
+                        "Tenzro iroh resolver bound (TDIP-anchored, Pkarr discovery via Tenzro relay, A2A ALPN registered)"
                     );
-                    // Bind failed — drop the deferred dispatcher handle since
-                    // no router will ever call into it.
-                    self.iroh_a2a_dispatcher = None;
+                } else if cfg.secret_key_seed.is_some() {
+                    info!(
+                        "Tenzro iroh resolver bound (TDIP-anchored, n0-dns discovery only, A2A ALPN registered)"
+                    );
+                } else {
+                    info!(
+                        "Tenzro iroh resolver bound (ephemeral key, in-memory blob store, A2A ALPN registered)"
+                    );
                 }
+                self.iroh_resolver = Some(resolver);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Iroh resolver bind failed ({}); continuing without iroh data plane",
+                    e
+                );
+                // Bind failed — drop the deferred dispatcher handle since
+                // no router will ever call into it.
+                self.iroh_a2a_dispatcher = None;
             }
         }
 

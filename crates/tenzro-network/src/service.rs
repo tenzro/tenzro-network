@@ -185,6 +185,52 @@ fn extract_ip(addr: &Multiaddr) -> Option<IpAddr> {
     None
 }
 
+/// Extracts the transport port from a libp2p `Multiaddr`, if any.
+///
+/// Walks the protocol stack and returns the first TCP/UDP/QUIC port encoded
+/// in the address. Used to gate `observed_addr` promotion on a
+/// listen-port match — see `is_observed_port_one_of_ours` below.
+fn extract_port(addr: &Multiaddr) -> Option<u16> {
+    use libp2p::multiaddr::Protocol;
+    for proto in addr.iter() {
+        match proto {
+            Protocol::Tcp(p) | Protocol::Udp(p) => return Some(p),
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// Returns `true` if the port carried by `observed` matches at least one
+/// of the ports we are actually listening on.
+///
+/// This is the canonical defence against promoting a NAT-translated outbound
+/// source port as if it were a reachable listen address. The mode where this
+/// matters in practice: a node behind a stateful NAT (cloud VPC, home
+/// router, mobile carrier) dials a peer; the peer's libp2p Identify reports
+/// `observed_addr` = `(our_public_ip, ephemeral_source_port)`. The
+/// ephemeral source port is *not* a listener — nothing is bound there. If we
+/// promote it via `Swarm::add_external_address`, we advertise an unreachable
+/// address that subsequent peers will dial and fail on, halting consensus
+/// when the bootstrap node restarts (see `consensus_stall_2026_05_18`).
+///
+/// Pattern mirrors go-libp2p `observedAddrManager.shouldRecordObservation`
+/// and rust-libp2p ≥ 0.45 Identify, both of which require the observation
+/// to match one of the host's actual listen addresses before promotion.
+///
+/// Wildcard `0.0.0.0` / `::` listen addresses are bound to their port; the
+/// port is the salient comparison key because the public IP cannot be
+/// determined from the wildcard.
+fn is_observed_port_one_of_ours(observed: &Multiaddr, our_listen_addrs: &[Multiaddr]) -> bool {
+    let Some(observed_port) = extract_port(observed) else {
+        return false;
+    };
+    our_listen_addrs
+        .iter()
+        .filter_map(extract_port)
+        .any(|p| p == observed_port)
+}
+
 /// An inbound block-sync request received from a peer.
 ///
 /// The receiver MUST eventually call
@@ -1070,6 +1116,16 @@ struct EventLoopState {
     /// to avoid double-promotion when more `observed_addr` reports arrive
     /// from additional peers after confirmation.
     advertised_external_addrs: HashSet<Multiaddr>,
+    /// Operator-configured bootstrap multiaddrs, retained for periodic
+    /// re-dial. Whenever a configured bootstrap peer is not currently
+    /// connected, the cleanup tick re-issues `Swarm::dial(addr)` from this
+    /// authoritative ground-truth set — independent of whatever Kademlia /
+    /// Identify learned about the peer. This is the Lighthouse/Substrate
+    /// self-healing pattern (`recurring_boot_dial`): bootstrap addresses
+    /// are the operator's source of truth, and the libp2p peer-store's
+    /// cached `(ip, ephemeral_port)` from a prior outbound connection
+    /// must never displace them across a bootstrap restart.
+    bootstrap_peers: Vec<(PeerId, Multiaddr)>,
 }
 
 /// Number of distinct peers that must independently report the same
@@ -1235,26 +1291,32 @@ async fn run_event_loop(
         }
     }
 
-    // Bootstrap DHT if enabled
-    if config.enable_dht && !config.boot_nodes.is_empty() {
-        let boot_nodes: Vec<_> = config
-            .boot_nodes
-            .iter()
-            .filter_map(|addr| {
-                // Extract peer ID from multiaddr
-                addr.iter()
-                    .find_map(|proto| {
-                        if let libp2p::multiaddr::Protocol::P2p(peer_id) = proto {
-                            Some(peer_id)
-                        } else {
-                            None
-                        }
-                    })
-                    .map(|peer_id| (peer_id, addr.clone()))
-            })
-            .collect();
+    // Parse `(PeerId, Multiaddr)` pairs out of the configured bootstrap
+    // multiaddrs exactly once. Used for (a) the one-shot Kademlia bootstrap,
+    // (b) the initial dial round below, and (c) the periodic re-dial sweep
+    // stored on `EventLoopState::bootstrap_peers`.
+    let bootstrap_peers: Vec<(PeerId, Multiaddr)> = config
+        .boot_nodes
+        .iter()
+        .filter_map(|addr| {
+            addr.iter()
+                .find_map(|proto| {
+                    if let libp2p::multiaddr::Protocol::P2p(peer_id) = proto {
+                        Some(peer_id)
+                    } else {
+                        None
+                    }
+                })
+                .map(|peer_id| (peer_id, addr.clone()))
+        })
+        .collect();
 
-        crate::discovery::bootstrap_dht(&mut swarm.behaviour_mut().kademlia, boot_nodes);
+    // Bootstrap DHT if enabled
+    if config.enable_dht && !bootstrap_peers.is_empty() {
+        crate::discovery::bootstrap_dht(
+            &mut swarm.behaviour_mut().kademlia,
+            bootstrap_peers.clone(),
+        );
     }
 
     // Dial boot nodes
@@ -1281,6 +1343,7 @@ async fn run_event_loop(
         consensus_direct_inbound_inflight: HashMap::new(),
         observed_addrs: HashMap::new(),
         advertised_external_addrs: preconfigured_external,
+        bootstrap_peers,
     };
 
     // Create periodic cleanup timer (every 60 seconds)
@@ -1339,6 +1402,37 @@ async fn run_event_loop(
                     stats.connected,
                     stats.banned
                 );
+
+                // Re-dial any configured bootstrap peer we are not currently
+                // connected to. This is the self-healing leg for the case
+                // where a bootstrap node restarts and peers' libp2p
+                // peer-stores still hold a cached `(ip, ephemeral_port)`
+                // observation from a prior outbound connection — without
+                // this sweep, peers will keep dialing the stale ephemeral
+                // port and never re-converge until manually restarted.
+                //
+                // Mirrors Lighthouse's `recurring_boot_dial` and
+                // Substrate's periodic bootnode dial. The configured
+                // bootstrap multiaddr is the operator's authoritative
+                // ground truth; the swarm's dial selector should always
+                // try it in addition to whatever was learned via Identify.
+                for (peer_id, addr) in &state.bootstrap_peers {
+                    if !state.swarm.is_connected(peer_id) {
+                        match state.swarm.dial(addr.clone()) {
+                            Ok(()) => tracing::info!(
+                                %peer_id,
+                                %addr,
+                                "Re-dialing configured bootstrap peer (not connected)"
+                            ),
+                            Err(e) => tracing::debug!(
+                                %peer_id,
+                                %addr,
+                                error = %e,
+                                "Bootstrap re-dial skipped"
+                            ),
+                        }
+                    }
+                }
             }
 
             // Periodic Kademlia bootstrap — keeps the DHT routing table fresh
@@ -1922,7 +2016,33 @@ async fn handle_swarm_event(
                 // our advertised external addresses and asks a public peer
                 // to dial back to verify reachability. Both gates must pass.
                 let obs = info.observed_addr.clone();
-                if is_globally_routable(&obs) && !state.advertised_external_addrs.contains(&obs) {
+                if !is_globally_routable(&obs) {
+                    tracing::trace!(
+                        %peer_id,
+                        observed = %obs,
+                        "Ignoring non-routable observed address from peer"
+                    );
+                } else if !is_observed_port_one_of_ours(&obs, &state.listen_addresses) {
+                    // Reject NAT-translated outbound source ports. The peer
+                    // observed us at `(public_ip, ephemeral_port)` because
+                    // our outbound connection was source-NAT'd; nothing is
+                    // listening on the ephemeral port, so advertising it
+                    // would publish an unreachable address. Subsequent peers
+                    // would dial the ephemeral port, fail, and cache the
+                    // stale entry — which is exactly the failure mode that
+                    // halted consensus when v0 restarted (see
+                    // `consensus_stall_2026_05_18` runbook).
+                    //
+                    // Only an observation whose port matches one of our
+                    // actual listen-port bindings can plausibly be a
+                    // dial-back-reachable address.
+                    tracing::debug!(
+                        %peer_id,
+                        observed = %obs,
+                        "Ignoring observed address — port not in our listen-port set \
+                         (NAT-translated source port, not a reachable listen address)"
+                    );
+                } else if !state.advertised_external_addrs.contains(&obs) {
                     let reporters = state.observed_addrs.entry(obs.clone()).or_default();
                     if reporters.insert(peer_id) {
                         tracing::debug!(
@@ -1946,12 +2066,6 @@ async fn handle_swarm_event(
                         // additional reports are not actionable.
                         state.observed_addrs.remove(&obs);
                     }
-                } else if !is_globally_routable(&obs) {
-                    tracing::trace!(
-                        %peer_id,
-                        observed = %obs,
-                        "Ignoring non-routable observed address from peer"
-                    );
                 }
             }
             TenzroBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed { result, .. }) => {
@@ -2466,3 +2580,80 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ma(s: &str) -> Multiaddr {
+        s.parse().expect("valid multiaddr")
+    }
+
+    #[test]
+    fn extract_port_pulls_tcp_port() {
+        assert_eq!(extract_port(&ma("/ip4/35.184.63.8/tcp/9000")), Some(9000));
+    }
+
+    #[test]
+    fn extract_port_pulls_udp_port_for_quic() {
+        assert_eq!(
+            extract_port(&ma("/ip4/35.184.63.8/udp/9000/quic-v1")),
+            Some(9000)
+        );
+    }
+
+    #[test]
+    fn extract_port_handles_p2p_suffix() {
+        let m = ma("/ip4/10.0.0.5/tcp/9000/p2p/12D3KooWGgjoKhKXBvN6jFWqn5sJE6KD38bXtNaoE6itbRUjGBxK");
+        assert_eq!(extract_port(&m), Some(9000));
+    }
+
+    #[test]
+    fn observed_port_accepted_when_matches_listen() {
+        // Wildcard listen on tcp/9000 — peer observes us at our public IP
+        // on tcp/9000 (correct, dial-back-reachable address).
+        let listen = vec![ma("/ip4/0.0.0.0/tcp/9000")];
+        let observed = ma("/ip4/35.184.63.8/tcp/9000");
+        assert!(is_observed_port_one_of_ours(&observed, &listen));
+    }
+
+    #[test]
+    fn observed_port_rejected_when_ephemeral_source_port() {
+        // The exact bug pattern: v0 listens on tcp/9000, dials a peer,
+        // peer sees the connection coming from the NAT'd source port 39692
+        // and reports `(public_ip, 39692)` in Identify. We must NOT
+        // promote 39692 — nothing is listening there.
+        let listen = vec![ma("/ip4/0.0.0.0/tcp/9000")];
+        let observed = ma("/ip4/35.184.63.8/tcp/39692");
+        assert!(!is_observed_port_one_of_ours(&observed, &listen));
+    }
+
+    #[test]
+    fn observed_port_accepted_against_quic_listener() {
+        // A QUIC listener on udp/9000 should accept a tcp/9000 observation
+        // *iff* the ports match — `extract_port` is transport-agnostic on
+        // the comparison key, which is what we want for a node that
+        // simultaneously listens on both transports at the same port (the
+        // tenzro-node universal default per CLAUDE.md).
+        let listen = vec![ma("/ip4/0.0.0.0/udp/9000/quic-v1")];
+        let observed = ma("/ip4/35.184.63.8/tcp/9000");
+        assert!(is_observed_port_one_of_ours(&observed, &listen));
+    }
+
+    #[test]
+    fn observed_port_rejected_when_no_listeners() {
+        let listen: Vec<Multiaddr> = vec![];
+        let observed = ma("/ip4/35.184.63.8/tcp/9000");
+        assert!(!is_observed_port_one_of_ours(&observed, &listen));
+    }
+
+    #[test]
+    fn observed_port_rejected_when_no_port_in_observation() {
+        // Pathological / malformed observation with no transport port —
+        // can't match anything, must reject.
+        let listen = vec![ma("/ip4/0.0.0.0/tcp/9000")];
+        let observed = ma("/ip4/35.184.63.8");
+        assert!(!is_observed_port_one_of_ours(&observed, &listen));
+    }
+}
+

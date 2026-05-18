@@ -1,6 +1,8 @@
 # Tenzro Network
 
-**The operating system for the AI economy.** A purpose-built L1 blockchain enabling humans and autonomous agents to access intelligence (AI models) and security (TEE enclaves) with native settlement in TNZO.
+**The reference implementation of the Open Agent Network (OAN).** The first protocol where the full agent loop — discover model, discover skill, discover task, access resource, pay for it — is wire-level, not application-level. Fully usable today with the latest protocol support.
+
+A purpose-built L1 blockchain enabling humans and autonomous agents to access intelligence (AI models) and security (TEE enclaves) with native settlement in TNZO.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-51%20suites%2C%200%20failures-brightgreen)]()
@@ -9,11 +11,12 @@
 
 ## What is Tenzro?
 
-Tenzro Network is a fully decentralized protocol for the AI economy:
+Tenzro Network is a fully decentralized protocol for the AI economy, and the reference implementation of the [Open Agent Network (OAN)](https://github.com/tenzro/open-agent-network) — the standards family (TNIP-001..022) for a hybrid human + agent coexisting network. OAN provides the full governance framework; Tenzro Network ships the working implementation. The wire stays open for other implementations.
 
 - **Providers** earn TNZO by securing the network (validators), serving AI models (inference), running TEE enclaves (confidential computing), and contributing GPU compute to verifiable training runs
 - **Users** discover and consume AI models, verify proofs, and interact through CLI, SDKs, or MCP
 - **Agents** operate autonomously with self-sovereign identities, FROST-Ed25519 threshold wallets, and delegation scopes — discovering compute, negotiating prices, and settling autonomously on the same TNZO rails
+- **Humans** are a peer identity class, not a UI concern: HITL escalation, guardian-quorum recovery, and delegation are wire primitives, not adapter-layer features
 - **Settlement** happens on-chain with micropayment channels for per-token billing and escrow + on-chain run-root commitments for training jobs
 - **Cross-chain** interoperability via LayerZero V2, Chainlink CCIP, deBridge DLN, LI.FI, Wormhole, and Canton
 
