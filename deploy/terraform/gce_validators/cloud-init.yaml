@@ -134,12 +134,22 @@ write_files:
       # The terraform module passes the GCE-assigned external IP here so the
       # only address other validators ever see is the routable public one.
       EXTERNAL_P2P_ADDR="/ip4/${external_p2p_ip}/tcp/9000"
+      # iroh QUIC sockaddr peers will dial back at. Without this flag,
+      # iroh's PkarrPublisher emits a signed-but-empty DNS body (the
+      # `presets::Minimal` endpoint can't autodiscover a public address
+      # since relay/STUN are disabled, and magicsock only sees the bind
+      # socket's `10.0.0.x:9001` private IP). With it, the published Pkarr
+      # record carries the routable sockaddr and cross-node iroh fetches
+      # resolve cleanly. Matching VPC + host iptables rules opening
+      # UDP/9001 are declared in `network.tf` / this file's `runcmd`.
+      EXTERNAL_IROH_ADDR="${external_p2p_ip}:9001"
 
       ARGS=(
         --role validator
         --data-dir /data/tenzro
         --listen-addr /ip4/0.0.0.0/tcp/9000
         --external-p2p-addr "$EXTERNAL_P2P_ADDR"
+        --external-iroh-addr "$EXTERNAL_IROH_ADDR"
         --rpc-addr "$RPC_BIND:8545"
         --genesis /config/genesis.toml
         --log-level info
@@ -232,6 +242,15 @@ runcmd:
   - |
     iptables -C INPUT -p tcp -m multiport --dports 8545,8080,9000,9090,3001:3008 -j ACCEPT 2>/dev/null \
       || iptables -I INPUT 1 -p tcp -m multiport --dports 8545,8080,9000,9090,3001:3008 -j ACCEPT
+  # Iroh QUIC endpoint (magicsock) pinned via `TenzroIrohConfig.bind_addr`
+  # default `0.0.0.0:9001` — one above libp2p's TCP/9000 so the two stacks
+  # coexist on the same host. Without this rule, iroh's UDP traffic is
+  # silently dropped by the COS host policy=DROP even though the GCE VPC
+  # firewall `tenzro-gce-allow-iroh-quic` permits it. Matching VPC rule is
+  # declared in `network.tf`; this opens the host firewall to match.
+  - |
+    iptables -C INPUT -p udp --dport 9001 -j ACCEPT 2>/dev/null \
+      || iptables -I INPUT 1 -p udp --dport 9001 -j ACCEPT
   # Caddy on the RPC-public node terminates TLS for *.tenzro.network on
   # 80/443. Idempotent like the rule above. Harmless on non-RPC nodes
   # (Caddy isn't running there; the kernel just accepts packets to closed

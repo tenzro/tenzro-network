@@ -20,11 +20,16 @@
 //! - [`SeedAgentEarmarkManager`] — owns the singleton + charter set +
 //!   per-agent registry with optional RocksDB write-through.
 //!
-//! Wave 1 ships the primitives + hydration + read access. The off-chain
-//! daemon, governance executor wiring (charter add/modify/terminate),
-//! per-month decay enforcement at refill, sunset wind-down sweep, and
-//! the `tenzro_seed_agents/1.0.0` gossipsub topic land in a later wave
-//! alongside the governance executor.
+//! All of Spec 10 is now shipped: the primitives + hydration + read
+//! access, the governance executor wiring (charter add/modify/terminate /
+//! earmark / status), the per-month decay enforcement at refill, the
+//! off-chain [`SeedAgentDaemon`](crate::seed_agent_daemon::SeedAgentDaemon)
+//! that drives monthly refills and pauses agents under sunsetted charters,
+//! the [`SEED_AGENTS_TOPIC`](crate::seed_agent_gossip::SEED_AGENTS_TOPIC)
+//! gossipsub fan-out (`tenzro/seed-agents`), and the sunset wind-down sweep
+//! ([`SeedAgentEarmarkManager::sunset_wind_down_sweep`]) that
+//! Paused→Quarantined→Terminated agents under sunsetted charters and
+//! disposes the residual surplus.
 //!
 //! Storage layout (`CF_TOKENS`):
 //! - `seed_earmark:singleton` → JSON-encoded [`TreasuryEarmark`].
@@ -56,6 +61,17 @@ pub const DEFAULT_BOOTSTRAP_MONTHS: u8 = 12;
 /// `5000 bps = 50%`. Matches seed-agent.md §"Sunset and wind-down":
 /// *"Default action absent a governance vote: burn 50% / return 50%."*
 pub const DEFAULT_SURPLUS_BURN_BPS: u16 = 5000;
+
+/// Default grace window between Paused → Quarantined and Quarantined →
+/// Terminated sweeps, in milliseconds. Seven days gives any in-flight
+/// counterparty operation (channel close, 7683 settle, dispute window)
+/// time to resolve before the agent is wallet-drained.
+pub const DEFAULT_QUARANTINE_GRACE_MS: i64 = 7 * 86_400_000;
+
+/// Length of a "month" in milliseconds for decay accounting purposes.
+/// Uses a fixed 30-day window so month-index arithmetic is deterministic
+/// independent of calendar drift. 30 * 86_400_000.
+pub const MONTH_MILLIS: i64 = 30 * 86_400_000;
 
 /// Operations that a [`Charter`] may permit.
 ///
@@ -312,6 +328,15 @@ pub struct TreasuryEarmark {
     /// Surplus disposition at sunset, in basis points to *burn* (the
     /// remainder returns to general treasury).
     pub surplus_burn_bps: u16,
+    /// Index of the month currently being drawn against (0-based from
+    /// `bootstrap_start`). When the observed month advances at refill
+    /// time, `current_month` rolls forward and `month_drawn_wei` resets.
+    pub current_month: u8,
+    /// Cumulative draw within `current_month`, in 18-decimal base units.
+    /// Reset to 0 when `current_month` advances. Bounded above by
+    /// `decay_schedule.cap_for_month(current_month) * seed_agent_count`
+    /// — that is, every active agent may draw the per-month cap once.
+    pub month_drawn_wei: u128,
 }
 
 impl Default for TreasuryEarmark {
@@ -328,11 +353,31 @@ impl Default for TreasuryEarmark {
             charter_ids: Vec::new(),
             enabled: true,
             surplus_burn_bps: DEFAULT_SURPLUS_BURN_BPS,
+            current_month: 0,
+            month_drawn_wei: 0,
         }
     }
 }
 
 impl TreasuryEarmark {
+    /// Compute the 0-indexed month relative to `bootstrap_start` for the
+    /// given timestamp. Saturates at 0 for `now < bootstrap_start` and at
+    /// 255 for very-far-future timestamps. Uses fixed [`MONTH_MILLIS`].
+    pub fn month_index_for(&self, now: Timestamp) -> u8 {
+        let now_ms = now.as_millis();
+        let start_ms = self.bootstrap_start.as_millis();
+        if now_ms <= start_ms {
+            return 0;
+        }
+        let diff = now_ms - start_ms;
+        let months = diff / MONTH_MILLIS;
+        if months > u8::MAX as i64 {
+            u8::MAX
+        } else {
+            months as u8
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.surplus_burn_bps > 10_000 {
             return Err(TokenError::InvalidParameter(format!(
@@ -421,6 +466,60 @@ impl SeedAgentRecord {
             last_active: provisioned_at,
         }
     }
+}
+
+/// Result of a [`SeedAgentEarmarkManager::refill_agent_monthly`] call.
+///
+/// `granted_wei` is the actually-disbursed amount after clamping against
+/// both the charter's monthly cap and the global decay schedule cap for
+/// the current month. `granted_wei == 0` means the schedule has sunsetted
+/// (month past final point) or the earmark is exhausted/disabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefillResult {
+    pub agent_did: String,
+    pub requested_wei: u128,
+    pub granted_wei: u128,
+    pub allocation_remaining_wei: u128,
+    pub month: u8,
+    pub schedule_cap_for_month_wei: u128,
+}
+
+/// Disposition of the unspent earmark surplus at hard sunset.
+///
+/// Produced by [`SeedAgentEarmarkManager::dispose_surplus_at_sunset`] when
+/// every charter has sunsetted and no Active/Paused/Quarantined agents
+/// remain. The caller (governance executor or wind-down sweeper) enacts
+/// the on-chain effect: `burn_wei` is removed from circulating supply via
+/// [`crate::tnzo::TnzoToken::burn`]; `treasury_wei` is deposited to the
+/// general [`crate::treasury::NetworkTreasury`] under the TNZO asset.
+///
+/// The manager itself only zeroes `allocation_remaining_wei` and flips
+/// `enabled` to `false` — token-supply effects are caller-owned so this
+/// crate stays free of cycles with the treasury module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurplusDisposition {
+    /// Surplus that was disposed at sunset (`burn_wei + treasury_wei`).
+    pub total_wei: u128,
+    /// Portion to burn (`total * surplus_burn_bps / 10_000`).
+    pub burn_wei: u128,
+    /// Portion to return to the general treasury (`total - burn_wei`).
+    pub treasury_wei: u128,
+    /// `surplus_burn_bps` at the time of disposition (audit).
+    pub surplus_burn_bps: u16,
+}
+
+/// Outcome of one [`SeedAgentEarmarkManager::sunset_wind_down_sweep`]
+/// invocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindDownReport {
+    /// Agent DIDs transitioned Paused → Quarantined this sweep.
+    pub quarantined: Vec<String>,
+    /// Agent DIDs transitioned Quarantined → Terminated this sweep.
+    pub terminated: Vec<String>,
+    /// Surplus disposition if all charters have sunsetted and no
+    /// non-Terminated agents remain. `None` if the wind-down condition
+    /// has not been reached (or surplus already disposed).
+    pub surplus: Option<SurplusDisposition>,
 }
 
 /// Manages the SeedAgent earmark + charters + per-agent registry, with
@@ -601,6 +700,352 @@ impl SeedAgentEarmarkManager {
             agent = %agent_did,
             status = %status.as_str(),
             "SeedAgent status updated"
+        );
+        Ok(())
+    }
+
+    /// Refill an agent's allocation, enforcing the per-month decay
+    /// schedule and charter caps.
+    ///
+    /// Granted amount = `min(requested_wei, charter.monthly_cap_wei,
+    /// schedule_cap_for_month, earmark.allocation_remaining_wei)`.
+    /// The earmark's `current_month` rolls forward when `now`
+    /// crosses a month boundary; `month_drawn_wei` resets at the
+    /// rollover. The cap is further constrained by the *remaining*
+    /// month-budget across all agents (so multi-agent draws inside
+    /// the same month cannot exceed schedule × seed_agent_count).
+    ///
+    /// Errors:
+    /// - earmark `enabled == false` or `allocation_remaining_wei == 0`
+    /// - agent is not registered or is Terminated
+    /// - the agent's charter is not enabled
+    /// - the agent's charter has been sunsetted (current `now` past
+    ///   `charter.sunset`)
+    ///
+    /// On success, persists both the earmark and the agent record.
+    pub fn refill_agent_monthly(
+        &self,
+        agent_did: &str,
+        requested_wei: u128,
+        now: Timestamp,
+    ) -> Result<RefillResult> {
+        if requested_wei == 0 {
+            return Err(TokenError::InvalidParameter(
+                "refill requested_wei == 0".into(),
+            ));
+        }
+
+        // Look up agent + charter under read locks.
+        let agent_snapshot = self
+            .agents
+            .get(agent_did)
+            .map(|e| e.value().clone())
+            .ok_or_else(|| {
+                TokenError::InvalidParameter(format!(
+                    "unknown SeedAgent {}",
+                    agent_did
+                ))
+            })?;
+        if matches!(agent_snapshot.status, SeedAgentStatus::Terminated) {
+            return Err(TokenError::InvalidParameter(format!(
+                "SeedAgent {} is Terminated",
+                agent_did
+            )));
+        }
+        if !matches!(agent_snapshot.status, SeedAgentStatus::Active) {
+            return Err(TokenError::InvalidParameter(format!(
+                "SeedAgent {} is not Active (status={})",
+                agent_did,
+                agent_snapshot.status.as_str()
+            )));
+        }
+        let charter = self
+            .charters
+            .get(&agent_snapshot.charter_id)
+            .map(|e| e.value().clone())
+            .ok_or_else(|| {
+                TokenError::InvalidParameter(format!(
+                    "SeedAgent {} references unknown charter {:?}",
+                    agent_did, agent_snapshot.charter_id
+                ))
+            })?;
+        if !charter.enabled {
+            return Err(TokenError::InvalidParameter(format!(
+                "charter {:?} is disabled",
+                charter.charter_id
+            )));
+        }
+        if now.as_millis() >= charter.sunset.as_millis()
+            && charter.sunset.as_millis() != 0
+        {
+            return Err(TokenError::InvalidParameter(format!(
+                "charter {:?} has sunsetted",
+                charter.charter_id
+            )));
+        }
+
+        // Mutate the earmark under the write lock: roll month forward
+        // if needed, then compute the granted amount.
+        let (granted, snapshot) = {
+            let mut guard = self.earmark.write();
+            if !guard.enabled {
+                return Err(TokenError::InvalidParameter(
+                    "SeedAgent earmark disabled".into(),
+                ));
+            }
+            if guard.allocation_remaining_wei == 0 {
+                return Err(TokenError::InvalidParameter(
+                    "SeedAgent earmark exhausted".into(),
+                ));
+            }
+
+            // Roll month forward if `now` lands in a later month than
+            // the recorded `current_month`.
+            let observed_month = guard.month_index_for(now);
+            if observed_month > guard.current_month {
+                guard.current_month = observed_month;
+                guard.month_drawn_wei = 0;
+            }
+
+            let schedule_cap = guard
+                .decay_schedule
+                .cap_for_month(guard.current_month);
+            // Per-agent cap = min(schedule, charter monthly cap, requested).
+            let per_agent_cap = schedule_cap
+                .min(charter.spend_caps.monthly_cap_wei)
+                .min(requested_wei);
+
+            // Across all agents this month, the earmark caps the total
+            // monthly draw at `schedule_cap * seed_agent_count` (so each
+            // agent gets its own monthly cap, summed). Compute the
+            // remaining month-budget and clamp to it.
+            let month_budget = schedule_cap
+                .saturating_mul(guard.seed_agent_count as u128);
+            let month_remaining = month_budget
+                .saturating_sub(guard.month_drawn_wei);
+
+            let mut granted = per_agent_cap.min(month_remaining);
+            // Cannot exceed the global allocation remaining.
+            granted = granted.min(guard.allocation_remaining_wei);
+
+            if granted == 0 {
+                let snapshot = RefillResult {
+                    agent_did: agent_did.to_string(),
+                    requested_wei,
+                    granted_wei: 0,
+                    allocation_remaining_wei: guard.allocation_remaining_wei,
+                    month: guard.current_month,
+                    schedule_cap_for_month_wei: schedule_cap,
+                };
+                return Ok(snapshot);
+            }
+
+            guard.allocation_remaining_wei = guard
+                .allocation_remaining_wei
+                .saturating_sub(granted);
+            guard.total_drawn_wei = guard
+                .total_drawn_wei
+                .saturating_add(granted);
+            guard.month_drawn_wei = guard
+                .month_drawn_wei
+                .saturating_add(granted);
+
+            let snapshot = guard.clone();
+            (granted, snapshot)
+        };
+
+        // Persist updated earmark.
+        self.persist_earmark(&snapshot)?;
+
+        // Mutate + persist the agent record.
+        let agent_record = {
+            let mut entry = self
+                .agents
+                .get_mut(agent_did)
+                .ok_or_else(|| TokenError::InvalidParameter(
+                    format!("unknown SeedAgent {}", agent_did),
+                ))?;
+            entry.allocation_used_wei = entry
+                .allocation_used_wei
+                .saturating_add(granted);
+            entry.last_active = now;
+            entry.value().clone()
+        };
+        self.persist_agent(&agent_record)?;
+
+        info!(
+            agent = %agent_did,
+            charter = ?charter.charter_id,
+            requested = requested_wei,
+            granted = granted,
+            month = snapshot.current_month,
+            remaining = snapshot.allocation_remaining_wei,
+            "SeedAgent monthly refill"
+        );
+
+        Ok(RefillResult {
+            agent_did: agent_did.to_string(),
+            requested_wei,
+            granted_wei: granted,
+            allocation_remaining_wei: snapshot.allocation_remaining_wei,
+            month: snapshot.current_month,
+            schedule_cap_for_month_wei: snapshot
+                .decay_schedule
+                .cap_for_month(snapshot.current_month),
+        })
+    }
+
+    /// Single-shot wind-down sweep (Spec 10 Task #44). Pure state-machine —
+    /// no external callbacks. The caller passes `now` (injectable for tests)
+    /// and a `quarantine_grace_ms` cooldown; the manager:
+    ///
+    /// 1. Transitions every `Paused` agent under a sunsetted/disabled
+    ///    charter to `Quarantined`. Records `last_active = now`.
+    /// 2. Transitions every `Quarantined` agent whose `last_active`
+    ///    exceeds `now - quarantine_grace_ms` (i.e. cooldown elapsed) to
+    ///    `Terminated`.
+    /// 3. If **all** charters have sunsetted (`sunset != 0 && now >= sunset`)
+    ///    or are disabled, AND no Active/Paused/Quarantined agents remain
+    ///    after steps 1+2, computes [`SurplusDisposition`] over the
+    ///    earmark's `allocation_remaining_wei`, zeros that field, and
+    ///    flips `enabled = false` on the earmark.
+    ///
+    /// Returns a [`WindDownReport`] describing the transitions + optional
+    /// surplus disposition. The caller (governance executor or daemon
+    /// sunset hook) enacts the on-chain surplus split: burn portion +
+    /// treasury deposit.
+    ///
+    /// Idempotent: a second call after the earmark is sunsetted and zeroed
+    /// returns an empty report. Subsequent quarantine→terminate sweeps
+    /// continue to drain any agents that survived the first pass.
+    pub fn sunset_wind_down_sweep(
+        &self,
+        now: Timestamp,
+        quarantine_grace_ms: i64,
+    ) -> Result<WindDownReport> {
+        let mut report = WindDownReport::default();
+
+        // --- step 1: Paused → Quarantined under sunsetted/disabled charter
+        for agent in self.list_agents(None) {
+            if !matches!(agent.status, SeedAgentStatus::Paused) {
+                continue;
+            }
+            let charter = self.charters.get(&agent.charter_id).map(|e| e.value().clone());
+            let should_quarantine = match charter {
+                None => true, // dangling charter — quarantine defensively
+                Some(c) => {
+                    !c.enabled
+                        || (c.sunset.as_millis() != 0
+                            && now.as_millis() >= c.sunset.as_millis())
+                }
+            };
+            if !should_quarantine {
+                continue;
+            }
+            self.set_agent_status_at(&agent.agent_did, SeedAgentStatus::Quarantined, now)?;
+            report.quarantined.push(agent.agent_did);
+        }
+
+        // --- step 2: Quarantined → Terminated after cooldown
+        for agent in self.list_agents(None) {
+            if !matches!(agent.status, SeedAgentStatus::Quarantined) {
+                continue;
+            }
+            let age = now.as_millis().saturating_sub(agent.last_active.as_millis());
+            if age < quarantine_grace_ms {
+                continue;
+            }
+            self.set_agent_status_at(&agent.agent_did, SeedAgentStatus::Terminated, now)?;
+            // Bump the earmark counter — `seed_agent_count` tracks
+            // *non-Terminated* agents (see field docs).
+            {
+                let snapshot = {
+                    let mut guard = self.earmark.write();
+                    guard.seed_agent_count = guard.seed_agent_count.saturating_sub(1);
+                    guard.clone()
+                };
+                self.persist_earmark(&snapshot)?;
+            }
+            report.terminated.push(agent.agent_did);
+        }
+
+        // --- step 3: dispose surplus iff all charters sunset/disabled
+        //             AND no Active/Paused/Quarantined agents remain.
+        let all_charters_sunset = {
+            let charters = self.list_charters();
+            !charters.is_empty()
+                && charters.iter().all(|c| {
+                    !c.enabled
+                        || (c.sunset.as_millis() != 0
+                            && now.as_millis() >= c.sunset.as_millis())
+                })
+        };
+        let no_live_agents = self.list_agents(None).iter().all(|a| {
+            matches!(a.status, SeedAgentStatus::Terminated)
+        });
+
+        if all_charters_sunset && no_live_agents {
+            let snapshot = self.earmark.read().clone();
+            let remaining = snapshot.allocation_remaining_wei;
+            if remaining > 0 || snapshot.enabled {
+                let burn_bps = snapshot.surplus_burn_bps.min(10_000) as u128;
+                // burn_wei = floor(remaining * burn_bps / 10000).
+                // u128 safe: remaining ≤ initial allocation (genesis bound).
+                let burn = remaining.saturating_mul(burn_bps) / 10_000;
+                let treasury = remaining.saturating_sub(burn);
+                let disposition = SurplusDisposition {
+                    total_wei: remaining,
+                    burn_wei: burn,
+                    treasury_wei: treasury,
+                    surplus_burn_bps: snapshot.surplus_burn_bps,
+                };
+                // Zero the surplus + freeze the earmark.
+                let new_snapshot = {
+                    let mut guard = self.earmark.write();
+                    guard.allocation_remaining_wei = 0;
+                    guard.enabled = false;
+                    guard.clone()
+                };
+                self.persist_earmark(&new_snapshot)?;
+                info!(
+                    total = disposition.total_wei,
+                    burn = disposition.burn_wei,
+                    treasury = disposition.treasury_wei,
+                    burn_bps = disposition.surplus_burn_bps,
+                    "SeedAgent earmark surplus disposed at sunset"
+                );
+                report.surplus = Some(disposition);
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// Internal: like [`set_agent_status`] but pins `last_active` to the
+    /// caller-supplied timestamp (the sweep uses this so the quarantine
+    /// cooldown is anchored to sweep time, not wall clock).
+    fn set_agent_status_at(
+        &self,
+        agent_did: &str,
+        status: SeedAgentStatus,
+        now: Timestamp,
+    ) -> Result<()> {
+        let record = {
+            let mut entry = self
+                .agents
+                .get_mut(agent_did)
+                .ok_or_else(|| TokenError::InvalidParameter(
+                    format!("unknown SeedAgent {}", agent_did),
+                ))?;
+            entry.status = status;
+            entry.last_active = now;
+            entry.value().clone()
+        };
+        self.persist_agent(&record)?;
+        debug!(
+            agent = %agent_did,
+            status = %status.as_str(),
+            "SeedAgent status updated (sweep)"
         );
         Ok(())
     }
@@ -875,6 +1320,250 @@ mod tests {
         assert!(e.validate().is_ok());
     }
 
+    fn seeded_manager_for_refill() -> SeedAgentEarmarkManager {
+        let mgr = SeedAgentEarmarkManager::new();
+
+        // Allocation: 10_000 TNZO base units; base monthly draw 100.
+        // Default schedule: month 0..=2 → 100, 3..=5 → 75, 6..=8 → 50,
+        // 9..=11 → 25, 12 → 0.
+        let earmark = TreasuryEarmark {
+            name: "SeedAgent".to_string(),
+            initial_allocation_wei: 10_000,
+            allocation_remaining_wei: 10_000,
+            total_drawn_wei: 0,
+            bootstrap_start: Timestamp::new(0),
+            bootstrap_end: Timestamp::new(MONTH_MILLIS * 12),
+            decay_schedule: DecaySchedule::default_with_base(100),
+            seed_agent_count: 0,
+            charter_ids: Vec::new(),
+            enabled: true,
+            surplus_burn_bps: DEFAULT_SURPLUS_BURN_BPS,
+            current_month: 0,
+            month_drawn_wei: 0,
+        };
+        mgr.apply_earmark(earmark).unwrap();
+
+        let charter = Charter {
+            charter_id: h(0xC1),
+            name: "InferenceLoad".to_string(),
+            purpose: "Steady inference load".to_string(),
+            operations: vec![OperationKind::InferenceConsumer],
+            spend_caps: SpendCaps {
+                daily_cap_wei: 50,
+                monthly_cap_wei: 1_000,
+                per_tx_cap_wei: 10,
+            },
+            target_throughput: None,
+            counterparty_filter: CounterpartyFilter::default(),
+            sunset: Timestamp::new(MONTH_MILLIS * 12),
+            enabled: true,
+        };
+        mgr.upsert_charter(charter).unwrap();
+
+        // Two agents under the same charter.
+        for did in ["did:tenzro:machine:seed:a", "did:tenzro:machine:seed:b"] {
+            mgr.register_agent(SeedAgentRecord::new(
+                did.to_string(),
+                "did:tenzro:org:treasury:seedagents".into(),
+                h(0xC1),
+                Timestamp::new(0),
+            ))
+            .unwrap();
+        }
+        mgr
+    }
+
+    #[test]
+    fn refill_clamps_to_schedule_in_month_0() {
+        let mgr = seeded_manager_for_refill();
+        // Month 0: schedule cap = 100. Charter monthly cap = 1_000.
+        // Request 80 → granted 80. Request 90 → only 20 left in the
+        // per-agent slot (already used 80) but the global month_budget
+        // is schedule_cap × seed_agent_count = 200, of which 80 used →
+        // 120 remaining. So second agent can still draw up to charter
+        // monthly_cap; the constraint is global.
+        let r1 = mgr
+            .refill_agent_monthly("did:tenzro:machine:seed:a", 80, Timestamp::new(0))
+            .unwrap();
+        assert_eq!(r1.granted_wei, 80);
+        assert_eq!(r1.month, 0);
+        assert_eq!(r1.schedule_cap_for_month_wei, 100);
+
+        // Same agent requests 90 again — clamped by remaining month budget
+        // (200 - 80 = 120) and by schedule cap per-agent (100). per_agent_cap
+        // = min(100, 1000, 90) = 90. month_remaining = 120. granted = 90.
+        let r2 = mgr
+            .refill_agent_monthly("did:tenzro:machine:seed:a", 90, Timestamp::new(0))
+            .unwrap();
+        assert_eq!(r2.granted_wei, 90);
+    }
+
+    #[test]
+    fn refill_clamps_to_charter_monthly_cap() {
+        let mgr = seeded_manager_for_refill();
+        // Charter monthly_cap = 1_000 — requested 2_000 clamped to schedule
+        // (100) first, well below charter cap. Use a larger schedule by
+        // advancing to a far-future test scenario: instead, prove charter
+        // cap binds when smaller than schedule × seed_agent_count.
+        // Tighten charter monthly_cap to 30 and re-upsert.
+        let mut charter = mgr.get_charter(&h(0xC1)).unwrap();
+        charter.spend_caps.monthly_cap_wei = 30;
+        charter.spend_caps.daily_cap_wei = 30;
+        charter.spend_caps.per_tx_cap_wei = 30;
+        mgr.upsert_charter(charter).unwrap();
+
+        let r = mgr
+            .refill_agent_monthly(
+                "did:tenzro:machine:seed:a",
+                500,
+                Timestamp::new(0),
+            )
+            .unwrap();
+        assert_eq!(r.granted_wei, 30);
+    }
+
+    #[test]
+    fn refill_rolls_month_forward() {
+        let mgr = seeded_manager_for_refill();
+        // Draw at month 0.
+        let r0 = mgr
+            .refill_agent_monthly("did:tenzro:machine:seed:a", 50, Timestamp::new(0))
+            .unwrap();
+        assert_eq!(r0.month, 0);
+        // Advance to month 3 (schedule cap = 75).
+        let later = Timestamp::new(MONTH_MILLIS * 3);
+        let r3 = mgr
+            .refill_agent_monthly("did:tenzro:machine:seed:a", 100, later)
+            .unwrap();
+        assert_eq!(r3.month, 3);
+        assert_eq!(r3.schedule_cap_for_month_wei, 75);
+        // per_agent_cap = min(75, 1000, 100) = 75. month_drawn_wei was
+        // reset on the rollover, so granted = 75.
+        assert_eq!(r3.granted_wei, 75);
+    }
+
+    #[test]
+    fn refill_after_sunset_grants_zero() {
+        let mgr = seeded_manager_for_refill();
+        // Month 12 → schedule cap 0. Charter sunset is at month 12, so
+        // the charter rejects refills past sunset. Move now to month
+        // 11.5 to keep before sunset but on the 0-cap month edge: use
+        // month 13 to test schedule-zero outside charter sunset. Instead,
+        // bump charter sunset further.
+        let mut charter = mgr.get_charter(&h(0xC1)).unwrap();
+        charter.sunset = Timestamp::new(MONTH_MILLIS * 24);
+        mgr.upsert_charter(charter).unwrap();
+
+        let later = Timestamp::new(MONTH_MILLIS * 12);
+        let r = mgr
+            .refill_agent_monthly("did:tenzro:machine:seed:a", 100, later)
+            .unwrap();
+        assert_eq!(r.granted_wei, 0);
+        assert_eq!(r.schedule_cap_for_month_wei, 0);
+    }
+
+    #[test]
+    fn refill_rejects_disabled_charter() {
+        let mgr = seeded_manager_for_refill();
+        let mut charter = mgr.get_charter(&h(0xC1)).unwrap();
+        charter.enabled = false;
+        mgr.upsert_charter(charter).unwrap();
+
+        let err = mgr
+            .refill_agent_monthly("did:tenzro:machine:seed:a", 10, Timestamp::new(0))
+            .unwrap_err();
+        match err {
+            TokenError::InvalidParameter(msg) => {
+                assert!(msg.contains("disabled"), "{}", msg);
+            }
+            other => panic!("unexpected err: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn refill_rejects_paused_or_terminated_agent() {
+        let mgr = seeded_manager_for_refill();
+        mgr.set_agent_status(
+            "did:tenzro:machine:seed:a",
+            SeedAgentStatus::Paused,
+        )
+        .unwrap();
+        assert!(mgr
+            .refill_agent_monthly("did:tenzro:machine:seed:a", 10, Timestamp::new(0))
+            .is_err());
+
+        mgr.set_agent_status(
+            "did:tenzro:machine:seed:b",
+            SeedAgentStatus::Terminated,
+        )
+        .unwrap();
+        assert!(mgr
+            .refill_agent_monthly("did:tenzro:machine:seed:b", 10, Timestamp::new(0))
+            .is_err());
+    }
+
+    #[test]
+    fn refill_drains_allocation_remaining() {
+        let mgr = SeedAgentEarmarkManager::new();
+        let earmark = TreasuryEarmark {
+            name: "SeedAgent".into(),
+            initial_allocation_wei: 50,
+            allocation_remaining_wei: 50,
+            total_drawn_wei: 0,
+            bootstrap_start: Timestamp::new(0),
+            bootstrap_end: Timestamp::new(MONTH_MILLIS * 12),
+            decay_schedule: DecaySchedule::default_with_base(1_000),
+            seed_agent_count: 0,
+            charter_ids: Vec::new(),
+            enabled: true,
+            surplus_burn_bps: DEFAULT_SURPLUS_BURN_BPS,
+            current_month: 0,
+            month_drawn_wei: 0,
+        };
+        mgr.apply_earmark(earmark).unwrap();
+        mgr.upsert_charter(Charter {
+            charter_id: h(0xC1),
+            name: "T".into(),
+            purpose: "T".into(),
+            operations: vec![OperationKind::InferenceConsumer],
+            spend_caps: SpendCaps {
+                daily_cap_wei: 1_000,
+                monthly_cap_wei: 1_000,
+                per_tx_cap_wei: 1_000,
+            },
+            target_throughput: None,
+            counterparty_filter: CounterpartyFilter::default(),
+            sunset: Timestamp::new(MONTH_MILLIS * 12),
+            enabled: true,
+        })
+        .unwrap();
+        mgr.register_agent(SeedAgentRecord::new(
+            "did:tenzro:machine:seed:x".into(),
+            "did:tenzro:org:treasury:seedagents".into(),
+            h(0xC1),
+            Timestamp::new(0),
+        ))
+        .unwrap();
+
+        // Schedule cap month 0 = 1_000, but allocation remaining only 50.
+        let r = mgr
+            .refill_agent_monthly("did:tenzro:machine:seed:x", 200, Timestamp::new(0))
+            .unwrap();
+        assert_eq!(r.granted_wei, 50);
+        assert_eq!(r.allocation_remaining_wei, 0);
+
+        // Subsequent refill → exhausted error.
+        let err = mgr
+            .refill_agent_monthly("did:tenzro:machine:seed:x", 1, Timestamp::new(0))
+            .unwrap_err();
+        match err {
+            TokenError::InvalidParameter(msg) => {
+                assert!(msg.contains("exhausted"), "{}", msg);
+            }
+            other => panic!("unexpected err: {:?}", other),
+        }
+    }
+
     #[test]
     fn list_agents_filters_by_charter() {
         let mgr = SeedAgentEarmarkManager::new();
@@ -906,5 +1595,197 @@ mod tests {
         assert_eq!(mgr.list_agents(None).len(), 3);
         assert_eq!(mgr.list_agents(Some(&h(0xA1))).len(), 2);
         assert_eq!(mgr.list_agents(Some(&h(0xA2))).len(), 1);
+    }
+
+    /// Build a manager with a sunsettable charter at `charter_sunset` and
+    /// `n` agents under it, all `Paused` at `t0`. Used by the wind-down
+    /// sweep tests.
+    fn seeded_manager_for_sweep(
+        n: usize,
+        charter_sunset: Timestamp,
+        charter_enabled: bool,
+    ) -> SeedAgentEarmarkManager {
+        let mgr = SeedAgentEarmarkManager::new();
+        let earmark = TreasuryEarmark {
+            name: "SeedAgent".into(),
+            initial_allocation_wei: 1_000,
+            allocation_remaining_wei: 1_000,
+            total_drawn_wei: 0,
+            bootstrap_start: Timestamp::new(0),
+            bootstrap_end: Timestamp::new(MONTH_MILLIS * 12),
+            decay_schedule: DecaySchedule::default_with_base(100),
+            seed_agent_count: 0,
+            charter_ids: Vec::new(),
+            enabled: true,
+            surplus_burn_bps: DEFAULT_SURPLUS_BURN_BPS,
+            current_month: 0,
+            month_drawn_wei: 0,
+        };
+        mgr.apply_earmark(earmark).unwrap();
+        mgr.upsert_charter(Charter {
+            charter_id: h(0xC1),
+            name: "SunsetCharter".into(),
+            purpose: "test".into(),
+            operations: vec![OperationKind::InferenceConsumer],
+            spend_caps: SpendCaps::default_inference_caps(),
+            target_throughput: None,
+            counterparty_filter: CounterpartyFilter::default(),
+            sunset: charter_sunset,
+            enabled: charter_enabled,
+        })
+        .unwrap();
+        for i in 0..n {
+            let did = format!("did:tenzro:machine:seed:s{}", i);
+            mgr.register_agent(SeedAgentRecord::new(
+                did.clone(),
+                "did:tenzro:org:treasury:seedagents".into(),
+                h(0xC1),
+                Timestamp::new(0),
+            ))
+            .unwrap();
+            mgr.set_agent_status(&did, SeedAgentStatus::Paused).unwrap();
+        }
+        mgr
+    }
+
+    #[test]
+    fn sweep_paused_to_quarantined_under_sunsetted_charter() {
+        // Charter sunset at t=1000; sweep at t=1500.
+        let mgr = seeded_manager_for_sweep(2, Timestamp::new(1_000), true);
+        let now = Timestamp::new(1_500);
+        let report = mgr.sunset_wind_down_sweep(now, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        assert_eq!(report.quarantined.len(), 2);
+        assert_eq!(report.terminated.len(), 0);
+        assert!(report.surplus.is_none(), "still inside grace window");
+        for a in mgr.list_agents(None) {
+            assert!(matches!(a.status, SeedAgentStatus::Quarantined));
+        }
+    }
+
+    #[test]
+    fn sweep_paused_to_quarantined_under_disabled_charter() {
+        // Charter sunset in the future, but disabled — still quarantines.
+        let mgr = seeded_manager_for_sweep(1, Timestamp::new(10_000_000), false);
+        let now = Timestamp::new(1_500);
+        let report = mgr.sunset_wind_down_sweep(now, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        assert_eq!(report.quarantined.len(), 1);
+    }
+
+    #[test]
+    fn sweep_quarantined_to_terminated_after_grace() {
+        let mgr = seeded_manager_for_sweep(1, Timestamp::new(1_000), true);
+        // First sweep: Paused → Quarantined at t=1_500.
+        let t1 = Timestamp::new(1_500);
+        let r1 = mgr.sunset_wind_down_sweep(t1, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        assert_eq!(r1.quarantined.len(), 1);
+        assert_eq!(mgr.earmark().seed_agent_count, 1);
+
+        // Second sweep before grace elapses: still Quarantined.
+        let t2 = Timestamp::new(1_500 + DEFAULT_QUARANTINE_GRACE_MS - 1);
+        let r2 = mgr.sunset_wind_down_sweep(t2, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        assert!(r2.terminated.is_empty());
+
+        // Third sweep after grace: Terminated, surplus disposed, earmark frozen.
+        let t3 = Timestamp::new(1_500 + DEFAULT_QUARANTINE_GRACE_MS);
+        let r3 = mgr.sunset_wind_down_sweep(t3, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        assert_eq!(r3.terminated.len(), 1);
+        assert_eq!(mgr.earmark().seed_agent_count, 0);
+        // All charters sunset + no live agents → surplus path triggers.
+        let disposition = r3.surplus.expect("surplus disposition must fire");
+        // Default 50/50 split on 1_000.
+        assert_eq!(disposition.total_wei, 1_000);
+        assert_eq!(disposition.burn_wei, 500);
+        assert_eq!(disposition.treasury_wei, 500);
+        assert_eq!(mgr.earmark().allocation_remaining_wei, 0);
+        assert!(!mgr.earmark().enabled);
+    }
+
+    #[test]
+    fn sweep_idempotent_after_sunset_completes() {
+        let mgr = seeded_manager_for_sweep(1, Timestamp::new(1_000), true);
+        let t_far = Timestamp::new(1_500 + DEFAULT_QUARANTINE_GRACE_MS);
+        // First sweep: Paused → Quarantined.
+        mgr.sunset_wind_down_sweep(Timestamp::new(1_500), DEFAULT_QUARANTINE_GRACE_MS)
+            .unwrap();
+        // Second sweep: Quarantined → Terminated + surplus disposed.
+        let r1 = mgr.sunset_wind_down_sweep(t_far, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        assert!(r1.surplus.is_some());
+        // Third sweep: nothing left to do.
+        let r2 = mgr.sunset_wind_down_sweep(t_far, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        assert!(r2.quarantined.is_empty());
+        assert!(r2.terminated.is_empty());
+        assert!(r2.surplus.is_none(), "surplus already disposed, earmark frozen");
+    }
+
+    #[test]
+    fn sweep_no_surplus_when_some_charter_still_live() {
+        let mgr = seeded_manager_for_sweep(1, Timestamp::new(1_000), true);
+        // Add a second charter that is NOT sunsetted.
+        mgr.upsert_charter(Charter {
+            charter_id: h(0xC2),
+            name: "Live".into(),
+            purpose: "live charter".into(),
+            operations: vec![OperationKind::InferenceConsumer],
+            spend_caps: SpendCaps::default_inference_caps(),
+            target_throughput: None,
+            counterparty_filter: CounterpartyFilter::default(),
+            // Well past `now + grace` so C2 remains live during the sweep.
+            sunset: Timestamp::new(i64::MAX / 2),
+            enabled: true,
+        })
+        .unwrap();
+        // First sweep quarantines the agent under the sunsetted C1 (anchors
+        // last_active = sweep-time). Second sweep beyond grace terminates it.
+        let t1 = Timestamp::new(1_500);
+        let _ = mgr.sunset_wind_down_sweep(t1, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        let t2 = Timestamp::new(1_500 + DEFAULT_QUARANTINE_GRACE_MS);
+        let report = mgr.sunset_wind_down_sweep(t2, DEFAULT_QUARANTINE_GRACE_MS).unwrap();
+        assert_eq!(report.terminated.len(), 1);
+        // Live charter still around → no surplus disposition.
+        assert!(report.surplus.is_none());
+        assert_eq!(mgr.earmark().allocation_remaining_wei, 1_000);
+        assert!(mgr.earmark().enabled);
+    }
+
+    #[test]
+    fn sweep_surplus_split_respects_burn_bps() {
+        let mgr = SeedAgentEarmarkManager::new();
+        // Bias the surplus disposition: 80% burn, 20% treasury.
+        let earmark = TreasuryEarmark {
+            name: "SeedAgent".into(),
+            initial_allocation_wei: 1_000,
+            allocation_remaining_wei: 1_000,
+            total_drawn_wei: 0,
+            bootstrap_start: Timestamp::new(0),
+            bootstrap_end: Timestamp::new(MONTH_MILLIS * 12),
+            decay_schedule: DecaySchedule::default_with_base(100),
+            seed_agent_count: 0,
+            charter_ids: Vec::new(),
+            enabled: true,
+            surplus_burn_bps: 8_000,
+            current_month: 0,
+            month_drawn_wei: 0,
+        };
+        mgr.apply_earmark(earmark).unwrap();
+        mgr.upsert_charter(Charter {
+            charter_id: h(0xC1),
+            name: "Sunsets".into(),
+            purpose: "p".into(),
+            operations: vec![OperationKind::InferenceConsumer],
+            spend_caps: SpendCaps::default_inference_caps(),
+            target_throughput: None,
+            counterparty_filter: CounterpartyFilter::default(),
+            sunset: Timestamp::new(1),
+            enabled: true,
+        })
+        .unwrap();
+        // No agents → step 1+2 are no-ops, step 3 fires immediately.
+        let r = mgr
+            .sunset_wind_down_sweep(Timestamp::new(2), DEFAULT_QUARANTINE_GRACE_MS)
+            .unwrap();
+        let d = r.surplus.expect("must dispose");
+        assert_eq!(d.burn_wei, 800);
+        assert_eq!(d.treasury_wei, 200);
+        assert_eq!(d.surplus_burn_bps, 8_000);
     }
 }

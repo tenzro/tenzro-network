@@ -219,18 +219,44 @@ impl MemoryManager {
         self.text.list(&filter, limit)
     }
 
+    /// Point-lookup a record by `(agent_did, record_id)`. Returns `Ok(None)`
+    /// if no row matches the pair (either wrong agent_did or unknown uuid).
+    /// Backs `tenzro://memory/<did>/<uuid>` URI resolution.
+    pub fn get_by_id(&self, agent_did: &str, record_id: &str) -> Result<Option<MemoryRecord>> {
+        self.text.get_by_id(agent_did, record_id)
+    }
+
+    /// Fetch the bulk payload of an archived record via the configured DA
+    /// backend. The input `record` must carry a `da_pointer` (i.e. its kind
+    /// must be [`MemoryKind::Archived`]); otherwise returns
+    /// [`MemoryError::InvalidArgument`].
+    ///
+    /// Returns the canonical JSON-serialized `MemoryRecord` bytes that were
+    /// originally submitted by [`Self::archive`]. The caller can deserialize
+    /// back into a `MemoryRecord` if needed.
+    pub async fn fetch_archived(&self, record: &MemoryRecord) -> Result<Vec<u8>> {
+        let pointer = record.da_pointer.as_ref().ok_or_else(|| {
+            MemoryError::InvalidArgument(format!(
+                "record {} has no da_pointer; not archived",
+                record.id
+            ))
+        })?;
+        self.da
+            .fetch(pointer)
+            .await
+            .map_err(|e| MemoryError::Da(format!("DA fetch: {}", e)))
+    }
+
     /// Archive a memory: push the canonical payload to the DA backend, then
     /// rewrite the on-tier rows with `kind = Archived` and the resulting
     /// [`DaPointer`] embedded so callers can fetch on demand.
     pub async fn archive(&self, record_id: &str, agent_did: &str) -> Result<MemoryRecord> {
         // Source-of-truth row is the text backend (it stores everything except
-        // the embedding bytes).
-        let mut filter = MemoryFilter::for_agent(agent_did);
-        filter.kind = None;
-        let candidates = self.text.list(&filter, 10_000)?;
-        let original = candidates
-            .into_iter()
-            .find(|r| r.id == record_id)
+        // the embedding bytes). Point-lookup via the indexed (agent_did, id)
+        // pair rather than scanning up to 10_000 rows.
+        let original = self
+            .text
+            .get_by_id(agent_did, record_id)?
             .ok_or_else(|| MemoryError::NotFound(format!("memory {} not found", record_id)))?;
 
         let payload = serde_json::to_vec(&original)?;
@@ -376,6 +402,74 @@ mod tests {
         let rest: Vec<&str> = merged[1..].iter().map(|r| r.id.as_str()).collect();
         assert!(rest.contains(&"id-B"));
         assert!(rest.contains(&"id-C"));
+    }
+
+    #[tokio::test]
+    async fn get_by_id_returns_none_for_unknown_and_scopes_to_agent() {
+        let (mgr, _g) = make_manager(None, None, 4).await;
+        let mut a = MemoryRecord::new(
+            "did:tenzro:machine:a",
+            MemoryKind::Granted,
+            MemorySource::Controller,
+            "alpha",
+            Some(vec![0.1, 0.2, 0.3, 0.4]),
+            serde_json::json!({}),
+        );
+        a.id = "id-alpha".into();
+        mgr.vector.insert(&a).await.unwrap();
+        mgr.text.insert(&a).unwrap();
+
+        // Hit.
+        let got = mgr.get_by_id("did:tenzro:machine:a", "id-alpha").unwrap();
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().text, "alpha");
+
+        // Unknown uuid.
+        let missing = mgr.get_by_id("did:tenzro:machine:a", "id-zzz").unwrap();
+        assert!(missing.is_none());
+
+        // Wrong DID — record exists but belongs to a different agent.
+        let other = mgr.get_by_id("did:tenzro:machine:b", "id-alpha").unwrap();
+        assert!(other.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_archived_round_trips_payload() {
+        let (mgr, _g) = make_manager(None, None, 4).await;
+        let mut rec = MemoryRecord::new(
+            "did:tenzro:machine:a",
+            MemoryKind::Granted,
+            MemorySource::Controller,
+            "round-trip-me",
+            Some(vec![0.1, 0.2, 0.3, 0.4]),
+            serde_json::json!({"k": "v"}),
+        );
+        rec.id = "id-roundtrip".into();
+        mgr.vector.insert(&rec).await.unwrap();
+        mgr.text.insert(&rec).unwrap();
+
+        let archived = mgr
+            .archive("id-roundtrip", "did:tenzro:machine:a")
+            .await
+            .unwrap();
+        let bytes = mgr.fetch_archived(&archived).await.unwrap();
+        let decoded: MemoryRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.id, "id-roundtrip");
+        assert_eq!(decoded.text, "round-trip-me");
+        assert_eq!(decoded.agent_did, "did:tenzro:machine:a");
+
+        // Non-archived record has no pointer → InvalidArgument.
+        let mut hot = MemoryRecord::new(
+            "did:tenzro:machine:a",
+            MemoryKind::Granted,
+            MemorySource::Controller,
+            "hot",
+            None,
+            serde_json::json!({}),
+        );
+        hot.id = "id-hot".into();
+        let err = mgr.fetch_archived(&hot).await.unwrap_err();
+        assert!(matches!(err, MemoryError::InvalidArgument(_)));
     }
 
     #[tokio::test]

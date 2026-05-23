@@ -29,6 +29,7 @@ tenzro-cortex = { workspace = true }
 tenzro-training = { workspace = true }
 tenzro-settlement = { workspace = true }
 tenzro-bridge = { workspace = true }
+tenzro-events = { workspace = true }
 tenzro-agent-kit = { workspace = true }
 tenzro-iroh = { workspace = true }
 tenzro-auth = { workspace = true }

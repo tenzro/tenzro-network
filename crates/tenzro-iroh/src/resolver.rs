@@ -3,18 +3,23 @@
 //! concrete iroh-blobs-backed implementation that lands as part of
 //! Phase A2 (#214) alongside the `DaBackend` impl in `tenzro-storage::da`.
 
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use iroh::{
-    address_lookup::{DnsAddressLookup, PkarrPublisher, PkarrResolver},
+    address_lookup::{AddrFilter, DnsAddressLookup, PkarrPublisher, PkarrResolver},
     endpoint::presets,
     protocol::Router,
-    Endpoint,
+    Endpoint, EndpointId,
 };
-use iroh_blobs::{api::Store as BlobStore, store::mem::MemStore, BlobsProtocol, Hash, ALPN};
+use iroh_blobs::{
+    api::{downloader::Downloader, Store as BlobStore},
+    store::mem::MemStore,
+    BlobsProtocol, Hash, ALPN,
+};
 use tokio::sync::Mutex;
 
 use crate::config::TenzroIrohConfig;
@@ -77,6 +82,11 @@ pub struct IrohBackedResolver {
     /// Router is kept alive (not used directly after spawn) so the
     /// iroh-blobs ALPN handler stays registered until shutdown.
     router: Mutex<Option<Router>>,
+    /// Cross-node blob downloader. Constructed once over `endpoint` + `store`
+    /// at bind time, reused on every `fetch_bytes` miss. Performs the actual
+    /// QUIC dial + BAO-stream pull against a provider `EndpointId` when the
+    /// blob is not yet in the local store.
+    downloader: Downloader,
 }
 
 impl IrohBackedResolver {
@@ -113,15 +123,63 @@ impl IrohBackedResolver {
     /// is also true, the n0-dns publisher + DNS resolver are layered in
     /// alongside for cross-network discoverability.
     ///
-    /// When neither field is set, falls back to the n0 preset (same
-    /// behaviour as [`Self::bind_in_memory`]).
+    /// `cfg.bind_addr` pins the QUIC UDP port — the magicsock would
+    /// otherwise bind two random ephemeral ports per boot, which cannot
+    /// be opened in firewalls ahead of time. Defaults to `0.0.0.0:9001`
+    /// (one above the libp2p QUIC port at 9000). Test / local-dev callers
+    /// that pass `bind_addr.port() == 0` AND set neither `pkarr_relay_url`
+    /// nor `secret_key_seed` fall through to [`Self::bind_in_memory`] for
+    /// a random ephemeral binding via the n0 preset.
     pub async fn bind_with_config(cfg: &TenzroIrohConfig) -> IrohResult<Arc<Self>> {
-        // Fast path: no Tenzro-specific overrides — use the n0 preset as-is.
-        if cfg.pkarr_relay_url.is_none() && cfg.secret_key_seed.is_none() {
+        // Fast path: no Tenzro-specific overrides AND port-0 bind — use the
+        // n0 preset as-is (random ephemeral port). This is the test /
+        // local-dev path; any operator who needs a deterministic port and
+        // production discovery wiring falls through to the builder path
+        // via `build_endpoint`.
+        if cfg.pkarr_relay_url.is_none()
+            && cfg.secret_key_seed.is_none()
+            && cfg.bind_addr.port() == 0
+        {
             return Self::bind_in_memory().await;
         }
 
+        let endpoint = Self::build_endpoint(cfg).await?;
+        Self::with_endpoint(endpoint, None, None)
+    }
+
+    /// Build an iroh `Endpoint` from a [`TenzroIrohConfig`]. Shared by
+    /// `bind_with_config` and `bind_with_jsonrpc` so the discovery + bind
+    /// wiring stays in one place.
+    async fn build_endpoint(cfg: &TenzroIrohConfig) -> IrohResult<Endpoint> {
         let mut builder = Endpoint::builder(presets::Minimal);
+
+        // Pin the QUIC port to the configured bind address so the magicsock
+        // doesn't bind a random ephemeral UDP port (which cannot be opened
+        // in firewalls ahead of time). `clear_ip_transports` strips the
+        // builder's default `0.0.0.0:0` + `[::]:0` pre-binds before we
+        // install our pinned IPv4 + IPv6 addresses.
+        builder = builder
+            .clear_ip_transports()
+            .bind_addr(cfg.bind_addr)
+            .map_err(|e| {
+                IrohError::Backend(format!("bind_addr {} invalid: {e}", cfg.bind_addr))
+            })?;
+        // IPv6 wildcard at the same port — `bind_addr_with_opts` would allow
+        // tuning the prefix length, but the default (`/0`) matches the
+        // builder's pre-configured `[::]:0` semantics. Failure to bind the
+        // v6 socket is allowed by iroh (matches the default-builder
+        // contract for the unspecified `[::]` address).
+        builder = builder
+            .bind_addr(SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                cfg.bind_addr.port(),
+            ))
+            .map_err(|e| {
+                IrohError::Backend(format!(
+                    "bind_addr [::]:{} invalid: {e}",
+                    cfg.bind_addr.port()
+                ))
+            })?;
 
         // Anchor the iroh EndpointId to the node's TDIP Ed25519 seed when
         // provided — otherwise iroh generates a fresh ephemeral key.
@@ -129,26 +187,56 @@ impl IrohBackedResolver {
             builder = builder.secret_key(derive_iroh_secret_key_from_ed25519(&seed));
         }
 
+        // Inject operator-supplied external addresses. Without these, an
+        // endpoint built on `presets::Minimal` (relay-disabled, no STUN
+        // `net_report`) has no way to autodiscover its public reachable
+        // address — magicsock only sees its bind socket's local address
+        // (e.g. `10.0.0.37:9001` on GCE, which isn't reachable from outside
+        // the VPC). The Pkarr publisher would then emit a signed-but-empty
+        // DNS body, and cross-node fetches by `EndpointId` would fail to
+        // resolve any dialable sockaddr. Operators on cloud platforms with
+        // public IPs plumb the VM's external IP through here; home/mobile
+        // nodes leave this empty and rely on the (forthcoming) relay path.
+        for addr in &cfg.external_addrs {
+            builder = builder.external_addr(*addr);
+        }
+
+        // The Pkarr publisher's default `AddrFilter::relay_only()` drops
+        // direct addresses from the published DNS body. That's the safe
+        // default for NAT'd nodes that route through an iroh relay (it
+        // avoids leaking local IPs), but it breaks the public-IP-no-relay
+        // model the fleet runs in. When external addrs are configured,
+        // switch the filter to `unfiltered()` so the published packet
+        // actually carries the dialable addrs we just injected.
+        let pkarr_filter = if cfg.external_addrs.is_empty() {
+            AddrFilter::relay_only()
+        } else {
+            AddrFilter::unfiltered()
+        };
+
         // Tenzro-operated Pkarr relay: publish and resolve through it.
         if let Some(url) = &cfg.pkarr_relay_url {
-            builder = builder.address_lookup(PkarrPublisher::builder(url.clone()));
+            builder = builder.address_lookup(
+                PkarrPublisher::builder(url.clone()).addr_filter(pkarr_filter.clone()),
+            );
             builder = builder.address_lookup(PkarrResolver::builder(url.clone()));
         }
 
         // Layer in n0 defaults alongside (cross-network discoverability) when
         // requested. We don't target `wasm_browser`, so always pair the n0
         // pkarr publisher with the DNS resolver (the n0 preset's native-only
-        // branch).
+        // branch). The same `pkarr_filter` decision applies — if we have a
+        // routable public addr we want the n0 mirror to advertise it too.
         if cfg.publish_to_n0_default_discovery {
-            builder = builder.address_lookup(PkarrPublisher::n0_dns());
+            builder =
+                builder.address_lookup(PkarrPublisher::n0_dns().addr_filter(pkarr_filter));
             builder = builder.address_lookup(DnsAddressLookup::n0_dns());
         }
 
-        let endpoint = builder
+        builder
             .bind()
             .await
-            .map_err(|e| IrohError::Backend(format!("endpoint bind: {e}")))?;
-        Self::with_endpoint(endpoint, None, None)
+            .map_err(|e| IrohError::Backend(format!("endpoint bind: {e}")))
     }
 
     /// Bind a new endpoint and additionally register A2A + MCP JSON-RPC
@@ -169,29 +257,16 @@ impl IrohBackedResolver {
         a2a: Option<Arc<dyn JsonRpcDispatcher>>,
         mcp: Option<Arc<dyn JsonRpcDispatcher>>,
     ) -> IrohResult<Arc<Self>> {
-        // Reuse the bind logic from `bind_with_config` so the discovery
-        // wiring stays in one place.
-        let endpoint = if cfg.pkarr_relay_url.is_none() && cfg.secret_key_seed.is_none() {
+        // Same bind decision as `bind_with_config` — see comments there.
+        let endpoint = if cfg.pkarr_relay_url.is_none()
+            && cfg.secret_key_seed.is_none()
+            && cfg.bind_addr.port() == 0
+        {
             Endpoint::bind(presets::N0)
                 .await
                 .map_err(|e| IrohError::Backend(format!("endpoint bind: {e}")))?
         } else {
-            let mut builder = Endpoint::builder(presets::Minimal);
-            if let Some(seed) = cfg.secret_key_seed {
-                builder = builder.secret_key(derive_iroh_secret_key_from_ed25519(&seed));
-            }
-            if let Some(url) = &cfg.pkarr_relay_url {
-                builder = builder.address_lookup(PkarrPublisher::builder(url.clone()));
-                builder = builder.address_lookup(PkarrResolver::builder(url.clone()));
-            }
-            if cfg.publish_to_n0_default_discovery {
-                builder = builder.address_lookup(PkarrPublisher::n0_dns());
-                builder = builder.address_lookup(DnsAddressLookup::n0_dns());
-            }
-            builder
-                .bind()
-                .await
-                .map_err(|e| IrohError::Backend(format!("endpoint bind: {e}")))?
+            Self::build_endpoint(cfg).await?
         };
         Self::with_endpoint(endpoint, a2a, mcp)
     }
@@ -214,10 +289,12 @@ impl IrohBackedResolver {
             builder = builder.accept(ALPN_MCP, JsonRpcProtocol::mcp(dispatcher));
         }
         let router = builder.spawn();
+        let downloader = Downloader::new(&*store, &endpoint);
         Ok(Arc::new(Self {
             endpoint,
             store,
             router: Mutex::new(Some(router)),
+            downloader,
         }))
     }
 
@@ -259,9 +336,41 @@ impl IrohBackedResolver {
             TenzroUri::Did { .. } => Err(IrohError::UnsupportedVariant("Did")),
             TenzroUri::Manifest { .. } => Err(IrohError::UnsupportedVariant("Manifest")),
             // Memory record-uuids aren't BLAKE3 hashes — they're an indirection
-            // to a DA pointer. Phase D1 (#222) lands the record-uuid → blob-hash
-            // lookup that lets this dispatch through to the blob path.
+            // (agent_did, record_uuid) → DA pointer that requires a
+            // MemoryManager lookup. We deliberately do NOT inject the
+            // MemoryManager into the iroh resolver (would invert the dep
+            // graph: iroh → agent). Memory URIs are instead dispatched
+            // upstream at the RPC layer (see `handle_iroh_fetch_blob` in
+            // `tenzro-node/src/rpc.rs`) which holds both the MemoryManager
+            // and a resolver reference, runs the uuid→record lookup, then
+            // fans out to `MemoryManager::fetch_archived` (which itself
+            // resolves the DaPointer via the iroh blob path for archived
+            // records). Callers hitting the resolver directly with a Memory
+            // URI have likely skipped the RPC layer by accident.
             TenzroUri::Memory { .. } => Err(IrohError::UnsupportedVariant("Memory")),
+        }
+    }
+
+    /// Extract the optional provider hint (peer iroh `EndpointId`) from `uri`,
+    /// where the URI variant supports one. Only `Blob` carries a hint in its
+    /// canonical form today (`?n=<endpoint-id>`); other content variants may
+    /// grow one in a follow-up.
+    ///
+    /// The hint string is accepted in either lowercase hex (the form emitted
+    /// by iroh's `Display` impl, and the form documented for `TenzroUri::Blob`)
+    /// or z-base-32 — iroh's `EndpointId::from_str` accepts both. Invalid
+    /// strings are returned as `Backend` errors so the caller can surface the
+    /// parse failure rather than silently swallowing the hint.
+    fn provider_hint(uri: &TenzroUri) -> IrohResult<Option<EndpointId>> {
+        let hint_str = match uri {
+            TenzroUri::Blob { provider_hint, .. } => provider_hint.as_deref(),
+            _ => None,
+        };
+        match hint_str {
+            None => Ok(None),
+            Some(s) => EndpointId::from_str(s)
+                .map(Some)
+                .map_err(|e| IrohError::Backend(format!("bad provider hint `{s}`: {e}"))),
         }
     }
 }
@@ -272,12 +381,50 @@ impl IrohResolver for IrohBackedResolver {
         let hex = Self::content_hash(uri)?;
         let hash = Hash::from_str(hex)
             .map_err(|e| IrohError::Backend(format!("bad blake3 hex {hex}: {e}")))?;
-        let bytes = self
-            .store
-            .blobs()
-            .get_bytes(hash)
+
+        // Fast path: blob already in the local store. iroh-blobs verifies the
+        // BLAKE3 root on read, so a successful `get_bytes` is the same trust
+        // surface as a successful remote pull.
+        if let Ok(bytes) = self.store.blobs().get_bytes(hash).await {
+            return Ok(bytes);
+        }
+
+        // Cross-node path. Two cases:
+        //   (a) the URI carries an explicit provider hint — dial that peer
+        //       directly via the shared `Downloader` and pull the blob into
+        //       the local store, then re-read.
+        //   (b) no hint — return `NotFound` with a message that names the
+        //       follow-up (Pkarr-based content discovery). We intentionally
+        //       do NOT broadcast a discovery query here: a hint-less fetch is
+        //       a caller-side bug today, and silently succeeding via discovery
+        //       would mask wiring gaps in upstream callers (publish-side
+        //       provider announcements are the right place to fix that).
+        let Some(provider) = Self::provider_hint(uri)? else {
+            return Err(IrohError::NotFound(format!(
+                "blob {hex} not local and no provider hint on URI"
+            )));
+        };
+
+        // `Downloader::download(hash, providers)` writes the blob into the
+        // store we constructed it with. Block on completion via the
+        // `IntoFuture` impl on `DownloadProgress` (returns `Result<()>`).
+        self.downloader
+            .download(hash, vec![provider])
             .await
-            .map_err(|e| IrohError::NotFound(format!("blob {hex} not local: {e}")))?;
+            .map_err(|e| {
+                IrohError::NotFound(format!(
+                    "blob {hex} not local; cross-node fetch from {provider} failed: {e}"
+                ))
+            })?;
+
+        // The download wrote into the same `MemStore` we read from. iroh-blobs
+        // verifies the BLAKE3 root on `get_bytes`, so a hashed mismatch fails
+        // here rather than silently returning corrupt data.
+        let bytes = self.store.blobs().get_bytes(hash).await.map_err(|e| {
+            IrohError::Backend(format!(
+                "blob {hex} downloaded from {provider} but get_bytes failed: {e}"
+            ))
+        })?;
         Ok(bytes)
     }
 

@@ -1030,13 +1030,41 @@ pub fn get_audio_catalog() -> Vec<OnnxAudioEntry> {
             license_tier: LicenseTier::Permissive,
             description: "OpenAI Whisper Large-v3-turbo — flagship multilingual ASR (128-mel)".into(),
         },
-        // ── Parakeet TDT 0.6B v3 (DEFERRED to wave 2) ──────────────
-        // Community ONNX export at istupakov/parakeet-tdt-0.6b-v3-onnx
-        // (fused decoder_joint-model.onnx). RNN-T transducer decoding loop
-        // is non-trivial; ships in the audio runtime's wave-2 milestone
-        // alongside Canary-class models. Catalog entry intentionally
-        // omitted from wave 1 — registering it would surface a model the
-        // runtime cannot serve.
+        // ── Parakeet TDT 0.6B v3 (NVIDIA, CC-BY-4.0) ───────────────
+        // Community ONNX export at istupakov/parakeet-tdt-0.6b-v3-onnx.
+        // Three-file bundle: encoder + fused decoder_joint + 128-mel
+        // preprocessor. Token-and-Duration Transducer — joint emits
+        // vocab logits plus per-step duration logits that drive how
+        // many encoder frames to advance per emission.
+        // `joiner_filename` carries the preprocessor here because the
+        // catalog struct doesn't have a dedicated preprocessor slot;
+        // `decoder_filename` carries the fused decoder_joint network.
+        // Loader resolves `vocab.txt` separately by convention.
+        OnnxAudioEntry {
+            id: "parakeet-tdt-0.6b-v3".into(),
+            name: "NeMo Parakeet TDT 0.6B v3".into(),
+            family: "parakeet".into(),
+            hf_repo: "istupakov/parakeet-tdt-0.6b-v3-onnx".into(),
+            encoder_filename: "encoder-model.onnx".into(),
+            decoder_filename: Some("decoder_joint-model.onnx".into()),
+            joiner_filename: Some("nemo128.onnx".into()),
+            sample_rate: 16000,
+            max_audio_seconds: 60,
+            languages: vec![
+                "en".into(), "es".into(), "fr".into(), "de".into(),
+                "bg".into(), "hr".into(), "cs".into(), "da".into(),
+                "nl".into(), "et".into(), "fi".into(), "el".into(),
+                "hu".into(), "it".into(), "lv".into(), "lt".into(),
+                "mt".into(), "pl".into(), "pt".into(), "ro".into(),
+                "sk".into(), "sl".into(), "sv".into(), "ru".into(),
+                "uk".into(),
+            ],
+            size_bytes: 2_500_000_000,
+            min_ram_gb: 4,
+            license: "CC-BY-4.0".into(),
+            license_tier: LicenseTier::Attribution,
+            description: "NVIDIA Parakeet TDT 0.6B v3 — multilingual TDT transducer (25 langs, 128-mel)".into(),
+        },
         // ── Canary 1B Flash (NOT SHIPPED) ──────────────────────────
         // No published ONNX export exists in the 2026 OSS landscape.
         // Re-evaluate when nvidia/ or a community account publishes one.

@@ -58,9 +58,7 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 
-use crate::aa_validators::{
-    IValidator, ValidationData, ValidatorError, ERC1271_FAILURE_VALUE,
-};
+use crate::aa_validators::{IValidator, ValidationData, ValidatorError};
 use crate::account_abstraction::UserOperation;
 
 // -----------------------------------------------------------------------------
@@ -475,18 +473,6 @@ fn merge_time_bounds(a: ValidationData, b: ValidationData) -> ValidationData {
     }
 }
 
-/// Convenience: if any layer returned the ERC-1271 failure sentinel, surface
-/// it; else return the magic value. Used by future composed validators that
-/// chain ERC-1271 checks (not used by [`DelegationScopeValidator`] itself).
-#[allow(dead_code)]
-fn merge_erc1271_results(legs: &[[u8; 4]], magic: [u8; 4]) -> [u8; 4] {
-    if legs.iter().any(|leg| leg == &ERC1271_FAILURE_VALUE) {
-        ERC1271_FAILURE_VALUE
-    } else {
-        magic
-    }
-}
-
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -494,7 +480,7 @@ fn merge_erc1271_results(legs: &[[u8; 4]], magic: [u8; 4]) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aa_validators::NoOpValidator;
+    use crate::aa_validators::{NoOpValidator, ERC1271_FAILURE_VALUE};
     use crate::account_abstraction::UserOperation;
 
     /// A test inner validator that fails iff `signature` is empty.

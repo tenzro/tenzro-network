@@ -1,9 +1,28 @@
 //! Configuration for the Tenzro iroh integration.
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use url::Url;
+
+/// Default UDP socket address for the iroh QUIC endpoint (magicsock).
+///
+/// `0.0.0.0:9001` — one above the libp2p QUIC port (9000) so the two QUIC
+/// stacks can coexist on a single host. Operators open UDP/9001 alongside
+/// UDP/9000 in their firewall; community joiners on home/mobile networks
+/// override via [`TenzroIrohConfig::bind_addr`] when their NAT mapping
+/// requires a different port.
+///
+/// Pinning a fixed port is required because iroh's magicsock binds two
+/// random ephemeral UDP ports per boot by default, which cannot be opened
+/// in any firewall ahead of time. Without pinning, cross-region QUIC dials
+/// from non-permissive networks are silently dropped at the destination.
+pub const DEFAULT_IROH_BIND_PORT: u16 = 9001;
+
+fn default_iroh_bind_addr() -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_IROH_BIND_PORT)
+}
 
 /// Configuration for the Tenzro iroh endpoint and its companion stores.
 ///
@@ -58,6 +77,52 @@ pub struct TenzroIrohConfig {
     /// iroh-gossip). Required for sealed-dataset manifest sync (Phase B2)
     /// and the agent-template registry (Phase D).
     pub enable_docs: bool,
+
+    /// Fixed UDP socket address for iroh's QUIC endpoint (magicsock).
+    ///
+    /// Defaults to `0.0.0.0:9001` — see [`DEFAULT_IROH_BIND_PORT`] for the
+    /// rationale. Operators on cloud platforms (GCE/AWS/Azure) open the
+    /// matching UDP port in their firewall. Community joiners on
+    /// home/mobile networks may need to override to a different port if
+    /// their NAT/router requires a specific mapping.
+    ///
+    /// Setting the port to `0` requests a random free port (only useful
+    /// for tests and ad-hoc clients; cross-node reachability requires a
+    /// deterministic port).
+    #[serde(default = "default_iroh_bind_addr")]
+    pub bind_addr: SocketAddr,
+
+    /// Externally-reachable UDP socket addresses for this endpoint.
+    ///
+    /// iroh's [`crate::address_lookup::PkarrPublisher`] publishes a DNS
+    /// record containing the endpoint's `direct_addrs` so peers can dial
+    /// back via plain UDP. Two things must be true for that record to be
+    /// non-empty:
+    ///
+    /// 1. The endpoint must actually know its public reachable address.
+    ///    With `presets::Minimal` (relay disabled, no STUN-based
+    ///    `net_report`), iroh has no way to autodiscover this — magicsock
+    ///    only sees its bind socket's local address (e.g. `10.0.0.37:9001`
+    ///    on GCE), which isn't reachable from outside the VPC. Operators
+    ///    plumb the routable address through this field.
+    /// 2. The publisher's `AddrFilter` must permit direct addresses (i.e.
+    ///    `AddrFilter::unfiltered()`). The default filter is `relay_only`
+    ///    which drops direct addrs from the published DNS body — fine for
+    ///    NAT'd nodes that round-trip through an iroh relay, broken for
+    ///    nodes with public IPs and no relay. The resolver layer flips this
+    ///    to `unfiltered()` when `external_addrs` is non-empty.
+    ///
+    /// Each entry is a `host:port` socket address. For GCE / AWS / Azure
+    /// fleets this is the VM's external IP plus the iroh bind port
+    /// (typically `9001`). Home / mobile / corporate-NAT nodes leave this
+    /// empty and rely on a forthcoming relay-fallback path (Phase C4); the
+    /// current relay-disabled `Minimal` preset means those nodes can only
+    /// receive cross-node fetches via libp2p, not iroh.
+    ///
+    /// Multiple addresses are accepted (e.g. v4 + v6, or multi-NIC hosts).
+    /// The serde default is empty so existing configs deserialize unchanged.
+    #[serde(default)]
+    pub external_addrs: Vec<SocketAddr>,
 }
 
 impl TenzroIrohConfig {
@@ -72,6 +137,8 @@ impl TenzroIrohConfig {
             pkarr_relay_url: None,
             secret_key_seed: None,
             enable_docs: true,
+            bind_addr: default_iroh_bind_addr(),
+            external_addrs: Vec::new(),
         }
     }
 
@@ -86,6 +153,23 @@ impl TenzroIrohConfig {
     /// Tenzro-operated Pkarr relay (e.g. `https://pkarr.tenzro.network`).
     pub fn with_pkarr_relay_url(mut self, url: Url) -> Self {
         self.pkarr_relay_url = Some(url);
+        self
+    }
+
+    /// Override the UDP socket address bound by iroh's QUIC endpoint.
+    ///
+    /// Default is `0.0.0.0:9001`. Override on hosts where UDP/9001 is
+    /// already taken or where the NAT mapping requires a specific port.
+    pub fn with_bind_addr(mut self, addr: SocketAddr) -> Self {
+        self.bind_addr = addr;
+        self
+    }
+
+    /// Append an externally-reachable UDP socket address. See
+    /// [`Self::external_addrs`] for why this is required on nodes with
+    /// public IPs that don't proxy through an iroh relay.
+    pub fn with_external_addr(mut self, addr: SocketAddr) -> Self {
+        self.external_addrs.push(addr);
         self
     }
 }
@@ -110,6 +194,8 @@ impl Default for TenzroIrohConfig {
             ),
             secret_key_seed: None,
             enable_docs: true,
+            bind_addr: default_iroh_bind_addr(),
+            external_addrs: Vec::new(),
         }
     }
 }
@@ -126,6 +212,18 @@ mod tests {
         assert!(cfg.enable_docs);
         assert!(cfg.pkarr_relay_url.is_none());
         assert!(cfg.secret_key_seed.is_none());
+        assert_eq!(cfg.bind_addr, default_iroh_bind_addr());
+        assert!(cfg.external_addrs.is_empty());
+    }
+
+    #[test]
+    fn with_external_addr_appends() {
+        let a1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(35, 184, 63, 8)), 9001);
+        let a2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(35, 232, 48, 224)), 9001);
+        let cfg = TenzroIrohConfig::with_data_dir(PathBuf::from("/tmp"))
+            .with_external_addr(a1)
+            .with_external_addr(a2);
+        assert_eq!(cfg.external_addrs, vec![a1, a2]);
     }
 
     #[test]
@@ -150,5 +248,17 @@ mod tests {
         assert!(cfg.enable_docs);
         assert!(cfg.secret_key_seed.is_none());
         assert_eq!(cfg.data_dir, PathBuf::from("./data/iroh"));
+        assert_eq!(
+            cfg.bind_addr,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_IROH_BIND_PORT)
+        );
+    }
+
+    #[test]
+    fn with_bind_addr_overrides_default() {
+        let custom = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 12345);
+        let cfg = TenzroIrohConfig::with_data_dir(PathBuf::from("/tmp"))
+            .with_bind_addr(custom);
+        assert_eq!(cfg.bind_addr, custom);
     }
 }

@@ -49,6 +49,9 @@ impl GossipTopics {
         topics.insert("training".to_string(), IdentTopic::new("tenzro/training"));
         topics.insert("training_syncer".to_string(), IdentTopic::new("tenzro/training/syncer"));
 
+        // SeedAgent (Spec 10) — provisioning lifecycle, refill, sunset
+        topics.insert("seed_agents".to_string(), IdentTopic::new("tenzro/seed-agents"));
+
         Self { topics }
     }
 
@@ -120,6 +123,11 @@ impl GossipTopics {
     /// Cortex worker-advertisement topic
     pub fn cortex(&self) -> &IdentTopic {
         self.topics.get("cortex").expect("cortex topic must exist")
+    }
+
+    /// SeedAgent lifecycle topic (Spec 10)
+    pub fn seed_agents(&self) -> &IdentTopic {
+        self.topics.get("seed_agents").expect("seed_agents topic must exist")
     }
 }
 

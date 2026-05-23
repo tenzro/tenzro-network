@@ -848,7 +848,7 @@ impl InferenceRouter {
                         provider_address, status, error_body
                     );
                     self.record_provider_failure(&provider_address);
-                    self.provider_manager.record_failure(&provider_address);
+                    self.provider_manager.record_call_failure(&provider_address);
                     excluded_providers.push(provider_address);
                     last_error = Some(ModelError::InferenceError(format!(
                         "Provider {} returned HTTP {}: {}",
@@ -861,7 +861,7 @@ impl InferenceRouter {
                         provider_address, e
                     );
                     self.record_provider_failure(&provider_address);
-                    self.provider_manager.record_failure(&provider_address);
+                    self.provider_manager.record_call_failure(&provider_address);
                     excluded_providers.push(provider_address);
                     last_error = Some(ModelError::InferenceError(format!(
                         "Provider {} unreachable: {}",

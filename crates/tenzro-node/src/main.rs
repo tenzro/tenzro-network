@@ -136,6 +136,24 @@ struct Cli {
     #[arg(long, value_name = "URL")]
     external_mcp_addr: Option<String>,
 
+    /// Externally-reachable UDP socket address(es) for this node's iroh QUIC
+    /// endpoint, as `IP:PORT` (comma-separated for multiple). On cloud
+    /// deployments that bind iroh to `0.0.0.0` this is the routable public
+    /// IP plus the iroh port (default `9001`) so that the Pkarr address
+    /// record published for this node carries a sockaddr peers can actually
+    /// dial. Without this flag, an endpoint built on `presets::Minimal`
+    /// (relay-disabled) has no way to autodiscover its public address and
+    /// publishes a signed-but-empty DNS body — cross-node fetches by
+    /// `EndpointId` then fail with "Unable to download" because the
+    /// downloader can't resolve any reachable sockaddr.
+    ///
+    /// Example: `--external-iroh-addr 35.184.63.8:9001`
+    ///
+    /// Home / mobile / corporate-NAT nodes leave this unset and rely on the
+    /// (forthcoming) iroh relay path.
+    #[arg(long, value_name = "ADDRS", value_delimiter = ',')]
+    external_iroh_addr: Vec<String>,
+
     /// State-sync bootstrap: fetch the highest snapshot from the given
     /// peer's RPC endpoint, verify chunk hashes against the manifest, and
     /// commit it to the local KV store before starting consensus. Skips
@@ -1151,6 +1169,39 @@ fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
     }
     if cli.external_mcp_addr.is_some() {
         config.external_mcp_addr = cli.external_mcp_addr.clone();
+    }
+
+    // External iroh sockaddr(s). Plumbed into the iroh endpoint builder via
+    // `Builder::external_addr` (so the magicsock state machine treats them
+    // as known reachable addrs) and into the Pkarr publisher (which then
+    // includes them in the published DNS record so peers can dial back).
+    // Parse permissively: skip empty entries and log invalid ones rather
+    // than failing the whole boot.
+    if !cli.external_iroh_addr.is_empty() {
+        let mut parsed = Vec::new();
+        for entry in &cli.external_iroh_addr {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match trimmed.parse::<std::net::SocketAddr>() {
+                Ok(addr) => parsed.push(addr),
+                Err(e) => {
+                    tracing::warn!(
+                        "Skipping invalid --external-iroh-addr entry '{}': {}",
+                        trimmed,
+                        e
+                    );
+                }
+            }
+        }
+        if !parsed.is_empty() {
+            info!(
+                "External iroh addresses to advertise: {} entries",
+                parsed.len()
+            );
+            config.iroh.external_addrs = parsed;
+        }
     }
 
     Ok(())

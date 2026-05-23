@@ -1,11 +1,23 @@
 # Tenzro Network Deployment
 
-This directory contains Kubernetes manifests and Terraform infrastructure-as-code for deploying the Tenzro testnet on Google Cloud Platform (GCP).
+> **Status (2026-05-18):** The canonical Tenzro testnet runs on a **tri-continental
+> 10-VM GCE fleet** managed by `deploy/terraform/gce_validators/`, **not** on GKE.
+> The Kubernetes manifests and GKE Terraform under this directory are **legacy
+> reference material** retained for operators who want to deploy a K8s-based
+> network of their own. They are not the current testnet topology.
+>
+> For the live fleet layout, build, and rollout procedure, see the **Deployment**
+> section of `CLAUDE.md` at the repo root. For operator-facing setup on any cloud
+> (GCE, EC2, Azure, plain VMs), see `docs/operators/OPERATOR_GUIDE.md`.
 
-## Current Deployment
+## Legacy GKE Deployment (reference, not current)
+
+This directory contains Kubernetes manifests and Terraform infrastructure-as-code
+for an example GKE-based Tenzro deployment. The text below describes that
+example, not the live testnet.
 
 **GCP Project:** `tenzro-infra`
-**GKE Cluster:** `tenzro-testnet` in `us-central1-a`
+**GKE Cluster (example):** `tenzro-testnet` in `us-central1-a`
 **Container Registry:** `us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node`
 **External IP:** `35.224.150.186` (LoadBalancer via Caddy)
 

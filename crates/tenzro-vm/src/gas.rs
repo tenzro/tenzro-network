@@ -69,6 +69,12 @@ pub struct GasOracle {
     /// the EIP-1559 base fee for hot accounts. Cheap to clone — internally
     /// `Arc`-backed.
     hot_state: crate::hot_state::HotStateMarket,
+
+    /// Optional adaptive-burn dial (Spec 8). When wired, the oracle reads
+    /// `base_fee_burn_bps` + `local_fee_burn_bps` on every block finalize
+    /// and routes the gross fees through the configured split. Absent
+    /// (single-node test harness paths), the oracle defaults to 100% burn.
+    burn_rate: Arc<RwLock<Option<Arc<tenzro_token::adaptive_burn::BurnRateConfigManager>>>>,
 }
 
 impl GasOracle {
@@ -80,7 +86,19 @@ impl GasOracle {
             max_history: 1000,
             fee_market: Arc::new(RwLock::new(None)),
             hot_state: crate::hot_state::HotStateMarket::new(),
+            burn_rate: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Wire the adaptive-burn dial. The oracle will read the live
+    /// `BurnRateConfig` on every block finalize and route the gross base
+    /// fees through the configured burn-vs-treasury split. If unset (or
+    /// set to `None`), the oracle defaults to 100% burn (genesis behavior).
+    pub async fn set_burn_rate_manager(
+        &self,
+        manager: Arc<tenzro_token::adaptive_burn::BurnRateConfigManager>,
+    ) {
+        *self.burn_rate.write().await = Some(manager);
     }
 
     /// Borrow the hot-state local fee market. Used by the node event
@@ -124,11 +142,34 @@ impl GasOracle {
     /// entry onto the base-fee history (read by `eth_feeHistory`) and
     /// adjusts the next-block base fee per EIP-1559 §3.
     ///
+    /// When the adaptive-burn dial is wired, the gross base-fee revenue is
+    /// split between burn and treasury per `BurnRateConfig.base_fee_burn_bps`.
+    /// Otherwise defaults to 100% burn.
+    ///
     /// No-op when the fee market is not configured.
     pub async fn on_block_finalized(&self, gas_used: u64) {
+        let burn_bps = self.current_base_fee_burn_bps().await;
         let mut fm = self.fee_market.write().await;
         if let Some(market) = fm.as_mut() {
-            market.on_block_finalized(gas_used);
+            market.on_block_finalized_with_split(gas_used, burn_bps);
+        }
+    }
+
+    /// Read the current `base_fee_burn_bps` from the wired adaptive-burn
+    /// manager, defaulting to 10_000 (100% burn) when unwired.
+    async fn current_base_fee_burn_bps(&self) -> u16 {
+        match self.burn_rate.read().await.as_ref() {
+            Some(mgr) => mgr.config().base_fee_burn_bps,
+            None => 10_000,
+        }
+    }
+
+    /// Read the current `local_fee_burn_bps` from the wired adaptive-burn
+    /// manager, defaulting to 10_000 (100% burn) when unwired.
+    async fn current_local_fee_burn_bps(&self) -> u16 {
+        match self.burn_rate.read().await.as_ref() {
+            Some(mgr) => mgr.config().local_fee_burn_bps,
+            None => 10_000,
         }
     }
 
@@ -143,19 +184,24 @@ impl GasOracle {
         self.hot_state.record_block(samples);
     }
 
-    /// Account a hot-state surcharge as additional burn into the FeeMarket
-    /// `total_burned` counter. The executor calls this after every tx
-    /// whose `effective_base_fee` exceeded the global base fee, passing
+    /// Account a hot-state surcharge as additional revenue into the FeeMarket
+    /// counters. The executor calls this after every tx whose
+    /// `effective_base_fee` exceeded the global base fee, passing
     /// `surcharge_per_gas * gas_used`.
+    ///
+    /// The surcharge is split between `total_burned` and `total_to_treasury`
+    /// per the wired adaptive-burn dial's `local_fee_burn_bps`. Defaults to
+    /// 100% burn when the dial is unwired (genesis behavior).
     ///
     /// No-op when the FeeMarket is not configured.
     pub async fn account_hot_state_burn(&self, surcharge_total: u128) {
         if surcharge_total == 0 {
             return;
         }
+        let local_burn_bps = self.current_local_fee_burn_bps().await;
         let mut fm = self.fee_market.write().await;
         if let Some(market) = fm.as_mut() {
-            market.add_external_burn(surcharge_total);
+            market.add_external_revenue_with_split(surcharge_total, local_burn_bps);
         }
     }
 

@@ -38,6 +38,7 @@ reqwest = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true, optional = true }
 libc = { workspace = true }
 k256 = { workspace = true }
+ed25519-dalek = { workspace = true }
 hkdf = "0.12"
 sha3 = { workspace = true }
 zeroize = { workspace = true }

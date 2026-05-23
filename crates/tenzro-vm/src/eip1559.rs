@@ -68,8 +68,16 @@ pub struct FeeMarket {
     last_block_gas_used: u64,
     /// Current block number
     block_number: u64,
-    /// Total base fees burned (deflationary mechanism)
+    /// Total base fees burned (deflationary mechanism). With the adaptive
+    /// burn dial in place, this is `gross_fees * base_fee_burn_bps / 10_000`
+    /// summed over all blocks. When the dial is 100% (genesis default), this
+    /// equals total gross base fees.
     total_burned: u128,
+    /// Total base-fee share routed to `NetworkTreasury` instead of burned.
+    /// Complement of `total_burned` against gross base fees. Stays zero
+    /// while `base_fee_burn_bps` remains at genesis 10_000.
+    #[serde(default)]
+    total_to_treasury: u128,
     /// Historical base fees (for analytics, last N blocks)
     base_fee_history: Vec<u128>,
     /// Maximum history entries to retain
@@ -88,6 +96,7 @@ impl FeeMarket {
             last_block_gas_used: 0,
             block_number: 0,
             total_burned: 0,
+            total_to_treasury: 0,
             base_fee_history: vec![initial_fee],
             max_history: 1024,
         }
@@ -125,8 +134,28 @@ impl FeeMarket {
 
     /// Update the fee market after a block is finalized.
     ///
-    /// This adjusts the base fee for the next block and records metrics.
+    /// Default-burns 100% of the gross base fees. Equivalent to
+    /// [`on_block_finalized_with_split`] called with `base_fee_burn_bps =
+    /// 10_000`. Retained as the simple entry point for callers that don't
+    /// yet wire the adaptive-burn dial (tests, single-node harnesses).
     pub fn on_block_finalized(&mut self, gas_used: u64) {
+        self.on_block_finalized_with_split(gas_used, 10_000);
+    }
+
+    /// Update the fee market after a block is finalized, splitting the
+    /// gross base-fee revenue between burn and treasury per the adaptive
+    /// burn dial (Spec 8 — see `tenzro_token::adaptive_burn::BurnRateConfig`).
+    ///
+    /// `base_fee_burn_bps` is the share to burn in basis points (0..=10_000).
+    /// Values outside the range are clamped. The complement
+    /// `(10_000 - base_fee_burn_bps)` accrues to `total_to_treasury`.
+    ///
+    /// Note: this updates accounting counters only. Actual ledger movement
+    /// of TNZO (burning supply, crediting `NetworkTreasury`) is handled by
+    /// the executor layer when it consumes base-fee charges from payers.
+    /// The split here is the authoritative basis for that movement, so the
+    /// two stay in lockstep.
+    pub fn on_block_finalized_with_split(&mut self, gas_used: u64, base_fee_burn_bps: u16) {
         let next_base_fee = self.calculate_next_base_fee(gas_used);
         let old_base_fee = self.current_base_fee;
 
@@ -140,12 +169,16 @@ impl FeeMarket {
             self.base_fee_history.remove(0);
         }
 
-        // Calculate burned amount for this block
-        let burned = old_base_fee * gas_used as u128;
+        // Gross base-fee revenue for this block, then split via the dial.
+        let gross = old_base_fee.saturating_mul(gas_used as u128);
+        let burn_bps = base_fee_burn_bps.min(10_000) as u128;
+        let burned = gross.saturating_mul(burn_bps) / 10_000;
+        let to_treasury = gross.saturating_sub(burned);
         self.total_burned = self.total_burned.saturating_add(burned);
+        self.total_to_treasury = self.total_to_treasury.saturating_add(to_treasury);
 
         debug!(
-            "EIP-1559: Block {} finalized, gas_used={}/{}, base_fee: {} -> {} ({:.1}% change), burned={}",
+            "EIP-1559: Block {} finalized, gas_used={}/{}, base_fee: {} -> {} ({:.1}% change), gross={}, burned={}, treasury={}, burn_bps={}",
             self.block_number,
             gas_used,
             self.config.target_gas_per_block,
@@ -156,7 +189,10 @@ impl FeeMarket {
             } else {
                 0.0
             },
-            burned
+            gross,
+            burned,
+            to_treasury,
+            base_fee_burn_bps,
         );
     }
 
@@ -204,8 +240,31 @@ impl FeeMarket {
     /// counter advances. This keeps `eth_feeHistory` reporting one
     /// authoritative burn figure even though local-fee surcharges are
     /// computed off the EIP-1559 path.
+    ///
+    /// Defaults the local-fee burn share to 100%. For non-default splits,
+    /// call [`add_external_revenue_with_split`].
     pub fn add_external_burn(&mut self, amount: u128) {
-        self.total_burned = self.total_burned.saturating_add(amount);
+        self.add_external_revenue_with_split(amount, 10_000);
+    }
+
+    /// Account additional revenue from an out-of-band source (Spec 6 local
+    /// fee market) and split it between burn and treasury per the adaptive
+    /// burn dial's `local_fee_burn_bps`.
+    pub fn add_external_revenue_with_split(&mut self, amount: u128, burn_bps: u16) {
+        if amount == 0 {
+            return;
+        }
+        let bps = burn_bps.min(10_000) as u128;
+        let burn = amount.saturating_mul(bps) / 10_000;
+        let treasury = amount.saturating_sub(burn);
+        self.total_burned = self.total_burned.saturating_add(burn);
+        self.total_to_treasury = self.total_to_treasury.saturating_add(treasury);
+    }
+
+    /// Get total TNZO routed to the network treasury via the adaptive burn
+    /// dial. Zero while the dial is at genesis 100%-burn.
+    pub fn total_to_treasury(&self) -> u128 {
+        self.total_to_treasury
     }
 
     /// Get the current block number
@@ -250,6 +309,7 @@ impl FeeMarket {
             min_base_fee_recent: min_base_fee,
             max_base_fee_recent: max_base_fee,
             total_burned: self.total_burned,
+            total_to_treasury: self.total_to_treasury,
             block_number: self.block_number,
             last_block_gas_used: self.last_block_gas_used,
             target_gas_per_block: self.config.target_gas_per_block,
@@ -318,6 +378,9 @@ pub struct FeeMarketStats {
     pub max_base_fee_recent: u128,
     /// Total TNZO burned through base fees
     pub total_burned: u128,
+    /// Total TNZO routed to the network treasury (adaptive-burn split).
+    #[serde(default)]
+    pub total_to_treasury: u128,
     /// Current block number
     pub block_number: u64,
     /// Gas used in the last block
@@ -443,6 +506,84 @@ mod tests {
         assert!(low < medium);
         assert!(medium < high);
         assert!(high < urgent);
+    }
+
+    #[test]
+    fn test_on_block_finalized_with_split_50_50() {
+        let mut market = FeeMarket::default();
+        let initial_fee = market.base_fee();
+        let target = market.config.target_gas_per_block;
+
+        // 50/50 split: burn 50%, treasury 50%
+        market.on_block_finalized_with_split(target, 5_000);
+
+        let gross = initial_fee.saturating_mul(target as u128);
+        let expected_burn = gross / 2;
+        let expected_treasury = gross - expected_burn;
+
+        assert_eq!(market.total_burned(), expected_burn);
+        assert_eq!(market.total_to_treasury(), expected_treasury);
+    }
+
+    #[test]
+    fn test_on_block_finalized_with_split_100_burn_back_compat() {
+        // The plain `on_block_finalized` must delegate to the split variant
+        // with burn_bps=10_000 (100% burn) for back-compat.
+        let mut a = FeeMarket::default();
+        let mut b = FeeMarket::default();
+        let target = a.config.target_gas_per_block;
+
+        a.on_block_finalized(target);
+        b.on_block_finalized_with_split(target, 10_000);
+
+        assert_eq!(a.total_burned(), b.total_burned());
+        assert_eq!(a.total_to_treasury(), 0);
+        assert_eq!(b.total_to_treasury(), 0);
+    }
+
+    #[test]
+    fn test_on_block_finalized_with_split_clamps_above_10000() {
+        let mut market = FeeMarket::default();
+        let initial_fee = market.base_fee();
+        let target = market.config.target_gas_per_block;
+
+        // burn_bps > 10_000 must clamp to 10_000 (100% burn)
+        market.on_block_finalized_with_split(target, 50_000);
+
+        let gross = initial_fee.saturating_mul(target as u128);
+        assert_eq!(market.total_burned(), gross);
+        assert_eq!(market.total_to_treasury(), 0);
+    }
+
+    #[test]
+    fn test_add_external_revenue_with_split_70_30() {
+        let mut market = FeeMarket::default();
+
+        // 70% burn, 30% treasury
+        market.add_external_revenue_with_split(1_000_000, 7_000);
+
+        assert_eq!(market.total_burned(), 700_000);
+        assert_eq!(market.total_to_treasury(), 300_000);
+    }
+
+    #[test]
+    fn test_add_external_burn_back_compat() {
+        // The plain `add_external_burn` must delegate to the split variant
+        // with burn_bps=10_000 (100% burn) for back-compat.
+        let mut market = FeeMarket::default();
+        market.add_external_burn(1_000_000);
+
+        assert_eq!(market.total_burned(), 1_000_000);
+        assert_eq!(market.total_to_treasury(), 0);
+    }
+
+    #[test]
+    fn test_add_external_revenue_zero_is_noop() {
+        let mut market = FeeMarket::default();
+        market.add_external_revenue_with_split(0, 5_000);
+
+        assert_eq!(market.total_burned(), 0);
+        assert_eq!(market.total_to_treasury(), 0);
     }
 
     #[test]

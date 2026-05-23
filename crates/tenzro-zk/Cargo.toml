@@ -41,3 +41,8 @@ bincode = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "zk_benchmarks"
+harness = false

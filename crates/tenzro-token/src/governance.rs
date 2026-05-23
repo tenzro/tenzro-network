@@ -342,6 +342,43 @@ impl GovernanceEngine {
         Ok(proposal_id)
     }
 
+    /// Creates a protocol-issued governance proposal that bypasses the
+    /// `min_proposal_stake` check.
+    ///
+    /// Used by autonomous on-chain machinery — currently the adaptive-burn
+    /// `AutoProposalGenerator` (Spec 8) which drafts `AdaptiveBurnConfigUpdate`
+    /// proposals when supply metrics drift outside the neutral band. The
+    /// generator runs as a protocol component and has no stake of its own,
+    /// so the proposer is recorded as `Address::default()` and the min-stake
+    /// floor does not apply. Voters still need real stake to vote on the
+    /// resulting proposal exactly like a regular one.
+    pub fn create_system_proposal(
+        &self,
+        title: String,
+        description: String,
+        proposal_type: ProposalType,
+        voting_duration_ms: i64,
+    ) -> Result<String> {
+        let proposal = GovernanceProposal::new(
+            title,
+            description,
+            Address::default(),
+            proposal_type,
+            voting_duration_ms,
+        );
+
+        let proposal_id = proposal.proposal_id.clone();
+
+        self.persist_proposal(&proposal);
+        self.persist_votes(&proposal_id, &[]);
+
+        self.proposals.insert(proposal_id.clone(), proposal);
+        self.votes.insert(proposal_id.clone(), Vec::new());
+
+        info!("Created system proposal: {}", proposal_id);
+        Ok(proposal_id)
+    }
+
     /// Casts a vote on a proposal
     ///
     /// # Arguments

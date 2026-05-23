@@ -213,6 +213,20 @@ pub struct TenzroProposalExecutor {
     /// the executor here doesn't bypass multisig — it just supplies the
     /// authorized caller for the threshold-1 governance path.
     treasury_caller: Address,
+    /// Optional SeedAgent earmark manager. When wired, governance
+    /// proposals of type `SeedAgentEarmarkUpdate` / `SeedAgentCharterUpsert`
+    /// / `SeedAgentStatusSet` (Spec 10) dispatch here. Absent on light
+    /// clients that do not initialize the seed-agent subsystem.
+    seed_agents: Option<Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>>,
+    /// Optional outbound channel for SeedAgent gossip broadcasts. When
+    /// wired, governance-driven mutations (earmark / charter / status
+    /// transitions) push a `SeedAgentGossipMessage` onto this channel
+    /// after the local mutation succeeds. A separate forwarder task
+    /// drains the channel and calls `network.broadcast(...)`. The
+    /// channel is unbounded because governance dispatch is rare and
+    /// the forwarder always drains in real time.
+    seed_agent_broadcast:
+        Option<tokio::sync::mpsc::UnboundedSender<tenzro_token::SeedAgentGossipMessage>>,
 }
 
 impl TenzroProposalExecutor {
@@ -221,7 +235,38 @@ impl TenzroProposalExecutor {
         treasury: Arc<NetworkTreasury>,
         treasury_caller: Address,
     ) -> Self {
-        Self { burn_rate, treasury, treasury_caller }
+        Self {
+            burn_rate,
+            treasury,
+            treasury_caller,
+            seed_agents: None,
+            seed_agent_broadcast: None,
+        }
+    }
+
+    /// Attach a SeedAgent earmark manager so that the three Spec 10
+    /// proposal types are dispatched on `apply_proposal`.
+    pub fn with_seed_agents(
+        mut self,
+        seed_agents: Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>,
+    ) -> Self {
+        self.seed_agents = Some(seed_agents);
+        self
+    }
+
+    /// Attach an outbound channel for SeedAgent gossip broadcasts so that
+    /// governance-driven mutations propagate to peers on
+    /// `tenzro/seed-agents` after the local mutation succeeds. The
+    /// receiver half is owned by a forwarder task spawned in
+    /// `init_event_loop` that calls `network.broadcast(...)` for each
+    /// message. Sends are non-blocking; channel-closed errors are logged
+    /// but do not fail the proposal.
+    pub fn with_seed_agent_broadcast(
+        mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<tenzro_token::SeedAgentGossipMessage>,
+    ) -> Self {
+        self.seed_agent_broadcast = Some(tx);
+        self
     }
 }
 
@@ -333,6 +378,139 @@ impl tenzro_token::governance::ProposalExecutor for TenzroProposalExecutor {
                     code_hash = ?code_hash,
                     "Applied ProtocolUpgrade via governance (operator rollout follows)"
                 );
+                Ok(())
+            }
+            ProposalType::SeedAgentEarmarkUpdate {
+                enabled,
+                allocation_topup_wei,
+                is_initial_seed,
+                surplus_burn_bps,
+            } => {
+                let Some(seed_agents) = &self.seed_agents else {
+                    return Err(tenzro_token::error::TokenError::InvalidParameter(
+                        "SeedAgentEarmarkUpdate proposal but seed-agent manager not wired"
+                            .into(),
+                    ));
+                };
+                if *surplus_burn_bps > 10_000 {
+                    return Err(tenzro_token::error::TokenError::InvalidParameter(
+                        format!("surplus_burn_bps {} > 10000", surplus_burn_bps),
+                    ));
+                }
+                let mut next = seed_agents.earmark();
+                next.enabled = *enabled;
+                next.surplus_burn_bps = *surplus_burn_bps;
+                next.allocation_remaining_wei = next
+                    .allocation_remaining_wei
+                    .saturating_add(*allocation_topup_wei);
+                if *is_initial_seed {
+                    next.initial_allocation_wei = next
+                        .initial_allocation_wei
+                        .saturating_add(*allocation_topup_wei);
+                }
+                seed_agents.apply_earmark(next.clone())?;
+                info!(
+                    proposal_id = %proposal.proposal_id,
+                    enabled,
+                    allocation_topup_wei,
+                    is_initial_seed,
+                    surplus_burn_bps,
+                    "Applied SeedAgentEarmarkUpdate via governance"
+                );
+                if let Some(tx) = &self.seed_agent_broadcast {
+                    if let Err(e) = tx.send(
+                        tenzro_token::SeedAgentGossipMessage::EarmarkUpdated(next),
+                    ) {
+                        tracing::warn!(
+                            proposal_id = %proposal.proposal_id,
+                            error = %e,
+                            "Failed to enqueue SeedAgent EarmarkUpdated gossip"
+                        );
+                    }
+                }
+                Ok(())
+            }
+            ProposalType::SeedAgentCharterUpsert { charter_blob } => {
+                let Some(seed_agents) = &self.seed_agents else {
+                    return Err(tenzro_token::error::TokenError::InvalidParameter(
+                        "SeedAgentCharterUpsert proposal but seed-agent manager not wired"
+                            .into(),
+                    ));
+                };
+                let charter: tenzro_token::seed_agent::Charter =
+                    bincode::deserialize(charter_blob).map_err(|e| {
+                        tenzro_token::error::TokenError::InvalidParameter(format!(
+                            "decode charter blob: {}",
+                            e
+                        ))
+                    })?;
+                let charter_id = charter.charter_id;
+                let name = charter.name.clone();
+                let charter_for_gossip = charter.clone();
+                seed_agents.upsert_charter(charter)?;
+                info!(
+                    proposal_id = %proposal.proposal_id,
+                    charter_id = ?charter_id,
+                    name = %name,
+                    "Applied SeedAgentCharterUpsert via governance"
+                );
+                if let Some(tx) = &self.seed_agent_broadcast {
+                    if let Err(e) = tx.send(
+                        tenzro_token::SeedAgentGossipMessage::CharterUpserted(
+                            charter_for_gossip,
+                        ),
+                    ) {
+                        tracing::warn!(
+                            proposal_id = %proposal.proposal_id,
+                            charter_id = ?charter_id,
+                            error = %e,
+                            "Failed to enqueue SeedAgent CharterUpserted gossip"
+                        );
+                    }
+                }
+                Ok(())
+            }
+            ProposalType::SeedAgentStatusSet { agent_did, status } => {
+                let Some(seed_agents) = &self.seed_agents else {
+                    return Err(tenzro_token::error::TokenError::InvalidParameter(
+                        "SeedAgentStatusSet proposal but seed-agent manager not wired"
+                            .into(),
+                    ));
+                };
+                use tenzro_token::seed_agent::SeedAgentStatus;
+                let target = match status.as_str() {
+                    "active" => SeedAgentStatus::Active,
+                    "paused" => SeedAgentStatus::Paused,
+                    "quarantined" => SeedAgentStatus::Quarantined,
+                    "terminated" => SeedAgentStatus::Terminated,
+                    other => {
+                        return Err(tenzro_token::error::TokenError::InvalidParameter(
+                            format!("unknown SeedAgent status '{}'", other),
+                        ));
+                    }
+                };
+                seed_agents.set_agent_status(agent_did, target)?;
+                info!(
+                    proposal_id = %proposal.proposal_id,
+                    agent_did = %agent_did,
+                    status = %status,
+                    "Applied SeedAgentStatusSet via governance"
+                );
+                if let Some(tx) = &self.seed_agent_broadcast {
+                    if let Err(e) = tx.send(
+                        tenzro_token::SeedAgentGossipMessage::AgentStatusChanged {
+                            agent_did: agent_did.clone(),
+                            status: target,
+                        },
+                    ) {
+                        tracing::warn!(
+                            proposal_id = %proposal.proposal_id,
+                            agent_did = %agent_did,
+                            error = %e,
+                            "Failed to enqueue SeedAgent AgentStatusChanged gossip"
+                        );
+                    }
+                }
                 Ok(())
             }
             ProposalType::Custom { proposal_data } => {
@@ -890,6 +1068,22 @@ pub struct TenzroNode {
     /// paths land in a later wave. Persists to CF_TOKENS via
     /// `SeedAgentEarmarkManager::with_storage`.
     seed_agent_manager: Option<Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>>,
+    /// Gossip sender created at `init_token_economics` time and consumed by
+    /// the SeedAgent provisioning daemon spawned in `start()` after
+    /// consensus is initialised. The receiver half is owned by the
+    /// forwarder task in `init_token_economics` (drains the channel and
+    /// broadcasts each envelope on `tenzro/seed-agents`). `None` when the
+    /// node has no `seed_agent_manager` or no network.
+    seed_agent_gossip_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<tenzro_token::SeedAgentGossipMessage>,
+    >,
+    /// SeedAgent provisioning daemon (Agent-Swarm Spec 10 Task #42). Owns
+    /// the monthly-refill tick loop + charter-sunset pause sweep + gossip
+    /// broadcast. Spawned in `start()` after consensus init so the leader
+    /// gate (`HotStuff2Engine::is_leader_in_next_views`) is wireable. The
+    /// `Arc` is retained so `tenzro_getSeedAgentDaemonStatus` can return
+    /// the most recent tick outcome.
+    seed_agent_daemon: Option<Arc<tenzro_token::SeedAgentDaemon>>,
     /// Liquid staking pool (stTNZO). Persists holder balances, validator
     /// delegations, withdrawal requests, and aggregate totals to CF_TOKENS
     /// via `LiquidStakingPool::with_storage`. Surfaced through
@@ -1102,6 +1296,22 @@ pub struct TenzroNode {
     pub served_models: Arc<DashMap<String, bool>>,
     pub model_services: Arc<DashMap<String, ModelServiceInstance>>,
     pub load_tracker: Arc<tenzro_model::LoadTracker>,
+    /// In-memory store of recent chat-completion SSE streams keyed by
+    /// completion id. Powers `Last-Event-ID`-based resume on
+    /// `/v1/chat/completions` (Streaming Stability P0.1). GC is spawned at
+    /// node init and runs every 30s; entries are evicted per
+    /// [`crate::streaming::DEFAULT_TTL`] (finished) or
+    /// [`crate::streaming::cursor::IN_FLIGHT_IDLE_TIMEOUT`] (in-flight).
+    pub stream_cursors: crate::streaming::StreamCursorStore,
+    /// Per-(provider, model) SLO histograms: TTFT, inter-token latency,
+    /// completion/failure counters. Surfaced via `/metrics` as the
+    /// `tenzro_inference_*` series. Cheap-to-clone (Arc inside).
+    pub stream_slo_metrics: crate::streaming::StreamSloMetrics,
+    /// Event bus for structured audit events (stream lifecycle, block
+    /// lifecycle, settlement, etc.). Consumed by RPC subscriptions
+    /// (`tenzro_subscribeEvents`) and the WebSocket / SSE event endpoints.
+    /// Cheap-to-clone (`Arc` inside) — used by RPC handlers to publish.
+    pub event_bus: Arc<tenzro_events::EventBus>,
     pub hardware_profile: Arc<RwLock<Option<HardwareProfile>>>,
     pub user_resources: Arc<DashMap<String, UserResource>>,
     pub transaction_history: Arc<RwLock<Vec<TransactionHistoryEntry>>>,
@@ -1203,6 +1413,8 @@ impl TenzroNode {
             burn_quota_manager: None,
             burn_rate_manager: None,
             seed_agent_manager: None,
+            seed_agent_gossip_tx: None,
+            seed_agent_daemon: None,
             liquid_staking_pool: None,
             governance: None,
             treasury: None,
@@ -1262,6 +1474,11 @@ impl TenzroNode {
             served_models: Arc::new(DashMap::new()),
             model_services: Arc::new(DashMap::new()),
             load_tracker: Arc::new(tenzro_model::LoadTracker::new()),
+            stream_cursors: crate::streaming::StreamCursorStore::new(),
+            stream_slo_metrics: crate::streaming::StreamSloMetrics::new(),
+            event_bus: Arc::new(tenzro_events::EventBus::new(
+                tenzro_events::EventBusConfig::default(),
+            )),
             hardware_profile: Arc::new(RwLock::new(None)),
             user_resources: Arc::new(DashMap::new()),
             transaction_history: Arc::new(RwLock::new(Vec::new())),
@@ -1463,6 +1680,61 @@ impl TenzroNode {
             }
         }
 
+        // 7c. Spawn the SeedAgent provisioning daemon (Agent-Swarm Spec 10
+        // Task #42). Drives per-month treasury draws against every Active
+        // SeedAgent and auto-pauses agents under disabled / past-sunset
+        // charters. Gated by the consensus leader so only one validator
+        // mutates per tick — convergence on other replicas happens via the
+        // `tenzro/seed-agents` gossipsub topic.
+        if let Some(seed_agents) = self.seed_agent_manager.clone() {
+            if matches!(self.config.role, NetworkRole::Validator) {
+                let mut daemon =
+                    tenzro_token::SeedAgentDaemon::new(seed_agents.clone());
+                if let Some(tx) = self.seed_agent_gossip_tx.clone() {
+                    daemon = daemon.with_gossip(tx);
+                }
+                // Tick-authority gate: this validator is authorised iff it
+                // is the elected leader for any of the next 32 views. The
+                // window is wide enough that one validator in a healthy
+                // 10-node fleet will consistently win the gate per 6-hour
+                // poll interval; if consensus has stalled or this node is
+                // not in the validator set, the conservative `Err` path
+                // inside `is_leader_in_next_views` returns `true`, but the
+                // earmark mutations are still serialised by the local
+                // manager's locks so divergence is bounded.
+                if let Some(consensus) = self.consensus.clone() {
+                    let gate: tenzro_token::TickAuthorityFn =
+                        Arc::new(move || consensus.is_leader_in_next_views(32));
+                    daemon = daemon.with_tick_authority(gate);
+                }
+                // Surplus-disposition callback (Spec 10 Task #44). When the
+                // wind-down sweep reports a non-zero surplus we log + emit
+                // gossip; the actual burn / treasury-deposit happens via a
+                // dedicated `ProposalType::SeedAgentSurplusDispose` governance
+                // proposal that consumes the disposition record. Keeping the
+                // daemon out of the supply-mutation path is intentional —
+                // sensitive flag-day economic events must traverse the
+                // proposal pipeline so they're recorded in the governance
+                // log and bounded by tally quorum.
+                let surplus_cb: tenzro_token::SurplusDispositionFn =
+                    Arc::new(|disposition| {
+                        info!(
+                            total = %disposition.total_wei,
+                            burn = %disposition.burn_wei,
+                            treasury = %disposition.treasury_wei,
+                            burn_bps = disposition.surplus_burn_bps,
+                            "SeedAgent surplus disposed at sunset — file SeedAgentSurplusDispose proposal to enact burn + treasury deposit"
+                        );
+                        Ok(())
+                    });
+                daemon = daemon.with_surplus_disposition(surplus_cb);
+                let daemon_arc = Arc::new(daemon);
+                daemon_arc.clone().spawn();
+                self.seed_agent_daemon = Some(daemon_arc);
+                info!("SeedAgentDaemon spawned (validator role, leader-gated)");
+            }
+        }
+
         // 8. Initialize settlement
         self.init_settlement().await.inspect_err(|e| {
             self.health_monitor.mark_unhealthy("settlement", e.to_string());
@@ -1610,6 +1882,13 @@ impl TenzroNode {
 
         // 15. Clean up stale model services from previous session
         self.cleanup_expired_model_services();
+
+        // 16. Spawn the streaming cursor GC. The handle is dropped here —
+        // the task lifetime is bound to the StreamCursorStore Arc inside.
+        // It runs until the process exits.
+        let _ = self
+            .stream_cursors
+            .spawn_gc(std::time::Duration::from_secs(30));
 
         // Mark as running
         *self.state.write() = NodeState::Running;
@@ -2049,7 +2328,19 @@ impl TenzroNode {
         } else {
             Arc::new(tenzro_token::adaptive_burn::BurnRateConfigManager::new())
         };
-        self.burn_rate_manager = Some(burn_rate_manager);
+        self.burn_rate_manager = Some(burn_rate_manager.clone());
+
+        // Wire the adaptive-burn dial into the VM gas oracle so the EIP-1559
+        // fee market splits per-block gross revenue between burn and treasury
+        // according to `BurnRateConfig.base_fee_burn_bps` and hot-state
+        // surcharges according to `local_fee_burn_bps`. Without this wiring
+        // the oracle defaults to 100% burn (genesis behavior).
+        if let Some(vm_runtime) = self.vm_runtime.as_ref() {
+            vm_runtime
+                .gas_oracle()
+                .set_burn_rate_manager(burn_rate_manager)
+                .await;
+        }
 
         // Initialize SeedAgent treasury earmark manager (Agent-Swarm Spec 10).
         // Wave 1 lands the protocol primitives, persistence, and read-only
@@ -2113,13 +2404,119 @@ impl TenzroNode {
             self.burn_rate_manager.as_ref(),
             self.treasury.as_ref(),
         ) {
-            let executor = Arc::new(TenzroProposalExecutor::new(
+            let mut executor = TenzroProposalExecutor::new(
                 burn_rate.clone(),
                 treasury.clone(),
                 treasury_addr,
-            ));
+            );
+            // SeedAgent gossip channel — shared by the governance executor
+            // (charter / earmark / status mutations) and the provisioning
+            // daemon (monthly refill broadcasts + automatic pause-on-sunset).
+            // The forwarder task drains the channel and publishes each
+            // envelope on `tenzro/seed-agents`; receivers apply messages
+            // idempotently against their own `SeedAgentEarmarkManager`.
+            let seed_agent_gossip_tx = if self.seed_agent_manager.is_some()
+                && self.network.is_some()
+            {
+                let network = self.network.clone().unwrap();
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<
+                    tenzro_token::SeedAgentGossipMessage,
+                >();
+                tokio::spawn(async move {
+                    while let Some(msg) = rx.recv().await {
+                        let bytes = match &msg {
+                            tenzro_token::SeedAgentGossipMessage::CharterUpserted(
+                                c,
+                            ) => tenzro_token::encode_charter_upserted(c),
+                            tenzro_token::SeedAgentGossipMessage::EarmarkUpdated(
+                                e,
+                            ) => tenzro_token::encode_earmark_updated(e),
+                            tenzro_token::SeedAgentGossipMessage::AgentRegistered(
+                                r,
+                            ) => tenzro_token::encode_agent_registered(r),
+                            tenzro_token::SeedAgentGossipMessage::AgentStatusChanged {
+                                agent_did,
+                                status,
+                            } => tenzro_token::encode_agent_status_changed(
+                                agent_did, *status,
+                            ),
+                            tenzro_token::SeedAgentGossipMessage::MonthlyRefillCompleted {
+                                agent_did,
+                                granted_wei,
+                                month,
+                                earmark_snapshot,
+                            } => tenzro_token::encode_monthly_refill_completed(
+                                agent_did,
+                                *granted_wei,
+                                *month,
+                                earmark_snapshot,
+                            ),
+                        };
+                        let bytes = match bytes {
+                            Ok(b) => b,
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to bincode-encode SeedAgent gossip envelope"
+                                );
+                                continue;
+                            }
+                        };
+                        let net_msg = tenzro_network::NetworkMessage::new(
+                            tenzro_network::MessagePayload::Custom {
+                                topic: tenzro_token::SEED_AGENTS_TOPIC.to_string(),
+                                data: bytes,
+                            },
+                        );
+                        if let Err(e) = network
+                            .broadcast(tenzro_token::SEED_AGENTS_TOPIC, net_msg)
+                            .await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to broadcast SeedAgent gossip on tenzro/seed-agents"
+                            );
+                        }
+                    }
+                });
+                info!(
+                    topic = tenzro_token::SEED_AGENTS_TOPIC,
+                    "SeedAgent gossip forwarder spawned"
+                );
+                Some(tx)
+            } else {
+                None
+            };
+
+            if let Some(seed_agents) = self.seed_agent_manager.as_ref() {
+                executor = executor.with_seed_agents(seed_agents.clone());
+                if let Some(tx) = seed_agent_gossip_tx.as_ref() {
+                    executor = executor.with_seed_agent_broadcast(tx.clone());
+                }
+            }
+            let executor = Arc::new(executor);
             governance.attach_executor(executor);
             info!("ProposalExecutor wired into GovernanceEngine");
+
+            // Stash the gossip sender so `start()` can hand it to the
+            // SeedAgent provisioning daemon after `init_consensus` runs
+            // (the daemon's tick-authority gate needs the consensus engine,
+            // which doesn't exist at this point in init).
+            self.seed_agent_gossip_tx = seed_agent_gossip_tx;
+
+            // Spawn the adaptive-burn AutoProposalGenerator. Polls
+            // BurnRateConfigManager::current_recommendation() on the epoch
+            // boundary (8h default) and drafts AdaptiveBurnConfigUpdate
+            // proposals via GovernanceEngine::create_system_proposal when
+            // metrics drift above the proposal floor or trip an alarm.
+            // No-op when the dial is Disabled or the recommendation is
+            // NoChange / below floor.
+            let auto_gen = Arc::new(tenzro_token::adaptive_burn::AutoProposalGenerator::new(
+                burn_rate.clone(),
+                governance.clone(),
+            ));
+            auto_gen.spawn();
+            info!("AutoProposalGenerator spawned for adaptive burn dial");
         } else {
             warn!(
                 "ProposalExecutor not wired: governance / burn_rate / treasury \
@@ -3007,14 +3404,17 @@ impl TenzroNode {
                 if cfg.pkarr_relay_url.is_some() && cfg.secret_key_seed.is_some() {
                     info!(
                         pkarr_relay = %cfg.pkarr_relay_url.as_ref().unwrap(),
+                        bind_addr = %cfg.bind_addr,
                         "Tenzro iroh resolver bound (TDIP-anchored, Pkarr discovery via Tenzro relay, A2A ALPN registered)"
                     );
                 } else if cfg.secret_key_seed.is_some() {
                     info!(
+                        bind_addr = %cfg.bind_addr,
                         "Tenzro iroh resolver bound (TDIP-anchored, n0-dns discovery only, A2A ALPN registered)"
                     );
                 } else {
                     info!(
+                        bind_addr = %cfg.bind_addr,
                         "Tenzro iroh resolver bound (ephemeral key, in-memory blob store, A2A ALPN registered)"
                     );
                 }
@@ -4856,6 +5256,17 @@ impl TenzroNode {
         // a self-published gradient is a no-op.
         let event_loop = event_loop.with_training_runtime(self.training_runtime.clone());
 
+        // Wire the shared SeedAgentEarmarkManager (Spec 10) so the event
+        // loop can apply idempotent state updates received over the
+        // tenzro/seed-agents gossipsub topic. `MonthlyRefillCompleted`
+        // is informational only — receivers refresh their earmark snapshot
+        // but do NOT replay the refill (that would double-spend).
+        let event_loop = if let Some(seed_agents) = self.seed_agent_manager.clone() {
+            event_loop.with_seed_agent_manager(seed_agents)
+        } else {
+            event_loop
+        };
+
         // Store the event sender for RPC to submit transactions
         self.event_loop_tx = Some(event_loop.event_sender());
 
@@ -5637,6 +6048,63 @@ impl TenzroNode {
                 });
             }
             info!("Tenzro Train discovery wired to gossipsub (tenzro/training + tenzro/training/syncer)");
+
+            // Wire SeedAgent (Spec 10) gossipsub bridge: subscribe to
+            // `tenzro/seed-agents` and forward opaque payloads to the event
+            // loop for decode + idempotent application against the local
+            // `SeedAgentEarmarkManager`. The five variants
+            // (CharterUpserted / EarmarkUpdated / AgentRegistered /
+            // AgentStatusChanged / MonthlyRefillCompleted) are all
+            // safe to re-apply — MonthlyRefillCompleted is informational
+            // only and never re-executes the refill on the receiver.
+            {
+                let event_tx_seed = event_loop.event_sender();
+                let net_seed = network.clone();
+                let topic_owned = tenzro_token::SEED_AGENTS_TOPIC.to_string();
+                tokio::spawn(async move {
+                    match net_seed.subscribe(&topic_owned).await {
+                        Ok(mut rx) => {
+                            tracing::info!(
+                                topic = %topic_owned,
+                                "SeedAgent: subscribed to gossipsub topic"
+                            );
+                            while let Some(msg) = rx.recv().await {
+                                if let tenzro_network::MessagePayload::Custom { topic, data } =
+                                    msg.payload
+                                {
+                                    if topic != topic_owned {
+                                        continue;
+                                    }
+                                    if let Err(e) = event_tx_seed
+                                        .send(NodeEvent::SeedAgentGossipReceived {
+                                            topic: topic.clone(),
+                                            bytes: data,
+                                        })
+                                        .await
+                                    {
+                                        tracing::error!(
+                                            "Failed to forward seed-agent gossip to event loop: {}",
+                                            e
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                topic = %topic_owned,
+                                error = %e,
+                                "Failed to subscribe to seed-agent gossipsub topic"
+                            );
+                        }
+                    }
+                });
+                info!(
+                    topic = tenzro_token::SEED_AGENTS_TOPIC,
+                    "SeedAgent discovery wired to gossipsub"
+                );
+            }
         }
 
         // Spawn the event loop in the background
@@ -5976,6 +6444,14 @@ impl TenzroNode {
         &self,
     ) -> Option<&Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>> {
         self.seed_agent_manager.as_ref()
+    }
+
+    /// Returns the SeedAgent provisioning daemon (Spec 10 Task #42). `None`
+    /// on non-validator roles or when the earmark subsystem is disabled.
+    pub fn seed_agent_daemon(
+        &self,
+    ) -> Option<&Arc<tenzro_token::SeedAgentDaemon>> {
+        self.seed_agent_daemon.as_ref()
     }
 
     /// Returns the OAuth 2.1 + DPoP + RAR auth engine if initialized.

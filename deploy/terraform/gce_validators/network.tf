@@ -51,6 +51,25 @@ resource "google_compute_firewall" "p2p_external" {
   target_tags   = ["tenzro-validator"]
 }
 
+# Iroh QUIC endpoint (magicsock) pinned via `TenzroIrohConfig.bind_addr`
+# default `0.0.0.0:9001`. Required for cross-node iroh fetches to reach
+# the destination — without a pinned port, iroh binds random ephemeral
+# UDP ports per boot which cannot be opened in any firewall ahead of time.
+# Matching COS host iptables rule lives in `cloud-init.yaml`.
+resource "google_compute_firewall" "iroh_quic_external" {
+  name    = "tenzro-gce-allow-iroh-quic"
+  network = data.google_compute_network.tenzro.name
+  project = var.project_id
+
+  allow {
+    protocol = "udp"
+    ports    = ["9001"]
+  }
+
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["tenzro-validator"]
+}
+
 # Validator-0 doubles as the RPC node; opens 8545 (RPC), 8080 (web verify),
 # 3001 (MCP), 3002 (A2A), and 3003–3008 (ecosystem MCPs) to internet.
 # Other validators only expose 9000 publicly.

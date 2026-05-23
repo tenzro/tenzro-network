@@ -1,6 +1,6 @@
 //! Audio (ASR) runtime backed by ONNX Runtime.
 //!
-//! Five concrete transcriber implementations cover the wave-1 catalog:
+//! Three concrete transcriber families cover the wave-1 catalog:
 //!
 //! - **Moonshine v2** (`MoonshineTranscriber`) — raw 16 kHz waveform input,
 //!   encoder + autoregressive decoder loop with merged-decoder KV-cache
@@ -10,10 +10,19 @@
 //!   large-v3-turbo** (`WhisperTranscriber`) — 80 or 128 log-mel
 //!   spectrogram input, encoder + autoregressive decoder loop with
 //!   `use_cache_branch` merged decoder. BPE detokenize.
+//! - **NeMo Parakeet TDT 0.6B v3** (`ParakeetTranscriber`) — Token-and-
+//!   Duration Transducer. Three ORT sessions: NeMo-exported 128-mel
+//!   preprocessor (`waveforms` → `features`), Conformer encoder
+//!   (`audio_signal` → `outputs, encoded_lengths`), fused
+//!   decoder+joint network (vocab + duration logits per step, two LSTM
+//!   states). Inner loop emits up to `max_tokens_per_step` per encoder
+//!   frame; duration logits select how many frames to skip.
+//!   `vocab.txt` is parsed line-by-line (`token id`, last entry
+//!   `<blk> N` marks the blank index).
 //!
-//! `AudioRuntime` exposes `load_moonshine` and `load_whisper` to
-//! construct these from on-disk `tokenizer.json` + ONNX bundles
-//! produced by the standard transformers.js / Optimum exports.
+//! `AudioRuntime` exposes `load_moonshine`, `load_whisper`, and
+//! `load_parakeet` to construct these from on-disk ONNX bundles
+//! produced by Optimum / transformers.js / istupakov-onnx-asr exports.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -943,6 +952,605 @@ mod onnx_backend {
         }
     }
 
+    /// ───────────────────────── Parakeet TDT ──────────────────────────
+
+    /// Vocabulary parsed from a NeMo `vocab.txt`.
+    ///
+    /// Lines are `token id` (single space). Tokens contain the
+    /// SentencePiece word-boundary marker `▁` (U+2581) for leading
+    /// space; we keep them raw and re-stitch at decode time. The blank
+    /// index is the entry whose token is exactly `<blk>` (always the
+    /// last entry in the istupakov bundle, but we look it up by name
+    /// rather than rely on position).
+    struct ParakeetVocab {
+        /// id → token (raw, ▁ kept).
+        tokens: Vec<String>,
+        /// Number of vocabulary entries excluding `<blk>`. The TDT
+        /// decoder_joint output is `[vocab_size + n_durations]`; we
+        /// slice at `vocab_size` to separate token logits from
+        /// duration logits.
+        vocab_size: usize,
+        /// Index of the `<blk>` token. Emitted by the joint when no
+        /// vocab token fires at the current encoder frame.
+        blank_idx: usize,
+    }
+
+    impl ParakeetVocab {
+        fn load(path: impl AsRef<std::path::Path>) -> Result<Self> {
+            let raw = std::fs::read_to_string(path.as_ref())
+                .map_err(|e| ModelError::InvalidModel(format!("vocab.txt read: {}", e)))?;
+            // Order tokens by their declared id, not file order, in case
+            // the export ever rearranges. Build a (token, id) list first.
+            let mut pairs: Vec<(String, usize)> = Vec::new();
+            for line in raw.lines() {
+                let line = line.trim_end_matches('\n');
+                if line.is_empty() {
+                    continue;
+                }
+                // Split on the LAST space — tokens themselves never
+                // contain a literal space (the SentencePiece `▁` marker
+                // stands in for leading space).
+                let sp = line.rfind(' ').ok_or_else(|| {
+                    ModelError::InvalidModel(format!("vocab.txt bad line: {:?}", line))
+                })?;
+                let token = line[..sp].to_string();
+                let id_str = &line[sp + 1..];
+                let id: usize = id_str.parse().map_err(|e| {
+                    ModelError::InvalidModel(format!(
+                        "vocab.txt id parse {:?}: {}",
+                        id_str, e
+                    ))
+                })?;
+                pairs.push((token, id));
+            }
+            if pairs.is_empty() {
+                return Err(ModelError::InvalidModel("vocab.txt empty".into()));
+            }
+            pairs.sort_by_key(|p| p.1);
+            // IDs must be contiguous starting at 0.
+            for (expected, (_, id)) in pairs.iter().enumerate() {
+                if *id != expected {
+                    return Err(ModelError::InvalidModel(format!(
+                        "vocab.txt non-contiguous ids: expected {}, got {}",
+                        expected, id
+                    )));
+                }
+            }
+            let tokens: Vec<String> = pairs.into_iter().map(|(t, _)| t).collect();
+            let blank_idx = tokens
+                .iter()
+                .position(|t| t == "<blk>")
+                .ok_or_else(|| ModelError::InvalidModel("vocab.txt missing <blk>".into()))?;
+            // vocab_size excludes <blk>'s LM-output slot conceptually,
+            // but the joint output uses `vocab_size = total_tokens`
+            // and emits blank as one of the logits. The duration logits
+            // come AFTER the full token bank. Following the istupakov
+            // convention: `vocab_size = self._vocab_size = len(vocab)`.
+            let vocab_size = tokens.len();
+            Ok(Self {
+                tokens,
+                vocab_size,
+                blank_idx,
+            })
+        }
+
+        /// Decode a list of vocab ids into a UTF-8 string.
+        ///
+        /// `▁` (U+2581) is replaced with a leading space per the
+        /// SentencePiece convention. Following the istupakov / NeMo
+        /// detokenization pattern, we concatenate tokens raw then
+        /// replace `▁` → ` `, finally trimming any leading space.
+        fn decode(&self, ids: &[usize]) -> String {
+            let mut out = String::new();
+            for &id in ids {
+                if id < self.tokens.len() {
+                    out.push_str(&self.tokens[id]);
+                }
+            }
+            // U+2581 → ASCII space.
+            let stitched: String = out.chars().map(|c| if c == '\u{2581}' { ' ' } else { c }).collect();
+            stitched.trim_start().to_string()
+        }
+    }
+
+    /// ORT-backed transcriber for NeMo Parakeet TDT 0.6B v3.
+    ///
+    /// Three ONNX sessions:
+    /// - `preprocessor` (`nemo128.onnx`): `waveforms [1, T_samples] f32`,
+    ///   `waveforms_lens [1] i64` → `features [1, 128, T_frames] f32`,
+    ///   `features_lens [1] i64`.
+    /// - `encoder` (`encoder-model.onnx`): `audio_signal [1, 128, T_frames]`,
+    ///   `length [1] i64` → `outputs [1, D, S]`, `encoded_lengths [1] i64`.
+    ///   Note `outputs` is channel-first — we transpose to `[1, S, D]` to
+    ///   index encoder frames as the leading dim, matching the istupakov
+    ///   reference impl.
+    /// - `decoder_joint` (`decoder_joint-model.onnx`): inputs
+    ///   `encoder_outputs [1, D, 1]`, `targets [1, 1] i64`,
+    ///   `target_length [1] i64`, `input_states_1 [L1, 1, H1]`,
+    ///   `input_states_2 [L2, 1, H2]` → outputs
+    ///   `outputs [vocab_size + n_durations]`, `output_states_1`,
+    ///   `output_states_2`. Vocab logits drive token emission; duration
+    ///   logits drive the encoder-frame skip.
+    pub struct ParakeetTranscriber {
+        preprocessor: Mutex<Session>,
+        encoder: Mutex<Session>,
+        decoder_joint: Mutex<Session>,
+        vocab: ParakeetVocab,
+        /// State 1 shape `[L1, 1, H1]` discovered from decoder inputs.
+        state1_shape: (usize, usize, usize),
+        /// State 2 shape `[L2, 1, H2]` discovered from decoder inputs.
+        state2_shape: (usize, usize, usize),
+        /// Inner-loop cap — emit up to N tokens at the same encoder
+        /// frame before forcibly advancing. NeMo / istupakov default 10.
+        max_tokens_per_step: usize,
+        max_audio_seconds: u32,
+    }
+
+    impl ParakeetTranscriber {
+        pub fn from_onnx(
+            preprocessor_path: impl AsRef<std::path::Path>,
+            encoder_path: impl AsRef<std::path::Path>,
+            decoder_joint_path: impl AsRef<std::path::Path>,
+            vocab_path: impl AsRef<std::path::Path>,
+            max_audio_seconds: u32,
+        ) -> Result<Self> {
+            let preprocessor = load_session(preprocessor_path)?;
+            let encoder = load_session(encoder_path)?;
+            let decoder_joint = load_session(decoder_joint_path)?;
+            let vocab = ParakeetVocab::load(vocab_path)?;
+
+            // Discover LSTM state shapes from decoder_joint declared inputs.
+            let state1_shape = discover_state_shape(&decoder_joint, "input_states_1")?;
+            let state2_shape = discover_state_shape(&decoder_joint, "input_states_2")?;
+
+            Ok(Self {
+                preprocessor: Mutex::new(preprocessor),
+                encoder: Mutex::new(encoder),
+                decoder_joint: Mutex::new(decoder_joint),
+                vocab,
+                state1_shape,
+                state2_shape,
+                max_tokens_per_step: 10,
+                max_audio_seconds,
+            })
+        }
+    }
+
+    /// Read a 3-D state shape `[L, 1, H]` from a declared session input.
+    /// Returns an error if the input is missing or has a non-3-D shape.
+    /// Dynamic dims (None) are not expected for these states in the
+    /// istupakov export and are rejected.
+    fn discover_state_shape(
+        session: &Session,
+        name: &str,
+    ) -> Result<(usize, usize, usize)> {
+        let input = session
+            .inputs
+            .iter()
+            .find(|i| i.name == name)
+            .ok_or_else(|| {
+                ModelError::InvalidModel(format!("decoder_joint missing {} input", name))
+            })?;
+        let dims: Vec<i64> = match &input.input_type {
+            ort::value::ValueType::Tensor { shape, .. } => shape.iter().copied().collect(),
+            _ => {
+                return Err(ModelError::InvalidModel(format!(
+                    "decoder_joint {} not a tensor input",
+                    name
+                )));
+            }
+        };
+        if dims.len() != 3 {
+            return Err(ModelError::InvalidModel(format!(
+                "decoder_joint {} expected 3-D, got {:?}",
+                name, dims
+            )));
+        }
+        // Dimensions are i64; -1 (or 0) typically means dynamic. The
+        // istupakov export pins all three for the LSTM states.
+        let to_usize = |d: i64| -> Result<usize> {
+            if d <= 0 {
+                Err(ModelError::InvalidModel(format!(
+                    "decoder_joint {} has dynamic dim",
+                    name
+                )))
+            } else {
+                Ok(d as usize)
+            }
+        };
+        Ok((to_usize(dims[0])?, to_usize(dims[1])?, to_usize(dims[2])?))
+    }
+
+    impl Transcriber for ParakeetTranscriber {
+        fn transcribe(
+            &self,
+            audio_bytes: &[u8],
+            _config: &TranscribeConfig,
+        ) -> Result<TranscribeResult> {
+            let start = Instant::now();
+            let pcm = decode_to_mono_16k(audio_bytes)?;
+            if pcm.is_empty() {
+                return Err(ModelError::InferenceError("empty audio".to_string()));
+            }
+            let max_samples = self.max_audio_seconds as usize * SAMPLE_RATE as usize;
+            let pcm = if pcm.len() > max_samples {
+                pcm[..max_samples].to_vec()
+            } else {
+                pcm
+            };
+            let n_samples = pcm.len();
+
+            // ── 1. Preprocessor: waveform → 128-mel features ──────────
+            let wave_arr =
+                Array2::<f32>::from_shape_vec((1, n_samples), pcm).map_err(|e| {
+                    ModelError::InferenceError(format!("waveform shape: {}", e))
+                })?;
+            let wave_lens =
+                ndarray::Array1::<i64>::from_vec(vec![n_samples as i64]);
+            let wave_tensor = Tensor::from_array(wave_arr).map_err(|e| {
+                ModelError::InferenceError(format!("waveform tensor: {}", e))
+            })?;
+            let wave_lens_tensor = Tensor::from_array(wave_lens).map_err(|e| {
+                ModelError::InferenceError(format!("waveform lens tensor: {}", e))
+            })?;
+            let (features_data, features_shape, features_lens_val) = {
+                let mut sess = self.preprocessor.lock();
+                let outputs = sess
+                    .run(ort::inputs![
+                        "waveforms" => wave_tensor,
+                        "waveforms_lens" => wave_lens_tensor,
+                    ])
+                    .map_err(|e| {
+                        ModelError::InferenceError(format!("preprocessor run: {}", e))
+                    })?;
+                let feat_val = outputs.get("features").ok_or_else(|| {
+                    ModelError::InferenceError(
+                        "preprocessor missing 'features' output".into(),
+                    )
+                })?;
+                let (fshape, fdata) =
+                    feat_val.try_extract_tensor::<f32>().map_err(|e| {
+                        ModelError::InferenceError(format!(
+                            "features extract: {}",
+                            e
+                        ))
+                    })?;
+                let fshape: Vec<i64> = fshape.iter().copied().collect();
+                let flens_val = outputs.get("features_lens").ok_or_else(|| {
+                    ModelError::InferenceError(
+                        "preprocessor missing 'features_lens' output".into(),
+                    )
+                })?;
+                let (_, flens_data) =
+                    flens_val.try_extract_tensor::<i64>().map_err(|e| {
+                        ModelError::InferenceError(format!(
+                            "features_lens extract: {}",
+                            e
+                        ))
+                    })?;
+                let flens_val = flens_data
+                    .first()
+                    .copied()
+                    .ok_or_else(|| {
+                        ModelError::InferenceError("empty features_lens".into())
+                    })?;
+                (fdata.to_vec(), fshape, flens_val)
+            };
+            if features_shape.len() != 3 {
+                return Err(ModelError::InferenceError(format!(
+                    "expected features [1, 128, T], got {:?}",
+                    features_shape
+                )));
+            }
+            let feat_chans = features_shape[1] as usize;
+            let feat_t = features_shape[2] as usize;
+
+            // ── 2. Encoder: features → encoder outputs ────────────────
+            let feat_arr = Array3::<f32>::from_shape_vec(
+                (1, feat_chans, feat_t),
+                features_data,
+            )
+            .map_err(|e| ModelError::InferenceError(format!("feat shape: {}", e)))?;
+            let feat_tensor = Tensor::from_array(feat_arr).map_err(|e| {
+                ModelError::InferenceError(format!("feat tensor: {}", e))
+            })?;
+            let feat_lens =
+                ndarray::Array1::<i64>::from_vec(vec![features_lens_val]);
+            let feat_lens_tensor = Tensor::from_array(feat_lens).map_err(|e| {
+                ModelError::InferenceError(format!("feat lens tensor: {}", e))
+            })?;
+            let (enc_out_data, enc_out_shape, enc_out_len) = {
+                let mut sess = self.encoder.lock();
+                let outputs = sess
+                    .run(ort::inputs![
+                        "audio_signal" => feat_tensor,
+                        "length" => feat_lens_tensor,
+                    ])
+                    .map_err(|e| {
+                        ModelError::InferenceError(format!("encoder run: {}", e))
+                    })?;
+                let out_val = outputs.get("outputs").ok_or_else(|| {
+                    ModelError::InferenceError(
+                        "encoder missing 'outputs'".into(),
+                    )
+                })?;
+                let (oshape, odata) = out_val
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| {
+                        ModelError::InferenceError(format!(
+                            "encoder outputs extract: {}",
+                            e
+                        ))
+                    })?;
+                let oshape: Vec<i64> = oshape.iter().copied().collect();
+                let elen_val = outputs.get("encoded_lengths").ok_or_else(|| {
+                    ModelError::InferenceError(
+                        "encoder missing 'encoded_lengths'".into(),
+                    )
+                })?;
+                let (_, elen_data) =
+                    elen_val.try_extract_tensor::<i64>().map_err(|e| {
+                        ModelError::InferenceError(format!(
+                            "encoded_lengths extract: {}",
+                            e
+                        ))
+                    })?;
+                let elen = elen_data.first().copied().ok_or_else(|| {
+                    ModelError::InferenceError("empty encoded_lengths".into())
+                })?;
+                (odata.to_vec(), oshape, elen)
+            };
+            // Encoder outputs are channel-first `[1, D, S]`. We index
+            // per-frame via D-stride arithmetic — no transpose needed.
+            if enc_out_shape.len() != 3 {
+                return Err(ModelError::InferenceError(format!(
+                    "expected encoder outputs [1, D, S], got {:?}",
+                    enc_out_shape
+                )));
+            }
+            let d_dim = enc_out_shape[1] as usize;
+            let s_dim = enc_out_shape[2] as usize;
+            let usable_frames = (enc_out_len as usize).min(s_dim);
+
+            // ── 3. TDT decoding inner loop ───────────────────────────
+            let mut tokens: Vec<usize> = Vec::new();
+            let mut state1: Vec<f32> = vec![
+                0.0;
+                self.state1_shape.0 * self.state1_shape.1 * self.state1_shape.2
+            ];
+            let mut state2: Vec<f32> = vec![
+                0.0;
+                self.state2_shape.0 * self.state2_shape.1 * self.state2_shape.2
+            ];
+            let blank_idx = self.vocab.blank_idx;
+            let vocab_size = self.vocab.vocab_size;
+            let max_decode_steps = (usable_frames * (self.max_tokens_per_step + 2)).max(64);
+            let mut total_steps = 0usize;
+
+            let mut t = 0usize;
+            let mut emitted_at_t = 0usize;
+            while t < usable_frames {
+                if total_steps > max_decode_steps {
+                    break;
+                }
+                total_steps += 1;
+
+                // Slice encoder frame at time t: `[1, D, 1]` indexed
+                // from the channel-first encoder output. For each
+                // d ∈ [0, D), pick enc_out_data[d*s_dim + t].
+                let mut frame: Vec<f32> = Vec::with_capacity(d_dim);
+                for d in 0..d_dim {
+                    frame.push(enc_out_data[d * s_dim + t]);
+                }
+                let frame_arr = Array3::<f32>::from_shape_vec((1, d_dim, 1), frame)
+                    .map_err(|e| {
+                        ModelError::InferenceError(format!(
+                            "encoder frame shape: {}",
+                            e
+                        ))
+                    })?;
+                let frame_tensor = Tensor::from_array(frame_arr).map_err(|e| {
+                    ModelError::InferenceError(format!("frame tensor: {}", e))
+                })?;
+
+                // Previous token: last emitted vocab token, or blank
+                // if none emitted yet.
+                let prev_tok = tokens.last().copied().unwrap_or(blank_idx) as i64;
+                let targets_arr =
+                    Array2::<i64>::from_shape_vec((1, 1), vec![prev_tok])
+                        .map_err(|e| {
+                            ModelError::InferenceError(format!(
+                                "targets shape: {}",
+                                e
+                            ))
+                        })?;
+                let targets_tensor = Tensor::from_array(targets_arr).map_err(|e| {
+                    ModelError::InferenceError(format!("targets tensor: {}", e))
+                })?;
+                let target_length_arr =
+                    ndarray::Array1::<i64>::from_vec(vec![1]);
+                let target_length_tensor = Tensor::from_array(target_length_arr)
+                    .map_err(|e| {
+                        ModelError::InferenceError(format!(
+                            "target_length tensor: {}",
+                            e
+                        ))
+                    })?;
+
+                let state1_arr = Array3::<f32>::from_shape_vec(
+                    self.state1_shape,
+                    state1.clone(),
+                )
+                .map_err(|e| {
+                    ModelError::InferenceError(format!("state1 shape: {}", e))
+                })?;
+                let state2_arr = Array3::<f32>::from_shape_vec(
+                    self.state2_shape,
+                    state2.clone(),
+                )
+                .map_err(|e| {
+                    ModelError::InferenceError(format!("state2 shape: {}", e))
+                })?;
+                let state1_tensor = Tensor::from_array(state1_arr).map_err(|e| {
+                    ModelError::InferenceError(format!("state1 tensor: {}", e))
+                })?;
+                let state2_tensor = Tensor::from_array(state2_arr).map_err(|e| {
+                    ModelError::InferenceError(format!("state2 tensor: {}", e))
+                })?;
+
+                let (joint_logits, new_state1, new_state2) = {
+                    let mut sess = self.decoder_joint.lock();
+                    let outputs = sess
+                        .run(ort::inputs![
+                            "encoder_outputs" => frame_tensor,
+                            "targets" => targets_tensor,
+                            "target_length" => target_length_tensor,
+                            "input_states_1" => state1_tensor,
+                            "input_states_2" => state2_tensor,
+                        ])
+                        .map_err(|e| {
+                            ModelError::InferenceError(format!(
+                                "decoder_joint run: {}",
+                                e
+                            ))
+                        })?;
+                    let out_val = outputs.get("outputs").ok_or_else(|| {
+                        ModelError::InferenceError(
+                            "decoder_joint missing 'outputs'".into(),
+                        )
+                    })?;
+                    let (_, odata) = out_val
+                        .try_extract_tensor::<f32>()
+                        .map_err(|e| {
+                            ModelError::InferenceError(format!(
+                                "joint outputs extract: {}",
+                                e
+                            ))
+                        })?;
+                    let s1_val =
+                        outputs.get("output_states_1").ok_or_else(|| {
+                            ModelError::InferenceError(
+                                "decoder_joint missing 'output_states_1'".into(),
+                            )
+                        })?;
+                    let (_, s1_data) =
+                        s1_val.try_extract_tensor::<f32>().map_err(|e| {
+                            ModelError::InferenceError(format!(
+                                "state1 extract: {}",
+                                e
+                            ))
+                        })?;
+                    let s2_val =
+                        outputs.get("output_states_2").ok_or_else(|| {
+                            ModelError::InferenceError(
+                                "decoder_joint missing 'output_states_2'".into(),
+                            )
+                        })?;
+                    let (_, s2_data) =
+                        s2_val.try_extract_tensor::<f32>().map_err(|e| {
+                            ModelError::InferenceError(format!(
+                                "state2 extract: {}",
+                                e
+                            ))
+                        })?;
+                    (odata.to_vec(), s1_data.to_vec(), s2_data.to_vec())
+                };
+
+                // Split joint output into vocab logits (first vocab_size)
+                // and duration logits (remaining).
+                if joint_logits.len() < vocab_size {
+                    return Err(ModelError::InferenceError(format!(
+                        "joint output {} smaller than vocab_size {}",
+                        joint_logits.len(),
+                        vocab_size
+                    )));
+                }
+                let token_logits = &joint_logits[..vocab_size];
+                let duration_logits = &joint_logits[vocab_size..];
+
+                let token = argmax_usize(token_logits);
+                let duration_step = if duration_logits.is_empty() {
+                    -1
+                } else {
+                    argmax_usize(duration_logits) as i32
+                };
+
+                if token != blank_idx {
+                    // Commit the vocab token and the freshly-produced
+                    // decoder state.
+                    tokens.push(token);
+                    state1 = new_state1;
+                    state2 = new_state2;
+                    emitted_at_t += 1;
+                }
+
+                // Advance time. Mirrors the istupakov reference:
+                // if duration > 0, jump that many frames (resetting
+                // the per-frame emit counter). Otherwise if we emitted
+                // blank, or hit the per-frame cap, step forward by 1.
+                if duration_step > 0 {
+                    t += duration_step as usize;
+                    emitted_at_t = 0;
+                } else if token == blank_idx || emitted_at_t == self.max_tokens_per_step {
+                    t += 1;
+                    emitted_at_t = 0;
+                }
+                // Otherwise: same `t`, accumulate another emit on the
+                // same frame (capped by max_tokens_per_step).
+            }
+
+            let text = self.vocab.decode(&tokens);
+
+            Ok(TranscribeResult {
+                text,
+                segments: Vec::new(),
+                language: None,
+                generation_time_ms: start.elapsed().as_millis() as u64,
+            })
+        }
+
+        fn sample_rate(&self) -> u32 {
+            SAMPLE_RATE
+        }
+        fn max_audio_seconds(&self) -> u32 {
+            self.max_audio_seconds
+        }
+    }
+
+    fn argmax_usize(v: &[f32]) -> usize {
+        let mut best_i: usize = 0;
+        let mut best_v: f32 = f32::NEG_INFINITY;
+        for (i, x) in v.iter().enumerate() {
+            if *x > best_v {
+                best_v = *x;
+                best_i = i;
+            }
+        }
+        best_i
+    }
+
+    #[cfg(test)]
+    pub(super) fn parakeet_vocab_load_for_test(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(Vec<String>, usize, usize)> {
+        let v = ParakeetVocab::load(path)?;
+        Ok((v.tokens, v.vocab_size, v.blank_idx))
+    }
+
+    #[cfg(test)]
+    pub(super) fn parakeet_vocab_decode_for_test(
+        tokens: Vec<String>,
+        blank_idx: usize,
+        ids: &[usize],
+    ) -> String {
+        let v = ParakeetVocab {
+            vocab_size: tokens.len(),
+            blank_idx,
+            tokens,
+        };
+        v.decode(ids)
+    }
+
     /// Resolve the canonical decoder input names from a loaded merged-decoder
     /// session. Returns `(input_ids_name, encoder_hidden_states_name,
     /// use_cache_branch_name?)`. Uses exact-name match, falling back to
@@ -1196,7 +1804,7 @@ mod onnx_backend {
 
 }
 
-pub use onnx_backend::{MoonshineTranscriber, WhisperTranscriber};
+pub use onnx_backend::{MoonshineTranscriber, ParakeetTranscriber, WhisperTranscriber};
 
 /// Runtime that owns multiple loaded ASR models.
 pub struct AudioRuntime {
@@ -1259,6 +1867,35 @@ impl AudioRuntime {
             decoder_path,
             tokenizer_path,
             family,
+            max_audio_seconds,
+        )?;
+        self.models.insert(
+            model_id.into(),
+            Arc::new(model) as Arc<dyn Transcriber>,
+        );
+        Ok(())
+    }
+
+    /// Load a NeMo Parakeet TDT 0.6B v3 ASR model from a downloaded
+    /// istupakov-style ONNX bundle. Inputs:
+    /// - `preprocessor_path`: `nemo128.onnx` (waveform → 128-mel features).
+    /// - `encoder_path`: `encoder-model.onnx`.
+    /// - `decoder_joint_path`: `decoder_joint-model.onnx`.
+    /// - `vocab_path`: `vocab.txt` (`token id` per line, trailing `<blk>`).
+    pub fn load_parakeet(
+        &self,
+        model_id: impl Into<String>,
+        preprocessor_path: impl AsRef<Path>,
+        encoder_path: impl AsRef<Path>,
+        decoder_joint_path: impl AsRef<Path>,
+        vocab_path: impl AsRef<Path>,
+        max_audio_seconds: u32,
+    ) -> Result<()> {
+        let model = ParakeetTranscriber::from_onnx(
+            preprocessor_path,
+            encoder_path,
+            decoder_joint_path,
+            vocab_path,
             max_audio_seconds,
         )?;
         self.models.insert(
@@ -1361,5 +1998,85 @@ mod tests {
         let long = vec![0.1_f32; preprocessing::N_SAMPLES * 2];
         let trunc = preprocessing::pad_or_truncate_30s(&long);
         assert_eq!(trunc.len(), preprocessing::N_SAMPLES);
+    }
+
+    #[test]
+    fn parakeet_vocab_load_happy_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vocab.txt");
+        // Three tokens: ▁hello=0, ▁world=1, <blk>=2
+        std::fs::write(
+            &path,
+            "\u{2581}hello 0\n\u{2581}world 1\n<blk> 2\n",
+        )
+        .unwrap();
+        let (tokens, vocab_size, blank_idx) =
+            onnx_backend::parakeet_vocab_load_for_test(&path).unwrap();
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0], "\u{2581}hello");
+        assert_eq!(tokens[1], "\u{2581}world");
+        assert_eq!(tokens[2], "<blk>");
+        assert_eq!(vocab_size, 3);
+        assert_eq!(blank_idx, 2);
+    }
+
+    #[test]
+    fn parakeet_vocab_load_rejects_non_contiguous_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vocab.txt");
+        // Missing id 1.
+        std::fs::write(&path, "tok_a 0\ntok_b 2\n<blk> 3\n").unwrap();
+        let res = onnx_backend::parakeet_vocab_load_for_test(&path);
+        assert!(matches!(res, Err(ModelError::InvalidModel(_))));
+    }
+
+    #[test]
+    fn parakeet_vocab_load_rejects_missing_blank() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vocab.txt");
+        std::fs::write(&path, "tok_a 0\ntok_b 1\n").unwrap();
+        let res = onnx_backend::parakeet_vocab_load_for_test(&path);
+        assert!(matches!(res, Err(ModelError::InvalidModel(_))));
+    }
+
+    #[test]
+    fn parakeet_vocab_load_rejects_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vocab.txt");
+        std::fs::write(&path, "").unwrap();
+        let res = onnx_backend::parakeet_vocab_load_for_test(&path);
+        assert!(matches!(res, Err(ModelError::InvalidModel(_))));
+    }
+
+    #[test]
+    fn parakeet_vocab_decode_replaces_word_boundary_marker() {
+        // ▁hello ▁world → "hello world" (leading space trimmed).
+        let tokens = vec![
+            "\u{2581}hello".to_string(),
+            "\u{2581}world".to_string(),
+            "<blk>".to_string(),
+        ];
+        let out = onnx_backend::parakeet_vocab_decode_for_test(tokens, 2, &[0, 1]);
+        assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn parakeet_vocab_decode_concatenates_subword_pieces() {
+        // ▁un + believ + able → "unbelievable"
+        let tokens = vec![
+            "\u{2581}un".to_string(),
+            "believ".to_string(),
+            "able".to_string(),
+            "<blk>".to_string(),
+        ];
+        let out = onnx_backend::parakeet_vocab_decode_for_test(tokens, 3, &[0, 1, 2]);
+        assert_eq!(out, "unbelievable");
+    }
+
+    #[test]
+    fn parakeet_vocab_decode_handles_empty_input() {
+        let tokens = vec!["\u{2581}hi".to_string(), "<blk>".to_string()];
+        let out = onnx_backend::parakeet_vocab_decode_for_test(tokens, 1, &[]);
+        assert_eq!(out, "");
     }
 }

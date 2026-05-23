@@ -6,9 +6,9 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use std::sync::Arc;
 use tenzro_consensus::leader_reputation::LeaderReputation;
 use tenzro_consensus::validator::{EquivocationDetector, ValidatorInfo, ValidatorSet};
-use tenzro_consensus::voter::{Vote, VoteCollector, VoteType};
+use tenzro_consensus::voter::{bls_payload_for_vote, Vote, VoteCollector, VoteType};
 use tenzro_consensus::{ConsensusConfig, EpochManager, Mempool};
-use tenzro_crypto::bls::BlsKeyPair;
+use tenzro_crypto::bls::{BlsKeyPair, BlsSignature};
 use tenzro_crypto::composite::{CompositePublicKey, CompositeSignature, HybridSigner, InMemoryHybridSigner};
 use tenzro_crypto::keys::{KeyPair, KeyType};
 use tenzro_crypto::pq::MlDsaSigningKey;
@@ -24,6 +24,7 @@ use tenzro_types::Signature;
 struct TestValidator {
     info: ValidatorInfo,
     signer: InMemoryHybridSigner,
+    bls: BlsKeyPair,
 }
 
 fn create_test_validator(stake: u128) -> TestValidator {
@@ -44,7 +45,7 @@ fn create_test_validator(stake: u128) -> TestValidator {
     );
     let classical = Ed25519SignerImpl::new(keypair).unwrap();
     let signer = InMemoryHybridSigner::new(Box::new(classical), pq);
-    TestValidator { info, signer }
+    TestValidator { info, signer, bls }
 }
 
 fn create_validator_set(n: usize) -> (Vec<TestValidator>, Arc<ValidatorSet>) {
@@ -62,15 +63,32 @@ fn create_signed_vote(
     block_hash: Hash,
     voter: Address,
     vote_type: VoteType,
-    signer: &InMemoryHybridSigner,
+    validator: &TestValidator,
 ) -> Vote {
     let placeholder_sig = CompositeSignature::new(Vec::new(), Vec::new());
-    let pk = signer.public_key().clone();
-    let mut vote = Vote::new(view, height, block_hash, voter, placeholder_sig, pk, vote_type, 0);
+    let pk = validator.signer.public_key().clone();
+    let placeholder_bls = placeholder_bls_sig();
+    let mut vote = Vote::new(
+        view,
+        height,
+        block_hash,
+        voter,
+        placeholder_sig,
+        pk,
+        placeholder_bls,
+        vote_type,
+        0,
+    );
     let payload = vote.signing_payload();
-    let sig = signer.sign(&payload).unwrap();
+    let sig = validator.signer.sign(&payload).unwrap();
     vote.signature = sig;
+    let bls_payload = bls_payload_for_vote(&vote);
+    vote.bls_signature = validator.bls.sign(&bls_payload);
     vote
+}
+
+fn placeholder_bls_sig() -> BlsSignature {
+    BlsKeyPair::generate().unwrap().sign(b"__bench_placeholder__")
 }
 
 fn create_test_tx(nonce: u64) -> SignedTransaction {
@@ -144,7 +162,7 @@ fn bench_vote_collection(c: &mut Criterion) {
                         Hash::default(),
                         v.info.address,
                         VoteType::Prepare,
-                        &v.signer,
+                        v,
                     );
                     let _ = black_box(collector.add_vote(vote));
                 }
@@ -171,7 +189,7 @@ fn bench_vote_verification(c: &mut Criterion) {
         Hash::default(),
         validators[0].info.address,
         VoteType::Prepare,
-        &validators[0].signer,
+        &validators[0],
     );
 
     group.bench_function("single_vote_verify_and_add", |b| {
@@ -206,7 +224,7 @@ fn bench_qc_formation(c: &mut Criterion) {
                         Hash::default(),
                         validators[i].info.address,
                         VoteType::Prepare,
-                        &validators[i].signer,
+                        &validators[i],
                     )
                 })
                 .collect();
@@ -275,6 +293,7 @@ fn bench_equivocation_detection(c: &mut Criterion) {
 
     let placeholder_pk = placeholder_composite_pk();
     let placeholder_sig = placeholder_composite_sig();
+    let placeholder_bls = placeholder_bls_sig();
 
     group.bench_function("clean_check", |b| {
         b.iter(|| {
@@ -286,6 +305,7 @@ fn bench_equivocation_detection(c: &mut Criterion) {
                 validator.info.address,
                 placeholder_sig.clone(),
                 placeholder_pk.clone(),
+                placeholder_bls.clone(),
                 VoteType::Prepare,
                 0,
             );
@@ -303,6 +323,7 @@ fn bench_equivocation_detection(c: &mut Criterion) {
                 validator.info.address,
                 placeholder_sig.clone(),
                 placeholder_pk.clone(),
+                placeholder_bls.clone(),
                 VoteType::Prepare,
                 0,
             );
@@ -317,6 +338,7 @@ fn bench_equivocation_detection(c: &mut Criterion) {
                 validator.info.address,
                 placeholder_sig.clone(),
                 placeholder_pk.clone(),
+                placeholder_bls.clone(),
                 VoteType::Prepare,
                 0,
             );
@@ -337,6 +359,7 @@ fn bench_equivocation_detection(c: &mut Criterion) {
                 addr,
                 placeholder_sig.clone(),
                 placeholder_pk.clone(),
+                placeholder_bls.clone(),
                 VoteType::Prepare,
                 0,
             );
@@ -351,6 +374,7 @@ fn bench_equivocation_detection(c: &mut Criterion) {
                 validator.info.address,
                 placeholder_sig.clone(),
                 placeholder_pk.clone(),
+                placeholder_bls.clone(),
                 VoteType::Prepare,
                 0,
             );
