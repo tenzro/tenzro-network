@@ -14,6 +14,7 @@ pub mod detection;
 pub mod enclave_crypto;
 pub mod error;
 pub mod registry;
+pub mod sealed_agent_keypair;
 pub mod sealed_secp256k1;
 pub mod traits;
 
@@ -38,6 +39,10 @@ pub use traits::TeeProvider;
 pub use detection::detect_tee;
 pub use registry::TeeRegistry;
 pub use attestation::{AttestationVerifier, ParsedCertificate, parse_x509_certificate, verify_certificate_signature};
+pub use sealed_agent_keypair::{
+    attest_agent_key, pack_user_data_for_vendor, rotate_agent_key, seal_agent_keypair,
+    AgentKeyAttestationPacket, AgentKeyHandle,
+};
 pub use sealed_secp256k1::SealedSecp256k1Key;
 
 // Re-export vendor implementations

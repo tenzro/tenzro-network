@@ -97,6 +97,7 @@ pub mod snapshot;
 pub mod spending_policy_bridge;
 pub mod spt_ceiling_bridge;
 pub mod spt_revocation_dispatcher;
+pub mod streaming;
 pub mod web;
 pub mod workflow_runtime;
 

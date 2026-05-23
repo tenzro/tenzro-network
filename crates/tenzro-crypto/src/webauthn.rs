@@ -191,12 +191,6 @@ const AUTHENTICATOR_DATA_FLAGS_OFFSET: usize = 32;
 
 /// authenticatorData flag bits (WebAuthn L3 §6.1).
 const AUTH_DATA_FLAG_UP: u8 = 0x01; // User Present
-#[allow(dead_code)]
-const AUTH_DATA_FLAG_UV: u8 = 0x04; // User Verified
-#[allow(dead_code)]
-const AUTH_DATA_FLAG_AT: u8 = 0x40; // Attested credential data included
-#[allow(dead_code)]
-const AUTH_DATA_FLAG_ED: u8 = 0x80; // Extension data included
 
 /// Unwrap a DER-encoded ECDSA signature `SEQUENCE { r INTEGER, s INTEGER }`
 /// to a raw 64-byte `r ‖ s` payload.

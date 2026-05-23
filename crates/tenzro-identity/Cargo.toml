@@ -33,3 +33,8 @@ unsigned-varint = { workspace = true }
 
 [dev-dependencies]
 parking_lot = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "identity_benchmarks"
+harness = false

@@ -20,8 +20,6 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{debug, error, info, warn};
 
-use futures_util::StreamExt;
-
 use crate::error::{NodeError, Result};
 use crate::node::{TenzroNode, detect_hardware, ModelDownloadStatus, UserResource};
 use crate::event_loop::NodeEvent;
@@ -654,6 +652,8 @@ pub(crate) async fn handle_request(
         "tenzro_getSeedAgentCharter" => handle_get_seed_agent_charter(node, request.params).await,
         "tenzro_listSeedAgentCharters" => handle_list_seed_agent_charters(node).await,
         "tenzro_listSeedAgents" => handle_list_seed_agents(node, request.params).await,
+        "tenzro_refillSeedAgent" => handle_refill_seed_agent(node, request.params).await,
+        "tenzro_getSeedAgentDaemonStatus" => handle_get_seed_agent_daemon_status(node).await,
         "tenzro_getNetworkActivity" => handle_get_network_activity(node, request.params).await,
 
         "tenzro_openPaymentChannel" => handle_open_payment_channel(node, request.params).await,
@@ -5076,14 +5076,75 @@ async fn handle_iroh_fetch_blob(
     }))
 }
 
-/// Generic dispatcher for any content-addressed `tenzro://` URI. Today this
-/// is a thin wrapper over `fetch_blob`; once `TenzroUri::Memory` resolves
-/// through the DA pointer indirection it will route through the agent-memory
-/// path automatically.
+/// Generic dispatcher for any content-addressed `tenzro://` URI. Dispatches
+/// `tenzro://memory/<did>/<uuid>` through [`MemoryManager`] (point-lookup; if
+/// archived, follow the `DaPointer` to fetch the bulk payload from DA); falls
+/// back to the iroh resolver's `fetch_blob` path for every other variant.
 async fn handle_iroh_resolve_tenzro_uri(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
+    use base64::Engine as _;
+    let uri_str: String = {
+        let params_ref = params.as_ref().ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing params".to_string(),
+            data: None,
+        })?;
+        params_ref
+            .get("tenzro_uri")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Missing tenzro_uri".to_string(),
+                data: None,
+            })?
+            .to_string()
+    };
+    let uri = tenzro_types::tenzro_uri::TenzroUri::parse(&uri_str).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("parse tenzro_uri: {e}"),
+        data: None,
+    })?;
+
+    if let tenzro_types::tenzro_uri::TenzroUri::Memory { agent_did, record_uuid } = &uri {
+        let mgr = require_memory_manager(node)?;
+        let record = mgr.get_by_id(agent_did, record_uuid).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("memory get_by_id: {e}"),
+            data: None,
+        })?;
+        let record = record.ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: format!("memory record {}/{} not found", agent_did, record_uuid),
+            data: None,
+        })?;
+        // Archived records fan out to the DA backend; hot records serialize
+        // the on-tier row as the canonical payload (same shape as what
+        // `archive()` originally submitted).
+        let bytes = if record.kind == tenzro_agent::memory::MemoryKind::Archived
+            && record.da_pointer.is_some()
+        {
+            mgr.fetch_archived(&record).await.map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("memory fetch_archived: {e}"),
+                data: None,
+            })?
+        } else {
+            serde_json::to_vec(&record).map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("serialize memory record: {e}"),
+                data: None,
+            })?
+        };
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        return Ok(serde_json::json!({
+            "tenzro_uri": uri.to_string(),
+            "size_bytes": bytes.len(),
+            "bytes_b64": b64,
+        }));
+    }
+
     handle_iroh_fetch_blob(node, params).await
 }
 
@@ -8070,6 +8131,134 @@ async fn handle_list_seed_agents(
     Ok(serde_json::json!({
         "agents": agents,
         "count": count,
+    }))
+}
+
+async fn handle_refill_seed_agent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let manager = node.seed_agent_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "SeedAgent manager not initialized".to_string(),
+        data: None,
+    })?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let agent_did = params
+        .get("agent_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_did".to_string(),
+            data: None,
+        })?;
+    let requested_wei = params
+        .get("requested_wei")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing requested_wei (as decimal string)".to_string(),
+            data: None,
+        })?
+        .parse::<u128>()
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("requested_wei parse: {}", e),
+            data: None,
+        })?;
+    // Optional `now_ms` override for governance-replay / tests; defaults to
+    // node wall clock.
+    let now = match params.get("now_ms").and_then(|v| v.as_i64()) {
+        Some(ms) => tenzro_types::primitives::Timestamp::new(ms),
+        None => tenzro_types::primitives::Timestamp::now(),
+    };
+    let result = manager
+        .refill_agent_monthly(agent_did, requested_wei, now)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("refill failed: {}", e),
+            data: None,
+        })?;
+
+    // Broadcast `MonthlyRefillCompleted` on `tenzro/seed-agents`.
+    // Receivers DO NOT replay the refill — they refresh their local
+    // earmark snapshot from the carried payload. This keeps passive
+    // observers' `tenzro_getTreasuryEarmark` responses in sync without
+    // polling the origin node.
+    if let Some(network) = node.network() {
+        let earmark_snapshot = manager.earmark();
+        match tenzro_token::encode_monthly_refill_completed(
+            &result.agent_did,
+            result.granted_wei,
+            result.month,
+            &earmark_snapshot,
+        ) {
+            Ok(bytes) => {
+                let msg = tenzro_network::NetworkMessage::new(
+                    tenzro_network::MessagePayload::Custom {
+                        topic: tenzro_token::SEED_AGENTS_TOPIC.to_string(),
+                        data: bytes,
+                    },
+                );
+                if let Err(e) = network
+                    .broadcast(tenzro_token::SEED_AGENTS_TOPIC, msg)
+                    .await
+                {
+                    tracing::warn!(
+                        agent_did = %result.agent_did,
+                        error = %e,
+                        "Failed to broadcast MonthlyRefillCompleted on tenzro/seed-agents"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                agent_did = %result.agent_did,
+                error = %e,
+                "Failed to bincode-encode MonthlyRefillCompleted for gossip"
+            ),
+        }
+    }
+
+    Ok(serde_json::json!({
+        "agent_did": result.agent_did,
+        "requested_wei": result.requested_wei.to_string(),
+        "granted_wei": result.granted_wei.to_string(),
+        "allocation_remaining_wei": result.allocation_remaining_wei.to_string(),
+        "month": result.month,
+        "schedule_cap_for_month_wei": result.schedule_cap_for_month_wei.to_string(),
+    }))
+}
+
+/// Read-only diagnostic: surface the most recent
+/// [`SeedAgentDaemon`](tenzro_token::SeedAgentDaemon) tick outcome. Returns
+/// `{ running: bool, last_outcome: Option<...> }`. The daemon only spawns on
+/// validator-role nodes, so non-validators always see `running: false`.
+async fn handle_get_seed_agent_daemon_status(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let Some(daemon) = node.seed_agent_daemon() else {
+        return Ok(serde_json::json!({
+            "running": false,
+            "last_outcome": serde_json::Value::Null,
+        }));
+    };
+    let last_outcome = daemon.last_outcome().map(|o| serde_json::json!({
+        "paused_count": o.paused_count,
+        "refilled_count": o.refilled_count,
+        "total_granted_wei": o.total_granted_wei.to_string(),
+        "master_switch_skipped": o.master_switch_skipped,
+        "authority_skipped": o.authority_skipped,
+        "quarantined_count": o.quarantined_count,
+        "terminated_count": o.terminated_count,
+        "surplus_disposed_wei": o.surplus_disposed_wei.to_string(),
+    }));
+    Ok(serde_json::json!({
+        "running": true,
+        "last_outcome": last_outcome,
     }))
 }
 
@@ -14499,11 +14688,20 @@ async fn handle_load_audio_model(
         .and_then(|v| v.as_str())
         .ok_or_else(|| missing_param("decoder_path"))?
         .to_string();
-    let tokenizer_path = p
+    // `tokenizer_path` is required for moonshine/whisper (tokenizer.json).
+    // Parakeet uses `vocab_path` instead — we resolve per-family below.
+    let tokenizer_path_opt = p
         .get("tokenizer_path")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| missing_param("tokenizer_path"))?
-        .to_string();
+        .map(|s| s.to_string());
+    let preprocessor_path_opt = p
+        .get("preprocessor_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let vocab_path_opt = p
+        .get("vocab_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     // Resolve family + max_audio_seconds + whisper variant. Either from
     // the catalog (catalog_id) or from explicit params.
@@ -14537,17 +14735,23 @@ async fn handle_load_audio_model(
 
     match family.as_str() {
         "moonshine" => {
+            let tokenizer_path = tokenizer_path_opt
+                .as_deref()
+                .ok_or_else(|| missing_param("tokenizer_path"))?;
             node.audio_runtime
                 .load_moonshine(
                     model_id.clone(),
                     &encoder_path,
                     &decoder_path,
-                    &tokenizer_path,
+                    tokenizer_path,
                     max_audio_seconds,
                 )
                 .map_err(forecast_err)?;
         }
         "whisper" => {
+            let tokenizer_path = tokenizer_path_opt
+                .as_deref()
+                .ok_or_else(|| missing_param("tokenizer_path"))?;
             let variant_str = p
                 .get("whisper_variant")
                 .and_then(|v| v.as_str())
@@ -14578,8 +14782,26 @@ async fn handle_load_audio_model(
                     model_id.clone(),
                     &encoder_path,
                     &decoder_path,
-                    &tokenizer_path,
+                    tokenizer_path,
                     variant,
+                    max_audio_seconds,
+                )
+                .map_err(forecast_err)?;
+        }
+        "parakeet" => {
+            let preprocessor_path = preprocessor_path_opt
+                .as_deref()
+                .ok_or_else(|| missing_param("preprocessor_path"))?;
+            let vocab_path = vocab_path_opt
+                .as_deref()
+                .ok_or_else(|| missing_param("vocab_path"))?;
+            node.audio_runtime
+                .load_parakeet(
+                    model_id.clone(),
+                    preprocessor_path,
+                    &encoder_path,
+                    &decoder_path,
+                    vocab_path,
                     max_audio_seconds,
                 )
                 .map_err(forecast_err)?;
@@ -14588,7 +14810,7 @@ async fn handle_load_audio_model(
             return Err(JsonRpcError {
                 code: -32602,
                 message: format!(
-                    "unknown audio family '{}' (expected: moonshine, whisper)",
+                    "unknown audio family '{}' (expected: moonshine, whisper, parakeet)",
                     other
                 ),
                 data: None,
@@ -15923,12 +16145,58 @@ async fn handle_openai_get_model(
 }
 
 /// POST /v1/chat/completions — OpenAI-compatible chat completions with SSE streaming
+///
+/// Supports resume via the SSE `Last-Event-ID` header. On reconnect the
+/// client sets `Last-Event-ID: <completion_id>:<seq>`; if the cursor for
+/// that completion is still in [`crate::streaming::StreamCursorStore`],
+/// the handler replays any chunks with seq > `seq` and then either
+/// closes (if the stream is already finished) or — for the still-in-flight
+/// case — replays the tail. Live emission past the cursor's head is not
+/// supported in this wave because the underlying `generate_chat_stream`
+/// has no resume hook into the in-progress generation; for that, the
+/// client should retry against a fresh prompt.
 async fn handle_openai_chat_completions(
     State(node): State<Arc<TenzroNode>>,
+    headers: HeaderMap,
     Json(request): Json<OpenAIChatRequest>,
 ) -> Response {
     let model_query = &request.model;
     let stream_requested = request.stream.unwrap_or(false);
+
+    // ── SSE resume short-circuit ────────────────────────────────────────
+    //
+    // If the client sent `Last-Event-ID: <rid>:<seq>` and the cursor is
+    // still alive, replay missed chunks and return without invoking the
+    // model again. This is the *correct* shape for SSE resume per the
+    // HTML5 spec (browsers auto-set this header on EventSource reconnect)
+    // and matches what OpenAI/Anthropic SDK reconnect logic expects.
+    if stream_requested {
+        if let Some(hv) = headers.get("last-event-id")
+            && let Ok(s) = hv.to_str()
+            && let Some((rid, after_seq)) = crate::streaming::parse_last_event_id(s)
+            && let Some((replay, finished)) = node.stream_cursors.replay(&rid, after_seq)
+        {
+            let replay_stream = async_stream::stream! {
+                for chunk in replay {
+                    yield Ok::<_, std::convert::Infallible>(
+                        Event::default().id(format!("{}:{}", rid, chunk.seq)).data(chunk.encoded),
+                    );
+                }
+                if finished {
+                    yield Ok::<_, std::convert::Infallible>(
+                        Event::default().data("data: [DONE]\n\n"),
+                    );
+                }
+                // If not finished, the stream remains open; the client
+                // will be holding it. We don't have a live tap into the
+                // generator from a second request — that would need a
+                // broadcast topology on the producer side. Document it.
+            };
+            return Sse::new(replay_stream)
+                .keep_alive(axum::response::sse::KeepAlive::default())
+                .into_response();
+        }
+    }
 
     // Resolve the model: try instance_id, then model_id in service registry, then served_models
     let service = node.get_model_service(model_query)
@@ -15998,6 +16266,39 @@ async fn handle_openai_chat_completions(
             let model_id_clone = model_id.clone();
             let node_clone = node.clone();
 
+            // Open a cursor for resume. Live emission below records each
+            // chunk into the cursor in addition to yielding to the
+            // client; a reconnecting client with `Last-Event-ID` replays
+            // from this state.
+            node.stream_cursors.create(&completion_id);
+            let cursor_rid = completion_id.clone();
+
+            // P1.3 SLO metrics — label the provider as "local" for
+            // self-served models to keep label cardinality bounded.
+            let slo = node.stream_slo_metrics.clone();
+            let slo_provider = "local".to_string();
+            let slo_model = model_id.clone();
+            slo.record_stream_started(&slo_provider, &slo_model);
+            let request_start = std::time::Instant::now();
+
+            // P2.2 audit log — publish stream lifecycle events to the bus
+            // so downstream consumers (replay, dispute resolution) see the
+            // same start/first-token/drop/complete boundaries that the
+            // SLO histograms record.
+            let event_bus = node.event_bus.clone();
+            let audit_request_id = completion_id.clone();
+            let audit_model_id = model_id.clone();
+            let audit_provider_label = slo_provider.clone();
+            event_bus.publish(
+                tenzro_events::TenzroEvent::InferenceStreamStarted {
+                    request_id: audit_request_id.clone(),
+                    model_id: audit_model_id.clone(),
+                    provider_label: audit_provider_label.clone(),
+                },
+                None,
+                Some(tenzro_events::VmType::Native),
+            );
+
             let (token_tx, mut token_rx) = tokio::sync::mpsc::channel::<String>(256);
 
             // Spawn the generation task — it feeds tokens into token_tx
@@ -16010,8 +16311,32 @@ async fn handle_openai_chat_completions(
 
             // Build SSE stream from the token receiver
             let stream = async_stream::stream! {
+                let cursors = node_clone.stream_cursors.clone();
+                // P1.3 SLO timing state.
+                let mut got_any_token = false;
+                let mut last_token_at: Option<std::time::Instant> = None;
                 // Emit each token as an OpenAI-compatible SSE chunk
                 while let Some(token_piece) = token_rx.recv().await {
+                    let now = std::time::Instant::now();
+                    if !got_any_token {
+                        let ttft = now.duration_since(request_start).as_secs_f64();
+                        slo.record_first_token(&slo_provider, &slo_model, ttft);
+                        event_bus.publish(
+                            tenzro_events::TenzroEvent::InferenceStreamFirstToken {
+                                request_id: audit_request_id.clone(),
+                                model_id: audit_model_id.clone(),
+                                provider_label: audit_provider_label.clone(),
+                                ttft_ms: (ttft * 1000.0) as u64,
+                            },
+                            None,
+                            Some(tenzro_events::VmType::Native),
+                        );
+                    } else if let Some(prev) = last_token_at {
+                        let gap = now.duration_since(prev).as_secs_f64();
+                        slo.record_intertoken(&slo_provider, &slo_model, gap);
+                    }
+                    last_token_at = Some(now);
+                    got_any_token = true;
                     let chunk = serde_json::json!({
                         "id": &completion_id,
                         "object": "chat.completion.chunk",
@@ -16026,7 +16351,13 @@ async fn handle_openai_chat_completions(
                         }]
                     });
                     let data = format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default());
-                    yield Ok::<_, std::convert::Infallible>(Event::default().data(data));
+                    // Record into the cursor *before* yielding — keeps
+                    // record and emit in lockstep so resume cannot miss
+                    // a chunk the client already saw.
+                    let seq = cursors.record(&cursor_rid, data.clone(), None).unwrap_or(0);
+                    yield Ok::<_, std::convert::Infallible>(
+                        Event::default().id(format!("{}:{}", cursor_rid, seq)).data(data),
+                    );
                 }
 
                 // Wait for the generation result to get final stats
@@ -16050,7 +16381,10 @@ async fn handle_openai_chat_completions(
                         }
                     });
                     let data = format!("data: {}\n\n", serde_json::to_string(&final_chunk).unwrap_or_default());
-                    yield Ok::<_, std::convert::Infallible>(Event::default().data(data));
+                    let seq = cursors.record(&cursor_rid, data.clone(), None).unwrap_or(0);
+                    yield Ok::<_, std::convert::Infallible>(
+                        Event::default().id(format!("{}:{}", cursor_rid, seq)).data(data),
+                    );
 
                     // Emit usage event with cost (wei)
                     // Scope the RwLock guard so it doesn't live across yield
@@ -16074,10 +16408,34 @@ async fn handle_openai_chat_completions(
                         })
                     };
                     let data = format!("data: {}\n\n", serde_json::to_string(&usage_data).unwrap_or_default());
-                    yield Ok::<_, std::convert::Infallible>(Event::default().data(data));
+                    let seq = cursors.record(&cursor_rid, data.clone(), None).unwrap_or(0);
+                    yield Ok::<_, std::convert::Infallible>(
+                        Event::default().id(format!("{}:{}", cursor_rid, seq)).data(data),
+                    );
                 }
 
-                // OpenAI-compatible stream terminator
+                // OpenAI-compatible stream terminator. The terminator is
+                // not recorded into the cursor — replay always synthesizes
+                // it from `finished == true` so a client resuming after a
+                // completed stream still sees `[DONE]`.
+                cursors.finish(&cursor_rid);
+                // P1.3 completion observation: local-model channel closing
+                // after at least one token is success; closing without any
+                // token (rare — would mean the generator faulted before
+                // emitting anything) is a failure for SLO purposes.
+                slo.record_stream_completed(&slo_provider, &slo_model, got_any_token);
+                let latency_ms = request_start.elapsed().as_millis() as u64;
+                event_bus.publish(
+                    tenzro_events::TenzroEvent::InferenceStreamCompleted {
+                        request_id: audit_request_id.clone(),
+                        model_id: audit_model_id.clone(),
+                        provider_label: audit_provider_label.clone(),
+                        latency_ms,
+                        success: got_any_token,
+                    },
+                    None,
+                    Some(tenzro_events::VmType::Native),
+                );
                 yield Ok::<_, std::convert::Infallible>(Event::default().data("data: [DONE]\n\n"));
             };
 
@@ -16163,24 +16521,206 @@ async fn handle_openai_chat_completions(
                         );
                     }
 
-                    // Proxy the SSE byte stream from the remote provider
+                    // Open a cursor for this proxied stream so a client
+                    // reconnect can resume against this gateway node. Each
+                    // upstream byte-batch is recorded as one cursor chunk.
+                    // The completion_id here is gateway-local — upstream
+                    // OpenAI/Anthropic provider ids inside the chunks are
+                    // pass-through.
+                    let proxy_completion_id = format!("chatcmpl-proxy-{}", uuid::Uuid::new_v4());
+                    node.stream_cursors.create(&proxy_completion_id);
+                    let cursors = node.stream_cursors.clone();
+                    let proxy_rid = proxy_completion_id.clone();
+
+                    // Capture the provider address + provider_manager
+                    // so a mid-stream drop can be charged back to the
+                    // upstream provider via `record_stream_failure`.
+                    // A pre-stream failure (non-2xx, connection refused)
+                    // already returns early above and is the call-failure
+                    // path; this branch is reached only after the upstream
+                    // accepted the request and started writing the SSE.
+                    let stream_provider_addr = svc.provider_address.clone();
+                    let stream_provider_manager =
+                        node.provider_manager().cloned();
+                    let remote_url_for_log = remote_url.clone();
+                    // P1.3 SLO metrics handle. Captured into the stream
+                    // closure; observations on first-chunk (TTFT),
+                    // every subsequent chunk (intertoken), and on stream
+                    // termination (completed/failed counters).
+                    let slo = node.stream_slo_metrics.clone();
+                    let slo_provider = svc.provider_address.to_string();
+                    let slo_model = svc.model_id.clone();
+                    slo.record_stream_started(&slo_provider, &slo_model);
+                    let request_start = std::time::Instant::now();
+
+                    // P2.2 audit log — emit the same lifecycle events as
+                    // the local path, with `provider_label` set to the
+                    // remote provider's address string for label parity
+                    // with the SLO histograms.
+                    let event_bus = node.event_bus.clone();
+                    let audit_request_id = proxy_rid.clone();
+                    let audit_model_id = svc.model_id.clone();
+                    let audit_provider_label = slo_provider.clone();
+                    event_bus.publish(
+                        tenzro_events::TenzroEvent::InferenceStreamStarted {
+                            request_id: audit_request_id.clone(),
+                            model_id: audit_model_id.clone(),
+                            provider_label: audit_provider_label.clone(),
+                        },
+                        None,
+                        Some(tenzro_events::VmType::Native),
+                    );
+
+                    // Proxy the SSE byte stream from the remote provider,
+                    // wrapped in a heartbeat watchdog so a stuck-but-TCP-
+                    // healthy provider gets caught at the application
+                    // layer. With the defaults (5s × 2) we detect a stall
+                    // within 10s — matches the P1.1 acceptance.
                     let byte_stream = resp.bytes_stream();
-                    let stream = byte_stream.map(|chunk| -> std::result::Result<Event, std::convert::Infallible> {
-                        match chunk {
-                            Ok(bytes) => {
-                                let text = String::from_utf8_lossy(&bytes);
-                                Ok(Event::default().data(&text))
-                            }
-                            Err(e) => {
-                                let err_json = serde_json::json!({
-                                    "error": format!("Stream error: {}", e)
-                                });
-                                Ok(Event::default().data(
-                                    format!("data: {}\n\n", serde_json::to_string(&err_json).unwrap_or_default())
-                                ))
+                    let stream = async_stream::stream! {
+                        use crate::streaming::{with_heartbeat, HeartbeatConfig, HeartbeatedChunk};
+                        use futures::StreamExt;
+                        let mut bs = Box::pin(with_heartbeat(byte_stream, HeartbeatConfig::default()));
+                        // Track whether any bytes were emitted before a
+                        // drop, so we can distinguish "upstream accepted
+                        // then died" (mid-stream drop, sharp signal) from
+                        // "first chunk was already an error" (treat the
+                        // same — the upstream told us yes then failed to
+                        // deliver, that's the contract violation we
+                        // penalize).
+                        let mut got_any_chunk = false;
+                        let mut had_stream_error = false;
+                        let mut had_stall = false;
+                        let mut stall_silent_for_ms: u64 = 0;
+                        // P1.3 SLO timing state: when did the previous
+                        // chunk land? Used to compute inter-chunk gap as
+                        // a proxy for inter-token latency at the chunk
+                        // granularity we observe (the upstream may pack
+                        // multiple tokens per SSE event, but the gap is
+                        // still the user-visible-update jitter).
+                        let mut last_chunk_at: Option<std::time::Instant> = None;
+                        while let Some(ev) = bs.next().await {
+                            match ev {
+                                HeartbeatedChunk::Chunk(Ok(bytes)) => {
+                                    let now = std::time::Instant::now();
+                                    if !got_any_chunk {
+                                        // First-token observation.
+                                        let ttft = now.duration_since(request_start).as_secs_f64();
+                                        slo.record_first_token(&slo_provider, &slo_model, ttft);
+                                        event_bus.publish(
+                                            tenzro_events::TenzroEvent::InferenceStreamFirstToken {
+                                                request_id: audit_request_id.clone(),
+                                                model_id: audit_model_id.clone(),
+                                                provider_label: audit_provider_label.clone(),
+                                                ttft_ms: (ttft * 1000.0) as u64,
+                                            },
+                                            None,
+                                            Some(tenzro_events::VmType::Native),
+                                        );
+                                    } else if let Some(prev) = last_chunk_at {
+                                        let gap = now.duration_since(prev).as_secs_f64();
+                                        slo.record_intertoken(&slo_provider, &slo_model, gap);
+                                    }
+                                    last_chunk_at = Some(now);
+                                    got_any_chunk = true;
+                                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                                    let seq = cursors.record(&proxy_rid, text.clone(), None).unwrap_or(0);
+                                    yield Ok::<_, std::convert::Infallible>(
+                                        Event::default()
+                                            .id(format!("{}:{}", proxy_rid, seq))
+                                            .data(text),
+                                    );
+                                }
+                                HeartbeatedChunk::Chunk(Err(e)) => {
+                                    had_stream_error = true;
+                                    warn!(
+                                        "Mid-stream proxy error from {} (provider {}): {}",
+                                        remote_url_for_log, stream_provider_addr, e
+                                    );
+                                    let err_json = serde_json::json!({
+                                        "error": format!("Stream error: {}", e)
+                                    });
+                                    let text = format!(
+                                        "data: {}\n\n",
+                                        serde_json::to_string(&err_json).unwrap_or_default()
+                                    );
+                                    yield Ok::<_, std::convert::Infallible>(Event::default().data(text));
+                                }
+                                HeartbeatedChunk::Stalled { silent_for_ms } => {
+                                    had_stall = true;
+                                    stall_silent_for_ms = silent_for_ms;
+                                    warn!(
+                                        "Stream stalled (no chunks for {}ms) from {} (provider {})",
+                                        silent_for_ms, remote_url_for_log, stream_provider_addr
+                                    );
+                                    let err_json = serde_json::json!({
+                                        "error": format!(
+                                            "Stream stalled: no tokens for {}ms",
+                                            silent_for_ms
+                                        )
+                                    });
+                                    let text = format!(
+                                        "data: {}\n\n",
+                                        serde_json::to_string(&err_json).unwrap_or_default()
+                                    );
+                                    yield Ok::<_, std::convert::Infallible>(Event::default().data(text));
+                                }
                             }
                         }
-                    });
+                        // Charge the provider for a mid-stream drop or
+                        // stall. We penalize on ANY stream error after the
+                        // upstream returned 200 — by the time we got past
+                        // the response headers the provider committed to
+                        // delivering.
+                        let latency_ms = request_start.elapsed().as_millis() as u64;
+                        if had_stream_error || had_stall {
+                            if let Some(pm) = &stream_provider_manager {
+                                pm.record_stream_failure(&stream_provider_addr);
+                            }
+                            slo.record_stream_completed(&slo_provider, &slo_model, false);
+                            let (reason, silent_for_ms) = if had_stall {
+                                ("stall".to_string(), Some(stall_silent_for_ms))
+                            } else {
+                                ("upstream_error".to_string(), None)
+                            };
+                            event_bus.publish(
+                                tenzro_events::TenzroEvent::InferenceStreamDropped {
+                                    request_id: audit_request_id.clone(),
+                                    model_id: audit_model_id.clone(),
+                                    provider_label: audit_provider_label.clone(),
+                                    reason,
+                                    silent_for_ms,
+                                },
+                                None,
+                                Some(tenzro_events::VmType::Native),
+                            );
+                        } else if got_any_chunk {
+                            // Successful stream completion — reset the
+                            // consecutive-stream-failure counter via the
+                            // metrics record_success path with zero
+                            // latency contribution (latency was already
+                            // recorded per-token at the runtime side for
+                            // local models; for proxied streams we don't
+                            // observe per-token timing, so 0 is the
+                            // honest value).
+                            if let Some(pm) = &stream_provider_manager {
+                                pm.record_success(&stream_provider_addr, 0);
+                            }
+                            slo.record_stream_completed(&slo_provider, &slo_model, true);
+                        }
+                        event_bus.publish(
+                            tenzro_events::TenzroEvent::InferenceStreamCompleted {
+                                request_id: audit_request_id.clone(),
+                                model_id: audit_model_id.clone(),
+                                provider_label: audit_provider_label.clone(),
+                                latency_ms,
+                                success: got_any_chunk && !had_stream_error && !had_stall,
+                            },
+                            None,
+                            Some(tenzro_events::VmType::Native),
+                        );
+                        cursors.finish(&proxy_rid);
+                    };
 
                     Sse::new(stream)
                         .keep_alive(axum::response::sse::KeepAlive::default())
@@ -27244,6 +27784,214 @@ async fn resolve_auth_to_wallet(
     AuthOutcome::Authenticated { wallet_id }
 }
 
+/// Deterministic 4-byte selector for a Tenzro `TransactionType` variant,
+/// computed as `keccak256(variant_name)[..4]`. Used to project a Tenzro
+/// typed transaction into the ERC-7579
+/// `execute(address,uint256,bytes)` envelope that the AA validator
+/// chain's `StandardExecuteDecoder` parses — so the `allowed_operations`
+/// axis of a `DelegationScope` can constrain typed-transaction signing,
+/// not just raw UserOps from the bundler path.
+fn tx_type_selector(tx_type: &TransactionType) -> [u8; 4] {
+    let name = match tx_type {
+        TransactionType::Transfer { .. } => "Transfer",
+        TransactionType::ContractDeploy { .. } => "ContractDeploy",
+        TransactionType::ContractCall { .. } => "ContractCall",
+        TransactionType::AgentRegister { .. } => "AgentRegister",
+        TransactionType::AgentExecute { .. } => "AgentExecute",
+        TransactionType::ModelInference { .. } => "ModelInference",
+        TransactionType::TeeProviderRegister { .. } => "TeeProviderRegister",
+        TransactionType::ProviderStake { .. } => "ProviderStake",
+        TransactionType::ProviderUnstake { .. } => "ProviderUnstake",
+        TransactionType::GovernancePropose { .. } => "GovernancePropose",
+        TransactionType::GovernanceVote { .. } => "GovernanceVote",
+        TransactionType::BridgeTransfer { .. } => "BridgeTransfer",
+        TransactionType::CreateEscrow { .. } => "CreateEscrow",
+        TransactionType::ReleaseEscrow { .. } => "ReleaseEscrow",
+        TransactionType::RefundEscrow { .. } => "RefundEscrow",
+        TransactionType::PauseAgent { .. } => "PauseAgent",
+        TransactionType::QuarantineAgent { .. } => "QuarantineAgent",
+        TransactionType::TerminateAgent { .. } => "TerminateAgent",
+        TransactionType::PostAgentBond { .. } => "PostAgentBond",
+        TransactionType::IncreaseAgentBond { .. } => "IncreaseAgentBond",
+        TransactionType::WithdrawAgentBond { .. } => "WithdrawAgentBond",
+        TransactionType::PayInsuranceClaim { .. } => "PayInsuranceClaim",
+        TransactionType::RegisterValidator { .. } => "RegisterValidator",
+        TransactionType::UpdateValidatorMetadata { .. } => "UpdateValidatorMetadata",
+        TransactionType::ExitValidator => "ExitValidator",
+    };
+    let hash = tenzro_crypto::hash::keccak256(name.as_bytes());
+    let bytes = hash.as_bytes();
+    let mut out = [0u8; 4];
+    out.copy_from_slice(&bytes[..4]);
+    out
+}
+
+/// ABI-encode `execute(address target, uint256 value, bytes data)` —
+/// the canonical ERC-7579 / Safe / Kernel execution envelope that the
+/// `StandardExecuteDecoder` parses. `data` here is just the 4-byte
+/// `tx_type_selector` (no further parameters needed — the validator
+/// only consults selector/target/value for scope decisions).
+fn encode_execute_envelope(target: [u8; 20], value: u128, inner: &[u8]) -> Vec<u8> {
+    // execute(address,uint256,bytes) selector
+    let mut out = Vec::with_capacity(4 + 32 * 4 + inner.len() + 32);
+    let sel = tenzro_crypto::hash::keccak256(b"execute(address,uint256,bytes)");
+    out.extend_from_slice(&sel.as_bytes()[..4]);
+    // target left-padded to 32 bytes
+    out.extend_from_slice(&[0u8; 12]);
+    out.extend_from_slice(&target);
+    // value as 32-byte big-endian (u128 → 32B with 16 leading zeros)
+    out.extend_from_slice(&[0u8; 16]);
+    out.extend_from_slice(&value.to_be_bytes());
+    // bytes offset = 0x60 (3 * 32) — points past target+value+offset words
+    let mut off = [0u8; 32];
+    off[31] = 0x60;
+    out.extend_from_slice(&off);
+    // bytes length
+    let mut len = [0u8; 32];
+    let l = inner.len() as u64;
+    len[24..].copy_from_slice(&l.to_be_bytes());
+    out.extend_from_slice(&len);
+    // bytes payload + right-pad to 32-byte boundary
+    out.extend_from_slice(inner);
+    let pad = (32 - (inner.len() % 32)) % 32;
+    if pad > 0 {
+        out.extend_from_slice(&vec![0u8; pad]);
+    }
+    out
+}
+
+/// On-chain ERC-7579 validator pre-check for the non-bundler signing path
+/// (`tenzro_signTransaction`, `tenzro_signAndSendTransaction`).
+///
+/// Per `feedback_custody_enforce_at_signing_time`: the off-chain
+/// `SpendingPolicyResolver` is defence-in-depth only — the *primary*
+/// cryptographic gate for delegated/autonomous machine identities is the
+/// ERC-7579 validator chain (`DelegationScopeValidator` + future
+/// `WebAuthnValidator` / `TeeBoundValidator`). That chain fires on the
+/// `eth_sendUserOperation` bundler path automatically. This helper forces
+/// the same chain to fire on the typed-Transaction signing path, so a
+/// revoked / expired `DelegationScope` can't be bypassed by switching
+/// from the bundler to `tenzro_signTransaction`.
+///
+/// Semantics:
+/// - If `aa_validator_registry()` is `None` (dev/test node), skip — there
+///   is no validator stack to consult.
+/// - If `from` has **no** installed validators (e.g. a human EOA or an
+///   unregistered account), skip — there is nothing for the AA chain to
+///   gate, and human EOAs are not subject to delegation scopes.
+/// - Otherwise build a synthetic `UserOperation` whose `call_data` is
+///   `execute(to, value, tx_type_selector)` and run it through
+///   `validate_user_op`. Failure → return JSON-RPC error -32003 and
+///   refuse to sign. Success → caller proceeds.
+fn aa_pre_sign_check(
+    node: &Arc<TenzroNode>,
+    from_addr: &tenzro_types::Address,
+    to_addr: &tenzro_types::Address,
+    value: u128,
+    nonce: u64,
+    gas_limit: u64,
+    gas_price: u64,
+    tx_type: &TransactionType,
+) -> std::result::Result<(), JsonRpcError> {
+    let Some(registry) = node.aa_validator_registry() else {
+        return Ok(());
+    };
+
+    // Strip from/to addresses to their trailing 20 bytes (EVM form). The
+    // AA validator registry is keyed by EVM-shaped sender.
+    let from_bytes = from_addr.as_bytes();
+    let from_start = from_bytes.len().saturating_sub(20);
+    let from_evm: Vec<u8> = from_bytes[from_start..from_start + 20].to_vec();
+
+    let to_bytes = to_addr.as_bytes();
+    let to_start = to_bytes.len().saturating_sub(20);
+    let mut to_evm = [0u8; 20];
+    to_evm.copy_from_slice(&to_bytes[to_start..to_start + 20]);
+
+    // No validators installed → not an AA-gated account. Skip.
+    if registry.list_for_account(&from_evm).is_empty() {
+        return Ok(());
+    }
+
+    // Project the typed transaction into the ERC-7579 execute envelope.
+    let selector = tx_type_selector(tx_type);
+    let call_data = encode_execute_envelope(to_evm, value, &selector);
+
+    // The AA chain only consults sender / nonce / call_data / signature
+    // for the scope decision; the remaining fields are populated so the
+    // op is well-formed for downstream validators that may inspect them.
+    let op = tenzro_vm::UserOperation {
+        sender: from_evm,
+        nonce,
+        factory: Vec::new(),
+        factory_data: Vec::new(),
+        call_data,
+        call_gas_limit: gas_limit,
+        verification_gas_limit: 100_000,
+        pre_verification_gas: 21_000,
+        max_fee_per_gas: gas_price as u128,
+        max_priority_fee_per_gas: gas_price as u128,
+        paymaster: Vec::new(),
+        paymaster_verification_gas_limit: 0,
+        paymaster_post_op_gas_limit: 0,
+        paymaster_data: Vec::new(),
+        // The signature leg is checked by the inner `IValidator`. For a
+        // pre-sign intent check we pass a non-empty sentinel so trivial
+        // "empty-sig → fail" inner validators don't short-circuit before
+        // the scope leg runs. The DelegationScopeValidator's scope
+        // check is what we actually want to exercise here; the real
+        // signature is produced by the wallet *after* this gate passes.
+        signature: vec![0xAAu8; 65],
+    };
+
+    // op_hash is what an aggregator would sign over. For the scope check
+    // we only need a stable per-op identifier — use keccak256 of the
+    // canonical call_data (the EIP-712 op hash needs the full EntryPoint
+    // domain which isn't material to scope decisions).
+    let hash = tenzro_crypto::hash::keccak256(&op.call_data);
+    let mut op_hash = [0u8; 32];
+    op_hash.copy_from_slice(hash.as_bytes());
+
+    let validation = registry.validate_user_op(&op, &op_hash).map_err(|e| {
+        // NoValidatorInstalled was already filtered above; anything else
+        // is a real validator error (decoder rejected the call_data,
+        // module attestation missing, etc).
+        JsonRpcError {
+            code: -32003,
+            message: format!(
+                "AA validator chain rejected sign intent: {e}. Per CLAUDE.md \
+                 self-custody architecture: typed-transaction signing for \
+                 machine identities must pass the same ERC-7579 validator \
+                 chain as the eth_sendUserOperation bundler path."
+            ),
+            data: None,
+        }
+    })?;
+
+    if validation.is_failure() {
+        return Err(JsonRpcError {
+            code: -32003,
+            message: format!(
+                "DelegationScope violation: signing intent (selector \
+                 0x{}, value {}, to {}) is out of scope for the on-chain \
+                 ERC-7579 validator chain bound to this machine identity. \
+                 Off-chain SpendingPolicyResolver is defence-in-depth; \
+                 the validator chain is the primary cryptographic gate \
+                 (feedback_custody_enforce_at_signing_time).",
+                hex::encode(selector),
+                value,
+                to_addr
+            ),
+            data: None,
+        });
+    }
+
+    // Validation succeeded. The `(valid_after, valid_until)` window on
+    // `validation` is purely advisory at the sign step — the actual
+    // execution timestamp is bounded later by consensus.
+    Ok(())
+}
+
 /// Build an `AuthorityRequest` from a Tenzro `Transaction`. Maps
 /// `TransactionType` variants onto `AuthorityAction` so the auth engine
 /// can scope-check the request against the JWT's RAR envelope.
@@ -27664,6 +28412,25 @@ async fn handle_sign_transaction(
             });
         }
     };
+
+    // === ERC-7579 on-chain validator pre-check ===
+    // Per `feedback_custody_enforce_at_signing_time` + the self-custody
+    // architecture target: typed-transaction signing for delegated /
+    // autonomous machine identities MUST pass the same ERC-7579 validator
+    // chain that gates the `eth_sendUserOperation` bundler path. Otherwise
+    // a revoked / expired `DelegationScope` could be bypassed by simply
+    // calling `tenzro_signTransaction` instead. Human EOAs and unregistered
+    // accounts have no installed validators and pass through transparently.
+    aa_pre_sign_check(
+        node,
+        &from_addr,
+        &to_addr,
+        value,
+        nonce,
+        gas_limit,
+        gas_price,
+        &tx_type,
+    )?;
 
     let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
         code: -32603,
@@ -30453,4 +31220,230 @@ mod onnx_runtime_rpc_tests {
     const _: () = assert!(super::BLOCK_RANGE_MAX <= 256);
     const _: () = assert!(super::BLOCK_RANGE_DEFAULT <= super::BLOCK_RANGE_MAX);
     const _: () = assert!(super::BLOCK_RANGE_DEFAULT > 0);
+}
+
+/// Unit tests for the ERC-7579 pre-sign gate that backs
+/// `tenzro_signTransaction` (Task #25 self-custody runtime wiring).
+///
+/// The full `aa_pre_sign_check` helper takes an `&Arc<TenzroNode>`, which
+/// is heavy to instantiate in a unit test. So these tests exercise the
+/// pure pieces — `tx_type_selector` for selector stability and
+/// `encode_execute_envelope` for ABI shape — and then synthesize a
+/// `UserOperation` directly to confirm that a `DelegationScopeValidator`
+/// gates it correctly. The synthesis test is the real assertion of the
+/// architectural property: a typed Tenzro transaction can be projected
+/// into an ERC-7579 execute envelope that the on-chain validator chain
+/// understands.
+#[cfg(test)]
+mod aa_pre_sign_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tenzro_vm::aa_delegation_validator::{
+        DelegationScopeValidator, EnforcedScope, InMemoryScopeOracle,
+    };
+    use tenzro_vm::aa_validators::{
+        IValidator, ModuleAttestation, ModuleType, NoOpValidator, ValidatorRegistry,
+    };
+
+    fn now_ts() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Build a fresh `ValidatorRegistry` with one `DelegationScopeValidator`
+    /// installed for `sender`, gated by an in-memory `EnforcedScope`.
+    fn install_for(
+        sender: &[u8; 20],
+        scope: EnforcedScope,
+    ) -> (Arc<ValidatorRegistry>, [u8; 20]) {
+        let module_addr = [0xDDu8; 20];
+        let oracle = Arc::new(InMemoryScopeOracle::new());
+        oracle.set(sender.to_vec(), scope);
+
+        let inner: Arc<dyn IValidator> = Arc::new(NoOpValidator::new(module_addr));
+        let validator: Arc<dyn IValidator> = Arc::new(DelegationScopeValidator::new(
+            module_addr,
+            inner,
+            oracle,
+        ));
+
+        let registry = Arc::new(ValidatorRegistry::new());
+        registry.attestations().attest(ModuleAttestation {
+            module_address: module_addr,
+            module_type: ModuleType::Validator,
+            registry: *registry.trusted_registry(),
+            attester: [0xAAu8; 20],
+            attestation_data: b"audit-pass".to_vec(),
+            revoked: false,
+        });
+        registry
+            .install(
+                sender.to_vec(),
+                ModuleType::Validator,
+                validator,
+                100,
+                Vec::new(),
+            )
+            .expect("install");
+        (registry, module_addr)
+    }
+
+    fn make_user_op(sender: &[u8; 20], call_data: Vec<u8>) -> tenzro_vm::UserOperation {
+        tenzro_vm::UserOperation {
+            sender: sender.to_vec(),
+            nonce: 0,
+            factory: Vec::new(),
+            factory_data: Vec::new(),
+            call_data,
+            call_gas_limit: 21_000,
+            verification_gas_limit: 100_000,
+            pre_verification_gas: 21_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            paymaster: Vec::new(),
+            paymaster_verification_gas_limit: 0,
+            paymaster_post_op_gas_limit: 0,
+            paymaster_data: Vec::new(),
+            signature: vec![0xAAu8; 65],
+        }
+    }
+
+    #[test]
+    fn tx_type_selector_is_stable_per_variant() {
+        let transfer_a = tx_type_selector(&TransactionType::Transfer { amount: 100 });
+        let transfer_b = tx_type_selector(&TransactionType::Transfer { amount: 999 });
+        // Selectors depend only on the variant name, not the field values.
+        assert_eq!(transfer_a, transfer_b);
+
+        let escrow = tx_type_selector(&TransactionType::RefundEscrow {
+            escrow_id: [0u8; 32],
+        });
+        // Distinct variants produce distinct selectors.
+        assert_ne!(transfer_a, escrow);
+    }
+
+    #[test]
+    fn encode_execute_envelope_matches_standard_decoder() {
+        use tenzro_vm::aa_delegation_validator::{CallIntentDecoder, StandardExecuteDecoder};
+
+        let target = [0xAAu8; 20];
+        let value = 1_000_000_000_000_000_000u128; // 1 TNZO in 18-dec base units
+        let selector = tx_type_selector(&TransactionType::Transfer { amount: value });
+        let envelope = encode_execute_envelope(target, value, &selector);
+
+        // The validator's decoder must successfully round-trip the envelope.
+        let decoder = StandardExecuteDecoder;
+        let intent = decoder.decode(&envelope).expect("decoder accepts envelope");
+        assert_eq!(intent.target, target);
+        assert_eq!(intent.value, value);
+        assert_eq!(intent.selector, Some(selector));
+    }
+
+    #[test]
+    fn delegation_scope_validator_rejects_over_limit_intent() {
+        // Per-tx ceiling 0.5 TNZO; submit 1 TNZO — must reject.
+        let sender = [0xBBu8; 20];
+        let target = [0xCCu8; 20];
+        let value = 1_000_000_000_000_000_000u128;
+        let transfer_selector = tx_type_selector(&TransactionType::Transfer { amount: value });
+
+        let scope = EnforcedScope {
+            max_per_tx: Some(500_000_000_000_000_000u128),
+            max_per_day: None,
+            allowed_selectors: vec![transfer_selector],
+            allowed_targets: Vec::new(),
+            valid_after: 0,
+            valid_until: 0,
+            window_start_ts: now_ts(),
+            spent_in_window: 0,
+            now_ts: now_ts(),
+        };
+        let (registry, _) = install_for(&sender, scope);
+
+        let call_data = encode_execute_envelope(target, value, &transfer_selector);
+        let op = make_user_op(&sender, call_data);
+        let op_hash = [0u8; 32];
+
+        let result = registry
+            .validate_user_op(&op, &op_hash)
+            .expect("registry call succeeds");
+        assert!(
+            result.is_failure(),
+            "scope-violating intent (1 TNZO > 0.5 TNZO ceiling) must be rejected"
+        );
+    }
+
+    #[test]
+    fn delegation_scope_validator_accepts_in_scope_intent() {
+        let sender = [0xBBu8; 20];
+        let target = [0xCCu8; 20];
+        let value = 100_000_000_000_000_000u128; // 0.1 TNZO — under ceiling
+        let transfer_selector = tx_type_selector(&TransactionType::Transfer { amount: value });
+
+        let scope = EnforcedScope {
+            max_per_tx: Some(500_000_000_000_000_000u128),
+            max_per_day: None,
+            allowed_selectors: vec![transfer_selector],
+            allowed_targets: Vec::new(),
+            valid_after: 0,
+            valid_until: 0,
+            window_start_ts: now_ts(),
+            spent_in_window: 0,
+            now_ts: now_ts(),
+        };
+        let (registry, _) = install_for(&sender, scope);
+
+        let call_data = encode_execute_envelope(target, value, &transfer_selector);
+        let op = make_user_op(&sender, call_data);
+        let op_hash = [0u8; 32];
+
+        let result = registry
+            .validate_user_op(&op, &op_hash)
+            .expect("registry call succeeds");
+        assert!(
+            !result.is_failure(),
+            "in-scope intent (0.1 TNZO < 0.5 TNZO ceiling) must pass"
+        );
+    }
+
+    #[test]
+    fn delegation_scope_validator_rejects_disallowed_selector() {
+        // Scope only permits Transfer; submit a RefundEscrow intent.
+        let sender = [0xBBu8; 20];
+        let target = [0xCCu8; 20];
+        let value = 0u128;
+        let transfer_selector = tx_type_selector(&TransactionType::Transfer { amount: 0 });
+        let escrow_selector = tx_type_selector(&TransactionType::RefundEscrow {
+            escrow_id: [0u8; 32],
+        });
+        assert_ne!(transfer_selector, escrow_selector);
+
+        let scope = EnforcedScope {
+            max_per_tx: None,
+            max_per_day: None,
+            allowed_selectors: vec![transfer_selector],
+            allowed_targets: Vec::new(),
+            valid_after: 0,
+            valid_until: 0,
+            window_start_ts: now_ts(),
+            spent_in_window: 0,
+            now_ts: now_ts(),
+        };
+        let (registry, _) = install_for(&sender, scope);
+
+        let call_data = encode_execute_envelope(target, value, &escrow_selector);
+        let op = make_user_op(&sender, call_data);
+        let op_hash = [0u8; 32];
+
+        let result = registry
+            .validate_user_op(&op, &op_hash)
+            .expect("registry call succeeds");
+        assert!(
+            result.is_failure(),
+            "out-of-allowlist selector must be rejected"
+        );
+    }
 }

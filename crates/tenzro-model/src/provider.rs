@@ -41,15 +41,35 @@ impl Default for ProviderHealth {
     }
 }
 
-/// Metrics for tracking provider performance
+/// Metrics for tracking provider performance.
+///
+/// Call failures and stream failures are tracked together in
+/// `failed_requests` for the success-rate calculation, but stream drops
+/// are also counted separately in `consecutive_stream_failures` because
+/// they are a much sharper trust signal than a single call rejection — a
+/// dropped stream means the client lost in-flight tokens it already paid
+/// for, while a failed call before any tokens left the wire is usually
+/// recoverable by retrying a sibling provider. After
+/// `STREAM_FAILURE_QUARANTINE_THRESHOLD` consecutive stream drops the
+/// provider is auto-quarantined for `STREAM_FAILURE_QUARANTINE_MS` ms.
+/// Any subsequent success resets the consecutive counter to zero.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderMetrics {
     /// Total number of inference requests received
     pub total_requests: u64,
     /// Number of successful requests
     pub successful_requests: u64,
-    /// Number of failed requests
+    /// Number of failed requests (call + stream)
     pub failed_requests: u64,
+    /// Number of failures that happened mid-stream (after first token)
+    pub stream_failures: u64,
+    /// Consecutive stream failures without an intervening success.
+    /// Reset by `record_success`. Used to drive auto-quarantine.
+    pub consecutive_stream_failures: u32,
+    /// If `Some(t)` and `t > now`, the provider is auto-quarantined and
+    /// will not be returned by `get_active_providers_for_model` until the
+    /// timestamp passes. Cleared on `record_success`.
+    pub quarantined_until: Option<Timestamp>,
     /// Average latency in milliseconds
     pub avg_latency_ms: u64,
     /// Uptime percentage (0-100)
@@ -62,24 +82,64 @@ pub struct ProviderMetrics {
     pub health: ProviderHealth,
 }
 
+/// Consecutive stream drops that trigger an auto-quarantine.
+pub const STREAM_FAILURE_QUARANTINE_THRESHOLD: u32 = 3;
+/// Duration of an auto-quarantine, in milliseconds (5 minutes).
+pub const STREAM_FAILURE_QUARANTINE_MS: i64 = 5 * 60 * 1000;
+
 impl ProviderMetrics {
     /// Creates new provider metrics
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Records a successful inference request
+    /// Records a successful inference request.
+    ///
+    /// Also resets the consecutive-stream-failure counter and clears any
+    /// active quarantine — a single success means the provider is
+    /// reachable and producing tokens again.
     pub fn record_success(&mut self, latency_ms: u64) {
         self.total_requests += 1;
         self.successful_requests += 1;
         self.total_latency_ms += latency_ms;
+        self.consecutive_stream_failures = 0;
+        self.quarantined_until = None;
         self.update_avg_latency();
     }
 
-    /// Records a failed inference request
-    pub fn record_failure(&mut self) {
+    /// Records a failed inference request (call-time, before any tokens
+    /// were emitted). Bumps the failed-requests counter only — does not
+    /// touch the consecutive-stream-failure counter, since a pre-stream
+    /// failure is a softer signal than a mid-stream drop.
+    pub fn record_call_failure(&mut self) {
         self.total_requests += 1;
         self.failed_requests += 1;
+    }
+
+    /// Records a mid-stream failure (transport drop after at least one
+    /// token was emitted, or upstream stream error). Bumps the
+    /// consecutive-stream-failure counter; if it reaches
+    /// `STREAM_FAILURE_QUARANTINE_THRESHOLD`, sets `quarantined_until`
+    /// to `now + STREAM_FAILURE_QUARANTINE_MS`.
+    pub fn record_stream_failure(&mut self) {
+        self.total_requests += 1;
+        self.failed_requests += 1;
+        self.stream_failures += 1;
+        self.consecutive_stream_failures =
+            self.consecutive_stream_failures.saturating_add(1);
+        if self.consecutive_stream_failures >= STREAM_FAILURE_QUARANTINE_THRESHOLD {
+            let now = Timestamp::now();
+            self.quarantined_until =
+                Some(Timestamp::new(now.as_millis() + STREAM_FAILURE_QUARANTINE_MS));
+        }
+    }
+
+    /// Returns true if the provider is currently auto-quarantined.
+    pub fn is_quarantined(&self) -> bool {
+        match self.quarantined_until {
+            Some(until) => Timestamp::now().as_millis() < until.as_millis(),
+            None => false,
+        }
     }
 
     /// Updates average latency
@@ -442,7 +502,10 @@ impl ProviderManager {
             .collect()
     }
 
-    /// Gets active providers for a specific model
+    /// Gets active providers for a specific model.
+    ///
+    /// Excludes providers that are auto-quarantined due to consecutive
+    /// mid-stream drops — see [`Self::record_stream_failure`].
     pub fn get_active_providers_for_model(&self, model_id: &str) -> Vec<ProviderWithMetrics> {
         self.providers
             .iter()
@@ -451,6 +514,7 @@ impl ProviderManager {
                 pwm.provider.serves_model(model_id)
                     && pwm.provider.status == ProviderStatus::Active
                     && pwm.metrics.is_healthy(self.max_heartbeat_age_ms)
+                    && !pwm.metrics.is_quarantined()
             })
             .map(|entry| entry.value().clone())
             .collect()
@@ -483,20 +547,52 @@ impl ProviderManager {
         }
     }
 
-    /// Records a failed inference for a provider.
+    /// Records a call-time failure (pre-stream) for a provider.
     ///
     /// Penalizes reputation by `-5` (saturating at 0). The asymmetry against
     /// `record_success`'s `+1` is intentional: a single failure should cost
     /// roughly as much trust as five successes earn, so a flaky provider
-    /// drifts down the ranking quickly.
-    pub fn record_failure(&self, provider_address: &Address) {
+    /// drifts down the ranking quickly. A pre-stream failure is recoverable
+    /// by retrying a sibling provider — see [`Self::record_stream_failure`]
+    /// for the sharper mid-stream signal.
+    pub fn record_call_failure(&self, provider_address: &Address) {
         if let Some(mut entry) = self.providers.get_mut(provider_address) {
-            entry.metrics.record_failure();
+            entry.metrics.record_call_failure();
             entry.provider.reputation = entry.provider.reputation.saturating_sub(5);
             let pwm = entry.clone();
             drop(entry);
             self.persist_provider(provider_address, &pwm);
         }
+    }
+
+    /// Records a mid-stream failure for a provider (transport drop after
+    /// at least one token was emitted, or upstream stream error).
+    ///
+    /// Penalizes reputation by `-15` — three times the call-failure
+    /// penalty — because a dropped stream means the client lost in-flight
+    /// tokens it already paid for, while a failed call before any tokens
+    /// left the wire is usually recoverable. Also bumps the
+    /// consecutive-stream-failure counter on [`ProviderMetrics`]; after
+    /// [`STREAM_FAILURE_QUARANTINE_THRESHOLD`] consecutive drops the
+    /// provider is auto-quarantined for [`STREAM_FAILURE_QUARANTINE_MS`]
+    /// and removed from the routable pool until the window passes.
+    pub fn record_stream_failure(&self, provider_address: &Address) {
+        if let Some(mut entry) = self.providers.get_mut(provider_address) {
+            entry.metrics.record_stream_failure();
+            entry.provider.reputation = entry.provider.reputation.saturating_sub(15);
+            let pwm = entry.clone();
+            drop(entry);
+            self.persist_provider(provider_address, &pwm);
+        }
+    }
+
+    /// Returns true if the provider is currently auto-quarantined due to
+    /// consecutive stream failures.
+    pub fn is_quarantined(&self, provider_address: &Address) -> bool {
+        self.providers
+            .get(provider_address)
+            .map(|entry| entry.value().metrics.is_quarantined())
+            .unwrap_or(false)
     }
 
     /// Returns the current reputation score for a provider, or `None` if
@@ -801,13 +897,85 @@ mod tests {
 
         metrics.record_success(100);
         metrics.record_success(200);
-        metrics.record_failure();
+        metrics.record_call_failure();
 
         assert_eq!(metrics.total_requests, 3);
         assert_eq!(metrics.successful_requests, 2);
         assert_eq!(metrics.failed_requests, 1);
         assert_eq!(metrics.avg_latency_ms, 150);
         assert_eq!(metrics.success_rate(), 2.0 / 3.0);
+    }
+
+    #[test]
+    fn stream_failure_quarantines_after_threshold() {
+        let mut metrics = ProviderMetrics::new();
+        // Heartbeat so the provider is otherwise "healthy" — quarantine
+        // must be the discriminator here.
+        metrics.heartbeat();
+
+        for _ in 0..(STREAM_FAILURE_QUARANTINE_THRESHOLD - 1) {
+            metrics.record_stream_failure();
+            assert!(!metrics.is_quarantined());
+        }
+        metrics.record_stream_failure();
+        assert!(metrics.is_quarantined());
+        assert_eq!(
+            metrics.consecutive_stream_failures,
+            STREAM_FAILURE_QUARANTINE_THRESHOLD
+        );
+        assert_eq!(
+            metrics.stream_failures,
+            STREAM_FAILURE_QUARANTINE_THRESHOLD as u64
+        );
+    }
+
+    #[test]
+    fn success_clears_quarantine_and_resets_counter() {
+        let mut metrics = ProviderMetrics::new();
+        for _ in 0..STREAM_FAILURE_QUARANTINE_THRESHOLD {
+            metrics.record_stream_failure();
+        }
+        assert!(metrics.is_quarantined());
+
+        metrics.record_success(50);
+        assert!(!metrics.is_quarantined());
+        assert_eq!(metrics.consecutive_stream_failures, 0);
+        assert!(metrics.quarantined_until.is_none());
+    }
+
+    #[test]
+    fn call_failure_does_not_advance_stream_counter() {
+        let mut metrics = ProviderMetrics::new();
+        for _ in 0..10 {
+            metrics.record_call_failure();
+        }
+        assert_eq!(metrics.consecutive_stream_failures, 0);
+        assert!(!metrics.is_quarantined());
+        assert_eq!(metrics.failed_requests, 10);
+        assert_eq!(metrics.stream_failures, 0);
+    }
+
+    #[test]
+    fn stream_failure_penalty_is_three_times_call_failure() {
+        // -15 vs -5 — verify via the ProviderManager surface.
+        let manager_call = ProviderManager::new();
+        let mut p_call = create_test_provider();
+        p_call.reputation = 100;
+        let addr_call = p_call.address.clone();
+        manager_call.register_provider(p_call, false).unwrap();
+        manager_call.record_call_failure(&addr_call);
+        let rep_after_call = manager_call.get_reputation(&addr_call).unwrap();
+
+        let manager_stream = ProviderManager::new();
+        let mut p_stream = create_test_provider();
+        p_stream.reputation = 100;
+        let addr_stream = p_stream.address.clone();
+        manager_stream.register_provider(p_stream, false).unwrap();
+        manager_stream.record_stream_failure(&addr_stream);
+        let rep_after_stream = manager_stream.get_reputation(&addr_stream).unwrap();
+
+        assert_eq!(100 - rep_after_call, 5);
+        assert_eq!(100 - rep_after_stream, 15);
     }
 
     #[test]

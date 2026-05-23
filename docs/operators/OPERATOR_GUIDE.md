@@ -489,10 +489,11 @@ on every provider you use:
 - **EC2**: Security group with the same rules.
 - **Azure**: NSG rules.
 - **GKE**: NetworkPolicy if you use one; otherwise nothing extra.
-- **COS (GKE Container-Optimized OS)**: COS defaults to `DROP` for everything
-  except `lo`, `icmp`, `tcp:22`, and ESTABLISHED. Append an `ACCEPT` rule for
-  TCP/9000 and UDP/9000 via cloud-init `runcmd:` — see
-  `deploy/kubernetes/cloud-init.yaml`.
+- **COS (Container-Optimized OS, used on GCE and GKE)**: COS defaults to `DROP`
+  for everything except `lo`, `icmp`, `tcp:22`, and ESTABLISHED. Append an
+  `ACCEPT` rule for TCP/9000 and UDP/9000 via cloud-init `runcmd:` — see
+  `deploy/terraform/gce_validators/cloud-init.yaml` for the canonical example
+  used by the Tenzro testnet fleet.
 
 ### Bootstrap addresses
 
@@ -553,12 +554,66 @@ lets downstream consumers distinguish a Tiber appraisal from native PCS.
 
 ---
 
-## 14. Reference
+## 14. Streaming inference (resume, backpressure, HTTP/3 ingress)
+
+Token-streamed inference responses (SSE) survive transport drops via cursor-based resume on the gateway. Clients reconnect using the standard HTML5 EventSource `Last-Event-ID` header; the node replays any chunks that were emitted but not yet acknowledged, then continues live emission.
+
+### Resume
+
+The OpenAI-compatible `POST /v1/chat/completions` and `POST /api/paid/chat/completions` handlers tag every emitted SSE event with an `id:` line of the form `<completion_id>:<seq>`:
+
+- `completion_id` is the same `chatcmpl-<uuid>` value returned in the first chunk. For network-model proxy paths it is locally generated as `chatcmpl-proxy-<uuid>` (the upstream provider's id is opaque on the wire, so we synthesize our own).
+- `seq` is a monotonically-increasing `u64` starting at `0`.
+
+On reconnect, the client sends `Last-Event-ID: <completion_id>:<last_seen_seq>`. The gateway replays every chunk with `seq > last_seen_seq` and then either continues live emission (if the producer is still active) or closes with `data: [DONE]\n\n` (if the original stream already finished).
+
+If the cursor has been garbage-collected (see TTL below) the gateway responds as if no resume were requested — the client must reissue the prompt.
+
+### Cursor lifecycle
+
+Cursors live in process memory under `TenzroNode::stream_cursors` (`crate::streaming::StreamCursorStore`, a clone-cheap `Arc<DashMap>`):
+
+- Per-stream ring cap: `MAX_BUFFERED_CHUNKS = 4096`. Beyond this, the oldest chunks are evicted from the head of the ring — a late reconnect receives a partial replay. Sized to cover a 4 KB completion at ~4-chars/token.
+- TTL after `finish()`: `DEFAULT_TTL = 5min`. Covers mobile flap + retry-with-backoff.
+- In-flight idle timeout: `IN_FLIGHT_IDLE_TIMEOUT = 10min`. Protects against stuck generators when the client never reconnects.
+- A background GC task ticks every 30s (spawned during `start()` step 16) and evicts past-deadline entries.
+
+State is in-memory and not persisted across node restarts — this is intentional: clients should always be prepared to fall back to a full reissue.
+
+### Backpressure observability
+
+The cursor module exposes `streaming::observe_and_send` for SSE producers that want to log when the consumer channel is the bottleneck. It uses `tokio::sync::mpsc::Sender::reserve()` so the value is never consumed by a timed-out future; if the soft deadline elapses before a permit is available the send still completes but a `BackpressureSignal::Slow { elapsed_ms }` is returned. Wire this into per-request logs to distinguish "model is slow" from "client TCP receive window is closed".
+
+### HTTP/3 ingress
+
+The fleet's edge already advertises HTTP/3 via the `alt-svc: h3=":443"; ma=2592000` header through the validator-0 Caddy reverse proxy (PQ-hybrid X25519MLKEM768 TLS). Clients that prefer h3 will use it transparently; clients that don't will fall back to h2 over TLS 1.3. No node-side configuration is required for the testnet edge.
+
+In-process HTTP/3 binding on the node itself is not enabled — the axum/hyper stack speaks HTTP/1.1 and h2 only. Operators running a node directly exposed to the internet (rare; usually behind Caddy or another proxy) can add h3 at the proxy. A standalone h3 listener inside `tenzro-node` is deferred — there is no production demand path that bypasses the Caddy edge.
+
+### Verifying resume end-to-end
+
+```bash
+# Open a stream, capture id and seq from the first chunk(s).
+curl -N -sS https://rpc.tenzro.network/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"<model_id>","stream":true,"messages":[{"role":"user","content":"hi"}]}' \
+  | head -20
+
+# Kill the connection. Reissue with Last-Event-ID, observe replay+resume.
+curl -N -sS https://rpc.tenzro.network/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'Last-Event-ID: chatcmpl-<uuid>:3' \
+  -d '{"model":"<model_id>","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+---
+
+## 15. Reference
 
 - **QuickStart**: `crates/tenzro-node/QUICKSTART.md`
 - **Architecture**: `crates/tenzro-node/ARCHITECTURE.md`
 - **Reference builds**: `docs/operators/REFERENCE_BUILDS.md`
-- **Kubernetes manifests**: `deploy/kubernetes/`
-- **Terraform (GKE)**: `deploy/terraform/`
+- **Terraform (GCE — canonical testnet fleet)**: `deploy/terraform/gce_validators/`
+- **Kubernetes manifests (legacy, not used by current testnet)**: `deploy/kubernetes/`
 - **Monitoring**: `deploy/monitoring/`
 - **GitHub**: https://github.com/tenzro/tenzro-network

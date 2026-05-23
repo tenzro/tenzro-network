@@ -39,3 +39,8 @@ iroh-blobs = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "iroh_uri_benchmarks"
+harness = false

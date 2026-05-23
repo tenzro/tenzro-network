@@ -73,6 +73,10 @@ pub enum EventType {
     ComplianceViolation,
     ModelRegistered,
     InferenceCompleted,
+    InferenceStreamStarted,
+    InferenceStreamFirstToken,
+    InferenceStreamDropped,
+    InferenceStreamCompleted,
     AgentMessage,
     SettlementCompleted,
     PaymentChannelUpdate,
@@ -116,6 +120,10 @@ pub fn event_type_static_name(et: EventType) -> &'static str {
         EventType::ComplianceViolation => "ComplianceViolation",
         EventType::ModelRegistered => "ModelRegistered",
         EventType::InferenceCompleted => "InferenceCompleted",
+        EventType::InferenceStreamStarted => "InferenceStreamStarted",
+        EventType::InferenceStreamFirstToken => "InferenceStreamFirstToken",
+        EventType::InferenceStreamDropped => "InferenceStreamDropped",
+        EventType::InferenceStreamCompleted => "InferenceStreamCompleted",
         EventType::AgentMessage => "AgentMessage",
         EventType::SettlementCompleted => "SettlementCompleted",
         EventType::PaymentChannelUpdate => "PaymentChannelUpdate",
@@ -311,6 +319,52 @@ pub enum TenzroEvent {
         cost: u128,
     },
 
+    /// A streaming inference request opened an SSE stream.
+    ///
+    /// `provider_label` mirrors the SLO-metrics label space so audit logs
+    /// and Prometheus rows join on the same key — `"local"` for
+    /// self-served streams, hex-encoded provider address for network-proxy
+    /// streams. Native Tenzro addresses (32 bytes) don't fit the EVM-style
+    /// `[u8; 20]` address-filter pathway used by `Log` / `Transfer`, so
+    /// string labels are the right shape here.
+    InferenceStreamStarted {
+        request_id: String,
+        model_id: String,
+        provider_label: String,
+    },
+
+    /// First token emitted on an SSE stream — fires at most once per stream.
+    /// `ttft_ms` is time-to-first-token measured from `InferenceStreamStarted`.
+    InferenceStreamFirstToken {
+        request_id: String,
+        model_id: String,
+        provider_label: String,
+        ttft_ms: u64,
+    },
+
+    /// SSE stream dropped before the upstream signalled completion.
+    /// `reason` is one of `"stall"`, `"upstream_error"`, `"transport_error"`.
+    /// `silent_for_ms` is populated when `reason == "stall"` (heartbeat
+    /// watchdog tripped) and reflects the silent window in milliseconds.
+    InferenceStreamDropped {
+        request_id: String,
+        model_id: String,
+        provider_label: String,
+        reason: String,
+        silent_for_ms: Option<u64>,
+    },
+
+    /// SSE stream completed cleanly. `latency_ms` is wall-clock from
+    /// `InferenceStreamStarted` to terminate. `success` distinguishes a
+    /// stream that produced at least one token from one that closed empty.
+    InferenceStreamCompleted {
+        request_id: String,
+        model_id: String,
+        provider_label: String,
+        latency_ms: u64,
+        success: bool,
+    },
+
     /// An agent-to-agent message was delivered.
     AgentMessage {
         from_agent: String,
@@ -499,6 +553,10 @@ impl TenzroEvent {
             TenzroEvent::ComplianceViolation { .. } => EventType::ComplianceViolation,
             TenzroEvent::ModelRegistered { .. } => EventType::ModelRegistered,
             TenzroEvent::InferenceCompleted { .. } => EventType::InferenceCompleted,
+            TenzroEvent::InferenceStreamStarted { .. } => EventType::InferenceStreamStarted,
+            TenzroEvent::InferenceStreamFirstToken { .. } => EventType::InferenceStreamFirstToken,
+            TenzroEvent::InferenceStreamDropped { .. } => EventType::InferenceStreamDropped,
+            TenzroEvent::InferenceStreamCompleted { .. } => EventType::InferenceStreamCompleted,
             TenzroEvent::AgentMessage { .. } => EventType::AgentMessage,
             TenzroEvent::SettlementCompleted { .. } => EventType::SettlementCompleted,
             TenzroEvent::PaymentChannelUpdate { .. } => EventType::PaymentChannelUpdate,
@@ -596,6 +654,41 @@ impl fmt::Display for TenzroEvent {
                     f,
                     "InferenceCompleted model={} latency={}ms tokens={}",
                     model_id, latency_ms, tokens_used
+                )
+            }
+            TenzroEvent::InferenceStreamStarted { request_id, model_id, provider_label } => {
+                write!(
+                    f,
+                    "InferenceStreamStarted req={} model={} provider={}",
+                    request_id, model_id, provider_label
+                )
+            }
+            TenzroEvent::InferenceStreamFirstToken { request_id, model_id, ttft_ms, .. } => {
+                write!(
+                    f,
+                    "InferenceStreamFirstToken req={} model={} ttft={}ms",
+                    request_id, model_id, ttft_ms
+                )
+            }
+            TenzroEvent::InferenceStreamDropped { request_id, model_id, reason, silent_for_ms, .. } => {
+                match silent_for_ms {
+                    Some(ms) => write!(
+                        f,
+                        "InferenceStreamDropped req={} model={} reason={} silent={}ms",
+                        request_id, model_id, reason, ms
+                    ),
+                    None => write!(
+                        f,
+                        "InferenceStreamDropped req={} model={} reason={}",
+                        request_id, model_id, reason
+                    ),
+                }
+            }
+            TenzroEvent::InferenceStreamCompleted { request_id, model_id, latency_ms, success, .. } => {
+                write!(
+                    f,
+                    "InferenceStreamCompleted req={} model={} latency={}ms success={}",
+                    request_id, model_id, latency_ms, success
                 )
             }
             TenzroEvent::AgentMessage { from_agent, to_agent, message_type, .. } => {
@@ -1020,6 +1113,10 @@ mod tests {
             EventType::ComplianceViolation,
             EventType::ModelRegistered,
             EventType::InferenceCompleted,
+            EventType::InferenceStreamStarted,
+            EventType::InferenceStreamFirstToken,
+            EventType::InferenceStreamDropped,
+            EventType::InferenceStreamCompleted,
             EventType::AgentMessage,
             EventType::SettlementCompleted,
             EventType::PaymentChannelUpdate,
@@ -1041,7 +1138,7 @@ mod tests {
             let name = event_type_static_name(*et);
             assert!(!name.is_empty(), "Empty name for {:?}", et);
         }
-        assert_eq!(all.len(), 32);
+        assert_eq!(all.len(), 36);
     }
 
     #[test]
@@ -1079,6 +1176,90 @@ mod tests {
         let json = serde_json::to_string(&e).unwrap();
         let back: TenzroEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(e, back);
+    }
+
+    #[test]
+    fn inference_stream_started_roundtrip() {
+        let e = TenzroEvent::InferenceStreamStarted {
+            request_id: "req-abc-123".into(),
+            model_id: "qwen3-0.6b".into(),
+            provider_label: "local".into(),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: TenzroEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(e, back);
+        assert_eq!(e.event_type(), EventType::InferenceStreamStarted);
+    }
+
+    #[test]
+    fn inference_stream_first_token_roundtrip() {
+        let e = TenzroEvent::InferenceStreamFirstToken {
+            request_id: "req-abc-123".into(),
+            model_id: "qwen3-0.6b".into(),
+            provider_label: "0xdeadbeef".into(),
+            ttft_ms: 250,
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: TenzroEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(e, back);
+        assert_eq!(e.event_type(), EventType::InferenceStreamFirstToken);
+        if let TenzroEvent::InferenceStreamFirstToken { ttft_ms, .. } = back {
+            assert_eq!(ttft_ms, 250);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn inference_stream_dropped_with_stall() {
+        let e = TenzroEvent::InferenceStreamDropped {
+            request_id: "req-abc-123".into(),
+            model_id: "qwen3-0.6b".into(),
+            provider_label: "0xdeadbeef".into(),
+            reason: "stall".into(),
+            silent_for_ms: Some(10_500),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: TenzroEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(e, back);
+        assert_eq!(e.event_type(), EventType::InferenceStreamDropped);
+        if let TenzroEvent::InferenceStreamDropped {
+            reason,
+            silent_for_ms,
+            ..
+        } = back
+        {
+            assert_eq!(reason, "stall");
+            assert_eq!(silent_for_ms, Some(10_500));
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn inference_stream_completed_success() {
+        let e = TenzroEvent::InferenceStreamCompleted {
+            request_id: "req-abc-123".into(),
+            model_id: "qwen3-0.6b".into(),
+            provider_label: "local".into(),
+            latency_ms: 4_200,
+            success: true,
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: TenzroEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(e, back);
+        assert_eq!(e.event_type(), EventType::InferenceStreamCompleted);
+        if let TenzroEvent::InferenceStreamCompleted {
+            latency_ms,
+            success,
+            ..
+        } = back
+        {
+            assert_eq!(latency_ms, 4_200);
+            assert!(success);
+        } else {
+            panic!("wrong variant");
+        }
     }
 
     #[test]

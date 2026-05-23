@@ -24,7 +24,8 @@ use tenzro_token::NetworkTreasury;
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::{Address, Timestamp};
 use tenzro_types::settlement::{
-    ProofType, ReleaseConditions, ServiceProof, ServiceType, SettlementRequest,
+    ProofSignature, ProofType, ReleaseConditions, ServiceProof, ServiceType, SettlementRequest,
+    SignerRole,
 };
 
 // ---------------------------------------------------------------------------
@@ -48,9 +49,25 @@ fn make_engine() -> SettlementEngine {
 }
 
 fn make_settlement_request(index: u8) -> SettlementRequest {
-    let provider = make_address(index);
+    // Provider needs to be a real Ed25519 pubkey-address so the engine's
+    // verify_ed25519_signature path (which derives the verifying key from the
+    // signer address bytes) accepts the proof signature.
+    let provider_kp = KeyPair::generate(KeyType::Ed25519).unwrap();
+    let pk_bytes = provider_kp.public_key().as_bytes();
+    let mut addr_bytes = [0u8; 32];
+    let len = pk_bytes.len().min(32);
+    addr_bytes[..len].copy_from_slice(&pk_bytes[..len]);
+    let provider = Address::new(addr_bytes);
     let customer = make_address(index.wrapping_add(100));
-    let proof = ServiceProof::new(ProofType::Cryptographic, vec![1, 2, 3, 4]);
+    let proof_data = vec![1, 2, 3, 4];
+    let signer = Ed25519SignerImpl::new(provider_kp).unwrap();
+    let sig = signer.sign(&proof_data).unwrap();
+    let mut proof = ServiceProof::new(ProofType::Cryptographic, proof_data);
+    proof.signatures.push(ProofSignature {
+        signer: provider,
+        signature: sig.as_bytes().to_vec(),
+        role: SignerRole::Provider,
+    });
     SettlementRequest::new(
         provider,
         customer,
@@ -143,11 +160,24 @@ fn bench_escrow_create_release(c: &mut Criterion) {
     let mut group = c.benchmark_group("escrow_create_release");
     group.sample_size(100);
 
+    // Generate the payee (provider) Ed25519 keypair once outside `iter()` so
+    // the signed proof preimage is a real pub-key-bytes address — the escrow
+    // release path verifies `proof.signatures[0]` against `proof_data` using
+    // the signer-address-bytes-as-Ed25519-pubkey convention.
+    let payee_kp = KeyPair::generate(KeyType::Ed25519).unwrap();
+    let pk_bytes = payee_kp.public_key().as_bytes();
+    let mut addr_bytes = [0u8; 32];
+    let len = pk_bytes.len().min(32);
+    addr_bytes[..len].copy_from_slice(&pk_bytes[..len]);
+    let payee = Address::new(addr_bytes);
+    let payee_signer = Ed25519SignerImpl::new(payee_kp).unwrap();
+    let proof_data = vec![1u8, 2, 3];
+    let payee_sig = payee_signer.sign(&proof_data).unwrap();
+
     group.bench_function("create_and_release", |b| {
         b.iter(|| {
             let balances = Arc::new(DashMap::new());
             let payer = make_address(1);
-            let payee = make_address(2);
             let asset = AssetId::tnzo();
             balances.insert((payer, asset.clone()), 1_000_000u128);
 
@@ -163,7 +193,12 @@ fn bench_escrow_create_release(c: &mut Criterion) {
                 )
                 .unwrap();
 
-            let proof = ServiceProof::new(ProofType::Cryptographic, vec![1, 2, 3]);
+            let mut proof = ServiceProof::new(ProofType::Cryptographic, proof_data.clone());
+            proof.signatures.push(ProofSignature {
+                signer: payee,
+                signature: payee_sig.as_bytes().to_vec(),
+                role: SignerRole::Provider,
+            });
             manager.release_escrow(&escrow.escrow_id, &proof).unwrap();
             black_box(());
         });

@@ -172,6 +172,39 @@ impl TantivyTextBackend {
         Ok(out)
     }
 
+    /// Point-lookup a single record by `(agent_did, record_id)`. Returns
+    /// `Ok(None)` if no row matches. Backs [`MemoryManager::get_by_id`] which
+    /// is in turn used by the `tenzro://memory/...` URI resolver and by the
+    /// archive path (replacing the prior O(n) `list` scan).
+    pub fn get_by_id(&self, agent_did: &str, record_id: &str) -> Result<Option<MemoryRecord>> {
+        let searcher = self.reader.searcher();
+        let id_term = Term::from_field_text(self.fields.id, record_id);
+        let did_term = Term::from_field_text(self.fields.agent_did, agent_did);
+        let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(id_term, IndexRecordOption::Basic)),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(did_term, IndexRecordOption::Basic)),
+            ),
+        ];
+        let q = BooleanQuery::new(clauses);
+        let docs = searcher
+            .search(&q, &TopDocs::with_limit(1).order_by_score())
+            .map_err(|e| MemoryError::Text(format!("get_by_id search: {}", e)))?;
+        match docs.into_iter().next() {
+            Some((_score, addr)) => {
+                let doc: TantivyDocument = searcher
+                    .doc(addr)
+                    .map_err(|e| MemoryError::Text(format!("fetch doc: {}", e)))?;
+                Ok(Some(self.doc_to_record(&doc)?))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Walk the index and return up to `limit` records matching the filter,
     /// most-recent-first. Backs `tenzro_listMemoryRecords` when no embedder
     /// or query string is in play.

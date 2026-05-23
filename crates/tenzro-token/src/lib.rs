@@ -54,6 +54,8 @@ pub mod compute_bond;
 pub mod burn_quota;
 pub mod adaptive_burn;
 pub mod seed_agent;
+pub mod seed_agent_daemon;
+pub mod seed_agent_gossip;
 pub mod validator_registry;
 
 // Re-export commonly used types
@@ -97,10 +99,12 @@ pub use burn_quota::{
     BURN_QUOTA_KEY, DEFAULT_DAILY_REFILL_TARGET, DEFAULT_CAP, DEFAULT_MIN_RESERVE_BPS,
 };
 pub use adaptive_burn::{
-    compute_recommendation, BurnBreakdown, BurnRateConfig, BurnRateConfigManager,
-    BurnRateRecommendation, EmissionBreakdown, RecommendationAction, SupplyMetricsSnapshot,
-    SupplyTargets, BURN_RATE_CONFIG_KEY, DEFAULT_ALARM_FAST_TRACK_ENABLED,
-    DEFAULT_ALARM_TIMELOCK_HOURS, DEFAULT_AUTO_PROPOSAL_MIN_MAGNITUDE_BPS,
+    compute_recommendation, AutoProposalGenerator, AutoProposalGeneratorConfig, BurnBreakdown,
+    BurnRateConfig, BurnRateConfigManager, BurnRateRecommendation, EmissionBreakdown,
+    RecommendationAction, SupplyMetricsSnapshot, SupplyTargets, BURN_RATE_CONFIG_KEY,
+    DEFAULT_ALARM_FAST_TRACK_ENABLED, DEFAULT_ALARM_TIMELOCK_HOURS,
+    DEFAULT_AUTO_PROPOSAL_DEBOUNCE_SECS, DEFAULT_AUTO_PROPOSAL_MIN_MAGNITUDE_BPS,
+    DEFAULT_AUTO_PROPOSAL_NORMAL_VOTING_HOURS, DEFAULT_AUTO_PROPOSAL_POLL_INTERVAL_SECS,
     DEFAULT_BASE_FEE_BURN_BPS, DEFAULT_DEFLATION_ALARM_BPS, DEFAULT_GAIN_BPS_PER_PCT,
     DEFAULT_INFLATION_ALARM_BPS, DEFAULT_LOCAL_FEE_BURN_BPS,
     DEFAULT_MAGNITUDE_CAP_ALARM_BPS, DEFAULT_MAGNITUDE_CAP_NORMAL_BPS,
@@ -109,10 +113,21 @@ pub use adaptive_burn::{
 };
 pub use seed_agent::{
     Charter, CounterpartyFilter, DecayPoint, DecaySchedule, OperationKind,
-    SeedAgentEarmarkManager, SeedAgentRecord, SeedAgentStatus, SpendCaps,
-    TargetThroughput, TreasuryEarmark, DEFAULT_BOOTSTRAP_MONTHS,
-    DEFAULT_SURPLUS_BURN_BPS, SEED_AGENT_PREFIX, SEED_CHARTER_PREFIX,
-    SEED_EARMARK_KEY,
+    RefillResult, SeedAgentEarmarkManager, SeedAgentRecord, SeedAgentStatus,
+    SpendCaps, SurplusDisposition, TargetThroughput, TreasuryEarmark,
+    WindDownReport, DEFAULT_BOOTSTRAP_MONTHS, DEFAULT_QUARANTINE_GRACE_MS,
+    DEFAULT_SURPLUS_BURN_BPS, MONTH_MILLIS, SEED_AGENT_PREFIX,
+    SEED_CHARTER_PREFIX, SEED_EARMARK_KEY,
+};
+pub use seed_agent_daemon::{
+    SeedAgentDaemon, SeedAgentDaemonConfig, SurplusDispositionFn,
+    TickAuthorityFn, TickOutcome, DEFAULT_DAEMON_POLL_INTERVAL_SECS,
+    DEFAULT_DAEMON_QUARANTINE_GRACE_MS, DEFAULT_MIN_REFILL_INTERVAL_MS,
+};
+pub use seed_agent_gossip::{
+    decode_for_topic as decode_seed_agent_for_topic, encode_agent_registered,
+    encode_agent_status_changed, encode_charter_upserted, encode_earmark_updated,
+    encode_monthly_refill_completed, SeedAgentGossipMessage, SEED_AGENTS_TOPIC,
 };
 pub use validator_registry::{
     EpochTransitionPlan, ValidatorRegistry, ValidatorRegistryConfig, ValidatorRegistryEntry,

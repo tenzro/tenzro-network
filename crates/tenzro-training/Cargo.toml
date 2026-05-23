@@ -24,3 +24,10 @@ dashmap = { workspace = true }
 ndarray = { workspace = true }
 bincode = { workspace = true }
 bytes = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "training_benchmarks"
+harness = false

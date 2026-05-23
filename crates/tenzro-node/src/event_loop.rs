@@ -105,6 +105,17 @@ pub enum NodeEvent {
     /// `accept_outer_gradient` path dedups by `trainer_did`, so
     /// re-receiving a self-published gradient is a no-op.
     TrainingGossipReceived { topic: String, bytes: Vec<u8> },
+    /// SeedAgent (Spec 10) gossip message received on `tenzro/seed-agents`.
+    ///
+    /// Carries one of the five variants in
+    /// [`tenzro_token::SeedAgentGossipMessage`]: `CharterUpserted`,
+    /// `EarmarkUpdated`, `AgentRegistered`, `AgentStatusChanged`, or
+    /// `MonthlyRefillCompleted`. The event loop decodes via
+    /// `tenzro_token::decode_seed_agent_for_topic` and applies the variant
+    /// idempotently against the local `SeedAgentEarmarkManager`.
+    /// `MonthlyRefillCompleted` is informational only — receivers do NOT
+    /// replay the refill, only update their earmark snapshot.
+    SeedAgentGossipReceived { topic: String, bytes: Vec<u8> },
     /// Shutdown signal
     Shutdown,
 }
@@ -341,6 +352,13 @@ pub struct EventLoop {
     /// dedups by `trainer_did`, so re-receiving a self-published gradient
     /// (the publisher is also subscribed to its own topic) is a no-op.
     training_runtime: Option<Arc<tenzro_training::TrainingRuntime>>,
+    /// Shared reference to the node's `SeedAgentEarmarkManager` (Spec 10)
+    /// used to apply idempotent state updates received over the
+    /// `tenzro/seed-agents` gossipsub topic. Absent on light clients or
+    /// nodes that don't initialize the seed-agent subsystem; in that case
+    /// inbound seed-agent gossip messages are decoded and logged but not
+    /// applied.
+    seed_agent_manager: Option<Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>>,
     /// Persistent kill-switch receipt store. Wired from the node so that the
     /// post-execute scan in `handle_block_finalized` can record the
     /// canonical `KillSwitchReceipt` (with the real `frozen_at_block`)
@@ -412,6 +430,16 @@ pub struct EventLoop {
     /// current supply on first observation, so the very first epoch
     /// reports a zero delta (no prior reference point).
     last_observed_epoch_supply: u128,
+    /// Cumulative `FeeMarket::total_burned()` at the previous epoch
+    /// observation. Used to compute the per-epoch `BurnBreakdown.base_fee`
+    /// delta. Zero on first observation → first epoch reports zero base-fee
+    /// burn (no prior anchor), then the running delta from this point
+    /// forward.
+    last_observed_base_fee_burn: u128,
+    /// Cumulative `StakingManager::total_slashed()` at the previous epoch
+    /// observation. Used to compute the per-epoch `BurnBreakdown.slash`
+    /// delta. Same first-observation semantics as the base-fee anchor.
+    last_observed_slash_burn: u128,
     /// Receives `BlockImport` requests from the `BlockSyncEngine`. Each item
     /// carries a `Block` that has already passed per-block QC verification at
     /// the engine boundary, plus a oneshot `result` channel that the event
@@ -485,6 +513,7 @@ impl EventLoop {
             load_tracker: None,
             remote_cortex_workers: None,
             training_runtime: None,
+            seed_agent_manager: None,
             kill_switch_store: None,
             staking: None,
             identity_registry: None,
@@ -496,6 +525,8 @@ impl EventLoop {
             burn_rate_manager: None,
             token: None,
             last_observed_epoch_supply: 0,
+            last_observed_base_fee_burn: 0,
+            last_observed_slash_burn: 0,
             snapshot_store: None,
         }
     }
@@ -751,6 +782,19 @@ impl EventLoop {
         runtime: Arc<tenzro_training::TrainingRuntime>,
     ) -> Self {
         self.training_runtime = Some(runtime);
+        self
+    }
+
+    /// Wires the shared `SeedAgentEarmarkManager` (Spec 10) so the event
+    /// loop can apply idempotent state updates received on the
+    /// `tenzro/seed-agents` gossipsub topic. Without this wired,
+    /// seed-agent payloads decoded off the wire are dropped with a
+    /// debug-level log.
+    pub fn with_seed_agent_manager(
+        mut self,
+        manager: Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>,
+    ) -> Self {
+        self.seed_agent_manager = Some(manager);
         self
     }
 
@@ -1967,6 +2011,154 @@ impl EventLoop {
                                 ),
                             }
                         }
+                        NodeEvent::SeedAgentGossipReceived { topic, bytes } => {
+                            match tenzro_token::decode_seed_agent_for_topic(&topic, &bytes) {
+                                Ok(tenzro_token::SeedAgentGossipMessage::CharterUpserted(
+                                    charter,
+                                )) => {
+                                    let charter_id = charter.charter_id;
+                                    let name = charter.name.clone();
+                                    if let Some(ref manager) = self.seed_agent_manager {
+                                        match manager.upsert_charter(charter) {
+                                            Ok(()) => info!(
+                                                charter_id = ?charter_id,
+                                                %name,
+                                                "Applied gossiped SeedAgent CharterUpserted"
+                                            ),
+                                            Err(e) => warn!(
+                                                charter_id = ?charter_id,
+                                                error = %e,
+                                                "Failed to apply gossiped CharterUpserted"
+                                            ),
+                                        }
+                                    } else {
+                                        debug!(
+                                            charter_id = ?charter_id,
+                                            "Dropping gossiped CharterUpserted (seed-agent manager not wired)"
+                                        );
+                                    }
+                                }
+                                Ok(tenzro_token::SeedAgentGossipMessage::EarmarkUpdated(
+                                    earmark,
+                                )) => {
+                                    let allocation_remaining = earmark.allocation_remaining_wei;
+                                    let charter_count = earmark.charter_ids.len();
+                                    if let Some(ref manager) = self.seed_agent_manager {
+                                        match manager.apply_earmark(earmark) {
+                                            Ok(()) => info!(
+                                                allocation_remaining,
+                                                charter_count,
+                                                "Applied gossiped SeedAgent EarmarkUpdated"
+                                            ),
+                                            Err(e) => warn!(
+                                                error = %e,
+                                                "Failed to apply gossiped EarmarkUpdated"
+                                            ),
+                                        }
+                                    } else {
+                                        debug!(
+                                            "Dropping gossiped EarmarkUpdated (seed-agent manager not wired)"
+                                        );
+                                    }
+                                }
+                                Ok(tenzro_token::SeedAgentGossipMessage::AgentRegistered(
+                                    record,
+                                )) => {
+                                    let agent_did = record.agent_did.clone();
+                                    let charter_id = record.charter_id;
+                                    if let Some(ref manager) = self.seed_agent_manager {
+                                        match manager.register_agent(record) {
+                                            Ok(()) => info!(
+                                                %agent_did,
+                                                charter_id = ?charter_id,
+                                                "Applied gossiped SeedAgent AgentRegistered"
+                                            ),
+                                            Err(e) => debug!(
+                                                %agent_did,
+                                                error = %e,
+                                                "AgentRegistered apply skipped (likely already known)"
+                                            ),
+                                        }
+                                    } else {
+                                        debug!(
+                                            %agent_did,
+                                            "Dropping gossiped AgentRegistered (seed-agent manager not wired)"
+                                        );
+                                    }
+                                }
+                                Ok(tenzro_token::SeedAgentGossipMessage::AgentStatusChanged {
+                                    agent_did,
+                                    status,
+                                }) => {
+                                    if let Some(ref manager) = self.seed_agent_manager {
+                                        match manager.set_agent_status(&agent_did, status) {
+                                            Ok(()) => info!(
+                                                %agent_did,
+                                                ?status,
+                                                "Applied gossiped SeedAgent AgentStatusChanged"
+                                            ),
+                                            Err(e) => warn!(
+                                                %agent_did,
+                                                error = %e,
+                                                "Failed to apply gossiped AgentStatusChanged"
+                                            ),
+                                        }
+                                    } else {
+                                        debug!(
+                                            %agent_did,
+                                            "Dropping gossiped AgentStatusChanged (seed-agent manager not wired)"
+                                        );
+                                    }
+                                }
+                                Ok(
+                                    tenzro_token::SeedAgentGossipMessage::MonthlyRefillCompleted {
+                                        agent_did,
+                                        granted_wei,
+                                        month,
+                                        earmark_snapshot,
+                                    },
+                                ) => {
+                                    // INFORMATIONAL ONLY — do not replay
+                                    // `refill_agent_monthly` (that would
+                                    // double-spend). Refresh the local
+                                    // earmark snapshot so passive observers
+                                    // can answer `tenzro_getTreasuryEarmark`
+                                    // without polling the origin node.
+                                    if let Some(ref manager) = self.seed_agent_manager {
+                                        let allocation_remaining =
+                                            earmark_snapshot.allocation_remaining_wei;
+                                        let month_drawn = earmark_snapshot.month_drawn_wei;
+                                        match manager.apply_earmark(earmark_snapshot) {
+                                            Ok(()) => info!(
+                                                %agent_did,
+                                                granted_wei,
+                                                month,
+                                                allocation_remaining,
+                                                month_drawn,
+                                                "Refreshed earmark snapshot from gossiped MonthlyRefillCompleted"
+                                            ),
+                                            Err(e) => warn!(
+                                                %agent_did,
+                                                error = %e,
+                                                "Failed to refresh earmark snapshot from MonthlyRefillCompleted"
+                                            ),
+                                        }
+                                    } else {
+                                        debug!(
+                                            %agent_did,
+                                            granted_wei,
+                                            month,
+                                            "Dropping gossiped MonthlyRefillCompleted (seed-agent manager not wired)"
+                                        );
+                                    }
+                                }
+                                Err(e) => warn!(
+                                    %topic,
+                                    error = %e,
+                                    "Failed to decode SeedAgentGossip payload"
+                                ),
+                            }
+                        }
                         NodeEvent::Shutdown => {
                             info!("Shutdown event received");
                             break;
@@ -2818,7 +3010,31 @@ impl EventLoop {
             let next_height =
                 tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
             if em.should_transition(next_height) {
-                use tenzro_token::adaptive_burn::SupplyMetricsSnapshot;
+                use tenzro_token::adaptive_burn::{
+                    BurnBreakdown, EmissionBreakdown, SupplyMetricsSnapshot,
+                };
+
+                // Per-epoch base-fee burn delta from the live EIP-1559 fee
+                // market. The gas oracle owns the `FeeMarket` (wired in
+                // `init_vm_runtime`); `total_burned()` is monotonic and
+                // we anchor against the previous observation to derive the
+                // per-epoch increment. Absent fee market → zero delta.
+                let cumulative_base_fee_burn = self
+                    .vm_runtime
+                    .gas_oracle()
+                    .fee_market_snapshot()
+                    .await
+                    .map(|fm| fm.total_burned())
+                    .unwrap_or(0);
+
+                // Per-epoch slash burn delta from the staking manager. Net
+                // of governance-authorized restorations. Skipped when the
+                // staking manager is not wired (light client).
+                let cumulative_slash_burn = self
+                    .staking
+                    .as_ref()
+                    .map(|s| s.total_slashed())
+                    .unwrap_or(0);
 
                 let circulating = token.circulating_supply();
                 let prior = self.last_observed_epoch_supply;
@@ -2852,14 +3068,49 @@ impl EventLoop {
                     bps.clamp(i32::MIN as i128, i32::MAX as i128) as i32
                 };
 
+                // Derive per-epoch deltas from monotonic cumulative
+                // counters. First observation (anchor == 0 && cumulative
+                // > 0) is treated as zero delta — we don't have a prior
+                // reference point, and double-counting historical burn at
+                // the first epoch boundary post-boot would bias the
+                // recommendation engine. The very next epoch sees the
+                // running delta from this anchor forward.
+                let base_fee_burn_delta = if self.last_observed_base_fee_burn == 0 {
+                    0
+                } else {
+                    cumulative_base_fee_burn
+                        .saturating_sub(self.last_observed_base_fee_burn)
+                };
+                let slash_burn_delta = if self.last_observed_slash_burn == 0 {
+                    0
+                } else {
+                    cumulative_slash_burn
+                        .saturating_sub(self.last_observed_slash_burn)
+                };
+
+                // Remaining `BurnBreakdown` lanes (local_fee, paymaster)
+                // and the full `EmissionBreakdown` (staking_rewards,
+                // treasury_emissions) are left at zero until their
+                // respective cumulative counters land. The transfer
+                // function `compute_recommendation` only consumes the
+                // already-annualized `rolling_window_supply_delta_bps`,
+                // so these are observational fields for the
+                // `tenzro_getSupplyMetrics` RPC — not inputs to the dial.
+                let burn_breakdown = BurnBreakdown {
+                    base_fee: base_fee_burn_delta,
+                    local_fee: 0,
+                    paymaster: 0,
+                    slash: slash_burn_delta,
+                };
+
                 let snapshot = SupplyMetricsSnapshot {
                     block_height,
                     captured_at: tenzro_types::primitives::Timestamp::now(),
                     circulating_supply: circulating,
                     epoch_supply_delta: epoch_delta,
                     rolling_window_supply_delta_bps: rolling_bps,
-                    burn_breakdown: Default::default(),
-                    emission_breakdown: Default::default(),
+                    burn_breakdown,
+                    emission_breakdown: EmissionBreakdown::default(),
                 };
 
                 if let Err(e) = burn_rate.record_metrics(snapshot) {
@@ -2874,9 +3125,13 @@ impl EventLoop {
                         circulating = circulating,
                         epoch_delta = epoch_delta,
                         rolling_bps = rolling_bps,
+                        base_fee_burn_delta = base_fee_burn_delta,
+                        slash_burn_delta = slash_burn_delta,
                         "Recorded adaptive-burn epoch snapshot"
                     );
                     self.last_observed_epoch_supply = circulating;
+                    self.last_observed_base_fee_burn = cumulative_base_fee_burn;
+                    self.last_observed_slash_burn = cumulative_slash_burn;
                 }
             }
         }

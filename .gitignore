@@ -50,6 +50,15 @@ docs/upstream-staging/
 docs/upstream-registrations.md
 docs/recognition-commands.md
 docs/recognition-roadmap.md
+docs/architecture/agentic-internet.md
+docs/architecture/gap-matrix.md
+docs/architecture/prior-art.md
+# Internal architecture/research drafts at repo root (never published)
+ARCHITECTURE-*.md
+ROADMAP*.md
+*-DRAFT*.md
+*-NOTES*.md
+*-RESEARCH*.md
 
 # Node.js (desktop app, website, scripts)
 node_modules/

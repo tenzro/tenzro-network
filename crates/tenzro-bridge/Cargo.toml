@@ -31,3 +31,11 @@ parking_lot = { workspace = true }
 k256 = { version = "0.13", features = ["ecdsa"] }
 reqwest = { version = "0.12", features = ["json"] }
 base64 = "0.22"
+
+[dev-dependencies]
+tenzro-crypto = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "bridge_benchmarks"
+harness = false

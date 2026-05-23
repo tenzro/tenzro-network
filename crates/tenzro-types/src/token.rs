@@ -441,6 +441,46 @@ pub enum ProposalType {
         alarm_fast_track_enabled: bool,
         alarm_timelock_hours: u32,
     },
+    /// SeedAgent earmark adjustment (Spec 10). Governs the master enable
+    /// flag, allocation top-ups, and the sunset surplus disposition. Other
+    /// fields on `TreasuryEarmark` (decay schedule, bootstrap window,
+    /// charter id list, draw counters) are mutated by protocol code, not
+    /// directly by proposal.
+    SeedAgentEarmarkUpdate {
+        /// Master enable flag. When `false`, no new SeedAgent provisioning
+        /// is admitted and the daemon should wind down.
+        enabled: bool,
+        /// TNZO base units to *add* to `allocation_remaining_wei` (and to
+        /// `initial_allocation_wei` if `is_initial_seed` is set). Zero
+        /// leaves the balance unchanged.
+        allocation_topup_wei: u128,
+        /// If `true`, this proposal also sets `initial_allocation_wei`
+        /// (genesis seeding). After genesis, top-ups should leave the
+        /// initial figure intact for audit purposes.
+        is_initial_seed: bool,
+        /// New sunset surplus disposition in basis points to burn (the
+        /// remainder returns to general treasury). `<= 10_000`.
+        surplus_burn_bps: u16,
+    },
+    /// SeedAgent charter upsert/disable (Spec 10). The charter id is
+    /// `Hash([u8; 32])` rendered as 32 raw bytes; downstream executor
+    /// resolves it against the SeedAgentEarmarkManager. Disabling sets
+    /// `enabled = false` on the existing charter without removing it,
+    /// which signals existing agents under that charter to wind down.
+    SeedAgentCharterUpsert {
+        /// Bincode-serialized [`Charter`] payload. The executor decodes
+        /// and runs `Charter::validate()` before applying.
+        charter_blob: Vec<u8>,
+    },
+    /// SeedAgent per-agent status transition (Spec 10). Used by
+    /// governance to Pause / Quarantine / Terminate a misbehaving agent
+    /// without touching the charter under which it operates.
+    SeedAgentStatusSet {
+        agent_did: String,
+        /// Target status as `SeedAgentStatus::as_str()`:
+        /// `"active" | "paused" | "quarantined" | "terminated"`.
+        status: String,
+    },
     /// Custom proposal
     Custom { proposal_data: Vec<u8> },
 }

@@ -821,6 +821,35 @@ impl StakingManager {
         self.total_staked_by_type.iter().map(|entry| *entry.value()).sum()
     }
 
+    /// Returns the cumulative slash burn across all stakes, net of any
+    /// governance restorations. Computed by summing `slashing_history` and
+    /// subtracting `restore_history` per stake.
+    ///
+    /// Saturating arithmetic — `u128` can hold the full TNZO supply (1B
+    /// scaled by 1e18) many times over, so an overflow here would indicate
+    /// data corruption rather than legitimate flow. Consumed by the
+    /// adaptive-burn observer at every epoch boundary to populate
+    /// `BurnBreakdown.slash`.
+    pub fn total_slashed(&self) -> u128 {
+        self.stakes
+            .iter()
+            .map(|entry| {
+                let stake = entry.value();
+                let slashed: u128 = stake
+                    .slashing_history
+                    .iter()
+                    .map(|s| s.amount)
+                    .fold(0u128, |a, b| a.saturating_add(b));
+                let restored: u128 = stake
+                    .restoration_history
+                    .iter()
+                    .map(|r| r.amount)
+                    .fold(0u128, |a, b| a.saturating_add(b));
+                slashed.saturating_sub(restored)
+            })
+            .fold(0u128, |a, b| a.saturating_add(b))
+    }
+
     /// Updates minimum stake requirement
     pub fn set_min_stake(&self, min_stake: u128) {
         *self.min_stake.write() = min_stake;

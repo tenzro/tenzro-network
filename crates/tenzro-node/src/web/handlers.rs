@@ -1372,6 +1372,15 @@ pub async fn prometheus_metrics(
         node.cortex_metrics.encode_prometheus(&mut body);
     }
 
+    // Append stream-level SLO metrics (P1.3): tenzro_inference_ttft_seconds,
+    // tenzro_inference_intertoken_seconds (histograms), and the
+    // started/completed/failed counters. Labels: (provider, model).
+    // Observations are made inline by the SSE handlers in `rpc.rs` —
+    // here we just serialize the current state.
+    if let Some(ref node) = state.node {
+        node.stream_slo_metrics.encode_prometheus(&mut body);
+    }
+
     // Append Spec 2 (#312) per-DID admission lane metrics. The
     // AdmissionController keeps cumulative LaneStats counters; the
     // mempool exposes per-lane queue depth via `lane_depths()` which

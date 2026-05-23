@@ -56,6 +56,10 @@ criterion = { workspace = true }
 tokio = { workspace = true }
 rand = { workspace = true }
 ed25519-dalek = { workspace = true }
+# Cross-crate consistency: assert wallet's client-side UserOp EIP-712 hash
+# matches the EntryPoint's hash byte-for-byte. Dev-only — never compiles
+# into the runtime crate. No cycle: tenzro-wallet does not depend on tenzro-vm.
+tenzro-wallet = { workspace = true }
 
 [[bench]]
 name = "vm_benchmarks"

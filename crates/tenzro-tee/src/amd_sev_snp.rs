@@ -82,7 +82,6 @@ pub const SNP_DERIVED_KEY_SIZE: usize = 64;
 /// e.g. `MEASUREMENT` makes the key change if the VM's initial state changes.
 ///
 /// Per AMD SEV-SNP ABI spec (revision 1.55), Table 16.
-#[allow(dead_code)]
 pub mod guest_field_select {
     pub const GUEST_POLICY: u64 = 1 << 0;
     pub const IMAGE_ID: u64 = 1 << 1;

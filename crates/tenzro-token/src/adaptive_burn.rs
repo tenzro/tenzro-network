@@ -693,6 +693,236 @@ impl BurnRateConfigManager {
     }
 }
 
+// ---------- Auto-proposal generator -----------------------------------------
+
+/// Default poll interval for the auto-proposal generator: 8 hours, matching
+/// the genesis epoch boundary in `adaptive-burn.md`.
+pub const DEFAULT_AUTO_PROPOSAL_POLL_INTERVAL_SECS: u64 = 8 * 60 * 60;
+
+/// Default debounce between auto-proposals: 24 hours. The generator will not
+/// emit a second proposal within this window even if metrics keep drifting,
+/// to prevent flooding governance with overlapping `AdaptiveBurnConfigUpdate`
+/// votes.
+pub const DEFAULT_AUTO_PROPOSAL_DEBOUNCE_SECS: u64 = 24 * 60 * 60;
+
+/// Normal-state voting duration for an auto-issued proposal: 24 hours.
+pub const DEFAULT_AUTO_PROPOSAL_NORMAL_VOTING_HOURS: u32 = 24;
+
+/// Configuration for [`AutoProposalGenerator`]. All values default to the
+/// genesis spec; operators tune via `NodeConfig` later if needed.
+#[derive(Debug, Clone, Copy)]
+pub struct AutoProposalGeneratorConfig {
+    /// How often the generator polls `current_recommendation()`. Defaults to
+    /// the epoch period (8h).
+    pub poll_interval_secs: u64,
+    /// Minimum elapsed time between two consecutive auto-issued proposals.
+    /// Defaults to 24h. Independent of voting duration — even if a prior
+    /// proposal finishes voting in 6h (alarm fast-track), the generator
+    /// still respects this debounce before drafting another.
+    pub debounce_secs: u64,
+    /// Voting duration for non-alarm proposals, hours.
+    pub normal_voting_hours: u32,
+}
+
+impl Default for AutoProposalGeneratorConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: DEFAULT_AUTO_PROPOSAL_POLL_INTERVAL_SECS,
+            debounce_secs: DEFAULT_AUTO_PROPOSAL_DEBOUNCE_SECS,
+            normal_voting_hours: DEFAULT_AUTO_PROPOSAL_NORMAL_VOTING_HOURS,
+        }
+    }
+}
+
+/// Wraps a [`BurnRateConfigManager`] + [`crate::governance::GovernanceEngine`]
+/// and runs a background tokio task that:
+///
+/// 1. Periodically reads `manager.current_recommendation()`.
+/// 2. If the recommendation has `above_proposal_floor` and the action is
+///    [`RecommendationAction::IncreaseBurnPct`], [`DecreaseBurnPct`],
+///    [`AlarmHighInflation`], or [`AlarmHighDeflation`], drafts a typed
+///    [`tenzro_types::token::ProposalType::AdaptiveBurnConfigUpdate`]
+///    proposal via the engine's `create_system_proposal` (bypasses
+///    min-proposer-stake since the protocol has no stake of its own).
+/// 3. Respects a debounce window to avoid flooding governance.
+///
+/// Alarm states use the `magnitude_cap_alarm_bps` for magnitude (the
+/// recommendation itself carries `magnitude_bps = 0` for alarms — the alarm
+/// is the signal, the size is set by the alarm cap). Alarm voting duration
+/// = `targets.alarm_timelock_hours` when fast-track is enabled, else
+/// `normal_voting_hours`.
+pub struct AutoProposalGenerator {
+    manager: Arc<BurnRateConfigManager>,
+    governance: Arc<crate::governance::GovernanceEngine>,
+    config: AutoProposalGeneratorConfig,
+    last_issued_at: parking_lot::Mutex<Option<std::time::Instant>>,
+}
+
+impl AutoProposalGenerator {
+    pub fn new(
+        manager: Arc<BurnRateConfigManager>,
+        governance: Arc<crate::governance::GovernanceEngine>,
+    ) -> Self {
+        Self::with_config(manager, governance, AutoProposalGeneratorConfig::default())
+    }
+
+    pub fn with_config(
+        manager: Arc<BurnRateConfigManager>,
+        governance: Arc<crate::governance::GovernanceEngine>,
+        config: AutoProposalGeneratorConfig,
+    ) -> Self {
+        Self {
+            manager,
+            governance,
+            config,
+            last_issued_at: parking_lot::Mutex::new(None),
+        }
+    }
+
+    /// Spawn the background loop. The returned `JoinHandle` lives for the
+    /// process lifetime; callers may drop it (no shutdown channel — the loop
+    /// is a no-op when the dial is disabled or the recommendation is
+    /// `NoChange`).
+    pub fn spawn(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let poll = std::time::Duration::from_secs(self.config.poll_interval_secs);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(poll);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip the immediate fire — wait one full interval before the
+            // first poll so metrics have a chance to be observed.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if let Err(e) = self.tick_once() {
+                    tracing::warn!(error = %e, "AutoProposalGenerator: tick_once failed");
+                }
+            }
+        })
+    }
+
+    /// One iteration: read recommendation, draft a proposal if applicable.
+    /// Public for tests; also called once per poll interval by `spawn`.
+    /// Returns `Ok(Some(proposal_id))` if a proposal was issued, `Ok(None)`
+    /// otherwise.
+    pub fn tick_once(&self) -> Result<Option<String>> {
+        let recommendation = self.manager.current_recommendation();
+        if !self.should_propose(&recommendation) {
+            return Ok(None);
+        }
+
+        // Debounce window. Note: tests bypass this by constructing the
+        // generator fresh; production runs hold a single instance.
+        {
+            let last = self.last_issued_at.lock();
+            if let Some(t) = *last {
+                let elapsed = t.elapsed();
+                if elapsed.as_secs() < self.config.debounce_secs {
+                    debug!(
+                        elapsed_secs = elapsed.as_secs(),
+                        debounce_secs = self.config.debounce_secs,
+                        "AutoProposalGenerator: within debounce window, skipping"
+                    );
+                    return Ok(None);
+                }
+            }
+        }
+
+        let targets = self.manager.targets();
+        let current = self.manager.config();
+        let proposed = self.compute_proposed_config(&current, &targets, &recommendation);
+
+        // Validate the proposed config before drafting the proposal so we
+        // don't waste a vote on something the executor will reject.
+        proposed.validate()?;
+
+        let voting_duration_ms = self.voting_duration_ms(&recommendation, &targets);
+
+        let title = format!(
+            "Adaptive burn: {} (deviation {} bps)",
+            recommendation.action.as_str(),
+            recommendation.deviation_bps,
+        );
+        let description = format!(
+            "Auto-issued by AutoProposalGenerator.\n\
+             Action: {action}\n\
+             Magnitude: {magnitude} bps\n\
+             Deviation: {deviation} bps\n\
+             Current base_fee_burn_bps: {cur}\n\
+             Proposed base_fee_burn_bps: {prop}\n\
+             Voting window: {hours}h ({alarm}).",
+            action = recommendation.action.as_str(),
+            magnitude = recommendation.magnitude_bps,
+            deviation = recommendation.deviation_bps,
+            cur = current.base_fee_burn_bps,
+            prop = proposed.base_fee_burn_bps,
+            hours = voting_duration_ms / 3_600_000,
+            alarm = if recommendation.action.is_alarm() {
+                "alarm fast-track"
+            } else {
+                "normal"
+            },
+        );
+
+        let proposal_type = tenzro_types::token::ProposalType::AdaptiveBurnConfigUpdate {
+            base_fee_burn_bps: proposed.base_fee_burn_bps,
+            local_fee_burn_bps: proposed.local_fee_burn_bps,
+            paymaster_burn_bps: proposed.paymaster_burn_bps,
+        };
+
+        let proposal_id = self
+            .governance
+            .create_system_proposal(title, description, proposal_type, voting_duration_ms)?;
+
+        *self.last_issued_at.lock() = Some(std::time::Instant::now());
+
+        info!(
+            proposal_id = %proposal_id,
+            action = recommendation.action.as_str(),
+            current_bps = current.base_fee_burn_bps,
+            proposed_bps = proposed.base_fee_burn_bps,
+            "AutoProposalGenerator: drafted adaptive burn proposal"
+        );
+
+        Ok(Some(proposal_id))
+    }
+
+    fn should_propose(&self, rec: &BurnRateRecommendation) -> bool {
+        match rec.action {
+            RecommendationAction::Disabled | RecommendationAction::NoChange => false,
+            RecommendationAction::IncreaseBurnPct | RecommendationAction::DecreaseBurnPct => {
+                rec.above_proposal_floor
+            }
+            RecommendationAction::AlarmHighInflation
+            | RecommendationAction::AlarmHighDeflation => true,
+        }
+    }
+
+    fn compute_proposed_config(
+        &self,
+        current: &BurnRateConfig,
+        targets: &SupplyTargets,
+        rec: &BurnRateRecommendation,
+    ) -> BurnRateConfig {
+        // For alarms the recommendation magnitude is 0 — pull the per-alarm
+        // cap from targets. Sign comes from which alarm fired.
+        let delta = match rec.action {
+            RecommendationAction::AlarmHighInflation => targets.magnitude_cap_alarm_bps as i32,
+            RecommendationAction::AlarmHighDeflation => -(targets.magnitude_cap_alarm_bps as i32),
+            _ => rec.magnitude_bps,
+        };
+        current.with_base_fee_burn_delta(delta)
+    }
+
+    fn voting_duration_ms(&self, rec: &BurnRateRecommendation, targets: &SupplyTargets) -> i64 {
+        let hours = if rec.action.is_alarm() && targets.alarm_fast_track_enabled {
+            targets.alarm_timelock_hours
+        } else {
+            self.config.normal_voting_hours
+        };
+        hours as i64 * 3_600_000
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -875,5 +1105,148 @@ mod tests {
         assert_eq!(r.action, RecommendationAction::IncreaseBurnPct);
         assert_eq!(r.magnitude_bps, 200);
         assert!(!r.above_proposal_floor);
+    }
+
+    // ---- AutoProposalGenerator tests --------------------------------------
+
+    fn make_auto_gen() -> (
+        Arc<BurnRateConfigManager>,
+        Arc<crate::governance::GovernanceEngine>,
+        Arc<AutoProposalGenerator>,
+    ) {
+        let manager = Arc::new(BurnRateConfigManager::new());
+        let governance = Arc::new(crate::governance::GovernanceEngine::new());
+        let generator = Arc::new(AutoProposalGenerator::new(manager.clone(), governance.clone()));
+        (manager, governance, generator)
+    }
+
+    #[test]
+    fn auto_gen_skips_no_change() {
+        let (mgr, gov, generator) = make_auto_gen();
+        // metrics with rolling=0 → deviation = -50 → per-epoch tiny, NoChange.
+        mgr.record_metrics(metrics_with_rolling(0)).unwrap();
+        let out = generator.tick_once().unwrap();
+        assert!(out.is_none());
+        assert_eq!(gov.proposal_count(), 0);
+    }
+
+    #[test]
+    fn auto_gen_skips_disabled() {
+        let (mgr, gov, generator) = make_auto_gen();
+        // Disable targets, then push extreme metrics.
+        let disabled = SupplyTargets {
+            enabled: false,
+            ..SupplyTargets::default()
+        };
+        mgr.apply_targets(disabled).unwrap();
+        mgr.record_metrics(metrics_with_rolling(10_000)).unwrap();
+        let out = generator.tick_once().unwrap();
+        assert!(out.is_none());
+        assert_eq!(gov.proposal_count(), 0);
+    }
+
+    #[test]
+    fn auto_gen_skips_below_floor() {
+        let (mgr, gov, generator) = make_auto_gen();
+        // Floor=500, rolling=450 → magnitude=200 → below floor.
+        let targets = SupplyTargets {
+            auto_proposal_min_magnitude_bps: 500,
+            rolling_window_epochs: 1,
+            ..SupplyTargets::default()
+        };
+        mgr.apply_targets(targets).unwrap();
+        mgr.record_metrics(metrics_with_rolling(450)).unwrap();
+        let out = generator.tick_once().unwrap();
+        assert!(out.is_none());
+        assert_eq!(gov.proposal_count(), 0);
+    }
+
+    #[test]
+    fn auto_gen_drafts_increase_burn_proposal() {
+        let (mgr, gov, generator) = make_auto_gen();
+        // gain=50/pct, rolling=450 → magnitude=200 → above default floor 25.
+        let targets = SupplyTargets {
+            rolling_window_epochs: 1, // per-epoch band check passes
+            ..SupplyTargets::default()
+        };
+        mgr.apply_targets(targets).unwrap();
+        mgr.record_metrics(metrics_with_rolling(450)).unwrap();
+        let proposal_id = generator.tick_once().unwrap();
+        assert!(proposal_id.is_some());
+        assert_eq!(gov.proposal_count(), 1);
+    }
+
+    #[test]
+    fn auto_gen_alarm_uses_alarm_cap_magnitude() {
+        let (mgr, gov, generator) = make_auto_gen();
+        // rolling=600 → exceeds inflation_alarm_bps=500 → AlarmHighInflation.
+        // Generator should still draft a proposal with magnitude derived
+        // from magnitude_cap_alarm_bps.
+        mgr.record_metrics(metrics_with_rolling(600)).unwrap();
+        let proposal_id = generator.tick_once().unwrap();
+        assert!(proposal_id.is_some());
+        assert_eq!(gov.proposal_count(), 1);
+    }
+
+    #[test]
+    fn auto_gen_alarm_decrease_clamps_at_zero() {
+        let (mgr, gov, generator) = make_auto_gen();
+        // Start config with base_fee_burn_bps = 50, then alarm-deflation
+        // wants to push it negative — clamps at 0.
+        let low_burn = BurnRateConfig {
+            base_fee_burn_bps: 50,
+            ..BurnRateConfig::default()
+        };
+        mgr.apply_config(low_burn).unwrap();
+        mgr.record_metrics(metrics_with_rolling(-600)).unwrap();
+        let proposal_id = generator.tick_once().unwrap();
+        assert!(proposal_id.is_some());
+        // The proposal should be valid (validate() passed)
+        assert_eq!(gov.proposal_count(), 1);
+    }
+
+    #[test]
+    fn auto_gen_respects_debounce() {
+        let (mgr, gov, generator) = make_auto_gen();
+        let targets = SupplyTargets {
+            rolling_window_epochs: 1,
+            ..SupplyTargets::default()
+        };
+        mgr.apply_targets(targets).unwrap();
+        mgr.record_metrics(metrics_with_rolling(450)).unwrap();
+        let first = generator.tick_once().unwrap();
+        assert!(first.is_some());
+        // Second tick within the 24h debounce — should be skipped.
+        let second = generator.tick_once().unwrap();
+        assert!(second.is_none());
+        assert_eq!(gov.proposal_count(), 1);
+    }
+
+    #[test]
+    fn voting_duration_alarm_fast_track() {
+        let (mgr, _gov, generator) = make_auto_gen();
+        let targets = mgr.targets();
+        let rec = BurnRateRecommendation {
+            action: RecommendationAction::AlarmHighInflation,
+            magnitude_bps: 0,
+            above_proposal_floor: true,
+            deviation_bps: 600,
+        };
+        let ms = generator.voting_duration_ms(&rec, &targets);
+        assert_eq!(ms, targets.alarm_timelock_hours as i64 * 3_600_000);
+    }
+
+    #[test]
+    fn voting_duration_normal() {
+        let (mgr, _gov, generator) = make_auto_gen();
+        let targets = mgr.targets();
+        let rec = BurnRateRecommendation {
+            action: RecommendationAction::IncreaseBurnPct,
+            magnitude_bps: 200,
+            above_proposal_floor: true,
+            deviation_bps: 400,
+        };
+        let ms = generator.voting_duration_ms(&rec, &targets);
+        assert_eq!(ms, DEFAULT_AUTO_PROPOSAL_NORMAL_VOTING_HOURS as i64 * 3_600_000);
     }
 }

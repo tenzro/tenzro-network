@@ -9,9 +9,9 @@
 //! - `tenzro seed-agent charters`           — list every Charter
 //! - `tenzro seed-agent list [--charter X]` — list SeedAgentRecords
 //! - `tenzro seed-agent activity`           — network activity baseline
+//! - `tenzro seed-agent refill`             — refill an agent monthly allocation
 //!
-//! Write-side (provisioning daemon, monthly decay, sunset wind-down) lands
-//! alongside the governance-executor mutation paths in a later wave.
+//! Write-side (provisioning daemon, sunset wind-down) lands in a later wave.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -31,6 +31,8 @@ pub enum SeedAgentCommand {
     List(SeedAgentListCmd),
     /// Show network activity baseline (for counterparty filter)
     Activity(SeedAgentActivityCmd),
+    /// Refill an agent's monthly allocation against the decay schedule
+    Refill(SeedAgentRefillCmd),
 }
 
 impl SeedAgentCommand {
@@ -41,6 +43,7 @@ impl SeedAgentCommand {
             Self::Charters(cmd) => cmd.execute().await,
             Self::List(cmd) => cmd.execute().await,
             Self::Activity(cmd) => cmd.execute().await,
+            Self::Refill(cmd) => cmd.execute().await,
         }
     }
 }
@@ -159,6 +162,44 @@ impl SeedAgentActivityCmd {
             None => serde_json::json!({}),
         };
         let v: serde_json::Value = rpc.call("tenzro_getNetworkActivity", params).await?;
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct SeedAgentRefillCmd {
+    /// SeedAgent machine DID
+    #[arg(long)]
+    agent_did: String,
+
+    /// Requested refill amount, as a decimal string of 18-decimal base
+    /// units (TNZO wei)
+    #[arg(long)]
+    requested_wei: String,
+
+    /// Optional override for `now` (Unix ms); defaults to node wall clock
+    #[arg(long)]
+    now_ms: Option<i64>,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl SeedAgentRefillCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("SeedAgent — Monthly Refill");
+        let rpc = RpcClient::new(&self.rpc);
+        let mut params = serde_json::json!({
+            "agent_did": self.agent_did,
+            "requested_wei": self.requested_wei,
+        });
+        if let Some(ms) = self.now_ms {
+            params["now_ms"] = serde_json::json!(ms);
+        }
+        let v: serde_json::Value = rpc.call("tenzro_refillSeedAgent", params).await?;
         println!("{}", serde_json::to_string_pretty(&v)?);
         Ok(())
     }
