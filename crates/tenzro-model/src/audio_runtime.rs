@@ -1529,6 +1529,597 @@ mod onnx_backend {
         best_i
     }
 
+    /// ───────────────────────── Canary ────────────────────────────────
+
+    /// Vocabulary parser for NVIDIA Canary-1B-Flash, an attention
+    /// encoder-decoder (AED) NeMo Conformer ASR with 5249 vocab entries
+    /// served as `token id` per line. Unlike Parakeet (TDT, RNN-T joint),
+    /// Canary has NO blank token — the decoder generates tokens
+    /// autoregressively until `<|endoftext|>`. The `▁` (U+2581) marker
+    /// is replaced with a literal space AT PARSE TIME, matching the
+    /// istupakov/onnx-asr reference (`asr.py`: `token.replace("\u2581", " ")`).
+    /// That makes id 1151 (the bare `▁`) decode to a literal " " token,
+    /// which Canary's decoder uses as the first prefix entry.
+    ///
+    /// The decoder consumes a 10-token prefix selecting source language,
+    /// target language, punctuation/case (`<|pnc|>` vs `<|nopnc|>`),
+    /// timestamp and diarization modes. We look up specials by name
+    /// (the reverse `name → id` map is built once at load time).
+    struct CanaryVocab {
+        /// id → token, with `▁` already replaced by " ".
+        tokens: Vec<String>,
+        /// name → id reverse index. Built from `tokens` after
+        /// replacement, so callers look up `" "` rather than `"▁"`
+        /// for the bare boundary token.
+        by_name: std::collections::HashMap<String, u32>,
+        /// `<|endoftext|>` id — terminates the decoding loop.
+        eos_id: u32,
+    }
+
+    impl CanaryVocab {
+        fn load(path: impl AsRef<std::path::Path>) -> Result<Self> {
+            let raw = std::fs::read_to_string(path.as_ref())
+                .map_err(|e| ModelError::InvalidModel(format!("vocab.txt read: {}", e)))?;
+            let mut pairs: Vec<(String, usize)> = Vec::new();
+            for line in raw.lines() {
+                let line = line.trim_end_matches('\n');
+                if line.is_empty() {
+                    continue;
+                }
+                let sp = line.rfind(' ').ok_or_else(|| {
+                    ModelError::InvalidModel(format!("vocab.txt bad line: {:?}", line))
+                })?;
+                let token_raw = &line[..sp];
+                let id_str = &line[sp + 1..];
+                let id: usize = id_str.parse().map_err(|e| {
+                    ModelError::InvalidModel(format!(
+                        "vocab.txt id parse {:?}: {}",
+                        id_str, e
+                    ))
+                })?;
+                // Per istupakov: replace ▁ with literal space at parse
+                // time. That makes the bare ▁ decode to " ", which the
+                // decoder prefix relies on.
+                let token = token_raw.replace('\u{2581}', " ");
+                pairs.push((token, id));
+            }
+            if pairs.is_empty() {
+                return Err(ModelError::InvalidModel("vocab.txt empty".into()));
+            }
+            pairs.sort_by_key(|p| p.1);
+            for (expected, (_, id)) in pairs.iter().enumerate() {
+                if *id != expected {
+                    return Err(ModelError::InvalidModel(format!(
+                        "vocab.txt non-contiguous ids: expected {}, got {}",
+                        expected, id
+                    )));
+                }
+            }
+            let tokens: Vec<String> = pairs.into_iter().map(|(t, _)| t).collect();
+            let mut by_name: std::collections::HashMap<String, u32> =
+                std::collections::HashMap::with_capacity(tokens.len());
+            for (i, t) in tokens.iter().enumerate() {
+                by_name.insert(t.clone(), i as u32);
+            }
+            let eos_id = *by_name.get("<|endoftext|>").ok_or_else(|| {
+                ModelError::InvalidModel("vocab.txt missing <|endoftext|>".into())
+            })?;
+            Ok(Self {
+                tokens,
+                by_name,
+                eos_id,
+            })
+        }
+
+        fn lookup(&self, name: &str) -> Result<u32> {
+            self.by_name.get(name).copied().ok_or_else(|| {
+                ModelError::InvalidModel(format!("vocab missing special token {:?}", name))
+            })
+        }
+
+        /// Detokenize a list of vocab ids into a string. Filters
+        /// `<|...|>` specials, concatenates remaining tokens, and
+        /// collapses whitespace around word boundaries per istupakov
+        /// `asr.py`: drop leading whitespace and trim spaces around
+        /// word boundaries (`\s\B`).
+        fn decode(&self, ids: &[u32]) -> String {
+            let mut joined = String::new();
+            for &id in ids {
+                if id as usize >= self.tokens.len() {
+                    continue;
+                }
+                let tok = &self.tokens[id as usize];
+                // Skip `<|...|>` specials.
+                if tok.starts_with("<|") && tok.ends_with("|>") {
+                    continue;
+                }
+                joined.push_str(tok);
+            }
+            // Trim leading whitespace and collapse double-spaces. The
+            // Python reference uses `re.sub(r"\A\s|\s\B|(\s)\b", r"\1",
+            // text)`; we approximate by trimming leading whitespace
+            // and collapsing runs of spaces to single spaces, which
+            // matches the SentencePiece detokenization for ASR output.
+            let trimmed = joined.trim_start();
+            let mut out = String::with_capacity(trimmed.len());
+            let mut prev_space = false;
+            for c in trimmed.chars() {
+                let is_space = c == ' ';
+                if is_space && prev_space {
+                    continue;
+                }
+                out.push(c);
+                prev_space = is_space;
+            }
+            out
+        }
+    }
+
+    /// ORT-backed transcriber for NVIDIA Canary-1B-Flash.
+    ///
+    /// Three ONNX sessions:
+    /// - `preprocessor` (`nemo128.onnx`, shared with Parakeet):
+    ///   `waveforms [1, T_samples] f32`, `waveforms_lens [1] i64` →
+    ///   `features [1, 128, T_frames] f32`, `features_lens [1] i64`.
+    /// - `encoder` (`encoder-model.onnx`): NeMo Conformer encoder.
+    ///   Inputs `audio_signal [1, 128, T_frames]`, `length [1] i64` →
+    ///   `outputs [1, S, D]` (sequence-first, unlike Parakeet which is
+    ///   channel-first), `encoded_lengths [1] i64`.
+    /// - `decoder` (`decoder-model.onnx`): cross-attention decoder.
+    ///   Inputs `targets [1, L_in] i64`, `encoder_outputs [1, S, D] f32`,
+    ///   `encoder_mask [1, S] bool`, `decoder_mems [num_layers, 1, L_kv, H] f32`,
+    ///   `decoder_mask [1, L_in] bool` →
+    ///   `logits [1, L_in, V] f32`, `decoder_mems_new`.
+    ///
+    /// Decoding is autoregressive (AED, no blank): seed with a 10-token
+    /// prefix selecting source lang, target lang, PNC, timestamp, and
+    /// diarization modes; argmax greedy decode until `<|endoftext|>`
+    /// or `max_sequence_length` (1024).
+    pub struct CanaryTranscriber {
+        preprocessor: Mutex<Session>,
+        encoder: Mutex<Session>,
+        decoder: Mutex<Session>,
+        vocab: CanaryVocab,
+        /// Decoder mems shape `[num_layers, batch=1, L_kv, hidden_dim]`
+        /// discovered from decoder declared inputs. `L_kv` is dynamic
+        /// (grows by one position per step), so we read num_layers and
+        /// hidden_dim only.
+        decoder_num_layers: usize,
+        decoder_hidden_dim: usize,
+        /// Default source language for the prefix (e.g. `"en"`).
+        default_source_lang: String,
+        /// Default target language for the prefix (e.g. `"en"`).
+        default_target_lang: String,
+        max_audio_seconds: u32,
+        /// Cap on autoregressive steps, per istupakov default.
+        max_sequence_length: usize,
+    }
+
+    impl CanaryTranscriber {
+        pub fn from_onnx(
+            preprocessor_path: impl AsRef<std::path::Path>,
+            encoder_path: impl AsRef<std::path::Path>,
+            decoder_path: impl AsRef<std::path::Path>,
+            vocab_path: impl AsRef<std::path::Path>,
+            source_lang: impl Into<String>,
+            target_lang: impl Into<String>,
+            max_audio_seconds: u32,
+        ) -> Result<Self> {
+            let preprocessor = load_session(preprocessor_path)?;
+            let encoder = load_session(encoder_path)?;
+            let decoder = load_session(decoder_path)?;
+            let vocab = CanaryVocab::load(vocab_path)?;
+            let (decoder_num_layers, decoder_hidden_dim) =
+                discover_canary_mems_shape(&decoder)?;
+            Ok(Self {
+                preprocessor: Mutex::new(preprocessor),
+                encoder: Mutex::new(encoder),
+                decoder: Mutex::new(decoder),
+                vocab,
+                decoder_num_layers,
+                decoder_hidden_dim,
+                default_source_lang: source_lang.into(),
+                default_target_lang: target_lang.into(),
+                max_audio_seconds,
+                max_sequence_length: 1024,
+            })
+        }
+
+        /// Build the 10-token Canary prefix per istupakov reference
+        /// (`models/nemo.py:NemoConformerAED._tokens` slot order):
+        /// `[" ", "<|startofcontext|>", "<|startoftranscript|>",
+        ///   "<|emo:undefined|>", source_lang_tag, target_lang_tag,
+        ///   "<|pnc|>", "<|noitn|>", "<|notimestamp|>",
+        ///   "<|nodiarize|>"]`. Languages are tagged `<|{code}|>`,
+        ///   e.g. `<|en|>`.
+        fn build_prefix(&self, src_lang: &str, tgt_lang: &str) -> Result<Vec<u32>> {
+            let v = &self.vocab;
+            let src_tag = format!("<|{}|>", src_lang);
+            let tgt_tag = format!("<|{}|>", tgt_lang);
+            Ok(vec![
+                v.lookup(" ")?,
+                v.lookup("<|startofcontext|>")?,
+                v.lookup("<|startoftranscript|>")?,
+                v.lookup("<|emo:undefined|>")?,
+                v.lookup(&src_tag)?,
+                v.lookup(&tgt_tag)?,
+                v.lookup("<|pnc|>")?,
+                v.lookup("<|noitn|>")?,
+                v.lookup("<|notimestamp|>")?,
+                v.lookup("<|nodiarize|>")?,
+            ])
+        }
+    }
+
+    /// Read `(num_layers, hidden_dim)` from the `decoder_mems` declared
+    /// input shape `[L, B, T, H]`. `L_kv` (dim 2) is dynamic.
+    fn discover_canary_mems_shape(session: &Session) -> Result<(usize, usize)> {
+        let input = session
+            .inputs
+            .iter()
+            .find(|i| i.name == "decoder_mems")
+            .ok_or_else(|| {
+                ModelError::InvalidModel("decoder missing 'decoder_mems' input".into())
+            })?;
+        let dims: Vec<i64> = match &input.input_type {
+            ort::value::ValueType::Tensor { shape, .. } => shape.iter().copied().collect(),
+            _ => {
+                return Err(ModelError::InvalidModel(
+                    "decoder_mems not a tensor input".into(),
+                ));
+            }
+        };
+        if dims.len() != 4 {
+            return Err(ModelError::InvalidModel(format!(
+                "decoder_mems expected 4-D, got {:?}",
+                dims
+            )));
+        }
+        let to_usize = |d: i64, name: &str| -> Result<usize> {
+            if d <= 0 {
+                Err(ModelError::InvalidModel(format!(
+                    "decoder_mems {} dim is dynamic ({})",
+                    name, d
+                )))
+            } else {
+                Ok(d as usize)
+            }
+        };
+        let num_layers = to_usize(dims[0], "num_layers")?;
+        let hidden_dim = to_usize(dims[3], "hidden_dim")?;
+        Ok((num_layers, hidden_dim))
+    }
+
+    impl Transcriber for CanaryTranscriber {
+        fn transcribe(
+            &self,
+            audio_bytes: &[u8],
+            _config: &TranscribeConfig,
+        ) -> Result<TranscribeResult> {
+            let start = Instant::now();
+            let pcm = decode_to_mono_16k(audio_bytes)?;
+            if pcm.is_empty() {
+                return Err(ModelError::InferenceError("empty audio".to_string()));
+            }
+            let max_samples = self.max_audio_seconds as usize * SAMPLE_RATE as usize;
+            let pcm = if pcm.len() > max_samples {
+                pcm[..max_samples].to_vec()
+            } else {
+                pcm
+            };
+            let n_samples = pcm.len();
+
+            // ── 1. Preprocessor: waveform → 128-mel features ──────────
+            let wave_arr =
+                Array2::<f32>::from_shape_vec((1, n_samples), pcm).map_err(|e| {
+                    ModelError::InferenceError(format!("waveform shape: {}", e))
+                })?;
+            let wave_lens = ndarray::Array1::<i64>::from_vec(vec![n_samples as i64]);
+            let wave_tensor = Tensor::from_array(wave_arr).map_err(|e| {
+                ModelError::InferenceError(format!("waveform tensor: {}", e))
+            })?;
+            let wave_lens_tensor = Tensor::from_array(wave_lens).map_err(|e| {
+                ModelError::InferenceError(format!("waveform lens tensor: {}", e))
+            })?;
+            let (features_data, features_shape, features_lens_val) = {
+                let mut sess = self.preprocessor.lock();
+                let outputs = sess
+                    .run(ort::inputs![
+                        "waveforms" => wave_tensor,
+                        "waveforms_lens" => wave_lens_tensor,
+                    ])
+                    .map_err(|e| {
+                        ModelError::InferenceError(format!("preprocessor run: {}", e))
+                    })?;
+                let feat_val = outputs.get("features").ok_or_else(|| {
+                    ModelError::InferenceError(
+                        "preprocessor missing 'features' output".into(),
+                    )
+                })?;
+                let (fshape, fdata) =
+                    feat_val.try_extract_tensor::<f32>().map_err(|e| {
+                        ModelError::InferenceError(format!("features extract: {}", e))
+                    })?;
+                let fshape: Vec<i64> = fshape.iter().copied().collect();
+                let flens_val = outputs.get("features_lens").ok_or_else(|| {
+                    ModelError::InferenceError(
+                        "preprocessor missing 'features_lens' output".into(),
+                    )
+                })?;
+                let (_, flens_data) =
+                    flens_val.try_extract_tensor::<i64>().map_err(|e| {
+                        ModelError::InferenceError(format!(
+                            "features_lens extract: {}",
+                            e
+                        ))
+                    })?;
+                let flens_val = flens_data
+                    .first()
+                    .copied()
+                    .ok_or_else(|| ModelError::InferenceError("empty features_lens".into()))?;
+                (fdata.to_vec(), fshape, flens_val)
+            };
+            if features_shape.len() != 3 {
+                return Err(ModelError::InferenceError(format!(
+                    "expected features [1, 128, T], got {:?}",
+                    features_shape
+                )));
+            }
+            let feat_chans = features_shape[1] as usize;
+            let feat_t = features_shape[2] as usize;
+
+            // ── 2. Encoder: features → encoder outputs ────────────────
+            let feat_arr =
+                Array3::<f32>::from_shape_vec((1, feat_chans, feat_t), features_data)
+                    .map_err(|e| ModelError::InferenceError(format!("feat shape: {}", e)))?;
+            let feat_tensor = Tensor::from_array(feat_arr).map_err(|e| {
+                ModelError::InferenceError(format!("feat tensor: {}", e))
+            })?;
+            let feat_lens = ndarray::Array1::<i64>::from_vec(vec![features_lens_val]);
+            let feat_lens_tensor = Tensor::from_array(feat_lens).map_err(|e| {
+                ModelError::InferenceError(format!("feat lens tensor: {}", e))
+            })?;
+            let (enc_out_data, enc_out_shape, enc_out_len) = {
+                let mut sess = self.encoder.lock();
+                let outputs = sess
+                    .run(ort::inputs![
+                        "audio_signal" => feat_tensor,
+                        "length" => feat_lens_tensor,
+                    ])
+                    .map_err(|e| {
+                        ModelError::InferenceError(format!("encoder run: {}", e))
+                    })?;
+                let out_val = outputs.get("outputs").ok_or_else(|| {
+                    ModelError::InferenceError("encoder missing 'outputs'".into())
+                })?;
+                let (oshape, odata) = out_val.try_extract_tensor::<f32>().map_err(|e| {
+                    ModelError::InferenceError(format!("encoder outputs extract: {}", e))
+                })?;
+                let oshape: Vec<i64> = oshape.iter().copied().collect();
+                let elen_val = outputs.get("encoded_lengths").ok_or_else(|| {
+                    ModelError::InferenceError("encoder missing 'encoded_lengths'".into())
+                })?;
+                let (_, elen_data) =
+                    elen_val.try_extract_tensor::<i64>().map_err(|e| {
+                        ModelError::InferenceError(format!("encoded_lengths extract: {}", e))
+                    })?;
+                let elen = elen_data.first().copied().ok_or_else(|| {
+                    ModelError::InferenceError("empty encoded_lengths".into())
+                })?;
+                (odata.to_vec(), oshape, elen)
+            };
+            if enc_out_shape.len() != 3 {
+                return Err(ModelError::InferenceError(format!(
+                    "expected encoder outputs [1, S, D], got {:?}",
+                    enc_out_shape
+                )));
+            }
+            // Canary encoder is sequence-first `[1, S, D]`.
+            let s_dim = enc_out_shape[1] as usize;
+            let d_dim = enc_out_shape[2] as usize;
+            let usable_s = (enc_out_len as usize).min(s_dim);
+
+            // Encoder mask: `[1, S]` bool, true for usable frames.
+            let mut enc_mask: Vec<bool> = vec![false; s_dim];
+            for i in 0..usable_s {
+                enc_mask[i] = true;
+            }
+
+            // ── 3. AED autoregressive decoding ───────────────────────
+            let prefix =
+                self.build_prefix(&self.default_source_lang, &self.default_target_lang)?;
+            let mut emitted: Vec<u32> = Vec::new();
+            // Mems start empty (L_kv = 0). Subsequent steps grow by 1.
+            let mut mems: Vec<f32> = Vec::new();
+            let mut mems_l_kv: usize = 0;
+
+            // Per istupakov: step 0 feeds the full prefix; subsequent
+            // steps feed only the last emitted token, with the
+            // accumulated mems carrying the prefix's KV cache.
+            let mut step = 0usize;
+            loop {
+                if step >= self.max_sequence_length {
+                    break;
+                }
+                let in_tokens: Vec<i64> = if step == 0 {
+                    prefix.iter().map(|&t| t as i64).collect()
+                } else {
+                    vec![*emitted.last().unwrap() as i64]
+                };
+                let l_in = in_tokens.len();
+
+                let targets_arr = Array2::<i64>::from_shape_vec((1, l_in), in_tokens)
+                    .map_err(|e| {
+                        ModelError::InferenceError(format!("targets shape: {}", e))
+                    })?;
+                let targets_tensor = Tensor::from_array(targets_arr).map_err(|e| {
+                    ModelError::InferenceError(format!("targets tensor: {}", e))
+                })?;
+
+                let enc_arr =
+                    Array3::<f32>::from_shape_vec((1, s_dim, d_dim), enc_out_data.clone())
+                        .map_err(|e| {
+                            ModelError::InferenceError(format!(
+                                "encoder_outputs shape: {}",
+                                e
+                            ))
+                        })?;
+                let enc_tensor = Tensor::from_array(enc_arr).map_err(|e| {
+                    ModelError::InferenceError(format!("encoder_outputs tensor: {}", e))
+                })?;
+
+                let enc_mask_arr =
+                    Array2::<bool>::from_shape_vec((1, s_dim), enc_mask.clone()).map_err(
+                        |e| {
+                            ModelError::InferenceError(format!("encoder_mask shape: {}", e))
+                        },
+                    )?;
+                let enc_mask_tensor = Tensor::from_array(enc_mask_arr).map_err(|e| {
+                    ModelError::InferenceError(format!("encoder_mask tensor: {}", e))
+                })?;
+
+                let mems_buf = if mems_l_kv == 0 {
+                    vec![0.0_f32; self.decoder_num_layers * 1 * 0 * self.decoder_hidden_dim]
+                } else {
+                    mems.clone()
+                };
+                let mems_arr = Array4::<f32>::from_shape_vec(
+                    (
+                        self.decoder_num_layers,
+                        1,
+                        mems_l_kv,
+                        self.decoder_hidden_dim,
+                    ),
+                    mems_buf,
+                )
+                .map_err(|e| {
+                    ModelError::InferenceError(format!("decoder_mems shape: {}", e))
+                })?;
+                let mems_tensor = Tensor::from_array(mems_arr).map_err(|e| {
+                    ModelError::InferenceError(format!("decoder_mems tensor: {}", e))
+                })?;
+
+                let dec_mask: Vec<bool> = vec![true; l_in];
+                let dec_mask_arr = Array2::<bool>::from_shape_vec((1, l_in), dec_mask)
+                    .map_err(|e| {
+                        ModelError::InferenceError(format!("decoder_mask shape: {}", e))
+                    })?;
+                let dec_mask_tensor = Tensor::from_array(dec_mask_arr).map_err(|e| {
+                    ModelError::InferenceError(format!("decoder_mask tensor: {}", e))
+                })?;
+
+                let (logits_data, logits_shape, new_mems_data, new_mems_shape) = {
+                    let mut sess = self.decoder.lock();
+                    let outputs = sess
+                        .run(ort::inputs![
+                            "targets" => targets_tensor,
+                            "encoder_outputs" => enc_tensor,
+                            "encoder_mask" => enc_mask_tensor,
+                            "decoder_mems" => mems_tensor,
+                            "decoder_mask" => dec_mask_tensor,
+                        ])
+                        .map_err(|e| {
+                            ModelError::InferenceError(format!("decoder run: {}", e))
+                        })?;
+                    let logits_val = outputs.get("logits").ok_or_else(|| {
+                        ModelError::InferenceError("decoder missing 'logits'".into())
+                    })?;
+                    let (lshape, ldata) =
+                        logits_val.try_extract_tensor::<f32>().map_err(|e| {
+                            ModelError::InferenceError(format!("logits extract: {}", e))
+                        })?;
+                    let lshape: Vec<i64> = lshape.iter().copied().collect();
+                    let mems_val = outputs.get("decoder_mems_new").ok_or_else(|| {
+                        ModelError::InferenceError(
+                            "decoder missing 'decoder_mems_new'".into(),
+                        )
+                    })?;
+                    let (mshape, mdata) =
+                        mems_val.try_extract_tensor::<f32>().map_err(|e| {
+                            ModelError::InferenceError(format!(
+                                "decoder_mems_new extract: {}",
+                                e
+                            ))
+                        })?;
+                    let mshape: Vec<i64> = mshape.iter().copied().collect();
+                    (ldata.to_vec(), lshape, mdata.to_vec(), mshape)
+                };
+
+                if logits_shape.len() != 3 {
+                    return Err(ModelError::InferenceError(format!(
+                        "logits expected [1, L, V], got {:?}",
+                        logits_shape
+                    )));
+                }
+                let l_out = logits_shape[1] as usize;
+                let v_dim = logits_shape[2] as usize;
+                // Take the LAST position's logits row.
+                let last_row_start = (l_out - 1) * v_dim;
+                let last_row = &logits_data[last_row_start..last_row_start + v_dim];
+                let next_tok = argmax_usize(last_row) as u32;
+
+                if next_tok == self.vocab.eos_id {
+                    break;
+                }
+                emitted.push(next_tok);
+
+                // Replace mems with the new ones (which now include
+                // L_kv = old + l_in positions).
+                if new_mems_shape.len() != 4 {
+                    return Err(ModelError::InferenceError(format!(
+                        "decoder_mems_new expected 4-D, got {:?}",
+                        new_mems_shape
+                    )));
+                }
+                mems = new_mems_data;
+                mems_l_kv = new_mems_shape[2] as usize;
+                step += 1;
+            }
+
+            let text = self.vocab.decode(&emitted);
+
+            Ok(TranscribeResult {
+                text,
+                segments: Vec::new(),
+                language: Some(self.default_target_lang.clone()),
+                generation_time_ms: start.elapsed().as_millis() as u64,
+            })
+        }
+
+        fn sample_rate(&self) -> u32 {
+            SAMPLE_RATE
+        }
+        fn max_audio_seconds(&self) -> u32 {
+            self.max_audio_seconds
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn canary_vocab_load_for_test(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(Vec<String>, u32)> {
+        let v = CanaryVocab::load(path)?;
+        Ok((v.tokens, v.eos_id))
+    }
+
+    #[cfg(test)]
+    pub(super) fn canary_vocab_decode_for_test(
+        tokens: Vec<String>,
+        ids: &[u32],
+    ) -> String {
+        let mut by_name = std::collections::HashMap::new();
+        for (i, t) in tokens.iter().enumerate() {
+            by_name.insert(t.clone(), i as u32);
+        }
+        let eos_id = by_name.get("<|endoftext|>").copied().unwrap_or(0);
+        let v = CanaryVocab {
+            tokens,
+            by_name,
+            eos_id,
+        };
+        v.decode(ids)
+    }
+
     #[cfg(test)]
     pub(super) fn parakeet_vocab_load_for_test(
         path: impl AsRef<std::path::Path>,
@@ -1804,7 +2395,7 @@ mod onnx_backend {
 
 }
 
-pub use onnx_backend::{MoonshineTranscriber, ParakeetTranscriber, WhisperTranscriber};
+pub use onnx_backend::{CanaryTranscriber, MoonshineTranscriber, ParakeetTranscriber, WhisperTranscriber};
 
 /// Runtime that owns multiple loaded ASR models.
 pub struct AudioRuntime {
@@ -1896,6 +2487,43 @@ impl AudioRuntime {
             encoder_path,
             decoder_joint_path,
             vocab_path,
+            max_audio_seconds,
+        )?;
+        self.models.insert(
+            model_id.into(),
+            Arc::new(model) as Arc<dyn Transcriber>,
+        );
+        Ok(())
+    }
+
+    /// Load an NVIDIA Canary-1B-Flash AED ASR model from a downloaded
+    /// istupakov-style ONNX bundle. Inputs:
+    /// - `preprocessor_path`: `nemo128.onnx` (shared with Parakeet —
+    ///   waveform → 128-mel features).
+    /// - `encoder_path`: `encoder-model.onnx` (NeMo Conformer encoder).
+    /// - `decoder_path`: `decoder-model.onnx` (cross-attention AED decoder).
+    /// - `vocab_path`: `vocab.txt` (`token id` per line, 5249 tokens
+    ///   including `<|endoftext|>` and the language/task control tags).
+    /// - `source_lang` / `target_lang`: ISO codes (`"en"`, `"de"`,
+    ///   `"es"`, `"fr"`) used to build the 10-token decoder prefix.
+    pub fn load_canary(
+        &self,
+        model_id: impl Into<String>,
+        preprocessor_path: impl AsRef<Path>,
+        encoder_path: impl AsRef<Path>,
+        decoder_path: impl AsRef<Path>,
+        vocab_path: impl AsRef<Path>,
+        source_lang: impl Into<String>,
+        target_lang: impl Into<String>,
+        max_audio_seconds: u32,
+    ) -> Result<()> {
+        let model = CanaryTranscriber::from_onnx(
+            preprocessor_path,
+            encoder_path,
+            decoder_path,
+            vocab_path,
+            source_lang,
+            target_lang,
             max_audio_seconds,
         )?;
         self.models.insert(
@@ -2077,6 +2705,102 @@ mod tests {
     fn parakeet_vocab_decode_handles_empty_input() {
         let tokens = vec!["\u{2581}hi".to_string(), "<blk>".to_string()];
         let out = onnx_backend::parakeet_vocab_decode_for_test(tokens, 1, &[]);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn canary_vocab_load_replaces_word_boundary_marker_at_parse_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vocab.txt");
+        // ▁ (bare boundary marker) → " " literal at parse time.
+        // ▁hello → " hello", believ → "believ", <|endoftext|> kept as-is.
+        std::fs::write(
+            &path,
+            "\u{2581} 0\n\u{2581}hello 1\nbeliev 2\n<|endoftext|> 3\n",
+        )
+        .unwrap();
+        let (tokens, eos_id) =
+            onnx_backend::canary_vocab_load_for_test(&path).unwrap();
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0], " ");
+        assert_eq!(tokens[1], " hello");
+        assert_eq!(tokens[2], "believ");
+        assert_eq!(tokens[3], "<|endoftext|>");
+        assert_eq!(eos_id, 3);
+    }
+
+    #[test]
+    fn canary_vocab_load_rejects_non_contiguous_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vocab.txt");
+        std::fs::write(&path, "tok_a 0\ntok_b 2\n<|endoftext|> 3\n").unwrap();
+        let res = onnx_backend::canary_vocab_load_for_test(&path);
+        assert!(matches!(res, Err(ModelError::InvalidModel(_))));
+    }
+
+    #[test]
+    fn canary_vocab_load_rejects_missing_eos() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vocab.txt");
+        std::fs::write(&path, "tok_a 0\ntok_b 1\n").unwrap();
+        let res = onnx_backend::canary_vocab_load_for_test(&path);
+        assert!(matches!(res, Err(ModelError::InvalidModel(_))));
+    }
+
+    #[test]
+    fn canary_vocab_load_rejects_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vocab.txt");
+        std::fs::write(&path, "").unwrap();
+        let res = onnx_backend::canary_vocab_load_for_test(&path);
+        assert!(matches!(res, Err(ModelError::InvalidModel(_))));
+    }
+
+    #[test]
+    fn canary_vocab_decode_filters_special_tokens() {
+        // Mix of specials (<|...|>) and content. Specials are dropped,
+        // content concatenated, leading space trimmed.
+        let tokens = vec![
+            "<|startoftranscript|>".to_string(), // 0
+            " hello".to_string(),                // 1 — leading space (was ▁hello)
+            " world".to_string(),                // 2
+            "<|endoftext|>".to_string(),         // 3
+        ];
+        let out = onnx_backend::canary_vocab_decode_for_test(tokens, &[0, 1, 2, 3]);
+        assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn canary_vocab_decode_concatenates_subword_pieces() {
+        // " un" + "believ" + "able" → "unbelievable" (leading space trimmed).
+        let tokens = vec![
+            " un".to_string(),
+            "believ".to_string(),
+            "able".to_string(),
+            "<|endoftext|>".to_string(),
+        ];
+        let out = onnx_backend::canary_vocab_decode_for_test(tokens, &[0, 1, 2]);
+        assert_eq!(out, "unbelievable");
+    }
+
+    #[test]
+    fn canary_vocab_decode_collapses_runs_of_spaces() {
+        let tokens = vec![
+            " ".to_string(),       // bare space (was ▁)
+            " hello".to_string(),
+            " world".to_string(),
+            "<|endoftext|>".to_string(),
+        ];
+        // Concatenated: " " + " hello" + " world" = "  hello world".
+        // Decode: trim leading, collapse double space → "hello world".
+        let out = onnx_backend::canary_vocab_decode_for_test(tokens, &[0, 1, 2]);
+        assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn canary_vocab_decode_handles_empty_input() {
+        let tokens = vec![" hi".to_string(), "<|endoftext|>".to_string()];
+        let out = onnx_backend::canary_vocab_decode_for_test(tokens, &[]);
         assert_eq!(out, "");
     }
 }

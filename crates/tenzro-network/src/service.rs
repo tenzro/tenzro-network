@@ -2270,6 +2270,22 @@ async fn handle_swarm_event(
                 .peer_manager
                 .update_status(&peer_id, PeerStatus::Connected);
 
+            // Application-layer peer address migration detection. libp2p's
+            // `ConnectionEstablished` surfaces the remote multiaddr via
+            // `endpoint.get_remote_address()`; comparing against the
+            // previously observed remote for this peer lets us count QUIC
+            // path migrations, mobile-network switches, and NAT rebinding
+            // events without reaching into quinn-proto internals.
+            let remote_addr = endpoint.get_remote_address().clone();
+            if state.peer_manager.update_endpoint(&peer_id, remote_addr.clone()) {
+                state.metrics.peer_address_migrations_total.inc();
+                tracing::info!(
+                    %peer_id,
+                    new_addr = %remote_addr,
+                    "Peer address migration observed — counter incremented"
+                );
+            }
+
             // Fan out a `PeerEvent::Connected` exactly once per peer — only
             // when this is the first physical connection. Subsequent
             // multiplexed connections to the same peer don't re-emit. If

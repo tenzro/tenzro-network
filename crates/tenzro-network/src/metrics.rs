@@ -52,6 +52,11 @@ pub struct NetworkMetrics {
     pub kad_routing_table_size: Gauge,
     /// Gossipsub mesh size for validator-only topics (aggregated).
     pub gossipsub_mesh_size: Gauge,
+    /// Total observed peer remote-address migrations (monotonic). Incremented
+    /// when a new connection to an already-known peer arrives on a different
+    /// remote multiaddr than the previously observed one — covers QUIC path
+    /// migration, mobile network switches, and NAT rebinding events.
+    pub peer_address_migrations_total: Counter,
 }
 
 impl NetworkMetrics {
@@ -166,6 +171,13 @@ impl NetworkMetrics {
             gossipsub_mesh_size.clone(),
         );
 
+        let peer_address_migrations_total = Counter::default();
+        sub.register(
+            "peer_address_migrations_total",
+            "Peer remote-address migrations observed (QUIC path migration, NAT rebinding)",
+            peer_address_migrations_total.clone(),
+        );
+
         Arc::new(Self {
             events_dropped,
             dials_rejected_per_ip,
@@ -182,6 +194,7 @@ impl NetworkMetrics {
             peers_connected,
             kad_routing_table_size,
             gossipsub_mesh_size,
+            peer_address_migrations_total,
         })
     }
 
