@@ -27,6 +27,8 @@ pub enum NodeCommand {
     MempoolStats(NodeMempoolStatsCmd),
     /// Resolve which admission lane an address would land in, plus its current token-bucket state
     MempoolLane(NodeMempoolLaneCmd),
+    /// Show network-layer counters and gauges (gossip, connections, peer-address migrations)
+    Stats(NodeStatsCmd),
 }
 
 impl NodeCommand {
@@ -41,6 +43,7 @@ impl NodeCommand {
             Self::FeeMarket(cmd) => cmd.execute().await,
             Self::MempoolStats(cmd) => cmd.execute().await,
             Self::MempoolLane(cmd) => cmd.execute().await,
+            Self::Stats(cmd) => cmd.execute().await,
         }
     }
 }
@@ -743,6 +746,87 @@ impl NodeMempoolLaneCmd {
         } else {
             output::print_info("Bucket has not been instantiated yet (no traffic from this address)");
         }
+
+        Ok(())
+    }
+}
+
+/// Show network-layer counters and gauges.
+///
+/// Calls `tenzro_getNetworkStats` and prints the snapshot. Includes gossip
+/// admit/reject counts, connection totals + current gauge, banned/connected
+/// peer counts, kad routing table size, gossipsub mesh size, and the
+/// `peer_address_migrations_total` counter — incremented when libp2p observes
+/// a new remote multiaddr for an already-known peer (QUIC path migration,
+/// mobile network switch, NAT rebinding).
+#[derive(Debug, Parser)]
+pub struct NodeStatsCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+impl NodeStatsCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_getNetworkStats", serde_json::json!([]))
+            .await?;
+
+        if self.format == "json" {
+            output::print_json(&result)?;
+            return Ok(());
+        }
+
+        output::print_header("Network Stats");
+
+        if !result.get("available").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let reason = result
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("network service not initialized");
+            output::print_warning(reason);
+            return Ok(());
+        }
+
+        let field = |k: &str| result.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        let ifield = |k: &str| result.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+
+        output::print_info("Connections");
+        output::print_field("  Established (current)", &ifield("connections_established").to_string());
+        output::print_field("  Inbound total", &field("connections_inbound_total").to_string());
+        output::print_field("  Outbound total", &field("connections_outbound_total").to_string());
+        output::print_field("  Peers connected", &ifield("peers_connected").to_string());
+        output::print_field("  Peers banned", &ifield("peers_banned").to_string());
+
+        println!();
+        output::print_info("Gossipsub");
+        output::print_field("  Published", &field("gossip_published").to_string());
+        output::print_field("  Accepted", &field("gossip_accepted").to_string());
+        output::print_field("  Rejected (validator-only)", &field("gossip_rejected_validator_only").to_string());
+        output::print_field("  Rejected (invalid)", &field("gossip_rejected_invalid").to_string());
+        output::print_field("  Rejected (duplicate)", &field("gossip_rejected_duplicate").to_string());
+        output::print_field("  Mesh size", &ifield("gossipsub_mesh_size").to_string());
+
+        println!();
+        output::print_info("Discovery & Dialing");
+        output::print_field("  Kademlia routing table", &ifield("kad_routing_table_size").to_string());
+        output::print_field("  Dials rejected (per-IP)", &field("dials_rejected_per_ip").to_string());
+        output::print_field("  Dials rejected (global)", &field("dials_rejected_global").to_string());
+        output::print_field("  Swarm events dropped", &field("events_dropped").to_string());
+
+        println!();
+        output::print_info("Path Migration");
+        output::print_field(
+            "  Peer address migrations",
+            &field("peer_address_migrations_total").to_string(),
+        );
 
         Ok(())
     }

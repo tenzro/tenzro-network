@@ -911,6 +911,7 @@ pub(crate) async fn handle_request(
         "tenzro_nodeInfo" | "tenzro_getNodeStatus" => handle_node_info(node).await,
         "tenzro_peerCount" => handle_peer_count(node).await,
         "tenzro_syncing" => handle_syncing(node).await,
+        "tenzro_getNetworkStats" => handle_get_network_stats(node).await,
         "tenzro_getFinalizedBlock" => handle_get_finalized_block(node).await,
         "tenzro_exportConfig" => handle_export_config(node).await,
         "tenzro_gracefulExit" => handle_graceful_exit(node, request.params).await,
@@ -10043,6 +10044,41 @@ async fn handle_syncing(node: &Arc<TenzroNode>) -> std::result::Result<Value, Js
     }
 }
 
+/// `tenzro_getNetworkStats` — snapshot of network-layer counters and gauges
+/// surfaced from `tenzro_network::NetworkMetrics`. Operators get the same
+/// values via the `/metrics` Prometheus endpoint; this RPC is the JSON
+/// surface for CLI/SDK consumers who don't run a Prometheus scrape.
+async fn handle_get_network_stats(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let Some(net) = node.network() else {
+        return Ok(serde_json::json!({
+            "available": false,
+            "reason": "network service not initialized",
+        }));
+    };
+    let m = net.metrics();
+    Ok(serde_json::json!({
+        "available": true,
+        "events_dropped": m.events_dropped.get(),
+        "dials_rejected_per_ip": m.dials_rejected_per_ip.get(),
+        "dials_rejected_global": m.dials_rejected_global.get(),
+        "gossip_rejected_validator_only": m.gossip_rejected_validator_only.get(),
+        "gossip_rejected_invalid": m.gossip_rejected_invalid.get(),
+        "gossip_rejected_duplicate": m.gossip_rejected_duplicate.get(),
+        "gossip_published": m.gossip_published.get(),
+        "gossip_accepted": m.gossip_accepted.get(),
+        "connections_established": m.connections_established.get(),
+        "connections_inbound_total": m.connections_inbound_total.get(),
+        "connections_outbound_total": m.connections_outbound_total.get(),
+        "peers_banned": m.peers_banned.get(),
+        "peers_connected": m.peers_connected.get(),
+        "kad_routing_table_size": m.kad_routing_table_size.get(),
+        "gossipsub_mesh_size": m.gossipsub_mesh_size.get(),
+        "peer_address_migrations_total": m.peer_address_migrations_total.get(),
+    }))
+}
+
 /// `tenzro_gracefulExit` — admin RPC for clean validator shutdown.
 ///
 /// Pattern: Solana `agave-validator exit` + Cosmos SDK `cosmovisor` halt.
@@ -14982,11 +15018,44 @@ async fn handle_load_audio_model(
                 )
                 .map_err(forecast_err)?;
         }
+        "canary" => {
+            let preprocessor_path = preprocessor_path_opt
+                .as_deref()
+                .ok_or_else(|| missing_param("preprocessor_path"))?;
+            let vocab_path = vocab_path_opt
+                .as_deref()
+                .ok_or_else(|| missing_param("vocab_path"))?;
+            // Canary needs source_lang + target_lang to build the
+            // 10-token decoder prefix. Both default to "en" (English
+            // ASR with no translation) when omitted.
+            let source_lang = p
+                .get("source_lang")
+                .and_then(|v| v.as_str())
+                .unwrap_or("en")
+                .to_string();
+            let target_lang = p
+                .get("target_lang")
+                .and_then(|v| v.as_str())
+                .unwrap_or("en")
+                .to_string();
+            node.audio_runtime
+                .load_canary(
+                    model_id.clone(),
+                    preprocessor_path,
+                    &encoder_path,
+                    &decoder_path,
+                    vocab_path,
+                    source_lang,
+                    target_lang,
+                    max_audio_seconds,
+                )
+                .map_err(forecast_err)?;
+        }
         other => {
             return Err(JsonRpcError {
                 code: -32602,
                 message: format!(
-                    "unknown audio family '{}' (expected: moonshine, whisper, parakeet)",
+                    "unknown audio family '{}' (expected: moonshine, whisper, parakeet, canary)",
                     other
                 ),
                 data: None,

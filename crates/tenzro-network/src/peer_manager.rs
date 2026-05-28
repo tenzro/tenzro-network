@@ -18,7 +18,7 @@ use governor::{
     state::{InMemoryState, NotKeyed},
     Quota, RateLimiter,
 };
-use libp2p::PeerId;
+use libp2p::{Multiaddr, PeerId};
 use std::collections::{HashSet, VecDeque};
 use std::net::IpAddr;
 use std::num::NonZeroU32;
@@ -97,6 +97,12 @@ pub struct ManagedPeer {
     pub protocol_version: Option<String>,
     /// Message timestamps for rate limiting (sliding window)
     pub message_timestamps: VecDeque<Instant>,
+    /// Last observed remote multiaddr for the peer's primary connection.
+    /// Used to detect address migrations (e.g. QUIC path migration, mobile
+    /// network switches, NAT rebinding). When the remote endpoint of a newly
+    /// established connection differs from this value, a migration counter is
+    /// incremented at the service layer.
+    pub last_endpoint: Option<Multiaddr>,
 }
 
 impl ManagedPeer {
@@ -112,6 +118,7 @@ impl ManagedPeer {
             ban_until: None,
             protocol_version: None,
             message_timestamps: VecDeque::new(),
+            last_endpoint: None,
         }
     }
 
@@ -368,6 +375,25 @@ impl PeerManager {
             peer.status = status;
             peer.update_last_seen();
         }
+    }
+
+    /// Records the observed remote multiaddr for a peer's newly established
+    /// connection. Returns `true` if the previous `last_endpoint` was set and
+    /// differed from `addr` — i.e. an address migration was observed
+    /// (QUIC path migration, mobile network switch, NAT rebinding). Returns
+    /// `false` on first observation or when the address is unchanged.
+    pub fn update_endpoint(&self, peer_id: &PeerId, addr: Multiaddr) -> bool {
+        let mut migrated = false;
+        if let Some(mut peer) = self.peers.get_mut(peer_id) {
+            match &peer.last_endpoint {
+                Some(prev) if prev != &addr => {
+                    migrated = true;
+                }
+                _ => {}
+            }
+            peer.last_endpoint = Some(addr);
+        }
+        migrated
     }
 
     /// Updates peer role

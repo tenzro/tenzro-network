@@ -4533,6 +4533,36 @@ impl TenzroMcpServer {
         }))
     }
 
+    #[tool(description = "Get a snapshot of libp2p network metrics: connection counts, gossipsub publish/accept/reject counters, Kademlia routing table size, gossipsub mesh size, and peer_address_migrations_total (QUIC path migration / mobile network switch / NAT rebinding observability)")]
+    async fn get_network_stats(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let Some(net) = self.node.network() else {
+            return json_result(serde_json::json!({
+                "available": false,
+                "reason": "network service not initialized",
+            }));
+        };
+        let m = net.metrics();
+        json_result(serde_json::json!({
+            "available": true,
+            "events_dropped": m.events_dropped.get(),
+            "dials_rejected_per_ip": m.dials_rejected_per_ip.get(),
+            "dials_rejected_global": m.dials_rejected_global.get(),
+            "gossip_rejected_validator_only": m.gossip_rejected_validator_only.get(),
+            "gossip_rejected_invalid": m.gossip_rejected_invalid.get(),
+            "gossip_rejected_duplicate": m.gossip_rejected_duplicate.get(),
+            "gossip_published": m.gossip_published.get(),
+            "gossip_accepted": m.gossip_accepted.get(),
+            "connections_established": m.connections_established.get(),
+            "connections_inbound_total": m.connections_inbound_total.get(),
+            "connections_outbound_total": m.connections_outbound_total.get(),
+            "peers_banned": m.peers_banned.get(),
+            "peers_connected": m.peers_connected.get(),
+            "kad_routing_table_size": m.kad_routing_table_size.get(),
+            "gossipsub_mesh_size": m.gossipsub_mesh_size.get(),
+            "peer_address_migrations_total": m.peer_address_migrations_total.get(),
+        }))
+    }
+
     #[tool(description = "Get a block by height from the Tenzro ledger, including transactions and metadata")]
     async fn get_block(
         &self,
@@ -11545,6 +11575,7 @@ impl ServerHandler for TenzroMcpServer {
              • close_payment_channel — Close a payment channel with a final balance\n\n\
              Network:\n\
              • get_node_status — Node health, block height, peers\n\
+             • get_network_stats — libp2p NetworkMetrics snapshot (connections, gossipsub, kad, peer_address_migrations_total)\n\
              • get_block — Get block by height\n\
              • get_block_range — Fetch a contiguous range of blocks (default 64, max 256)\n\
              • get_transaction — Look up transaction by hash\n\

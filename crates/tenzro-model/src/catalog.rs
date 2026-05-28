@@ -1065,9 +1065,34 @@ pub fn get_audio_catalog() -> Vec<OnnxAudioEntry> {
             license_tier: LicenseTier::Attribution,
             description: "NVIDIA Parakeet TDT 0.6B v3 — multilingual TDT transducer (25 langs, 128-mel)".into(),
         },
-        // ── Canary 1B Flash (NOT SHIPPED) ──────────────────────────
-        // No published ONNX export exists in the 2026 OSS landscape.
-        // Re-evaluate when nvidia/ or a community account publishes one.
+        // ── Canary 1B Flash ────────────────────────────────────────
+        // NeMo Conformer AED ASR (attention encoder-decoder, no blank).
+        // 5249-entry SentencePiece vocab, 10-token decoder prefix
+        // selecting source/target language + PNC + timestamp + diarize
+        // modes. CC-BY-4.0 / Attribution. Reuses Parakeet's nemo128
+        // preprocessor — `joiner_filename` slot carries `nemo128.onnx`.
+        OnnxAudioEntry {
+            id: "canary-1b-flash".into(),
+            name: "NVIDIA Canary 1B Flash".into(),
+            family: "canary".into(),
+            hf_repo: "istupakov/canary-1b-flash-onnx".into(),
+            encoder_filename: "encoder-model.onnx".into(),
+            decoder_filename: Some("decoder-model.onnx".into()),
+            joiner_filename: Some("nemo128.onnx".into()),
+            sample_rate: 16000,
+            max_audio_seconds: 40,
+            languages: vec![
+                "en".into(),
+                "de".into(),
+                "es".into(),
+                "fr".into(),
+            ],
+            size_bytes: 4_000_000_000,
+            min_ram_gb: 6,
+            license: "CC-BY-4.0".into(),
+            license_tier: LicenseTier::Attribution,
+            description: "NVIDIA Canary 1B Flash — Conformer AED with translation across 4 languages (en/de/es/fr)".into(),
+        },
     ]
 }
 
