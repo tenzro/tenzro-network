@@ -124,8 +124,9 @@ Usage:
     python tenzro_rpc.py get_voting_power 0x<address>
     python tenzro_rpc.py delegate_voting_power 0xfrom 0xto
     python tenzro_rpc.py list_canton_domains
-    python tenzro_rpc.py list_daml_contracts
-    python tenzro_rpc.py submit_daml_command create MyTemplate party1
+    python tenzro_rpc.py list_daml_contracts '["Tenzro.Workflow:WorkflowAnchor"]'
+    python tenzro_rpc.py submit_daml_create Tenzro.Workflow:WorkflowAnchor '{"owner":"alice"}'
+    python tenzro_rpc.py submit_daml_exercise Tenzro.Workflow:WorkflowAnchor <cid> Approve '{}'
     python tenzro_rpc.py set_role Validator
     python tenzro_rpc.py list_providers llm
     python tenzro_rpc.py get_provider_schedule
@@ -240,6 +241,12 @@ def _rpc(method: str, params: Any = None) -> dict:
     issued JWT and TENZRO_DPOP_PROOF to a fresh DPoP proof header value.
     The server validates both before invoking the auth-mediated signing
     path. Public RPCs (balance, status, block reads) work without auth.
+
+    Scope-gated RPCs (currently `tenzro_*Canton*`) require an operator-
+    issued API key. Set TENZRO_API_KEY to the `tnz_<base64url>` key
+    issued by the RPC operator; it is forwarded as the `X-Tenzro-Api-Key`
+    header. The node holds the upstream Auth0 credentials and proxies
+    on the caller's behalf — callers do not manage Auth0 directly.
     """
     global _request_id
     _request_id += 1
@@ -256,6 +263,9 @@ def _rpc(method: str, params: Any = None) -> dict:
     dpop = os.environ.get("TENZRO_DPOP_PROOF")
     if dpop:
         headers["DPoP"] = dpop
+    api_key = os.environ.get("TENZRO_API_KEY")
+    if api_key:
+        headers["X-Tenzro-Api-Key"] = api_key
     resp = requests.post(RPC_URL, json=payload, headers=headers,
                          timeout=RPC_TIMEOUT)
     resp.raise_for_status()
@@ -3069,42 +3079,61 @@ def delegate_voting_power(from_addr: str, to_addr: str) -> dict:
 
 
 def list_canton_domains() -> dict:
-    """List Canton synchronizer domains."""
+    """List Canton synchronizer domains configured on this node.
+
+    Returns the `{enabled, domains, message?}` envelope. Check `enabled`
+    before treating `domains` as live.
+    """
     return _rpc("tenzro_listCantonDomains")
 
 
-def list_daml_contracts(domain: str = None,
-                        template_id: str = None) -> dict:
-    """List DAML contracts, optionally filtered.
+def list_daml_contracts(template_ids: list,
+                        query: dict = None) -> dict:
+    """Query active DAML contracts on the shared Canton domain.
 
-    domain: optional domain filter
-    template_id: optional template ID filter
+    The Canton v2 active-contracts endpoint requires at least one template
+    id — pass them as a list.
+
+    template_ids: list of DAML template ids (required, non-empty)
+    query: optional structural filter applied against `createArguments`
     """
-    params = {}
-    if domain:
-        params["domain"] = domain
-    if template_id:
-        params["template_id"] = template_id
+    if not template_ids:
+        raise ValueError("template_ids must contain at least one DAML template id")
+    params = {"template_ids": list(template_ids)}
+    if query is not None:
+        params["query"] = query
     return _rpc("tenzro_listDamlContracts", params)
 
 
-def submit_daml_command(command_type: str, template_id: str,
-                        party: str, payload: dict = None) -> dict:
-    """Submit a DAML command to Canton.
+def submit_daml_create(template_id: str, create_arguments: dict) -> dict:
+    """Submit a DAML `create` command on the shared Canton domain.
 
-    command_type: create | exercise
-    template_id: DAML template ID
-    party: acting party
-    payload: command payload
+    template_id: DAML template id (e.g. "Tenzro.Workflow:WorkflowAnchor")
+    create_arguments: contract payload
     """
-    params = {
-        "command_type": command_type,
+    return _rpc("tenzro_submitDamlCommand", {
+        "command_type": "create",
         "template_id": template_id,
-        "party": party,
-    }
-    if payload:
-        params["payload"] = payload
-    return _rpc("tenzro_submitDamlCommand", params)
+        "create_arguments": create_arguments,
+    })
+
+
+def submit_daml_exercise(template_id: str, contract_id: str,
+                         choice: str, choice_argument: dict) -> dict:
+    """Submit a DAML `exercise` command on an existing contract.
+
+    template_id: DAML template id
+    contract_id: existing contract id
+    choice: choice name to exercise
+    choice_argument: argument payload for the choice
+    """
+    return _rpc("tenzro_submitDamlCommand", {
+        "command_type": "exercise",
+        "template_id": template_id,
+        "contract_id": contract_id,
+        "choice": choice,
+        "choice_argument": choice_argument,
+    })
 
 
 # ── Provider Management (Extended) ─────────────────────────────
@@ -6311,11 +6340,16 @@ COMMANDS = {
     # Canton / DAML
     "list_canton_domains": lambda args: list_canton_domains(),
     "list_daml_contracts": lambda args: list_daml_contracts(
-        args[0] if args else None,
+        json.loads(args[0]) if args else [],
+        json.loads(args[1]) if len(args) > 1 else None,
     ),
-    "submit_daml_command": lambda args: submit_daml_command(
+    "submit_daml_create": lambda args: submit_daml_create(
+        args[0],
+        json.loads(args[1]) if len(args) > 1 else {},
+    ),
+    "submit_daml_exercise": lambda args: submit_daml_exercise(
         args[0], args[1], args[2],
-        json.loads(args[3]) if len(args) > 3 else None,
+        json.loads(args[3]) if len(args) > 3 else {},
     ),
     # Provider Management (Extended)
     "set_role": lambda args: set_role(args[0]),

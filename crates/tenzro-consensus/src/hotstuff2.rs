@@ -684,11 +684,42 @@ impl HotStuff2Engine {
             height + 1u64
         };
 
+        // Recover the certifying view of the latest finalized block via the
+        // wired BlockProvider. The block at `height` was finalized through a
+        // 2f+1 Commit-QC at `block.header.view`; this view is the highest
+        // Prepare-QC the network has produced, so `high_qc_view` must be at
+        // least `block.header.view` on boot. Without this, a freshly-booted
+        // leader proposes from a stale lock (default 0), the network already
+        // holds a higher lock and refuses to vote, the view times out, and
+        // the chain live-locks across all validators rebooting in sequence.
+        //
+        // This is the Diem/Aptos Safety Rules pattern: persisted highest_qc
+        // is restored on boot so the engine cannot regress its lock.
+        // Mirrors the `commit_qc_view` parameter accepted by
+        // `resume_from_synced_height`, but recovered from storage instead of
+        // passed by the block-sync caller.
+        let recovered_commit_qc_view: Option<u64> = if height.0 > 0 {
+            self.block_provider
+                .as_ref()
+                .and_then(|bp| bp.get_block(height))
+                .map(|block| block.header.view)
+        } else {
+            None
+        };
+
         let mut state = self.view_state.write();
         state.height = next_height;
         // Set view to at least match height for consistency
         if height.0 > state.view {
             state.view = height.0;
+        }
+        // Bump view past the certifying QC view — we must not propose or
+        // vote at any view ≤ the view that already produced a Commit-QC.
+        if let Some(commit_qc_view) = recovered_commit_qc_view {
+            let target_view = commit_qc_view.saturating_add(1);
+            if target_view > state.view {
+                state.view = target_view;
+            }
         }
 
         // Consult persisted vote state. The persisted view is a
@@ -717,10 +748,73 @@ impl HotStuff2Engine {
             }
         }
 
+        // Drop the view_state lock before acquiring high_qc_view to keep
+        // lock acquisition order consistent with the rest of the engine.
+        drop(state);
+
+        // Restore high_qc_view from the recovered commit-QC view. In
+        // HotStuff-2, high_qc_view tracks the highest Prepare-QC view; a
+        // Commit-QC at view V implies a Prepare-QC at view V (commits are
+        // produced one phase after Prepare in the same view), so using
+        // `recovered_commit_qc_view` here is sound.
+        if let Some(commit_qc_view) = recovered_commit_qc_view {
+            let mut hqc = self.high_qc_view.write();
+            if commit_qc_view > *hqc {
+                let prev_hqc = *hqc;
+                *hqc = commit_qc_view;
+                tracing::info!(
+                    prev_high_qc_view = prev_hqc,
+                    restored_high_qc_view = commit_qc_view,
+                    from_height = %height,
+                    "Consensus engine: restored high_qc_view from finalized block header"
+                );
+            }
+
+            // Record a synthetic LastSignState at (view = commit_qc_view,
+            // height = height, step = Commit) so the persistent signing
+            // ceiling reflects the certified state. A future
+            // `is_strictly_after` check will refuse any vote at
+            // (v ≤ commit_qc_view, *) on this height.
+            let synthetic = LastSignState {
+                version: 1,
+                view: commit_qc_view,
+                height: height.0,
+                step: VoteStep::Commit,
+                block_hash: None,
+                signature: None,
+            };
+            if let Err(e) = self.vote_state_store.record(&synthetic) {
+                tracing::warn!(
+                    error = %e,
+                    resumed_height = %height,
+                    commit_qc_view,
+                    "vote_state_store.record() failed during resume — engine \
+                     will still advance its in-memory state, but a crash \
+                     before the next legitimate vote could regress the \
+                     signing ceiling"
+                );
+            }
+        } else if height.0 > 0 {
+            // We have a finalized height but couldn't recover the block —
+            // either no block_provider is wired (test paths) or storage
+            // returned None. Log a warning so this is visible in operator
+            // dashboards; the engine will still boot but with the lock
+            // unrestored, which is the pre-fix wedge condition.
+            tracing::warn!(
+                resumed_height = %height,
+                block_provider_wired = self.block_provider.is_some(),
+                "Consensus engine: could not recover commit_qc_view from \
+                 storage on boot — high_qc_view NOT restored. This may \
+                 cause a consensus live-lock if peers hold a higher lock."
+            );
+        }
+
+        let final_view = self.view_state.read().view;
         tracing::info!(
             stored_height = %height,
             next_height = %next_height,
-            view = state.view,
+            view = final_view,
+            recovered_commit_qc_view = ?recovered_commit_qc_view,
             "Consensus engine resuming from stored height"
         );
     }
@@ -897,6 +991,19 @@ impl HotStuff2Engine {
     /// Returns the current validator set
     pub fn validator_set(&self) -> ValidatorSet {
         self.epoch_manager.current_validator_set()
+    }
+
+    /// Returns the validator set that was active at the given block height.
+    ///
+    /// This is the load-bearing accessor for cross-epoch block-sync: a node
+    /// catching up from far behind must verify each historical block's
+    /// commit-QC against the validator set that signed it, not the current
+    /// epoch's set. Returns `None` if the epoch covering `height` has been
+    /// pruned from history (signals "snapshot sync required" to the caller).
+    pub fn validator_set_for_height(&self, height: BlockHeight) -> Option<ValidatorSet> {
+        self.epoch_manager
+            .get_epoch_for_height(height)
+            .map(|e| e.validator_set)
     }
 
     /// Checks if this node is a validator
@@ -3030,6 +3137,129 @@ mod tests {
             persisted.height,
             29989,
             state.view
+        );
+    }
+
+    /// Regression test for the **high_qc_view restoration** live-lock
+    /// surfaced 2026-05-23 on testnet (block height stalled at 55,539 for
+    /// 4 days across all 10 validators).
+    ///
+    /// Failure mode: validators reboot from storage tip=55,539 (a block
+    /// finalized via Commit-QC at some view V ~= 239,800). The old
+    /// `resume_from_height` only consulted `vote_state_store` for the
+    /// **signing** ceiling — it did NOT restore `high_qc_view` (the
+    /// **locking** ceiling). After the resume, `high_qc_view` defaulted
+    /// to 0. The leader at view N proposed a block extending a stale
+    /// parent (because its lock was unrestored), peers refused to vote
+    /// because their locks were at the correct higher view, the view
+    /// timed out, NEC formed, and the cycle repeated forever —
+    /// observable as `DOUBLE-SIGN PREVENTED` at multiple views with
+    /// vote heights spanning 49,282..55,540.
+    ///
+    /// Fix (Diem/Aptos Safety Rules pattern): on boot, read the latest
+    /// finalized block via the wired `BlockProvider`, extract
+    /// `header.view` (the certifying Commit-QC view), and restore
+    /// `high_qc_view` to that value. Mirrors `resume_from_synced_height`'s
+    /// behavior but recovers the QC view from storage instead of taking
+    /// it as a parameter.
+    #[tokio::test]
+    async fn test_resume_from_height_restores_high_qc_view_from_block_header() {
+        use tenzro_types::block::{
+            BlockHeader, BlockMetadata, ConsensusAlgorithm, ConsensusProof, FeeMarketParams,
+        };
+        use tenzro_types::primitives::{Address, Hash};
+
+        // Minimal in-memory BlockProvider that returns a single block at a
+        // configured height with a configured certifying view.
+        struct TestBlockProvider {
+            height: BlockHeight,
+            view: u64,
+        }
+        impl BlockProvider for TestBlockProvider {
+            fn get_block(&self, height: BlockHeight) -> Option<Block> {
+                if height != self.height {
+                    return None;
+                }
+                let mut header = BlockHeader::new_at_view(
+                    self.height,
+                    self.view,
+                    Hash::default(),
+                    Hash::default(),
+                    Hash::default(),
+                    Address::new([0u8; 32]),
+                    ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
+                );
+                header.metadata = BlockMetadata {
+                    gas_used: 0,
+                    gas_limit: 30_000_000,
+                    tx_count: 0,
+                    protocol_version: 1,
+                    base_fee_per_gas: Some(FeeMarketParams::default().initial_base_fee),
+                };
+                Some(Block::new(header, vec![]))
+            }
+        }
+
+        let stored_height = BlockHeight(55_539);
+        let certifying_view: u64 = 239_800;
+
+        let provider: Arc<dyn BlockProvider> = Arc::new(TestBlockProvider {
+            height: stored_height,
+            view: certifying_view,
+        });
+        let store = Arc::new(crate::vote_state::MemoryVoteStateStore::new());
+
+        let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let pq = MlDsaSigningKey::generate();
+        let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
+        let config = ConsensusConfig::default();
+        let validators = create_test_validators(4);
+        let epoch_manager = EpochManager::new(validators, 100).unwrap();
+        let engine = HotStuff2Engine::new(keypair, pq, bls, config, epoch_manager)
+            .with_block_provider(provider)
+            .with_vote_state_store(store.clone());
+
+        // Before resume: high_qc_view defaults to 0.
+        assert_eq!(*engine.high_qc_view.read(), 0);
+
+        engine.resume_from_height(stored_height);
+
+        // After resume: high_qc_view must be restored to the certifying view.
+        assert_eq!(
+            *engine.high_qc_view.read(),
+            certifying_view,
+            "high_qc_view must be restored to the certifying Commit-QC view of the latest finalized block"
+        );
+
+        // Current view must be > certifying view so the engine cannot
+        // propose or vote at any view ≤ the view that already produced a
+        // Commit-QC.
+        let state = engine.view_state.read();
+        assert_eq!(
+            state.height,
+            BlockHeight(55_540),
+            "height must advance to next-to-propose"
+        );
+        assert!(
+            state.view > certifying_view,
+            "view must be > certifying_view={} — got view={}",
+            certifying_view,
+            state.view
+        );
+        drop(state);
+
+        // The synthetic LastSignState must have been recorded so that a
+        // crash-and-restart cannot regress the signing ceiling below the
+        // certified state.
+        use crate::vote_state::VoteStateStore;
+        let persisted = store.load().expect("synthetic LastSignState must be recorded");
+        assert_eq!(
+            persisted.view, certifying_view,
+            "synthetic LastSignState.view must equal certifying_view"
+        );
+        assert_eq!(
+            persisted.height, stored_height.0,
+            "synthetic LastSignState.height must equal stored_height"
         );
     }
 

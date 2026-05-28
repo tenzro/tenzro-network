@@ -1579,29 +1579,58 @@ async def freeze_address(token: str, address: str) -> dict:
 
 @mcp.tool
 async def list_canton_domains() -> dict:
-    """List available Canton synchronization domains."""
-    result = await rpc_call("tenzro_listCantonDomains", [])
+    """List Canton synchronizer domains configured on this node.
+
+    Returns the ``{enabled, domains, message?}`` envelope. Check ``enabled``
+    before treating ``domains`` as live.
+    """
+    result = await rpc_call("tenzro_listCantonDomains", {})
     return result
 
 
 @mcp.tool
-async def list_daml_contracts(domain_id: str) -> dict:
-    """List active DAML contracts on a Canton domain."""
-    result = await rpc_call("tenzro_listDamlContracts", [domain_id])
-    return result
-
-
-@mcp.tool
-async def submit_daml_command(
-    domain_id: str, command_type: str, payload: str
+async def list_daml_contracts(
+    template_ids: list[str], query: dict | None = None
 ) -> dict:
-    """Submit a DAML command (create or exercise) to a Canton domain."""
+    """Query active DAML contracts on the shared Canton domain.
+
+    template_ids: one or more DAML template ids (required, non-empty).
+    query: optional structural filter applied against ``createArguments``.
+    """
+    params: dict = {"template_ids": template_ids}
+    if query is not None:
+        params["query"] = query
+    result = await rpc_call("tenzro_listDamlContracts", params)
+    return result
+
+
+@mcp.tool
+async def submit_daml_create(template_id: str, create_arguments: dict) -> dict:
+    """Submit a DAML ``create`` command on the shared Canton domain."""
     result = await rpc_call(
         "tenzro_submitDamlCommand",
         {
-            "domain_id": domain_id,
-            "command_type": command_type,
-            "payload": payload,
+            "command_type": "create",
+            "template_id": template_id,
+            "create_arguments": create_arguments,
+        },
+    )
+    return result
+
+
+@mcp.tool
+async def submit_daml_exercise(
+    template_id: str, contract_id: str, choice: str, choice_argument: dict
+) -> dict:
+    """Submit a DAML ``exercise`` command on an existing contract."""
+    result = await rpc_call(
+        "tenzro_submitDamlCommand",
+        {
+            "command_type": "exercise",
+            "template_id": template_id,
+            "contract_id": contract_id,
+            "choice": choice,
+            "choice_argument": choice_argument,
         },
     )
     return result

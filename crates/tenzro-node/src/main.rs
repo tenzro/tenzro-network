@@ -662,15 +662,55 @@ async fn main() -> Result<()> {
     // derived from `config.canton.host`/`port` (the same source `init_vm()`
     // uses to wire the DamlExecutor); JWT is read from `CANTON_JWT_TOKEN` env
     // since it's a secret and intentionally not on the on-disk config.
-    let canton_ledger_api_url =
-        format!("http://{}:{}", config.canton.host, config.canton.port);
-    let canton_admin_api_url = format!(
-        "http://{}:{}",
-        config.canton.host,
-        config.canton.port.saturating_add(1),
-    );
-    let canton_jwt_token = std::env::var("CANTON_JWT_TOKEN").ok();
+    // Canton MCP endpoint resolution honors the same three profiles as
+    // `Node::init_bridge`:
+    //  1. Devnet — fixed `json.devnet.tenzro.network` host, TLS, Auth0 bearer.
+    //  2. Operator-run validator — operator's host:port (TLS per `canton.tls`),
+    //     with EITHER operator OAuth2 (`canton.oauth`) OR static JWT
+    //     (`canton.static_jwt`, set from `CANTON_JWT_TOKEN`).
+    //  3. Local unauth — plaintext HTTP to localhost, no bearer.
+    let (canton_ledger_api_url, canton_admin_api_url, canton_token_provider, canton_jwt_token) =
+        if config.canton.devnet {
+            let provider = config.canton.devnet_client_secret.clone().map(|secret| {
+                let auth_cfg =
+                    tenzro_bridge::canton_auth::CantonAuthConfig::devnet(secret);
+                tenzro_bridge::canton_auth::CantonTokenProvider::new(auth_cfg)
+            });
+            (
+                "https://json.devnet.tenzro.network/v2".to_string(),
+                "https://admin.devnet.tenzro.network".to_string(),
+                provider,
+                None,
+            )
+        } else {
+            let scheme = if config.canton.tls { "https" } else { "http" };
+            let ledger = format!("{}://{}:{}", scheme, config.canton.host, config.canton.port);
+            let admin = format!(
+                "{}://{}:{}",
+                scheme,
+                config.canton.host,
+                config.canton.port.saturating_add(1),
+            );
+            let provider = config.canton.oauth.as_ref().map(|oauth| {
+                let auth_cfg = tenzro_bridge::canton_auth::CantonAuthConfig {
+                    token_url: oauth.token_url.clone(),
+                    client_id: oauth.client_id.clone(),
+                    client_secret: oauth.client_secret.clone(),
+                    audience: oauth.audience.clone(),
+                    scope: oauth.scope.clone(),
+                };
+                tenzro_bridge::canton_auth::CantonTokenProvider::new(auth_cfg)
+            });
+            // Static JWT only takes effect if no OAuth2 provider is set.
+            let jwt = if provider.is_none() {
+                config.canton.static_jwt.clone()
+            } else {
+                None
+            };
+            (ledger, admin, provider, jwt)
+        };
     let mut canton_shutdown_rx = shutdown_tx.subscribe();
+    let canton_api_key_mgr = node_arc.api_key_manager().cloned();
     tokio::spawn(async move {
         tokio::select! {
             result = mcp::canton::start_canton_mcp_server(
@@ -678,6 +718,8 @@ async fn main() -> Result<()> {
                 canton_ledger_api_url,
                 canton_admin_api_url,
                 canton_jwt_token,
+                canton_token_provider,
+                canton_api_key_mgr,
             ) => {
                 if let Err(e) = result { error!("Canton MCP server error: {}", e); }
             }

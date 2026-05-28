@@ -10,6 +10,9 @@ pub struct RpcClient {
     rpc_url: String,
     api_url: String,
     request_id: std::sync::atomic::AtomicU64,
+    /// Optional explicit override for the `X-Tenzro-Api-Key` header.
+    /// When set, takes precedence over `TENZRO_API_KEY` env var.
+    api_key_override: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -77,6 +80,7 @@ impl RpcClient {
             rpc_url: rpc_url.to_string(),
             api_url,
             request_id: std::sync::atomic::AtomicU64::new(1),
+            api_key_override: None,
         }
     }
 
@@ -85,12 +89,26 @@ impl RpcClient {
         &self.rpc_url
     }
 
+    /// Set an explicit `X-Tenzro-Api-Key` value, overriding the
+    /// `TENZRO_API_KEY` env var. Empty strings are ignored.
+    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
+        let key = key.into();
+        if !key.is_empty() {
+            self.api_key_override = Some(key);
+        }
+        self
+    }
+
     /// Make a JSON-RPC call.
     ///
     /// Forwards `Authorization: DPoP <jwt>` and `DPoP: <proof>` headers
     /// when the `TENZRO_BEARER_JWT` and `TENZRO_DPOP_PROOF` env vars are set.
     /// Auth-sensitive RPCs (signing, escrow, settlement) require these; public
     /// RPCs (balance/status/block reads) work without them.
+    ///
+    /// Forwards `X-Tenzro-Api-Key: <key>` when `TENZRO_API_KEY` is set —
+    /// required for scoped RPCs (currently `tenzro_*Canton*`) that the
+    /// node mediates on the caller's behalf.
     pub async fn call<T: serde::de::DeserializeOwned>(&self, method: &str, params: Value) -> Result<T> {
         let id = self.request_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let request = JsonRpcRequest {
@@ -109,6 +127,13 @@ impl RpcClient {
             && !dpop.is_empty() {
                 req = req.header("DPoP", dpop);
             }
+        if let Some(ref api_key) = self.api_key_override {
+            req = req.header("X-Tenzro-Api-Key", api_key);
+        } else if let Ok(api_key) = std::env::var("TENZRO_API_KEY")
+            && !api_key.is_empty()
+        {
+            req = req.header("X-Tenzro-Api-Key", api_key);
+        }
 
         let response = req.send().await?;
 

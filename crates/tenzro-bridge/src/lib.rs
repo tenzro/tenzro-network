@@ -84,6 +84,7 @@
 //! - **Async/Await**: Full async support for non-blocking operations
 
 pub mod canton;
+pub mod canton_auth;
 pub mod chainlink_ccip;
 pub mod circuit_breaker;
 pub mod debridge;
@@ -115,6 +116,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod prelude {
     pub use crate::{
         canton::{CantonAdapter, CantonConfig},
+        canton_auth::{CantonAuthConfig, CantonTokenProvider},
         chainlink_ccip::{ChainlinkCcipAdapter, CcipConfig, CcipMessage, FeeToken},
         debridge::{DeBridgeAdapter, DeBridgeConfig, DlnOrder, DlnOrderStatus, DlnHook},
         error::{BridgeError, Result},

@@ -69,6 +69,7 @@
 //! See [`NodeConfig`] for available configuration options.
 
 pub mod a2a;
+pub mod api_key;
 pub mod block_sync;
 pub mod commission_policy;
 pub mod config;
@@ -87,6 +88,7 @@ pub mod lifecycle_state_bridge;
 pub mod liveness;
 pub mod mcp;
 pub mod delegation_scope_oracle;
+pub mod epoch_state_store;
 pub mod metrics;
 pub mod model_blob_fetcher_bridge;
 pub mod node;

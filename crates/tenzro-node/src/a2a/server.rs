@@ -23,6 +23,7 @@ use tracing::{info, warn};
 use tenzro_storage::KvStore;
 
 use super::agent_card::{self, AgentCard};
+use super::did_envelope;
 use super::task_manager::{
     MessagePart, TaskArtifact, TaskManager, TaskMessage, TaskState,
 };
@@ -203,6 +204,64 @@ fn default_currency() -> String {
     "TNZO".to_string()
 }
 
+// ---------------------------------------------------------------------------
+// DID envelope extraction helpers — peek at raw `params` JSON before per-method
+// deserialization so the dispatcher chokepoint can verify the envelope without
+// caring about each method's param shape.
+// ---------------------------------------------------------------------------
+
+/// Extract the envelope metadata map from raw `params`. Looks first at
+/// `params.message.metadata` (used by `message/send` and `tasks/send`),
+/// then at `params.metadata` (used by `payments/create`). Returns an
+/// empty map when neither is present — the verifier will then surface a
+/// precise `Missing(...)` field error for the relying party.
+fn extract_envelope_metadata(
+    params: &serde_json::Value,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    let candidate = params
+        .get("message")
+        .and_then(|m| m.get("metadata"))
+        .or_else(|| params.get("metadata"));
+    match candidate {
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        _ => std::collections::HashMap::new(),
+    }
+}
+
+/// Extract the task identifier that binds the envelope signature to a
+/// specific A2A operation. The path varies by method:
+///
+/// - `message/send` / `tasks/send`: `params.message.taskId` (may be absent
+///   when creating a new task — the empty string is then signed).
+/// - `tasks/cancel`: `params.id`.
+/// - `payments/{create,authorize,execute,cancel}`: `params.paymentId` for
+///   methods that bind to an existing payment; `payments/create` signs
+///   with an empty task_id because the payment_id is server-assigned.
+fn extract_envelope_task_id(method: &str, params: &serde_json::Value) -> String {
+    let key = match method {
+        "message/send" | "tasks/send" => {
+            return params
+                .get("message")
+                .and_then(|m| m.get("taskId"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+        }
+        "tasks/cancel" => "id",
+        "payments/create" => return String::new(),
+        "payments/authorize" | "payments/execute" | "payments/cancel" => "paymentId",
+        _ => return String::new(),
+    };
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Ap2AuthorizeParams {
@@ -274,6 +333,35 @@ pub(crate) fn dispatch_jsonrpc(state: &Arc<A2aState>, req: JsonRpcRequest) -> Js
         );
     }
 
+    // Tenzro DID envelope gate — fail-closed authorization for all A2A
+    // mutation methods. Read methods (`tasks/get`, `tasks/list`,
+    // `payments/status`) are not gated. See `super::did_envelope` for the
+    // wire format and verification rules.
+    if did_envelope::requires_envelope(&req.method) {
+        let metadata = extract_envelope_metadata(&req.params);
+        let task_id = extract_envelope_task_id(&req.method, &req.params);
+        match did_envelope::verify_envelope(
+            &state.node,
+            &req.method,
+            &task_id,
+            &metadata,
+        ) {
+            Ok(sender_did) => {
+                tracing::debug!(
+                    "A2A envelope verified: method={} task_id={} sender={}",
+                    req.method, task_id, sender_did
+                );
+            }
+            Err(err) => {
+                warn!(
+                    "A2A envelope rejected: method={} task_id={} reason={}",
+                    req.method, task_id, err.message()
+                );
+                return JsonRpcResponse::error(req.id, -32001, err.message());
+            }
+        }
+    }
+
     match req.method.as_str() {
         "message/send" | "tasks/send" => handle_send_message(state, req.params, req.id.clone()),
         "tasks/get" => handle_get_task(state, req.params, req.id.clone()),
@@ -302,6 +390,33 @@ async fn stream_handler(
     // Process the request and stream updates
     let state_clone = state.clone();
     tokio::spawn(async move {
+        // Apply the same DID envelope gate that `dispatch_jsonrpc` enforces
+        // for the unary route. SSE streaming runs the same method
+        // (`message/send`/`tasks/send`), so the wire requirements are
+        // identical — fail-closed before touching the task manager.
+        if did_envelope::requires_envelope(&req.method) {
+            let metadata = extract_envelope_metadata(&req.params);
+            let task_id = extract_envelope_task_id(&req.method, &req.params);
+            if let Err(err) = did_envelope::verify_envelope(
+                &state_clone.node,
+                &req.method,
+                &task_id,
+                &metadata,
+            ) {
+                warn!(
+                    "A2A SSE envelope rejected: method={} task_id={} reason={}",
+                    req.method, task_id, err.message()
+                );
+                let rejected = JsonRpcResponse::error(req.id.clone(), -32001, err.message());
+                let event = Event::default()
+                    .event("error")
+                    .json_data(&rejected)
+                    .unwrap_or_else(|_| Event::default().data("error"));
+                let _ = tx.send(Ok(event)).await;
+                return;
+            }
+        }
+
         // First, process the message like a normal send
         let result = handle_send_message(&state_clone, req.params, req.id.clone());
 

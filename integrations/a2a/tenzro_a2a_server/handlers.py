@@ -1007,12 +1007,19 @@ async def handle_canton(text: str, metadata: dict = None) -> str:
     t = text.lower()
 
     if "domain" in t:
-        result = await rpc_call("tenzro_listCantonDomains", [])
+        result = await rpc_call("tenzro_listCantonDomains", {})
         return f"Canton domains:\n{json.dumps(result, indent=2)}"
 
     if "contract" in t:
-        result = await rpc_call("tenzro_listDamlContracts", [])
-        return f"DAML contracts:\n{json.dumps(result, indent=2)}"
+        # The Canton v2 active-contracts endpoint requires at least one
+        # template id. Surface the requirement to the caller — we don't
+        # guess a default template here.
+        return (
+            "To list DAML contracts, provide one or more template ids, e.g.\n"
+            '  "List DAML contracts for template Tenzro.Workflow:WorkflowAnchor"\n'
+            "Use the Canton MCP server at canton-mcp.tenzro.network/mcp for "
+            "full active-contracts query support."
+        )
 
     if "submit" in t or "command" in t:
         return (

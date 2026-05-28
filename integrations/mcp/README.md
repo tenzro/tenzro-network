@@ -10,7 +10,7 @@ The official [Model Context Protocol](https://modelcontextprotocol.io) server fo
 
 The Tenzro MCP server is an installable Python package that exposes blockchain and multi-modal AI tools across 19+ categories to any MCP-compatible AI agent (Claude, GPT, Cursor, Windsurf, etc.) via **stdio** or **Streamable HTTP** transport. Install with `pip install tenzro-mcp-server` and run locally, or connect directly to the live testnet endpoint. Agents can query balances, send transactions, mint NFTs, bridge tokens, check compliance, subscribe to events, run timeseries forecasts, embed images and text, segment and detect objects, transcribe audio, and interact with AI models — all through the standard MCP tool interface.
 
-The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **247 tools** (base + 29 multi-modal AI + 3 AgentBond/insurance + 3 agent-memory) and is the authoritative tool inventory; this Python distributable exposes a comparable subset over stdio + Streamable HTTP.
+The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **192 tools** (Tenzro Ledger + multi-modal AI + AgentBond/insurance + agent memory) and is the authoritative tool inventory; this Python distributable exposes a comparable subset over stdio + Streamable HTTP.
 
 **Testnet endpoint:** `https://mcp.tenzro.network/mcp`
 **Local:** `http://localhost:3001/mcp`
@@ -410,7 +410,7 @@ In addition to the main Tenzro MCP server, the node runs specialized servers for
 
 | Server | Port | Endpoint | Description |
 |--------|------|----------|-------------|
-| **Tenzro** | 3001 | `/mcp` | 247 tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + AgentBond/insurance + agent memory |
+| **Tenzro** | 3001 | `/mcp` | 192 tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + AgentBond/insurance + agent memory |
 | **Solana** | 3003 | `/mcp` | 14 tools — Jupiter swaps, SPL tokens, Metaplex NFTs, SNS, staking |
 | **Ethereum** | 3004 | `/mcp` | 16 tools — Chainlink feeds, ENS, ERC-20, EAS, ERC-8004 |
 | **Canton** | 3005 | `/mcp` | 14 tools — DAML contracts, CIP-56 tokens, DvP settlement |

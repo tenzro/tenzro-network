@@ -14,6 +14,13 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use axum::{
+    body::Body,
+    extract::State,
+    http::{Request, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
 use rmcp::{
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
@@ -21,8 +28,10 @@ use rmcp::{
     tool, tool_handler, tool_router, Json, ServerHandler,
 };
 use serde::Deserialize;
+use tenzro_bridge::canton_auth::CantonTokenProvider;
 
 use super::server::RpcPassthroughOutput;
+use crate::api_key::{ApiKeyManager, ApiKeyScope, AuthorizeOutcome};
 
 // ─── Tool parameter structs ───
 
@@ -193,16 +202,25 @@ fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthrou
 /// Canton MCP Server providing 14 tools for Canton Network / DAML interaction.
 ///
 /// Communicates with a Canton participant node via:
-/// - JSON Ledger API v2 (default: `http://localhost:7575/v2`)
-/// - Admin API (default: `http://localhost:7576`)
+/// - JSON Ledger API v2 (e.g. `https://json.devnet.tenzro.network/v2`)
+/// - Admin API (e.g. `https://admin.devnet.tenzro.network`)
+///
+/// Authentication precedence:
+/// 1. If a [`CantonTokenProvider`] is attached via [`with_token_provider`],
+///    every request fetches a cached bearer JWT via the OAuth2 client-
+///    credentials flow. This is the Tenzro devnet path.
+/// 2. Otherwise falls back to a static `jwt_token` configured via
+///    [`with_jwt_token`]. This is the local / unauth path.
 #[derive(Clone)]
 pub struct CantonMcpServer {
-    /// Canton JSON Ledger API base URL (e.g. "http://localhost:7575")
+    /// Canton JSON Ledger API base URL (e.g. "https://json.devnet.tenzro.network")
     ledger_api_url: String,
-    /// Canton Admin API base URL (e.g. "http://localhost:7576")
+    /// Canton Admin API base URL (e.g. "https://admin.devnet.tenzro.network")
     admin_api_url: String,
-    /// Optional JWT token for authentication
+    /// Optional static JWT token (used only when no token provider is attached).
     jwt_token: Option<String>,
+    /// Optional OAuth2 client-credentials token provider.
+    token_provider: Option<Arc<CantonTokenProvider>>,
     /// HTTP client for API calls
     http: reqwest::Client,
     /// Tool router
@@ -226,12 +244,15 @@ impl std::fmt::Debug for CantonMcpServer {
 
 #[tool_router]
 impl CantonMcpServer {
-    /// Create a new Canton MCP server with default URLs.
+    /// Create a new Canton MCP server. URLs default to the Tenzro-operated
+    /// Canton devnet. Override with [`with_ledger_api_url`] /
+    /// [`with_admin_api_url`] for self-hosted participants.
     pub fn new() -> Self {
         Self {
-            ledger_api_url: "http://localhost:7575".to_string(),
-            admin_api_url: "http://localhost:7576".to_string(),
+            ledger_api_url: "https://json.devnet.tenzro.network".to_string(),
+            admin_api_url: "https://admin.devnet.tenzro.network".to_string(),
             jwt_token: None,
+            token_provider: None,
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -252,40 +273,61 @@ impl CantonMcpServer {
         self
     }
 
-    /// Set JWT authentication token.
+    /// Set static JWT authentication token. Used only when no token provider
+    /// is attached.
     pub fn with_jwt_token(mut self, token: impl Into<String>) -> Self {
         self.jwt_token = Some(token.into());
         self
     }
 
+    /// Attach an OAuth2 client-credentials token provider. Required for the
+    /// Tenzro-operated Canton devnet.
+    pub fn with_token_provider(mut self, provider: Arc<CantonTokenProvider>) -> Self {
+        self.token_provider = Some(provider);
+        self
+    }
+
     // ─── Internal helpers ───
 
+    /// Resolve the bearer JWT for outgoing requests. Prefers the
+    /// [`CantonTokenProvider`] (OAuth2 client-credentials) when attached,
+    /// falls back to a static configured token.
+    async fn resolve_bearer(&self) -> std::result::Result<Option<String>, ErrorData> {
+        if let Some(ref provider) = self.token_provider {
+            let token = provider.bearer().await.map_err(|e| {
+                err_internal(format!("Canton auth: token refresh failed: {}", e))
+            })?;
+            return Ok(Some(token));
+        }
+        Ok(self.jwt_token.clone())
+    }
+
     /// Build an authenticated request to the JSON Ledger API v2.
-    fn ledger_request(
+    async fn ledger_request(
         &self,
         method: reqwest::Method,
         endpoint: &str,
-    ) -> reqwest::RequestBuilder {
+    ) -> std::result::Result<reqwest::RequestBuilder, ErrorData> {
         let url = format!("{}/v2{}", self.ledger_api_url, endpoint);
         let mut builder = self.http.request(method, url);
-        if let Some(ref token) = self.jwt_token {
+        if let Some(token) = self.resolve_bearer().await? {
             builder = builder.bearer_auth(token);
         }
-        builder
+        Ok(builder)
     }
 
     /// Build an authenticated request to the Admin API.
-    fn admin_request(
+    async fn admin_request(
         &self,
         method: reqwest::Method,
         endpoint: &str,
-    ) -> reqwest::RequestBuilder {
+    ) -> std::result::Result<reqwest::RequestBuilder, ErrorData> {
         let url = format!("{}{}", self.admin_api_url, endpoint);
         let mut builder = self.http.request(method, url);
-        if let Some(ref token) = self.jwt_token {
+        if let Some(token) = self.resolve_bearer().await? {
             builder = builder.bearer_auth(token);
         }
-        builder
+        Ok(builder)
     }
 
     /// Execute a JSON Ledger API v2 POST and return the response body as JSON.
@@ -296,6 +338,7 @@ impl CantonMcpServer {
     ) -> std::result::Result<serde_json::Value, ErrorData> {
         let resp = self
             .ledger_request(reqwest::Method::POST, endpoint)
+            .await?
             .json(body)
             .send()
             .await
@@ -325,6 +368,7 @@ impl CantonMcpServer {
     ) -> std::result::Result<serde_json::Value, ErrorData> {
         let resp = self
             .ledger_request(reqwest::Method::GET, endpoint)
+            .await?
             .send()
             .await
             .map_err(|e| err_internal(format!("Canton JSON Ledger API request failed: {}", e)))?;
@@ -353,6 +397,7 @@ impl CantonMcpServer {
     ) -> std::result::Result<serde_json::Value, ErrorData> {
         let resp = self
             .admin_request(reqwest::Method::GET, endpoint)
+            .await?
             .send()
             .await
             .map_err(|e| err_internal(format!("Canton Admin API request failed: {}", e)))?;
@@ -385,6 +430,7 @@ impl CantonMcpServer {
     ) -> std::result::Result<serde_json::Value, ErrorData> {
         let resp = self
             .admin_request(reqwest::Method::POST, endpoint)
+            .await?
             .json(body)
             .send()
             .await
@@ -1109,16 +1155,83 @@ impl ServerHandler for CantonMcpServer {
 
 // ─── Server startup ───
 
+/// Axum middleware that gates every request on a scope-`canton` API key
+/// presented as the `X-Tenzro-Api-Key` header.
+///
+/// The Canton MCP server runs as its own subdomain (`canton-mcp.tenzro.network`)
+/// and dispatches tool calls directly to the upstream Canton JSON Ledger and
+/// Admin APIs using the operator's bearer JWT. Without this gate, anyone able
+/// to reach the endpoint would get full operator-authority access to the
+/// shared Canton validator party.
+///
+/// This is the MCP-layer twin of the JSON-RPC gate enforced by
+/// `gate_api_key` in `rpc.rs` — both consult the same `ApiKeyManager`
+/// and require [`ApiKeyScope::Canton`].
+///
+/// When the manager is absent (no API keys configured on the node), the
+/// middleware fails closed: every request returns 401.
+async fn require_canton_api_key(
+    State(mgr): State<Option<Arc<ApiKeyManager>>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let presented = request
+        .headers()
+        .get("x-tenzro-api-key")
+        .and_then(|v| v.to_str().ok());
+
+    let outcome = match mgr.as_ref() {
+        Some(m) => m.authorize(presented, "tenzro_listCantonDomains"),
+        None => AuthorizeOutcome::MissingKey(ApiKeyScope::Canton),
+    };
+
+    match outcome {
+        AuthorizeOutcome::Allowed => next.run(request).await,
+        AuthorizeOutcome::MissingKey(scope) => (
+            StatusCode::UNAUTHORIZED,
+            format!(
+                "Unauthorized: missing X-Tenzro-Api-Key header (required scope: {})",
+                scope.as_str()
+            ),
+        )
+            .into_response(),
+        AuthorizeOutcome::UnknownOrRevoked => (
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized: API key is unknown or revoked".to_string(),
+        )
+            .into_response(),
+        AuthorizeOutcome::InsufficientScope(scope) => (
+            StatusCode::FORBIDDEN,
+            format!(
+                "Forbidden: API key lacks required scope ({})",
+                scope.as_str()
+            ),
+        )
+            .into_response(),
+    }
+}
+
 /// Start the Canton MCP server on the given address using Streamable HTTP transport.
 ///
 /// `ledger_api_url` / `admin_api_url` configure the Canton participant endpoints
 /// the tools talk to (typically derived from the node's `CantonConfig`).
 /// `jwt_token` is the optional bearer token for authenticated participants.
+/// `token_provider` is the optional OAuth2 client-credentials provider used
+/// by the Tenzro-operated devnet — when set, it takes precedence over
+/// `jwt_token`.
+///
+/// `api_key_manager` enforces caller authorization at the HTTP layer: every
+/// request must present a valid `X-Tenzro-Api-Key` with scope
+/// [`ApiKeyScope::Canton`]. When `None`, the server fails closed and refuses
+/// every request — consistent with the JSON-RPC gate, which would refuse
+/// `tenzro_*Canton*` methods on the same input.
 pub async fn start_canton_mcp_server(
     listen_addr: String,
     ledger_api_url: String,
     admin_api_url: String,
     jwt_token: Option<String>,
+    token_provider: Option<Arc<CantonTokenProvider>>,
+    api_key_manager: Option<Arc<ApiKeyManager>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
@@ -1150,20 +1263,39 @@ pub async fn start_canton_mcp_server(
             if let Some(token) = jwt_token.clone() {
                 server = server.with_jwt_token(token);
             }
+            if let Some(provider) = token_provider.clone() {
+                server = server.with_token_provider(provider);
+            }
             Ok(server)
         },
         Arc::new(LocalSessionManager::default()),
         config,
     );
 
-    let app = axum::Router::new().nest_service("/mcp", service);
+    // Canton MCP is a server-to-server surface. The X-Tenzro-Api-Key gate
+    // already requires a Tenzro-issued credential, but a browser running on
+    // a third-party origin could still issue a credentialed fetch if a key
+    // leaked. We add an explicit default-deny CORS layer so browser
+    // preflights are rejected outright: no `Origin` allow-list, no
+    // credentials, no methods, no headers. Server-side callers (CLI, SDKs,
+    // MCP clients) don't send `Origin` and are unaffected.
+    let cors = tower_http::cors::CorsLayer::new();
+
+    let app = axum::Router::new()
+        .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn_with_state(
+            api_key_manager.clone(),
+            require_canton_api_key,
+        ))
+        .layer(cors);
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     tracing::info!(
         addr = %listen_addr,
         tools = 14,
         mode = "stateless-json",
-        "Canton MCP Server listening (endpoint: /mcp)"
+        auth_gated = api_key_manager.is_some(),
+        "Canton MCP Server listening (endpoint: /mcp, X-Tenzro-Api-Key scope=canton required)"
     );
 
     axum::serve(listener, app).await?;

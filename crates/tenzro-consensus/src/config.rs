@@ -189,7 +189,7 @@ mod tests {
         let config = ConsensusConfig::default();
         assert_eq!(config.block_time_ms, 400);
         assert_eq!(config.max_block_size, 2 * 1024 * 1024);
-        assert_eq!(config.view_timeout_ms, 2000);
+        assert_eq!(config.view_timeout_ms, 1000);
     }
 
     #[test]

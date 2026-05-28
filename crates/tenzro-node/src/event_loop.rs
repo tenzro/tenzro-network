@@ -2386,10 +2386,14 @@ impl EventLoop {
     /// down. This is the security boundary that lets us trust historical blocks
     /// from non-validator peers without re-running consensus.
     ///
-    /// Caveat (cross-epoch sync): we currently verify against
-    /// `consensus.validator_set()` which is the active set at the validator's
-    /// *current* epoch. Cross-epoch verification (using historical validator
-    /// sets) lands when the BlockSyncEngine's epoch boundary handling lands.
+    /// Cross-epoch verification: the QC is verified against the validator
+    /// set that was active at the *block's* height, not the current epoch.
+    /// This is what lets a node catching up across an epoch boundary import
+    /// historical blocks without false-positive `InvalidValidatorSet`
+    /// rejections — the May 2026 testnet stall root cause. If the validator
+    /// set for the block's height is not in the working set or persistent
+    /// store (i.e., predates available history), the block is rejected and
+    /// the caller falls back to snapshot sync.
     pub(crate) async fn handle_block_imported_from_sync(&mut self, block: Block) -> Result<()> {
         // Need a consensus engine to know the validator set we're verifying against.
         let consensus = self.consensus.as_ref().ok_or_else(|| {
@@ -2432,13 +2436,32 @@ impl EventLoop {
 
         // (2) Verify QC: every vote's signature, validator membership, key binding,
         // no duplicates, voting power meets quorum threshold.
-        let validator_set = consensus.validator_set();
+        //
+        // CRITICAL: use the validator set active at the *block's* height, not
+        // the current epoch's set. A node catching up across one or more
+        // epoch transitions would otherwise reject every historical block
+        // whose signers no longer (or don't yet) match the current epoch.
+        // `validator_set_for_height` returns `None` only if the epoch
+        // covering `block.height()` has been pruned beyond the working set
+        // *and* the persistent store doesn't have it — in that case we
+        // refuse the block and the caller falls back to snapshot sync.
+        let validator_set = consensus
+            .validator_set_for_height(block.height())
+            .ok_or_else(|| {
+                crate::error::NodeError::Other(format!(
+                    "block-sync rejected block at height {}: no validator set \
+                     available for that height (history pruned beyond working set); \
+                     snapshot sync required",
+                    block.height()
+                ))
+            })?;
         qc.verify(&validator_set).map_err(|e| {
             crate::error::NodeError::Other(format!(
                 "block-sync rejected block at height {} (hash={}): QC verification \
-                 failed: {}",
+                 failed against epoch validator set ({} members): {}",
                 block.height(),
                 block_hash,
+                validator_set.len(),
                 e
             ))
         })?;

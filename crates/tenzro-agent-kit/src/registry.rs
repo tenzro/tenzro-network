@@ -218,7 +218,13 @@ impl RegistryClient {
         params.insert("name".to_string(), json!(template.name));
         params.insert("description".to_string(), json!(template.description));
         params.insert("system_prompt".to_string(), json!(template.system_prompt));
-        params.insert("creator".to_string(), json!(template.creator));
+        // The node RPC parses `creator` as a hex string (see `parse_address`
+        // in tenzro-node/src/rpc.rs). `Address`'s default Serialize impl emits
+        // a 32-element JSON array, which the RPC rejects. Encode as `0x`-hex.
+        params.insert(
+            "creator".to_string(),
+            json!(format!("0x{}", hex::encode(template.creator.as_bytes()))),
+        );
         params.insert(
             "template_type".to_string(),
             json!(serde_json::to_string(&template.template_type)
