@@ -13,6 +13,9 @@ use tenzro_bridge::BridgeRouter;
 use tenzro_bridge::chainlink_ccip::{ChainlinkCcipAdapter, CcipConfig, FeeToken};
 use tenzro_bridge::debridge::{DeBridgeAdapter, DeBridgeConfig};
 use tenzro_bridge::layerzero::{LayerZeroAdapter, LayerZeroConfig};
+use tenzro_bridge::lifi::{LiFiAdapter, LiFiConfig};
+use tenzro_bridge::wormhole::{WormholeAdapter, WormholeConfig};
+use tenzro_bridge::tnzo_cct::{TnzoCctBridge, TnzoCctRegistry};
 use tenzro_bridge::evm_signer::{EvmSignerConfig, EvmTransactionSigner};
 use tenzro_consensus::{
     open_default_file_store, ConsensusEngine, ConsensusOutMessage, EquivocationEvidence,
@@ -1114,6 +1117,30 @@ pub struct TenzroNode {
     /// trust model and storage layout (CF_AUDIT, CF_APPROVALS).
     auth_engine: Option<Arc<tenzro_auth::AuthEngine>>,
 
+    /// Per-client API key manager. Gates access to scoped RPC surfaces
+    /// (currently `Canton` — `tenzro_*Canton*` methods). The server-side
+    /// Canton credentials live in [`Self::canton_adapter`] and are never
+    /// exposed to clients; instead, clients authenticate to Tenzro with
+    /// an opaque `tnz_*` API key, and the dispatch path in `rpc.rs`
+    /// calls `authorize(plaintext, method)` to gate scoped methods.
+    /// Persists `ApiKeyRecord` rows (SHA-256-hashed plaintext) to
+    /// `CF_API_KEYS` via [`crate::api_key::ApiKeyManager::new`].
+    api_key_manager: Option<Arc<crate::api_key::ApiKeyManager>>,
+
+    /// Operator admin token gating per-node mutation RPCs (API-key
+    /// issuance/revocation, staking, provider registration). Loaded once
+    /// from the `TENZRO_ADMIN_TOKEN` environment variable during
+    /// [`Node::start`] and never persisted: it lives only in process
+    /// memory, never appears in `NodeConfig`, the TOML config file, or
+    /// RocksDB. When `None`, the node is in **fail-closed** mode — every
+    /// gated method returns `-32001 Unauthorized` regardless of caller
+    /// input. Operators set the env var on the validator service unit
+    /// (`Environment="TENZRO_ADMIN_TOKEN=..."`) to unlock the gates.
+    ///
+    /// Compared via [`crate::api_key::verify_admin_token`] in constant
+    /// time to avoid leaking the secret through timing.
+    admin_token: Option<String>,
+
     // AI infrastructure
     model_registry: Option<Arc<ModelRegistry>>,
     provider_manager: Option<Arc<ProviderManager>>,
@@ -1206,6 +1233,13 @@ pub struct TenzroNode {
     /// which synchronizer is per-workflow operator policy, not a global
     /// node default).
     canton_adapter: Option<Arc<tenzro_bridge::canton::CantonAdapter>>,
+
+    /// TNZO CCT bridge — Chainlink CCT (Cross-Chain Token) helper that wraps
+    /// a `ChainlinkCcipAdapter` plus the canonical TNZO pool registry
+    /// (Ethereum / Base / Arbitrum / Optimism LockRelease + Solana BurnMint).
+    /// Used by `tenzro_cctTransfer` RPCs to build CCT-formatted CCIP messages
+    /// for native-TNZO cross-chain delivery without bridge custody risk.
+    cct_bridge: Option<Arc<TnzoCctBridge>>,
 
     // TEE (optional). The local hardware provider is retained so attestation
     // requests routed to this node (RPC `tenzro_attest`, MCP `attest`, agent
@@ -1426,6 +1460,8 @@ impl TenzroNode {
             batch_processor: None,
             fee_collector: None,
             auth_engine: None,
+            api_key_manager: None,
+            admin_token: None,
             model_registry: None,
             provider_manager: None,
             inference_router: None,
@@ -1454,6 +1490,7 @@ impl TenzroNode {
             token_registry: None,
             bridge_router: None,
             canton_adapter: None,
+            cct_bridge: None,
             tee_provider: None,
             tee_registry: None,
             zk_commitment_registry: Arc::new(tenzro_vm::precompiles::ZkCommitmentRegistry::new()),
@@ -2040,6 +2077,41 @@ impl TenzroNode {
         self.storage = Some(store.clone());
         self.health_monitor.mark_healthy("storage");
 
+        // Initialize the API key manager. Hydrates `ApiKeyRecord` cache from
+        // `CF_API_KEYS` so previously-issued keys survive restart. Required
+        // before any RPC dispatch so the scoped-method gate is active from
+        // request #1.
+        let api_keys = crate::api_key::ApiKeyManager::new(
+            store.clone() as Arc<dyn tenzro_storage::KvStore>,
+        )?;
+        self.api_key_manager = Some(api_keys);
+
+        // Load the operator admin token from the environment. Gates
+        // operator-only mutation RPCs (createApiKey/revokeApiKey/
+        // listApiKeys/stake/unstake/registerProvider). Fail-closed:
+        // a node with no env var set rejects every gated call. The
+        // token is captured exactly once at startup so the env var can
+        // be unset (or rotated and restart) without leaving the in-process
+        // copy stale.
+        match std::env::var("TENZRO_ADMIN_TOKEN") {
+            Ok(token) if !token.is_empty() => {
+                self.admin_token = Some(token);
+                tracing::info!(
+                    "operator admin-token gate ENABLED — mutation RPCs require X-Tenzro-Admin-Token"
+                );
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    "TENZRO_ADMIN_TOKEN is set but empty — admin gate is fail-closed, mutation RPCs unreachable"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "TENZRO_ADMIN_TOKEN not set — admin gate is fail-closed, mutation RPCs unreachable (set the env var on the service unit to unlock)"
+                );
+            }
+        }
+
         // Initialize the snapshot ABCI store on top of the live KV store.
         // Snapshots land in `<data_dir>/snapshots/` and are produced
         // periodically by the EventLoop's finality subscriber once the
@@ -2531,13 +2603,16 @@ impl TenzroNode {
         } else {
             Arc::new(TokenRegistry::new())
         };
-        // Register native TNZO token at startup (wTNZO ERC-20 pointer address)
-        if let Err(e) = token_registry.register_tnzo(
-            Some([0x10, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01]),
-            None,
-            None,
-        ) {
-            warn!("TNZO token registration: {} (may already be registered)", e);
+        // Register native TNZO token at startup (wTNZO ERC-20 pointer address).
+        // Skip if already in the persisted catalog from a previous boot.
+        if token_registry.get_by_symbol("TNZO").is_none() {
+            if let Err(e) = token_registry.register_tnzo(
+                Some([0x10, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01]),
+                None,
+                None,
+            ) {
+                warn!("TNZO token registration: {}", e);
+            }
         }
 
         // Register canonical Tempo L1 TIP-20 stablecoins so the catalog reflects
@@ -2550,6 +2625,11 @@ impl TenzroNode {
             ("PYUSD", "PayPal USD (Tempo)", 6u8, 0xC2u8),
             ("USDT", "Tether USD (Tempo)", 6u8, 0xC3u8),
         ] {
+            // Skip if already registered on a previous boot — the catalog is
+            // RocksDB-persisted, so this hot path runs on every restart.
+            if token_registry.get_by_symbol(symbol).is_some() {
+                continue;
+            }
             // Deterministic placeholder address: 19-byte zero-pad + per-symbol seed byte.
             // Will be replaced via governance when canonical issuance lands.
             let mut addr = [0u8; 20];
@@ -2786,8 +2866,23 @@ impl TenzroNode {
             }
         }
 
-        // Create epoch manager
-        let epoch_manager = EpochManager::new(validators, 10000)?;
+        // Create epoch manager — backed by RocksDB when storage is available,
+        // so validator-set history for past epochs survives restart and
+        // block-sync can verify historical commit-QCs against the correct
+        // set. Without persistence, a node falling behind across an epoch
+        // boundary would reject every historical block as `InvalidValidatorSet`
+        // and never re-converge — the May 2026 testnet stall root cause.
+        let epoch_manager = if let Some(ref storage) = self.storage {
+            let epoch_store = std::sync::Arc::new(
+                crate::epoch_state_store::RocksDbEpochStateStore::new(storage.clone()),
+            );
+            EpochManager::with_store(validators, 10000, epoch_store)?
+        } else {
+            // Ephemeral nodes (no storage) get an in-memory-only manager.
+            // Used by tests and by short-lived light-client roles that don't
+            // produce blocks and therefore don't traverse epoch transitions.
+            EpochManager::new(validators, 10000)?
+        };
 
         // Create consensus engine with slashing callback wired to StakingManager
         let consensus_config = self.config.consensus.clone().unwrap_or_default();
@@ -3519,8 +3614,12 @@ impl TenzroNode {
             info!("Liveness sweeper spawned (5min cadence)");
         }
 
-        // Auto-register TenzroClaw agents on every startup so they survive restarts
+        // Auto-register TenzroClaw agents on every startup so they survive restarts.
+        // Registration is idempotent: AgentRuntime hydrates `RegisteredAgent` records
+        // from CF_AGENTS on boot, so on every restart after the first these calls
+        // return `AgentAlreadyExists`. Treat that variant as a no-op (debug log).
         {
+            use tenzro_agent::AgentError;
             use tenzro_types::agent::Capability;
             let system_addr = Address::zero();
             let tenzroclaw_caps = vec![
@@ -3536,6 +3635,9 @@ impl TenzroNode {
                 tokio::spawn(async move {
                     match ar1.register_agent("TenzroClaw-1".to_string(), addr1, caps1, false, 1).await {
                         Ok(a) => info!("Auto-registered TenzroClaw-1: agent_id={}", a.identity.agent_id),
+                        Err(AgentError::AgentAlreadyExists(id)) => {
+                            debug!("TenzroClaw-1 already registered (hydrated from storage): agent_id={}", id);
+                        }
                         Err(e) => warn!("Failed to auto-register TenzroClaw-1: {}", e),
                     }
                 });
@@ -3544,6 +3646,9 @@ impl TenzroNode {
                 tokio::spawn(async move {
                     match ar2.register_agent("TenzroClaw-2".to_string(), addr2, tenzroclaw_caps, false, 2).await {
                         Ok(a) => info!("Auto-registered TenzroClaw-2: agent_id={}", a.identity.agent_id),
+                        Err(AgentError::AgentAlreadyExists(id)) => {
+                            debug!("TenzroClaw-2 already registered (hydrated from storage): agent_id={}", id);
+                        }
                         Err(e) => warn!("Failed to auto-register TenzroClaw-2: {}", e),
                     }
                 });
@@ -4500,6 +4605,66 @@ impl TenzroNode {
                 info!("Registered deBridge DLN bridge adapter");
             }
 
+        // LI.FI aggregator adapter
+        if let Some(lifi_cfg) = &bridge_cfg.lifi
+            && lifi_cfg.enabled {
+                let mut adapter = LiFiAdapter::new(LiFiConfig::default());
+
+                if let Some(signer) = Self::build_bridge_signer("LI.FI", lifi_cfg).await {
+                    adapter = adapter.with_signer(signer);
+                }
+
+                bridge_router.register_adapter("lifi", Box::new(adapter)).await;
+                info!("Registered LI.FI aggregator bridge adapter");
+            }
+
+        // Wormhole adapter (Guardian-VAA token + message bridge). Constructed
+        // with a Tenzro-local sentinel chain ID (10_000) until Tenzro receives
+        // an officially assigned Wormhole chain ID. Core / token bridge
+        // contract addresses default to the zero address — operators that
+        // need to publish messages on-chain must override via their own
+        // signer + chain-specific contract deployment.
+        if let Some(wh_cfg) = &bridge_cfg.wormhole
+            && wh_cfg.enabled {
+                let wormhole_config = WormholeConfig::new(
+                    10_000, // Tenzro-local sentinel; not officially assigned.
+                    "0x0000000000000000000000000000000000000000",
+                    "0x0000000000000000000000000000000000000000",
+                );
+                let mut adapter = WormholeAdapter::new(wormhole_config);
+
+                if let Some(signer) = Self::build_bridge_signer("Wormhole", wh_cfg).await {
+                    adapter = adapter.with_signer(signer);
+                }
+
+                bridge_router.register_adapter("wormhole", Box::new(adapter)).await;
+                info!("Registered Wormhole bridge adapter");
+            }
+
+        // TNZO CCT bridge — only useful when CCIP is also enabled, since the
+        // CCT path delegates CCIP fee quoting / message submission. The CCT
+        // bridge holds its own `ChainlinkCcipAdapter` instance (sharing the
+        // router's would require Arc-wrapping the registered adapter; for
+        // pre-alpha simplicity we construct a second instance with the same
+        // config). The canonical Tenzro mainnet pool registry is seeded
+        // automatically (Ethereum / Base / Arbitrum / Optimism LockRelease
+        // + Solana BurnMint).
+        if let Some(ccip_cfg) = &bridge_cfg.ccip
+            && ccip_cfg.enabled {
+                let mut cct_ccip_adapter = ChainlinkCcipAdapter::new(
+                    CcipConfig::ethereum_mainnet(FeeToken::Native),
+                );
+                if let Some(signer) = Self::build_bridge_signer("CCT-CCIP", ccip_cfg).await {
+                    cct_ccip_adapter = cct_ccip_adapter.with_signer(signer);
+                }
+                let cct_bridge = TnzoCctBridge::new(
+                    Arc::new(cct_ccip_adapter),
+                    TnzoCctRegistry::tenzro_mainnet(),
+                );
+                self.cct_bridge = Some(Arc::new(cct_bridge));
+                info!("Registered TNZO CCT bridge with canonical mainnet pool topology");
+            }
+
         // Canton adapter — constructed independently of the per-protocol
         // bridge adapters because Canton mirroring uses a different surface
         // (typed `mirror_*` / `consume_daml_events` methods on the adapter
@@ -4507,20 +4672,91 @@ impl TenzroNode {
         // configure Canton via the top-level `[canton]` config section,
         // not under `[bridge.*]`.
         if self.config.canton.enabled {
-            let canton_cfg = tenzro_bridge::canton::CantonConfig::new(
-                self.config.canton.host.clone(),
-                self.config.canton.port,
-                Vec::<String>::new(),
-                String::new(),
-                "tenzro-node-workflow-mirror",
-            );
-            let canton_adapter = Arc::new(
-                tenzro_bridge::canton::CantonAdapter::new(canton_cfg),
-            );
+            // Three Canton profiles:
+            //  (1) Tenzro-operated devnet — fixed host + Auth0 issuer +
+            //      shared `tenzro-validator-1` party.
+            //  (2) Operator-run validator — operator's host:port, with
+            //      either operator-supplied OAuth2 client-credentials or
+            //      a long-lived static JWT.
+            //  (3) Local unauth — plaintext HTTP, no bearer, dev/test.
+            use tenzro_bridge::canton::{CantonAdapter, CantonConfig as BridgeCantonConfig};
+            use tenzro_bridge::canton_auth::{CantonAuthConfig, CantonTokenProvider};
+
+            let (mut canton_cfg, token_provider, static_jwt, profile_label) =
+                if self.config.canton.devnet {
+                    let secret = self
+                        .config
+                        .canton
+                        .devnet_client_secret
+                        .clone()
+                        .ok_or_else(|| NodeError::Internal(
+                            "Canton devnet enabled but CANTON_DEVNET_CLIENT_SECRET is not set"
+                                .to_string(),
+                        ))?;
+                    let provider = CantonTokenProvider::new(
+                        CantonAuthConfig::devnet(secret),
+                    );
+                    (
+                        BridgeCantonConfig::devnet(),
+                        Some(provider),
+                        None,
+                        "tenzro-operated devnet".to_string(),
+                    )
+                } else {
+                    let cfg = BridgeCantonConfig::new(
+                        self.config.canton.host.clone(),
+                        self.config.canton.port,
+                        Vec::<String>::new(),
+                        String::new(),
+                        "tenzro-node-workflow-mirror",
+                    );
+
+                    if let Some(oauth) = &self.config.canton.oauth {
+                        let auth_cfg = CantonAuthConfig {
+                            token_url: oauth.token_url.clone(),
+                            client_id: oauth.client_id.clone(),
+                            client_secret: oauth.client_secret.clone(),
+                            audience: oauth.audience.clone(),
+                            scope: oauth.scope.clone(),
+                        };
+                        let provider = CantonTokenProvider::new(auth_cfg);
+                        (
+                            cfg,
+                            Some(provider),
+                            None,
+                            "operator-run validator (oauth2)".to_string(),
+                        )
+                    } else if let Some(jwt) = &self.config.canton.static_jwt {
+                        (
+                            cfg,
+                            None,
+                            Some(jwt.clone()),
+                            "operator-run validator (static jwt)".to_string(),
+                        )
+                    } else {
+                        (cfg, None, None, "local unauth".to_string())
+                    }
+                };
+
+            if self.config.canton.tls || self.config.canton.devnet {
+                canton_cfg = canton_cfg.with_tls(true);
+            }
+            if let Some(jwt) = static_jwt {
+                canton_cfg = canton_cfg.with_jwt_token(jwt);
+            }
+
+            let mut adapter = CantonAdapter::new(canton_cfg);
+            if let Some(provider) = token_provider {
+                adapter = adapter.with_token_provider(provider);
+            }
+            let canton_adapter = Arc::new(adapter);
+
             info!(
                 host = %self.config.canton.host,
                 port = self.config.canton.port,
-                "Canton adapter initialized for workflow mirroring"
+                tls = self.config.canton.tls || self.config.canton.devnet,
+                profile = %profile_label,
+                "Canton adapter initialized"
             );
             self.canton_adapter = Some(canton_adapter);
         } else {
@@ -6459,6 +6695,23 @@ impl TenzroNode {
         self.auth_engine.as_ref()
     }
 
+    /// Returns the per-client API key manager, populated once storage is
+    /// initialized. Used by the RPC dispatch path to gate scoped methods
+    /// (currently `tenzro_*Canton*`) behind a valid `X-Tenzro-Api-Key`
+    /// header.
+    pub fn api_key_manager(&self) -> Option<&Arc<crate::api_key::ApiKeyManager>> {
+        self.api_key_manager.as_ref()
+    }
+
+    /// Returns the operator admin token, if one is configured for this
+    /// process. The token gates operator-only mutation RPCs and is loaded
+    /// from `TENZRO_ADMIN_TOKEN` at startup. `None` means the gate is
+    /// fail-closed and every gated handler must reject regardless of
+    /// caller input — see [`crate::api_key::verify_admin_token`].
+    pub fn admin_token(&self) -> Option<&str> {
+        self.admin_token.as_deref()
+    }
+
     /// Returns the active liveness sweeper config, if the sweeper is running.
     pub fn liveness_config(&self) -> Option<crate::liveness::LivenessConfig> {
         self.liveness_sweeper.as_ref().map(|s| s.config.clone())
@@ -6490,6 +6743,13 @@ impl TenzroNode {
     /// Used by `tenzro_mirror*` / `tenzro_consumeDamlEvents` RPC handlers.
     pub fn canton_adapter(&self) -> Option<&Arc<tenzro_bridge::canton::CantonAdapter>> {
         self.canton_adapter.as_ref()
+    }
+
+    /// Returns the TNZO CCT bridge if CCIP was enabled at init time.
+    /// Used by `tenzro_cct*` RPC handlers that need to build CCT-formatted
+    /// CCIP messages against the canonical TNZO pool registry.
+    pub fn cct_bridge(&self) -> Option<&Arc<TnzoCctBridge>> {
+        self.cct_bridge.as_ref()
     }
 
     /// Returns the node config

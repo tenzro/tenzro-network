@@ -825,8 +825,9 @@ fn is_public_mcp_request(body: &[u8]) -> bool {
 ///
 /// - Read-only tools (queries, discovery): public, no auth required
 /// - Write tools: require Bearer JWT minted by [`tenzro_auth::AuthEngine`]
-/// - Set `TENZRO_MCP_AUTH=false` to disable auth entirely (testnet/dev)
-/// - Set `TENZRO_MCP_AUTH=full` to require auth for ALL tools
+/// - `TENZRO_MCP_AUTH=tiered` (default) — public-read tools open, mutations require Bearer
+/// - `TENZRO_MCP_AUTH=full` — every call requires Bearer
+/// - Any other value (including the removed `false`/`0` bypass) falls back to `tiered`
 ///
 /// Side-effect: while `next.run(req)` is awaited, the
 /// [`crate::mcp::server::MCP_REQUEST_HEADERS`] task-local is set so that
@@ -862,13 +863,22 @@ pub async fn bearer_auth_check(
         http_uri: req.uri().to_string(),
     };
 
-    let auth_mode = std::env::var("TENZRO_MCP_AUTH").unwrap_or_else(|_| "tiered".to_string());
-
-    if auth_mode == "false" || auth_mode == "0" {
-        return crate::mcp::server::MCP_REQUEST_HEADERS
-            .scope(mcp_headers, next.run(req))
-            .await;
-    }
+    // Auth mode floor is `tiered`. Historical `false`/`0` bypass was removed —
+    // a public-facing MCP endpoint must never be unauthenticated for mutation
+    // tools. `tiered` (default) lets public-read tools through and requires
+    // Bearer for everything else; `full` requires Bearer for every call.
+    let auth_mode_raw = std::env::var("TENZRO_MCP_AUTH").unwrap_or_else(|_| "tiered".to_string());
+    let auth_mode = match auth_mode_raw.as_str() {
+        "full" => "full",
+        "tiered" => "tiered",
+        other => {
+            tracing::warn!(
+                "TENZRO_MCP_AUTH={:?} is not recognised (or is a removed bypass value); falling back to `tiered`",
+                other
+            );
+            "tiered"
+        }
+    };
 
     if auth_mode == "tiered" {
         let (parts, body) = req.into_parts();

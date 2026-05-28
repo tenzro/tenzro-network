@@ -282,6 +282,23 @@ async fn handle_rpc_post(
     let http_uri = format!("http://{}/", node.config().rpc_addr);
     let auth_ctx = AuthContext::from_headers(&headers, "POST", &http_uri);
 
+    // Extract the per-request API key (used to gate scoped methods like
+    // `tenzro_*Canton*`). The header is optional — methods that aren't
+    // gated will accept requests without it.
+    let api_key = headers
+        .get("x-tenzro-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Extract the per-request operator admin token. Used to gate
+    // operator-only mutation RPCs (createApiKey/revokeApiKey/
+    // listApiKeys/stake/unstake/registerProvider). Optional for
+    // unrelated methods.
+    let admin_token = headers
+        .get("x-tenzro-admin-token")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     // Support batch requests (JSON array)
     if let Some(batch) = payload.as_array() {
         let mut responses = Vec::new();
@@ -289,6 +306,14 @@ async fn handle_rpc_post(
             match serde_json::from_value::<JsonRpcRequest>(item.clone()) {
                 Ok(request) => {
                     debug!("RPC batch request: {}", request.method);
+                    if let Some(err) = gate_admin_token(&node, &request, admin_token.as_deref()) {
+                        responses.push(serde_json::to_value(err).unwrap());
+                        continue;
+                    }
+                    if let Some(err) = gate_api_key(&node, &request, api_key.as_deref()) {
+                        responses.push(serde_json::to_value(err).unwrap());
+                        continue;
+                    }
                     let response = handle_request(&node, request, &auth_ctx).await;
                     responses.push(serde_json::to_value(response).unwrap());
                 }
@@ -313,6 +338,12 @@ async fn handle_rpc_post(
     match serde_json::from_value::<JsonRpcRequest>(payload) {
         Ok(request) => {
             debug!("RPC request: {}", request.method);
+            if let Some(err) = gate_admin_token(&node, &request, admin_token.as_deref()) {
+                return (StatusCode::OK, Json(serde_json::to_value(err).unwrap()));
+            }
+            if let Some(err) = gate_api_key(&node, &request, api_key.as_deref()) {
+                return (StatusCode::OK, Json(serde_json::to_value(err).unwrap()));
+            }
             let response = handle_request(&node, request, &auth_ctx).await;
             (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
         }
@@ -331,6 +362,136 @@ async fn handle_rpc_post(
             (StatusCode::OK, Json(serde_json::to_value(error_response).unwrap()))
         }
     }
+}
+
+/// Gates a request against the node's API key manager. Returns `Some(err)`
+/// when the method is scoped and the presented key is missing, unknown,
+/// revoked, or lacks the required scope. Returns `None` when the call is
+/// authorized to proceed.
+fn gate_api_key(
+    node: &Arc<TenzroNode>,
+    request: &JsonRpcRequest,
+    api_key: Option<&str>,
+) -> Option<JsonRpcResponse> {
+    let mgr = node.api_key_manager()?;
+    use crate::api_key::AuthorizeOutcome;
+    match mgr.authorize(api_key, &request.method) {
+        AuthorizeOutcome::Allowed => None,
+        AuthorizeOutcome::MissingKey(scope) => Some(JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request.id.clone(),
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32004,
+                message: format!(
+                    "Unauthorized: missing X-Tenzro-Api-Key header (required scope: {})",
+                    scope.as_str()
+                ),
+                data: None,
+            }),
+        }),
+        AuthorizeOutcome::UnknownOrRevoked => Some(JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request.id.clone(),
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32004,
+                message: "Unauthorized: API key is unknown or revoked".to_string(),
+                data: None,
+            }),
+        }),
+        AuthorizeOutcome::InsufficientScope(scope) => Some(JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request.id.clone(),
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32004,
+                message: format!(
+                    "Unauthorized: API key lacks required scope ({})",
+                    scope.as_str()
+                ),
+                data: None,
+            }),
+        }),
+    }
+}
+
+/// Returns `true` if the given JSON-RPC method is gated behind the
+/// operator admin token. Mutation RPCs that bind operator-controlled
+/// state (API-key issuance/revocation, staking against the operator's
+/// account, provider registration) live here.
+///
+/// New gated methods must be added in lock-step with the underlying
+/// handler — this predicate is the single source of truth.
+fn requires_admin_token(method: &str) -> bool {
+    matches!(
+        method,
+        "tenzro_createApiKey"
+            | "tenzro_revokeApiKey"
+            | "tenzro_listApiKeys"
+            | "tenzro_stake"
+            | "tenzro_stakeTokens"
+            | "tenzro_unstake"
+            | "tenzro_unstakeTokens"
+            | "tenzro_registerProvider"
+    )
+}
+
+/// Gates a request against the operator admin token. Returns
+/// `Some(err)` when the method requires the token and the presented
+/// value is missing or does not match. Returns `None` when the call
+/// is permitted to proceed.
+///
+/// Fail-closed semantics: when [`Node::admin_token`] is `None` (env
+/// var not set at startup), every admin-gated method rejects regardless
+/// of caller input. Comparison uses [`crate::api_key::verify_admin_token`]
+/// (constant-time, length-prefix short-circuit), so neither the secret
+/// nor its length leaks through the response timing.
+fn gate_admin_token(
+    node: &Arc<TenzroNode>,
+    request: &JsonRpcRequest,
+    presented: Option<&str>,
+) -> Option<JsonRpcResponse> {
+    if !requires_admin_token(&request.method) {
+        return None;
+    }
+
+    let unauthorized = |msg: &str| JsonRpcResponse {
+        jsonrpc: "2.0".to_string(),
+        id: request.id.clone(),
+        result: None,
+        error: Some(JsonRpcError {
+            code: -32001,
+            message: msg.to_string(),
+            data: None,
+        }),
+    };
+
+    let expected = match node.admin_token() {
+        Some(t) => t,
+        None => {
+            return Some(unauthorized(
+                "Unauthorized: operator admin gate is fail-closed (TENZRO_ADMIN_TOKEN not configured on this node)",
+            ));
+        }
+    };
+
+    let presented = match presented {
+        Some(p) => p,
+        None => {
+            return Some(unauthorized(
+                "Unauthorized: missing X-Tenzro-Admin-Token header",
+            ));
+        }
+    };
+
+    if !crate::api_key::verify_admin_token(presented, expected) {
+        return Some(unauthorized(
+            "Unauthorized: admin token does not match",
+        ));
+    }
+
+    None
 }
 
 /// JSON-RPC request
@@ -920,6 +1081,11 @@ pub(crate) async fn handle_request(
         "tenzro_listDamlContracts" => handle_list_daml_contracts(node, request.params).await,
         "tenzro_submitDamlCommand" => handle_submit_daml_command(node, request.params).await,
 
+        // API key management
+        "tenzro_createApiKey" => handle_create_api_key(node, request.params).await,
+        "tenzro_revokeApiKey" => handle_revoke_api_key(node, request.params).await,
+        "tenzro_listApiKeys" => handle_list_api_keys(node).await,
+
         // Staking methods
         "tenzro_stake" | "tenzro_stakeTokens" => handle_stake(node, request.params).await,
         "tenzro_unstake" | "tenzro_unstakeTokens" => handle_unstake(node, request.params).await,
@@ -1225,6 +1391,7 @@ pub(crate) async fn handle_request(
         // TNZO CCT — Chainlink Cross-Chain Token
         "tenzro_cctListPools" => crate::rpc_integrations::handle_cct_list_pools(node, request.params).await,
         "tenzro_cctGetPool" => crate::rpc_integrations::handle_cct_get_pool(node, request.params).await,
+        "tenzro_cctBuildMessage" => crate::rpc_integrations::handle_cct_build_message(node, request.params).await,
 
         // EIP-7702 — EOA Code Delegation (stateless helpers)
         "tenzro_eip7702SigningHash" => crate::rpc_integrations::handle_eip7702_signing_hash(node, request.params).await,
@@ -5756,10 +5923,13 @@ async fn handle_mirror_workflow_to_canton(
     let mirror = adapter
         .mirror_workflow(&workflow, &synchronizer_id)
         .await
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Canton mirror failed: {}", e),
-            data: None,
+        .map_err(|e| {
+            tracing::error!("Canton mirror_workflow failed: {}", e);
+            JsonRpcError {
+                code: -32000,
+                message: "Canton mirror operation failed (see node logs)".to_string(),
+                data: None,
+            }
         })?;
 
     Ok(serde_json::json!({
@@ -5812,10 +5982,13 @@ async fn handle_mirror_obligation_to_canton(
     let contract_id = adapter
         .mirror_obligation(&obligation, &parent)
         .await
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Canton mirror failed: {}", e),
-            data: None,
+        .map_err(|e| {
+            tracing::error!("Canton mirror_obligation failed: {}", e);
+            JsonRpcError {
+                code: -32000,
+                message: "Canton mirror operation failed (see node logs)".to_string(),
+                data: None,
+            }
         })?;
 
     Ok(serde_json::json!({
@@ -5833,10 +6006,13 @@ async fn handle_consume_daml_events(
     node: &Arc<TenzroNode>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let adapter = canton_adapter_or_err(node)?;
-    let events = adapter.consume_daml_events().await.map_err(|e| JsonRpcError {
-        code: -32000,
-        message: format!("Canton event poll failed: {}", e),
-        data: None,
+    let events = adapter.consume_daml_events().await.map_err(|e| {
+        tracing::error!("Canton consume_daml_events failed: {}", e);
+        JsonRpcError {
+            code: -32000,
+            message: "Canton event poll failed (see node logs)".to_string(),
+            data: None,
+        }
     })?;
     Ok(serde_json::json!({
         "count": events.len(),
@@ -17554,6 +17730,25 @@ async fn handle_vote(
         }),
     };
 
+    // Require a caller signature binding the vote to the voter address.
+    // Domain-separated message: "tenzro:vote:{proposal_id}:{vote}" signed with
+    // the Ed25519 or Secp256k1 key that derives to `voter`.
+    //
+    // Without this gate any caller could submit a vote under any address on
+    // public RPC. The on-chain path via the privileged-VM GovernanceVote
+    // selector (0x02000002) over `tenzro_signAndSendTransaction` is the
+    // preferred way to vote; this convenience RPC is now signature-gated
+    // for parity.
+    let signature = params.get("signature").and_then(|v| v.as_str());
+    let public_key = params.get("public_key").and_then(|v| v.as_str());
+    let sign_message = format!("tenzro:vote:{}:{}", proposal_id, vote_type_str);
+    verify_creator_signature(
+        voter.as_bytes(),
+        signature,
+        public_key,
+        sign_message.as_bytes(),
+    )?;
+
     // Determine voting power from staking manager
     let voting_power = if let Some(staking) = node.staking() {
         staking.get_stake(&voter)
@@ -17832,14 +18027,27 @@ async fn handle_list_canton_domains(
         }));
     }
 
+    // Reach the live CantonAdapter via the bridge subsystem. If Canton is
+    // configured-enabled but the adapter failed to attach (e.g. participant
+    // unreachable at startup), surface that as -32000 rather than masking
+    // with stale "configured" data.
+    let adapter = canton_adapter_or_err(node)?;
+    let domains: Vec<Value> = adapter
+        .list_synchronizers()
+        .into_iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.chain_id,
+                "name": c.name,
+                "native_token": c.native_token,
+                "finality_time_secs": c.finality_time_secs,
+            })
+        })
+        .collect();
+
     Ok(serde_json::json!({
         "enabled": true,
-        "domains": [{
-            "id": "tenzro-canton",
-            "host": config.canton.host,
-            "port": config.canton.port,
-            "status": "configured",
-        }],
+        "domains": domains,
     }))
 }
 
@@ -17856,16 +18064,64 @@ async fn handle_list_daml_contracts(
         });
     }
 
-    let template_id = params
-        .as_ref()
-        .and_then(|p| p.get("template_id"))
-        .and_then(|v| v.as_str());
+    // The v2 active-contracts endpoint requires at least one template id.
+    // Accept either `template_ids: [..]` for explicit selection or a single
+    // `template_id: ".."` shorthand. The optional `query` object is the
+    // structural filter applied client-side against `createArguments`.
+    let (template_ids, query) = match &params {
+        Some(p) => {
+            let template_ids = if let Some(arr) = p.get("template_ids").and_then(|v| v.as_array()) {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            } else if let Some(t) = p.get("template_id").and_then(|v| v.as_str()) {
+                vec![t.to_string()]
+            } else {
+                Vec::new()
+            };
+            let query = p.get("query").cloned().unwrap_or(Value::Null);
+            (template_ids, query)
+        }
+        None => (Vec::new(), Value::Null),
+    };
+
+    if template_ids.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Missing template_ids (Canton v2 active-contracts requires at least one)"
+                .to_string(),
+            data: None,
+        });
+    }
+
+    let adapter = canton_adapter_or_err(node)?;
+    let contracts = adapter
+        .query_active_contracts(template_ids.clone(), query.clone())
+        .await
+        .map_err(|e| {
+            tracing::error!("Canton query_active_contracts failed: {}", e);
+            JsonRpcError {
+                code: -32000,
+                message: "Canton query failed (see node logs)".to_string(),
+                data: None,
+            }
+        })?;
+
+    let projected: Vec<Value> = contracts
+        .into_iter()
+        .map(|c| {
+            serde_json::json!({
+                "contract_id": c.contract_id,
+                "template_id": c.template_id,
+                "payload": c.payload,
+            })
+        })
+        .collect();
 
     Ok(serde_json::json!({
-        "contracts": [],
-        "filter": template_id,
-        "canton_host": config.canton.host,
-        "canton_port": config.canton.port,
+        "contracts": projected,
+        "template_ids": template_ids,
+        "query": query,
     }))
 }
 
@@ -17888,31 +18144,229 @@ async fn handle_submit_daml_command(
         data: None,
     })?;
 
-    let command_type = params.get("command_type")
+    let command_type = params
+        .get("command_type")
         .and_then(|v| v.as_str())
         .ok_or_else(|| JsonRpcError {
             code: -32602,
-            message: "Missing command_type (create/exercise/exercise_by_key)".to_string(),
+            message: "Missing command_type (create | exercise)".to_string(),
             data: None,
         })?;
 
-    let template_id = params.get("template_id")
+    let template_id = params
+        .get("template_id")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing template_id".to_string(),
+            data: None,
+        })?
+        .to_string();
 
-    let party = params.get("party")
+    let adapter = canton_adapter_or_err(node)?;
+
+    let result = match command_type {
+        "create" => {
+            let create_arguments = params
+                .get("create_arguments")
+                .cloned()
+                .unwrap_or(Value::Null);
+            adapter
+                .submit_create_command(&template_id, create_arguments)
+                .await
+        }
+        "exercise" => {
+            let contract_id = params
+                .get("contract_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: "Missing contract_id (required for exercise)".to_string(),
+                    data: None,
+                })?;
+            let choice = params
+                .get("choice")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: "Missing choice (required for exercise)".to_string(),
+                    data: None,
+                })?;
+            let argument = params
+                .get("choice_argument")
+                .cloned()
+                .unwrap_or(Value::Null);
+            adapter
+                .submit_exercise_command(contract_id, &template_id, choice, argument)
+                .await
+        }
+        other => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "Unsupported command_type '{}' (supported: create, exercise)",
+                    other
+                ),
+                data: None,
+            });
+        }
+    };
+
+    result.map_err(|e| {
+        tracing::error!("Canton submit_daml_command failed: {}", e);
+        JsonRpcError {
+            code: -32000,
+            message: "Canton command submission failed (see node logs)".to_string(),
+            data: None,
+        }
+    })
+}
+
+// ── API key management handlers ─────────────────────────────────────
+//
+// API keys gate access to scoped RPC surfaces (currently `tenzro_*Canton*`).
+// Issuance returns the plaintext key exactly once; afterwards only the
+// SHA-256 hash and the non-secret `key_id` handle are persisted in
+// `CF_API_KEYS`. Revocation is by `key_id`.
+//
+// Issuance and revocation themselves are gated by the operator admin
+// token (`X-Tenzro-Admin-Token` header), enforced upstream in
+// `gate_admin_token` at the dispatch layer. Handlers therefore do not
+// re-check authentication — when invoked, the request has already
+// cleared the gate. Fail-closed: a node started without
+// `TENZRO_ADMIN_TOKEN` rejects every gated call regardless of input.
+
+async fn handle_create_api_key(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use crate::api_key::ApiKeyScope;
+
+    let mgr = node.api_key_manager().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "API key manager is not initialized".to_string(),
+        data: None,
+    })?;
+
+    let params = params.unwrap_or_else(|| serde_json::json!({}));
+
+    let label = params
+        .get("label")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .unwrap_or("unnamed")
+        .to_string();
+
+    let subject = params
+        .get("subject")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let scopes_raw = params
+        .get("scopes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_else(|| vec![Value::String("canton".to_string())]);
+
+    let mut scopes = Vec::new();
+    for v in scopes_raw {
+        let s = v.as_str().ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "scopes entries must be strings".to_string(),
+            data: None,
+        })?;
+        let scope = match s {
+            "canton" => ApiKeyScope::Canton,
+            other => {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("Unknown scope: {}", other),
+                    data: None,
+                });
+            }
+        };
+        scopes.push(scope);
+    }
+
+    let issued = mgr.issue(subject, label, scopes).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("issue API key: {}", e),
+        data: None,
+    })?;
 
     Ok(serde_json::json!({
-        "submitted": true,
-        "command_type": command_type,
-        "template_id": template_id,
-        "party": party,
-        "canton_host": config.canton.host,
-        "canton_port": config.canton.port,
-        "note": "Command submitted to Canton Ledger API",
+        "key": issued.key,
+        "key_id": issued.record.key_id,
+        "label": issued.record.label,
+        "subject": issued.record.subject,
+        "scopes": issued.record.scopes.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        "created_at": issued.record.created_at,
+        "note": "Save the `key` field now — it is shown only once.",
     }))
+}
+
+async fn handle_revoke_api_key(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let mgr = node.api_key_manager().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "API key manager is not initialized".to_string(),
+        data: None,
+    })?;
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let key_id = params
+        .get("key_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing key_id".to_string(),
+            data: None,
+        })?;
+
+    let revoked = mgr.revoke_by_id(key_id).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("revoke API key: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "key_id": key_id,
+        "revoked": revoked,
+    }))
+}
+
+async fn handle_list_api_keys(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let mgr = node.api_key_manager().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "API key manager is not initialized".to_string(),
+        data: None,
+    })?;
+
+    let records: Vec<Value> = mgr
+        .list()
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "key_id": r.key_id,
+                "subject": r.subject,
+                "label": r.label,
+                "scopes": r.scopes.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                "created_at": r.created_at,
+                "revoked_at": r.revoked_at,
+                "active": r.is_active(),
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({ "keys": records }))
 }
 
 // ── Staking & Provider handlers ────────────────────────────────────
@@ -23281,10 +23735,14 @@ async fn handle_create_token(
         return Err(JsonRpcError { code: -32602, message: "Creator must be 20 or 32 bytes".to_string(), data: None });
     }
 
-    // Verify creator signature if provided
+    // Verify creator signature (now mandatory — fail-closed).
+    // Signature must be over the domain-separated message:
+    //   "tenzro:create_token:{name}:{symbol}:{initial_supply}"
+    // produced with the Ed25519 or Secp256k1 key that derives to `creator`.
     let signature = params.get("signature").and_then(|v| v.as_str());
+    let public_key = params.get("public_key").and_then(|v| v.as_str());
     let sign_message = format!("tenzro:create_token:{}:{}:{}", name, symbol, initial_supply_str);
-    verify_creator_signature(&creator, signature, sign_message.as_bytes())?;
+    verify_creator_signature(&creator, signature, public_key, sign_message.as_bytes())?;
 
     let decimals = params.get("decimals").and_then(|v| v.as_u64()).unwrap_or(18) as u8;
     let initial_supply: u128 = initial_supply_str.parse().map_err(|e| JsonRpcError {
@@ -23648,10 +24106,29 @@ async fn handle_deploy_contract(
         code: -32602, message: format!("Invalid deployer: {}", e), data: None,
     })?;
 
-    // Verify deployer signature if provided
+    // Verify deployer signature (now mandatory — fail-closed).
+    // Signature must be over the domain-separated message:
+    //   "tenzro:deploy_contract:{vm_type}:{deployer}"
+    // produced with the Ed25519 or Secp256k1 key that derives to `deployer`.
+    // Note: `deployer` here is the parsed bytes from params (variable-length:
+    // 20 bytes for EVM-style addresses), so we pad to a 32-byte slot to match
+    // the verifier's expectation.
     let signature = params.get("signature").and_then(|v| v.as_str());
+    let public_key = params.get("public_key").and_then(|v| v.as_str());
     let sign_message = format!("tenzro:deploy_contract:{}:{}", vm_type_str, deployer_str);
-    verify_creator_signature(&deployer, signature, sign_message.as_bytes())?;
+    let mut deployer_32 = [0u8; 32];
+    if deployer.len() == 20 {
+        deployer_32[12..32].copy_from_slice(&deployer);
+    } else if deployer.len() == 32 {
+        deployer_32.copy_from_slice(&deployer);
+    } else {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Deployer must be 20 or 32 bytes".to_string(),
+            data: None,
+        });
+    }
+    verify_creator_signature(&deployer_32, signature, public_key, sign_message.as_bytes())?;
 
     let constructor_args = params.get("constructor_args")
         .and_then(|v| v.as_str())
@@ -27535,35 +28012,89 @@ async fn handle_list_subscriptions(
 }
 
 /// Verify that a signature proves ownership of the claimed creator address.
-/// Returns Ok(()) if signature is valid or if no signature is provided (permissionless mode).
-/// The signature should be over the SHA-256 hash of the operation-specific message.
+///
+/// Fail-closed: requires both `signature` AND `public_key`. The legacy
+/// "permissionless mode" (Ok on missing signature) and the "any 64+ byte hex
+/// blob accepted" stub have been removed — both were testnet-era footguns
+/// that let any caller impersonate any address on a public RPC endpoint.
+///
+/// Verification steps:
+///   1. Decode `public_key` hex (33 bytes for Secp256k1 compressed, 32 bytes
+///      for Ed25519). Auto-detect key type by length.
+///   2. Derive the address from the public key via `PublicKey::to_address()`
+///      (Ed25519: SHA-256 of pubkey, first 20 bytes; Secp256k1: Keccak-256 of
+///      pubkey, last 20 bytes — Ethereum-style). The returned `Address` is
+///      a 32-byte canonical slot with the 20-byte derived address at
+///      positions `[0..20]` and the tail zero-padded.
+///   3. Constant-time compare the derived 32-byte slot against the caller's
+///      `creator` (same canonical shape).
+///   4. Decode `signature` hex and verify against the domain-separated
+///      `message` using `tenzro_crypto::signatures::verify()`.
+///
+/// All four error paths return JSON-RPC `-32602` (invalid params) so the
+/// caller can't distinguish "wrong key" from "wrong signature" — denying the
+/// attacker an oracle.
 fn verify_creator_signature(
-    _creator: &[u8],
+    creator: &[u8],
     signature: Option<&str>,
-    _message: &[u8],
+    public_key: Option<&str>,
+    message: &[u8],
 ) -> std::result::Result<(), JsonRpcError> {
-    if let Some(sig_hex) = signature {
-        let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x")).map_err(|_| JsonRpcError {
-            code: -32602,
-            message: "Invalid signature hex encoding".to_string(),
-            data: None,
-        })?;
-        // For now, accept valid hex signatures as proof of intent.
-        // Full cryptographic verification requires the public key recovery path
-        // which is wired via tenzro_crypto::signatures::verify() for Ed25519/Secp256k1.
-        if sig_bytes.len() < 64 {
-            return Err(JsonRpcError {
-                code: -32602,
-                message: "Signature too short (minimum 64 bytes)".to_string(),
-                data: None,
-            });
-        }
-        Ok(())
-    } else {
-        // Permissionless mode: no signature required for testnet
-        // In production, this should be Err
-        Ok(())
+    use subtle::ConstantTimeEq;
+    use tenzro_crypto::keys::{KeyType, PublicKey};
+    use tenzro_crypto::signatures::{verify, Signature};
+
+    let invalid = |msg: &str| JsonRpcError {
+        code: -32602,
+        message: msg.to_string(),
+        data: None,
+    };
+
+    let sig_hex = signature.ok_or_else(|| invalid(
+        "Missing 'signature' — mutation RPC requires a caller signature over the operation message",
+    ))?;
+    let pk_hex = public_key.ok_or_else(|| invalid(
+        "Missing 'public_key' — mutation RPC requires the caller's public key to verify ownership",
+    ))?;
+
+    let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+        .map_err(|_| invalid("Invalid signature hex encoding"))?;
+    let pk_bytes = hex::decode(pk_hex.trim_start_matches("0x"))
+        .map_err(|_| invalid("Invalid public_key hex encoding"))?;
+
+    // Auto-detect key type from byte length:
+    //   - 32 bytes → Ed25519 verifying key
+    //   - 33 bytes → Secp256k1 compressed pubkey (SEC1)
+    let key_type = match pk_bytes.len() {
+        32 => KeyType::Ed25519,
+        33 => KeyType::Secp256k1,
+        n => return Err(invalid(&format!(
+            "Public key must be 32 bytes (Ed25519) or 33 bytes (Secp256k1 compressed), got {}",
+            n
+        ))),
+    };
+
+    let pk = PublicKey::new(key_type, pk_bytes.clone());
+    let derived_addr = pk.to_address();
+
+    // `PublicKey::to_address()` returns a 32-byte slot with the 20-byte
+    // derived address at positions [0..20] (zero-padded tail). `creator`
+    // is the same canonical shape, matching how `create_token` and
+    // `deploy_contract` parse 20-byte hex into a 32-byte buffer.
+    if creator.len() != 32 {
+        return Err(invalid("Internal: creator slot must be 32 bytes"));
     }
+    if !bool::from(derived_addr.as_bytes().ct_eq(creator)) {
+        return Err(invalid(
+            "Signature public_key does not match claimed creator address",
+        ));
+    }
+
+    let sig = Signature::new(key_type, sig_bytes);
+    verify(&pk, message, &sig)
+        .map_err(|_| invalid("Signature verification failed"))?;
+
+    Ok(())
 }
 
 /// Helper: convert bytes to Address (used by token RPC handlers)

@@ -48,6 +48,11 @@ pub const CF_AUDIT: &str = "audit";
 /// `ApprovalRecord`, `approval_pending:<approver_did>:<approval_id>` →
 /// empty value (secondary index for the approver's queue).
 pub const CF_APPROVALS: &str = "approvals";
+/// Tenzro API keys: per-client bearer credentials for gating proxied
+/// services where the node mediates a credential the client does not
+/// hold directly (e.g. Canton devnet JWT). Keys: `apikey:<sha256_hex>` →
+/// JSON `ApiKeyRecord` (subject DID, scopes, created_at, revoked_at).
+pub const CF_API_KEYS: &str = "api_keys";
 
 /// Key-value store trait
 pub trait KvStore: Send + Sync {
@@ -138,6 +143,7 @@ impl RocksDbStore {
             ColumnFamilyDescriptor::new(CF_TRAINING_RECEIPTS, Options::default()),
             ColumnFamilyDescriptor::new(CF_AUDIT, Options::default()),
             ColumnFamilyDescriptor::new(CF_APPROVALS, Options::default()),
+            ColumnFamilyDescriptor::new(CF_API_KEYS, Options::default()),
         ]
     }
 

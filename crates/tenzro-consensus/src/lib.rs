@@ -124,7 +124,7 @@ pub use admission::{
     DefaultLaneResolver, Lane, LaneResolver, LaneStats,
 };
 pub use config::{BftThreshold, ConsensusConfig, ProposerElectionKind};
-pub use epoch_manager::{Epoch, EpochManager, EpochStats};
+pub use epoch_manager::{Epoch, EpochManager, EpochStateStore, EpochStats};
 pub use error::{ConsensusError, Result};
 pub use finality::{FinalityNotification, FinalityTracker, ForkChoice};
 pub use hotstuff2::{

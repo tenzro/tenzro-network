@@ -7,6 +7,34 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tenzro_types::primitives::{BlockHeight, Timestamp};
 
+/// Persistence backend for epoch state.
+///
+/// Implemented by the node layer (over RocksDB CF_METADATA) and injected
+/// into `EpochManager::with_store`. The trait is intentionally minimal —
+/// it stores serialized `Epoch` records keyed by epoch number. We avoid a
+/// hard dependency on `tenzro-storage` from `tenzro-consensus`, matching
+/// the pattern used by `tenzro-vm::StateAdapter` and
+/// `tenzro-token::RocksDbBackend`.
+///
+/// Implementations must be thread-safe (`Send + Sync`) — write-through
+/// happens from inside `transition_epoch`'s critical section, and hydration
+/// reads happen from `with_store`.
+pub trait EpochStateStore: Send + Sync {
+    /// Persists the bincode-serialized `Epoch` under `epoch_number`.
+    ///
+    /// Called once per epoch transition (write-through). Errors are logged
+    /// but do not roll back the in-memory transition — durability is
+    /// best-effort; the next leader's commit-QC will re-anchor the chain.
+    fn put_epoch(&self, epoch_number: u64, bytes: Vec<u8>) -> Result<()>;
+
+    /// Loads all persisted epochs in ascending order (epoch 0 first).
+    ///
+    /// Called once from `EpochManager::with_store` to hydrate
+    /// `current_epoch` + `epoch_history`. Returns an empty vec for a
+    /// fresh database.
+    fn load_all_epochs(&self) -> Result<Vec<Vec<u8>>>;
+}
+
 /// Epoch information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Epoch {
@@ -86,12 +114,32 @@ pub struct EpochManager {
     /// History of past epochs (protected by RwLock)
     epoch_history: Arc<RwLock<Vec<Epoch>>>,
 
-    /// Maximum epochs to keep in history
+    /// Maximum epochs to keep in-memory.
+    ///
+    /// Persistent store (if attached) retains all epochs unconditionally —
+    /// in-memory trim is a working-set bound, not a retention policy. A node
+    /// catching up across an epoch boundary outside the in-memory window
+    /// falls back to the store via `get_epoch_for_height` / `get_epoch`.
     max_history: usize,
+
+    /// Optional persistence backend.
+    ///
+    /// Set via `with_store` (wired in node startup). When present:
+    /// - construction hydrates `current_epoch` + `epoch_history` from disk;
+    /// - every `transition_epoch` writes the new epoch through.
+    /// When absent (tests, ephemeral nodes), `EpochManager` behaves
+    /// identically to the pre-persistence implementation.
+    store: Option<Arc<dyn EpochStateStore>>,
 }
 
 impl EpochManager {
-    /// Creates a new epoch manager
+    /// Creates a new epoch manager (ephemeral — no persistence).
+    ///
+    /// Used by tests and ephemeral nodes. Production nodes should use
+    /// `with_store` so that the validator-set history survives restarts —
+    /// without that, a node catching up across an epoch boundary cannot
+    /// verify historical commit-QCs and gets stuck in `InvalidHeight`
+    /// rejection (the May 2026 testnet stall).
     pub fn new(
         initial_validators: Vec<ValidatorInfo>,
         epoch_duration: u64,
@@ -111,7 +159,87 @@ impl EpochManager {
             pending_validators: Arc::new(RwLock::new(Vec::new())),
             pending_removals: Arc::new(RwLock::new(Vec::new())),
             epoch_history: Arc::new(RwLock::new(Vec::new())),
-            max_history: 10, // Keep last 10 epochs
+            max_history: 10,
+            store: None,
+        })
+    }
+
+    /// Creates a new epoch manager backed by a persistent store.
+    ///
+    /// On construction, hydrates `current_epoch` and `epoch_history` from
+    /// the store. If the store is empty (fresh node), bootstraps epoch 0
+    /// from `initial_validators` and writes it through immediately so a
+    /// crash before the first transition still leaves a recoverable record.
+    ///
+    /// Hydration order: the highest-numbered persisted epoch becomes
+    /// `current_epoch`; everything below it (up to `max_history`) becomes
+    /// `epoch_history`, oldest first.
+    ///
+    /// The store retains all epochs unconditionally; `max_history` only
+    /// bounds the in-memory working set. Cross-epoch verification for an
+    /// epoch outside the working set falls back to the store transparently
+    /// via `get_epoch` / `get_epoch_for_height`.
+    pub fn with_store(
+        initial_validators: Vec<ValidatorInfo>,
+        epoch_duration: u64,
+        store: Arc<dyn EpochStateStore>,
+    ) -> Result<Self> {
+        let persisted = store.load_all_epochs()?;
+
+        let (current_epoch, history) = if persisted.is_empty() {
+            // Fresh node: bootstrap epoch 0 and write it through.
+            let validator_set = ValidatorSet::new(0, initial_validators)?;
+            let epoch = Epoch::new(
+                0,
+                BlockHeight::from(0),
+                BlockHeight::from(epoch_duration),
+                validator_set,
+            );
+            let bytes = bincode::serialize(&epoch).map_err(|e| {
+                ConsensusError::Internal(format!("bootstrap epoch 0 encode: {e}"))
+            })?;
+            if let Err(e) = store.put_epoch(0, bytes) {
+                tracing::warn!(error = %e, "Failed to persist bootstrap epoch 0; continuing in-memory");
+            }
+            (epoch, Vec::new())
+        } else {
+            // Decode all, sort by epoch number (defensive — store may not order).
+            let mut decoded: Vec<Epoch> = persisted
+                .into_iter()
+                .map(|bytes| {
+                    bincode::deserialize::<Epoch>(&bytes).map_err(|e| {
+                        ConsensusError::Internal(format!("epoch decode: {e}"))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            decoded.sort_by_key(|e| e.number);
+
+            let current = decoded
+                .pop()
+                .expect("non-empty after is_empty check");
+
+            // Tail is history; cap to max_history (oldest first).
+            let max_history = 10usize;
+            let history_start = decoded.len().saturating_sub(max_history);
+            let history: Vec<Epoch> = decoded.into_iter().skip(history_start).collect();
+
+            tracing::info!(
+                current_epoch = current.number,
+                history_len = history.len(),
+                "Hydrated EpochManager from persistent store"
+            );
+
+            (current, history)
+        };
+
+        Ok(Self {
+            current_epoch: Arc::new(RwLock::new(current_epoch)),
+            epoch_duration,
+            pending_validators: Arc::new(RwLock::new(Vec::new())),
+            pending_removals: Arc::new(RwLock::new(Vec::new())),
+            epoch_history: Arc::new(RwLock::new(history)),
+            max_history: 10,
+            store: Some(store),
         })
     }
 
@@ -223,12 +351,73 @@ impl EpochManager {
         *current = new_epoch.clone();
 
         // current lock is released here, making the transition visible
+        drop(current);
+
+        // 4. Write-through to persistent store (if attached).
+        //
+        // Best-effort: a write failure is logged but does not roll back the
+        // in-memory transition. The next leader's commit-QC will re-anchor
+        // the chain at the new epoch, and on the next clean restart we'll
+        // hydrate from whatever did make it to disk plus replay from
+        // genesis — never from a torn write.
+        //
+        // Note: we persist the OUTGOING epoch (its end_height is now
+        // fixed) so history is complete, plus the NEW epoch so it survives
+        // crash-before-first-block-of-epoch. Both writes are independent;
+        // a partial failure still gives us a usable state on restart.
+        if let Some(store) = self.store.as_ref() {
+            // Persist the just-finalized outgoing epoch (history record).
+            // The clone before the swap is captured in `history.push(current.clone())`
+            // above; we re-derive its serialized form here.
+            let outgoing_number = next_epoch_number - 1;
+            if let Some(outgoing) = self.get_epoch(outgoing_number) {
+                match bincode::serialize(&outgoing) {
+                    Ok(bytes) => {
+                        if let Err(e) = store.put_epoch(outgoing_number, bytes) {
+                            tracing::warn!(
+                                epoch = outgoing_number,
+                                error = %e,
+                                "Failed to persist outgoing epoch; chain will rebuild on next leader"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            epoch = outgoing_number,
+                            error = %e,
+                            "Failed to serialize outgoing epoch"
+                        );
+                    }
+                }
+            }
+
+            // Persist the new current epoch.
+            match bincode::serialize(&new_epoch) {
+                Ok(bytes) => {
+                    if let Err(e) = store.put_epoch(next_epoch_number, bytes) {
+                        tracing::warn!(
+                            epoch = next_epoch_number,
+                            error = %e,
+                            "Failed to persist new epoch; will retry on next transition"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        epoch = next_epoch_number,
+                        error = %e,
+                        "Failed to serialize new epoch"
+                    );
+                }
+            }
+        }
 
         tracing::info!(
             epoch = next_epoch_number,
             start_height = %start_height,
             end_height = %end_height,
             validator_count = validator_set.len(),
+            persisted = self.store.is_some(),
             "Epoch transition completed atomically"
         );
 

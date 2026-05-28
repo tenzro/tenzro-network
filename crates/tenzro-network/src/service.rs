@@ -1076,6 +1076,12 @@ struct EventLoopState {
     /// Subscriber channel for inbound block-sync requests. `None` until the
     /// node-level block-sync server attaches via `SubscribeBlockSyncRequests`.
     block_sync_request_subscriber: Option<mpsc::UnboundedSender<InboundBlockSync>>,
+    /// Latched once `SubscribeBlockSyncRequests` runs. Used to distinguish
+    /// "no subscriber yet" (legitimate bootstrap window before the event
+    /// loop spawns the block-sync engine — log at debug) from "subscriber
+    /// dropped after attach" (the genuinely anomalous channel-closed case —
+    /// log at warn).
+    block_sync_request_subscriber_ever_attached: bool,
     /// Subscriber channel for outbound block-sync results. `None` until the
     /// node-level block-sync engine attaches via `SubscribeBlockSyncResults`.
     block_sync_result_subscriber: Option<mpsc::UnboundedSender<OutboundBlockSyncResult>>,
@@ -1091,6 +1097,10 @@ struct EventLoopState {
     /// `ConsensusDirectError::NoSubscriber` so the sender stops retrying
     /// against this peer.
     consensus_direct_subscriber: Option<mpsc::UnboundedSender<ConsensusMessage>>,
+    /// Latched once `SubscribeConsensusDirect` runs. Same rationale as
+    /// `block_sync_request_subscriber_ever_attached` — separates the
+    /// bootstrap-pre-attach debug case from the dropped-channel warn case.
+    consensus_direct_subscriber_ever_attached: bool,
     /// Per-peer count of currently-in-flight inbound consensus-direct
     /// streams. Used to enforce `MAX_INBOUND_STREAMS_PER_PEER` and reject
     /// overflow with `ConsensusDirectError::ServerBusy` rather than queueing.
@@ -1337,9 +1347,11 @@ async fn run_event_loop(
         listen_addresses: Vec::new(),
         pending_inbound_block_sync: HashMap::new(),
         block_sync_request_subscriber: None,
+        block_sync_request_subscriber_ever_attached: false,
         block_sync_result_subscriber: None,
         peer_event_subscriber: None,
         consensus_direct_subscriber: None,
+        consensus_direct_subscriber_ever_attached: false,
         consensus_direct_inbound_inflight: HashMap::new(),
         observed_addrs: HashMap::new(),
         advertised_external_addrs: preconfigured_external,
@@ -1491,11 +1503,26 @@ fn handle_block_sync_event(
             // — silent timeouts cause cascading peer-disconnect spirals
             // (Lighthouse `SyncManager` notes the same anti-pattern).
             let Some(tx) = state.block_sync_request_subscriber.as_ref() else {
-                tracing::warn!(
-                    %peer,
-                    "Inbound block-sync request received but no subscriber attached — \
-                     replying with Storage error"
-                );
+                // Pre-attach is normal during the bootstrap window: the
+                // libp2p stack starts accepting inbound block-sync requests
+                // as soon as listeners bind, but the node-level engine in
+                // `event_loop.rs` only spawns after the validator-mesh
+                // warm-up gate. Log noisily only if a subscriber was once
+                // attached and has since been dropped (the genuinely
+                // anomalous case).
+                if state.block_sync_request_subscriber_ever_attached {
+                    tracing::warn!(
+                        %peer,
+                        "Inbound block-sync request received but subscriber was dropped — \
+                         replying with Storage error"
+                    );
+                } else {
+                    tracing::debug!(
+                        %peer,
+                        "Inbound block-sync request received during bootstrap window \
+                         (subscriber not yet attached) — replying with Storage error"
+                    );
+                }
                 let err_resp = BlockSyncResponse::Error(
                     crate::block_sync_proto::BlockSyncError::Storage(
                         "no block-sync subscriber attached".to_string(),
@@ -1667,11 +1694,26 @@ fn handle_consensus_direct_event(
             // No subscriber attached — sender should NOT retry against us.
             // Reply NoSubscriber so the consensus retry policy on the other
             // side can prune us from its targets.
+            //
+            // Pre-attach is normal during the validator-mesh warm-up window:
+            // the libp2p stack accepts inbound consensus-direct requests as
+            // soon as listeners bind, but the node-level engine attaches via
+            // `subscribe_consensus_direct()` only after `init_consensus()`
+            // and the bootstrap-quorum gate clear. Log noisily only when a
+            // subscriber was once attached and has since been dropped.
             let Some(tx) = state.consensus_direct_subscriber.as_ref() else {
-                tracing::warn!(
-                    %peer,
-                    "consensus-direct: no subscriber attached — replying NoSubscriber"
-                );
+                if state.consensus_direct_subscriber_ever_attached {
+                    tracing::warn!(
+                        %peer,
+                        "consensus-direct: subscriber was dropped — replying NoSubscriber"
+                    );
+                } else {
+                    tracing::debug!(
+                        %peer,
+                        "consensus-direct: inbound during bootstrap window \
+                         (subscriber not yet attached) — replying NoSubscriber"
+                    );
+                }
                 let _ = state
                     .swarm
                     .behaviour_mut()
@@ -2509,6 +2551,7 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
         NetworkCommand::SubscribeBlockSyncRequests { response } => {
             let (tx, rx) = mpsc::unbounded_channel();
             state.block_sync_request_subscriber = Some(tx);
+            state.block_sync_request_subscriber_ever_attached = true;
             let _ = response.send(Ok(rx));
         }
         NetworkCommand::SubscribeBlockSyncResults { response } => {
@@ -2557,6 +2600,7 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
         NetworkCommand::SubscribeConsensusDirect { response } => {
             let (tx, rx) = mpsc::unbounded_channel();
             state.consensus_direct_subscriber = Some(tx);
+            state.consensus_direct_subscriber_ever_attached = true;
             let _ = response.send(Ok(rx));
         }
         NetworkCommand::ConnectedValidatorCount { response } => {

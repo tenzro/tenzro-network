@@ -17,6 +17,12 @@ async def rpc_call(method: str, params=None):
     forwarded transparently as `Authorization: DPoP <jwt>` and `DPoP:
     <proof>` headers. Public RPCs (balance/status/block reads) work
     without auth.
+
+    Scope-gated RPCs (currently `tenzro_*Canton*`) require an operator-
+    issued API key. Set TENZRO_API_KEY to the `tnz_<base64url>` key; it is
+    forwarded as the `X-Tenzro-Api-Key` header. The RPC node holds the
+    upstream credentials (Auth0 for Canton devnet) and proxies on the
+    caller's behalf — callers never need to manage Auth0 directly.
     """
     global _REQUEST_ID
     _REQUEST_ID += 1
@@ -27,6 +33,9 @@ async def rpc_call(method: str, params=None):
     dpop = os.environ.get("TENZRO_DPOP_PROOF")
     if dpop:
         headers["DPoP"] = dpop
+    api_key = os.environ.get("TENZRO_API_KEY")
+    if api_key:
+        headers["X-Tenzro-Api-Key"] = api_key
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             TENZRO_RPC_URL,

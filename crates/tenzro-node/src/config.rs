@@ -159,7 +159,7 @@ pub struct CortexConfig {
 }
 
 /// A single Cortex worker specification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CortexWorkerConfig {
     /// Stable model identifier exposed to clients (e.g. "mythos-3b").
     pub model_id: String,
@@ -169,7 +169,11 @@ pub struct CortexWorkerConfig {
     pub sidecar_url: String,
 
     /// Optional bearer token for sidecar auth.
-    #[serde(default)]
+    ///
+    /// Marked `#[serde(skip_serializing)]` so the token never round-trips
+    /// out of `NodeConfig::save_to_file`; the `Debug` impl below redacts
+    /// presence as `<redacted>` / `<unset>`.
+    #[serde(default, skip_serializing)]
     pub bearer_token: Option<String>,
 
     /// Architecture identifier — informational, passed into CortexModelFamily.
@@ -213,27 +217,87 @@ fn default_experts_per_token() -> u32 { 2 }
 fn default_attn_type() -> String { "mla".to_string() }
 fn default_cortex_timeout_secs() -> u64 { 120 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+impl std::fmt::Debug for CortexWorkerConfig {
+    /// Custom `Debug` that redacts the sidecar `bearer_token`. Presence
+    /// is reported as `<redacted>` / `<unset>`; all other fields pass
+    /// through unchanged.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CortexWorkerConfig")
+            .field("model_id", &self.model_id)
+            .field("sidecar_url", &self.sidecar_url)
+            .field(
+                "bearer_token",
+                &if self.bearer_token.is_some() { "<redacted>" } else { "<unset>" },
+            )
+            .field("arch", &self.arch)
+            .field("max_loops", &self.max_loops)
+            .field("moe_experts", &self.moe_experts)
+            .field("experts_per_token", &self.experts_per_token)
+            .field("attn_type", &self.attn_type)
+            .field("worker_did", &self.worker_did)
+            .field("pricing", &self.pricing)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfig {
     /// Whether the bridge subsystem is enabled.
-    #[serde(default)]
+    #[serde(default = "BridgeConfig::default_enabled")]
     pub enabled: bool,
 
     /// LayerZero V2 adapter configuration (optional).
-    #[serde(default)]
+    #[serde(default = "BridgeConfig::default_adapter_enabled")]
     pub layerzero: Option<BridgeAdapterConfig>,
 
     /// Chainlink CCIP adapter configuration (optional).
-    #[serde(default)]
+    #[serde(default = "BridgeConfig::default_adapter_enabled")]
     pub ccip: Option<BridgeAdapterConfig>,
 
     /// deBridge DLN adapter configuration (optional).
-    #[serde(default)]
+    #[serde(default = "BridgeConfig::default_adapter_enabled")]
     pub debridge: Option<BridgeAdapterConfig>,
 
     /// LI.FI aggregator adapter configuration (optional).
-    #[serde(default)]
+    #[serde(default = "BridgeConfig::default_adapter_enabled")]
     pub lifi: Option<BridgeAdapterConfig>,
+
+    /// Wormhole adapter configuration (optional).
+    #[serde(default = "BridgeConfig::default_adapter_enabled")]
+    pub wormhole: Option<BridgeAdapterConfig>,
+}
+
+impl BridgeConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+
+    /// Default to a quote-only adapter (no signer). The chain catalog
+    /// from `supported_chains()` still populates `tenzro_listChains`,
+    /// and read-only paths (fee quotes, route discovery, pool lookups)
+    /// work without an EVM signing key. Adapters that need to *settle*
+    /// require an explicit signer config — set `private_key_env` or
+    /// `tee_sealed = true` in node config to enable.
+    fn default_adapter_enabled() -> Option<BridgeAdapterConfig> {
+        Some(BridgeAdapterConfig {
+            enabled: true,
+            ..Default::default()
+        })
+    }
+}
+
+impl Default for BridgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            layerzero: Self::default_adapter_enabled(),
+            ccip: Self::default_adapter_enabled(),
+            debridge: Self::default_adapter_enabled(),
+            lifi: Self::default_adapter_enabled(),
+            wormhole: Self::default_adapter_enabled(),
+        }
+    }
 }
 
 /// Generic bridge adapter configuration.
@@ -241,7 +305,7 @@ pub struct BridgeConfig {
 /// Captures the minimum RPC / chain / signer information needed to wire any
 /// EVM-based adapter. Individual adapters may read additional protocol-specific
 /// parameters from environment variables.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct BridgeAdapterConfig {
     /// Whether this adapter is enabled.
     #[serde(default)]
@@ -257,7 +321,12 @@ pub struct BridgeAdapterConfig {
 
     /// Hex-encoded private key for the signer (32 bytes, no 0x prefix).
     /// Prefer reading from env var `private_key_env` instead of inlining.
-    #[serde(default)]
+    ///
+    /// Marked `#[serde(skip_serializing)]` so `NodeConfig::save_to_file`
+    /// never round-trips a private key from a config that was loaded with
+    /// the key inlined. The corresponding `Debug` impl below also redacts
+    /// the field — `tracing::debug!("{:?}", config)` will not leak it.
+    #[serde(default, skip_serializing)]
     pub private_key: Option<String>,
 
     /// Name of an environment variable that holds the signer private key.
@@ -311,13 +380,34 @@ impl BridgeAdapterConfig {
     }
 }
 
+impl std::fmt::Debug for BridgeAdapterConfig {
+    /// Custom `Debug` that redacts the inline `private_key` field so
+    /// secret material never reaches logs via `tracing::debug!("{:?}", ...)`.
+    /// Presence is reported as `<redacted>` / `<unset>`; all other fields
+    /// pass through unchanged.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BridgeAdapterConfig")
+            .field("enabled", &self.enabled)
+            .field("chain_id", &self.chain_id)
+            .field("rpc_url", &self.rpc_url)
+            .field(
+                "private_key",
+                &if self.private_key.is_some() { "<redacted>" } else { "<unset>" },
+            )
+            .field("private_key_env", &self.private_key_env)
+            .field("tee_sealed", &self.tee_sealed)
+            .field("tee_label", &self.tee_label)
+            .finish()
+    }
+}
+
 /// HTTP 402 payment gate configuration for Web API endpoints
 ///
 /// Controls automatic payment-required responses for selected web routes.
 /// When `enabled = true`, requests to paths in `paid_routes` without a
 /// valid payment credential are answered with HTTP 402 + a challenge JSON
 /// body. Verified credentials forward the request to the underlying handler.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PaymentsConfig {
     /// Whether the payment gate middleware is wired into the Web API
     pub enabled: bool,
@@ -350,9 +440,13 @@ pub struct PaymentsConfig {
     /// SpendingPolicy). Absent this key, SPT-authorized payments fall back
     /// to scope+policy enforcement only.
     ///
+    /// Marked `#[serde(skip_serializing)]` so the key never round-trips
+    /// out of `NodeConfig::save_to_file`; the `Debug` impl on
+    /// [`PaymentsConfig`] redacts presence as `<redacted>` / `<unset>`.
+    ///
     /// [`StripeClient`]: tenzro_payments::mpp::StripeClient
     /// [`IdentityPaymentBinder`]: tenzro_payments::identity_binding::IdentityPaymentBinder
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub stripe_api_key: Option<String>,
 
     /// Stripe API base URL override. Defaults to `https://api.stripe.com`.
@@ -376,6 +470,26 @@ impl Default for PaymentsConfig {
     }
 }
 
+impl std::fmt::Debug for PaymentsConfig {
+    /// Custom `Debug` that redacts the Stripe secret key. Presence is
+    /// reported as `<redacted>` / `<unset>`; all other fields pass through.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PaymentsConfig")
+            .field("enabled", &self.enabled)
+            .field("default_protocol", &self.default_protocol)
+            .field("default_amount", &self.default_amount)
+            .field("default_asset", &self.default_asset)
+            .field("recipient", &self.recipient)
+            .field("paid_routes", &self.paid_routes)
+            .field(
+                "stripe_api_key",
+                &if self.stripe_api_key.is_some() { "<redacted>" } else { "<unset>" },
+            )
+            .field("stripe_api_base", &self.stripe_api_base)
+            .finish()
+    }
+}
+
 /// Canton/DAML participant configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CantonConfig {
@@ -387,6 +501,67 @@ pub struct CantonConfig {
 
     /// Whether Canton/DAML VM is enabled
     pub enabled: bool,
+
+    /// When `true`, the node connects to the Tenzro-operated Canton devnet
+    /// (`json.devnet.tenzro.network`) over TLS:443, authenticates via the
+    /// Auth0 client-credentials flow, and acts as the shared validator
+    /// party `tenzro-validator-1`. Overrides `host`/`port`. Set via the
+    /// `CANTON_DEVNET=true` env var.
+    #[serde(default)]
+    pub devnet: bool,
+
+    /// Auth0 client secret for the Canton devnet client-credentials grant.
+    /// Loaded from the `CANTON_DEVNET_CLIENT_SECRET` env var when `devnet`
+    /// is true. Never serialized to config files even if set programmatically.
+    #[serde(skip_serializing, default)]
+    pub devnet_client_secret: Option<String>,
+
+    /// Use TLS when talking to the Canton Ledger API.
+    ///
+    /// Defaults to `true` when `devnet` is on. Operator-run profiles (an
+    /// RPC provider running their own Canton validator) should set this
+    /// to `true` whenever the participant is reachable over a public
+    /// network. Set via `CANTON_TLS=true|false`.
+    #[serde(default)]
+    pub tls: bool,
+
+    /// Custom OAuth2 client-credentials configuration for an operator-run
+    /// Canton validator. When set, the node uses this in place of the
+    /// hard-coded Tenzro Auth0 issuer. Mutually exclusive with `static_jwt`.
+    ///
+    /// All four fields must be present: `token_url`, `client_id`,
+    /// `client_secret`, `audience`. `scope` is optional and defaults to
+    /// `daml_ledger_api`. Env vars: `CANTON_OAUTH_TOKEN_URL`,
+    /// `CANTON_OAUTH_CLIENT_ID`, `CANTON_OAUTH_CLIENT_SECRET`,
+    /// `CANTON_OAUTH_AUDIENCE`, `CANTON_OAUTH_SCOPE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<CantonOAuthConfig>,
+
+    /// Static bearer JWT for the Canton Ledger API. Use this when the
+    /// operator's Canton participant is configured to accept a long-lived
+    /// JWT instead of an OAuth2 client-credentials grant. Mutually
+    /// exclusive with `oauth`. Env var: `CANTON_JWT_TOKEN`.
+    #[serde(skip_serializing, default)]
+    pub static_jwt: Option<String>,
+}
+
+/// Operator-supplied OAuth2 client-credentials configuration for talking
+/// to a self-hosted Canton validator. Mirrors the fields of
+/// `tenzro_bridge::canton_auth::CantonAuthConfig` so the node can build
+/// the upstream provider without leaking that type into config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CantonOAuthConfig {
+    pub token_url: String,
+    pub client_id: String,
+    #[serde(skip_serializing)]
+    pub client_secret: String,
+    pub audience: String,
+    #[serde(default = "default_oauth_scope")]
+    pub scope: String,
+}
+
+fn default_oauth_scope() -> String {
+    "daml_ledger_api".to_string()
 }
 
 impl Default for CantonConfig {
@@ -395,13 +570,54 @@ impl Default for CantonConfig {
             host: "localhost".to_string(),
             port: 5001,
             enabled: false,
+            devnet: false,
+            devnet_client_secret: None,
+            tls: false,
+            oauth: None,
+            static_jwt: None,
         }
     }
 }
 
 impl CantonConfig {
-    /// Create from environment variables, falling back to defaults
+    /// Create from environment variables, falling back to defaults.
+    ///
+    /// Three profiles are supported:
+    ///
+    /// 1. **Tenzro-operated devnet** — `CANTON_DEVNET=true`. Forces
+    ///    `json.devnet.tenzro.network:443` over TLS with the Tenzro Auth0
+    ///    issuer. Client secret from `CANTON_DEVNET_CLIENT_SECRET`.
+    ///
+    /// 2. **Operator-run validator** (RPC providers running their own
+    ///    Canton validator) — `CANTON_ENABLED=true` with custom host/port.
+    ///    Auth is configured via EITHER:
+    ///    - `CANTON_OAUTH_TOKEN_URL` + `CANTON_OAUTH_CLIENT_ID` +
+    ///      `CANTON_OAUTH_CLIENT_SECRET` + `CANTON_OAUTH_AUDIENCE`
+    ///      (+ optional `CANTON_OAUTH_SCOPE`), OR
+    ///    - `CANTON_JWT_TOKEN` (long-lived bearer).
+    ///    `CANTON_TLS=true` for HTTPS upstream.
+    ///
+    /// 3. **Local unauth** — `CANTON_ENABLED=true` with no auth env vars.
+    ///    Plaintext HTTP to localhost. Dev/test only.
     pub fn from_env() -> Self {
+        let devnet = std::env::var("CANTON_DEVNET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(false);
+
+        if devnet {
+            return Self {
+                host: "json.devnet.tenzro.network".to_string(),
+                port: 443,
+                enabled: true,
+                devnet: true,
+                devnet_client_secret: std::env::var("CANTON_DEVNET_CLIENT_SECRET").ok(),
+                tls: true,
+                oauth: None,
+                static_jwt: None,
+            };
+        }
+
         let host = std::env::var("CANTON_LEDGER_API_HOST")
             .unwrap_or_else(|_| "localhost".to_string());
         let port = std::env::var("CANTON_LEDGER_API_PORT")
@@ -412,8 +628,55 @@ impl CantonConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(false);
+        let tls = std::env::var("CANTON_TLS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(false);
 
-        Self { host, port, enabled }
+        // Operator OAuth2 — all four fields required, scope optional.
+        let oauth = match (
+            std::env::var("CANTON_OAUTH_TOKEN_URL").ok(),
+            std::env::var("CANTON_OAUTH_CLIENT_ID").ok(),
+            std::env::var("CANTON_OAUTH_CLIENT_SECRET").ok(),
+            std::env::var("CANTON_OAUTH_AUDIENCE").ok(),
+        ) {
+            (Some(token_url), Some(client_id), Some(client_secret), Some(audience))
+                if !token_url.is_empty()
+                    && !client_id.is_empty()
+                    && !client_secret.is_empty()
+                    && !audience.is_empty() =>
+            {
+                Some(CantonOAuthConfig {
+                    token_url,
+                    client_id,
+                    client_secret,
+                    audience,
+                    scope: std::env::var("CANTON_OAUTH_SCOPE")
+                        .unwrap_or_else(|_| default_oauth_scope()),
+                })
+            }
+            _ => None,
+        };
+
+        // Static JWT only honored when OAuth2 is not configured.
+        let static_jwt = if oauth.is_none() {
+            std::env::var("CANTON_JWT_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty())
+        } else {
+            None
+        };
+
+        Self {
+            host,
+            port,
+            enabled,
+            devnet: false,
+            devnet_client_secret: None,
+            tls,
+            oauth,
+            static_jwt,
+        }
     }
 }
 

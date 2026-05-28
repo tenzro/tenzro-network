@@ -63,8 +63,9 @@ impl PublicKey {
 
     /// Derive an address from this public key.
     ///
-    /// For Ed25519: uses the first 20 bytes of the public key hash.
-    /// For Secp256k1: uses the last 20 bytes of the Keccak-256 hash (Ethereum-style).
+    /// For Ed25519: first 20 bytes of the SHA-256 hash of the public key.
+    /// For Secp256k1: last 20 bytes of the Keccak-256 hash of the public key
+    /// (Ethereum-style).
     pub fn to_address(&self) -> Address {
         match self.key_type {
             KeyType::Ed25519 => {

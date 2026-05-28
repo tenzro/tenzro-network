@@ -2192,27 +2192,33 @@ pub(crate) async fn handle_wormhole_bridge(
 // TNZO CCT — Chainlink Cross-Chain Token
 // ============================================================
 
-/// `tenzro_cctListPools` — return the canonical Tenzro mainnet TNZO
-/// CCT topology (Ethereum, Base, Arbitrum, Optimism, Solana).
+/// `tenzro_cctListPools` — return the live TNZO CCT pool topology from
+/// the registered `TnzoCctBridge` when CCIP is enabled; otherwise fall
+/// back to the canonical Tenzro mainnet topology (Ethereum, Base,
+/// Arbitrum, Optimism, Solana).
 pub(crate) async fn handle_cct_list_pools(
-    _node: &Arc<TenzroNode>,
+    node: &Arc<TenzroNode>,
     _params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    let registry = tenzro_bridge::TnzoCctRegistry::tenzro_mainnet();
-    let pools: Vec<Value> = registry
-        .all()
-        .into_iter()
-        .map(pool_to_json)
-        .collect();
+    let pools: Vec<Value> = if let Some(bridge) = node.cct_bridge() {
+        bridge.registry().all().into_iter().map(pool_to_json).collect()
+    } else {
+        tenzro_bridge::TnzoCctRegistry::tenzro_mainnet()
+            .all()
+            .into_iter()
+            .map(pool_to_json)
+            .collect()
+    };
     Ok(json!({
-        "pools": pools,
-        "count": registry.len(),
+        "pools": pools.clone(),
+        "count": pools.len(),
     }))
 }
 
-/// `tenzro_cctGetPool` — lookup a single TNZO CCT pool by chain id.
+/// `tenzro_cctGetPool` — lookup a single TNZO CCT pool by chain id from
+/// the live registered registry, with canonical mainnet fallback.
 pub(crate) async fn handle_cct_get_pool(
-    _node: &Arc<TenzroNode>,
+    node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| missing("Missing params"))?;
@@ -2222,13 +2228,92 @@ pub(crate) async fn handle_cct_get_pool(
         .and_then(|v| v.as_str())
         .ok_or_else(|| missing("Missing chain"))?;
 
-    let registry = tenzro_bridge::TnzoCctRegistry::tenzro_mainnet();
-    match registry.get(chain) {
+    let pool = if let Some(bridge) = node.cct_bridge() {
+        bridge.registry().get(chain)
+    } else {
+        tenzro_bridge::TnzoCctRegistry::tenzro_mainnet().get(chain)
+    };
+
+    match pool {
         Some(pool) => Ok(pool_to_json(pool)),
         None => Err(invalid_params(format!(
             "no TNZO CCT pool registered for {chain}"
         ))),
     }
+}
+
+/// `tenzro_cctBuildMessage` — build a CCT-formatted CCIP message for a
+/// TNZO transfer between two chains. Returns the serialized CCIP message
+/// envelope (dest_chain_selector, receiver, token_amounts, extra_args)
+/// that the caller can submit to the source-chain CCIP Router. Requires
+/// the CCT bridge to be initialized (CCIP enabled).
+pub(crate) async fn handle_cct_build_message(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let bridge = node.cct_bridge().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "TNZO CCT bridge not initialized — enable [bridge.ccip] in node config".to_string(),
+        data: None,
+    })?;
+
+    let source_chain = params
+        .get("source_chain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing source_chain"))?;
+    let dest_chain = params
+        .get("dest_chain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing dest_chain"))?;
+    let recipient = params
+        .get("recipient")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing recipient"))?;
+    let amount: u128 = params
+        .get("amount")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .or_else(|| params.get("amount").and_then(|v| v.as_u64()).map(|n| n as u128))
+        .ok_or_else(|| missing("Missing or invalid amount"))?;
+
+    let fee_token = match params
+        .get("fee_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("native")
+    {
+        "link" | "LINK" => tenzro_bridge::chainlink_ccip::FeeToken::Link,
+        _ => tenzro_bridge::chainlink_ccip::FeeToken::Native,
+    };
+
+    let msg = bridge
+        .build_message(source_chain, dest_chain, recipient, amount, fee_token)
+        .map_err(|e| invalid_params(format!("build_message: {e}")))?;
+
+    let dest_selector = bridge
+        .registry()
+        .get(dest_chain)
+        .map(|p| p.chain_selector.to_string())
+        .unwrap_or_default();
+
+    Ok(json!({
+        "source_chain": source_chain,
+        "dest_chain": dest_chain,
+        "dest_chain_selector": dest_selector,
+        "receiver": msg.receiver,
+        "token_amounts": msg.token_amounts.iter().map(|t| json!({
+            "token": t.token,
+            "amount": t.amount.to_string(),
+        })).collect::<Vec<_>>(),
+        "data": format!("0x{}", hex::encode(&msg.data)),
+        "fee_token": match msg.fee_token {
+            tenzro_bridge::chainlink_ccip::FeeToken::Native => "native",
+            tenzro_bridge::chainlink_ccip::FeeToken::Link => "link",
+        },
+        "extra_args": format!("0x{}", hex::encode(&msg.extra_args)),
+    }))
 }
 
 // ============================================================

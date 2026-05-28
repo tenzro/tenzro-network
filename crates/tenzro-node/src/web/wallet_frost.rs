@@ -223,6 +223,18 @@ struct FrostSession {
     /// Aggregated 64-byte (or 65-byte for secp) signature.
     /// Populated at `respond`. Returned at `finalize`.
     signature: Option<Vec<u8>>,
+    /// JWT `sub` claim of the bearer that opened this session via
+    /// `start`. Every subsequent endpoint (commit / await-challenge /
+    /// respond / finalize / abort) constant-time compares the
+    /// presenter's `sub` against this and rejects on mismatch.
+    ///
+    /// Why bind to `sub` and not just the capability: a leaked refresh
+    /// token can mint a new access JWT with the same capabilities but
+    /// a different `sub` is impossible without compromising the wallet
+    /// itself. Binding the session to the originating subject means a
+    /// second, unrelated bearer that happens to hold `wallet.sign` on
+    /// a different DID cannot hijack an in-flight signing session.
+    initiating_sub: String,
 }
 
 impl FrostSession {
@@ -394,6 +406,32 @@ fn session_not_found() -> WalletApiError {
         "session_not_found",
         "no FROST session for that session_id (possibly expired)",
     )
+}
+
+/// Constant-time compare the presenter's JWT `sub` against the
+/// session's `initiating_sub`. On mismatch returns a coarse
+/// 403 — deliberately the same shape as a missing session would
+/// have been (NOT_FOUND), to avoid leaking session existence to a
+/// bearer that doesn't own it. (FROST callers know their own
+/// session IDs; an honest caller never hits this path.)
+fn require_session_owner(
+    session_initiating_sub: &str,
+    presenter_sub: &str,
+) -> Result<(), WalletApiError> {
+    use subtle::ConstantTimeEq;
+    let a = session_initiating_sub.as_bytes();
+    let b = presenter_sub.as_bytes();
+    // Length-mismatch is a definite reject; ct_eq's docs note that
+    // length is leaked anyway because the slices have differing
+    // lengths at the call site, so an early-out is fine.
+    if a.len() != b.len() || !bool::from(a.ct_eq(b)) {
+        return Err(wallet_error(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            "no FROST session for that session_id (possibly expired)",
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -888,9 +926,10 @@ pub async fn start_handler(
     };
     let path = format!("/wallet/frost/{}/start", scheme.as_str());
     let full_uri = full_request_uri(&headers, &path);
-    if let Err(resp) = validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
-        return resp;
-    }
+    let claims = match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
 
     let preimage = match parse_b64("preimage_b64", &body.preimage_b64) {
         Ok(p) => p,
@@ -917,6 +956,7 @@ pub async fn start_handler(
         device_commitments: None,
         signing_package: None,
         signature: None,
+        initiating_sub: claims.sub.clone(),
     };
 
     let coord = coordinator(&state);
@@ -976,9 +1016,10 @@ pub async fn commit_handler(
     };
     let path = format!("/wallet/frost/{}/commit", scheme.as_str());
     let full_uri = full_request_uri(&headers, &path);
-    if let Err(resp) = validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
-        return resp;
-    }
+    let claims = match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
 
     let device_commitments = match parse_b64("device_commitments_b64", &body.device_commitments_b64) {
         Ok(b) => b,
@@ -996,14 +1037,18 @@ pub async fn commit_handler(
     // Compute the SigningPackage *before* taking the session lock for
     // mutation so we don't hold both at once. This is fine because
     // `node_commitments` is immutable for the lifetime of the session.
-    let (node_commitments, preimage, sess_scheme) = {
+    let (node_commitments, preimage, sess_scheme, sess_sub) = {
         let sess = sess_arc.lock();
         (
             sess.node_commitments.clone(),
             sess.preimage.clone(),
             sess.scheme,
+            sess.initiating_sub.clone(),
         )
     };
+    if let Err(e) = require_session_owner(&sess_sub, &claims.sub) {
+        return e.into_response();
+    }
     if sess_scheme != scheme {
         return wallet_error(StatusCode::BAD_REQUEST,
             "scheme_mismatch",
@@ -1046,9 +1091,10 @@ pub async fn await_challenge_handler(
     };
     let path = format!("/wallet/frost/{}/await-challenge", scheme.as_str());
     let full_uri = full_request_uri(&headers, &path);
-    if let Err(resp) = validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
-        return resp;
-    }
+    let claims = match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
 
     let coord = coordinator(&state);
     let deadline = SystemTime::now() + LONG_POLL_TIMEOUT;
@@ -1058,14 +1104,18 @@ pub async fn await_challenge_handler(
             None => return session_not_found().into_response(),
         };
         let now = now_ms();
-        let (effective, package, sess_scheme) = {
+        let (effective, package, sess_scheme, sess_sub) = {
             let mut sess = sess_arc.lock();
             (
                 sess.effective_state(now),
                 sess.signing_package.clone(),
                 sess.scheme,
+                sess.initiating_sub.clone(),
             )
         };
+        if let Err(e) = require_session_owner(&sess_sub, &claims.sub) {
+            return e.into_response();
+        }
         if sess_scheme != scheme {
             return wallet_error(StatusCode::BAD_REQUEST,
                 "scheme_mismatch",
@@ -1109,9 +1159,10 @@ pub async fn respond_handler(
     };
     let path = format!("/wallet/frost/{}/respond", scheme.as_str());
     let full_uri = full_request_uri(&headers, &path);
-    if let Err(resp) = validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
-        return resp;
-    }
+    let claims = match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
 
     let device_share = match parse_b64(
         "device_signature_share_b64",
@@ -1131,7 +1182,7 @@ pub async fn respond_handler(
 
     // Snapshot the inputs needed for aggregation, drop the lock,
     // run the crypto, then take the lock again to mutate.
-    let (sess_scheme, did, surface_key, signing_package, node_nonces, current_state) = {
+    let (sess_scheme, did, surface_key, signing_package, node_nonces, current_state, sess_sub) = {
         let mut sess = sess_arc.lock();
         let eff = sess.effective_state(now);
         if eff != FrostSessionState::Committed {
@@ -1157,8 +1208,12 @@ pub async fn respond_handler(
             pkg,
             sess.node_nonces.clone(),
             eff,
+            sess.initiating_sub.clone(),
         )
     };
+    if let Err(e) = require_session_owner(&sess_sub, &claims.sub) {
+        return e.into_response();
+    }
     if sess_scheme != scheme {
         return wallet_error(StatusCode::BAD_REQUEST,
             "scheme_mismatch",
@@ -1205,9 +1260,10 @@ pub async fn finalize_handler(
     };
     let path = format!("/wallet/frost/{}/finalize", scheme.as_str());
     let full_uri = full_request_uri(&headers, &path);
-    if let Err(resp) = validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
-        return resp;
-    }
+    let claims = match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
 
     let coord = coordinator(&state);
     let deadline = SystemTime::now() + LONG_POLL_TIMEOUT;
@@ -1217,14 +1273,18 @@ pub async fn finalize_handler(
             None => return session_not_found().into_response(),
         };
         let now = now_ms();
-        let (effective, signature, sess_scheme) = {
+        let (effective, signature, sess_scheme, sess_sub) = {
             let mut sess = sess_arc.lock();
             (
                 sess.effective_state(now),
                 sess.signature.clone(),
                 sess.scheme,
+                sess.initiating_sub.clone(),
             )
         };
+        if let Err(e) = require_session_owner(&sess_sub, &claims.sub) {
+            return e.into_response();
+        }
         if sess_scheme != scheme {
             return wallet_error(StatusCode::BAD_REQUEST,
                 "scheme_mismatch",
@@ -1266,9 +1326,10 @@ pub async fn abort_handler(
     };
     let path = format!("/wallet/frost/{}/abort", scheme.as_str());
     let full_uri = full_request_uri(&headers, &path);
-    if let Err(resp) = validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
-        return resp;
-    }
+    let claims = match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
 
     let coord = coordinator(&state);
     let now = now_ms();
@@ -1279,6 +1340,9 @@ pub async fn abort_handler(
     };
 
     let mut sess = sess_arc.lock();
+    if let Err(e) = require_session_owner(&sess.initiating_sub, &claims.sub) {
+        return e.into_response();
+    }
     if sess.scheme != scheme {
         return wallet_error(StatusCode::BAD_REQUEST,
             "scheme_mismatch",

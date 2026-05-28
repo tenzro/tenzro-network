@@ -1058,16 +1058,27 @@ impl SeedAgentEarmarkManager {
             .as_ref()
             .expect("hydrate_from_storage requires storage");
 
+        // Pre-launch policy (CLAUDE.md "Pre-Launch Code Hygiene"): no
+        // backcompat shims. If a persisted record was written by an older
+        // schema and can't deserialize, drop it and reseed from defaults.
+        // No live users, no data to preserve.
+
         // Earmark singleton.
         match storage.get(CF_TOKENS, SEED_EARMARK_KEY)? {
-            Some(bytes) => {
-                let earmark: TreasuryEarmark = serde_json::from_slice(&bytes)
-                    .map_err(|e| TokenError::StorageError(format!(
-                        "decode SeedAgent earmark: {}",
-                        e
-                    )))?;
-                *self.earmark.write() = earmark;
-            }
+            Some(bytes) => match serde_json::from_slice::<TreasuryEarmark>(&bytes) {
+                Ok(earmark) => {
+                    *self.earmark.write() = earmark;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "tenzro_token::seed_agent",
+                        error = %e,
+                        "persisted SeedAgent earmark is from an older schema; reseeding from default"
+                    );
+                    let genesis = TreasuryEarmark::default();
+                    self.persist_earmark(&genesis)?;
+                }
+            },
             None => {
                 let genesis = TreasuryEarmark::default();
                 self.persist_earmark(&genesis)?;
@@ -1079,12 +1090,23 @@ impl SeedAgentEarmarkManager {
             storage.get_keys_with_prefix(CF_TOKENS, SEED_CHARTER_PREFIX)?;
         for key in charter_keys {
             let Some(bytes) = storage.get(CF_TOKENS, &key)? else { continue };
-            let charter: Charter = serde_json::from_slice(&bytes)
-                .map_err(|e| TokenError::StorageError(format!(
-                    "decode SeedAgent charter: {}",
-                    e
-                )))?;
-            self.charters.insert(charter.charter_id, charter);
+            match serde_json::from_slice::<Charter>(&bytes) {
+                Ok(charter) => {
+                    self.charters.insert(charter.charter_id, charter);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "tenzro_token::seed_agent",
+                        key = %String::from_utf8_lossy(&key),
+                        error = %e,
+                        "dropping unreadable SeedAgent charter (pre-launch flag-day)"
+                    );
+                    storage.write_batch_sync(vec![WriteOp::Delete {
+                        cf: CF_TOKENS.to_string(),
+                        key: key.clone(),
+                    }])?;
+                }
+            }
         }
 
         // Agents.
@@ -1092,12 +1114,23 @@ impl SeedAgentEarmarkManager {
             storage.get_keys_with_prefix(CF_TOKENS, SEED_AGENT_PREFIX)?;
         for key in agent_keys {
             let Some(bytes) = storage.get(CF_TOKENS, &key)? else { continue };
-            let record: SeedAgentRecord = serde_json::from_slice(&bytes)
-                .map_err(|e| TokenError::StorageError(format!(
-                    "decode SeedAgent record: {}",
-                    e
-                )))?;
-            self.agents.insert(record.agent_did.clone(), record);
+            match serde_json::from_slice::<SeedAgentRecord>(&bytes) {
+                Ok(record) => {
+                    self.agents.insert(record.agent_did.clone(), record);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "tenzro_token::seed_agent",
+                        key = %String::from_utf8_lossy(&key),
+                        error = %e,
+                        "dropping unreadable SeedAgent record (pre-launch flag-day)"
+                    );
+                    storage.write_batch_sync(vec![WriteOp::Delete {
+                        cf: CF_TOKENS.to_string(),
+                        key: key.clone(),
+                    }])?;
+                }
+            }
         }
 
         info!(

@@ -34,6 +34,7 @@
 //! Authentication is handled via JWT tokens in the Authorization header.
 
 use crate::{
+    canton_auth::CantonTokenProvider,
     error::{BridgeError, Result},
     traits::{BridgeAdapter, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo, TransferStatus},
 };
@@ -67,6 +68,13 @@ pub struct CantonAdapter {
     http_client: reqwest::Client,
     /// Pending transfer status tracking
     pending_transfers: Arc<DashMap<String, CantonTransferState>>,
+    /// Optional OAuth2 client-credentials bearer token provider.
+    ///
+    /// When set, every JSON-API request fetches a fresh bearer JWT from
+    /// the provider (cached + refreshed 60s before expiry). When unset,
+    /// the adapter falls back to the static `config.jwt_token` — used for
+    /// local Canton instances that accept unsigned tokens or no auth.
+    token_provider: Option<Arc<CantonTokenProvider>>,
 }
 
 impl CantonAdapter {
@@ -81,7 +89,80 @@ impl CantonAdapter {
             config,
             http_client,
             pending_transfers: Arc::new(DashMap::new()),
+            token_provider: None,
         }
+    }
+
+    /// Attaches an OAuth2 client-credentials token provider. Required for
+    /// the Tenzro-operated Canton devnet (`json.devnet.tenzro.network`),
+    /// which gates the JSON Ledger API behind Auth0-issued JWTs.
+    pub fn with_token_provider(mut self, provider: Arc<CantonTokenProvider>) -> Self {
+        self.token_provider = Some(provider);
+        self
+    }
+
+    /// Returns the configured Canton synchronizers as `ChainInfo` records.
+    ///
+    /// This is the same data exposed via the `BridgeAdapter::supported_chains`
+    /// trait method, surfaced as an inherent method so RPC handlers can call
+    /// it without importing the trait.
+    pub fn list_synchronizers(&self) -> Vec<ChainInfo> {
+        Self::get_supported_synchronizers(&self.config.synchronizer_ids)
+    }
+
+    /// Public wrapper over the private `query_contracts` helper.
+    ///
+    /// Returns the active contract set on the participant filtered by
+    /// `template_ids` (Daml template-id strings) and an optional structural
+    /// `query` over `createArguments`. An empty `template_ids` list yields
+    /// an empty result — Canton requires at least one template filter.
+    pub async fn query_active_contracts(
+        &self,
+        template_ids: Vec<String>,
+        query: serde_json::Value,
+    ) -> Result<Vec<JsonApiContract>> {
+        if template_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.query_contracts(template_ids, query).await
+    }
+
+    /// Public wrapper that submits a Daml `create` command and returns the
+    /// resulting contract id + payload as JSON.
+    pub async fn submit_create_command(
+        &self,
+        template_id: &str,
+        create_arguments: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let response = self.create_contract(template_id, create_arguments).await?;
+        Ok(serde_json::json!({
+            "command_type": "create",
+            "template_id": template_id,
+            "contract_id": response.contract_id,
+            "payload": response.payload,
+        }))
+    }
+
+    /// Public wrapper that exercises a Daml choice and returns the choice
+    /// result + resulting events as JSON.
+    pub async fn submit_exercise_command(
+        &self,
+        contract_id: &str,
+        template_id: &str,
+        choice: &str,
+        choice_argument: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let response = self
+            .exercise_choice(contract_id, template_id, choice, choice_argument)
+            .await?;
+        Ok(serde_json::json!({
+            "command_type": "exercise",
+            "template_id": template_id,
+            "contract_id": contract_id,
+            "choice": choice,
+            "exercise_result": response.exercise_result,
+            "events": response.events,
+        }))
     }
 
     /// Generates a unique command ID for Canton command deduplication.
@@ -131,17 +212,70 @@ impl CantonAdapter {
         )
     }
 
-    /// Creates HTTP request with authentication header
-    fn build_request(&self, method: reqwest::Method, endpoint: &str) -> reqwest::RequestBuilder {
+    /// Creates HTTP request with authentication header.
+    ///
+    /// Auth precedence:
+    /// 1. If a [`CantonTokenProvider`] is attached, fetch (cached) bearer
+    ///    JWT via the OAuth2 client-credentials flow. This is the devnet
+    ///    path.
+    /// 2. Otherwise fall back to the static `config.jwt_token`. This is
+    ///    the local / unauth path.
+    ///
+    /// Async because the token provider may need to hit the IdP on the
+    /// first call or near expiry.
+    async fn build_request(
+        &self,
+        method: reqwest::Method,
+        endpoint: &str,
+    ) -> Result<reqwest::RequestBuilder> {
         let url = format!("{}{}", self.json_api_url(), endpoint);
         let mut builder = self.http_client.request(method, url);
 
-        // Add JWT authentication if configured
-        if let Some(ref token) = self.config.jwt_token {
+        if let Some(ref provider) = self.token_provider {
+            let bearer = provider.bearer().await?;
+            builder = builder.bearer_auth(bearer);
+        } else if let Some(ref token) = self.config.jwt_token {
             builder = builder.bearer_auth(token);
         }
 
-        builder.header("Content-Type", "application/json")
+        Ok(builder.header("Content-Type", "application/json"))
+    }
+
+    /// Sanitizes a `reqwest::Error` for logging and JSON-RPC propagation.
+    ///
+    /// `reqwest::Error`'s `Display` impl includes the full URL by default, which
+    /// would leak the operator's internal Canton participant endpoint to anyone
+    /// who can trigger an error path (caller via JSON-RPC, or a log scraper).
+    /// This helper extracts only the structural classification — timeout /
+    /// connect / decode / status code — without ever rendering the URL.
+    fn classify_reqwest_error(e: &reqwest::Error) -> String {
+        if e.is_timeout() {
+            "timeout".to_string()
+        } else if e.is_connect() {
+            "connection refused".to_string()
+        } else if e.is_decode() {
+            "response decode error".to_string()
+        } else if e.is_body() {
+            "request body error".to_string()
+        } else if let Some(status) = e.status() {
+            format!("http status {}", status.as_u16())
+        } else {
+            "transport error".to_string()
+        }
+    }
+
+    /// Sanitizes an HTTP error response for logging and JSON-RPC propagation.
+    ///
+    /// Canton participants may echo internal URLs or stack traces in error
+    /// bodies; we surface only the status code and body length, never the body
+    /// itself. The full body is dropped — operators read the upstream Canton
+    /// log directly for debugging.
+    fn sanitize_canton_http_error(status: reqwest::StatusCode, body_len: usize) -> String {
+        format!(
+            "Canton upstream returned HTTP {} ({} bytes redacted)",
+            status.as_u16(),
+            body_len
+        )
     }
 
     /// Submits a CreateCommand via POST /v2/commands/submit-and-wait-for-transaction.
@@ -181,14 +315,16 @@ impl CantonAdapter {
                 reqwest::Method::POST,
                 "/commands/submit-and-wait-for-transaction",
             )
+            .await?
             .json(&request_body)
             .send()
             .await
             .map_err(|e| {
-                error!("Canton JSON Ledger API v2 submit failed: {}", e);
+                let cls = Self::classify_reqwest_error(&e);
+                error!("Canton JSON Ledger API v2 submit failed: {}", cls);
                 BridgeError::AdapterError(format!(
                     "Canton JSON Ledger API v2 submit failed: {}",
-                    e
+                    cls
                 ))
             })?;
 
@@ -197,20 +333,16 @@ impl CantonAdapter {
             let error_text = response
                 .text()
                 .await
-                .unwrap_or_else(|_| String::from("(failed to read response)"));
-            error!(
-                "Canton JSON Ledger API v2 submit error: {} - {}",
-                status, error_text
-            );
-            return Err(BridgeError::AdapterError(format!(
-                "Canton JSON Ledger API v2 submit failed: {} - {}",
-                status, error_text
-            )));
+                .unwrap_or_default();
+            let sanitized = Self::sanitize_canton_http_error(status, error_text.len());
+            error!("Canton JSON Ledger API v2 submit error: {}", sanitized);
+            return Err(BridgeError::AdapterError(sanitized));
         }
 
         let tx_tree: JsonApiSubmitAndWaitResponse = response.json().await.map_err(|e| {
-            error!("Failed to parse Canton JSON Ledger API v2 response: {}", e);
-            BridgeError::AdapterError(format!("Invalid JSON Ledger API v2 response: {}", e))
+            let cls = Self::classify_reqwest_error(&e);
+            error!("Failed to parse Canton JSON Ledger API v2 response: {}", cls);
+            BridgeError::AdapterError(format!("Invalid JSON Ledger API v2 response: {}", cls))
         })?;
 
         // Extract the created event's contract id from the transaction tree.
@@ -273,14 +405,16 @@ impl CantonAdapter {
                 reqwest::Method::POST,
                 "/commands/submit-and-wait-for-transaction",
             )
+            .await?
             .json(&request_body)
             .send()
             .await
             .map_err(|e| {
-                error!("Canton JSON Ledger API v2 exercise failed: {}", e);
+                let cls = Self::classify_reqwest_error(&e);
+                error!("Canton JSON Ledger API v2 exercise failed: {}", cls);
                 BridgeError::AdapterError(format!(
                     "Canton JSON Ledger API v2 exercise failed: {}",
-                    e
+                    cls
                 ))
             })?;
 
@@ -289,23 +423,16 @@ impl CantonAdapter {
             let error_text = response
                 .text()
                 .await
-                .unwrap_or_else(|_| String::from("(failed to read response)"));
-            error!(
-                "Canton JSON Ledger API v2 exercise error: {} - {}",
-                status, error_text
-            );
-            return Err(BridgeError::AdapterError(format!(
-                "Canton JSON Ledger API v2 exercise failed: {} - {}",
-                status, error_text
-            )));
+                .unwrap_or_default();
+            let sanitized = Self::sanitize_canton_http_error(status, error_text.len());
+            error!("Canton JSON Ledger API v2 exercise error: {}", sanitized);
+            return Err(BridgeError::AdapterError(sanitized));
         }
 
         let tx_tree: JsonApiSubmitAndWaitResponse = response.json().await.map_err(|e| {
-            error!(
-                "Failed to parse Canton JSON Ledger API v2 exercise response: {}",
-                e
-            );
-            BridgeError::AdapterError(format!("Invalid JSON Ledger API v2 response: {}", e))
+            let cls = Self::classify_reqwest_error(&e);
+            error!("Failed to parse Canton JSON Ledger API v2 exercise response: {}", cls);
+            BridgeError::AdapterError(format!("Invalid JSON Ledger API v2 response: {}", cls))
         })?;
 
         let exercise_response = tx_tree.into_exercise_response();
@@ -338,14 +465,16 @@ impl CantonAdapter {
 
         let response = self
             .build_request(reqwest::Method::POST, "/events/events-by-contract-id")
+            .await?
             .json(&request_body)
             .send()
             .await
             .map_err(|e| {
-                warn!("Canton JSON Ledger API v2 fetch failed: {}", e);
+                let cls = Self::classify_reqwest_error(&e);
+                warn!("Canton JSON Ledger API v2 fetch failed: {}", cls);
                 BridgeError::AdapterError(format!(
                     "Canton JSON Ledger API v2 fetch failed: {}",
-                    e
+                    cls
                 ))
             })?;
 
@@ -359,23 +488,16 @@ impl CantonAdapter {
             let error_text = response
                 .text()
                 .await
-                .unwrap_or_else(|_| String::from("(failed to read response)"));
-            warn!(
-                "Canton JSON Ledger API v2 fetch error: {} - {}",
-                status, error_text
-            );
-            return Err(BridgeError::AdapterError(format!(
-                "Canton JSON Ledger API v2 fetch failed: {} - {}",
-                status, error_text
-            )));
+                .unwrap_or_default();
+            let sanitized = Self::sanitize_canton_http_error(status, error_text.len());
+            warn!("Canton JSON Ledger API v2 fetch error: {}", sanitized);
+            return Err(BridgeError::AdapterError(sanitized));
         }
 
         let fetch_response: JsonApiFetchResponse = response.json().await.map_err(|e| {
-            error!(
-                "Failed to parse Canton JSON Ledger API v2 fetch response: {}",
-                e
-            );
-            BridgeError::AdapterError(format!("Invalid JSON Ledger API v2 response: {}", e))
+            let cls = Self::classify_reqwest_error(&e);
+            error!("Failed to parse Canton JSON Ledger API v2 fetch response: {}", cls);
+            BridgeError::AdapterError(format!("Invalid JSON Ledger API v2 response: {}", cls))
         })?;
 
         Ok(fetch_response.into_contract())
@@ -430,14 +552,16 @@ impl CantonAdapter {
 
         let response = self
             .build_request(reqwest::Method::POST, "/state/active-contracts")
+            .await?
             .json(&request_body)
             .send()
             .await
             .map_err(|e| {
-                error!("Canton JSON Ledger API v2 query failed: {}", e);
+                let cls = Self::classify_reqwest_error(&e);
+                error!("Canton JSON Ledger API v2 query failed: {}", cls);
                 BridgeError::AdapterError(format!(
                     "Canton JSON Ledger API v2 query failed: {}",
-                    e
+                    cls
                 ))
             })?;
 
@@ -446,23 +570,16 @@ impl CantonAdapter {
             let error_text = response
                 .text()
                 .await
-                .unwrap_or_else(|_| String::from("(failed to read response)"));
-            error!(
-                "Canton JSON Ledger API v2 query error: {} - {}",
-                status, error_text
-            );
-            return Err(BridgeError::AdapterError(format!(
-                "Canton JSON Ledger API v2 query failed: {} - {}",
-                status, error_text
-            )));
+                .unwrap_or_default();
+            let sanitized = Self::sanitize_canton_http_error(status, error_text.len());
+            error!("Canton JSON Ledger API v2 query error: {}", sanitized);
+            return Err(BridgeError::AdapterError(sanitized));
         }
 
         let query_response: JsonApiQueryResponse = response.json().await.map_err(|e| {
-            error!(
-                "Failed to parse Canton JSON Ledger API v2 query response: {}",
-                e
-            );
-            BridgeError::AdapterError(format!("Invalid JSON Ledger API v2 response: {}", e))
+            let cls = Self::classify_reqwest_error(&e);
+            error!("Failed to parse Canton JSON Ledger API v2 query response: {}", cls);
+            BridgeError::AdapterError(format!("Invalid JSON Ledger API v2 response: {}", cls))
         })?;
 
         // Apply the client-side payload filter — match every (key, value) in
@@ -1259,17 +1376,21 @@ impl CantonAdapter {
         let response = builder
             .send()
             .await
-            .map_err(|e| BridgeError::AdapterError(format!("Canton Admin API GET failed: {}", e)))?;
+            .map_err(|e| {
+                let cls = Self::classify_reqwest_error(&e);
+                BridgeError::AdapterError(format!("Canton Admin API GET failed: {}", cls))
+            })?;
 
         if !response.status().is_success() {
             return Err(BridgeError::AdapterError(format!(
                 "Canton Admin API returned HTTP {}",
-                response.status()
+                response.status().as_u16()
             )));
         }
 
         let json: serde_json::Value = response.json().await.map_err(|e| {
-            BridgeError::AdapterError(format!("Canton Admin API returned invalid JSON: {}", e))
+            let cls = Self::classify_reqwest_error(&e);
+            BridgeError::AdapterError(format!("Canton Admin API returned invalid JSON: {}", cls))
         })?;
 
         // The Admin API fee-schedule is expected to contain a base fee and a
@@ -1380,6 +1501,31 @@ impl CantonConfig {
     pub fn with_admin_port(mut self, port: u16) -> Self {
         self.admin_api_port = port;
         self
+    }
+
+    /// Returns the verified Tenzro-operated Canton devnet profile.
+    ///
+    /// Resolves to `https://json.devnet.tenzro.network/v2`, the GCE-fronted
+    /// JSON Ledger API for the Tenzro Canton validator. The participant
+    /// gRPC API (port 5001) is **not** externally exposed — this profile
+    /// is JSON-only.
+    ///
+    /// The primary party `tenzro-validator-1` is the shared validator party
+    /// allocated by the Splice validator process. Tenzro mediates all
+    /// Canton access on this party; external clients authenticate to the
+    /// Tenzro node via the API key surface, not directly to Canton.
+    pub fn devnet() -> Self {
+        Self {
+            participant_host: "json.devnet.tenzro.network".to_string(),
+            json_api_port: 443,
+            participant_port: 5001,
+            admin_api_port: 5002,
+            tls_enabled: true,
+            jwt_token: None,
+            synchronizer_ids: vec!["global-domain".to_string()],
+            act_as_party: "tenzro-validator-1".to_string(),
+            application_id: "tenzro-network".to_string(),
+        }
     }
 }
 
