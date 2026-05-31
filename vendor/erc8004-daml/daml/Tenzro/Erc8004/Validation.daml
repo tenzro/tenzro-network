@@ -1,0 +1,84 @@
+-- | ERC-8004 ValidationRegistry — Canton/DAML port.
+--
+-- Mirrors the canonical EVM `ValidationRegistry` proxy at
+-- `tenzro_identity::erc8004::addresses::VALIDATION_REGISTRY`. Records
+-- validator countersignatures on work hashes (ZK proof CIDs, TEE
+-- attestation CIDs, etc.).
+--
+-- # Two-step flow
+--
+-- A `ValidationRequest` contract is created by the requester naming a
+-- specific validator party. The validator exercises `Respond` to
+-- replace it with a `ValidationResponse` contract carrying the score
+-- + proof material. The two-template pattern (vs. one mutable
+-- template) preserves DAML's immutability while matching ERC-8004's
+-- request→response shape.
+
+module Tenzro.Erc8004.Validation where
+
+-- | An outstanding request for a validator to countersign.
+template ValidationRequest
+  with
+    admin       : Party
+    -- ^ Registry admin (Tenzro Network).
+    requester   : Party
+    -- ^ Party that submitted the work for validation.
+    validator   : Party
+    -- ^ Party expected to countersign.
+    agentId     : Int
+    -- ^ Subject ERC-8004 agentId.
+    requestUri  : Text
+    -- ^ Resolvable pointer to the work being attested to.
+    requestHash : Text
+    -- ^ 32-byte hex-encoded commitment to the work.
+  where
+    signatory admin, requester
+    observer validator
+
+    -- | Validator countersignature. Creates a `ValidationResponse`
+    -- contract and consumes this request — exactly one response per
+    -- request, matching the EVM model where
+    -- `validationResponse(bytes32,...)` is a single state write per
+    -- `requestHash`.
+    choice Respond
+      : ContractId ValidationResponse
+      with
+        response     : Int       -- ^ 0..=100 quality score.
+        responseUri  : Text
+        responseHash : Text      -- ^ 32-byte hex-encoded commitment.
+        tag          : Text      -- ^ "valid" / "invalid" / "abstain".
+      controller validator
+      do
+        assertMsg "response must be 0..=100" (response >= 0 && response <= 100)
+        create ValidationResponse with
+          admin        = admin
+          requester    = requester
+          validator    = validator
+          agentId      = agentId
+          requestUri   = requestUri
+          requestHash  = requestHash
+          response     = response
+          responseUri  = responseUri
+          responseHash = responseHash
+          tag          = tag
+
+-- | A completed validation. Counterpart to EVM `getValidation(bytes32)`
+-- — the off-chain reflector reads the latest `ValidationResponse`
+-- contract by `requestHash` to populate query caches.
+template ValidationResponse
+  with
+    admin        : Party
+    requester    : Party
+    validator    : Party
+    agentId      : Int
+    requestUri   : Text
+    requestHash  : Text
+    response     : Int
+    responseUri  : Text
+    responseHash : Text
+    tag          : Text
+  where
+    signatory admin, validator
+    observer requester
+    key (admin, requestHash) : (Party, Text)
+    maintainer key._1

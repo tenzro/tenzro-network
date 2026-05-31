@@ -125,7 +125,7 @@ multiple ecosystems. Tenzro implements each as a first-class primitive:
 
 | Layer | Standard | Tenzro implementation |
 |-------|----------|-----------------------|
-| Agent identity | ERC-8004 | `tenzro-identity::erc8004` selectors + `did:tenzro:machine:` DIDs |
+| Agent identity | ERC-8004 (cross-VM trio) | `tenzro-identity::erc8004` (EVM canonical OZ-ERC721 proxies at genesis), `::erc8004_svm` (QuantuLabs Anchor mirror), `::erc8004_daml` (Tenzro-authored Canton package) all driven by `did:tenzro:machine:` DIDs from a single TDIP write |
 | Agent payments | AP2 (Google → FIDO) | `tenzro-payments::ap2`, `tenzro_validateMandatePair`, intent/cart/payment VDCs |
 | Micropayments | x402 (Coinbase) | `tenzro-payments::x402`, EIP-3009 calldata, CDP facilitator |
 | Streaming payments | MPP (Stripe/Tempo) | `tenzro-payments::mpp`, Payment Intents API, HMAC webhook |

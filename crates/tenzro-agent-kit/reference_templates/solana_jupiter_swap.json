@@ -1,0 +1,111 @@
+{
+  "template_id": "ref-solana-jupiter-swap-v1",
+  "name": "Solana Jupiter Swap Agent",
+  "description": "Autonomous agent that quotes and executes SPL token swaps on Solana via the Jupiter v6 aggregator. Fetches the best-price route through the Tenzro Solana MCP server, then dispatches the assembled swap transaction through the agent's MPC wallet using SvmDispatch (DPoP-authenticated tenzro_svmDispatch).",
+  "template_type": "autonomous",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1712534400,
+  "updated_at": 1712534400,
+  "capabilities": [
+    {
+      "id": "jupiter_quote",
+      "name": "Jupiter Quote",
+      "description": "Fetches a best-price swap quote from Jupiter aggregator (`solana_swap` tool) for any SPL token pair, with configurable slippage tolerance.",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"input_mint\":{\"type\":\"string\"},\"output_mint\":{\"type\":\"string\"},\"amount\":{\"type\":\"string\"},\"slippage_bps\":{\"type\":\"integer\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"in_amount\":{\"type\":\"string\"},\"out_amount\":{\"type\":\"string\"},\"price_impact_pct\":{\"type\":\"number\"},\"route_plan\":{\"type\":\"array\"}}}"
+    },
+    {
+      "id": "jupiter_swap_execute",
+      "name": "Jupiter Swap Execute",
+      "description": "Dispatches the assembled Jupiter swap instruction (program id, account metas, instruction data) through the agent's MPC wallet via SvmDispatch.",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"program_id\":{\"type\":\"string\"},\"swap_instruction_data\":{\"type\":\"string\"},\"user_source_token_account\":{\"type\":\"string\"},\"user_destination_token_account\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"signature\":{\"type\":\"string\"},\"in_amount\":{\"type\":\"string\"},\"out_amount\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 512,
+    "min_storage_mb": 64,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": false,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are a Solana swap agent. For every swap request: (1) call the `solana_swap` tool with `input_mint`, `output_mint`, `amount` (raw base units, no decimal point), and `slippage_bps` to fetch a Jupiter v6 quote; (2) inspect the returned `out_amount` and `price_impact_pct` — if price impact exceeds 1.0% or the quote rejects, abort and report to the user; (3) dispatch the assembled swap via SvmDispatch to the Jupiter v6 router program with the quote's instruction data, the user's associated token accounts as writable account metas, and the SPL Token Program as a read-only meta. Always respect the delegation's per-transaction and daily caps. Report back the transaction signature, in/out amounts, and effective slippage.",
+  "examples": [
+    {
+      "description": "Swap 1 SOL → USDC at 0.5% slippage",
+      "user_input": "Swap 1 SOL to USDC, 0.5% max slippage",
+      "expected_output": "Quote: in 1000000000 lamports (1 SOL), out 187432110 (187.43 USDC), price impact 0.04%. Executed via Jupiter v6. Signature: 5J7…aB3. Effective slippage: 0.03%."
+    },
+    {
+      "description": "Swap USDC → JitoSOL",
+      "user_input": "Swap 500 USDC to JitoSOL",
+      "expected_output": "Quote: in 500000000 (500 USDC), out 2641892 lamports JitoSOL, price impact 0.11%. Executed. Signature: 4kF…q8z."
+    }
+  ],
+  "tags": ["solana", "jupiter", "swap", "dex", "spl", "aggregator"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/solana-jupiter-swap",
+  "metadata": {},
+  "execution_spec": {
+    "backend": "MultiVm",
+    "delegation": {
+      "max_transaction_value": "1000000000000000000000",
+      "max_daily_spend": "5000000000000000000000",
+      "allowed_operations": ["svm_dispatch", "swap"],
+      "allowed_chains": ["solana"],
+      "time_bound_days": 90,
+      "kyc_tier": "Basic"
+    },
+    "required_tool_tags": ["solana", "dex", "swap"],
+    "required_skill_tags": ["solana-defi"],
+    "steps": [
+      {
+        "ToolInvoke": {
+          "tool_tag": "solana",
+          "method": "solana_swap",
+          "params_template": "{\"input_mint\":\"{{input_mint}}\",\"output_mint\":\"{{output_mint}}\",\"amount\":\"{{amount}}\",\"slippage_bps\":{{slippage_bps}}}"
+        }
+      },
+      {
+        "When": {
+          "jmespath_expr": "price_impact_pct <= `1.0`",
+          "body": [
+            {
+              "SvmDispatch": {
+                "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+                "accounts": [
+                  {
+                    "pubkey": "{{user_source_token_account}}",
+                    "is_signer": false,
+                    "is_writable": true
+                  },
+                  {
+                    "pubkey": "{{user_destination_token_account}}",
+                    "is_signer": false,
+                    "is_writable": true
+                  },
+                  {
+                    "pubkey": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                    "is_signer": false,
+                    "is_writable": false
+                  }
+                ],
+                "instruction_data_template": "{{swap_instruction_data}}"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "hard_caps": {
+      "per_operation_value": "1000000000000000000000",
+      "per_day_value": "5000000000000000000000"
+    }
+  }
+}

@@ -174,7 +174,7 @@ Pass `dpop_jkt` (RFC 7638 thumbprint of the holder's Ed25519 public key) to bind
 - `spt_issue` — Issue a SharedPaymentToken bound to a principal/agent DID pair. The node-side `SptCeilingResolver` cross-checks the requested cap against the principal's `DelegationScope` and runtime `SpendingPolicy` before signing.
 - `spt_verify` — Verify SPT signature, principal/agent DID activity, and remaining cap.
 
-### ERC-8004 v0.6+ Trustless Agents Registry
+### ERC-8004 v0.6+ Trustless Agents Registry (cross-VM trio)
 
 IdentityRegistry: `erc8004_encode_register` (no-arg overload), `erc8004_encode_register_with_uri` (`register(string)` overload), `erc8004_encode_register_with_metadata` (`register(string,(string,bytes)[])` overload), `erc8004_encode_get_agent`, `erc8004_decode_get_agent`, `erc8004_encode_set_agent_uri`, `erc8004_encode_set_agent_wallet`, `erc8004_encode_set_metadata`, `erc8004_encode_get_metadata`, `erc8004_decode_get_metadata`, `erc8004_encode_get_agent_uri`, `erc8004_encode_get_agent_wallet`.
 
@@ -182,7 +182,14 @@ ReputationRegistry: `erc8004_encode_feedback`, `erc8004_encode_get_feedback`, `e
 
 ValidationRegistry: `erc8004_encode_validation_request`, `erc8004_encode_validation_response`, `erc8004_encode_get_validation`.
 
-Calldata is byte-identical to the native EVM precompiles `0x101a` / `0x101b` / `0x101c`. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — server-allocated, never derivable client-side. Encoder tools accept `agent_id` as a JSON number, decimal string, or 0x-prefixed hex word (rejected if it exceeds `u64::MAX`).
+The MCP encoder tools above produce **EVM** calldata, byte-identical to the native EVM precompiles `0x101a` / `0x101b` / `0x101c`. They target the canonical OpenZeppelin-ERC721 upgradeable proxies deployed at genesis at `tenzro_identity::erc8004::addresses::{IDENTITY_REGISTRY, REPUTATION_REGISTRY, VALIDATION_REGISTRY}`. Encoder tools accept `agent_id` as a JSON number, decimal string, or 0x-prefixed hex word (rejected if it exceeds `u64::MAX`).
+
+The same registration semantics are mirrored to two non-EVM backends from a single TDIP `register_machine_with_fee` write — neither path is callable via MCP encoder tools (calldata is VM-native):
+
+- **SVM mirror**: QuantuLabs Anchor program (`https://github.com/QuantuLabs/erc-8004-svm`). `tenzro-identity::erc8004_svm` builds Anchor-formatted instruction calldata; the node mirror buffers payloads under `erc8004_svm_pending_tx:` in RocksDB and indexes DID → 32-byte Pubkey under `erc8004_svm_did_index:`. Operator drains the queue to a Solana RPC.
+- **DAML mirror**: Tenzro-authored Canton package at `vendor/erc8004-daml/daml/Tenzro/Erc8004/{Identity,Reputation,Validation}.daml`. `tenzro-identity::erc8004_daml` emits Canton Ledger JSON API v2 `submit-and-wait` commands as `serde_json::Value`; the node mirror buffers payloads under `erc8004_daml_pending_tx:` and indexes DID → 8-byte LE u64 agentId under `erc8004_daml_did_index:`. Opt-in: wired only when `NodeConfig.erc8004_daml` is present (package id = SHA-256 of compiled `.dar`, supplied by operator).
+
+`agentId` is server-allocated by each backing registry (sequential `uint256` on EVM, 32-byte Pubkey on SVM, 8-byte LE u64 on DAML) — never derivable client-side.
 
 ### Identity (right-to-erasure)
 

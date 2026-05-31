@@ -618,14 +618,33 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "name": "Image Segmentation",
                 "description": (
                     "Promptable image segmentation via Tenzro-served encoders "
-                    "(SAM 3, SAM 2, EdgeSAM, MobileSAM). Accepts point and "
-                    "box prompts, returns per-prompt mask geometry and scores."
+                    "(SAM 2, EdgeSAM, MobileSAM). Accepts point and box "
+                    "prompts, returns per-prompt mask geometry and scores."
                 ),
                 "tags": ["vision", "segmentation", "sam", "edgesam", "ai"],
                 "examples": [
                     "List available segmentation models",
-                    "Segment image with SAM 3 given point prompts",
+                    "Segment image with SAM 2 given point prompts",
                     "Segment image with EdgeSAM given a box prompt",
+                ],
+                "inputModes": ["application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "text-segmentation",
+                "name": "Open-Vocabulary Text-Promptable Segmentation",
+                "description": (
+                    "Open-vocabulary text-promptable image segmentation via "
+                    "Tenzro-served SAM 3 / SAM 3.1. Accepts a free-text label "
+                    "(e.g. 'person', 'sofa', 'dog') and an image; optionally "
+                    "narrowed with a normalized cxcywh box. Returns variable-N "
+                    "detections with bbox, score, and full-resolution mask."
+                ),
+                "tags": ["vision", "segmentation", "sam3", "open-vocabulary", "text-promptable", "ai"],
+                "examples": [
+                    "List available text-promptable segmentation models",
+                    "Segment all 'people' in image with sam3-vit-h",
+                    "Segment 'dog' restricted to box (0.4,0.4,0.3,0.5)",
                 ],
                 "inputModes": ["application/json"],
                 "outputModes": ["application/json"],

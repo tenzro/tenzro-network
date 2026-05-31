@@ -292,23 +292,13 @@ After per-command deploy authorization (each `gcloud builds submit` and each `ku
 
 ```
 TAG=$(date +%Y%m%d-%H%M%S)
-gcloud builds submit ~/AI/tenzronetwork \
-  --tag=us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:$TAG \
-  --project=tenzro-infra \
-  --machine-type=n1-highcpu-32 \
-  --disk-size=200 \
-  --timeout=3600s
+docker build -t <your-registry>/tenzro-node:$TAG .
+docker push <your-registry>/tenzro-node:$TAG
 
-# Wipe + re-genesis (per reference_testnet_wipe_pvc.md)
-kubectl delete statefulset tenzro-validator -n tenzro-testnet
-kubectl delete pvc -l app=tenzro-validator -n tenzro-testnet
-kubectl delete deployment tenzro-rpc -n tenzro-testnet
-kubectl delete pvc data-tenzro-rpc -n tenzro-testnet
-# Re-apply manifests (PVC for rpc must be re-applied manually — Deployments don't auto-recreate PVCs)
-kubectl apply -f deploy/kubernetes/
-
-# Verify the new pods come up healthy
-kubectl get pods -n tenzro-testnet -o wide --watch
+# Wipe + re-genesis: flag-day cutover requires destroying all v2 chain state
+# before validators boot the v3 binary. The exact mechanic depends on your
+# deployment (k8s PVC delete, GCE disk re-attach, bare-metal `rm -rf /var/lib/tenzro/data`).
+# Then restart each validator with the new genesis embedded and the new image.
 ```
 
 After pods are Ready, smoke tests:

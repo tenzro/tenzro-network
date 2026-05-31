@@ -27,11 +27,13 @@ use tenzro_crypto::{KeyPair, KeyType};
 use tenzro_model::{
     get_audio_catalog, get_audio_model_by_id, get_detection_catalog, get_forecast_catalog,
     get_model_by_id, get_model_catalog, get_segmentation_catalog, get_text_embedding_catalog,
-    get_video_catalog, get_vision_catalog, get_vision_model_by_id, ChatMessage as ModelChatMessage,
-    ForecastConfig, GenerationConfig, ImageEmbedConfig, ImageNormalization, SegmentPrompt,
-    TextEmbedConfig, ToolDefinition as RuntimeToolDefinition, TranscribeConfig, VideoEmbedConfig,
-    WhisperFamily,
+    get_text_segmentation_catalog, get_text_segmentation_model_by_id, get_video_catalog,
+    get_vision_catalog, get_vision_model_by_id, ChatMessage as ModelChatMessage, ForecastConfig,
+    GenerationConfig, ImageEmbedConfig, ImageNormalization, SegmentPrompt, TextEmbedConfig,
+    TextSegmentBoxPrompt, TextSegmentConfig, ToolDefinition as RuntimeToolDefinition,
+    TranscribeConfig, VideoEmbedConfig, WhisperFamily,
 };
+use tenzro_model::hf_download::{ArtifactSpec, DownloadProgress, DownloadState, HfArtifactDownloader};
 use tenzro_network::{NetworkMessage, MessagePayload, NetworkService};
 use tenzro_storage::{BlockStoreImpl, AccountStoreImpl, KvStore, CF_IDENTITIES, CF_TASKS, CF_AGENT_TEMPLATES, CF_MODELS, CF_AGENTS, CF_SKILLS, CF_TOOLS, CF_METADATA, CF_SETTLEMENTS, traits::{BlockStore, AccountStore}};
 use tenzro_types::block::Block;
@@ -314,7 +316,7 @@ async fn handle_rpc_post(
                         responses.push(serde_json::to_value(err).unwrap());
                         continue;
                     }
-                    let response = handle_request(&node, request, &auth_ctx).await;
+                    let response = handle_request(&node, request, &auth_ctx, api_key.as_deref()).await;
                     responses.push(serde_json::to_value(response).unwrap());
                 }
                 Err(e) => {
@@ -344,7 +346,7 @@ async fn handle_rpc_post(
             if let Some(err) = gate_api_key(&node, &request, api_key.as_deref()) {
                 return (StatusCode::OK, Json(serde_json::to_value(err).unwrap()));
             }
-            let response = handle_request(&node, request, &auth_ctx).await;
+            let response = handle_request(&node, request, &auth_ctx, api_key.as_deref()).await;
             (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
         }
         Err(e) => {
@@ -368,7 +370,7 @@ async fn handle_rpc_post(
 /// when the method is scoped and the presented key is missing, unknown,
 /// revoked, or lacks the required scope. Returns `None` when the call is
 /// authorized to proceed.
-fn gate_api_key(
+pub(crate) fn gate_api_key(
     node: &Arc<TenzroNode>,
     request: &JsonRpcRequest,
     api_key: Option<&str>,
@@ -447,7 +449,7 @@ fn requires_admin_token(method: &str) -> bool {
 /// of caller input. Comparison uses [`crate::api_key::verify_admin_token`]
 /// (constant-time, length-prefix short-circuit), so neither the secret
 /// nor its length leaks through the response timing.
-fn gate_admin_token(
+pub(crate) fn gate_admin_token(
     node: &Arc<TenzroNode>,
     request: &JsonRpcRequest,
     presented: Option<&str>,
@@ -564,6 +566,7 @@ pub(crate) async fn handle_request(
     node: &Arc<TenzroNode>,
     mut request: JsonRpcRequest,
     auth_ctx: &AuthContext,
+    api_key: Option<&str>,
 ) -> JsonRpcResponse {
     // Per JSON-RPC 2.0 §4: the `jsonrpc` member MUST be exactly the string "2.0".
     // Reject anything else with -32600 Invalid Request before dispatching the
@@ -1002,12 +1005,18 @@ pub(crate) async fn handle_request(
         "tenzro_listTextEmbeddingModels" => handle_list_text_embedding_models(node).await,
         "tenzro_listTextEmbeddingCatalog" => handle_list_text_embedding_catalog().await,
         "tenzro_textEmbed" => handle_text_embed(node, request.params).await,
-        // Segmentation (ONNX runtime — SAM 3, SAM 2, EdgeSAM, MobileSAM)
+        // Segmentation (ONNX runtime — SAM 2, EdgeSAM, MobileSAM)
         "tenzro_loadSegmentationModel" => handle_load_segmentation_model(node, request.params).await,
         "tenzro_unloadSegmentationModel" => handle_unload_segmentation_model(node, request.params).await,
         "tenzro_listSegmentationModels" => handle_list_segmentation_models(node).await,
         "tenzro_listSegmentationCatalog" => handle_list_segmentation_catalog().await,
         "tenzro_segment" => handle_segment(node, request.params).await,
+        // Text-promptable segmentation (ONNX runtime — SAM 3 / SAM 3.1)
+        "tenzro_loadTextSegmentationModel" => handle_load_text_segmentation_model(node, request.params).await,
+        "tenzro_unloadTextSegmentationModel" => handle_unload_text_segmentation_model(node, request.params).await,
+        "tenzro_listTextSegmentationModels" => handle_list_text_segmentation_models(node).await,
+        "tenzro_listTextSegmentationCatalog" => handle_list_text_segmentation_catalog().await,
+        "tenzro_textSegment" => handle_text_segment(node, request.params).await,
         // Object detection (ONNX runtime — RF-DETR, D-FINE)
         "tenzro_loadDetectionModel" => handle_load_detection_model(node, request.params).await,
         "tenzro_unloadDetectionModel" => handle_unload_detection_model(node, request.params).await,
@@ -1020,7 +1029,7 @@ pub(crate) async fn handle_request(
         "tenzro_listAudioModels" => handle_list_audio_models(node).await,
         "tenzro_listAudioCatalog" => handle_list_audio_catalog().await,
         "tenzro_transcribe" => handle_transcribe(node, request.params).await,
-        // Video encoders (ONNX runtime — empty wave 1, scaffolding for V-JEPA / VideoMAE)
+        // Video encoders (ONNX runtime — V-JEPA 2 catalog; loader pending per-model ONNX export)
         "tenzro_loadVideoModel" => handle_load_video_model(node, request.params).await,
         "tenzro_unloadVideoModel" => handle_unload_video_model(node, request.params).await,
         "tenzro_listVideoModels" => handle_list_video_models(node).await,
@@ -1081,11 +1090,16 @@ pub(crate) async fn handle_request(
         "tenzro_listCantonDomains" => handle_list_canton_domains(node).await,
         "tenzro_listDamlContracts" => handle_list_daml_contracts(node, request.params).await,
         "tenzro_submitDamlCommand" => handle_submit_daml_command(node, request.params).await,
+        "tenzro_allocateParty" => handle_allocate_party(node, request.params).await,
 
-        // API key management
+        // API key management — operator (admin-token-gated)
         "tenzro_createApiKey" => handle_create_api_key(node, request.params).await,
         "tenzro_revokeApiKey" => handle_revoke_api_key(node, request.params).await,
         "tenzro_listApiKeys" => handle_list_api_keys(node).await,
+
+        // API key management — subject (X-Tenzro-Api-Key authenticated)
+        "tenzro_revokeMyApiKey" => handle_revoke_my_api_key(node, request.params, api_key).await,
+        "tenzro_listMyApiKeys" => handle_list_my_api_keys(node, api_key).await,
 
         // Staking methods
         "tenzro_stake" | "tenzro_stakeTokens" => handle_stake(node, request.params).await,
@@ -1276,6 +1290,7 @@ pub(crate) async fn handle_request(
         "tenzro_signAndSendTransaction" => {
             handle_sign_and_send_transaction(node, request.params, auth_ctx).await
         }
+        "tenzro_svmDispatch" => handle_svm_dispatch(node, request.params, auth_ctx).await,
         "tenzro_verifySignature" => handle_verify_signature(node, request.params).await,
         "tenzro_encrypt" | "tenzro_encryptData" => handle_encrypt(node, request.params).await,
         "tenzro_decrypt" | "tenzro_decryptData" => handle_decrypt(node, request.params).await,
@@ -13674,7 +13689,7 @@ async fn handle_download_model(
         });
 
         // Perform the actual download
-        match hf_dl.download_model(&entry_clone, progress_tx).await {
+        match hf_dl.download_model(&entry_clone, None, progress_tx).await {
             Ok(_path) => {
                 if let Some(mut entry) = downloads.get_mut(&model_id) {
                     entry.status = "completed".to_string();
@@ -14778,6 +14793,179 @@ async fn handle_segment(
 }
 
 // ============================================================================
+// Text-promptable segmentation — SAM 3 / SAM 3.1
+// ============================================================================
+
+/// `tenzro_loadTextSegmentationModel`: download (or reuse cached) the
+/// SAM-3-family ONNX bundle from HuggingFace Hub and register it under
+/// `model_id` in the text-segmentation runtime.
+///
+/// Params: `{ model_id: String }`
+async fn handle_load_text_segmentation_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?
+        .to_string();
+
+    let entry = get_text_segmentation_model_by_id(&model_id).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("unknown text-segmentation model_id '{}'", model_id),
+        data: None,
+    })?;
+
+    // Resolve models_dir (same pattern as node.rs:3964-3975).
+    let models_dir = node.config().models_dir.clone().unwrap_or_else(|| {
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home/tenzro".into()))
+            .join(".tenzro")
+            .join("models")
+    });
+    std::fs::create_dir_all(&models_dir).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("failed to create models dir: {}", e),
+        data: None,
+    })?;
+
+    let files = vec![
+        entry.image_encoder_filename.clone(),
+        entry.language_encoder_filename.clone(),
+        entry.decoder_filename.clone(),
+        entry.tokenizer_filename.clone(),
+    ];
+    let dir_name = format!("{}-bundle", model_id);
+    let spec = ArtifactSpec::Bundle {
+        files: files.clone(),
+        dir_name: dir_name.clone(),
+        peer_hints: Vec::new(),
+    };
+
+    let downloader = HfArtifactDownloader::new(models_dir);
+    let initial_progress = DownloadProgress {
+        model_id: model_id.clone(),
+        status: DownloadState::Pending,
+        progress_percent: 0.0,
+        downloaded_bytes: 0,
+        total_bytes: entry.size_bytes,
+    };
+    let (tx, _rx) = tokio::sync::watch::channel(initial_progress);
+    let bundle_dir = downloader
+        .download(&model_id, &entry.hf_repo, &spec, entry.size_bytes, tx)
+        .await
+        .map_err(forecast_err)?;
+
+    node.text_segmentation_runtime
+        .load_sam3(
+            model_id.clone(),
+            bundle_dir.join(&entry.image_encoder_filename),
+            bundle_dir.join(&entry.language_encoder_filename),
+            bundle_dir.join(&entry.decoder_filename),
+            bundle_dir.join(&entry.tokenizer_filename),
+        )
+        .map_err(forecast_err)?;
+
+    Ok(serde_json::json!({
+        "model_id": model_id,
+        "bundle_dir": bundle_dir.display().to_string(),
+        "loaded": true,
+    }))
+}
+
+async fn handle_unload_text_segmentation_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let removed = node.text_segmentation_runtime.unregister(model_id);
+    Ok(serde_json::json!({ "model_id": model_id, "removed": removed }))
+}
+
+async fn handle_list_text_segmentation_models(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": node.text_segmentation_runtime.loaded_models(),
+    }))
+}
+
+async fn handle_list_text_segmentation_catalog() -> std::result::Result<Value, JsonRpcError> {
+    Ok(serde_json::json!({
+        "models": get_text_segmentation_catalog(),
+    }))
+}
+
+/// `tenzro_textSegment`: open-vocabulary text-promptable segmentation.
+///
+/// Params: `{ model_id, image_base64: String, text_prompt: String,
+///            box_prompts?: [TextSegmentBoxPrompt,...],
+///            score_threshold?: f32 }`
+async fn handle_text_segment(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use base64::Engine;
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let b64 = p
+        .get("image_base64")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("image_base64"))?;
+    let text_prompt = p
+        .get("text_prompt")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("text_prompt"))?
+        .to_string();
+    let box_prompt: Option<TextSegmentBoxPrompt> = match p.get("box_prompt") {
+        Some(v) if !v.is_null() => Some(serde_json::from_value(v.clone()).map_err(|e| {
+            JsonRpcError {
+                code: -32602,
+                message: format!("invalid 'box_prompt': {}", e),
+                data: None,
+            }
+        })?),
+        _ => None,
+    };
+    let score_threshold = p
+        .get("score_threshold")
+        .and_then(|v| v.as_f64())
+        .map(|f| f as f32)
+        .unwrap_or(0.5);
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid base64 in 'image_base64': {}", e),
+            data: None,
+        })?;
+    let config = TextSegmentConfig {
+        text_prompt,
+        box_prompt,
+        score_threshold,
+    };
+    let result = node
+        .text_segmentation_runtime
+        .segment_with_text(model_id, bytes, config)
+        .await
+        .map_err(forecast_err)?;
+    serde_json::to_value(result).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("text-segment result serialization: {}", e),
+        data: None,
+    })
+}
+
+// ============================================================================
 // Object detection — RF-DETR, D-FINE
 // ============================================================================
 
@@ -15150,16 +15338,22 @@ async fn handle_transcribe(
 }
 
 // ============================================================================
-// Video — empty wave 1; scaffolding for V-JEPA / VideoMAE once exports land
+// Video — V-JEPA 2 ViT-L/H/g advertised; loader pending per-model ONNX export
 // ============================================================================
 
 async fn handle_load_video_model(
     _node: &Arc<TenzroNode>,
     _params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
+    // The catalog advertises V-JEPA 2 ViT-L / ViT-H / ViT-g
+    // (LicenseTier::Permissive: MIT / MIT / Apache-2.0), but the
+    // upstream facebook/vjepa2-* repos ship safetensors only — no
+    // native ONNX export. Loading is gated until the ONNX-export
+    // pipeline (see tools/video-export) emits per-model `model.onnx`
+    // files matching the catalog `hf_filename`.
     Err(JsonRpcError {
         code: -32004,
-        message: "video ONNX loading not yet wired; catalog is empty in wave 1 pending license clearance + ONNX export (see tools/video-export)".to_string(),
+        message: "video ONNX loading not yet wired; catalog lists V-JEPA 2 ViT-L/H/g but per-model ONNX exports have not landed (see tools/video-export)".to_string(),
         data: None,
     })
 }
@@ -18234,6 +18428,11 @@ async fn handle_submit_daml_command(
 
     let adapter = canton_adapter_or_err(node)?;
 
+    // Optional per-submission `actAs` override. Set by per-agent spawning so
+    // contracts created by the agent name the agent's allocated party (not
+    // the operator's participant-default party).
+    let act_as_party = params.get("act_as").and_then(|v| v.as_str());
+
     let result = match command_type {
         "create" => {
             let create_arguments = params
@@ -18241,7 +18440,7 @@ async fn handle_submit_daml_command(
                 .cloned()
                 .unwrap_or(Value::Null);
             adapter
-                .submit_create_command(&template_id, create_arguments)
+                .submit_create_command_as(&template_id, create_arguments, act_as_party)
                 .await
         }
         "exercise" => {
@@ -18266,7 +18465,13 @@ async fn handle_submit_daml_command(
                 .cloned()
                 .unwrap_or(Value::Null);
             adapter
-                .submit_exercise_command(contract_id, &template_id, choice, argument)
+                .submit_exercise_command_as(
+                    contract_id,
+                    &template_id,
+                    choice,
+                    argument,
+                    act_as_party,
+                )
                 .await
         }
         other => {
@@ -18291,6 +18496,70 @@ async fn handle_submit_daml_command(
     })
 }
 
+/// Allocates a fresh Daml party on the configured Canton participant.
+///
+/// Used by `tenzro-agent-kit` at spawn time for DAML-backed agent
+/// templates: each agent receives its own on-ledger party so contracts it
+/// creates name the agent (not the operator's default `act_as_party`) as
+/// `actAs`. The allocated party id is then stored on `SpawnedAgent` and
+/// passed through to the executor's DAML dispatch path on every
+/// `submit-and-wait-for-transaction` call.
+///
+/// Params:
+///   - `party_id_hint`: human-readable label suggested to the participant
+///     (e.g. `"agent-<uuid>"`); the participant may suffix-encode it.
+///   - `display_name` (optional): metadata stored alongside the party.
+///
+/// Returns: `{ "party_id": "<canonical-id>" }`.
+async fn handle_allocate_party(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let party_id_hint = params
+        .get("party_id_hint")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing party_id_hint".to_string(),
+            data: None,
+        })?;
+
+    let display_name = params.get("display_name").and_then(|v| v.as_str());
+
+    let adapter = canton_adapter_or_err(node)?;
+    let party_id = adapter
+        .allocate_party(party_id_hint, display_name)
+        .await
+        .map_err(|e| {
+            tracing::error!("Canton allocate_party failed: {}", e);
+            JsonRpcError {
+                code: -32000,
+                message: "Canton party allocation failed (see node logs)".to_string(),
+                data: None,
+            }
+        })?;
+
+    Ok(serde_json::json!({
+        "party_id": party_id,
+        "party_id_hint": party_id_hint,
+    }))
+}
+
 // ── API key management handlers ─────────────────────────────────────
 //
 // API keys gate access to scoped RPC surfaces (currently `tenzro_*Canton*`).
@@ -18309,7 +18578,7 @@ async fn handle_create_api_key(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    use crate::api_key::ApiKeyScope;
+    use crate::api_key::{ApiKeyScope, KeyClass};
 
     let mgr = node.api_key_manager().ok_or_else(|| JsonRpcError {
         code: -32603,
@@ -18356,11 +18625,43 @@ async fn handle_create_api_key(
         scopes.push(scope);
     }
 
-    let issued = mgr.issue(subject, label, scopes).map_err(|e| JsonRpcError {
-        code: -32603,
-        message: format!("issue API key: {}", e),
+    // `class` defaults to `subject` for the common developer-key path.
+    // `operator_protected` is the operator's self-lockdown class —
+    // accept it but require an explicit confirmation flag so a slipped
+    // typo doesn't mint a key the operator cannot revoke via RPC.
+    let class_str = params
+        .get("class")
+        .and_then(|v| v.as_str())
+        .unwrap_or("subject");
+    let class = KeyClass::from_str(class_str).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!(
+            "Unknown class: {} (expected operator_protected | subject | operator_internal)",
+            class_str
+        ),
         data: None,
     })?;
+    if matches!(class, KeyClass::OperatorProtected) {
+        let confirmed = params
+            .get("confirm_operator_protected")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !confirmed {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "class=operator_protected requires confirm_operator_protected:true (this key cannot be revoked via RPC, including by an admin token)".to_string(),
+                data: None,
+            });
+        }
+    }
+
+    let issued = mgr
+        .issue(subject, label, scopes, class)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("issue API key: {}", e),
+            data: None,
+        })?;
 
     Ok(serde_json::json!({
         "key": issued.key,
@@ -18368,6 +18669,7 @@ async fn handle_create_api_key(
         "label": issued.record.label,
         "subject": issued.record.subject,
         "scopes": issued.record.scopes.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        "class": issued.record.class.as_str(),
         "created_at": issued.record.created_at,
         "note": "Save the `key` field now — it is shown only once.",
     }))
@@ -18377,6 +18679,8 @@ async fn handle_revoke_api_key(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
+    use crate::api_key::AdminRevokeOutcome;
+
     let mgr = node.api_key_manager().ok_or_else(|| JsonRpcError {
         code: -32603,
         message: "API key manager is not initialized".to_string(),
@@ -18398,16 +18702,27 @@ async fn handle_revoke_api_key(
             data: None,
         })?;
 
-    let revoked = mgr.revoke_by_id(key_id).map_err(|e| JsonRpcError {
+    let outcome = mgr.revoke_by_id_admin(key_id).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("revoke API key: {}", e),
         data: None,
     })?;
 
-    Ok(serde_json::json!({
-        "key_id": key_id,
-        "revoked": revoked,
-    }))
+    match outcome {
+        AdminRevokeOutcome::Revoked => Ok(serde_json::json!({
+            "key_id": key_id,
+            "revoked": true,
+        })),
+        AdminRevokeOutcome::NotFound => Ok(serde_json::json!({
+            "key_id": key_id,
+            "revoked": false,
+        })),
+        AdminRevokeOutcome::Protected => Err(JsonRpcError {
+            code: -32004,
+            message: "operator-protected key cannot be revoked via RPC (rotate the operator secret + restart the node)".to_string(),
+            data: Some(serde_json::json!({ "key_id": key_id, "class": "operator_protected" })),
+        }),
+    }
 }
 
 async fn handle_list_api_keys(
@@ -18428,6 +18743,7 @@ async fn handle_list_api_keys(
                 "subject": r.subject,
                 "label": r.label,
                 "scopes": r.scopes.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                "class": r.class.as_str(),
                 "created_at": r.created_at,
                 "revoked_at": r.revoked_at,
                 "active": r.is_active(),
@@ -18436,6 +18752,144 @@ async fn handle_list_api_keys(
         .collect();
 
     Ok(serde_json::json!({ "keys": records }))
+}
+
+// ── Subject-gated API key handlers ──────────────────────────────────
+//
+// These RPCs let a key holder list and revoke their own keys without
+// the operator admin token. They are gated only by `X-Tenzro-Api-Key`
+// (no admin token required); the caller's `subject` is recovered from
+// the presented key, and only records whose `subject` matches that
+// value are visible / revokable.
+//
+// The presented key must be active. The `class` field on each record
+// still drives revoke admissibility — only `KeyClass::Subject` records
+// are revokable via `tenzro_revokeMyApiKey`.
+//
+// The header itself is forwarded into the handler via the `api_key`
+// param threaded by `handle_request` — the gate at `gate_api_key`
+// does NOT cover these methods (since they themselves serve key
+// management, not Canton), so the handler MUST do its own auth.
+
+async fn handle_revoke_my_api_key(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+    api_key: Option<&str>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use crate::api_key::SubjectRevokeOutcome;
+
+    let mgr = node.api_key_manager().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "API key manager is not initialized".to_string(),
+        data: None,
+    })?;
+
+    let presented = api_key.ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Unauthorized: missing X-Tenzro-Api-Key header".to_string(),
+        data: None,
+    })?;
+
+    let caller = mgr.lookup(presented).ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Unauthorized: API key is unknown or revoked".to_string(),
+        data: None,
+    })?;
+
+    let caller_subject = caller.subject.clone().ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Unauthorized: presented key has no subject — subject-gated revoke is not applicable".to_string(),
+        data: None,
+    })?;
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let target = params
+        .get("key_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing key_id".to_string(),
+            data: None,
+        })?;
+
+    let outcome = mgr
+        .revoke_by_subject(&caller_subject, target)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("subject-revoke API key: {}", e),
+            data: None,
+        })?;
+
+    match outcome {
+        SubjectRevokeOutcome::Revoked => Ok(serde_json::json!({
+            "key_id": target,
+            "revoked": true,
+        })),
+        // NotFound and NotYours map to the same error — a caller cannot
+        // distinguish "this key doesn't exist on this node" from "it
+        // exists but belongs to a different subject", since the latter
+        // would leak ownership metadata.
+        SubjectRevokeOutcome::NotFound | SubjectRevokeOutcome::NotYours => Err(JsonRpcError {
+            code: -32004,
+            message: "Unauthorized: no active key with that key_id belongs to your subject".to_string(),
+            data: None,
+        }),
+        SubjectRevokeOutcome::NotSubjectRevokable => Err(JsonRpcError {
+            code: -32004,
+            message: "key is not subject-revokable (operator-internal or operator-protected class)".to_string(),
+            data: Some(serde_json::json!({ "key_id": target })),
+        }),
+    }
+}
+
+async fn handle_list_my_api_keys(
+    node: &Arc<TenzroNode>,
+    api_key: Option<&str>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let mgr = node.api_key_manager().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "API key manager is not initialized".to_string(),
+        data: None,
+    })?;
+
+    let presented = api_key.ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Unauthorized: missing X-Tenzro-Api-Key header".to_string(),
+        data: None,
+    })?;
+    let caller = mgr.lookup(presented).ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Unauthorized: API key is unknown or revoked".to_string(),
+        data: None,
+    })?;
+    let caller_subject = caller.subject.clone().ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Unauthorized: presented key has no subject".to_string(),
+        data: None,
+    })?;
+
+    let records: Vec<Value> = mgr
+        .list_by_subject(&caller_subject)
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "key_id": r.key_id,
+                "subject": r.subject,
+                "label": r.label,
+                "scopes": r.scopes.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                "class": r.class.as_str(),
+                "created_at": r.created_at,
+                "revoked_at": r.revoked_at,
+                "active": r.is_active(),
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({ "keys": records, "subject": caller_subject }))
 }
 
 // ── Staking & Provider handlers ────────────────────────────────────
@@ -28559,8 +29013,8 @@ fn aa_pre_sign_check(
         JsonRpcError {
             code: -32003,
             message: format!(
-                "AA validator chain rejected sign intent: {e}. Per CLAUDE.md \
-                 self-custody architecture: typed-transaction signing for \
+                "AA validator chain rejected sign intent: {e}. \
+                 Self-custody policy: typed-transaction signing for \
                  machine identities must pass the same ERC-7579 validator \
                  chain as the eth_sendUserOperation bundler path."
             ),
@@ -29232,6 +29686,307 @@ async fn handle_sign_and_send_transaction(
     }
 
     handle_send_raw_transaction(node, Some(send_params)).await
+}
+
+/// Dispatches a Solana-VM instruction on behalf of the authenticated bearer DID.
+///
+/// This is the SVM counterpart to `tenzro_signAndSendTransaction`. The agent-kit
+/// executor's `SvmDispatch` step calls this handler with DPoP-bound credentials;
+/// the handler:
+///
+///   1. Validates the DPoP+JWT via `resolve_auth_to_wallet`. No scope intent is
+///      passed — Solana instructions don't map cleanly onto `AuthorityAction`
+///      yet, so JWT/DPoP validation runs but RAR scope-checking does not. (The
+///      `DelegationScope.allowed_operations` envelope already gated the call at
+///      executor.rs via `enforce_operation("svm_dispatch", ..)`.)
+///   2. Loads the wallet bound to the bearer DID and uses its 32-byte Ed25519
+///      group public key as the SVM `from` (SVM addresses are 32 bytes).
+///   3. Builds a `VmTransaction { vm_type: VmType::Svm, to: program_id_bytes,
+///      data: instruction_data_bytes, value: 0, .. }` — the simplified Tenzro
+///      SVM model treats `tx.data` as the raw BPF instruction payload (or the
+///      Anchor discriminator+args for native programs like `tenzro_cross_vm`).
+///      Account metadata is forwarded in the response for caller telemetry but
+///      is NOT structurally consumed by the executor — agent templates encode
+///      whatever account refs the target program needs inside `instruction_data`
+///      per program convention.
+///   4. Signs the transaction hash via `wallet_service.sign_transaction` so the
+///      runtime's signature pre-check passes.
+///   5. Dispatches via `MultiVmRuntime::execute_transaction` and persists state.
+///
+/// Returns `{signature, public_key, tx_hash, compute_units_consumed, logs,
+/// state_changes_count, program_id, accounts}`.
+async fn handle_svm_dispatch(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+    auth_ctx: &AuthContext,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let program_id_str = params.get("program_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'program_id' field (32-byte hex)".to_string(), data: None,
+    })?;
+    let instruction_data_hex = params.get("instruction_data").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'instruction_data' field (hex)".to_string(), data: None,
+    })?;
+    let accounts = params.get("accounts").cloned().unwrap_or(serde_json::json!([]));
+    if !accounts.is_array() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "'accounts' must be an array of {pubkey, is_signer, is_writable} objects".to_string(),
+            data: None,
+        });
+    }
+    let _cluster = params.get("cluster").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    // Decode program_id (32-byte SVM pubkey). The Tenzro SVM model identifies
+    // programs by raw 32-byte slices; agent templates inline hex (with or
+    // without `0x` prefix) in `instruction_data_template`. Base58 (Solana
+    // tooling default) is intentionally not accepted here — templates targeting
+    // Tenzro SVM use hex consistently.
+    let program_id_bytes = {
+        let raw = program_id_str.strip_prefix("0x").unwrap_or(program_id_str);
+        hex::decode(raw).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("program_id must be 32-byte hex (with or without 0x): {}", e),
+            data: None,
+        })?
+    };
+    if program_id_bytes.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("program_id must decode to 32 bytes, got {}", program_id_bytes.len()),
+            data: None,
+        });
+    }
+
+    let instruction_data_bytes = {
+        let raw = instruction_data_hex.strip_prefix("0x").unwrap_or(instruction_data_hex);
+        hex::decode(raw).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid hex instruction_data: {}", e),
+            data: None,
+        })?
+    };
+
+    // Defaults match the SVM compute-unit model: typical Solana programs run
+    // well under 200k CUs; we set 1_400_000 to match Solana's max-per-tx CU
+    // ceiling so unusual programs (Jupiter route aggregation, large CPI
+    // chains) don't get clipped at submit time.
+    let gas_limit = params.get("gas_limit").or_else(|| params.get("computeUnits"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1_400_000);
+
+    // === Auth-mediated path ===
+    // Auth is mandatory. We pass `None` for the intent — see top-of-function
+    // doc comment for why scope-checking lives in the executor.
+    let outcome = resolve_auth_to_wallet(node, auth_ctx, None).await;
+    let wallet_id = match outcome {
+        AuthOutcome::Authenticated { wallet_id } => wallet_id,
+        AuthOutcome::AuthError(err) => return Err(err),
+        AuthOutcome::Unauthenticated => {
+            return Err(JsonRpcError {
+                code: -32001,
+                message: "Authentication required: present an OAuth/DPoP JWT \
+                          via the 'Authorization: DPoP <jwt>' + 'DPoP: <proof>' \
+                          headers."
+                    .to_string(),
+                data: None,
+            });
+        }
+    };
+
+    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Wallet service not initialized on this node".to_string(),
+        data: None,
+    })?;
+    use tenzro_wallet::{WalletId, WalletService};
+    let wid = WalletId::from_string(wallet_id.clone());
+    let wallet = wallet_service
+        .get_wallet(&wid)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Wallet lookup failed: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: format!("Wallet {} not found", wallet_id),
+            data: None,
+        })?;
+
+    // SVM addresses are 32 bytes (Ed25519 pubkey). Tenzro wallets use FROST
+    // Ed25519 group key as the canonical chain identity → use it directly as
+    // the SVM `from`. This matches how the desktop wallet & SDK derive the
+    // user's Solana-compatible address.
+    let from_bytes_32 = wallet.public_key.as_bytes().to_vec();
+    if from_bytes_32.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: format!(
+                "Wallet public key is {} bytes, expected 32 for SVM dispatch (Ed25519)",
+                from_bytes_32.len()
+            ),
+            data: None,
+        });
+    }
+
+    let vm_runtime = node.vm_runtime().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "VM runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    // Resolve gas_price + nonce live.
+    let gas_price = vm_runtime.gas_oracle().current_price().await.effective_price();
+
+    let mut state = if let Some(storage) = node.storage() {
+        tenzro_vm::StateAdapter::with_storage(
+            storage.clone() as std::sync::Arc<dyn tenzro_storage::KvStore>,
+        )
+    } else {
+        tenzro_vm::StateAdapter::new()
+    };
+
+    use tenzro_vm::traits::VmState as _;
+    let nonce = state.get_nonce(&from_bytes_32);
+
+    let chain_id = node
+        .config()
+        .genesis
+        .as_ref()
+        .map(|g| g.chain_id)
+        .unwrap_or(1337);
+
+    // Build the VmTransaction. The signing flow below populates `signature`,
+    // `public_key`, and `signing_digest` so the runtime's pre-execution
+    // signature verifier passes.
+    let mut vm_tx = tenzro_vm::types::VmTransaction::new(
+        from_bytes_32.clone(),
+        Some(program_id_bytes.clone()),
+        0u128,
+        instruction_data_bytes.clone(),
+        gas_limit,
+        gas_price,
+        nonce,
+        tenzro_vm::VmType::Svm,
+        chain_id,
+    );
+
+    // Construct the canonical Tenzro Transaction (same hashing scheme as EVM
+    // path) so wallet signing produces a signature the runtime can verify via
+    // the `signing_digest` path. SVM uses 32-byte addresses; `Address`
+    // accepts variable-length byte vecs already.
+    let timestamp = tenzro_types::primitives::Timestamp::now();
+    let from_addr = tenzro_types::primitives::Address::from_bytes(&from_bytes_32)
+        .ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: format!(
+                "wallet pubkey is {} bytes, expected 32 for SVM Address",
+                from_bytes_32.len()
+            ),
+            data: None,
+        })?;
+    let to_addr = tenzro_types::primitives::Address::from_bytes(&program_id_bytes)
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!(
+                "program_id is {} bytes, expected 32 for SVM Address",
+                program_id_bytes.len()
+            ),
+            data: None,
+        })?;
+    let svm_tx = tenzro_types::Transaction {
+        chain_id: ChainId::from(chain_id),
+        from: from_addr,
+        to: to_addr,
+        nonce: Nonce::from(nonce),
+        // SVM dispatch carries the instruction payload as a ContractCall with
+        // empty function and `args = instruction_data`. The runtime path for
+        // SVM doesn't read `tx_type` (it routes by VmType), but we still need
+        // a typed payload for canonical hashing.
+        tx_type: TransactionType::ContractCall {
+            function: String::new(),
+            args: instruction_data_bytes.clone(),
+        },
+        gas_limit,
+        gas_price: u64::try_from(gas_price).unwrap_or(u64::MAX),
+        timestamp,
+        memo: None,
+        pq_public_key: wallet.pq_verifying_key_bytes(),
+    };
+    let tx_hash = svm_tx.hash();
+    let signing_digest = tx_hash.as_bytes().to_vec();
+
+    let hybrid_sig = wallet_service
+        .sign_transaction(&wid, &svm_tx)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Wallet signing failed: {}", e),
+            data: None,
+        })?;
+
+    vm_tx.signature = Some(hybrid_sig.classical.clone());
+    vm_tx.public_key = Some(wallet.public_key.as_bytes().to_vec());
+    vm_tx.signing_digest = Some(signing_digest);
+
+    info!(
+        target: "rpc",
+        from = %hex::encode(&from_bytes_32),
+        program_id = %hex::encode(&program_id_bytes),
+        instruction_data_len = instruction_data_bytes.len(),
+        accounts_count = accounts.as_array().map(|a| a.len()).unwrap_or(0),
+        nonce,
+        gas_limit,
+        "tenzro_svmDispatch: dispatching SVM instruction"
+    );
+
+    let result = vm_runtime
+        .execute_transaction(&vm_tx, &mut state)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("SVM execution failed: {}", e),
+            data: None,
+        })?;
+
+    if !result.success {
+        return Err(JsonRpcError {
+            code: -32003,
+            message: format!(
+                "SVM transaction reverted: {}",
+                result.revert_reason.clone().unwrap_or_else(|| "unknown".to_string())
+            ),
+            data: Some(serde_json::json!({
+                "compute_units_consumed": result.gas_used,
+                "logs": result.logs,
+                "program_id": format!("0x{}", hex::encode(&program_id_bytes)),
+            })),
+        });
+    }
+
+    // Persist post-execution state (BPF writes, balance updates from the
+    // gas debit) so subsequent reads see the changes.
+    if let Err(e) = state.commit() {
+        tracing::warn!("Failed to commit state after SVM dispatch: {}", e);
+    }
+
+    Ok(serde_json::json!({
+        "signature": format!("0x{}", hex::encode(&hybrid_sig.classical)),
+        "public_key": format!("0x{}", wallet.public_key.to_hex()),
+        "tx_hash": format!("{}", tx_hash),
+        "program_id": format!("0x{}", hex::encode(&program_id_bytes)),
+        "accounts": accounts,
+        "compute_units_consumed": result.gas_used,
+        "logs": result.logs,
+        "state_changes_count": result.state_changes.len(),
+        "nonce": nonce,
+        "gas_limit": gas_limit,
+        "gas_price": gas_price.to_string(),
+        "vm_type": "svm",
+    }))
 }
 
 async fn handle_verify_signature(

@@ -72,6 +72,7 @@
 //! # }
 //! ```
 
+mod auth;
 mod bootstrap;
 mod error;
 mod executor;
@@ -80,6 +81,7 @@ mod resolver;
 mod spawner;
 mod spec;
 
+pub use auth::{AgentAuthRequest, AgentCredentials, AuthIssuer, DpopSigner};
 pub use bootstrap::{bootstrap_reference_templates, BootstrapReport};
 pub use error::AgentKitError;
 pub use executor::{ExecutionContext, RunOptions, RunReport, StepResult};
@@ -92,7 +94,7 @@ pub use spawner::{AgentSpawner, SpawnArgs, SpawnedAgent};
 pub use tenzro_types::agent_template::{
     AgentCapability, AgentPricingModel, AgentRuntimeRequirements, AgentTemplate,
     AgentTemplateFilter, AgentTemplateStatus, AgentTemplateType, DelegationSpec,
-    ExecutionBackend, ExecutionSpec, ExecutionStep, HardCaps,
+    ExecutionBackend, ExecutionSpec, ExecutionStep, HardCaps, SvmAccountMeta,
 };
 
 use std::sync::Arc;
@@ -109,11 +111,22 @@ pub struct AgentKit {
     identity_registry: Arc<IdentityRegistry>,
     agent_runtime: Arc<AgentRuntime>,
     registry: Arc<RegistryClient>,
+    /// Optional auth issuer. When set, `spawn()` returns a `SpawnedAgent`
+    /// whose `credentials` field carries a DPoP-bound JWT + signer; the
+    /// executor's authenticated dispatch paths (EVM/SVM/DAML) use these
+    /// credentials to call `tenzro_signAndSendTransaction` /
+    /// `tenzro_svmDispatch` / DAML submission RPCs on the agent's behalf.
+    auth_issuer: Option<Arc<dyn AuthIssuer>>,
 }
 
 impl AgentKit {
     /// Constructs a new `AgentKit` pointing at the local node's JSON-RPC
     /// endpoint, sharing the node's [`IdentityRegistry`] and [`AgentRuntime`].
+    ///
+    /// No [`AuthIssuer`] is wired. Any spawned agent's authenticated
+    /// dispatch steps (EvmDispatch / SvmDispatch / DamlSubmit) will fail
+    /// loudly with a "lacks DPoP credentials" error. Use
+    /// [`AgentKit::with_auth_issuer`] to enable the full path.
     pub fn new(
         rpc_url: impl Into<String>,
         identity_registry: Arc<IdentityRegistry>,
@@ -126,6 +139,27 @@ impl AgentKit {
             identity_registry,
             agent_runtime,
             registry,
+            auth_issuer: None,
+        }
+    }
+
+    /// Constructs a new `AgentKit` with a DPoP-capable [`AuthIssuer`] wired.
+    /// Every `spawn()` call will mint per-agent DPoP-bound JWT credentials
+    /// scoped to the template's `DelegationSpec`.
+    pub fn with_auth_issuer(
+        rpc_url: impl Into<String>,
+        identity_registry: Arc<IdentityRegistry>,
+        agent_runtime: Arc<AgentRuntime>,
+        auth_issuer: Arc<dyn AuthIssuer>,
+    ) -> Self {
+        let rpc_url = Arc::new(rpc_url.into());
+        let registry = Arc::new(RegistryClient::new((*rpc_url).clone()));
+        Self {
+            rpc_url,
+            identity_registry,
+            agent_runtime,
+            registry,
+            auth_issuer: Some(auth_issuer),
         }
     }
 
@@ -180,11 +214,20 @@ impl AgentKit {
         template_id: &str,
         args: SpawnArgs,
     ) -> Result<SpawnedAgent, AgentKitError> {
-        let spawner = AgentSpawner::new(
-            self.registry.clone(),
-            self.identity_registry.clone(),
-            self.agent_runtime.clone(),
-        );
+        let spawner = if let Some(issuer) = self.auth_issuer.clone() {
+            AgentSpawner::with_auth_issuer(
+                self.registry.clone(),
+                self.identity_registry.clone(),
+                self.agent_runtime.clone(),
+                issuer,
+            )
+        } else {
+            AgentSpawner::new(
+                self.registry.clone(),
+                self.identity_registry.clone(),
+                self.agent_runtime.clone(),
+            )
+        };
         spawner.spawn(template_id, args).await
     }
 

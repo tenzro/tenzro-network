@@ -129,22 +129,44 @@ impl CantonAdapter {
 
     /// Public wrapper that submits a Daml `create` command and returns the
     /// resulting contract id + payload as JSON.
+    ///
+    /// Uses the participant-default `act_as_party` from config.
     pub async fn submit_create_command(
         &self,
         template_id: &str,
         create_arguments: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let response = self.create_contract(template_id, create_arguments).await?;
+        self.submit_create_command_as(template_id, create_arguments, None)
+            .await
+    }
+
+    /// Same as `submit_create_command` but allows the caller to override the
+    /// `actAs` party for this single submission. Used by per-agent spawning:
+    /// each DAML-backed agent is allocated its own Daml party via
+    /// [`allocate_party`], and that party is passed here so the on-ledger
+    /// signer of the created contract is the agent, not the operator's
+    /// default party.
+    pub async fn submit_create_command_as(
+        &self,
+        template_id: &str,
+        create_arguments: serde_json::Value,
+        act_as_party: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let response = self
+            .create_contract_as(template_id, create_arguments, act_as_party)
+            .await?;
         Ok(serde_json::json!({
             "command_type": "create",
             "template_id": template_id,
             "contract_id": response.contract_id,
             "payload": response.payload,
+            "act_as": act_as_party.unwrap_or(&self.config.act_as_party),
         }))
     }
 
     /// Public wrapper that exercises a Daml choice and returns the choice
-    /// result + resulting events as JSON.
+    /// result + resulting events as JSON. Uses the participant-default
+    /// `act_as_party` from config.
     pub async fn submit_exercise_command(
         &self,
         contract_id: &str,
@@ -152,8 +174,28 @@ impl CantonAdapter {
         choice: &str,
         choice_argument: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        self.submit_exercise_command_as(
+            contract_id,
+            template_id,
+            choice,
+            choice_argument,
+            None,
+        )
+        .await
+    }
+
+    /// Same as `submit_exercise_command` but allows the caller to override
+    /// the `actAs` party for this single submission.
+    pub async fn submit_exercise_command_as(
+        &self,
+        contract_id: &str,
+        template_id: &str,
+        choice: &str,
+        choice_argument: serde_json::Value,
+        act_as_party: Option<&str>,
+    ) -> Result<serde_json::Value> {
         let response = self
-            .exercise_choice(contract_id, template_id, choice, choice_argument)
+            .exercise_choice_as(contract_id, template_id, choice, choice_argument, act_as_party)
             .await?;
         Ok(serde_json::json!({
             "command_type": "exercise",
@@ -162,7 +204,83 @@ impl CantonAdapter {
             "choice": choice,
             "exercise_result": response.exercise_result,
             "events": response.events,
+            "act_as": act_as_party.unwrap_or(&self.config.act_as_party),
         }))
+    }
+
+    /// Allocates a fresh Daml party on the participant via
+    /// `POST /v2/parties`. Used by `tenzro-agent-kit` to give every
+    /// DAML-backed agent its own on-ledger identity, so that contracts the
+    /// agent creates name the agent (not the operator's default party) as
+    /// `actAs`. The participant returns the canonical `partyIdHint :: ::
+    /// participantId` identifier; we surface that as the party id used in
+    /// subsequent submissions.
+    ///
+    /// `party_id_hint` is the human-readable label suggested to the
+    /// participant (e.g. `"agent-<uuid>"`); the participant may return a
+    /// suffixed canonical form. `display_name` is optional metadata.
+    pub async fn allocate_party(
+        &self,
+        party_id_hint: &str,
+        display_name: Option<&str>,
+    ) -> Result<String> {
+        let mut body = serde_json::json!({
+            "partyIdHint": party_id_hint,
+        });
+        if let Some(name) = display_name {
+            body["displayName"] = serde_json::Value::String(name.to_string());
+        }
+
+        debug!(
+            "Canton JSON Ledger API v2: Allocating party with partyIdHint={}",
+            party_id_hint
+        );
+
+        let response = self
+            .build_request(reqwest::Method::POST, "/parties")
+            .await?
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                let cls = Self::classify_reqwest_error(&e);
+                error!("Canton party allocation failed: {}", cls);
+                BridgeError::AdapterError(format!("Canton party allocation failed: {}", cls))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            let sanitized = Self::sanitize_canton_http_error(status, error_text.len());
+            error!("Canton party allocation error: {}", sanitized);
+            return Err(BridgeError::AdapterError(sanitized));
+        }
+
+        let allocation: serde_json::Value = response.json().await.map_err(|e| {
+            let cls = Self::classify_reqwest_error(&e);
+            error!("Failed to parse Canton party allocation response: {}", cls);
+            BridgeError::AdapterError(format!("Invalid party allocation response: {}", cls))
+        })?;
+
+        // Canton's allocation response shape:
+        //   { "partyDetails": { "party": "<canonical-id>", ... } }
+        // or older shape:
+        //   { "identifier": "<canonical-id>", ... }
+        let party_id = allocation
+            .get("partyDetails")
+            .and_then(|d| d.get("party"))
+            .and_then(|v| v.as_str())
+            .or_else(|| allocation.get("party").and_then(|v| v.as_str()))
+            .or_else(|| allocation.get("identifier").and_then(|v| v.as_str()))
+            .ok_or_else(|| {
+                BridgeError::AdapterError(
+                    "Canton party allocation response missing party identifier".to_string(),
+                )
+            })?
+            .to_string();
+
+        info!("Canton: Party allocated successfully, party_id={}", party_id);
+        Ok(party_id)
     }
 
     /// Generates a unique command ID for Canton command deduplication.
@@ -291,7 +409,21 @@ impl CantonAdapter {
         template_id: &str,
         payload: serde_json::Value,
     ) -> Result<JsonApiCreateResponse> {
+        self.create_contract_as(template_id, payload, None).await
+    }
+
+    /// As `create_contract` but with an optional `actAs` party override —
+    /// used by per-agent spawning (see [`allocate_party`]).
+    async fn create_contract_as(
+        &self,
+        template_id: &str,
+        payload: serde_json::Value,
+        act_as_party: Option<&str>,
+    ) -> Result<JsonApiCreateResponse> {
         let command_id = self.generate_command_id();
+        let act_as_party = act_as_party
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.config.act_as_party.clone());
 
         let request_body = JsonApiSubmitAndWaitRequest {
             commands: vec![JsonApiCommandV2::Create {
@@ -300,7 +432,7 @@ impl CantonAdapter {
             }],
             command_id: command_id.clone(),
             user_id: self.config.application_id.clone(),
-            act_as: vec![self.config.act_as_party.clone()],
+            act_as: vec![act_as_party],
             read_as: Vec::new(),
             workflow_id: None,
         };
@@ -379,7 +511,24 @@ impl CantonAdapter {
         choice: &str,
         argument: serde_json::Value,
     ) -> Result<JsonApiExerciseResponse> {
+        self.exercise_choice_as(contract_id, template_id, choice, argument, None)
+            .await
+    }
+
+    /// As `exercise_choice` but with an optional `actAs` party override —
+    /// used by per-agent spawning (see [`allocate_party`]).
+    async fn exercise_choice_as(
+        &self,
+        contract_id: &str,
+        template_id: &str,
+        choice: &str,
+        argument: serde_json::Value,
+        act_as_party: Option<&str>,
+    ) -> Result<JsonApiExerciseResponse> {
         let command_id = self.generate_command_id();
+        let act_as_party = act_as_party
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.config.act_as_party.clone());
 
         let request_body = JsonApiSubmitAndWaitRequest {
             commands: vec![JsonApiCommandV2::Exercise {
@@ -390,7 +539,7 @@ impl CantonAdapter {
             }],
             command_id: command_id.clone(),
             user_id: self.config.application_id.clone(),
-            act_as: vec![self.config.act_as_party.clone()],
+            act_as: vec![act_as_party],
             read_as: Vec::new(),
             workflow_id: None,
         };

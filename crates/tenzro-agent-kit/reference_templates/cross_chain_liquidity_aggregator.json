@@ -1,7 +1,7 @@
 {
   "template_id": "ref-cross-chain-liquidity-aggregator-v1",
   "name": "Cross-Chain Liquidity Aggregator",
-  "description": "Autonomous agent that aggregates liquidity quotes from LayerZero, Chainlink CCIP, deBridge, and 1inch Fusion+ to find the optimal route for any cross-chain swap. Compares fees, slippage, and settlement time, then executes via the best available bridge adapter.",
+  "description": "Autonomous agent that aggregates liquidity quotes from LayerZero, Chainlink CCIP, deBridge, 1inch Fusion+, and Jupiter (Solana) to find the optimal route for any cross-chain swap. Compares fees, slippage, and settlement time, then executes via the best available bridge adapter or — when the destination is Solana and the leg is intra-cluster — via a Jupiter SvmDispatch.",
   "template_type": "autonomous",
   "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
   "version": "1.0.0",
@@ -33,7 +33,7 @@
     "supported_platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
   },
   "pricing": "free",
-  "system_prompt": "You are a cross-chain liquidity aggregator. For every swap request, fetch quotes from LayerZero V2, Chainlink CCIP, deBridge DLN, and 1inch Fusion+ in parallel. Rank routes by total cost (bridge fee + gas + slippage). If the user wants cheapest, pick the lowest total cost. If they want fastest, pick the shortest settlement time. Execute via the winning adapter. Always enforce max slippage protection and never exceed delegation caps. Report the adapter used, fee, estimated vs actual settlement time, and transaction hash.",
+  "system_prompt": "You are a cross-chain liquidity aggregator. For every swap request, fetch quotes from LayerZero V2, Chainlink CCIP, deBridge DLN, 1inch Fusion+, and — when the request involves Solana — Jupiter (via the `solana_swap` tool). Rank routes by total cost (bridge fee + gas + slippage). If the user wants cheapest, pick the lowest total cost. If they want fastest, pick the shortest settlement time. Execute EVM-only or cross-chain legs through the winning bridge adapter; execute an intra-Solana leg via SvmDispatch to the Jupiter v6 router with the quote's instruction data. Always enforce max slippage protection and never exceed delegation caps. Report the adapter used, fee, estimated vs actual settlement time, and transaction hash (or Solana signature).",
   "examples": [
     {
       "description": "Find cheapest route for ETH to Solana bridge",
@@ -44,9 +44,14 @@
       "description": "Find fastest route for Arbitrum to Base",
       "user_input": "Swap 200 TNZO from Arbitrum to Base, fastest",
       "expected_output": "Quotes: LayerZero 0.4 TNZO (90s), CCIP 0.6 TNZO (60s), deBridge 0.3 TNZO (180s). Selected CCIP (fastest). Bridged 200 TNZO, fee 0.6 TNZO. TX: 0xbbb... Settlement: 58s."
+    },
+    {
+      "description": "Intra-Solana SOL → USDC via Jupiter",
+      "user_input": "Swap 5 SOL to USDC on Solana, cheapest",
+      "expected_output": "Quotes: Jupiter v6 0.0001 SOL (3s, 0.03% impact). Bridge adapters skipped (intra-cluster). Executed via SvmDispatch. Signature: 4kF…q8z."
     }
   ],
-  "tags": ["liquidity", "aggregator", "cross-chain", "bridge", "swap"],
+  "tags": ["liquidity", "aggregator", "cross-chain", "bridge", "swap", "solana", "jupiter"],
   "download_count": 0,
   "rating": 0,
   "content_hash": null,
@@ -61,13 +66,13 @@
     "delegation": {
       "max_transaction_value": "5000000000000000000000",
       "max_daily_spend": "20000000000000000000000",
-      "allowed_operations": ["bridge", "swap"],
+      "allowed_operations": ["bridge", "swap", "svm_dispatch"],
       "allowed_chains": ["ethereum", "arbitrum", "base", "optimism", "polygon", "solana"],
       "time_bound_days": 90,
       "kyc_tier": "Enhanced"
     },
-    "required_tool_tags": ["cross-chain", "bridge", "dex", "swap"],
-    "required_skill_tags": ["layerzero-bridge", "chainlink-oracle", "debridge-cross-chain", "oneinch-aggregator"],
+    "required_tool_tags": ["cross-chain", "bridge", "dex", "swap", "solana"],
+    "required_skill_tags": ["layerzero-bridge", "chainlink-oracle", "debridge-cross-chain", "oneinch-aggregator", "solana-defi"],
     "steps": [
       {
         "ToolInvoke": {
@@ -99,6 +104,20 @@
       },
       {
         "When": {
+          "jmespath_expr": "from_chain == 'solana' && to_chain == 'solana'",
+          "body": [
+            {
+              "ToolInvoke": {
+                "tool_tag": "solana",
+                "method": "solana_swap",
+                "params_template": "{\"input_mint\":\"{{input_mint}}\",\"output_mint\":\"{{output_mint}}\",\"amount\":\"{{amount}}\",\"slippage_bps\":{{slippage_bps}}}"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "When": {
           "jmespath_expr": "best_route.adapter == 'layerzero' || best_route.adapter == 'debridge'",
           "body": [
             {
@@ -124,6 +143,36 @@
                 "asset": "{{asset}}",
                 "amount": "{{amount}}",
                 "strategy": "fastest"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "When": {
+          "jmespath_expr": "best_route.adapter == 'jupiter'",
+          "body": [
+            {
+              "SvmDispatch": {
+                "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+                "accounts": [
+                  {
+                    "pubkey": "{{user_source_token_account}}",
+                    "is_signer": false,
+                    "is_writable": true
+                  },
+                  {
+                    "pubkey": "{{user_destination_token_account}}",
+                    "is_signer": false,
+                    "is_writable": true
+                  },
+                  {
+                    "pubkey": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                    "is_signer": false,
+                    "is_writable": false
+                  }
+                ],
+                "instruction_data_template": "{{swap_instruction_data}}"
               }
             }
           ]

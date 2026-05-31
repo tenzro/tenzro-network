@@ -55,7 +55,7 @@ Source of truth lives in the monorepo dev tree:
 └── docs/                         # repo-level README, examples
 ```
 
-GitHub mirror lives at `~/Documents/tenzro-github/tenzro-ai/` and is sibling to `tenzro-wallet`. Sync direction is dev → mirror only, per the rsync rules in `CLAUDE.md`. The mirror is created/synced when the user explicitly authorizes; design and implementation happen entirely in the dev tree first.
+The package is developed in the monorepo first; the standalone GitHub mirror is published as a derived artifact via the established repo sync mechanism. Design and implementation happen entirely in the dev tree before any mirror push.
 
 Tooling is identical to `tenzro-wallet`: pnpm 10.33.2, turbo 2.3.3, biome 1.9.4, TypeScript 5.7.3, vitest 4, ESM-only, Node ≥22. `tsconfig.base.json` carries `strict: true`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `verbatimModuleSyntax`. This is non-negotiable — every Tenzro TS package speaks the same dialect.
 
@@ -67,7 +67,7 @@ Tooling is identical to `tenzro-wallet`: pnpm 10.33.2, turbo 2.3.3, biome 1.9.4,
 | `sdk/tenzro-ts-sdk` (TS) | `InferenceClient` removed. The package keeps wallet/identity/agent/bridge/etc. clients; AI is no longer in scope. `tenzro-ai`'s core depends on `tenzro-sdk` (the npm package, which is `tenzro-ts-sdk`'s published name) for `RpcClient`, transport, and config. |
 | `tenzro-wallet` | Unchanged. `tenzro-ai` consumes `WalletKernel` *optionally* via a `walletSigner(kernel)` adapter that projects the wallet's TDIP identity + signing into a `Signer` for inference. No coupling forced — apps without a wallet can pass any `Signer` implementation, or none at all (faucet-tier). |
 
-This is the pre-launch hygiene rule from `CLAUDE.md` applied at SDK level: one canonical AI surface, no parallel half-implementations. When `tenzro-ai` ships, `tenzro-ts-sdk`'s `InferenceClient` is deleted, not deprecated.
+This is the pre-launch hygiene rule applied at SDK level: one canonical AI surface, no parallel half-implementations. When `tenzro-ai` ships, `tenzro-ts-sdk`'s `InferenceClient` is deleted, not deprecated.
 
 ## 5. Public API — surface tour
 

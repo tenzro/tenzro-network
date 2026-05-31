@@ -127,6 +127,7 @@ pub mod runtime;
 pub mod segmentation_runtime;
 pub mod sla;
 pub mod text_embedding_runtime;
+pub mod text_segmentation_runtime;
 pub mod ts_runtime;
 pub mod usage;
 pub mod video_runtime;
@@ -147,11 +148,12 @@ pub use library::{
 pub use download::{DownloadManager, DownloadStatus, DownloadTask};
 pub use catalog::{
     HfModelEntry, LicenseTier, ModelArchitecture, OnnxAudioEntry, OnnxDetectionEntry,
-    OnnxForecastEntry, OnnxSegmentationEntry, OnnxTextEmbeddingEntry, OnnxVideoEntry,
-    OnnxVisionEntry, get_audio_catalog, get_audio_model_by_id, get_detection_catalog,
-    get_detection_model_by_id, get_forecast_catalog, get_forecast_model_by_id, get_model_by_id,
-    get_model_catalog, get_segmentation_catalog, get_segmentation_model_by_id,
-    get_text_embedding_catalog, get_text_embedding_model_by_id, get_video_catalog,
+    OnnxForecastEntry, OnnxSegmentationEntry, OnnxTextEmbeddingEntry, OnnxTextSegmentationEntry,
+    OnnxVideoEntry, OnnxVisionEntry, get_audio_catalog, get_audio_model_by_id,
+    get_detection_catalog, get_detection_model_by_id, get_forecast_catalog,
+    get_forecast_model_by_id, get_model_by_id, get_model_catalog, get_segmentation_catalog,
+    get_segmentation_model_by_id, get_text_embedding_catalog, get_text_embedding_model_by_id,
+    get_text_segmentation_catalog, get_text_segmentation_model_by_id, get_video_catalog,
     get_video_model_by_id, get_vision_catalog, get_vision_model_by_id,
 };
 pub use hf_download::{
@@ -180,6 +182,10 @@ pub use text_embedding_runtime::{
 pub use segmentation_runtime::{
     BoxPrompt, GenericSamSegmenter, PointPrompt, SamFamily, SegmentMask, SegmentPrompt,
     SegmentResult, SegmentationRuntime, Segmenter, StubSegmenter,
+};
+pub use text_segmentation_runtime::{
+    Sam3Segmenter, StubTextSegmenter, TextPromptableSegmenter, TextSegmentBoxPrompt,
+    TextSegmentConfig, TextSegmentResult, TextSegmentation, TextSegmentationRuntime,
 };
 pub use detection_runtime::{
     DetectResult, Detection, DetectionRuntime, Detector, DetrFamily, GenericDetrDetector,

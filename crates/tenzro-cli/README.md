@@ -18,7 +18,7 @@ The official command-line interface for operating Tenzro Network nodes, managing
 - **Agent Operations**: Register agents, spawn from templates, manage swarms
 - **VRF Operations**: RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI prove/verify/keygen
 - **AP2 / x402 / AAP**: Mandate validation, x402 facilitator payments, OAuth 2.1 + DPoP + RAR auth (with `aap` alias)
-- **ERC-8004 Registry**: Trustless agent registration, reputation feedback, validation requests (with `8004` alias)
+- **ERC-8004 Registry (cross-VM trio)**: Trustless agent registration, reputation feedback, validation requests across EVM (canonical OZ-ERC721 proxies at genesis), SVM (QuantuLabs Anchor mirror), and DAML (Tenzro-authored Canton package). One TDIP `tenzro identity register --type machine ...` fans out to all three backing registries (with `8004` alias)
 - **Approvals & Disputes**: Inspect pending out-of-scope approvals; read channel-dispute lifecycle records
 - **Provenance**: Fetch C2PA-style manifests for AI-generated content (EU AI Act §50(2))
 - **Chat Interface**: Interactive REPL with local llama.cpp + RPC fallback (output prefixed `[AI]` per EU AI Act §50(1))
@@ -379,10 +379,30 @@ tenzro 8004 request-validation --agent-id <id> --task <task>
 tenzro 8004 submit-validation --validation-id <id> --result <result>
 ```
 
-`agentId` is a sequential `uint256` (1-indexed) allocated by the
-registry at `register*()` time — server-allocated, never derivable
+These commands hit the **EVM** surface. `agentId` is a sequential
+`uint256` (1-indexed) allocated by the canonical OZ-ERC721-upgradeable
+proxy at `register*()` time — server-allocated, never derivable
 client-side. Calldata is byte-identical against either the native
-Tenzro registry or an Ethereum mirror.
+Tenzro registry (proxies deployed at genesis at
+`tenzro_identity::erc8004::addresses::*`) or an Ethereum mirror.
+
+The same ERC-8004 semantic is automatically mirrored to two non-EVM
+backends from a single TDIP write — invoke via
+`tenzro identity register --type machine ...` rather than the
+`erc8004 register` subcommand to drive the full fanout:
+
+- **SVM mirror**: QuantuLabs Anchor program. Node buffers Anchor
+  calldata under `erc8004_svm_pending_tx:` in RocksDB; operator
+  drains to a Solana RPC.
+- **DAML mirror**: Tenzro-authored Canton package at
+  `vendor/erc8004-daml/daml/Tenzro/Erc8004/`. Node buffers
+  Canton Ledger JSON API v2 `submit-and-wait` commands under
+  `erc8004_daml_pending_tx:`. Opt-in: wired only when the node's
+  `erc8004_daml` config block is present (package id = SHA-256 of
+  compiled `.dar`, supplied by operator).
+
+Each backing registry allocates its own id shape: `uint256` on EVM,
+32-byte Pubkey on SVM, 8-byte LE u64 on DAML.
 
 ### Reputation
 

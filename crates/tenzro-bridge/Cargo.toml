@@ -32,6 +32,14 @@ k256 = { version = "0.13", features = ["ecdsa"] }
 reqwest = { version = "0.12", features = ["json"] }
 base64 = "0.22"
 
+# CGGMP24 t-of-n threshold-ECDSA — Phase D bridge signer foundation. The
+# vendored glass_pumpkin (at vendor/glass_pumpkin) drops the yanked `core2`
+# dep — see workspace-root [patch.crates-io] for the rationale.
+cggmp24 = { workspace = true }
+cggmp24-keygen = { workspace = true }
+round-based = { workspace = true }
+generic-ec = { workspace = true }
+
 [dev-dependencies]
 tenzro-crypto = { workspace = true }
 criterion = { workspace = true }

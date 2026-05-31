@@ -1,0 +1,276 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Changed
+
+- Testing: widened `test:all` / `test:all-local` aggregates to include `e2e-atom-toggle`, `revoke-e2e`, and `security-fixes` suites for stronger business/integrity coverage.
+
+## [0.6.0] - 2026-01-30
+
+### Added - SEAL v1 (Solana Event Authenticity Layer)
+
+Trustless on-chain `seal_hash` computation. See **[docs/SEAL.md](docs/SEAL.md)** for full specification.
+
+- `compute_seal_hash()` - Keccak256 of all feedback params
+- `compute_feedback_leaf_v1()` - Binds seal to context
+- 4 cross-validation vectors (Rust/TypeScript parity)
+
+### Breaking Changes
+
+- `give_feedback`: `feedback_hash` → `feedback_file_hash: Option<[u8; 32]>`
+- `revoke_feedback` / `append_response`: require `seal_hash` (recomputed by client)
+- Events: `seal_hash` replaces `feedback_hash`
+
+---
+
+## [0.5.1] - 2026-01-30
+
+### Security
+
+- **Integer overflow fix** - EMA decay calculation in `compute.rs` now uses u32 widening with `saturating_mul` to prevent potential overflow when `epochs_inactive * decay_per_epoch` exceeds u16::MAX
+
+### Changed
+
+- ATOM Engine v0.2.2 with hardened arithmetic
+- Removed deprecated `sdk/metadata-helpers.ts` (use official SDK instead)
+
+---
+
+## [0.5.0] - 2026-01-26
+
+### Feedback System - Rich Metrics Support
+
+#### Added
+- **`value: i64`** - Raw metric value for revenues, latency, yields, etc.
+- **`value_decimals: u8`** - Decimal precision (0-6) for fixed-point representation
+- **`score: Option<u8>`** - Optional quality score (null = skip ATOM scoring)
+- **IDL files** - Published in `idl/` folder for integrators
+
+#### Changed
+- `give_feedback` instruction now accepts value/valueDecimals/optional score
+- `NewFeedback` event includes new fields
+
+### ATOM Engine v0.2.0 "Fortress"
+
+#### Added
+- **Tier Vesting** - 8 epoch (~20 days) delay before tier promotion
+- **Platinum Loyalty Gate** - Requires 500+ loyalty score
+- **Anti-Oscillation** - Tier fluctuations don't reset vesting timer
+
+#### State Changes
+- +4 bytes per agent (tier_candidate, tier_candidate_epoch, tier_confirmed)
+
+### Removed
+- **Base Registry Rotation** - Removed `rotate_base_registry` instruction (simplified architecture)
+
+---
+
+## [0.4.1] - 2026-01-13
+
+### Added
+- ATOM Engine adversarial test suites (entropy backfire, griefing, HLL stuffing, iron dome, phantom swarm)
+- `ATOM-CHANGELOG.md` for detailed audit history
+
+### Changed
+- Hardened ATOM Engine stats computation and parameters
+- SDK package version bumped to 0.4.1
+
+### Removed
+- Devnet debug test scripts from `scripts/`
+
+---
+
+## [0.4.0] - 2026-01-12
+
+### Added - ATOM Engine Integration
+
+New `atom-engine` program for advanced on-chain reputation analytics with Sybil resistance.
+
+#### New Program: atom-engine
+- **HyperLogLog (HLL)** - 256 registers (4-bit packed, 128 bytes) for unique client estimation
+- **Ring Buffer** - 24 slots with 56-bit fingerprints for burst detection and revoke support
+- **Per-Agent Salt** - 8-byte salt prevents HLL grinding attacks
+- **Round Robin Eviction** - Cursor-based eviction prevents targeted manipulation
+- **Trust Tiers** - 5 tiers (Unknown → Legendary) with hysteresis thresholds
+
+#### CPI Integration
+- `give_feedback` → CPI to `atom_engine::update_stats`
+- `revoke_feedback` → CPI to `atom_engine::revoke_stats`
+- `NewFeedback` event enriched with ATOM metrics (trust_tier, quality_score, confidence, risk_score, diversity_ratio)
+
+#### New Account: AtomStats (460 bytes/agent)
+| Field | Type | Description |
+|-------|------|-------------|
+| collection | Pubkey | Collection filter |
+| asset | Pubkey | Agent identifier |
+| feedback_count | u32 | Total feedbacks |
+| quality_score | i32 | Weighted score (EMA) |
+| hll_packed | [u8; 128] | HyperLogLog registers |
+| hll_salt | u64 | Per-agent salt |
+| recent_callers | [u64; 24] | Ring buffer fingerprints |
+| eviction_cursor | u8 | Round robin pointer |
+| trust_tier/confidence/risk_score/diversity_ratio | cached | Output cache |
+
+### Changed
+- `NewFeedback` event now includes 6 new ATOM fields
+- `FeedbackRevoked` event now includes revoke impact metrics
+
+### Storage
+- AtomStats: 460 bytes (~$0.82 rent at 150 SOL/USD)
+- Total per agent with ATOM: ~773 bytes
+
+---
+
+## [0.3.0] - 2026-01-10
+
+### Breaking Changes - Asset-Based Identification + Multi-Collection Sharding
+
+This version replaces `agent_id` (u64) with `asset` (Pubkey) as the unique identifier, and introduces multi-collection sharding for scalability.
+
+### Added - Scalability Architecture
+
+#### New Accounts
+| Account | Seeds | Description |
+|---------|-------|-------------|
+| RootConfig | `["root_config"]` | Global pointer to current base registry |
+| RegistryConfig | `["registry_config", collection]` | Per-collection config (Base or User type) |
+
+#### New Instructions
+| Instruction | Access | Description |
+|-------------|--------|-------------|
+| `initialize` | Authority | Initialize root config + first base registry |
+| `create_user_registry` | Anyone | Create custom user shard |
+| `update_user_registry_metadata` | Owner | Update user collection name/URI |
+| `register` | Anyone | Register agent in specific registry |
+
+#### Registry Types
+- **Base Registry**: Protocol-managed base registry (single canonical base)
+- **User Registry**: Custom shards, owned by creator, independent
+
+### Changed
+
+#### API Changes
+- `give_feedback`: removed `agent_id` parameter (uses `asset` from context)
+- `revoke_feedback`: removed `agent_id` parameter
+- `append_response`: removed `agent_id` parameter
+- `set_feedback_tags`: removed `agent_id` parameter
+- `request_validation`: removed `agent_id` parameter
+- All events now use `asset: Pubkey` instead of `agent_id: u64`
+
+#### PDA Seeds Changes
+| PDA | Before | After |
+|-----|--------|-------|
+| FeedbackAccount | `["feedback", collection, agent_id, index]` | `["feedback", asset, index]` |
+| FeedbackTagsPda | `["feedback_tags", collection, agent_id, index]` | `["feedback_tags", asset, index]` |
+| ResponseAccount | `["response", collection, agent_id, fb_idx, resp_idx]` | `["response", asset, fb_idx, resp_idx]` |
+| ResponseIndexAccount | `["response_index", collection, agent_id, fb_idx]` | `["response_index", asset, fb_idx]` |
+| AgentReputationMetadata | `["agent_reputation", collection, agent_id]` | `["agent_reputation", asset]` |
+| ValidationRequest | `["validation", collection, agent_id, validator, nonce]` | `["validation", asset, validator, nonce]` |
+| MetadataEntryPda | `["agent_meta", agent_id, key_hash]` | `["agent_meta", asset, key_hash]` |
+
+### Removed
+
+#### Accounts
+- `ValidationStats` - counters now computed off-chain via indexer
+
+#### Fields
+- `agent_id` - everywhere (replaced by `asset`)
+- `collection` - from FeedbackAccount, ValidationRequest (implicit via PDA)
+- `created_at` - from FeedbackAccount, ResponseAccount, AgentAccount (use blockTime)
+- `responded_at` - from ValidationRequest (replaced by `last_update` + `has_response`)
+- `nft_symbol` - from AgentAccount (read from Metaplex if needed)
+- `next_agent_id`, `total_agents` - from RegistryConfig (off-chain)
+- `total_feedbacks`, `total_score_sum`, `average_score`, `last_updated` - from AgentReputationMetadata (off-chain)
+
+### Added
+
+#### Fields
+- `last_update` - in ValidationRequest (timestamp of last update)
+- `has_response` - in ValidationRequest (boolean flag)
+
+### Storage Optimization
+
+| Account | Before | After | Savings |
+|---------|--------|-------|---------|
+| FeedbackAccount | 99 bytes | 83 bytes | -16% |
+| FeedbackTagsPda | 97 bytes | 81 bytes | -16% |
+| AgentReputationMetadata | 50 bytes | 17 bytes | -66% |
+| ValidationRequest | 166 bytes | 151 bytes | -9% |
+| AgentAccount | 343 bytes | 313 bytes | -9% |
+| RegistryConfig | 94 bytes | 78 bytes | -17% |
+| ResponseAccount | 73 bytes | 41 bytes | -44% |
+| ResponseIndexAccount | 33 bytes | 17 bytes | -48% |
+
+**Per agent (1 feedback, 1 response, 1 validation):** -158 bytes (-18%), -0.14 SOL
+
+---
+
+## [0.2.2] - 2026-01-06
+
+### Security Audit Fixes
+
+- **F-01**: Initialize gate with upgrade authority check
+- **F-02v2**: `close_validation` rent goes to current Core asset owner (not cached)
+- **F-03**: Fixed `agent_id==0` sentinel bug for agent #0
+- **F-05**: `key_hash` validated against SHA256(key)
+- **F-06v2**: `mpl_core::ID` ownership check in `get_core_owner()`
+- **A-06**: Key hash collision protection for metadata
+- **A-07**: Average score rounding (instead of truncation)
+- **V-01**: Tag length validation in `respond_to_validation`
+
+### Added
+- 29 dedicated security tests
+- 100% conformity with Metaplex Core best practices
+- 100% conformity with Anchor framework guidelines
+
+---
+
+## [0.2.1] - 2026-01-05
+
+### Changed - Field Ordering for Indexing Optimization
+
+- **Static fields first** - Reordered account fields for `memcmp` filtering
+- **Fixed offsets** - `created_at`, `bump`, `immutable` now at predictable offsets
+- **SDK backward compatibility** - Dual deserializers support both old and new layouts
+
+### Breaking Changes
+- Account binary layout changed (new accounts incompatible with pre-v0.2.1)
+- SDK includes `LEGACY_DEVNET` fallback for old devnet accounts
+
+---
+
+## [0.2.0] - 2026-01-04
+
+### Added
+- **Metadata PDAs** - Individual PDAs per metadata key (replaces Vec)
+- **Immutable Metadata** - Lock metadata permanently for certifications
+- **Delete Metadata** - Recover rent by deleting mutable entries
+- **Optional Tags PDA** - FeedbackTagsPda for -42% cost when tags not used
+- **Global Feedback Index** - Simplified PDA derivation
+
+### Changed
+- **Hash-Only Storage** - URIs in events, hashes on-chain (-66% ResponseAccount)
+
+### Breaking Changes
+- `file_uri` and `response_uri` removed from accounts (events only)
+- `tag1` and `tag2` moved to optional `FeedbackTagsPda`
+- Metadata now via `set_metadata_pda` / `delete_metadata_pda`
+- Account sizes changed (incompatible with v0.1.0)
+
+---
+
+## [0.1.0] - 2026-01-01
+
+### Added
+- Initial implementation of ERC-8004 on Solana
+- Identity Registry with Metaplex Core integration
+- Reputation Registry with feedback and responses
+- Validation Registry with multi-validator support
+- TypeScript SDK
+- 118 tests with 100% pass rate

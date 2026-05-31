@@ -610,13 +610,12 @@ pub struct OnnxSegmentationEntry {
 
 /// Get the curated ONNX segmentation catalog.
 pub fn get_segmentation_catalog() -> Vec<OnnxSegmentationEntry> {
-    // SAM 3 / SAM 3.1 are intentionally absent: their community ONNX exports
-    // bundle a CLIP-style text encoder and a 14-input box-prompted decoder
-    // that returns a variable number of detections (not the SAM-1/SAM-2
-    // point/box prompt → 3-mask shape that this runtime's `Segmenter` trait
-    // models). Text-promptable segmentation will land in a separate
-    // `text_segmentation_runtime` when Meta or the community publishes a
-    // stable ONNX schema.
+    // SAM 3 / SAM 3.1 live in [`get_text_segmentation_catalog`] — they
+    // ship a 3-graph bundle (image encoder + CLIP language encoder +
+    // detection-shaped decoder) and need an open-vocabulary text prompt.
+    // Their I/O contract doesn't fit the SAM-1/SAM-2 single-mask
+    // `Segmenter` trait, so they're routed through
+    // `text_segmentation_runtime` instead.
     vec![
         // ── SAM 2 (community ONNX export — vietanhdev / samexporter) ─
         // Meta source is Apache 2.0; ONNX exports inherit that tier.
@@ -684,6 +683,92 @@ pub fn get_segmentation_catalog() -> Vec<OnnxSegmentationEntry> {
 /// Look up an ONNX segmentation model by its internal ID.
 pub fn get_segmentation_model_by_id(id: &str) -> Option<OnnxSegmentationEntry> {
     get_segmentation_catalog().into_iter().find(|m| m.id == id)
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Text-promptable segmentation catalog — SAM 3 family.
+// ─────────────────────────────────────────────────────────────────────
+
+/// A curated ONNX text-promptable segmentation entry.
+///
+/// SAM 3 ships a three-graph bundle: an image encoder, a CLIP-style
+/// language encoder, and a detection-shaped decoder. All three plus a
+/// CLIP BPE `tokenizer.json` are required at inference time, so the
+/// artifact is a multi-file `Bundle`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnnxTextSegmentationEntry {
+    /// Internal model ID (e.g. "sam3-vit-h").
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Model family (e.g. "sam3").
+    pub family: String,
+    /// HuggingFace repository ID for the ONNX bundle.
+    pub hf_repo: String,
+    /// Image encoder ONNX filename within the bundle.
+    pub image_encoder_filename: String,
+    /// Language encoder ONNX filename within the bundle.
+    pub language_encoder_filename: String,
+    /// Decoder ONNX filename within the bundle.
+    pub decoder_filename: String,
+    /// Tokenizer JSON filename within the bundle (CLIP BPE).
+    pub tokenizer_filename: String,
+    /// Native encoder input resolution (square). SAM 3 = 1008.
+    pub input_size: u32,
+    /// CLIP context length used by the language encoder. SAM 3 = 32.
+    pub context_length: u32,
+    /// Approximate total bundle size in bytes (all 3 graphs + tokenizer).
+    pub size_bytes: u64,
+    /// Minimum RAM in GB.
+    pub min_ram_gb: u32,
+    /// License (inherited from upstream).
+    pub license: String,
+    /// License tier — drives gating in `ModelRegistry::register_model()`.
+    #[serde(default)]
+    pub license_tier: LicenseTier,
+    /// Short description.
+    pub description: String,
+}
+
+/// Get the curated ONNX text-promptable segmentation catalog.
+///
+/// SAM 3 weights are released under the Meta SAM License (custom
+/// commercial-allowed terms with use restrictions) — the runtime gates
+/// these as `LicenseTier::CommercialCustom`, requiring explicit
+/// `--accept-license meta-sam` at registration time.
+pub fn get_text_segmentation_catalog() -> Vec<OnnxTextSegmentationEntry> {
+    vec![
+        // ── SAM 3 ViT-H (community ONNX export by wkentaro) ─────────
+        // Source weights: Meta `facebook/sam3-vit-h-2024-10`.
+        // ONNX bundle: `wkentaro/sam3-onnx-models` (export script MIT,
+        // weights inherit Meta SAM License).
+        // Tokenizer: openai/clip-vit-base-patch16 tokenizer.json (CLIP
+        // BPE with `<|endoftext|>` BOS/EOS/pad, context_length=32).
+        OnnxTextSegmentationEntry {
+            id: "sam3-vit-h".into(),
+            name: "SAM 3 ViT-H".into(),
+            family: "sam3".into(),
+            hf_repo: "wkentaro/sam3-onnx-models".into(),
+            image_encoder_filename: "sam3_image_encoder.onnx".into(),
+            language_encoder_filename: "sam3_language_encoder.onnx".into(),
+            decoder_filename: "sam3_decoder.onnx".into(),
+            tokenizer_filename: "tokenizer.json".into(),
+            input_size: 1008,
+            context_length: 32,
+            size_bytes: 2_500_000_000,
+            min_ram_gb: 6,
+            license: "Meta SAM License".into(),
+            license_tier: LicenseTier::CommercialCustom,
+            description:
+                "Meta SAM 3 ViT-H — text-promptable open-vocabulary segmenter (community ONNX)"
+                    .into(),
+        },
+    ]
+}
+
+/// Look up an ONNX text-promptable segmentation model by its internal ID.
+pub fn get_text_segmentation_model_by_id(id: &str) -> Option<OnnxTextSegmentationEntry> {
+    get_text_segmentation_catalog().into_iter().find(|m| m.id == id)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1102,17 +1187,17 @@ pub fn get_audio_model_by_id(id: &str) -> Option<OnnxAudioEntry> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Video catalog (NEW scaffolding for wave 1 — empty until permissive
-// + ONNX-shippable encoder lands).
+// Video catalog — V-JEPA 2 family advertised; loader pending ONNX export.
 // ─────────────────────────────────────────────────────────────────────
 
 /// A curated ONNX video-encoder entry.
 ///
-/// Empty in wave 1 — the 2026 OSS landscape has no permissive,
-/// ONNX-shippable, encoder-only video model. VideoMAE v1/v2 are
-/// CC-BY-NC; V-JEPA 2/2.1 license is unclear and ONNX export is
-/// non-trivial. The runtime + RPC + CLI surface ships empty so adding
-/// entries later is mechanical. Re-evaluate quarterly.
+/// The catalog advertises the V-JEPA 2 family (ViT-L/H MIT, ViT-g
+/// Apache-2.0) so license_tier-gated discovery, CLI listing, and RPC
+/// surfaces show the correct options. The `load_video_model` RPC
+/// rejects until per-model ONNX exports land — facebook/vjepa2-* ships
+/// safetensors only, no native ONNX. VideoMAE v1/v2 stay off the
+/// catalog (CC-BY-NC), V-JEPA 2.1 stays off (CC-BY-NC-ND).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OnnxVideoEntry {
     /// Internal model ID.
@@ -1148,11 +1233,81 @@ pub struct OnnxVideoEntry {
 
 /// Get the curated ONNX video catalog.
 ///
-/// Returns an empty Vec in wave 1 (intentional). The runtime, RPC, CLI,
-/// and MCP surfaces all build and register, but no concrete entries
-/// exist until a permissive + ONNX-shippable video encoder is verified.
+/// Returns the V-JEPA 2 family (Meta AI, 2025). All three sizes share
+/// the same architecture (ViT encoder over 64-frame tubelets, patch
+/// size 16, tubelet size 2) — they differ only in width, depth, and
+/// input resolution. License: ViT-L/H are MIT, ViT-g is Apache-2.0,
+/// all `LicenseTier::Permissive`.
+///
+/// Loading currently rejects at `tenzro_loadVideoModel` with
+/// `-32004`: the upstream `facebook/vjepa2-*` repos ship `safetensors`
+/// only, no native ONNX export. Catalog entries exist so license-tier
+/// gating, discovery RPCs, CLI listing, and MCP enumeration return
+/// the V-JEPA 2 options correctly; the loader will accept them once
+/// the ONNX export step lands.
 pub fn get_video_catalog() -> Vec<OnnxVideoEntry> {
-    vec![]
+    vec![
+        // V-JEPA 2 ViT-L — 300M params, 256² spatial, embed dim 1024.
+        // Smallest of the three; the default reference for video
+        // embedding in the V-JEPA 2 family.
+        OnnxVideoEntry {
+            id: "vjepa2-vitl-256".to_string(),
+            name: "V-JEPA 2 ViT-L".to_string(),
+            family: "vjepa2".to_string(),
+            hf_repo: "facebook/vjepa2-vitl-fpc64-256".to_string(),
+            // Pending ONNX export. Filename matches what the export
+            // tool will emit (encoder-only, single-file).
+            hf_filename: "model.onnx".to_string(),
+            frame_size: 256,
+            num_frames: 64,
+            // V-JEPA 2 native sampling is uniform over the clip; 8 fps
+            // is the canonical CLIP4Clip-style preprocessing rate
+            // applied by the V-JEPA 2 reference loader.
+            fps: 8,
+            embedding_dim: 1024,
+            size_bytes: 1_400_000_000,
+            min_ram_gb: 4,
+            license: "MIT".to_string(),
+            license_tier: LicenseTier::Permissive,
+            description: "V-JEPA 2 ViT-L joint-embedding video encoder (Meta AI, 256² spatial, 64-frame tubelets, 1024-d embeddings)".to_string(),
+        },
+        // V-JEPA 2 ViT-H — 700M params, 256² spatial, embed dim 1280.
+        OnnxVideoEntry {
+            id: "vjepa2-vith-256".to_string(),
+            name: "V-JEPA 2 ViT-H".to_string(),
+            family: "vjepa2".to_string(),
+            hf_repo: "facebook/vjepa2-vith-fpc64-256".to_string(),
+            hf_filename: "model.onnx".to_string(),
+            frame_size: 256,
+            num_frames: 64,
+            fps: 8,
+            embedding_dim: 1280,
+            size_bytes: 2_700_000_000,
+            min_ram_gb: 8,
+            license: "MIT".to_string(),
+            license_tier: LicenseTier::Permissive,
+            description: "V-JEPA 2 ViT-H joint-embedding video encoder (Meta AI, 256² spatial, 64-frame tubelets, 1280-d embeddings)".to_string(),
+        },
+        // V-JEPA 2 ViT-g — 1B+ params, 384² spatial, embed dim 1408.
+        // Largest in the family; Apache-2.0 rather than MIT (still
+        // `LicenseTier::Permissive`).
+        OnnxVideoEntry {
+            id: "vjepa2-vitg-384".to_string(),
+            name: "V-JEPA 2 ViT-g".to_string(),
+            family: "vjepa2".to_string(),
+            hf_repo: "facebook/vjepa2-vitg-fpc64-384".to_string(),
+            hf_filename: "model.onnx".to_string(),
+            frame_size: 384,
+            num_frames: 64,
+            fps: 8,
+            embedding_dim: 1408,
+            size_bytes: 4_300_000_000,
+            min_ram_gb: 12,
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            description: "V-JEPA 2 ViT-g joint-embedding video encoder (Meta AI, 384² spatial, 64-frame tubelets, 1408-d embeddings)".to_string(),
+        },
+    ]
 }
 
 /// Look up an ONNX video model by its internal ID.
@@ -2535,15 +2690,48 @@ mod tests {
         }
     }
 
-    // ── Video catalog (empty scaffolding) ──────────────────────────
+    // ── Video catalog (V-JEPA 2 family) ────────────────────────────
 
     #[test]
-    fn test_video_catalog_empty_in_wave_1() {
+    fn test_video_catalog_vjepa2_family() {
         let catalog = get_video_catalog();
-        assert!(
-            catalog.is_empty(),
-            "wave 1 ships an empty video catalog by design"
+        let ids: Vec<&str> = catalog.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["vjepa2-vitl-256", "vjepa2-vith-256", "vjepa2-vitg-384"],
+            "expected V-JEPA 2 ViT-L / ViT-H / ViT-g entries in order"
         );
-        assert!(get_video_model_by_id("anything").is_none());
+        for e in &catalog {
+            assert_eq!(e.family, "vjepa2");
+            assert_eq!(e.num_frames, 64, "V-JEPA 2 native frames_per_clip");
+            // All three sizes are LicenseTier::Permissive: ViT-L/H are
+            // MIT, ViT-g is Apache-2.0.
+            assert!(
+                matches!(e.license_tier, LicenseTier::Permissive),
+                "{} must be Permissive (license={})",
+                e.id,
+                e.license
+            );
+            // Lookup round-trips through get_video_model_by_id.
+            let looked_up = get_video_model_by_id(&e.id)
+                .unwrap_or_else(|| panic!("{} missing from catalog lookup", e.id));
+            assert_eq!(looked_up.embedding_dim, e.embedding_dim);
+        }
+        assert!(get_video_model_by_id("not-a-real-id").is_none());
+    }
+
+    #[test]
+    fn test_video_catalog_dims_match_vjepa2_configs() {
+        // Sanity-check that embed dims and crop sizes match the
+        // upstream `config.json` for each V-JEPA 2 release. Drift here
+        // means the catalog is lying about model shape to downstream
+        // CLI/RPC consumers.
+        let by = |id: &str| get_video_model_by_id(id).unwrap_or_else(|| panic!("{}", id));
+        let l = by("vjepa2-vitl-256");
+        assert_eq!((l.frame_size, l.embedding_dim), (256, 1024));
+        let h = by("vjepa2-vith-256");
+        assert_eq!((h.frame_size, h.embedding_dim), (256, 1280));
+        let g = by("vjepa2-vitg-384");
+        assert_eq!((g.frame_size, g.embedding_dim), (384, 1408));
     }
 }

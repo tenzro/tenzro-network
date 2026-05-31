@@ -238,7 +238,7 @@ toml = "0.8"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 # MCP (Model Context Protocol)
-rmcp = { version = "1.5", features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "1.7", features = ["server", "transport-streamable-http-server", "transport-async-rw"] }
 schemars = "1"
 
 # EVM execution
@@ -295,6 +295,32 @@ realfft = "3.4"
 # hand a path to the CLI without exposing AVIO callbacks for in-memory bytes.
 tempfile = "3"
 
+# CGGMP24 threshold-ECDSA (t-of-n MPC) for the bridge signer. cggmp24 0.7.x
+# is the LFDT-Lockness reimplementation of the 2024 CGGMP paper; cggmp24-keygen
+# 0.7.x is the UC-secure DKG that pairs with it. round-based 0.4 is the
+# transport-agnostic round driver, generic-ec 0.4 gives the curve abstraction.
+#
+# Upstream-blocker chain (resolved by vendoring):
+#   1. fast-paillier 0.3.2 fails against glass_pumpkin 1.10.x rand_core bounds
+#      → LFDT-Lockness/fast-paillier#23 (open). Documented downstream fix:
+#      pin glass_pumpkin to >=1.8,<1.10.
+#   2. glass_pumpkin 1.9.0 has a non-optional dep on `core2 ^0.4`, and the
+#      entire `core2` crate is yanked from crates.io (only used for the
+#      `core::error::Error` shim, irrelevant in std builds).
+#   3. We vendor glass_pumpkin 1.9.0 at vendor/glass_pumpkin with the single
+#      `core2::error::Error` import swapped to `std::error::Error`, and
+#      route the transitive resolution through [patch.crates-io] below.
+# Drop both the vendor + patch once upstream fast-paillier#24 lands and
+# republishes against glass_pumpkin 1.10.x.
+cggmp24 = { version = "=0.7.0-alpha.3", features = ["curve-secp256k1", "state-machine"] }
+# Pinned to alpha.3 (not alpha.4) to match the cggmp24 alpha.3 release —
+# alpha.4 of keygen bumped to generic-ec 0.5 while cggmp24 alpha.3 still
+# pins generic-ec 0.4. Crossing them puts two incompatible generic-ec-core
+# trait versions in the dep graph (233 trait-not-impl errors).
+cggmp24-keygen = { version = "=0.7.0-alpha.3", features = ["state-machine"] }
+round-based = "0.4"
+generic-ec = { version = "0.4", features = ["curve-secp256k1"] }
+
 # Agent memory tier (Phase B): Lance-backed vector store + Tantivy BM25
 # full-text index, hybrid recall via Reciprocal Rank Fusion (k=60). Lives in
 # `crates/tenzro-agent/src/memory/`. Lance writes Apache Arrow RecordBatches
@@ -317,3 +343,10 @@ strip = "symbols"
 [profile.dev]
 opt-level = 0
 debug = true
+
+# Route the workspace-wide resolution of glass_pumpkin through our vendored
+# 1.9.0 copy (vendor/glass_pumpkin), which drops the yanked `core2` dep.
+# Pulled in transitively by fast-paillier 0.3.2 → cggmp24 0.7.0-alpha.3.
+# See workspace.dependencies cggmp24 comment for the full blocker chain.
+[patch.crates-io]
+glass_pumpkin = { path = "vendor/glass_pumpkin" }

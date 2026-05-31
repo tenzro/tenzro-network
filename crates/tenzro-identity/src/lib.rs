@@ -64,6 +64,8 @@ pub mod delegation;
 pub mod did;
 pub mod document;
 pub mod erc8004;
+pub mod erc8004_daml;
+pub mod erc8004_svm;
 pub mod error;
 pub mod identity;
 pub mod kya;
@@ -84,6 +86,13 @@ pub use erc8004::{
     agent_id_from_uint256_be, agent_id_to_uint256_be, AgentRecord, Erc8004Adapter,
     Erc8004Addresses, Erc8004Transport, EthAddress, FeedbackEntry, MetadataEntry,
     OnChainAgentRegistry, ValidationRequest, ValidationResult,
+};
+pub use erc8004_daml::{
+    DamlAgentRecord, DamlPackageIds, Erc8004DamlTransport, OnChainAgentDamlRegistry, PackageId,
+    PartyId,
+};
+pub use erc8004_svm::{
+    Erc8004SvmTransport, OnChainAgentSvmRegistry, SolPubkey, SvmAgentRecord,
 };
 pub use error::{IdentityError, Result};
 pub use identity::{

@@ -149,14 +149,22 @@ enabled = false
 |---------------------------------|-----------------------------------------|
 | `RUST_LOG`                      | tracing filter (e.g. `info,tenzro_consensus=debug`) |
 | `TENZRO_VALIDATOR_KEY`          | Hex-encoded Ed25519 validator key       |
+| `TENZRO_ADMIN_TOKEN`            | Operator admin secret. Gates `tenzro_createApiKey` / `tenzro_revokeApiKey` / `tenzro_listApiKeys` / `tenzro_resetCircuitBreaker` (and other admin RPCs) via `X-Tenzro-Admin-Token` header. **Unset = admin gate is fail-closed.** Required only on the public RPC node. |
+| `CANTON_DEVNET`                 | Set to `true` on the public RPC node to enable the Canton devnet profile in `CantonConfig::from_env()`. Other validators leave unset. |
+| `CANTON_DEVNET_CLIENT_SECRET`   | Auth0 client_secret used by `CantonTokenProvider` to mint `daml_ledger_api` JWTs against `https://canton.network.global`. Required when `CANTON_DEVNET=true`. |
 | `TENZRO_LZ_SIGNER_KEY`          | EVM private key for LayerZero sends     |
 | `TENZRO_CCIP_SIGNER_KEY`        | EVM private key for CCIP sends          |
 | `TENZRO_DEBRIDGE_SIGNER_KEY`    | EVM private key for deBridge orders     |
 | `TENZRO_SIMULATE_TDX`           | Simulate TDX attestation (dev only)     |
 | `TENZRO_SIMULATE_SEV_SNP`       | Simulate SEV-SNP attestation (dev only) |
 
-**Secret hygiene**: private keys should live in systemd credentials, AWS
-Secrets Manager, GCP Secret Manager, or Vault — not in `.env` files on disk.
+**Secret hygiene**: private keys, admin tokens, and Auth0 client secrets
+should live in systemd credentials, AWS Secrets Manager, GCP Secret Manager,
+or Vault — not in `.env` files on disk. The recommended pattern is a
+boot-time fetcher (oneshot systemd unit) that pulls each secret into a
+root-only `EnvironmentFile` consumed by `tenzro-node.service`. See
+`deploy/terraform/gce_validators/cloud-init.yaml` for a Canton-on-GCE
+worked example (`tenzro-fetch-canton-config.service` → `/etc/tenzro/tenzro-node.env`).
 
 ---
 
@@ -196,6 +204,7 @@ Prometheus metrics are exposed at `http://<web-addr>/metrics`. Key series:
 - `tenzro_consensus_votes_total{phase}` — votes by phase
 - `tenzro_consensus_equivocations_total` — detected equivocations (should be 0)
 - `tenzro_network_peers` — connected peer count
+- `tenzro_peer_address_migrations_total` — count of peers whose remote multiaddr changed on a new `ConnectionEstablished` event. Rises on QUIC path migration, NAT rebinding, and any wifi→cellular interface switch. Note: rust-libp2p 0.56 does not surface a structured QUIC migration event, so this counter cannot distinguish path migration (same connection, new path) from reconnection (new connection on new address). The acceptance test for migration-without-redial is a hands-on procedure, not CI-automated — see §9 *QUIC migration acceptance test (hands-on)*.
 - `tenzro_rpc_requests_total{method}` — RPC call counts
 - `tenzro_bridge_circuit_breaker_state{endpoint}` — 0=closed, 1=open
 - `tenzro_storage_write_latency_seconds{cf}` — RocksDB write histogram
@@ -322,6 +331,79 @@ tenzro_bridge_circuit_breaker_failures{endpoint="dln-api"} 5
 
 Manual recovery: restart the node (state is in-memory) or hit the admin RPC
 `tenzro_resetCircuitBreaker` (requires admin token).
+
+### Canton bridge
+
+The Canton bridge follows the same opt-in pattern but with one extra layer:
+the Canton ledger API requires an Auth0-issued JWT bearer, and external
+callers should not need Auth0 credentials. Tenzro fronts Canton with an
+operator-issued API-key gate (`X-Tenzro-Api-Key` with the `canton` scope) so
+the Auth0 client_secret stays server-side. To enable on your public RPC node:
+
+1. Provision an Auth0 application with the `daml_ledger_api` scope on your
+   ledger's audience (e.g. `https://canton.network.global` for the public
+   devnet, or your own audience for self-hosted Canton).
+2. Set `CANTON_DEVNET=true` + `CANTON_DEVNET_CLIENT_SECRET=<auth0-secret>`
+   on the RPC node (`CantonConfig::from_env()` picks this profile up). For
+   operator-run Canton, see `CantonConfig::from_env()` in
+   `crates/tenzro-node/src/config.rs` for the OAuth2 and static-JWT profiles.
+3. Set `TENZRO_ADMIN_TOKEN=<random-32-byte-secret>` on the RPC node. Without
+   this, all admin RPCs (including API-key issuance) are fail-closed.
+4. Restart the node so the new env is picked up.
+
+Other validators in your fleet should **not** set any of these — they will
+return `-32004` on `tenzro_*Canton*` calls (scope gate, no API key) and
+`-32001` on admin RPCs (admin-token unset), which is the intended fail-closed
+posture.
+
+### API key issuance (admin)
+
+Once `TENZRO_ADMIN_TOKEN` is set on the RPC node, you can issue scoped API
+keys to external callers via three admin RPCs. All three require the
+`X-Tenzro-Admin-Token` header on the request.
+
+```bash
+# Mint a Canton-scoped key for a developer
+curl -s https://rpc.your-network -X POST \
+  -H 'content-type: application/json' \
+  -H "X-Tenzro-Admin-Token: $TENZRO_ADMIN_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tenzro_createApiKey","params":{
+        "label": "alice@example.com",
+        "subject": "did:tenzro:human:alice",
+        "scopes": ["canton"]
+      }}'
+# → { "key": "tnz_...",  ← shown once; hand to dev securely
+#     "key_id": "30891a07da6f9f98", ← retain for audit/revoke
+#     ... }
+
+# List all issued keys (revoked + active)
+curl -s https://rpc.your-network -X POST \
+  -H 'content-type: application/json' \
+  -H "X-Tenzro-Admin-Token: $TENZRO_ADMIN_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tenzro_listApiKeys","params":[]}'
+
+# Revoke a key by id
+curl -s https://rpc.your-network -X POST \
+  -H 'content-type: application/json' \
+  -H "X-Tenzro-Admin-Token: $TENZRO_ADMIN_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tenzro_revokeApiKey","params":{
+        "key_id": "30891a07da6f9f98"
+      }}'
+```
+
+The key (`tnz_...`) is shown only once at issuance — the node persists only
+its SHA-256 hash in `CF_API_KEYS`. Callers send it on every Canton RPC call:
+
+```bash
+curl -s https://rpc.your-network -X POST \
+  -H 'content-type: application/json' \
+  -H 'X-Tenzro-Api-Key: tnz_...' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tenzro_listCantonDomains","params":[]}'
+```
+
+Available scopes: `canton`. Additional scopes (`inference`, `bridge`, etc.)
+are enum extensions in `tenzro_node::api_key::ApiKeyScope` and will land as
+those surfaces are gated.
 
 ---
 
@@ -605,6 +687,28 @@ curl -N -sS https://rpc.tenzro.network/v1/chat/completions \
   -H 'Last-Event-ID: chatcmpl-<uuid>:3' \
   -d '{"model":"<model_id>","stream":true,"messages":[{"role":"user","content":"hi"}]}'
 ```
+
+### QUIC migration acceptance test (hands-on)
+
+**Known limitation.** rust-libp2p 0.56 does not surface a structured per-connection QUIC migration event. The `tenzro_peer_address_migrations_total` counter (see §6) is the only available signal, and it cannot distinguish path migration (same QUIC connection, new remote address) from reconnection (new connection on new address). The acceptance test below is a manual interface-switch procedure rather than a CI check — re-evaluate once rust-libp2p ships a structured event upstream.
+
+**Procedure.** Two hosts: A = the node under test (any role, public reachable), B = a mobile/laptop validator on wifi.
+
+1. From host B, run a tenzro-node configured to dial A and confirm `peer_count >= 1` and gossipsub mesh participation.
+2. On host A, capture baseline:
+   ```bash
+   curl -s http://127.0.0.1:8080/metrics | grep -E 'tenzro_peer_address_migrations_total|tenzro_network_peers'
+   ```
+3. On host B, switch network interface (wifi → cellular tether, or wifi → different SSID with a different external IP). Do **not** restart the node.
+4. Wait ~30s (libp2p ping cadence is 15s — give two cycles for the new path to be observed).
+5. On host A, re-capture metrics. **Pass conditions:**
+   - `tenzro_peer_address_migrations_total` incremented by 1 for the B peer.
+   - `tenzro_network_peers` unchanged (B was not disconnected).
+   - No `SwarmEvent::ConnectionClosed{peer=<B>}` in A's logs between baseline and re-capture.
+   - B's gossipsub mesh score for A (visible via the node's debug RPC) did not reset to zero.
+6. From host B, immediately publish a transaction or send a gossipsub message and confirm A receives it without a re-dial round-trip.
+
+**If the test fails** (counter incremented but peer count dropped, or `ConnectionClosed` observed), QUIC migration is not transparently transferring on this network path — the connection re-established rather than migrated. This is acceptable for current production but defeats the purpose of QUIC vs TCP for mobile clients. File the incident with packet captures from both ends.
 
 ---
 

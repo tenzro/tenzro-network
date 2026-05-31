@@ -75,50 +75,116 @@ pub trait Erc8004Transport: Send + Sync {
     async fn eth_send_raw(&self, signed_tx: &[u8]) -> Result<String>;
 }
 
-/// Hook for mirroring TDIP machine registrations into a native ERC-8004
-/// IdentityRegistry — typically the Tenzro precompile at `0x101a`, but
-/// any conforming registry works (e.g., a Solidity deployment on
-/// Ethereum, or a test harness).
+/// Hook for mirroring TDIP machine registrations into the canonical ERC-8004
+/// IdentityRegistry contract at [`addresses::IDENTITY_REGISTRY`].
 ///
 /// Implementors live in `tenzro-node` so `tenzro-identity` does not depend
-/// on `tenzro-vm`. The TDIP `IdentityRegistry` calls
-/// [`OnChainAgentRegistry::mirror_register_agent`] inside
+/// on `tenzro-vm` or any HTTP / signing crate. The TDIP `IdentityRegistry`
+/// calls [`OnChainAgentRegistry::mirror_register_agent`] inside
 /// `register_machine_with_fee` and `register_autonomous_machine_with_fee`
 /// so every machine identity is discoverable via `getAgent(uint256)` on
-/// the precompile without an explicit second user step.
+/// the on-chain registry without an explicit second user step.
+///
+/// # Async-by-spawn pattern
+///
+/// `mirror_register_agent` is **sync from the TDIP caller's perspective**
+/// but performs its on-chain work as a detached `tokio::spawn`: it builds
+/// the calldata + signs an EIP-1559 tx with a node-held system key and
+/// submits via `eth_sendRawTransaction`, returning to the TDIP caller
+/// immediately. This preserves the existing sync surface of
+/// `IdentityRegistry::register_machine_with_fee` without an async cascade
+/// through every TDIP RPC handler, while satisfying the architectural
+/// rule of "no `tokio::block_on`".
+///
+/// The newly-allocated `uint256 agentId` is **not** returned synchronously
+/// — it arrives later via the `Registered(agentId, agentURI, owner)` event
+/// listener (see [`OnChainAgentRegistry::lookup_agent_id_by_did`]), which
+/// also populates `IdentityData::Machine.erc8004_agent_id` on the TDIP
+/// record. Callers querying `lookup_agent_id_by_did` between
+/// `mirror_register_agent` and event inclusion will see `None`; this
+/// latency is documented for any caller surface that depends on it.
 ///
 /// Failures are logged but never block TDIP registration — the on-chain
 /// mirror is best-effort and additive.
 pub trait OnChainAgentRegistry: Send + Sync {
     /// Mirror a TDIP machine registration into the on-chain registry.
     ///
-    /// The registry allocates a fresh sequential `uint256 agentId`, binds
-    /// it to the supplied controller `agent_address` and `metadata_uri`,
-    /// records the reverse `did → agentId` mapping, and returns the new
-    /// id so the caller can persist it on the TDIP identity record.
+    /// Builds calldata for `register(string agentURI)` against
+    /// [`addresses::IDENTITY_REGISTRY`], signs with the node-held
+    /// `erc8004-system` key, and submits the EIP-1559 tx as a detached
+    /// tokio task. Returns immediately on calldata-build success;
+    /// transport / signing failures inside the spawned task are logged
+    /// and dropped (TDIP registration is unaffected).
     fn mirror_register_agent(
         &self,
         did: &str,
         agent_address: &EthAddress,
         metadata_uri: &str,
-    ) -> Result<u64>;
+    ) -> Result<()>;
 
     /// Resolve a TDIP DID string back to its allocated ERC-8004
-    /// `agentId`. Returns `None` if the DID has never been mirrored.
+    /// `agentId`. Reads from the off-chain DID index in RocksDB
+    /// (`CF_IDENTITIES` under the `erc8004_did_index:` prefix), which is
+    /// populated by the `Registered(uint256,string,address)` event
+    /// listener.
+    ///
+    /// Returns `None` if the DID has never been mirrored OR if the mirror
+    /// tx has not yet been included + indexed. Callers MUST tolerate the
+    /// `None` case (poll-and-retry, or fall back to other identity surfaces).
     fn lookup_agent_id_by_did(&self, did: &str) -> Option<u64>;
+}
+
+/// Canonical ERC-8004 contract addresses on Tenzro Ledger.
+///
+/// As of genesis schema v3 + the genesis predeploy bundle
+/// (`crates/tenzro-node/res/genesis/erc8004-predeploys.json`), the
+/// canonical ERC-8004 contracts ship live at block 0 at the same vanity
+/// addresses as the upstream reference deployment — so byte-identical
+/// calldata works against Tenzro Ledger and any Ethereum-compatible
+/// chain that has deployed the canonical contracts.
+///
+/// These are the **proxy** addresses (UUPS upgradeable). Implementation
+/// addresses are read out of each proxy's EIP-1967 implementation slot
+/// (`0x36089...382bbc`) at runtime — they are not exposed here because
+/// callers never address them directly.
+pub mod addresses {
+    use super::EthAddress;
+
+    /// `IdentityRegistry` proxy — `register*` / `getAgent` / `setMetadata` /
+    /// `setAgentURI` / `setAgentWallet` / `getMetadata` etc. Mirrors the
+    /// upstream canonical vanity deployment.
+    pub const IDENTITY_REGISTRY: EthAddress = [
+        0x80, 0x04, 0xA8, 0x18, 0xBF, 0xB9, 0x12, 0x23, 0x3c, 0x49,
+        0x18, 0x71, 0xb3, 0xd8, 0x4c, 0x89, 0xA4, 0x94, 0xBD, 0x9e,
+    ];
+
+    /// `ReputationRegistry` proxy — `submitFeedback` / `getFeedback` /
+    /// `getFeedbackCount` / `revokeFeedback` / `appendResponse` etc.
+    pub const REPUTATION_REGISTRY: EthAddress = [
+        0x80, 0x04, 0xB6, 0x63, 0x05, 0x6A, 0x59, 0x7D, 0xff, 0xe9,
+        0xEc, 0xcC, 0x19, 0x65, 0xA1, 0x93, 0xB7, 0x38, 0x87, 0x13,
+    ];
+
+    /// `ValidationRegistry` proxy — `validationRequest` / `validationResponse` /
+    /// `getValidation`.
+    pub const VALIDATION_REGISTRY: EthAddress = [
+        0x80, 0x04, 0xCb, 0x1B, 0xF3, 0x1D, 0xAf, 0x77, 0x88, 0x92,
+        0x3b, 0x40, 0x5b, 0x75, 0x4f, 0x57, 0xac, 0xEB, 0x42, 0x72,
+    ];
 }
 
 /// ERC-8004 canonical function selectors.
 ///
 /// Selectors are the first 4 bytes of `keccak256(canonical_signature)`.
 ///
-/// These selectors MUST stay byte-identical to the EVM precompile
-/// constants in `crates/tenzro-vm/src/evm/erc8004.rs` so that the same
-/// calldata works against either the native Tenzro precompile (at
-/// `0x101a` / `0x101b` / `0x101c`) or an external Solidity deployment
-/// of the reference ERC-8004 contracts.
+/// These selectors are byte-identical to the upstream reference contracts
+/// at [`addresses::IDENTITY_REGISTRY`] / [`addresses::REPUTATION_REGISTRY`] /
+/// [`addresses::VALIDATION_REGISTRY`] — predeployed at block 0 via the
+/// Tenzro genesis predeploy bundle. The same calldata works against
+/// Tenzro Ledger and any Ethereum-compatible chain hosting the canonical
+/// deployment.
 pub mod selectors {
-    // -- IdentityRegistry (0x101a) --
+    // -- IdentityRegistry (addresses::IDENTITY_REGISTRY) --
 
     /// `register()` — ERC-8004 register overload that allocates a fresh
     /// `agentId` for `msg.sender` with no URI and no metadata entries.
@@ -164,7 +230,7 @@ pub mod selectors {
     /// address skip the dynamic-string decode path.
     pub const GET_AGENT_WALLET: [u8; 4] = [0x00, 0x33, 0x95, 0x09];
 
-    // -- ReputationRegistry (0x101b) --
+    // -- ReputationRegistry (addresses::REPUTATION_REGISTRY) --
 
     /// `submitFeedback(uint256,int8,string)` — submit a feedback rating
     /// against a subject agent identified by its sequential `uint256`
@@ -197,7 +263,7 @@ pub mod selectors {
     /// landed (or when the entry is unknown).
     pub const GET_FEEDBACK_RESPONSES: [u8; 4] = [0xcc, 0x84, 0x63, 0x3b];
 
-    // -- ValidationRegistry (0x101c) --
+    // -- ValidationRegistry (addresses::VALIDATION_REGISTRY) --
 
     /// `validationRequest(address,uint256,string,bytes32)` per ERC-8004.
     /// The validator address is the on-chain account expected to
@@ -903,9 +969,10 @@ pub mod abi {
     }
 
     /// Decode the return of `getValidation(bytes32 requestHash)`
-    /// produced by the Tenzro precompile at `0x101c`. Returns `None` if
-    /// the bytes don't match the 7-slot head + three dynamic-string
-    /// tails layout.
+    /// produced by the canonical ValidationRegistry at
+    /// [`super::addresses::VALIDATION_REGISTRY`]. Returns `None` if the
+    /// bytes don't match the 7-slot head + three dynamic-string tails
+    /// layout.
     pub fn decode_get_validation(data: &[u8]) -> Option<DecodedValidation> {
         if data.len() < 7 * 32 {
             return None;

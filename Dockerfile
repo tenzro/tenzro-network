@@ -22,6 +22,14 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY sdk/ sdk/
 COPY tools/ tools/
+# vendor/glass_pumpkin is patched into the workspace via [patch.crates-io] in
+# the root Cargo.toml (CGGMP24 unblock — see workspace.dependencies cggmp24
+# comment for the full blocker chain). Other vendor/* subtrees (erc8004-evm,
+# erc8004-solana, erc8004-daml, erc8004-atom) are source artifacts for
+# regenerate.sh / DAML compilation, not build-time dependencies — they're
+# copied here too because COPY vendor/ is a single layer and the cost is
+# negligible vs. surgical sub-copies.
+COPY vendor/ vendor/
 
 # Create minimal stub for desktop app workspace member (not built, but cargo needs it to resolve workspace)
 # The real Cargo.toml is excluded by .gcloudignore (apps/), so we generate a stub inline

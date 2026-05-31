@@ -1026,9 +1026,16 @@ pub(crate) async fn handle_process_spt_settlement_outcome(
         )));
     }
 
-    let registry = node.erc8004_reputation().ok_or_else(|| JsonRpcError {
+    // Acquire the node-held `erc8004-system` signer. This is the
+    // submitter for the SPT reputation row; `msg.sender` on the
+    // resulting `submitFeedback` EVM tx is the signer's address, so
+    // operators reading the on-chain registry see that the row was
+    // authored by this validator acting on the upstream Stripe signal.
+    let signer = node.erc8004_system_signer().ok_or_else(|| JsonRpcError {
         code: -32603,
-        message: "ERC-8004 ReputationRegistry not initialized on this node".to_string(),
+        message: "ERC-8004 system signer not initialized on this node — \
+                  SPT reputation dispatch is unavailable (check init_storage logs)"
+            .to_string(),
         data: None,
     })?;
 
@@ -1040,28 +1047,13 @@ pub(crate) async fn handle_process_spt_settlement_outcome(
         data: None,
     })?;
 
-    let validator_addr = node.local_validator_address().ok_or_else(|| JsonRpcError {
-        code: -32603,
-        message: "Local validator address not available — \
-                  non-validator nodes cannot author ERC-8004 reputation rows"
-            .to_string(),
-        data: None,
-    })?;
-
-    // Truncate 32-byte Tenzro Address to the trailing 20 bytes for the
-    // ERC-8004 `rater` field, matching the `[12..32]` Ethereum-address
-    // derivation used elsewhere in this file.
-    let mut rater = [0u8; 20];
-    rater.copy_from_slice(&validator_addr.as_bytes()[12..32]);
-
     let outcome = crate::erc8004_reputation_dispatcher::dispatch_settlement_outcome(
         &event,
         &machine_did,
         &granted_token_id,
         payment_intent_id.as_deref(),
         dispute_status.as_deref(),
-        &rater,
-        registry,
+        signer,
         agent_registry,
     )
     .map_err(|e| JsonRpcError {

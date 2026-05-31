@@ -225,13 +225,14 @@ All 9 standard precompiles fully implemented per EIPs 196/197/198/1108/2565/152:
 - `0x1007` - VRF Verify (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI)
 - `0x1008` - Training Verify (Tenzro Train receipt commitment-chain verification)
 
-### ERC-8004 System Contracts (0x101a-0x101c)
+### ERC-8004 System Contracts
 
-- `0x101a` - IdentityRegistry (`registerAgent` / `getAgent`)
-- `0x101b` - ReputationRegistry (`submitFeedback` / `getFeedback` / `getFeedbackCount`)
-- `0x101c` - ValidationRegistry (`validationRequest` / `validationResponse` / `getValidation`)
-
-Selectors are byte-identical to `tenzro_identity::erc8004::selectors`, so the same calldata works against either the native Tenzro registry or the Ethereum mirror.
+The ERC-8004 IdentityRegistry / ReputationRegistry / ValidationRegistry
+are deployed at genesis as canonical OpenZeppelin-ERC721 upgradeable
+proxies. See the addresses + ABIs in
+[`tenzro_identity::erc8004::addresses`](../tenzro-identity/src/erc8004.rs).
+Writes flow through standard EVM transactions; no precompile state is
+involved.
 
 ## State Management
 

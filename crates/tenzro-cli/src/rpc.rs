@@ -13,6 +13,11 @@ pub struct RpcClient {
     /// Optional explicit override for the `X-Tenzro-Api-Key` header.
     /// When set, takes precedence over `TENZRO_API_KEY` env var.
     api_key_override: Option<String>,
+    /// Optional explicit override for the `X-Tenzro-Admin-Token` header.
+    /// When set, takes precedence over `TENZRO_ADMIN_TOKEN` env var.
+    /// Required for admin RPCs (`tenzro_createApiKey`, `tenzro_revokeApiKey`,
+    /// `tenzro_listApiKeys`, `tenzro_resetCircuitBreaker`).
+    admin_token_override: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -81,6 +86,7 @@ impl RpcClient {
             api_url,
             request_id: std::sync::atomic::AtomicU64::new(1),
             api_key_override: None,
+            admin_token_override: None,
         }
     }
 
@@ -95,6 +101,18 @@ impl RpcClient {
         let key = key.into();
         if !key.is_empty() {
             self.api_key_override = Some(key);
+        }
+        self
+    }
+
+    /// Set an explicit `X-Tenzro-Admin-Token` value, overriding the
+    /// `TENZRO_ADMIN_TOKEN` env var. Empty strings are ignored.
+    /// Required for admin RPCs (key issuance, revocation, listing,
+    /// circuit-breaker reset).
+    pub fn with_admin_token(mut self, token: impl Into<String>) -> Self {
+        let token = token.into();
+        if !token.is_empty() {
+            self.admin_token_override = Some(token);
         }
         self
     }
@@ -133,6 +151,16 @@ impl RpcClient {
             && !api_key.is_empty()
         {
             req = req.header("X-Tenzro-Api-Key", api_key);
+        }
+        // Admin token for operator RPCs (`tenzro_createApiKey`,
+        // `tenzro_revokeApiKey`, `tenzro_listApiKeys`,
+        // `tenzro_resetCircuitBreaker`). See docs/api-keys.md.
+        if let Some(ref admin) = self.admin_token_override {
+            req = req.header("X-Tenzro-Admin-Token", admin);
+        } else if let Ok(admin) = std::env::var("TENZRO_ADMIN_TOKEN")
+            && !admin.is_empty()
+        {
+            req = req.header("X-Tenzro-Admin-Token", admin);
         }
 
         let response = req.send().await?;

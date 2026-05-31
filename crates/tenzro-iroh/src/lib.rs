@@ -80,8 +80,8 @@ pub use da_backend::IrohBlobsDaBackend;
 pub use error::{IrohError, IrohResult};
 pub use gradient_store::IrohGradientStore;
 pub use jsonrpc::{
-    call as jsonrpc_call, DeferredJsonRpcDispatcher, JsonRpcDispatcher, JsonRpcProtocol, ALPN_A2A,
-    ALPN_MCP,
+    call as jsonrpc_call, DeferredJsonRpcDispatcher, DeferredMcpHandler, JsonRpcDispatcher,
+    JsonRpcProtocol, McpProtocol, McpStreamHandler, ALPN_A2A, ALPN_MCP,
 };
 pub use resolver::{IrohBackedResolver, IrohResolver};
 pub use sealed_shard_store::IrohSealedShardStore;
@@ -90,3 +90,9 @@ pub use tdip::derive_iroh_secret_key_from_ed25519;
 // Re-export the parsed URI type so downstream crates only need to import
 // `tenzro_iroh::TenzroUri` rather than reaching into `tenzro_types`.
 pub use tenzro_types::tenzro_uri::{TenzroUri, TenzroUriError};
+
+// Re-export the iroh QUIC stream halves so downstream crates that
+// implement [`McpStreamHandler`] (notably `tenzro-node`) can name them
+// without taking a direct dependency on `iroh`. Keeps the iroh runtime
+// surface in exactly one place — this crate.
+pub use iroh::endpoint::{RecvStream, SendStream};

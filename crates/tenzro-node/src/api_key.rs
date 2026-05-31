@@ -57,6 +57,100 @@ impl ApiKeyScope {
     }
 }
 
+/// Trust class of an issued key.
+///
+/// Determines the revocation policy. All classes are **node-scoped**:
+/// they only authorize the issuing node's API surface, never network-wide
+/// state. Network-wide changes (validator set, treasury, fee schedule,
+/// system contracts, protocol params) require the on-chain governance
+/// path (`tenzro-token::GovernanceEngine` + the `0x1005` GOVERNANCE
+/// precompile) regardless of which class of key is presented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyClass {
+    /// The operator's own self-imposed lockdown key. Not revokable via
+    /// any RPC — including by an admin holding `X-Tenzro-Admin-Token`.
+    /// Rotation requires updating the operator's secret store + node
+    /// restart. Use this for keys the node itself or critical
+    /// infrastructure depends on, where accidental RPC-side revoke would
+    /// take the node offline.
+    OperatorProtected,
+    /// Operator-issued for a developer / external caller. Both the
+    /// subject (presenting their own `X-Tenzro-Api-Key` to
+    /// `tenzro_revokeMyApiKey`) and the operator (presenting
+    /// `X-Tenzro-Admin-Token` to `tenzro_revokeApiKey`) can revoke.
+    Subject,
+    /// Operator-internal ops key (CI pipelines, monitoring agents, etc.).
+    /// No subject revoke applies; only the operator (via admin token) can
+    /// revoke.
+    OperatorInternal,
+}
+
+impl KeyClass {
+    /// Canonical wire-format string used in JSON-RPC params and records.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            KeyClass::OperatorProtected => "operator_protected",
+            KeyClass::Subject => "subject",
+            KeyClass::OperatorInternal => "operator_internal",
+        }
+    }
+
+    /// Parses the wire-format string. Returns `None` for unknown values
+    /// so callers can produce a structured `-32602` error.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "operator_protected" => Some(KeyClass::OperatorProtected),
+            "subject" => Some(KeyClass::Subject),
+            "operator_internal" => Some(KeyClass::OperatorInternal),
+            _ => None,
+        }
+    }
+}
+
+/// Default class for any record (handles deserialization of records
+/// persisted before `class` was introduced — they pre-date the
+/// `OperatorProtected` lockdown semantics and so are correctly modeled
+/// as `Subject`).
+fn default_key_class() -> KeyClass {
+    KeyClass::Subject
+}
+
+/// Outcome of an admin-issued revoke attempt against a specific record.
+/// Surfaced by [`ApiKeyManager::revoke_by_id_admin`] so callers (the RPC
+/// handler) can map the four states to distinct JSON-RPC errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminRevokeOutcome {
+    /// Key was active and is now revoked.
+    Revoked,
+    /// No active record with this `key_id` exists (already revoked, or
+    /// never minted on this node).
+    NotFound,
+    /// Record exists but is `KeyClass::OperatorProtected` — the operator
+    /// has self-locked this key against RPC-side revoke. Rotation
+    /// requires updating the secret store + restarting the node.
+    Protected,
+}
+
+/// Outcome of a subject-issued revoke attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubjectRevokeOutcome {
+    /// Caller's subject matches the record's subject and the key is
+    /// now revoked.
+    Revoked,
+    /// No active record with this `key_id` exists.
+    NotFound,
+    /// Record exists but its subject does not match the caller's
+    /// presented key — surfaced as `-32004` so the caller cannot infer
+    /// which other subject owns it.
+    NotYours,
+    /// Record exists and the subject matches, but the class is not
+    /// subject-revokable (`OperatorProtected` or `OperatorInternal`).
+    /// Surfaced separately from `NotYours` because the subject does in
+    /// fact own the record — they just can't revoke it via this path.
+    NotSubjectRevokable,
+}
+
 /// Persisted record for an issued API key.
 ///
 /// The raw key is hashed with SHA-256 and never stored. The key id
@@ -72,6 +166,9 @@ pub struct ApiKeyRecord {
     pub label: String,
     /// Granted scopes. Empty = invalid.
     pub scopes: Vec<ApiKeyScope>,
+    /// Trust class. Drives the revoke policy — see [`KeyClass`].
+    #[serde(default = "default_key_class")]
+    pub class: KeyClass,
     /// Unix timestamp (seconds) of issuance.
     pub created_at: i64,
     /// Unix timestamp (seconds) of revocation, if any.
@@ -159,6 +256,7 @@ impl ApiKeyManager {
         subject: Option<String>,
         label: impl Into<String>,
         scopes: Vec<ApiKeyScope>,
+        class: KeyClass,
     ) -> Result<IssuedApiKey> {
         if scopes.is_empty() {
             return Err(NodeError::Internal(
@@ -182,6 +280,7 @@ impl ApiKeyManager {
             subject,
             label: label.into(),
             scopes,
+            class,
             created_at,
             revoked_at: None,
         };
@@ -206,9 +305,12 @@ impl ApiKeyManager {
         cache.get(&hash_hex).filter(|r| r.is_active()).cloned()
     }
 
-    /// Revokes a key by its `key_id` (non-secret handle). Returns true if
-    /// a matching active key was found and revoked.
-    pub fn revoke_by_id(&self, key_id: &str) -> Result<bool> {
+    /// Admin-path revoke by `key_id`. Refuses to revoke records with
+    /// `KeyClass::OperatorProtected` — those keys are locked against
+    /// RPC-side revoke as a self-imposed safety net for the operator
+    /// (rotation requires updating the secret store + restarting the
+    /// node).
+    pub fn revoke_by_id_admin(&self, key_id: &str) -> Result<AdminRevokeOutcome> {
         let mut cache = self.cache.write();
         let (hash_hex, mut record) = match cache
             .iter()
@@ -216,8 +318,12 @@ impl ApiKeyManager {
             .map(|(k, r)| (k.clone(), r.clone()))
         {
             Some(pair) => pair,
-            None => return Ok(false),
+            None => return Ok(AdminRevokeOutcome::NotFound),
         };
+
+        if matches!(record.class, KeyClass::OperatorProtected) {
+            return Ok(AdminRevokeOutcome::Protected);
+        }
 
         record.revoked_at = Some(chrono::Utc::now().timestamp());
         let storage_key = format!("apikey:{}", hash_hex);
@@ -227,13 +333,66 @@ impl ApiKeyManager {
             .put(CF_API_KEYS, storage_key.as_bytes(), &value)
             .map_err(|e| NodeError::Internal(format!("api_key put: {}", e)))?;
         cache.insert(hash_hex, record);
-        Ok(true)
+        Ok(AdminRevokeOutcome::Revoked)
+    }
+
+    /// Subject-path revoke. The caller presents their own active key
+    /// (resolved by `gate_api_key` upstream), and supplies its
+    /// `subject` value here for ownership matching against the target
+    /// `key_id`. Only `KeyClass::Subject` records are revokable via
+    /// this path; OperatorProtected and OperatorInternal records refuse.
+    pub fn revoke_by_subject(
+        &self,
+        caller_subject: &str,
+        target_key_id: &str,
+    ) -> Result<SubjectRevokeOutcome> {
+        let mut cache = self.cache.write();
+        let (hash_hex, mut record) = match cache
+            .iter()
+            .find(|(_, r)| r.key_id == target_key_id && r.is_active())
+            .map(|(k, r)| (k.clone(), r.clone()))
+        {
+            Some(pair) => pair,
+            None => return Ok(SubjectRevokeOutcome::NotFound),
+        };
+
+        let record_subject = match record.subject.as_deref() {
+            Some(s) => s,
+            None => return Ok(SubjectRevokeOutcome::NotYours),
+        };
+        if record_subject != caller_subject {
+            return Ok(SubjectRevokeOutcome::NotYours);
+        }
+        if !matches!(record.class, KeyClass::Subject) {
+            return Ok(SubjectRevokeOutcome::NotSubjectRevokable);
+        }
+
+        record.revoked_at = Some(chrono::Utc::now().timestamp());
+        let storage_key = format!("apikey:{}", hash_hex);
+        let value = serde_json::to_vec(&record)
+            .map_err(|e| NodeError::Internal(format!("api_key serialize: {}", e)))?;
+        self.storage
+            .put(CF_API_KEYS, storage_key.as_bytes(), &value)
+            .map_err(|e| NodeError::Internal(format!("api_key put: {}", e)))?;
+        cache.insert(hash_hex, record);
+        Ok(SubjectRevokeOutcome::Revoked)
     }
 
     /// Lists all known records (active and revoked). The plaintext keys
     /// are not stored and cannot be returned.
     pub fn list(&self) -> Vec<ApiKeyRecord> {
         self.cache.read().values().cloned().collect()
+    }
+
+    /// Lists records whose `subject` matches `caller_subject` (active +
+    /// revoked). Used by the subject-gated `tenzro_listMyApiKeys` RPC.
+    pub fn list_by_subject(&self, caller_subject: &str) -> Vec<ApiKeyRecord> {
+        self.cache
+            .read()
+            .values()
+            .filter(|r| r.subject.as_deref() == Some(caller_subject))
+            .cloned()
+            .collect()
     }
 
     /// Authorizes a request for the given RPC method.
@@ -344,23 +503,140 @@ mod tests {
                 Some("did:tenzro:human:abc".to_string()),
                 "test key",
                 vec![ApiKeyScope::Canton],
+                KeyClass::Subject,
             )
             .unwrap();
         assert!(issued.key.starts_with("tnz_"));
         let found = mgr.lookup(&issued.key).expect("key must resolve");
         assert!(found.has_scope(ApiKeyScope::Canton));
         assert_eq!(found.key_id, issued.record.key_id);
+        assert_eq!(found.class, KeyClass::Subject);
     }
 
     #[test]
-    fn revoke_makes_key_unusable() {
+    fn admin_revoke_makes_key_unusable() {
         let mgr = ApiKeyManager::new(mem_store()).unwrap();
         let issued = mgr
-            .issue(None, "to revoke", vec![ApiKeyScope::Canton])
+            .issue(None, "to revoke", vec![ApiKeyScope::Canton], KeyClass::Subject)
             .unwrap();
-        let revoked = mgr.revoke_by_id(&issued.record.key_id).unwrap();
-        assert!(revoked);
+        let outcome = mgr.revoke_by_id_admin(&issued.record.key_id).unwrap();
+        assert_eq!(outcome, AdminRevokeOutcome::Revoked);
         assert!(mgr.lookup(&issued.key).is_none());
+    }
+
+    #[test]
+    fn admin_revoke_refuses_operator_protected() {
+        let mgr = ApiKeyManager::new(mem_store()).unwrap();
+        let issued = mgr
+            .issue(
+                None,
+                "locked",
+                vec![ApiKeyScope::Canton],
+                KeyClass::OperatorProtected,
+            )
+            .unwrap();
+        let outcome = mgr.revoke_by_id_admin(&issued.record.key_id).unwrap();
+        assert_eq!(outcome, AdminRevokeOutcome::Protected);
+        // Still usable.
+        assert!(mgr.lookup(&issued.key).is_some());
+    }
+
+    #[test]
+    fn admin_revoke_not_found_is_distinct_from_protected() {
+        let mgr = ApiKeyManager::new(mem_store()).unwrap();
+        let outcome = mgr.revoke_by_id_admin("0000000000000000").unwrap();
+        assert_eq!(outcome, AdminRevokeOutcome::NotFound);
+    }
+
+    #[test]
+    fn subject_revoke_only_own_key() {
+        let mgr = ApiKeyManager::new(mem_store()).unwrap();
+        let alice = mgr
+            .issue(
+                Some("did:tenzro:human:alice".to_string()),
+                "alice",
+                vec![ApiKeyScope::Canton],
+                KeyClass::Subject,
+            )
+            .unwrap();
+        let bob = mgr
+            .issue(
+                Some("did:tenzro:human:bob".to_string()),
+                "bob",
+                vec![ApiKeyScope::Canton],
+                KeyClass::Subject,
+            )
+            .unwrap();
+
+        // Alice cannot revoke bob's key.
+        let outcome = mgr
+            .revoke_by_subject("did:tenzro:human:alice", &bob.record.key_id)
+            .unwrap();
+        assert_eq!(outcome, SubjectRevokeOutcome::NotYours);
+        assert!(mgr.lookup(&bob.key).is_some());
+
+        // Alice can revoke her own.
+        let outcome = mgr
+            .revoke_by_subject("did:tenzro:human:alice", &alice.record.key_id)
+            .unwrap();
+        assert_eq!(outcome, SubjectRevokeOutcome::Revoked);
+        assert!(mgr.lookup(&alice.key).is_none());
+    }
+
+    #[test]
+    fn subject_revoke_refuses_non_subject_class() {
+        let mgr = ApiKeyManager::new(mem_store()).unwrap();
+        for class in [KeyClass::OperatorProtected, KeyClass::OperatorInternal] {
+            let issued = mgr
+                .issue(
+                    Some("did:tenzro:machine:ops".to_string()),
+                    "ops",
+                    vec![ApiKeyScope::Canton],
+                    class,
+                )
+                .unwrap();
+            let outcome = mgr
+                .revoke_by_subject("did:tenzro:machine:ops", &issued.record.key_id)
+                .unwrap();
+            assert_eq!(
+                outcome,
+                SubjectRevokeOutcome::NotSubjectRevokable,
+                "class {:?} must refuse subject revoke",
+                class,
+            );
+        }
+    }
+
+    #[test]
+    fn list_by_subject_filters() {
+        let mgr = ApiKeyManager::new(mem_store()).unwrap();
+        mgr.issue(
+            Some("did:tenzro:human:alice".to_string()),
+            "alice-1",
+            vec![ApiKeyScope::Canton],
+            KeyClass::Subject,
+        )
+        .unwrap();
+        mgr.issue(
+            Some("did:tenzro:human:alice".to_string()),
+            "alice-2",
+            vec![ApiKeyScope::Canton],
+            KeyClass::Subject,
+        )
+        .unwrap();
+        mgr.issue(
+            Some("did:tenzro:human:bob".to_string()),
+            "bob-1",
+            vec![ApiKeyScope::Canton],
+            KeyClass::Subject,
+        )
+        .unwrap();
+
+        let alice = mgr.list_by_subject("did:tenzro:human:alice");
+        assert_eq!(alice.len(), 2);
+        assert!(alice.iter().all(|r| {
+            r.subject.as_deref() == Some("did:tenzro:human:alice")
+        }));
     }
 
     #[test]
@@ -401,9 +677,9 @@ mod tests {
     fn authorize_rejects_revoked_key() {
         let mgr = ApiKeyManager::new(mem_store()).unwrap();
         let issued = mgr
-            .issue(None, "tmp", vec![ApiKeyScope::Canton])
+            .issue(None, "tmp", vec![ApiKeyScope::Canton], KeyClass::Subject)
             .unwrap();
-        mgr.revoke_by_id(&issued.record.key_id).unwrap();
+        mgr.revoke_by_id_admin(&issued.record.key_id).unwrap();
         let outcome = mgr.authorize(Some(&issued.key), "tenzro_listCantonDomains");
         assert_eq!(outcome, AuthorizeOutcome::UnknownOrRevoked);
     }
@@ -413,13 +689,19 @@ mod tests {
         let store = mem_store();
         let mgr = ApiKeyManager::new(store.clone()).unwrap();
         let issued = mgr
-            .issue(None, "persisted", vec![ApiKeyScope::Canton])
+            .issue(
+                None,
+                "persisted",
+                vec![ApiKeyScope::Canton],
+                KeyClass::Subject,
+            )
             .unwrap();
         // Drop and rebuild against the same backing store.
         drop(mgr);
         let mgr2 = ApiKeyManager::new(store).unwrap();
         let found = mgr2.lookup(&issued.key);
         assert!(found.is_some());
+        assert_eq!(found.unwrap().class, KeyClass::Subject);
     }
 
     #[test]

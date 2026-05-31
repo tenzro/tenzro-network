@@ -35,10 +35,11 @@
 //! prediction per mask; this runtime returns the argmax-IoU mask resampled
 //! to the original image size as a `[H * W]` u8 buffer.
 //!
-//! SAM 3 / SAM 3.1 are intentionally not supported here — they are
-//! text-promptable and use a 14-input box-output decoder. They will land
-//! in a separate `text_segmentation_runtime` when a stable community ONNX
-//! schema is published.
+//! SAM 3 / SAM 3.1 are text-promptable and use a different decoder
+//! topology (image encoder + language encoder + detection-shaped box
+//! decoder). They live in [`crate::text_segmentation_runtime`] with
+//! their own [`TextPromptableSegmenter`](crate::text_segmentation_runtime::TextPromptableSegmenter)
+//! trait — same crate, separate type, different I/O contract.
 
 use std::path::Path;
 use std::sync::Arc;

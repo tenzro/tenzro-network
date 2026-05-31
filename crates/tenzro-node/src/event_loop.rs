@@ -2627,6 +2627,19 @@ impl EventLoop {
                         // committed by the VM at this point.
                         self.process_bond_logs(&result, block_height).await;
 
+                        // Post-execute ERC-8004 `Registered` scan: reflects
+                        // the canonical `IdentityRegistry` proxy's
+                        // `Registered(uint256,string,address)` event into
+                        // the off-chain `erc8004_did_index:` keyspace in
+                        // CF_IDENTITIES and patches the matching TDIP
+                        // `Machine` identity's `erc8004_agent_id` field.
+                        // This is the listener half of the
+                        // `NativeErc8004Mirror` async-detached-spawn
+                        // architecture — the EVM tx is submitted by the
+                        // mirror's `tokio::spawn`, and the resulting log
+                        // lands here when the block applies.
+                        self.process_erc8004_registered_logs(&result, block_height).await;
+
                         // Post-execute escrow scan: mirrors VM-emitted
                         // `EscrowCreated` / `EscrowReleased` / `EscrowRefunded`
                         // logs into the off-chain `EscrowManager` query index
@@ -3556,6 +3569,211 @@ impl EventLoop {
         }
     }
 
+    /// Reflect the canonical ERC-8004 `Registered(uint256 indexed
+    /// agentId, string agentURI, address indexed owner)` event emitted
+    /// by the on-chain `IdentityRegistry` proxy at
+    /// `tenzro_identity::erc8004::addresses::IDENTITY_REGISTRY` into the
+    /// off-chain `did → agentId` index stored in `CF_IDENTITIES` under
+    /// the `erc8004_did_index:` prefix (see
+    /// `crate::erc8004_mirror::ERC8004_DID_INDEX_PREFIX`), and patch
+    /// the matching TDIP `Machine` identity's `erc8004_agent_id` field
+    /// via `IdentityRegistry::apply_erc8004_registered_event`.
+    ///
+    /// This is the **other half** of the locked async-detached-spawn
+    /// architecture (see `project_erc8004_evm_architecture` memory):
+    /// `NativeErc8004Mirror::mirror_register_agent` dispatches the
+    /// signed EVM tx and returns immediately; the resulting
+    /// `Registered` event lands here when the block is applied, and
+    /// this function closes the loop by populating the off-chain
+    /// index that `lookup_agent_id_by_did` reads.
+    ///
+    /// The function is filter-by-address + filter-by-topic[0]: it only
+    /// considers logs whose address matches `IDENTITY_REGISTRY` and
+    /// whose first topic is
+    /// `keccak256("Registered(uint256,string,address)")`. Logs that
+    /// fail either filter are ignored.
+    ///
+    /// Decoded event layout (per Solidity ABI):
+    /// - `topics[0]` = 32-byte event signature hash
+    /// - `topics[1]` = 32-byte big-endian `uint256 agentId` (indexed)
+    /// - `topics[2]` = 32-byte left-padded `address owner` (indexed)
+    /// - `data`      = ABI-encoded `string agentURI`:
+    ///   `offset(32)=0x20 || length_be(32) || padded_utf8_bytes`
+    ///
+    /// **DID derivation:** the canonical contract has no DID concept;
+    /// the `did:tenzro:...` is conveyed in the `agentURI` payload
+    /// itself. We parse it by recognising the well-known prefix
+    /// `did:tenzro:` at the very start of the decoded URI string. Any
+    /// other URI shape (HTTP, IPFS, plain text) is logged and skipped
+    /// — it's a legitimate non-Tenzro agent registration that we have
+    /// no DID to index.
+    ///
+    /// Idempotent: re-applying the same `Registered` event after a
+    /// reorg / restart writes the same `(did, agent_id)` pair and
+    /// leaves the TDIP record's `erc8004_agent_id` unchanged.
+    async fn process_erc8004_registered_logs(
+        &self,
+        result: &tenzro_vm::ExecutionResult,
+        block_height: BlockHeight,
+    ) {
+        use std::sync::OnceLock;
+        use tenzro_identity::erc8004::addresses;
+
+        // Lazy-compute the event signature hash once per process.
+        // `keccak256("Registered(uint256,string,address)")`.
+        static REGISTERED_TOPIC: OnceLock<[u8; 32]> = OnceLock::new();
+        let registered_topic = REGISTERED_TOPIC.get_or_init(|| {
+            tenzro_crypto::hash::keccak256(b"Registered(uint256,string,address)").to_bytes()
+        });
+
+        // Fast-path: most blocks have no ERC-8004 logs at all.
+        let any_registered = result.logs.iter().any(|l| {
+            l.address.as_slice() == addresses::IDENTITY_REGISTRY
+                && l.topics
+                    .first()
+                    .map(|t| t.as_slice() == registered_topic.as_slice())
+                    .unwrap_or(false)
+        });
+        if !any_registered {
+            return;
+        }
+
+        for log in &result.logs {
+            if log.address.as_slice() != addresses::IDENTITY_REGISTRY {
+                continue;
+            }
+            if log.topics.first().map(|t| t.as_slice()) != Some(registered_topic.as_slice()) {
+                continue;
+            }
+            // Need topics[0..=2] for sig / agentId / owner.
+            if log.topics.len() < 3 {
+                warn!(
+                    target: "tenzro::erc8004::listener",
+                    block_height = block_height.0,
+                    topic_count = log.topics.len(),
+                    "Registered log has fewer than 3 topics; skipping"
+                );
+                continue;
+            }
+
+            // Decode agentId from topics[1] (32-byte big-endian uint256).
+            // We accept anything that fits in u64 — Tenzro genesis allocates
+            // ids from 1 and will not overflow u64 within any realistic
+            // testnet/mainnet horizon. Values with non-zero high 192 bits
+            // are rejected loudly.
+            let id_bytes = log.topics[1].as_slice();
+            if id_bytes.len() != 32 {
+                warn!(
+                    target: "tenzro::erc8004::listener",
+                    block_height = block_height.0,
+                    len = id_bytes.len(),
+                    "Registered topic[1] (agentId) has unexpected length; skipping"
+                );
+                continue;
+            }
+            if id_bytes[..24].iter().any(|b| *b != 0) {
+                warn!(
+                    target: "tenzro::erc8004::listener",
+                    block_height = block_height.0,
+                    "Registered agentId exceeds u64 — high 192 bits non-zero; skipping"
+                );
+                continue;
+            }
+            let mut id_buf = [0u8; 8];
+            id_buf.copy_from_slice(&id_bytes[24..32]);
+            let agent_id = u64::from_be_bytes(id_buf);
+
+            // Decode the `string agentURI` from `data`. The ABI layout
+            // for a single dynamic string is:
+            //   offset (32)  = always 0x20
+            //   length (32)  = big-endian byte count
+            //   payload      = utf-8 bytes, right-padded to 32-byte word
+            let did = match decode_single_string_abi(&log.data) {
+                Some(s) => s,
+                None => {
+                    warn!(
+                        target: "tenzro::erc8004::listener",
+                        block_height = block_height.0,
+                        agent_id,
+                        data_len = log.data.len(),
+                        "Registered.agentURI ABI-decode failed; skipping"
+                    );
+                    continue;
+                }
+            };
+
+            // Only index DIDs that start with `did:tenzro:`. Any other URI
+            // shape (HTTPS metadata, IPFS, opaque agentURI from a
+            // non-Tenzro registrant) is a legitimate canonical-contract
+            // registration but carries no DID we can key on.
+            if !did.starts_with("did:tenzro:") {
+                debug!(
+                    target: "tenzro::erc8004::listener",
+                    block_height = block_height.0,
+                    agent_id,
+                    uri_prefix = %did.chars().take(16).collect::<String>(),
+                    "Registered.agentURI is not a did:tenzro: URI; not indexed"
+                );
+                continue;
+            }
+
+            // 1. Write the off-chain did → agentId index.
+            let key = crate::erc8004_mirror::did_index_key(&did);
+            let val = agent_id.to_be_bytes();
+            if let Err(e) =
+                self.storage.put(tenzro_storage::CF_IDENTITIES, &key, &val)
+            {
+                warn!(
+                    target: "tenzro::erc8004::listener",
+                    did = %did,
+                    agent_id,
+                    error = %e,
+                    "Failed to write erc8004_did_index entry; subsequent lookups will miss"
+                );
+                continue;
+            }
+
+            // 2. Patch the in-memory TDIP record's `erc8004_agent_id`
+            //    field so callers reading the identity see the bound
+            //    agent id without an extra RocksDB hop. The patch is a
+            //    no-op on remote-node records that haven't been
+            //    locally registered.
+            if let Some(registry) = self.identity_registry.as_ref() {
+                match registry.apply_erc8004_registered_event(&did, agent_id) {
+                    Ok(true) => {
+                        debug!(
+                            target: "tenzro::erc8004::listener",
+                            block_height = block_height.0,
+                            did = %did,
+                            agent_id,
+                            "ERC-8004 Registered event reflected into TDIP identity"
+                        );
+                    }
+                    Ok(false) => {
+                        debug!(
+                            target: "tenzro::erc8004::listener",
+                            block_height = block_height.0,
+                            did = %did,
+                            agent_id,
+                            "ERC-8004 Registered event indexed in RocksDB; \
+                             no local TDIP identity to patch (foreign-node registration)"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            target: "tenzro::erc8004::listener",
+                            block_height = block_height.0,
+                            did = %did,
+                            agent_id,
+                            error = %e,
+                            "Failed to apply Registered event to TDIP identity"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Reflect VM-emitted escrow logs into the off-chain
     /// `EscrowManager` query index.
     ///
@@ -4141,6 +4359,42 @@ impl EventLoop {
         let registry = self.identity_registry.as_ref()?;
         registry.resolve(agent_did).ok().map(|id| id.wallet_address)
     }
+}
+
+/// Decode a Solidity ABI-encoded single dynamic `string` from a log
+/// `data` payload. Layout:
+///
+/// ```text
+///   offset (32 bytes, big-endian) — always 0x20 for a single dynamic head
+///   length (32 bytes, big-endian) — utf-8 byte count
+///   payload (length bytes, right-padded to a 32-byte word)
+/// ```
+///
+/// Returns `None` if the payload is shorter than 64 bytes, the offset
+/// word is not 0x20, the declared length overflows the remaining buffer,
+/// or the payload bytes are not valid UTF-8. Trailing zero-padding bytes
+/// after `length` are tolerated — only the first `length` bytes are
+/// decoded.
+fn decode_single_string_abi(data: &[u8]) -> Option<String> {
+    if data.len() < 64 {
+        return None;
+    }
+    // Offset word: must be exactly 0x20 (32-byte big-endian) for a
+    // single dynamic-string head. Anything else is a malformed payload
+    // (or a multi-arg event we shouldn't be decoding with this helper).
+    if data[..31].iter().any(|b| *b != 0) || data[31] != 0x20 {
+        return None;
+    }
+    // Length word: u256 big-endian; we reject anything that doesn't
+    // fit in usize on this platform.
+    if data[32..56].iter().any(|b| *b != 0) {
+        return None;
+    }
+    let mut len_buf = [0u8; 8];
+    len_buf.copy_from_slice(&data[56..64]);
+    let len = u64::from_be_bytes(len_buf) as usize;
+    let body = data.get(64..64usize.checked_add(len)?)?;
+    std::str::from_utf8(body).ok().map(|s| s.to_string())
 }
 
 /// Decode the kill-switch log `data` field per the VM wire format:

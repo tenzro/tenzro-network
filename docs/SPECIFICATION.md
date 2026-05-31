@@ -2485,7 +2485,7 @@ The Tenzro testnet is deployed on Google Kubernetes Engine (GKE) in `us-central1
 - Namespace: `tenzro-testnet`
 - Chain ID: 1337
 - Faucet: 100 TNZO per request, 24-hour cooldown per address
-- Docker image: `us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:latest`
+- Docker image: `<your-registry>/tenzro-node:<tag>` (build from the repo `Dockerfile`)
 
 ---
 

@@ -1,5 +1,5 @@
 variable "project_id" {
-  description = "GCP project ID (must be tenzro-infra per CLAUDE.md)"
+  description = "GCP project ID (must be tenzro-infra)"
   type        = string
   default     = "tenzro-infra"
 }

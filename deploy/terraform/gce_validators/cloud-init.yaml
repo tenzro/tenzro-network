@@ -165,6 +165,22 @@ write_files:
         # the #129 binary ships.
       fi
 
+      # Canton + admin-token env vars on the RPC-public node only. The fetcher
+      # (tenzro-fetch-canton-config) populates /etc/tenzro/tenzro-node.env with
+      # TENZRO_ADMIN_TOKEN + CANTON_DEVNET_CLIENT_SECRET before this service
+      # starts (Requires= in the unit file). CANTON_DEVNET=true is set
+      # statically — the secret is the only per-environment value. On non-RPC
+      # validators these vars are not exported and CantonConfig::from_env()
+      # returns the default disabled profile.
+      CANTON_ARGS=()
+      if [[ "$RPC_PUBLIC" == "true" ]]; then
+        CANTON_ARGS=(
+          -e TENZRO_ADMIN_TOKEN
+          -e CANTON_DEVNET=true
+          -e CANTON_DEVNET_CLIENT_SECRET
+        )
+      fi
+
       exec docker run --rm \
         --name tenzro-node \
         --network host \
@@ -174,8 +190,75 @@ write_files:
         -e TENZRO_SIMULATE_TDX=0 \
         -e TENZRO_SIMULATE_NITRO=0 \
         -e TENZRO_SIMULATE_GPU=0 \
+        "$${CANTON_ARGS[@]}" \
         "$IMAGE" \
         "$${ARGS[@]}"
+
+  # Canton config + admin-token fetcher. RPC-public node only — pulls
+  # `tenzro-rpc-admin-token` and `damlstudio-canton-auth0-client-secret` from
+  # the `canton-network` GCP project and writes them into
+  # /etc/tenzro/tenzro-node.env for systemd to source via EnvironmentFile.
+  #
+  # Cross-project access: validator-0's SA
+  # (tenzro-validator-0@tenzro-infra.iam.gserviceaccount.com) holds
+  # roles/secretmanager.secretAccessor granted *per-secret* on each of the two
+  # above in the canton-network project. Those grants live in the canton-network
+  # project and are managed out-of-band — they are NOT in this terraform module
+  # because this module's provider is scoped to tenzro-infra.
+  #
+  # Why env-only (no TOML overlay): NodeConfig::load_from_file is full-schema
+  # only; partial overlays aren't supported. CantonConfig::from_env() already
+  # covers the devnet profile via CANTON_DEVNET=true + CANTON_DEVNET_CLIENT_SECRET.
+  #
+  # Why the damlstudio Auth0 client_secret is reused: it grants the
+  # `daml_ledger_api` scope on the `https://canton.network.global` audience
+  # that Tenzro's hard-coded CantonTokenProvider expects (issuer
+  # `dev-x0gilg1n7mhbxz5r.us.auth0.com`). Verified against
+  # https://json.devnet.tenzro.network/v2/version with a fresh token. Avoids
+  # duplicating an Auth0 client for one ledger endpoint.
+  - path: /var/lib/tenzro-bin/tenzro-fetch-canton-config
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      # Runs once on boot via tenzro-fetch-canton-config.service, before
+      # tenzro-node.service. RPC-public node only — Terraform omits the
+      # corresponding systemd unit on validators 1-9, so on those VMs this
+      # script is present but never invoked.
+      set -euo pipefail
+      PROJECT=canton-network
+      ETC=/etc/tenzro
+
+      TOKEN=$(curl -sS --fail \
+        -H 'Metadata-Flavor: Google' \
+        'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
+        | python3 -c 'import sys, json; print(json.load(sys.stdin)["access_token"])')
+
+      fetch_secret() {
+        local secret="$1"
+        curl -sS --fail \
+          -H "Authorization: Bearer $TOKEN" \
+          -H 'Accept: application/json' \
+          "https://secretmanager.googleapis.com/v1/projects/$PROJECT/secrets/$secret/versions/latest:access" \
+          | python3 -c 'import sys, json, base64; sys.stdout.buffer.write(base64.b64decode(json.load(sys.stdin)["payload"]["data"]))'
+      }
+
+      ADMIN_TOKEN=$(fetch_secret tenzro-rpc-admin-token)
+      CANTON_CS=$(fetch_secret damlstudio-canton-auth0-client-secret)
+
+      install -d -m 0755 -o root -g root "$ETC"
+      umask 077
+      # systemd reads this as root via EnvironmentFile=, then the wrapper
+      # forwards both vars into the container via `-e VAR` (no `=value` makes
+      # docker pass through whatever the environment has). 0600 root-only is
+      # fine — the container never reads this file directly.
+      cat > "$ETC/tenzro-node.env" <<EOF
+      TENZRO_ADMIN_TOKEN=$ADMIN_TOKEN
+      CANTON_DEVNET_CLIENT_SECRET=$CANTON_CS
+      EOF
+      chmod 0600 "$ETC/tenzro-node.env"
+      chown root:root "$ETC/tenzro-node.env"
+      echo "fetch-canton-config: wrote $ETC/tenzro-node.env"
 
   - path: /etc/systemd/system/tenzro-node.service
     permissions: '0644'
@@ -183,14 +266,15 @@ write_files:
     content: |
       [Unit]
       Description=Tenzro validator node
-      After=network-online.target docker.service tenzro-fetch-keys.service
+      After=network-online.target docker.service tenzro-fetch-keys.service${rpc_public == "true" ? " tenzro-fetch-canton-config.service" : ""}
       Wants=network-online.target docker.service
-      Requires=tenzro-fetch-keys.service
+      Requires=tenzro-fetch-keys.service${rpc_public == "true" ? " tenzro-fetch-canton-config.service" : ""}
 
       [Service]
       Type=simple
       Restart=always
       RestartSec=10
+      ${rpc_public == "true" ? "EnvironmentFile=/etc/tenzro/tenzro-node.env" : "# EnvironmentFile only set on the RPC-public node (Canton + admin token)."}
       # SIGTERM → /ready returns 503, drain in-flight requests, exit cleanly.
       # 60s aligns with the graceful_exit() handler timeout in #129.
       TimeoutStopSec=60
@@ -214,6 +298,26 @@ write_files:
       Type=oneshot
       RemainAfterExit=yes
       ExecStart=/bin/bash /var/lib/tenzro-bin/tenzro-fetch-keys
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/tenzro-fetch-canton-config.service
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Fetch Canton config + admin token from canton-network Secret Manager
+      After=network-online.target
+      Wants=network-online.target
+      Before=tenzro-node.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      # COS mounts /var as noexec. systemd cannot direct-exec the script — invoke
+      # via `bash <path>` so bash reads it as data, matching tenzro-fetch-keys.
+      ExecStart=/bin/bash /var/lib/tenzro-bin/tenzro-fetch-canton-config
 
       [Install]
       WantedBy=multi-user.target
@@ -273,4 +377,11 @@ runcmd:
   - sysctl -w net.ipv4.tcp_keepalive_time=120 net.ipv4.tcp_keepalive_intvl=30 net.ipv4.tcp_keepalive_probes=4
   - systemctl daemon-reload
   - systemctl enable --now tenzro-fetch-keys.service
+  # Canton fetcher only on the RPC-public node. The unit file is written on
+  # every VM so re-applying terraform never needs to branch on file presence,
+  # but it's only enabled where it has work to do.
+  - |
+    if [[ "${rpc_public}" == "true" ]]; then
+      systemctl enable --now tenzro-fetch-canton-config.service
+    fi
   - systemctl enable --now tenzro-node.service

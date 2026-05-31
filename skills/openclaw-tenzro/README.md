@@ -107,7 +107,7 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 
 **AgentBond & Insurance (Spec 9):** `post_agent_bond`, `increase_agent_bond`, `withdraw_agent_bond`, `get_agent_bond`, `list_agent_bonds`, `file_insurance_claim`, `get_insurance_claim`, `list_insurance_claims`, `get_insurance_pool`
 
-**ERC-8004 Trustless Agents:** `register_8004_agent`, `lookup_8004_agent`, `submit_8004_feedback`, `request_8004_validation`, `submit_8004_validation`
+**ERC-8004 Trustless Agents (cross-VM trio):** `register_8004_agent`, `lookup_8004_agent`, `submit_8004_feedback`, `request_8004_validation`, `submit_8004_validation`. Each `register_8004_agent` call fans out from one TDIP write to canonical EVM proxies (deployed at genesis), the QuantuLabs Anchor program on SVM, and the Tenzro-authored Canton package on DAML. `agentId` shape is per-backend: `uint256` on EVM, 32-byte Pubkey on SVM, 8-byte LE u64 on DAML.
 
 **Network & Node:** `node_status`, `node_info`, `get_block_number`, `get_block`, `peer_count`, `syncing`
 

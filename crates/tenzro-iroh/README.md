@@ -27,7 +27,7 @@ services every consumer above. Wiring lives in `tenzro-node`:
 (so the memory archive can pick up `IrohBlobsDaBackend`) and attaches it to
 `TrainingRuntime` as the payload store.
 
-## Phases shipped (per CLAUDE.md)
+## Phases shipped
 
 - **Phase A2** — DA adapter, blob resolution.
 - **Phase B1** — gradient store (local-only; ticket distribution lands in B2).
@@ -40,7 +40,11 @@ services every consumer above. Wiring lives in `tenzro-node`:
 - **Phase C3** — multi-platform reference build contracts.
 - **Phase D1** — agent-memory DA flowing through iroh-blobs when bound.
 - **Phase D2** — A2A-over-iroh on the shared router via the
-  `DeferredJsonRpcDispatcher` trampoline (MCP-over-iroh deferred).
+  `DeferredJsonRpcDispatcher` trampoline, plus MCP-over-iroh on the
+  same router via the `DeferredMcpHandler` trampoline + `McpProtocol`
+  ALPN (`tenzro/mcp`). Each inbound MCP bi-stream becomes a full rmcp
+  session over `AsyncRwTransport` (newline-delimited JSON-RPC, same
+  wire format as stdio MCP).
 
 ## What we never expose
 

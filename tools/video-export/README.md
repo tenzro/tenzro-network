@@ -7,13 +7,14 @@ artifacts compatible with the Tenzro `VideoRuntime`
 
 ## Why this exists
 
-As of 2026-04, the OSS landscape has **no** permissive +
-ONNX-shippable encoder-only video model. VideoMAE v1/v2 are
-CC-BY-NC-4.0 (non-commercial); V-JEPA 2 / 2.1 license is unclear on
-the model card and ONNX export is non-trivial (custom 3D-conv stem).
-This harness exists so that as soon as a permissive video encoder
-lands — or as soon as Meta clarifies the V-JEPA license — we can
-ship the artifact mechanically.
+V-JEPA 2 base is MIT-licensed per Meta's model cards
+(`facebook/vjepa2-vitl-fpc64-256` and sibling repos), so the licensing
+blocker that kept the video catalog empty in wave 1 is resolved. ONNX
+export is still non-trivial (custom 3D-conv stem, predictor head must
+be skipped) so this harness produces the artifact once, the maintainer
+publishes it to `tenzro/vjepa2-vitl-fpc64-256-onnx`, and the catalog
+entry in `crates/tenzro-model/src/catalog.rs::get_video_catalog` is
+flipped on.
 
 The runtime + RPC + CLI surfaces ship empty in wave 1; this harness
 populates them in wave 2.
@@ -22,7 +23,7 @@ populates them in wave 2.
 
 | Model | Upstream repo | Params | License | Tier |
 |-------|---------------|--------|---------|------|
-| V-JEPA 2.1 base | `facebook/vjepa2` | 300M | TBD (license unclear) | B — predictor stripped, custom stem |
+| V-JEPA 2 ViT-L (base) | `facebook/vjepa2-vitl-fpc64-256` | 300M | MIT | B — predictor stripped via `skip_predictor=True`, custom 3D-conv stem |
 | VideoMAE base | `MCG-NJU/videomae-base` | 87M | CC-BY-NC-4.0 | A — clean export, gated by `--accept-non-commercial` |
 
 Tier A: small, well-defined transformer — straight `torch.onnx.export`.
@@ -47,11 +48,11 @@ cd tools/video-export
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
-# Export VideoMAE base to ./out/videomae-base.onnx
-python export.py videomae-base --out ./out
+# Export V-JEPA 2 base to ./out/vjepa2-vitl-fpc64-256.onnx
+python export.py vjepa2-vitl-fpc64-256 --out ./out
 
 # Smoke-test the export
-python verify.py ./out/videomae-base.onnx
+python verify.py ./out/vjepa2-vitl-fpc64-256.onnx
 ```
 
 ## CI
@@ -62,8 +63,9 @@ python verify.py ./out/videomae-base.onnx
 maintainers can manually upload to `tenzro/video-onnx` on
 HuggingFace.
 
-We deliberately don't auto-publish — license clearance for video
-encoders is the bottleneck, not export mechanics.
+We deliberately don't auto-publish. The maintainer runs the export,
+eyeballs the smoke-test output, and uploads to `tenzro/<bundle>` by
+hand.
 
 ## Adding a new target
 

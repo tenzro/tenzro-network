@@ -22,12 +22,15 @@ use commands::{
     ZkCommand, VrfCommand, CustodyCommand, AppCommand,
     CortexCommand, Ap2Command, Erc8004Command, WormholeCommand, CctCommand,
     TrainCommand,
-    DetectCommand, EmbedTextCommand, EmbedVideoCommand, SegmentCommand, TranscribeCommand,
+    DetectCommand, EmbedTextCommand, EmbedVideoCommand, SegmentCommand, TextSegmentCommand,
+    TranscribeCommand,
     AuthCommand,
     X402Command, ReputationCommand, ApprovalCommand, DisputeCommand, ProvenanceCommand,
     BondCommand, InsuranceCommand, CapabilityCommand,
     ValidatorCommand, MemoryCommand, IrohCommand,
     AdaptiveBurnCommand, SeedAgentCommand, Erc7683Command, Erc7579Command, PqHybridCommand,
+    AdminCommand,
+    KeyCommand,
 };
 
 /// Tenzro Network CLI — node operation, wallet management, provider tools
@@ -213,6 +216,10 @@ enum Command {
     #[command(subcommand)]
     Segment(SegmentCommand),
 
+    /// Open-vocabulary text-promptable segmentation (SAM 3, SAM 3.1)
+    #[command(subcommand, name = "text-segment")]
+    TextSegment(TextSegmentCommand),
+
     /// Object detection (RF-DETR, D-FINE)
     #[command(subcommand)]
     Detect(DetectCommand),
@@ -303,6 +310,14 @@ enum Command {
     /// PQ-hybrid signing helpers: info / send / inspect (Ed25519 + ML-DSA-65 composite)
     #[command(subcommand)]
     PqHybrid(PqHybridCommand),
+
+    /// Operator admin: api-key issuance / revocation / listing (`X-Tenzro-Admin-Token`)
+    #[command(subcommand)]
+    Admin(AdminCommand),
+
+    /// Self-managed API keys: list-mine / revoke-mine (subject-gated via `X-Tenzro-Api-Key`)
+    #[command(subcommand)]
+    Key(KeyCommand),
 
     /// Interactive chat with AI models
     Chat(ChatCmd),
@@ -441,6 +456,7 @@ async fn main() -> Result<()> {
         Command::Train(cmd) => cmd.execute().await?,
         Command::EmbedText(cmd) => cmd.execute().await?,
         Command::Segment(cmd) => cmd.execute().await?,
+        Command::TextSegment(cmd) => cmd.execute().await?,
         Command::Detect(cmd) => cmd.execute().await?,
         Command::Transcribe(cmd) => cmd.execute().await?,
         Command::EmbedVideo(cmd) => cmd.execute().await?,
@@ -463,6 +479,8 @@ async fn main() -> Result<()> {
         Command::Erc7683(cmd) => cmd.execute().await?,
         Command::Erc7579(cmd) => cmd.execute().await?,
         Command::PqHybrid(cmd) => cmd.execute().await?,
+        Command::Admin(cmd) => cmd.execute().await?,
+        Command::Key(cmd) => cmd.execute().await?,
         Command::Faucet(cmd) => execute_faucet(cmd).await?,
         Command::Chat(cmd) => execute_chat(cmd).await?,
         Command::Hardware(cmd) => commands::hardware::execute(&cmd.format).await?,

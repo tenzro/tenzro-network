@@ -679,21 +679,18 @@ Changes to bridge configurations are subject to governance proposals. Emergency 
 
 ### 14.1 Testnet
 
-The Foundation (during pre-formation: Tenzro Labs) operates the public testnet:
+The Foundation (during pre-formation: Tenzro Labs) operates the public testnet. Public endpoints:
 
-| Component | Details |
-|-----------|---------|
-| GCP Project | `tenzro-infra` |
-| GKE Cluster | `tenzro-testnet` (us-central1-a) |
-| Container Registry | `us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node` |
-| External access | Caddy reverse proxy with automatic Let's Encrypt TLS |
-| P2P Port | 9000 (direct to pods) |
+| Service | Endpoint |
+|---------|----------|
 | JSON-RPC | `rpc.tenzro.network` |
 | Web API | `api.tenzro.network` |
 | Faucet | `api.tenzro.network/faucet` |
 | MCP Server | `mcp.tenzro.network` |
 | A2A Server | `a2a.tenzro.network` |
-| Metrics | Internal only (port 9090) |
+| P2P | port 9000 (TCP + QUIC) |
+
+Infrastructure layout (cloud, registry, fleet topology) is operator-specific; the Foundation's deployment is one of many possible. For the IaC-agnostic operator guide, see [`deploy/validator-deployment.md`](../deploy/validator-deployment.md).
 
 ### 14.2 Testnet Faucet
 

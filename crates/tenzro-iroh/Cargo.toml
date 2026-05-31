@@ -32,7 +32,7 @@ url = { workspace = true }
 #                    `tenzro/training` libp2p gossipsub topic instead of
 #                    iroh-docs (see sealed_shard_store.rs for rationale).
 # Phase D2 (#223):  iroh-gossip + irpc → A2A/MCP-over-iroh.
-# Per CLAUDE.md pre-launch hygiene: no unused deps shipped to the workspace.
+# Pre-launch hygiene: no unused deps shipped to the workspace.
 iroh = { workspace = true }
 iroh-base = { workspace = true }
 iroh-blobs = { workspace = true }

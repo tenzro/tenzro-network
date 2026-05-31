@@ -1,10 +1,12 @@
 //! Video encoder runtime backed by ONNX Runtime.
 //!
-//! As of 2026 the OSS landscape has no permissive + ONNX-shippable
-//! encoder-only video model. VideoMAE v1/v2 are CC-BY-NC; V-JEPA 2/2.1
-//! has unclear licensing and non-trivial ONNX export. The video catalog
-//! (`get_video_catalog`) ships empty so we don't surface non-runnable
-//! options to users.
+//! The video catalog (`get_video_catalog`) advertises the V-JEPA 2
+//! family (Meta AI, 2025): ViT-L and ViT-H are MIT, ViT-g is
+//! Apache-2.0 — all three are `LicenseTier::Permissive`. The
+//! `load_video_model` RPC rejects until per-model ONNX exports land:
+//! the upstream `facebook/vjepa2-*` repos ship `safetensors` only.
+//! VideoMAE v1/v2 stay off the catalog (CC-BY-NC); V-JEPA 2.1 stays
+//! off (CC-BY-NC-ND).
 //!
 //! The `VisionFallbackVideoEncoder` provided here turns any registered
 //! `ImageEncoder` (CLIP / SigLIP2 / DINOv3 / ViT) into a video encoder by:
