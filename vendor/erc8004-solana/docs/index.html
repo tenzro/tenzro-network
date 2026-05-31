@@ -1,0 +1,1178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>8004 on Solana - Technical Documentation</title>
+    <style>
+        :root {
+            --bg-dark: #0d1117;
+            --bg-card: #161b22;
+            --bg-code: #1c2128;
+            --border: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent-purple: #a371f7;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-orange: #d29922;
+            --accent-red: #f85149;
+            --accent-cyan: #39c5cf;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            line-height: 1.6;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            padding: 3rem 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 3rem;
+        }
+
+        h1 {
+            font-size: 3rem;
+            background: linear-gradient(135deg, var(--accent-purple), var(--accent-blue));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 1rem;
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 1.2rem;
+        }
+
+        .program-ids {
+            display: flex;
+            justify-content: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-top: 2rem;
+        }
+
+        .program-id {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.75rem 1.5rem;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+        }
+
+        .program-id .label {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            display: block;
+            margin-bottom: 0.25rem;
+        }
+
+        .program-id.identity { border-left: 3px solid var(--accent-purple); }
+        .program-id.reputation { border-left: 3px solid var(--accent-green); }
+        .program-id.seal { border-left: 3px solid var(--accent-orange); }
+
+        nav {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 3rem;
+            position: sticky;
+            top: 1rem;
+            z-index: 100;
+        }
+
+        nav ul {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 1rem;
+            list-style: none;
+        }
+
+        nav a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        nav a:hover {
+            background: var(--bg-code);
+            color: var(--accent-blue);
+        }
+
+        section {
+            margin-bottom: 4rem;
+        }
+
+        h2 {
+            font-size: 2rem;
+            color: var(--accent-purple);
+            margin-bottom: 1.5rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid var(--border);
+        }
+
+        h3 {
+            font-size: 1.5rem;
+            color: var(--accent-blue);
+            margin: 2rem 0 1rem;
+        }
+
+        h4 {
+            font-size: 1.2rem;
+            color: var(--accent-cyan);
+            margin: 1.5rem 0 0.75rem;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+
+        .card-header .icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+
+        .icon.purple { background: rgba(163, 113, 247, 0.2); color: var(--accent-purple); }
+        .icon.green { background: rgba(63, 185, 80, 0.2); color: var(--accent-green); }
+        .icon.orange { background: rgba(210, 153, 34, 0.2); color: var(--accent-orange); }
+        .icon.blue { background: rgba(88, 166, 255, 0.2); color: var(--accent-blue); }
+
+        code {
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            background: var(--bg-code);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+
+        pre {
+            background: var(--bg-code);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+            overflow-x: auto;
+            margin: 1rem 0;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            background: var(--bg-code);
+            color: var(--accent-blue);
+            font-weight: 600;
+        }
+
+        tr:hover {
+            background: rgba(88, 166, 255, 0.05);
+        }
+
+        .tag {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .tag.required { background: rgba(248, 81, 73, 0.2); color: var(--accent-red); }
+        .tag.optional { background: rgba(63, 185, 80, 0.2); color: var(--accent-green); }
+        .tag.signer { background: rgba(163, 113, 247, 0.2); color: var(--accent-purple); }
+        .tag.mut { background: rgba(210, 153, 34, 0.2); color: var(--accent-orange); }
+        .tag.init { background: rgba(88, 166, 255, 0.2); color: var(--accent-blue); }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .architecture-diagram {
+            background: var(--bg-code);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2rem;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+            white-space: pre;
+            overflow-x: auto;
+            line-height: 1.4;
+        }
+
+        .highlight {
+            color: var(--accent-green);
+        }
+
+        .warning {
+            background: rgba(210, 153, 34, 0.1);
+            border: 1px solid var(--accent-orange);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+
+        .warning::before {
+            content: "⚠️ ";
+        }
+
+        .info {
+            background: rgba(88, 166, 255, 0.1);
+            border: 1px solid var(--accent-blue);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+
+        .info::before {
+            content: "ℹ️ ";
+        }
+
+        .success {
+            background: rgba(63, 185, 80, 0.1);
+            border: 1px solid var(--accent-green);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+
+        .success::before {
+            content: "✅ ";
+        }
+
+        .pda-seed {
+            background: var(--bg-code);
+            border-left: 3px solid var(--accent-purple);
+            padding: 0.5rem 1rem;
+            margin: 0.5rem 0;
+            font-family: monospace;
+        }
+
+        .flex-row {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
+            text-align: center;
+            flex: 1;
+            min-width: 150px;
+        }
+
+        .stat-card .value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: var(--accent-green);
+        }
+
+        .stat-card .label {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        footer {
+            text-align: center;
+            padding: 3rem 0;
+            border-top: 1px solid var(--border);
+            margin-top: 4rem;
+            color: var(--text-secondary);
+        }
+
+        @media (max-width: 768px) {
+            body { padding: 1rem; }
+            h1 { font-size: 2rem; }
+            nav { position: static; }
+            .program-ids { flex-direction: column; align-items: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="version-tabs" style="margin-bottom: 1rem;">
+                <a href="archive/v0.1.0.html" style="color: var(--text-secondary); margin-right: 1rem; text-decoration: none;">v0.1.0</a>
+                <a href="archive/v0.2.0.html" style="color: var(--text-secondary); margin-right: 1rem; text-decoration: none;">v0.2.0</a>
+                <a href="index.html" style="color: var(--accent-purple); font-weight: bold; text-decoration: none; border-bottom: 2px solid var(--accent-purple); padding-bottom: 2px;">v0.6.0</a>
+            </div>
+            <h1>8004 on Solana</h1>
+            <p class="subtitle">Technical Documentation for AI Agent Identity & Reputation Registry</p>
+            <div class="program-ids">
+                <div class="program-id identity" style="border-left: 3px solid var(--accent-blue);">
+                    <span class="label">agent-registry-8004 (Devnet)</span>
+                    8oo4J9tBB3Hna1jRQ3rWvJjojqM5DYTDJo5cejUuJy3C
+                </div>
+                <div class="program-id reputation" style="border-left: 3px solid var(--accent-green);">
+                    <span class="label">atom-engine (Devnet)</span>
+                    AToMufS4QD6hEXvcvBDg9m1AHeCLpmZQsyfYa5h9MwAF
+                </div>
+            </div>
+            <p style="color: var(--text-secondary); margin-top: 1rem; font-size: 0.9rem;">
+                2 programs | Metaplex Core | ATOM Engine (HLL + Ring Buffer) | 35+ security tests | Asset-based IDs
+            </p>
+        </header>
+
+        <nav>
+            <ul>
+                <li><a href="#changelog">Changelog</a></li>
+                <li><a href="#overview">Overview</a></li>
+                <li><a href="#architecture">Architecture</a></li>
+                <li><a href="#atom-engine">ATOM Engine</a></li>
+                <li><a href="#identity">Identity</a></li>
+                <li><a href="#reputation">Reputation</a></li>
+                <li><a href="#seal">SEAL v1</a></li>
+                <li><a href="#costs">Costs</a></li>
+                <li><a href="#pda-reference">PDA Reference</a></li>
+            </ul>
+        </nav>
+
+        <!-- CHANGELOG SECTION -->
+        <section id="changelog">
+            <h2>Changelog</h2>
+
+            <div class="success">
+                <strong>New:</strong> ATOM Engine integration for advanced on-chain reputation analytics with Sybil resistance.
+            </div>
+
+            <h3>New Program: atom-engine</h3>
+            <ul>
+                <li><strong>HyperLogLog (HLL)</strong> — 256 registers (4-bit packed, 128 bytes) for unique client estimation</li>
+                <li><strong>Ring Buffer</strong> — 24 slots with 56-bit fingerprints for burst detection and revoke</li>
+                <li><strong>Per-Agent Salt</strong> — 8-byte salt prevents HLL grinding attacks</li>
+                <li><strong>Round Robin Eviction</strong> — Cursor-based eviction prevents targeted manipulation</li>
+                <li><strong>Trust Tiers</strong> — 5 tiers (Unknown → Legendary) with hysteresis thresholds</li>
+            </ul>
+
+            <h3>CPI Integration</h3>
+            <ul>
+                <li><code>give_feedback</code> → CPI to <code>atom_engine::update_stats</code></li>
+                <li><code>revoke_feedback</code> → CPI to <code>atom_engine::revoke_stats</code></li>
+                <li><code>NewFeedback</code> event enriched with ATOM metrics</li>
+            </ul>
+
+            <h3>New Account: AtomStats (460 bytes)</h3>
+            <table>
+                <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+                <tr><td>collection</td><td>Pubkey</td><td>Collection filter</td></tr>
+                <tr><td>asset</td><td>Pubkey</td><td>Agent identifier</td></tr>
+                <tr><td>feedback_count</td><td>u32</td><td>Total feedbacks</td></tr>
+                <tr><td>quality_score</td><td>i32</td><td>Weighted score (EMA)</td></tr>
+                <tr><td>hll_packed</td><td>[u8; 128]</td><td>HyperLogLog registers</td></tr>
+                <tr><td>hll_salt</td><td>u64</td><td>Per-agent salt</td></tr>
+                <tr><td>recent_callers</td><td>[u64; 24]</td><td>Ring buffer fingerprints</td></tr>
+                <tr><td>eviction_cursor</td><td>u8</td><td>Round robin pointer</td></tr>
+            </table>
+
+            <h3>Enriched Events</h3>
+            <p><code>NewFeedback</code> now includes:</p>
+            <ul>
+                <li><code>new_trust_tier</code> — Current trust tier (0-4)</li>
+                <li><code>new_quality_score</code> — Updated EMA score</li>
+                <li><code>new_confidence</code> — Statistical confidence (0-100)</li>
+                <li><code>new_risk_score</code> — Burst/outlier risk (0-100)</li>
+                <li><code>new_diversity_ratio</code> — Client diversity (0-100)</li>
+                <li><code>is_unique_client</code> — HLL changed flag</li>
+            </ul>
+        </section>
+
+        <!-- OVERVIEW SECTION -->
+        <section id="overview">
+            <h2>Overview</h2>
+            <p>8004 is a standard for on-chain AI agent registries. This Solana implementation features <strong>SEAL v1</strong> integrity, <strong>ATOM Engine</strong> reputation, and single-collection architecture:</p>
+
+            <div class="grid" style="margin-top: 1.5rem;">
+                <div class="card">
+                    <div class="card-header">
+                        <div class="icon purple">ID</div>
+                        <h4 style="margin: 0;">Identity Module</h4>
+                    </div>
+                    <p>NFT-based agent registration with <strong>Metaplex Core</strong>. Each agent's Core asset address is its unique identifier.</p>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <div class="icon green">★</div>
+                        <h4 style="margin: 0;">Reputation + ATOM</h4>
+                    </div>
+                    <p>Feedback system with <strong>CPI to ATOM Engine</strong>. HyperLogLog for Sybil resistance, trust tiers, and real-time scoring.</p>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <div class="icon orange">🔒</div>
+                        <h4 style="margin: 0;">SEAL v1</h4>
+                    </div>
+                    <p>Solana Event Authenticity Layer. On-chain hash computation ensures feedback integrity — clients cannot lie about what they submitted.</p>
+                </div>
+            </div>
+
+            <div class="flex-row" style="margin-top: 2rem;">
+                <div class="stat-card">
+                    <div class="value">0.0058</div>
+                    <div class="label">SOL per Agent Registration</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value">~0.0046</div>
+                    <div class="label">SOL per Feedback + ATOM</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value">460</div>
+                    <div class="label">Bytes AtomStats/Agent</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value">5</div>
+                    <div class="label">Trust Tiers</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ARCHITECTURE SECTION -->
+        <section id="architecture">
+            <h2>Architecture</h2>
+
+            <div class="architecture-diagram">
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     agent-registry-8004 (Devnet)                             │
+│              <span class="highlight">8oo4J9tBB3Hna1jRQ3rWvJjojqM5DYTDJo5cejUuJy3C</span>                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  ┌────────────────────┐ ┌──────────────────┐ ┌────────────────────────────┐ │
+│  ┌────────────────────┐ ┌──────────────────┐ ┌────────────────────────────┐ │
+│  │   Identity Module  │ │ Reputation Module│ │       SEAL v1              │ │
+│  ├────────────────────┤ ├──────────────────┤ ├────────────────────────────┤ │
+│  │ • register()       │ │ • give_feedback()│ │ • On-chain seal_hash       │ │
+│  │ • set_metadata_pda │ │   └─→ CPI ATOM   │ │ • Hash-chain digests       │ │
+│  │ • delete_meta_pda  │ │ • revoke_feedback│ │ • Feedback/revoke/response │ │
+│  │ • set_agent_uri()  │ │   └─→ CPI ATOM   │ │   integrity verification   │ │
+│  │ • transfer_agent() │ │ • append_response│ │                            │ │
+│  └────────────────────┘ └────────┬─────────┘ └────────────────────────────┘ │
+├──────────────────────────────────┼──────────────────────────────────────────┤
+│                                  ▼                                           │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │                        atom-engine (Devnet)                           │   │
+│  │              <span class="highlight">AToMufS4QD6hEXvcvBDg9m1AHeCLpmZQsyfYa5h9MwAF</span>              │   │
+│  ├──────────────────────────────────────────────────────────────────────┤   │
+│  │  • update_stats() — HLL + Ring Buffer + EMA + Trust Tier              │   │
+│  │  • revoke_stats() — Remove from ring buffer, adjust scores            │   │
+│  │  • AtomStats PDA — 460 bytes per agent                                │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                           METAPLEX CORE                                      │
+│  • Collection created on initialize() as Core Collection                    │
+│  • Agent NFTs are Core Assets verified against collection                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+            </div>
+        </section>
+
+        <!-- ATOM ENGINE SECTION -->
+        <section id="atom-engine">
+            <h2>ATOM Engine</h2>
+            <p>Agent Trust On-chain Model - Advanced reputation analytics with Sybil resistance.</p>
+
+            <div class="info">
+                ATOM provides real-time trust scoring via HyperLogLog (unique clients), ring buffer (burst detection), and EMA (quality weighting).
+            </div>
+
+            <h3>Trust Tiers</h3>
+            <table>
+                <tr><th>Tier</th><th>Value</th><th>Threshold (Upgrade)</th><th>Hysteresis (Downgrade)</th></tr>
+                <tr><td>Unknown</td><td>0</td><td>-</td><td>-</td></tr>
+                <tr><td>New</td><td>1</td><td>1 feedback</td><td>0</td></tr>
+                <tr><td>Established</td><td>2</td><td>10 feedbacks + 60 quality</td><td>50 quality</td></tr>
+                <tr><td>Trusted</td><td>3</td><td>50 feedbacks + 75 quality</td><td>65 quality</td></tr>
+                <tr><td>Legendary</td><td>4</td><td>200 feedbacks + 90 quality</td><td>80 quality</td></tr>
+            </table>
+
+            <h3>Key Algorithms</h3>
+
+            <div class="card">
+                <h4>HyperLogLog (Unique Client Estimation)</h4>
+                <p>256 registers, 4-bit packed (128 bytes). Estimates unique clients with ~6.5% standard error.</p>
+                <pre><code>// Per-agent salt prevents grinding attacks
+salted_hash = keccak256(client_hash || hll_salt)
+register_idx = salted_hash[0..8] % 256
+leading_zeros = count_leading_zeros(salted_hash[8..])
+registers[idx] = max(registers[idx], leading_zeros + 1)</code></pre>
+            </div>
+
+            <div class="card">
+                <h4>Ring Buffer (Burst Detection & Revoke)</h4>
+                <p>24 slots with 56-bit fingerprints. Round-robin eviction prevents manipulation.</p>
+                <pre><code>// Fingerprint = truncated keccak hash
+fingerprint = keccak256(client_pubkey)[0..7]
+
+// Round-robin eviction (cursor increments each write)
+slot = eviction_cursor % 24
+recent_callers[slot] = fingerprint
+eviction_cursor += 1</code></pre>
+            </div>
+
+            <div class="card">
+                <h4>EMA Quality Score</h4>
+                <p>Exponential Moving Average with α=0.1 (10% weight to new scores).</p>
+                <pre><code>// Centered score: 0-100 → -50 to +50
+centered = (score as i32) - 50
+
+// EMA update (scaled by 1000 for precision)
+quality_score = (quality_score * 900 + centered * 100) / 1000</code></pre>
+            </div>
+
+            <h3>CPI Flow</h3>
+            <div class="architecture-diagram">
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        give_feedback()                                   │
+│                    agent-registry-8004                                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│  1. Validate feedback parameters                                         │
+│  2. Compute client_hash = keccak256(client.key)                         │
+│  3. CPI → atom_engine::update_stats(client_hash, score)                 │
+│     └─→ Returns: UpdateResult { trust_tier, quality_score, ... }        │
+│  4. Emit NewFeedback event with ATOM metrics                            │
+└─────────────────────────────────────────────────────────────────────────┘
+            </div>
+
+            <h3>Account Structure: AtomStats</h3>
+            <pre><code>pub struct AtomStats {           // 460 bytes total
+    pub collection: Pubkey,      // 32 - Collection filter
+    pub asset: Pubkey,           // 32 - Agent identifier
+    pub feedback_count: u32,     // 4  - Total feedbacks
+    pub positive_count: u32,     // 4  - Score > 50
+    pub negative_count: u32,     // 4  - Score < 50
+    pub quality_score: i32,      // 4  - EMA score (scaled)
+    pub last_feedback_slot: u64, // 8  - Slot of last feedback
+    pub hll_packed: [u8; 128],   // 128 - HLL registers (256 × 4-bit)
+    pub hll_salt: u64,           // 8  - Per-agent salt
+    pub recent_callers: [u64; 24], // 192 - Ring buffer
+    pub eviction_cursor: u8,     // 1  - Round robin pointer
+    // Output cache (computed on update)
+    pub trust_tier: u8,          // 1
+    pub confidence: u8,          // 1
+    pub risk_score: u8,          // 1
+    pub diversity_ratio: u8,     // 1
+    pub bump: u8,                // 1
+}</code></pre>
+            <div class="pda-seed"><strong>PDA:</strong> seeds = ["atom_stats", asset.key()]</div>
+        </section>
+
+        <!-- TOOLS & ECOSYSTEM SECTION -->
+        <section id="tools">
+            <h2>Tools & Ecosystem</h2>
+
+            <div class="grid">
+                <div class="card">
+                    <div class="card-header">
+                        <div class="icon blue">SDK</div>
+                        <h4 style="margin: 0;">8004 Solana TypeScript SDK</h4>
+                    </div>
+                    <p>Official TypeScript SDK for interacting with 8004 programs. Includes PDA derivation, Borsh schemas, and program wrappers.</p>
+                    <p style="margin-top: 1rem;">
+                        <span class="tag" style="background: rgba(63, 185, 80, 0.2); color: var(--accent-green);">Available</span>
+                    </p>
+                    <p style="margin-top: 0.75rem;">
+                        <a href="https://github.com/QuantuLabs/8004-solana-ts-sdk" style="color: var(--accent-blue);">GitHub Repository →</a>
+                    </p>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="icon green">🔍</div>
+                        <h4 style="margin: 0;">Agent Explorer</h4>
+                    </div>
+                    <p>Browse and explore all registered 8004 agents on Solana. View agent metadata, reputation scores, and feedback history.</p>
+                    <p style="margin-top: 1rem;">
+                        <span class="tag" style="background: rgba(63, 185, 80, 0.2); color: var(--accent-green);">Available</span>
+                    </p>
+                    <p style="margin-top: 0.75rem;">
+                        <a href="https://x402synthex.xyz/agents/" style="color: var(--accent-blue);">x402synthex.xyz/agents →</a>
+                    </p>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="icon purple">UI</div>
+                        <h4 style="margin: 0;">Agent Creation Tool</h4>
+                    </div>
+                    <p>Web interface for creating and managing 8004 agents. No-code solution for registering AI agents on Solana.</p>
+                    <p style="margin-top: 1rem;">
+                        <span class="tag" style="background: rgba(163, 113, 247, 0.2); color: var(--accent-purple);">Launching This Week</span>
+                    </p>
+                    <p style="margin-top: 0.75rem;">
+                        <a href="https://x402synthex.xyz/create-agent/" style="color: var(--accent-blue);">x402synthex.xyz/create-agent →</a>
+                    </p>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="icon orange">IDX</div>
+                        <h4 style="margin: 0;">8004 Indexer</h4>
+                    </div>
+                    <p>Off-chain indexer for 8004 events and account data. Enables fast queries for agent reputation and feedback history.</p>
+                    <p style="margin-top: 1rem;">
+                        <span class="tag" style="background: rgba(210, 153, 34, 0.2); color: var(--accent-orange);">In Development</span>
+                        <span style="color: var(--text-secondary); font-size: 0.85rem; margin-left: 0.5rem;">Expected: Q1 2026</span>
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- IDENTITY MODULE SECTION -->
+        <section id="identity">
+            <h2>Identity Module</h2>
+            <p>Manages agent registration with NFT-based identity. Each agent is represented by a unique <strong>Metaplex Core</strong> asset.</p>
+
+            <h3>Key Design: Permissionless Registration</h3>
+            <div class="info">
+                Anyone can register agents without requiring deployer signature. The program's <strong>Collection Authority PDA</strong> signs for Metaplex collection verification via <code>invoke_signed()</code>.
+            </div>
+
+            <h3>Instructions</h3>
+
+            <!-- initialize -->
+            <div class="card">
+                <h4>initialize()</h4>
+                <p>Initialize the registry and create the Metaplex Core Collection.</p>
+
+                <p><strong>What it does:</strong></p>
+                <ul>
+                    <li>Creates <code>Config</code> PDA with global state</li>
+                    <li>Creates Metaplex Core Collection</li>
+                    <li><strong>Config PDA becomes collection update_authority</strong> (enables permissionless registration)</li>
+                </ul>
+
+                <p><strong>Accounts:</strong></p>
+                <table>
+                    <tr><th>Account</th><th>Type</th><th>Description</th></tr>
+                    <tr><td>config</td><td><span class="tag init">init</span> <span class="tag mut">mut</span></td><td>PDA: <code>["config"]</code></td></tr>
+                    <tr><td>collection</td><td><span class="tag init">init</span></td><td>Core Collection asset</td></tr>
+                    <tr><td>authority</td><td><span class="tag signer">signer</span></td><td>Registry deployer</td></tr>
+                </table>
+            </div>
+
+            <!-- register -->
+            <div class="card">
+                <h4>register(agent_uri: String) / register_empty()</h4>
+                <p>Register a new agent with optional URI.</p>
+
+                <p><strong>Parameters:</strong></p>
+                <table>
+                    <tr><th>Param</th><th>Type</th><th>Constraint</th></tr>
+                    <tr><td>agent_uri</td><td>String</td><td>Max 250 bytes (or empty for register_empty)</td></tr>
+                </table>
+
+                <p><strong>Flow:</strong></p>
+                <ol>
+                    <li>Create Metaplex Core asset with collection plugin</li>
+                    <li><strong>Add to collection via Config PDA signature</strong></li>
+                    <li>Initialize AgentAccount PDA keyed by Core asset address</li>
+                    <li><strong>Asset address = unique identifier</strong> (no sequential counter)</li>
+                </ol>
+
+                <div class="pda-seed">
+                    <strong>Agent PDA:</strong> seeds = ["agent", asset.key()]
+                </div>
+
+                <p><strong>Events:</strong> <code>Registered { asset, owner, agent_uri }</code></p>
+            </div>
+
+            <!-- set_metadata_pda -->
+            <div class="card">
+                <h4>set_metadata_pda(key_hash, key, value, immutable)</h4>
+                <p>Create or update a metadata entry as individual PDA. Only Core asset holder can call.</p>
+
+                <p><strong>Parameters:</strong></p>
+                <table>
+                    <tr><th>Param</th><th>Type</th><th>Description</th></tr>
+                    <tr><td>key_hash</td><td>[u8; 8]</td><td>First 8 bytes of SHA256(key)</td></tr>
+                    <tr><td>key</td><td>String</td><td>Max 32 bytes</td></tr>
+                    <tr><td>value</td><td>Vec&lt;u8&gt;</td><td>Max 256 bytes</td></tr>
+                    <tr><td>immutable</td><td>bool</td><td>If true, cannot modify/delete later</td></tr>
+                </table>
+
+                <div class="pda-seed">
+                    <strong>Metadata PDA:</strong> seeds = ["agent_meta", asset.key(), key_hash[0..8]]
+                </div>
+
+                <div class="warning">
+                    Once <code>immutable: true</code>, the entry is permanently locked.
+                </div>
+            </div>
+
+            <!-- delete_metadata_pda -->
+            <div class="card">
+                <h4>delete_metadata_pda(key_hash)</h4>
+                <p>Delete a metadata PDA and recover rent. Only works if not immutable.</p>
+
+                <p><strong>Parameters:</strong></p>
+                <table>
+                    <tr><th>Param</th><th>Type</th><th>Description</th></tr>
+                    <tr><td>key_hash</td><td>[u8; 8]</td><td>First 8 bytes of SHA256(key)</td></tr>
+                </table>
+
+                <p><strong>Returns:</strong> ~0.0031 SOL rent to owner</p>
+
+                <p><strong>Events:</strong> <code>MetadataDeleted</code></p>
+            </div>
+
+            <!-- set_agent_uri -->
+            <div class="card">
+                <h4>set_agent_uri(new_uri: String)</h4>
+                <p>Update agent URI and sync to Metaplex Core asset.</p>
+                <p>Uses <code>UpdateV1CpiBuilder</code> to update Core asset URI. Config PDA signs as collection update authority.</p>
+            </div>
+
+            <!-- transfer_agent -->
+            <div class="card">
+                <h4>transfer_agent()</h4>
+                <p>Transfer Core asset to new owner. Uses <code>TransferV1CpiBuilder</code> for Metaplex Core transfer.</p>
+            </div>
+
+            <h3>Account Structures</h3>
+
+            <div class="card">
+                <h4>RegistryConfig</h4>
+                <pre><code>pub struct RegistryConfig {
+    pub collection: Pubkey,             // 32 bytes (Core Collection)
+    pub authority: Pubkey,              // 32 bytes
+    pub bump: u8,                       // 1 byte
+}</code></pre>
+                <div class="pda-seed"><strong>PDA:</strong> seeds = ["config"]</div>
+            </div>
+
+            <div class="card">
+                <h4>AgentAccount (313 bytes)</h4>
+                <pre><code>pub struct AgentAccount {
+    pub owner: Pubkey,                  // 32 bytes (cached, synced on transfer)
+    pub asset: Pubkey,                  // 32 bytes (Core asset = unique ID)
+    pub bump: u8,                       // 1 byte
+    pub agent_uri: String,              // 4 + 200 = 204 bytes
+    pub nft_name: String,               // 4 + 32 = 36 bytes ("Agent #X")
+    // Metadata moved to individual PDAs (v0.2.0)
+}
+// Removed: agent_id, created_at, nft_symbol
+// Use blockTime for timestamps, Metaplex for symbol</code></pre>
+                <div class="pda-seed"><strong>PDA:</strong> seeds = ["agent", asset.key()]</div>
+            </div>
+
+            <div class="card">
+                <h4>MetadataEntryPda (~332 bytes)</h4>
+                <pre><code>pub struct MetadataEntryPda {
+    pub asset: Pubkey,              // 32 bytes
+    pub metadata_key: String,       // 4 + 32 = 36 bytes
+    pub metadata_value: Vec&lt;u8&gt;,    // 4 + 250 = 254 bytes
+    pub immutable: bool,            // 1 byte (if true, locked forever)
+    pub bump: u8,                   // 1 byte
+}
+// Removed: agent_id, created_at
+// Delete to recover rent (~0.0029 SOL)</code></pre>
+                <div class="pda-seed"><strong>PDA:</strong> seeds = ["agent_meta", asset.key(), key_hash[0..16]]</div>
+            </div>
+
+            <h3>Error Codes</h3>
+            <table>
+                <tr><th>Error</th><th>Message</th><th>Condition</th></tr>
+                <tr><td>UriTooLong</td><td>"URI&gt;250"</td><td>agent_uri exceeds 250 bytes</td></tr>
+                <tr><td>KeyTooLong</td><td>"Key&gt;32"</td><td>metadata key exceeds 32 bytes</td></tr>
+                <tr><td>ValueTooLong</td><td>"Val&gt;250"</td><td>metadata value exceeds 250 bytes</td></tr>
+                <tr><td>MetadataImmutable</td><td>"Immutable"</td><td>Cannot modify/delete immutable metadata</td></tr>
+                <tr><td>Unauthorized</td><td>"!owner"</td><td>Caller is not agent owner</td></tr>
+                <tr><td>Overflow</td><td>"Overflow"</td><td>Arithmetic overflow during on-chain math</td></tr>
+                <tr><td>InvalidTokenAccount</td><td>"!NFT"</td><td>Token account doesn't hold the NFT</td></tr>
+            </table>
+
+            <h3>Events</h3>
+            <table>
+                <tr><th>Event</th><th>Fields</th><th>Emitted</th></tr>
+                <tr><td>Registered</td><td><strong>asset</strong>, agent_uri, owner</td><td>register()</td></tr>
+                <tr><td>MetadataSet</td><td><strong>asset</strong>, indexed_key, key, value, immutable</td><td>set_metadata_pda()</td></tr>
+                <tr><td>MetadataDeleted</td><td><strong>asset</strong>, key</td><td>delete_metadata_pda()</td></tr>
+                <tr><td>UriUpdated</td><td><strong>asset</strong>, new_uri, updated_by</td><td>set_agent_uri()</td></tr>
+                <tr><td>AgentOwnerSynced</td><td><strong>asset</strong>, old_owner, new_owner</td><td>transfer_agent()</td></tr>
+            </table>
+            <div class="info" style="margin-top: 0.5rem;">
+                <strong>v0.3.0:</strong> All events use <code>asset: Pubkey</code> instead of <code>agent_id: u64</code>.
+            </div>
+        </section>
+
+        <!-- REPUTATION MODULE SECTION -->
+        <section id="reputation">
+            <h2>Reputation Module</h2>
+            <p>Manages feedback and responses for agents. Uses <strong>asset</strong> (Pubkey) as identifier.</p>
+
+            <h3>Key Design: Off-chain Aggregation</h3>
+            <div class="info">
+                <strong>v0.3.0:</strong> Aggregates (total_feedbacks, average_score) computed off-chain via indexer. <code>AgentReputationMetadata</code> only stores <code>next_feedback_index</code> for sequencing.
+            </div>
+            <div class="info" style="margin-top: 0.5rem;">
+                <strong>Compatibility profile:</strong> <code>feedback_index</code> is an on-chain global per-asset sequence (0-based). Per-client ordering is derived off-chain by the indexer.
+            </div>
+
+            <h3>Instructions</h3>
+
+            <!-- give_feedback -->
+            <div class="card">
+                <h4>give_feedback(value, value_decimals, score, feedback_file_hash, tag1, tag2, endpoint, feedback_uri)</h4>
+                <p>Create feedback for an agent. Asset passed via account context.</p>
+
+                <p><strong>Parameters:</strong></p>
+                <table>
+                    <tr><th>Param</th><th>Type</th><th>Constraint</th></tr>
+                    <tr><td>value</td><td>i128</td><td>Signed metric value</td></tr>
+                    <tr><td>value_decimals</td><td>u8</td><td>0-18 (validated on-chain)</td></tr>
+                    <tr><td>score</td><td>Option&lt;u8&gt;</td><td>0-100 when present</td></tr>
+                    <tr><td>feedback_file_hash</td><td>Option&lt;[u8; 32]&gt;</td><td>Optional external file hash</td></tr>
+                    <tr><td>tag1, tag2</td><td>String</td><td>Max 32 bytes each (in event)</td></tr>
+                    <tr><td>endpoint</td><td>String</td><td>Max 250 bytes (in event)</td></tr>
+                    <tr><td>feedback_uri</td><td>String</td><td>Max 250 bytes (in event)</td></tr>
+                </table>
+
+                <p><strong>Global Feedback Index:</strong></p>
+                <pre><code>// feedback_index is global per-asset and managed on-chain
+let feedback_index = agent.feedback_count;
+agent.feedback_count += 1;</code></pre>
+
+                <div class="info" style="margin-top: 0.5rem;">
+                    <strong>Event-only:</strong> No Feedback PDA. Data stored in <code>NewFeedback</code> event + rolling hash-chain digest on <code>AgentAccount</code>.
+                </div>
+            </div>
+
+            <!-- revoke_feedback -->
+            <div class="card">
+                <h4>revoke_feedback(feedback_index, seal_hash)</h4>
+                <p>Emit revocation event and update hash-chain digest. Permissionless (indexer validates authorship).</p>
+
+                <p><strong>Parameters:</strong></p>
+                <table>
+                    <tr><th>Param</th><th>Type</th><th>Constraint</th></tr>
+                    <tr><td>feedback_index</td><td>u64</td><td>Must be &lt; agent.feedback_count</td></tr>
+                    <tr><td>seal_hash</td><td>[u8; 32]</td><td>SEAL hash of original feedback (for digest integrity)</td></tr>
+                </table>
+
+                <p><strong>State Changes:</strong></p>
+                <ul>
+                    <li><code>agent.revoke_digest</code> updated (hash-chain)</li>
+                    <li><code>agent.revoke_count += 1</code></li>
+                    <li>CPI to ATOM <code>revoke_stats</code> (if enabled)</li>
+                </ul>
+                <div class="info" style="margin-top: 0.5rem;">
+                    <strong>Event-only:</strong> No PDA. Emits <code>FeedbackRevoked</code> event.
+                </div>
+            </div>
+
+            <!-- append_response -->
+            <div class="card">
+                <h4>append_response(client_address, feedback_index, response_uri, response_hash, seal_hash)</h4>
+                <p>Append response to existing feedback. <strong>Permissionless</strong> (any signer).</p>
+
+                <p><strong>Parameters:</strong></p>
+                <table>
+                    <tr><th>Param</th><th>Type</th><th>Constraint</th></tr>
+                    <tr><td>client_address</td><td>Pubkey</td><td>Original feedback author</td></tr>
+                    <tr><td>feedback_index</td><td>u64</td><td>Must be &lt; agent.feedback_count</td></tr>
+                    <tr><td>response_uri</td><td>String</td><td>Max 250 bytes (in event)</td></tr>
+                    <tr><td>response_hash</td><td>[u8; 32]</td><td>SHA-256 hash (in event)</td></tr>
+                    <tr><td>seal_hash</td><td>[u8; 32]</td><td>SEAL hash of original feedback (for digest integrity)</td></tr>
+                </table>
+
+                <p><strong>State Changes:</strong></p>
+                <ul>
+                    <li><code>agent.response_digest</code> updated (hash-chain)</li>
+                    <li><code>agent.response_count += 1</code></li>
+                </ul>
+                <div class="info" style="margin-top: 0.5rem;">
+                    <strong>Event-only:</strong> No Response PDA. Emits <code>ResponseAppended</code> event.
+                </div>
+            </div>
+
+            <h3>Reputation Data Model</h3>
+
+            <div class="card">
+                <h4>Event-Only Architecture</h4>
+                <p>Feedback, revocation, and response data are stored as <strong>Solana events</strong> (not PDAs) for rent optimization.
+                   Integrity is guaranteed by rolling hash-chain digests stored in <code>AgentAccount</code>:</p>
+                <pre><code>// In AgentAccount (120 bytes for reputation)
+pub feedback_digest: [u8; 32],   // Rolling keccak256 hash-chain
+pub feedback_count: u64,         // Global feedback counter
+pub response_digest: [u8; 32],   // Rolling keccak256 hash-chain
+pub response_count: u64,         // Response counter
+pub revoke_digest: [u8; 32],     // Rolling keccak256 hash-chain
+pub revoke_count: u64,           // Revoke counter</code></pre>
+                <p>Each operation updates its chain: <code>new_digest = keccak256(old_digest || domain || leaf_data)</code>.</p>
+                <p>Clients verify by replaying all events and comparing final digest against on-chain value.</p>
+            </div>
+
+            <h3>Error Codes</h3>
+            <table>
+                <tr><th>Error</th><th>Message</th><th>Condition</th></tr>
+                <tr><td>InvalidScore</td><td>"Score[0-100]"</td><td>score &gt; 100</td></tr>
+                <tr><td>UriTooLong</td><td>"URI&gt;250"</td><td>file_uri exceeds 250 bytes</td></tr>
+                <tr><td>AgentNotFound</td><td>"!Agent"</td><td>Agent doesn't exist in Identity Registry</td></tr>
+                <tr><td>InvalidFeedbackIndex</td><td>"!FbIdx"</td><td>Index mismatch</td></tr>
+                <tr><td>InvalidIdentityRegistry</td><td>"!IdReg"</td><td>Wrong Identity Registry program</td></tr>
+            </table>
+
+            <h3>Events</h3>
+            <table>
+                <tr><th>Event</th><th>Fields</th></tr>
+                <tr><td>NewFeedback</td><td><strong>asset</strong>, client_address, feedback_index, value, value_decimals, score, feedback_file_hash, seal_hash, atom fields, tag1, tag2, endpoint, feedback_uri</td></tr>
+                <tr><td>FeedbackRevoked</td><td><strong>asset</strong>, client_address, feedback_index, seal_hash, atom result fields, new_revoke_digest/count</td></tr>
+                <tr><td>ResponseAppended</td><td><strong>asset</strong>, client, feedback_index, responder, response_uri, response_hash, seal_hash, new_response_digest/count</td></tr>
+            </table>
+            <div class="info" style="margin-top: 0.5rem;">
+                <strong>v0.3.0:</strong> All events use <code>asset: Pubkey</code>. URIs/hashes stored in events only.
+            </div>
+        </section>
+
+        <!-- SEAL v1 SECTION -->
+        <section id="seal">
+            <h2>SEAL v1 - Solana Event Authenticity Layer</h2>
+            <p>Trustless on-chain hash computation for feedback integrity. The program computes <code>seal_hash</code> deterministically from all instruction parameters.</p>
+
+            <div class="success">
+                <strong>On-chain truth:</strong> seal_hash is computed BY the program, not supplied by the client. Clients cannot lie about what they submitted.
+            </div>
+
+            <h3>How It Works</h3>
+            <div class="architecture-diagram">
+CLIENT submits instruction params (value, score, tags, uri, ...)
+                    │
+                    ▼
+PROGRAM computes: seal_hash = keccak256(canonical_encoding(params))
+                    │
+                    ▼
+LEAF binds seal to context: keccak256(DOMAIN || asset || client || index || seal_hash || slot)
+                    │
+                    ▼
+HASH-CHAIN: digest = keccak256(prev_digest || DOMAIN || leaf)
+                    │
+                    ▼
+INDEXER stores events with seal_hash for off-chain verification
+            </div>
+
+            <h3>Domain Separators</h3>
+            <table>
+                <tr><th>Constant</th><th>Value (16 bytes)</th><th>Usage</th></tr>
+                <tr><td>DOMAIN_SEAL_V1</td><td><code>8004_SEAL_V1____</code></td><td>Seal hash prefix</td></tr>
+                <tr><td>DOMAIN_LEAF_V1</td><td><code>8004_LEAF_V1____</code></td><td>Leaf hash prefix</td></tr>
+                <tr><td>DOMAIN_FEEDBACK</td><td><code>8004_FEED_V1___</code></td><td>Feedback chain</td></tr>
+                <tr><td>DOMAIN_RESPONSE</td><td><code>8004_RESP_V1___</code></td><td>Response chain</td></tr>
+                <tr><td>DOMAIN_REVOKE</td><td><code>8004_REVK_V1___</code></td><td>Revoke chain</td></tr>
+            </table>
+
+            <h3>Hash-Chain Digests</h3>
+            <p>Three independent rolling hash-chains stored in <code>AgentAccount</code>:</p>
+            <table>
+                <tr><th>Field</th><th>Updated By</th><th>Format</th></tr>
+                <tr><td>feedback_digest + feedback_count</td><td>give_feedback()</td><td>40 bytes</td></tr>
+                <tr><td>response_digest + response_count</td><td>append_response()</td><td>40 bytes</td></tr>
+                <tr><td>revoke_digest + revoke_count</td><td>revoke_feedback()</td><td>40 bytes</td></tr>
+            </table>
+
+            <p>See <a href="SEAL.md" style="color: var(--accent-blue);">SEAL.md</a> for full binary format specification and cross-validation vectors.</p>
+        </section>
+
+        <!-- SECURITY SECTION -->
+        <section id="security">
+            <h2>Security</h2>
+            <p>Security mechanisms in the unified program architecture.</p>
+
+            <div class="card">
+                <h4>Agent Existence Verification</h4>
+                <p>Reputation module verifies agent existence by checking the AgentAccount PDA exists before processing.</p>
+                <pre><code>// Agent PDA must exist (asset = unique identifier)
+#[account(
+    seeds = [b"agent", asset.key().as_ref()],
+    bump = agent_account.bump,
+)]
+pub agent_account: Account&lt;'info, AgentAccount&gt;,</code></pre>
+            </div>
+
+            <div class="card">
+                <h4>Ownership Verification (Metaplex Core)</h4>
+                <p>For metadata/URI updates, ownership verified via Core asset directly:</p>
+                <pre><code>// Core asset stores owner in its data
+constraint = asset.owner == owner.key()</code></pre>
+                <p><strong>Why:</strong> Metaplex Core assets store owner directly, simplifying ownership verification.</p>
+            </div>
+
+            <div class="card">
+                <h4>Events-Only Reputation</h4>
+                <p>Feedbacks, responses, and revocations are events-only (no per-feedback PDAs). Integrity ensured via SEAL v1 hash-chains:</p>
+                <pre><code>// Hash-chain rolling digests in AgentAccount
+agent.feedback_digest = chain_hash(prev_digest, DOMAIN_FEEDBACK, leaf);
+agent.feedback_count += 1;</code></pre>
+            </div>
+
+            <div class="card">
+                <h4>SEAL v1 Integrity</h4>
+                <p>seal_hash computed on-chain from all feedback parameters. Indexers verify by replaying events against on-chain digests.</p>
+                <pre><code>let seal_hash = compute_seal_hash_v1(value, decimals, score, ...);
+// seal_hash emitted in event, bound into hash-chain leaf</code></pre>
+            </div>
+        </section>
+
+        <!-- COSTS SECTION -->
+        <section id="costs">
+            <h2>Cost Analysis (v0.3.0)</h2>
+
+            <h3>Operation Costs (Estimated)</h3>
+            <table>
+                <tr><th>Operation</th><th>Cost (SOL)</th><th>Notes</th></tr>
+                <tr><td>Register Agent</td><td><strong>~0.0058</strong></td><td>Core asset + AgentAccount (smaller)</td></tr>
+                <tr><td>Set Metadata</td><td>~0.0032</td><td>MetadataEntryPda</td></tr>
+                <tr><td>Give Feedback</td><td>~0.0014</td><td>FeedbackAccount (optimized)</td></tr>
+                <tr><td>Append Response</td><td>~0.0012</td><td>ResponseAccount (minimal)</td></tr>
+                <tr><td>Initialize ATOM Stats</td><td>~0.005</td><td>AtomStats PDA</td></tr>
+            </table>
+
+            <h3>v0.3.0 Account Size Optimizations</h3>
+            <table>
+                <tr><th>Account</th><th>v0.2.0</th><th>v0.3.0</th><th>Savings</th></tr>
+                <tr><td>AgentReputationMetadata</td><td>50 bytes</td><td>17 bytes</td><td class="highlight"><strong>-66%</strong></td></tr>
+                <tr><td>ResponseAccount</td><td>73 bytes</td><td>41 bytes</td><td class="highlight"><strong>-44%</strong></td></tr>
+                <tr><td>ResponseIndexAccount</td><td>33 bytes</td><td>17 bytes</td><td class="highlight"><strong>-48%</strong></td></tr>
+                <tr><td>FeedbackAccount</td><td>99 bytes</td><td>83 bytes</td><td>-16%</td></tr>
+                <tr><td>FeedbackTagsPda</td><td>97 bytes</td><td>81 bytes</td><td>-16%</td></tr>
+                <tr><td>AgentAccount</td><td>343 bytes</td><td>313 bytes</td><td>-9%</td></tr>
+                <tr><td>RegistryConfig</td><td>94 bytes</td><td>78 bytes</td><td>-17%</td></tr>
+            </table>
+            <p><strong>Per agent (1 feedback, 1 response): significant rent savings via events-only design</strong></p>
+
+            <h3>What Was Removed</h3>
+
+            <div class="card">
+                <h4>1. Validation Module</h4>
+                <p><strong>Removed entirely.</strong> Archived for future upgrade.</p>
+            </div>
+
+            <div class="card">
+                <h4>2. On-chain Aggregates</h4>
+                <p>From AgentReputationMetadata:</p>
+                <ul>
+                    <li><code>total_feedbacks</code>, <code>total_score_sum</code>, <code>average_score</code>, <code>last_updated</code></li>
+                </ul>
+                <p>Now computed off-chain. Only <code>next_feedback_index</code> remains for sequencing.</p>
+            </div>
+
+            <div class="card">
+                <h4>3. Redundant Fields</h4>
+                <ul>
+                    <li><code>agent_id</code> everywhere (replaced by <code>asset</code>)</li>
+                    <li><code>collection</code> from FeedbackAccount</li>
+                    <li><code>created_at</code> from all accounts (use blockTime)</li>
+                    <li><code>nft_symbol</code> from AgentAccount (read from Metaplex)</li>
+                    <li><code>response_hash</code>, indices from ResponseAccount (in events)</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h4>4. Rent Recovery</h4>
+                <p>Accounts can be closed to recover rent:</p>
+                <ul>
+                    <li><code>delete_metadata_pda()</code> - Returns ~0.0029 SOL per entry</li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- PDA REFERENCE SECTION -->
+        <section id="pda-reference">
+            <h2>PDA Reference (v0.3.0)</h2>
+
+            <div class="info">
+                <strong>v0.3.0:</strong> All PDAs now use <code>asset.key()</code> instead of <code>agent_id</code>. The Core NFT address is the unique identifier.
+            </div>
+
+            <h3>Identity Module PDAs</h3>
+            <table>
+                <tr><th>Account</th><th>Seeds</th></tr>
+                <tr><td>Config</td><td><code>["config"]</code></td></tr>
+                <tr><td>Agent</td><td><code>["agent", asset.key()]</code></td></tr>
+                <tr><td>Metadata Entry</td><td><code>["agent_meta", asset.key(), key_hash[0..8]]</code></td></tr>
+            </table>
+
+            <h3>Reputation Module PDAs</h3>
+            <table>
+                <tr><th>Account</th><th>Seeds</th></tr>
+                <tr><td>Agent Reputation</td><td><code>["agent_reputation", asset.key()]</code></td></tr>
+                <tr><td>Feedback</td><td><code>["feedback", asset.key(), feedback_index (LE)]</code></td></tr>
+                <tr><td>Feedback Tags</td><td><code>["feedback_tags", asset.key(), feedback_index (LE)]</code></td></tr>
+                <tr><td>Response</td><td><code>["response", asset.key(), feedback_index (LE), response_index (LE)]</code></td></tr>
+                <tr><td>Response Index</td><td><code>["response_index", asset.key(), feedback_index (LE)]</code></td></tr>
+            </table>
+
+            <h3>ATOM Engine PDAs</h3>
+            <table>
+                <tr><th>Account</th><th>Seeds</th></tr>
+                <tr><td>AtomStats</td><td><code>["atom_stats", asset.key()]</code></td></tr>
+                <tr><td>ATOM Config</td><td><code>["atom_config"]</code></td></tr>
+            </table>
+
+            <h3>Metaplex Core (External)</h3>
+            <table>
+                <tr><th>Account</th><th>Description</th></tr>
+                <tr><td>Collection</td><td>Core Collection asset (stored in config.collection_mint)</td></tr>
+                <tr><td>Asset</td><td>Core Asset for each agent = <strong>unique identifier</strong></td></tr>
+            </table>
+        </section>
+
+        <footer>
+            <p>8004 Solana Implementation v0.6.0 - Technical Documentation</p>
+            <p>Updated: February 2026 | Programs deployed on Devnet</p>
+            <p style="margin-top: 1rem;">
+                <a href="https://eips.ethereum.org/EIPS/eip-8004" style="color: var(--accent-blue);">8004 Spec</a> ·
+                <a href="https://github.com/QuantuLabs/8004-solana" style="color: var(--accent-blue);">GitHub Repository</a>
+            </p>
+        </footer>
+    </div>
+</body>
+</html>

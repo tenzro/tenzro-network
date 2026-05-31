@@ -1,0 +1,143 @@
+-- | ERC-8004 IdentityRegistry — Canton/DAML port.
+--
+-- Mirrors the canonical EVM `IdentityRegistry` proxy at
+-- `tenzro_identity::erc8004::addresses::IDENTITY_REGISTRY`. Allocates a
+-- sequential `agentId` (Int, DAML has no `uint256`) per registration
+-- and binds it to a `controller` party + `metadataUri` (resolvable DID
+-- document, AgentCard, etc.).
+--
+-- # Two-step authorization
+--
+-- Unlike EVM (single signer = `msg.sender`), DAML requires explicit
+-- signatories. The flow:
+--
+-- 1. Caller exercises `Register` on a `RegistryAdmin` contract held by
+--    the Tenzro Network admin party.
+-- 2. The choice creates a `Registered` contract co-signed by the
+--    admin + the registering controller party. `Registered` is the
+--    canonical record; off-chain reflectors read it to populate the
+--    `(did → agentId)` index.
+--
+-- The Tenzro Network admin party is the same actor that holds the
+-- canonical `RegistryAdmin` contract. Registrations are append-only
+-- — `agentId` allocation is via the `nextAgentId` field on the
+-- `RegistryAdmin` contract, which is bumped atomically by the
+-- `Register` choice.
+
+module Tenzro.Erc8004.Identity where
+
+-- | The canonical registry admin contract, held by the Tenzro Network
+-- admin party. Tracks the next agent id to allocate.
+template RegistryAdmin
+  with
+    admin     : Party
+    -- ^ Tenzro Network admin party (registry curator).
+    nextAgentId : Int
+    -- ^ Next sequential agent id (mirrors EVM's `_nextAgentId` counter).
+  where
+    signatory admin
+
+    ensure nextAgentId >= 1
+
+    -- | Allocate a fresh agent id and create the canonical `Registered`
+    -- record. `controller` is the registering party (caller-side
+    -- identity); `metadataUri` is the resolvable DID document /
+    -- AgentCard URL the off-chain world dereferences for full identity.
+    --
+    -- Returns the allocated agent id + the new `RegistryAdmin`
+    -- contract id (with the counter bumped).
+    nonconsuming choice Register
+      : (Int, ContractId Registered)
+      with
+        controller   : Party
+        metadataUri  : Text
+      controller controller, admin
+      do
+        let agentId = nextAgentId
+        registered <- create Registered with
+          admin       = admin
+          controller  = controller
+          agentId     = agentId
+          metadataUri = metadataUri
+        return (agentId, registered)
+
+    -- | Bump the counter. Used internally by `Register`; exposed as a
+    -- separate choice for explicit admin-driven re-syncs (e.g. after a
+    -- cross-VM mirror skews the counter).
+    choice BumpCounter
+      : ContractId RegistryAdmin
+      with
+        newNext : Int
+      controller admin
+      do
+        assertMsg "new counter must be strictly greater" (newNext > nextAgentId)
+        create this with nextAgentId = newNext
+
+-- | The canonical record of a registered agent. Co-signed by the admin
+-- and the controller party so neither side can unilaterally remove the
+-- record (matches the EVM model where neither `msg.sender` nor the
+-- contract owner can silently delete a registration).
+--
+-- Mutator choices (`SetAgentURI`, `SetAgentWallet`, `SetMetadata`)
+-- consume the contract and create a new one with the updated field.
+-- This preserves DAML's "no mutation" invariant while exposing
+-- ERC-8004's update semantics.
+template Registered
+  with
+    admin       : Party
+    controller  : Party
+    agentId     : Int
+    metadataUri : Text
+  where
+    signatory admin, controller
+    key (admin, agentId) : (Party, Int)
+    maintainer key._1
+
+    -- | Update the resolvable metadata URI. Counterpart to EVM
+    -- `setAgentURI(uint256,string)`.
+    choice SetAgentURI
+      : ContractId Registered
+      with
+        newUri : Text
+      controller controller
+      do
+        create this with metadataUri = newUri
+
+    -- | Rebind the controller party. Counterpart to EVM
+    -- `setAgentWallet(uint256,address,uint256,bytes)`. In DAML, the
+    -- newController must counter-sign (so we model the EVM
+    -- `(deadline, signature)` consent pair as an explicit two-party
+    -- exercise).
+    choice SetAgentWallet
+      : ContractId Registered
+      with
+        newController : Party
+      controller controller, newController
+      do
+        create this with controller = newController
+
+    -- | Clear the controller binding. Counterpart to EVM
+    -- `unsetAgentWallet(uint256)`. Once cleared, the registry admin
+    -- becomes the sole signatory — used for retirement.
+    choice UnsetAgentWallet
+      : ContractId Retired
+      controller controller
+      do
+        create Retired with
+          admin       = admin
+          agentId     = agentId
+          metadataUri = metadataUri
+
+-- | The terminal state for a deregistered / wallet-cleared agent.
+-- Held only by the admin party (the controller is gone). The off-chain
+-- DID index treats `Retired` as the negative answer to
+-- `lookup_agent_id_by_did`.
+template Retired
+  with
+    admin       : Party
+    agentId     : Int
+    metadataUri : Text
+  where
+    signatory admin
+    key (admin, agentId) : (Party, Int)
+    maintainer key._1

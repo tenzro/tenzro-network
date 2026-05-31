@@ -1005,4 +1005,4 @@ For each Phase, the integration is considered done when:
 - Fresh node startup hydrates state from RocksDB (no in-memory-only).
 - One end-to-end demo run on testnet using the relevant reference template, producing receipts queryable via RPC, A2A, and (for Phase 2+) on the Canton synchronizer.
 - Operator docs land in the same PR as the feature.
-- All hard rules from project `CLAUDE.md` honored: no backcompat shims, no dead code, no `/api/` redundancy, no version-prefix in tenzro-owned identifiers (`tenzro_workflow_events/1.0.0` is a gossip topic = third-party-style namespacing per existing convention; new RPC methods are `tenzro_*` flat).
+- All workspace conventions honored: no backcompat shims, no dead code, no `/api/` redundancy, no version-prefix in tenzro-owned identifiers (`tenzro_workflow_events/1.0.0` is a gossip topic = third-party-style namespacing per existing convention; new RPC methods are `tenzro_*` flat).

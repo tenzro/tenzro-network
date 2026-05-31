@@ -214,6 +214,177 @@ impl SegmentRunCmd {
 }
 
 // ============================================================================
+// text-segment (SAM 3 / SAM 3.1 — open-vocabulary text-promptable segmentation)
+// ============================================================================
+
+#[derive(Debug, Subcommand)]
+pub enum TextSegmentCommand {
+    /// List the curated text-segmentation catalog (SAM 3, SAM 3.1).
+    Catalog(TextSegmentCatalogCmd),
+    /// List currently-loaded text-promptable segmenters.
+    List(TextSegmentListCmd),
+    /// Download the SAM-3 bundle from HuggingFace Hub and register it.
+    Load(TextSegmentLoadCmd),
+    /// Unregister a previously-loaded text-promptable segmenter.
+    Unload(TextSegmentUnloadCmd),
+    /// Run an open-vocabulary text-prompt segmentation.
+    Run(TextSegmentRunCmd),
+}
+
+impl TextSegmentCommand {
+    pub async fn execute(&self) -> Result<()> {
+        match self {
+            Self::Catalog(c) => c.execute().await,
+            Self::List(c) => c.execute().await,
+            Self::Load(c) => c.execute().await,
+            Self::Unload(c) => c.execute().await,
+            Self::Run(c) => c.execute().await,
+        }
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct TextSegmentCatalogCmd {
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl TextSegmentCatalogCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value =
+            rpc.call("tenzro_listTextSegmentationCatalog", json!({})).await?;
+        println!("{}", serde_json::to_string_pretty(&res)?);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct TextSegmentListCmd {
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl TextSegmentListCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value =
+            rpc.call("tenzro_listTextSegmentationModels", json!({})).await?;
+        println!("{}", serde_json::to_string_pretty(&res)?);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct TextSegmentLoadCmd {
+    /// Catalog model id (e.g. `sam3-vit-h`).
+    #[arg(long)]
+    model: String,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl TextSegmentLoadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc
+            .call(
+                "tenzro_loadTextSegmentationModel",
+                json!({ "model_id": self.model }),
+            )
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&res)?);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct TextSegmentUnloadCmd {
+    #[arg(long)]
+    model: String,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl TextSegmentUnloadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc
+            .call(
+                "tenzro_unloadTextSegmentationModel",
+                json!({ "model_id": self.model }),
+            )
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&res)?);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct TextSegmentRunCmd {
+    /// Model id of a loaded SAM-3 segmenter.
+    #[arg(long)]
+    model: String,
+    /// Path to the input image (PNG/JPEG/WebP).
+    #[arg(long)]
+    image: String,
+    /// Free-text label to segment (e.g. `"person"`, `"sofa"`, `"dog"`).
+    #[arg(long)]
+    text: String,
+    /// Optional normalized cxcywh box prompt, four floats in `[0,1]`
+    /// (e.g. `--box "0.5,0.5,0.3,0.4"`).
+    #[arg(long)]
+    r#box: Option<String>,
+    /// Score threshold in `[0, 1]`.
+    #[arg(long, default_value_t = 0.5)]
+    score_threshold: f32,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl TextSegmentRunCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let image_b64 = read_b64(&self.image)?;
+        let box_prompt = if let Some(spec) = &self.r#box {
+            let parts: Vec<&str> = spec.split(',').collect();
+            if parts.len() != 4 {
+                return Err(anyhow!(
+                    "--box expects four comma-separated floats: cx,cy,w,h"
+                ));
+            }
+            let floats: Vec<f32> = parts
+                .iter()
+                .map(|s| s.trim().parse::<f32>())
+                .collect::<std::result::Result<_, _>>()
+                .map_err(|e| anyhow!("invalid float in --box: {}", e))?;
+            Some(json!({
+                "cx": floats[0],
+                "cy": floats[1],
+                "w": floats[2],
+                "h": floats[3],
+            }))
+        } else {
+            None
+        };
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc
+            .call(
+                "tenzro_textSegment",
+                json!({
+                    "model_id": self.model,
+                    "image_base64": image_b64,
+                    "text_prompt": self.text,
+                    "box_prompt": box_prompt,
+                    "score_threshold": self.score_threshold,
+                }),
+            )
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&res)?);
+        Ok(())
+    }
+}
+
+// ============================================================================
 // detect
 // ============================================================================
 
@@ -400,7 +571,7 @@ impl TranscribeRunCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum EmbedVideoCommand {
-    /// List the curated video catalog (empty in wave 1 pending license clearance).
+    /// List the curated video catalog (V-JEPA 2 ViT-L/H/g; loader pending per-model ONNX export).
     Catalog(EmbedVideoCatalogCmd),
     /// List currently-loaded video encoders.
     List(EmbedVideoListCmd),

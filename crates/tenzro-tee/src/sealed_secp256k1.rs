@@ -35,8 +35,8 @@
 //!
 //! # Production posture
 //!
-//! - No simulation fallback. Per Tenzro's no-simulation-on-testnet policy
-//!   (CLAUDE.md), this module returns `TeeError::NotAvailable` on dev
+//! - No simulation fallback. Per Tenzro's no-simulation-on-testnet
+//!   policy, this module returns `TeeError::NotAvailable` on dev
 //!   machines rather than fabricating fake key material.
 //! - Secret key bytes are wrapped in [`zeroize::Zeroizing`] and wiped on
 //!   drop. `SealedSecp256k1Key` does not implement `Clone` or `Debug` for
@@ -272,8 +272,8 @@ mod tests {
     #[test]
     fn test_derive_auto_off_hardware_returns_not_available() {
         // On dev machines without /dev/sev-guest or /dev/tdx_guest,
-        // derive_auto must NOT silently fabricate a key. Per CLAUDE.md
-        // no-simulation policy.
+        // derive_auto must NOT silently fabricate a key. No-simulation
+        // policy on testnet.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(SealedSecp256k1Key::derive_auto(b"test"));
         // Either NotAvailable (typical dev/CI) or Ok(_) when this very

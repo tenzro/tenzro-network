@@ -1221,7 +1221,7 @@ mod tests {
     fn test_derived_key_off_hardware_returns_not_available() {
         // On every non-SEV host (including macOS dev machines and Linux CI
         // without /dev/sev-guest), derived_key MUST return NotAvailable rather
-        // than fabricate key material. Per CLAUDE.md no-simulation policy.
+        // than fabricate key material. No-simulation policy on testnet.
         let provider = AmdSevSnpProvider::new();
         let result = provider.derived_key(
             0,

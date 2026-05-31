@@ -27,6 +27,7 @@ use tenzro_types::agent_template::{AgentTemplate, AgentTemplateFilter};
 use tenzro_types::skill::{SkillDefinition, SkillFilter};
 use tenzro_types::tool::{ToolDefinition, ToolFilter};
 
+use crate::auth::AgentCredentials;
 use crate::error::AgentKitError;
 
 /// JSON-RPC 2.0 envelope.
@@ -95,7 +96,29 @@ impl RegistryClient {
         method: &str,
         params: Value,
     ) -> Result<Value, AgentKitError> {
-        self.call(method, params).await
+        self.call_inner(method, params, None).await
+    }
+
+    /// DPoP-authenticated low-level JSON-RPC call.
+    ///
+    /// Adds:
+    /// - `Authorization: DPoP <jwt>` from `credentials.jwt`
+    /// - `DPoP: <jws>` from `credentials.dpop.sign_proof(POST, rpc_url, jwt)`
+    ///
+    /// Per RFC 9449, the DPoP proof is bound to:
+    /// - the HTTP method ("POST"),
+    /// - the request URL (the bare `rpc_url`, since JSON-RPC has no per-method path),
+    /// - the access token via `ath = base64url(SHA-256(token))`,
+    /// - a fresh `jti` (replay-detected at the verifier).
+    ///
+    /// The proof is constructed fresh per call — never cached, never reused.
+    pub async fn call_raw_with_auth(
+        &self,
+        method: &str,
+        params: Value,
+        credentials: &AgentCredentials,
+    ) -> Result<Value, AgentKitError> {
+        self.call_inner(method, params, Some(credentials)).await
     }
 
     /// Low-level call: sends a JSON-RPC request and decodes the result into `T`.
@@ -104,6 +127,21 @@ impl RegistryClient {
         method: &str,
         params: Value,
     ) -> Result<T, AgentKitError> {
+        let value = self.call_inner(method, params, None).await?;
+        serde_json::from_value::<T>(value).map_err(|e| {
+            AgentKitError::RpcDeserialize(format!("result decode for {method}: {e}"))
+        })
+    }
+
+    /// Single dispatch site that handles both the anonymous and the
+    /// DPoP-authenticated paths so the envelope / response / error
+    /// handling stays in one place.
+    async fn call_inner(
+        &self,
+        method: &str,
+        params: Value,
+        credentials: Option<&AgentCredentials>,
+    ) -> Result<Value, AgentKitError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -112,15 +150,29 @@ impl RegistryClient {
             params,
         };
 
-        tracing::debug!(target: "tenzro_agent_kit::registry", method, "rpc call");
+        tracing::debug!(
+            target: "tenzro_agent_kit::registry",
+            method,
+            authed = credentials.is_some(),
+            "rpc call"
+        );
 
-        let resp = self
-            .http
-            .post(self.rpc_url.as_str())
-            .json(&req)
-            .send()
-            .await
-            .map_err(AgentKitError::from)?;
+        // RFC 9449: htu is origin + path with the query string stripped.
+        // We post against the bare rpc_url which already lacks a query
+        // string, so the configured URL is the htu verbatim.
+        let mut builder = self.http.post(self.rpc_url.as_str()).json(&req);
+
+        if let Some(creds) = credentials {
+            let proof = creds
+                .dpop
+                .sign_proof("POST", self.rpc_url.as_str(), &creds.jwt)
+                .await?;
+            builder = builder
+                .header("Authorization", format!("DPoP {}", creds.jwt))
+                .header("DPoP", proof);
+        }
+
+        let resp = builder.send().await.map_err(AgentKitError::from)?;
 
         let status = resp.status();
         let body = resp.text().await.map_err(AgentKitError::from)?;
@@ -167,9 +219,7 @@ impl RegistryClient {
             AgentKitError::RpcDeserialize("rpc response missing both result and error".into())
         })?;
 
-        serde_json::from_value::<T>(result).map_err(|e| {
-            AgentKitError::RpcDeserialize(format!("result decode for {method}: {e}"))
-        })
+        Ok(result)
     }
 
     // ────────────────────────────────────────────────────────────────────────

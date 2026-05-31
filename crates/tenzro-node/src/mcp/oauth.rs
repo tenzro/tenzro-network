@@ -861,6 +861,16 @@ pub async fn bearer_auth_check(
             .map(|s| s.to_string()),
         http_method: req.method().as_str().to_string(),
         http_uri: req.uri().to_string(),
+        x_tenzro_api_key: req
+            .headers()
+            .get("x-tenzro-api-key")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
+        x_tenzro_admin_token: req
+            .headers()
+            .get("x-tenzro-admin-token")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
     };
 
     // Auth mode floor is `tiered`. Historical `false`/`0` bypass was removed —

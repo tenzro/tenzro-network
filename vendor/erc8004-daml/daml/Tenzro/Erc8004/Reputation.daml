@@ -1,0 +1,104 @@
+-- | ERC-8004 ReputationRegistry — Canton/DAML port.
+--
+-- Mirrors the canonical EVM `ReputationRegistry` proxy at
+-- `tenzro_identity::erc8004::addresses::REPUTATION_REGISTRY`. Records
+-- cross-agent feedback (rating + context URI) plus the v0.6+ revoke +
+-- response choices.
+--
+-- # Two-party authorization
+--
+-- `SubmitFeedback` is signed by the rater alone (no co-signature from
+-- the subject — anyone can publicly rate any agent, mirroring EVM
+-- permissionless writes). `AppendResponse` is signed by the *subject*
+-- (the rated agent's controller party) because only they can attach a
+-- response URI to a feedback row about themselves. `RevokeFeedback` is
+-- signed by the rater (the original author of the row).
+--
+-- Subject identity is the `(admin, agentId)` key the EVM contract
+-- emits in its `FeedbackSubmitted` event — i.e. the same `agentId`
+-- allocated by `Tenzro.Erc8004.Identity.RegistryAdmin.Register`.
+
+module Tenzro.Erc8004.Reputation where
+
+-- | A single feedback entry. Append-only with two mutator paths
+-- (`Revoke` by rater + `AppendResponse` by subject).
+template Feedback
+  with
+    admin           : Party
+    -- ^ Registry admin (Tenzro Network), pinned for cross-template key
+    -- alignment with `Tenzro.Erc8004.Identity.Registered`.
+    rater           : Party
+    -- ^ Party that authored this feedback.
+    subjectAgentId  : Int
+    -- ^ ERC-8004 agentId of the rated subject.
+    rating          : Int
+    -- ^ Quality score (DAML has no `int8`; runtime asserts -128..=127).
+    contextUri      : Text
+    -- ^ Resolvable pointer to the context that justified the rating
+    --   (transcript, work hash, etc.).
+    feedbackId      : Text
+    -- ^ 32-byte hex-encoded feedback id (mirrors EVM `bytes32`).
+    revoked         : Bool
+    -- ^ Latest-write-wins toggle set by `Revoke`.
+    responseUri     : Optional Text
+    -- ^ Latest response attached by the subject via `AppendResponse`.
+  where
+    signatory admin, rater
+
+    ensure rating >= -128 && rating <= 127
+
+    -- | Mark this feedback as revoked. Counterpart to EVM
+    -- `revokeFeedback(uint256,bytes32)`. Idempotent: a second call
+    -- after the entry is already revoked returns the same contract.
+    choice Revoke
+      : ContractId Feedback
+      controller rater
+      do
+        create this with revoked = True
+
+    -- | Attach a response URI. Counterpart to EVM
+    -- `appendResponse(uint256,bytes32,string)`. The subject's
+    -- controller party must counter-sign (DAML's analogue of "only
+    -- the rated agent can respond").
+    --
+    -- "Latest response wins" semantics: repeated calls overwrite.
+    choice AppendResponse
+      : ContractId Feedback
+      with
+        subjectController : Party
+        uri               : Text
+      controller subjectController
+      do
+        create this with responseUri = Some uri
+
+-- | The factory contract held by the registry admin. Creating a
+-- feedback row goes through this so the admin co-signs every row
+-- (matches the EVM model: all rows live in the same on-chain
+-- registry contract).
+template ReputationAdmin
+  with
+    admin : Party
+  where
+    signatory admin
+
+    -- | Submit a new feedback row. Counterpart to EVM
+    -- `submitFeedback(uint256,int8,string)`.
+    nonconsuming choice SubmitFeedback
+      : ContractId Feedback
+      with
+        rater          : Party
+        subjectAgentId : Int
+        rating         : Int
+        contextUri     : Text
+        feedbackId     : Text
+      controller admin, rater
+      do
+        create Feedback with
+          admin          = admin
+          rater          = rater
+          subjectAgentId = subjectAgentId
+          rating         = rating
+          contextUri     = contextUri
+          feedbackId     = feedbackId
+          revoked        = False
+          responseUri    = None

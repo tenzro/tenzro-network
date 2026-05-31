@@ -807,6 +807,54 @@ pub struct NodeConfig {
     /// coordination."
     #[serde(default)]
     pub iroh: tenzro_iroh::TenzroIrohConfig,
+
+    /// Optional Canton/DAML ERC-8004 mirror wiring. When present, every
+    /// TDIP machine registration also buffers (or, with a wired
+    /// `DamlMirrorTransport`, submits) a `RegistryAdmin.Register`
+    /// command against the in-tree DAML port of the canonical
+    /// ERC-8004 IdentityRegistry (see
+    /// `vendor/erc8004-daml/daml/Tenzro/Erc8004/`).
+    ///
+    /// All four fields are participant-side identifiers unknown to
+    /// `tenzro-identity`: they must be supplied by the operator after
+    /// (a) running `daml build` on the vendored DAR (the resulting
+    /// SHA-256 is `package_id`), (b) allocating the Tenzro Network
+    /// admin party on the target Canton participant (`admin_party`),
+    /// and (c) one-time creating the long-lived `RegistryAdmin`
+    /// contract under the admin party (`admin_contract_id`).
+    ///
+    /// `None` is the default and disables the DAML mirror entirely —
+    /// the EVM + SVM mirrors are unaffected.
+    #[serde(default)]
+    pub erc8004_daml: Option<Erc8004DamlConfig>,
+}
+
+/// Operator-supplied Canton/DAML mirror config for the ERC-8004
+/// IdentityRegistry. See [`NodeConfig::erc8004_daml`] for the activation
+/// contract.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Erc8004DamlConfig {
+    /// SHA-256 (64 hex chars) of the compiled `Tenzro.Erc8004.*` DAR
+    /// artifact. Printed by `daml build` and also queryable via the
+    /// Canton participant's `PackageManagementService.ListKnownPackages`
+    /// RPC. Same package id covers all three modules (Identity /
+    /// Reputation / Validation).
+    pub package_id: String,
+
+    /// The Tenzro Network admin party id allocated on the target
+    /// Canton participant (e.g. `TenzroAdmin::123abc...`).
+    pub admin_party: String,
+
+    /// Contract id of the single long-lived `RegistryAdmin` contract
+    /// held by the admin party. Allocated once at participant setup
+    /// via `RegistryAdmin` template create + a stored cid lookup.
+    pub admin_contract_id: String,
+
+    /// Default controller party id used when a TDIP machine
+    /// registration has no Canton-side party binding (the common case
+    /// today — Canton parties are operator-allocated, not
+    /// per-machine).
+    pub default_controller_party: String,
 }
 
 impl Default for NodeConfig {
@@ -866,6 +914,7 @@ impl NodeConfig {
             external_mcp_addr: None,
             geography: None,
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
+            erc8004_daml: None,
         }
     }
 
@@ -901,6 +950,7 @@ impl NodeConfig {
             external_mcp_addr: None,
             geography: None,
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
+            erc8004_daml: None,
         }
     }
 
@@ -936,6 +986,7 @@ impl NodeConfig {
             external_mcp_addr: None,
             geography: None,
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
+            erc8004_daml: None,
         }
     }
 
@@ -971,6 +1022,7 @@ impl NodeConfig {
             external_mcp_addr: None,
             geography: None,
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
+            erc8004_daml: None,
         }
     }
 
@@ -1173,6 +1225,87 @@ mod tests {
         assert_eq!(loaded.rpc_addr, config.rpc_addr);
 
         // Clean up
+        let _ = std::fs::remove_file(temp_file);
+    }
+
+    /// Proves that secret-bearing canton fields marked `#[serde(skip_serializing,
+    /// default)]` survive a load via `load_from_file`. This is the contract the
+    /// RPC-node-only canton persistence design depends on: the secret is hand-
+    /// placed in `/etc/tenzro/node-config.toml` by the fetch-on-boot service,
+    /// the node reads it via `--config`, and the serializer never writes it back
+    /// out even if the loaded config is re-saved.
+    #[test]
+    fn test_canton_devnet_secret_loads_from_toml() {
+        use std::env;
+
+        // Build on default_validator() so every other field has a value the
+        // schema is happy with; only canton matters here.
+        let mut config = NodeConfig::default_validator();
+        config.canton = CantonConfig {
+            host: "json.devnet.tenzro.network".to_string(),
+            port: 443,
+            enabled: true,
+            devnet: true,
+            devnet_client_secret: Some("must-not-be-saved".to_string()),
+            tls: true,
+            oauth: None,
+            static_jwt: None,
+        };
+
+        // Save: the serializer must drop the secret. This is the half of the
+        // contract that protects us from accidentally persisting it on
+        // save_to_file (e.g. via a future admin RPC).
+        let temp_file = env::temp_dir().join("test_canton_secret_load.toml");
+        config.save_to_file(&temp_file).unwrap();
+        let on_disk = std::fs::read_to_string(&temp_file).unwrap();
+        assert!(
+            !on_disk.contains("must-not-be-saved"),
+            "save_to_file must not emit devnet_client_secret — \
+             #[serde(skip_serializing)] is the only defence against \
+             leaking the secret if we ever re-save a loaded config",
+        );
+        assert!(
+            on_disk.contains("devnet = true"),
+            "non-secret canton fields must persist",
+        );
+
+        // Now hand-edit the secret in, the way fetch-canton-config does it
+        // at boot time on validator-0.
+        let with_secret = format!(
+            "{}\ndevnet_client_secret = \"injected-by-fetch-on-boot\"\n",
+            on_disk
+        );
+        // The secret line must land inside the [canton] table — append works
+        // because [canton] is the last table in the default_validator render
+        // (the iroh table comes after but we'll insert at the canton table
+        // explicitly instead of relying on layout).
+        let injected = if let Some(pos) = on_disk.find("[canton]") {
+            // Insert the secret right after the [canton] header so it
+            // unambiguously belongs to that table regardless of what trails it.
+            let mut s = on_disk.clone();
+            let insertion = "\ndevnet_client_secret = \"injected-by-fetch-on-boot\"";
+            let after_header = pos + "[canton]".len();
+            s.insert_str(after_header, insertion);
+            s
+        } else {
+            with_secret
+        };
+        std::fs::write(&temp_file, &injected).unwrap();
+
+        // Load: the deserializer must populate the secret despite the
+        // skip_serializing attribute. This is the half of the contract that
+        // makes hand-placed config work.
+        let loaded = NodeConfig::load_from_file(&temp_file).unwrap();
+        assert!(loaded.canton.enabled);
+        assert!(loaded.canton.devnet);
+        assert!(loaded.canton.tls);
+        assert_eq!(
+            loaded.canton.devnet_client_secret.as_deref(),
+            Some("injected-by-fetch-on-boot"),
+            "load_from_file must populate devnet_client_secret from TOML — \
+             the persistent canton config design depends on this",
+        );
+
         let _ = std::fs::remove_file(temp_file);
     }
 }

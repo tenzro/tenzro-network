@@ -394,7 +394,7 @@ impl ModelDownloadCmd {
         });
 
         // Perform download
-        match downloader.download_model(&entry, progress_tx).await {
+        match downloader.download_model(&entry, None, progress_tx).await {
             Ok(path) => {
                 pb.finish_with_message("Download complete!");
                 output::print_success(&format!("Model downloaded to: {}", path.display()));

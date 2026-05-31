@@ -14,7 +14,8 @@
 //!
 //! | Step variant      | RPC method / handler used                         |
 //! |-------------------|---------------------------------------------------|
-//! | `EvmDispatch`     | `eth_sendRawTransaction` (via registry client)    |
+//! | `EvmDispatch`     | `tenzro_signAndSendTransaction` (DPoP-authed)     |
+//! | `SvmDispatch`     | `tenzro_svmDispatch` (DPoP-authed)                |
 //! | `BridgeTransfer`  | `tenzro_bridgeTokens` (or `tenzro_getBridgeRoutes`)|
 //! | `MppPay`          | `tenzro_payMpp`                                   |
 //! | `X402Pay`         | `tenzro_payX402`                                  |
@@ -50,7 +51,7 @@ use serde_json::{json, Value};
 
 use tenzro_identity::IdentityRegistry;
 use tenzro_types::agent_template::{
-    ExecutionBackend, ExecutionSpec, ExecutionStep,
+    ExecutionBackend, ExecutionSpec, ExecutionStep, SvmAccountMeta,
 };
 
 use crate::error::AgentKitError;
@@ -372,6 +373,23 @@ impl Executor {
                 )
                 .await
             }
+            ExecutionStep::SvmDispatch {
+                program_id,
+                accounts,
+                instruction_data_template,
+            } => {
+                self.dispatch_svm(
+                    spawned,
+                    spec,
+                    program_id,
+                    accounts,
+                    instruction_data_template,
+                    ctx,
+                    run_opts,
+                    report,
+                )
+                .await
+            }
             ExecutionStep::BridgeTransfer {
                 from_chain,
                 to_chain,
@@ -578,27 +596,369 @@ impl Executor {
             return Ok(());
         }
 
-        // Real (non-dry-run) dispatch is not wired in this build. The agent-kit
-        // does not yet hold the DPoP-bound JWT credentials required by
-        // `tenzro_signAndSendTransaction`; the previous shortcut went through
-        // an unauthenticated RPC that has been removed. Surface the gap as an
-        // explicit failed step so callers see it instead of silently
-        // succeeding against a non-existent path.
-        let _ = (calldata_resolved, gas_limit, run_opts);
-        report.push(
-            StepResult {
-                step_kind: "EvmDispatch".into(),
-                operation: operation.into(),
-                status: StepStatus::Failed,
-                message: format!(
-                    "real EVM dispatch unavailable: agent-kit lacks DPoP credentials \
-                     for tenzro_signAndSendTransaction. to={to_resolved} value={value_u128}. \
-                     Use --dry-run for now."
-                ),
-                output: None,
-            },
-            0,
+        // Real dispatch: route through `tenzro_signAndSendTransaction` with
+        // the spawn-time DPoP-bound JWT. The agent's machine identity is the
+        // bearer DID; the node's `resolve_auth_to_wallet` projects that to
+        // the wallet bound at registration and signs hybrid (Ed25519 +
+        // ML-DSA-65) under RAR-scoped authorization derived from the
+        // template's `DelegationSpec`. If no `AuthIssuer` was wired at
+        // spawn (`AgentKit::new` rather than `AgentKit::with_auth_issuer`),
+        // we fail loudly here per `feedback_implement_dont_delete` — never
+        // a silent unauthenticated fallback.
+        let creds = match spawned.credentials.as_ref() {
+            Some(c) => c,
+            None => {
+                report.push(
+                    StepResult {
+                        step_kind: "EvmDispatch".into(),
+                        operation: operation.into(),
+                        status: StepStatus::Failed,
+                        message: format!(
+                            "EVM dispatch requires DPoP credentials but the spawner was \
+                             constructed without an AuthIssuer. Use AgentKit::with_auth_issuer \
+                             at node startup. to={to_resolved} value={value_u128}"
+                        ),
+                        output: None,
+                    },
+                    0,
+                );
+                return Ok(());
+            }
+        };
+
+        // `from` is the agent's machine wallet — the same address that
+        // `register_machine_with_fee` bound a fresh MPC wallet to at spawn.
+        let from_hex = format!(
+            "0x{}",
+            hex::encode(spawned.machine.wallet_address.as_bytes())
         );
+
+        // Decode the template's calldata blob. Empty (or `"0x"`) means a
+        // pure value transfer; anything else is a contract call where the
+        // template has already encoded `selector ++ abi(args)`. We project
+        // this into the `TransactionType` variants the node's typed-tx
+        // signer understands.
+        let raw_calldata = calldata_resolved
+            .strip_prefix("0x")
+            .unwrap_or(&calldata_resolved);
+        let tx_type_json = if raw_calldata.is_empty() {
+            json!({ "Transfer": { "amount": value_u128 } })
+        } else {
+            let bytes = match hex::decode(raw_calldata) {
+                Ok(b) => b,
+                Err(e) => {
+                    report.push(
+                        StepResult {
+                            step_kind: "EvmDispatch".into(),
+                            operation: operation.into(),
+                            status: StepStatus::Failed,
+                            message: format!(
+                                "EVM dispatch: calldata is not valid hex: {e}. \
+                                 calldata={calldata_resolved}"
+                            ),
+                            output: None,
+                        },
+                        0,
+                    );
+                    return Ok(());
+                }
+            };
+            // `ContractCall { function, args }` — the event loop concatenates
+            // `function.as_bytes() ++ args` and routes to the EVM. Pre-encoded
+            // calldata goes entirely into `args` with `function: ""`.
+            json!({
+                "ContractCall": {
+                    "function": "",
+                    "args": bytes,
+                }
+            })
+        };
+
+        let mut params = json!({
+            "from": from_hex,
+            "to": to_resolved,
+            "value": value_u128.to_string(),
+            "gas_limit": gas_limit,
+            "tx_type": tx_type_json,
+        });
+        // Chain id resolution: explicit `RunOptions` override beats the
+        // template's `ExecutionBackend::Evm { chain_id }`, which in turn
+        // beats the node default. We never silently fall through to 1337
+        // here — if neither is set we omit the field and let the node fill
+        // in its genesis chain_id.
+        let chain_id_resolved = run_opts.chain_id_override.or_else(|| match &spec.backend {
+            ExecutionBackend::Evm { chain_id } => Some(*chain_id),
+            _ => None,
+        });
+        if let Some(chain_id) = chain_id_resolved {
+            params["chain_id"] = json!(chain_id);
+        }
+
+        match self
+            .registry
+            .call_raw_with_auth("tenzro_signAndSendTransaction", params, creds)
+            .await
+        {
+            Ok(output) => {
+                ctx.running_total = ctx.running_total.saturating_add(value_u128);
+                let tx_hash = output
+                    .get("tx_hash")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                report.push(
+                    StepResult {
+                        step_kind: "EvmDispatch".into(),
+                        operation: operation.into(),
+                        status: StepStatus::Executed,
+                        message: format!(
+                            "EVM tx signed and submitted: to={to_resolved} \
+                             value={value_u128} tx_hash={tx_hash}"
+                        ),
+                        output: Some(output),
+                    },
+                    value_u128,
+                );
+            }
+            Err(e) => {
+                report.push(
+                    StepResult {
+                        step_kind: "EvmDispatch".into(),
+                        operation: operation.into(),
+                        status: StepStatus::Failed,
+                        message: format!(
+                            "EVM dispatch failed: {e}. to={to_resolved} value={value_u128}"
+                        ),
+                        output: None,
+                    },
+                    0,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Dispatches an [`ExecutionStep::SvmDispatch`] step.
+    ///
+    /// Mirrors [`Self::dispatch_evm`]: substitute template vars, gate
+    /// through hard caps + delegation, honour dry-run, then call the
+    /// node's `tenzro_svmDispatch` JSON-RPC handler with the spawn-time
+    /// DPoP-bound JWT. The handler resolves the bearer DID to the
+    /// agent's wallet, builds a Solana `Transaction` with the agent
+    /// wallet as fee payer + first signer, signs with the wallet's
+    /// Ed25519 leg, and routes the assembled tx through
+    /// `MultiVmRuntime::execute(VmType::Svm)`.
+    ///
+    /// SVM instructions carry no native lamport-value field, so the
+    /// hard-cap gate is invoked with `0` and the delegation enforcement
+    /// runs against the `svm_dispatch` operation label only (no value
+    /// component). Templates that need a per-instruction lamport ceiling
+    /// must encode it in the instruction data itself.
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_svm(
+        &self,
+        spawned: &SpawnedAgent,
+        spec: &ExecutionSpec,
+        program_id: &str,
+        accounts: &[SvmAccountMeta],
+        instruction_data_template: &str,
+        ctx: &mut ExecutionContext,
+        run_opts: &RunOptions,
+        report: &mut RunReport,
+    ) -> Result<(), AgentKitError> {
+        let operation = "svm_dispatch";
+
+        let program_id_resolved = substitute(program_id, &ctx.vars)?;
+        let ix_data_resolved = substitute(instruction_data_template, &ctx.vars)?;
+        let mut accounts_resolved: Vec<SvmAccountMeta> = Vec::with_capacity(accounts.len());
+        for acct in accounts {
+            accounts_resolved.push(SvmAccountMeta {
+                pubkey: substitute(&acct.pubkey, &ctx.vars)?,
+                is_signer: acct.is_signer,
+                is_writable: acct.is_writable,
+            });
+        }
+
+        // Hard-cap gate. SVM ix has no native value, but we still pass
+        // through the standard per-op cap check so an spec author can
+        // disable SVM dispatch entirely via `per_op_value_caps`.
+        if let Err(e) = check_hard_cap(operation, 0, &spec.hard_caps) {
+            report.push(
+                StepResult {
+                    step_kind: "SvmDispatch".into(),
+                    operation: operation.into(),
+                    status: StepStatus::SkippedByHardCap,
+                    message: format!("hard cap: {e}"),
+                    output: None,
+                },
+                0,
+            );
+            return Ok(());
+        }
+
+        // Delegation gate.
+        if let Err(reason) = self.enforce(spawned, operation, None) {
+            report.push(
+                StepResult {
+                    step_kind: "SvmDispatch".into(),
+                    operation: operation.into(),
+                    status: StepStatus::SkippedByDelegation,
+                    message: reason,
+                    output: None,
+                },
+                0,
+            );
+            return Ok(());
+        }
+
+        if run_opts.dry_run {
+            let msg = format!(
+                "dry-run: would dispatch SVM ix program={} accounts={} data_len={}",
+                program_id_resolved,
+                accounts_resolved.len(),
+                ix_data_resolved
+                    .strip_prefix("0x")
+                    .unwrap_or(&ix_data_resolved)
+                    .len()
+                    / 2
+            );
+            report.push(
+                StepResult {
+                    step_kind: "SvmDispatch".into(),
+                    operation: operation.into(),
+                    status: StepStatus::DryRun,
+                    message: msg,
+                    output: None,
+                },
+                0,
+            );
+            return Ok(());
+        }
+
+        // DPoP credentials gate. Same contract as EVM: no AuthIssuer →
+        // no SVM dispatch. Fail loudly per `feedback_implement_dont_delete`.
+        let creds = match spawned.credentials.as_ref() {
+            Some(c) => c,
+            None => {
+                report.push(
+                    StepResult {
+                        step_kind: "SvmDispatch".into(),
+                        operation: operation.into(),
+                        status: StepStatus::Failed,
+                        message: format!(
+                            "SVM dispatch requires DPoP credentials but the spawner was \
+                             constructed without an AuthIssuer. Use AgentKit::with_auth_issuer \
+                             at node startup. program={program_id_resolved}"
+                        ),
+                        output: None,
+                    },
+                    0,
+                );
+                return Ok(());
+            }
+        };
+
+        // Decode instruction data from hex. Empty (or `"0x"`) means a
+        // zero-data ping ix (rare but valid — e.g. system program
+        // CreateAccount has a non-empty data; Memo with empty data is
+        // pathological but legal).
+        let raw_ix = ix_data_resolved
+            .strip_prefix("0x")
+            .unwrap_or(&ix_data_resolved);
+        let ix_bytes = if raw_ix.is_empty() {
+            Vec::new()
+        } else {
+            match hex::decode(raw_ix) {
+                Ok(b) => b,
+                Err(e) => {
+                    report.push(
+                        StepResult {
+                            step_kind: "SvmDispatch".into(),
+                            operation: operation.into(),
+                            status: StepStatus::Failed,
+                            message: format!(
+                                "SVM dispatch: instruction_data is not valid hex: {e}. \
+                                 data={ix_data_resolved}"
+                            ),
+                            output: None,
+                        },
+                        0,
+                    );
+                    return Ok(());
+                }
+            }
+        };
+
+        // Project `accounts_resolved` into the JSON shape the node's
+        // `tenzro_svmDispatch` handler expects: a list of
+        // `{ pubkey, is_signer, is_writable }` objects in the order the
+        // program reads them. The agent's own wallet pubkey is supplied
+        // by the handler as the fee-payer / first signer — templates
+        // never need to list it themselves.
+        let accounts_json: Vec<Value> = accounts_resolved
+            .iter()
+            .map(|a| {
+                json!({
+                    "pubkey": a.pubkey,
+                    "is_signer": a.is_signer,
+                    "is_writable": a.is_writable,
+                })
+            })
+            .collect();
+
+        let mut params = json!({
+            "program_id": program_id_resolved,
+            "accounts": accounts_json,
+            "instruction_data": ix_bytes,
+        });
+
+        // Cluster identifier from the template's backend, if present.
+        // Allows multi-cluster deployments to disambiguate
+        // mainnet-beta / devnet / localhost without per-agent rewiring.
+        if let ExecutionBackend::Svm { cluster } = &spec.backend {
+            params["cluster"] = json!(cluster);
+        }
+
+        match self
+            .registry
+            .call_raw_with_auth("tenzro_svmDispatch", params, creds)
+            .await
+        {
+            Ok(output) => {
+                let signature = output
+                    .get("signature")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                report.push(
+                    StepResult {
+                        step_kind: "SvmDispatch".into(),
+                        operation: operation.into(),
+                        status: StepStatus::Executed,
+                        message: format!(
+                            "SVM tx signed and submitted: program={program_id_resolved} \
+                             accounts={} signature={signature}",
+                            accounts_resolved.len()
+                        ),
+                        output: Some(output),
+                    },
+                    0,
+                );
+            }
+            Err(e) => {
+                report.push(
+                    StepResult {
+                        step_kind: "SvmDispatch".into(),
+                        operation: operation.into(),
+                        status: StepStatus::Failed,
+                        message: format!(
+                            "SVM dispatch failed: {e}. program={program_id_resolved}"
+                        ),
+                        output: None,
+                    },
+                    0,
+                );
+            }
+        }
 
         Ok(())
     }
@@ -945,9 +1305,36 @@ impl Executor {
             return Ok(());
         }
 
+        // Bind `agent_party` to the spawn-time-allocated Canton party so
+        // template `{{agent_party}}` placeholders resolve correctly. When
+        // the template's backend is non-DAML this is `None` and the
+        // substitution will fail loudly on first use of `{{agent_party}}` —
+        // which is the right failure mode (DAML steps in a non-DAML
+        // template are a config bug).
+        if let Some(party) = spawned.canton_party_id() {
+            ctx.vars
+                .entry("agent_party".to_string())
+                .or_insert_with(|| party.to_string());
+        }
+
         let fields_resolved = substitute(fields_json, &ctx.vars)?;
         let fields_value: Value = serde_json::from_str(&fields_resolved)
             .map_err(|e| AgentKitError::Other(format!("daml fields not valid json: {e}")))?;
+
+        // Compose Canton's `template_id` string from the constituent parts.
+        // Canton 3.x JSON Ledger API expects `PackageId:Module:Entity`.
+        let composed_template_id = format!("{template_package}:{module}:{entity}");
+
+        // Map the executor's `command_variant` ("Create" | "Exercise" | a
+        // choice name) to the RPC handler's `command_type` ("create" |
+        // "exercise") + parameter shape. A "Create" submission carries
+        // `create_arguments`; anything else is an exercise that needs a
+        // `contract_id` and a `choice_argument`.
+        let command_type = if command_variant.eq_ignore_ascii_case("create") {
+            "create"
+        } else {
+            "exercise"
+        };
 
         if run_opts.dry_run {
             report.push(
@@ -956,7 +1343,8 @@ impl Executor {
                     operation: operation.into(),
                     status: StepStatus::DryRun,
                     message: format!(
-                        "dry-run: would submit DAML {command_variant} on {template_package}:{module}:{entity}"
+                        "dry-run: would submit DAML {command_variant} on {composed_template_id} as {}",
+                        spawned.canton_party_id().unwrap_or("<participant-default>"),
                     ),
                     output: None,
                 },
@@ -965,18 +1353,41 @@ impl Executor {
             return Ok(());
         }
 
-        let rpc_params = json!({
-            "template_package": template_package,
-            "module": module,
-            "entity": entity,
-            "command_variant": command_variant,
-            "fields": fields_value,
-            "agent_id": spawned.agent_id(),
-            "canton_override": run_opts.canton_participant.as_ref().map(|(h, p)| json!({
-                "host": h,
-                "port": p,
-            })),
-        });
+        let mut rpc_params = serde_json::Map::new();
+        rpc_params.insert("command_type".into(), json!(command_type));
+        rpc_params.insert("template_id".into(), json!(composed_template_id));
+
+        if command_type == "create" {
+            rpc_params.insert("create_arguments".into(), fields_value);
+        } else {
+            // For exercise, the fields payload must include `contract_id`
+            // (the target contract) and `choice_argument` (the choice
+            // parameters). Pull `contract_id` out of the resolved fields
+            // and use `command_variant` as the choice name.
+            let contract_id = fields_value
+                .get("contract_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AgentKitError::Other(
+                    "DAML exercise requires `contract_id` in fields_json"
+                        .to_string(),
+                ))?
+                .to_string();
+            let choice_argument = fields_value
+                .get("choice_argument")
+                .cloned()
+                .unwrap_or(Value::Null);
+            rpc_params.insert("contract_id".into(), json!(contract_id));
+            rpc_params.insert("choice".into(), json!(command_variant));
+            rpc_params.insert("choice_argument".into(), choice_argument);
+        }
+
+        // Per-agent `actAs` override — the participant signs the command
+        // on the agent's allocated party (not the operator's default).
+        if let Some(party) = spawned.canton_party_id() {
+            rpc_params.insert("act_as".into(), json!(party));
+        }
+
+        let rpc_params = Value::Object(rpc_params);
 
         match self
             .registry
@@ -991,7 +1402,8 @@ impl Executor {
                         operation: operation.into(),
                         status: StepStatus::Executed,
                         message: format!(
-                            "submitted DAML {command_variant} on {template_package}:{module}:{entity}"
+                            "submitted DAML {command_variant} on {composed_template_id} as {}",
+                            spawned.canton_party_id().unwrap_or("<participant-default>"),
                         ),
                         output: Some(output),
                     },

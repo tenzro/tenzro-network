@@ -1,6 +1,5 @@
 //! EVM (Ethereum Virtual Machine) executor module
 
-pub mod erc8004;
 pub mod executor;
 pub mod revm_db;
 pub mod wtnzo;

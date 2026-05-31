@@ -1058,10 +1058,9 @@ impl SeedAgentEarmarkManager {
             .as_ref()
             .expect("hydrate_from_storage requires storage");
 
-        // Pre-launch policy (CLAUDE.md "Pre-Launch Code Hygiene"): no
-        // backcompat shims. If a persisted record was written by an older
-        // schema and can't deserialize, drop it and reseed from defaults.
-        // No live users, no data to preserve.
+        // Pre-launch policy: no backcompat shims. If a persisted record
+        // was written by an older schema and can't deserialize, drop it
+        // and reseed from defaults. No live users, no data to preserve.
 
         // Earmark singleton.
         match storage.get(CF_TOKENS, SEED_EARMARK_KEY)? {

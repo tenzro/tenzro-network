@@ -72,6 +72,30 @@ pub struct RequestFaucetParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateApiKeyParams {
+    #[schemars(description = "Free-form label shown in `list`")]
+    pub label: String,
+    #[schemars(
+        description = "Scopes to grant (e.g. [\"canton\"]). Defaults to [\"canton\"] server-side when empty."
+    )]
+    pub scopes: Option<Vec<String>>,
+    #[schemars(
+        description = "Optional subject identifier — typically a Tenzro DID. Required if the operator wants the holder to self-revoke later via `revoke_my_api_key`."
+    )]
+    pub subject: Option<String>,
+    #[schemars(
+        description = "Key class — controls revocability. `subject` (default): subject can self-revoke, admin can revoke. `operator_internal`: admin-only revoke. `operator_protected`: not revokable via RPC by anyone (rotate via operator secret + restart). The MCP tool auto-injects the `confirm_operator_protected` interlock when class is `operator_protected`."
+    )]
+    pub class: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RevokeApiKeyParams {
+    #[schemars(description = "Non-secret `key_id` (returned by `create_api_key` / `list_api_keys`)")]
+    pub key_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetFeeMarketParams {
     #[schemars(description = "Number of recent blocks to summarize in fee history (1..=1024, default 10)")]
     pub blocks: Option<u64>,
@@ -2384,7 +2408,7 @@ pub struct TranscribeParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct VideoEmbedParams {
-    #[schemars(description = "Registered video encoder id. Wave 1 catalog ships empty pending license clearance + ONNX export.")]
+    #[schemars(description = "Registered video encoder id. The V-JEPA 2 family (vjepa2-vitl-256, vjepa2-vith-256, vjepa2-vitg-384) is advertised in the catalog; loading is gated until per-model ONNX exports land.")]
     pub model_id: String,
     #[schemars(description = "Base64-encoded video bytes")]
     pub video_base64: String,
@@ -2453,6 +2477,20 @@ pub struct LoadSegmentationModelParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TextSegmentParams {
+    #[schemars(description = "Registered SAM-3 family segmenter id (e.g. 'sam3-vit-h')")]
+    pub model_id: String,
+    #[schemars(description = "Base64-encoded image bytes")]
+    pub image_base64: String,
+    #[schemars(description = "Free-text label to segment (e.g. 'person', 'sofa', 'dog')")]
+    pub text_prompt: String,
+    #[schemars(description = "Optional normalized cxcywh box prompt {cx, cy, w, h} in [0,1]")]
+    pub box_prompt: Option<serde_json::Value>,
+    #[schemars(description = "Score threshold in [0, 1]; detections below are dropped (default 0.5)")]
+    pub score_threshold: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LoadDetectionModelParams {
     #[schemars(description = "Model id to register under (e.g. 'rf-detr-base')")]
     pub model_id: String,
@@ -2490,7 +2528,7 @@ pub struct LoadVideoModelParams {
     pub model_id: String,
     #[schemars(description = "Filesystem path to the ONNX file")]
     pub path: String,
-    #[schemars(description = "Optional catalog id. Wave-1 RPC stub: returns -32004 — catalog is empty pending license clearance + ONNX export (tools/video-export).")]
+    #[schemars(description = "Optional catalog id (e.g. 'vjepa2-vitl-256'). Returns -32004 until the V-JEPA 2 ONNX export pipeline lands (tools/video-export).")]
     pub catalog_id: Option<String>,
 }
 
@@ -2779,6 +2817,19 @@ pub struct McpRequestHeaders {
     pub dpop: Option<String>,
     pub http_method: String,
     pub http_uri: String,
+    /// Subject-class API key (`tnz_...`) presented via `X-Tenzro-Api-Key`.
+    /// Forwarded into `gate_api_key` and `handle_request` so MCP-originated
+    /// calls to scope-gated namespaces (e.g. `tenzro_*Canton*`,
+    /// `tenzro_listMyApiKeys`, `tenzro_revokeMyApiKey`) see the same
+    /// subject identity that direct JSON-RPC clients do.
+    pub x_tenzro_api_key: Option<String>,
+    /// Operator admin token presented via `X-Tenzro-Admin-Token`. Used to
+    /// gate node-scoped operator mutations (`tenzro_createApiKey`,
+    /// `tenzro_listApiKeys`, `tenzro_revokeApiKey`, staking, provider
+    /// registration). The per-operator sovereignty model: each node
+    /// holds its own admin token; this header authenticates the
+    /// operator-of-this-node, not a global "Tenzro Labs token."
+    pub x_tenzro_admin_token: Option<String>,
 }
 
 tokio::task_local! {
@@ -2807,7 +2858,10 @@ async fn rpc_dispatch(node: &Arc<TenzroNode>, method: &str, params: serde_json::
     };
     // Forward the inbound MCP request's Authorization + DPoP headers to
     // the JSON-RPC layer so auth-sensitive handlers see the real bearer
-    // identity, not an empty `internal()` context.
+    // identity, not an empty `internal()` context. Also forward the
+    // per-request API key + operator admin token so scope-gated and
+    // operator-gated tenzro_* methods can be invoked from MCP tools
+    // with the same authorization model the direct JSON-RPC path uses.
     let h = current_request_headers();
     let auth_ctx = crate::rpc::AuthContext::from_mcp(
         h.authorization,
@@ -2815,7 +2869,25 @@ async fn rpc_dispatch(node: &Arc<TenzroNode>, method: &str, params: serde_json::
         h.http_method,
         h.http_uri,
     );
-    let response = crate::rpc::handle_request(node, request, &auth_ctx).await;
+
+    // Mirror the JSON-RPC layer's gate ordering: admin first, then
+    // subject. Either gate may short-circuit with a typed JSON-RPC
+    // error (`-32001` for admin, `-32004` for subject). Surface the
+    // gate's error message verbatim to MCP callers via
+    // `ErrorData::internal_error` so tool consumers can react to the
+    // same failure modes (missing/wrong header, fail-closed operator).
+    if let Some(err) = crate::rpc::gate_admin_token(node, &request, h.x_tenzro_admin_token.as_deref()) {
+        if let Some(e) = err.error {
+            return Err(ErrorData::internal_error(e.message, None));
+        }
+    }
+    if let Some(err) = crate::rpc::gate_api_key(node, &request, h.x_tenzro_api_key.as_deref()) {
+        if let Some(e) = err.error {
+            return Err(ErrorData::internal_error(e.message, None));
+        }
+    }
+
+    let response = crate::rpc::handle_request(node, request, &auth_ctx, h.x_tenzro_api_key.as_deref()).await;
     if let Some(result) = response.result {
         Ok(result)
     } else if let Some(error) = response.error {
@@ -6449,7 +6521,7 @@ impl TenzroMcpServer {
                     }
                 }
             });
-            match hf_dl.download_model(&entry_clone, progress_tx).await {
+            match hf_dl.download_model(&entry_clone, None, progress_tx).await {
                 Ok(_path) => {
                     if let Some(mut e) = downloads.get_mut(&model_id_spawn) {
                         e.status = "completed".to_string();
@@ -10925,6 +10997,90 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
+    // ─── Multi-modal: Text-promptable segmentation (SAM 3 / SAM 3.1) ───
+
+    #[tool(description = "List text-promptable segmenters currently loaded on this node (SAM 3 family). Use list_text_segmentation_catalog to browse the curated catalog.")]
+    async fn list_text_segmentation_models(
+        &self,
+        Parameters(_): Parameters<EmptyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listTextSegmentationModels",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listTextSegmentationModels failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Browse the curated ONNX text-promptable segmentation catalog: SAM 3 / SAM 3.1 (Meta) — open-vocabulary text-promptable segmenter, ViT-H backbone, 1008x1008 input, 32-token CLIP BPE language encoder.")]
+    async fn list_text_segmentation_catalog(
+        &self,
+        Parameters(_): Parameters<EmptyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listTextSegmentationCatalog",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listTextSegmentationCatalog failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Download (or reuse cached) the SAM-3 family ONNX bundle from HuggingFace Hub and register it under model_id. Bundle contains image encoder, language (CLIP) encoder, decoder, and CLIP tokenizer.")]
+    async fn load_text_segmentation_model(
+        &self,
+        Parameters(params): Parameters<ModelIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_loadTextSegmentationModel",
+            serde_json::json!({ "model_id": params.model_id }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("loadTextSegmentationModel failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Unload a registered SAM-3 segmenter, freeing its three ORT sessions (image encoder, language encoder, decoder).")]
+    async fn unload_text_segmentation_model(
+        &self,
+        Parameters(params): Parameters<ModelIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_unloadTextSegmentationModel",
+            serde_json::json!({ "model_id": params.model_id }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("unloadTextSegmentationModel failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Run open-vocabulary text-promptable segmentation. Provide a free-text label (e.g. 'person', 'dog') and an image; optionally narrow with a normalized cxcywh box. Returns a variable number of detections, each with a bbox (x0,y0,x1,y1 pixels), score, and binary mask resampled to original image dimensions.")]
+    async fn text_segment(
+        &self,
+        Parameters(params): Parameters<TextSegmentParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut payload = serde_json::json!({
+            "model_id": params.model_id,
+            "image_base64": params.image_base64,
+            "text_prompt": params.text_prompt,
+        });
+        if let Some(b) = params.box_prompt {
+            payload["box_prompt"] = b;
+        }
+        if let Some(t) = params.score_threshold {
+            payload["score_threshold"] = serde_json::json!(t);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_textSegment", payload)
+            .await
+            .map_err(|e| err_internal(format!("textSegment failed: {}", e)))?;
+        json_result(result)
+    }
+
     // ─── Multi-modal: Object detection ───
 
     #[tool(description = "List object detection models currently loaded on this node (RF-DETR, D-FINE). Use list_detection_catalog to browse the curated catalog.")]
@@ -11103,7 +11259,7 @@ impl TenzroMcpServer {
 
     // ─── Multi-modal: Video encoders ───
 
-    #[tool(description = "List video encoder models currently loaded on this node. Wave 1 catalog ships empty pending license clearance + ONNX export (V-JEPA 2.1, VideoMAE).")]
+    #[tool(description = "List video encoder models currently loaded on this node. The V-JEPA 2 family (ViT-L / ViT-H / ViT-g) is advertised in the catalog; loading is gated on per-model ONNX export.")]
     async fn list_video_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -11114,7 +11270,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX video encoder catalog. Wave 1 returns an empty list — no permissive, ONNX-shippable, encoder-only video model exists yet in the 2026 OSS landscape. Re-evaluated quarterly. The runtime scaffolding is in place so adding entries later is mechanical.")]
+    #[tool(description = "Browse the curated ONNX video encoder catalog. Advertises the V-JEPA 2 family (vjepa2-vitl-256, vjepa2-vith-256, vjepa2-vitg-384 — Meta AI, MIT / Apache-2.0). Loading is gated on per-model ONNX export until each entry has a published `model.onnx` artifact.")]
     async fn list_video_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -11125,7 +11281,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a video encoder ONNX. Wave-1: the underlying RPC handler returns JSON-RPC -32004 — the video catalog ships empty pending license clearance + ONNX export. Until a native encoder lands, agents should pool per-frame vision_embed instead.")]
+    #[tool(description = "Load a video encoder ONNX. The V-JEPA 2 catalog entries (vjepa2-vitl-256 / vith-256 / vitg-384) are licensed permissively but ship as safetensors upstream; until per-model `model.onnx` exports land, the RPC handler returns JSON-RPC -32004. Until then, agents should pool per-frame vision_embed.")]
     async fn load_video_model(
         &self,
         Parameters(params): Parameters<LoadVideoModelParams>,
@@ -11158,7 +11314,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Produce a clip-level embedding from a short video (base64-encoded). Wave 1: agents can fall back to per-frame vision_embed pooling until a native video encoder lands.")]
+    #[tool(description = "Produce a clip-level embedding from a short video (base64-encoded). Until a V-JEPA 2 ONNX export lands, agents can fall back to per-frame vision_embed pooling.")]
     async fn video_embed(
         &self,
         Parameters(params): Parameters<VideoEmbedParams>,
@@ -11379,6 +11535,100 @@ impl TenzroMcpServer {
         .map_err(|e| err_internal(format!("getWorkflowOperationalMetrics failed: {}", e)))?;
         json_result(result)
     }
+
+    // ─── API Keys ───
+    //
+    // Two control planes mirror the JSON-RPC surface:
+    //
+    //   * Operator (`X-Tenzro-Admin-Token`): `create_api_key`, `list_api_keys`,
+    //     `revoke_api_key` — node-scoped mutation, fail-closed if the admin
+    //     token header is missing or wrong.
+    //   * Subject (`X-Tenzro-Api-Key`): `list_my_api_keys`,
+    //     `revoke_my_api_key` — scoped to the subject identified by the
+    //     presented key; NotFound and NotYours collapse to the same error
+    //     to prevent ownership probing.
+    //
+    // Per-operator sovereignty: each node holds its own admin token; there
+    // is no global "Tenzro Labs token". Network-wide state (validator set,
+    // treasury, fee schedule, system contracts) flows through on-chain
+    // governance via `tenzro-token`, not through admin headers.
+
+    #[tool(
+        description = "Operator-only. Mint a new API key on this node. Requires the caller's MCP request to carry an `X-Tenzro-Admin-Token` header matching the node's configured admin token. `class` controls revocability: `subject` (default) — subject can self-revoke, admin can revoke; `operator_internal` — admin-only revoke; `operator_protected` — not revokable via RPC by anyone (rotate via operator secret + restart). The MCP tool auto-injects the `confirm_operator_protected` interlock when class is `operator_protected`. Returns the plaintext `tnz_...` key exactly once — persist it immediately."
+    )]
+    async fn create_api_key(
+        &self,
+        Parameters(params): Parameters<CreateApiKeyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let class = params.class.unwrap_or_else(|| "subject".to_string());
+        let mut payload = serde_json::json!({
+            "label": params.label,
+            "scopes": params.scopes.unwrap_or_default(),
+            "class": class,
+        });
+        if let Some(subject) = params.subject {
+            payload["subject"] = serde_json::Value::String(subject);
+        }
+        if class == "operator_protected" {
+            payload["confirm_operator_protected"] = serde_json::Value::Bool(true);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_createApiKey", payload)
+            .await
+            .map_err(|e| err_internal(format!("createApiKey failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(
+        description = "Operator-only. List every API key the node has issued — active and revoked. Requires `X-Tenzro-Admin-Token`. Returns `key_id`, `subject`, `label`, `scopes`, `class`, `created_at`, `revoked_at`, `active`."
+    )]
+    async fn list_api_keys(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_listApiKeys", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listApiKeys failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(
+        description = "Operator-only. Revoke an API key by its non-secret `key_id`. Requires `X-Tenzro-Admin-Token`. Fails with `-32004` if the target is an `operator_protected` key (those cannot be revoked via RPC, by anyone, including an admin — rotate by updating the operator secret and restarting the node)."
+    )]
+    async fn revoke_api_key(
+        &self,
+        Parameters(params): Parameters<RevokeApiKeyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "key_id": params.key_id });
+        let result = rpc_dispatch(&self.node, "tenzro_revokeApiKey", payload)
+            .await
+            .map_err(|e| err_internal(format!("revokeApiKey failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(
+        description = "Subject-gated. List every API key belonging to the caller's own subject. Requires the caller's MCP request to carry an `X-Tenzro-Api-Key` header identifying the subject."
+    )]
+    async fn list_my_api_keys(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_listMyApiKeys", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listMyApiKeys failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(
+        description = "Subject-gated. Revoke an API key belonging to the caller's own subject. Requires `X-Tenzro-Api-Key`. Only `subject`-class keys are eligible. The error for \"no such key\" and \"not your key\" is intentionally the same so ownership cannot be probed."
+    )]
+    async fn revoke_my_api_key(
+        &self,
+        Parameters(params): Parameters<RevokeApiKeyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "key_id": params.key_id });
+        let result = rpc_dispatch(&self.node, "tenzro_revokeMyApiKey", payload)
+            .await
+            .map_err(|e| err_internal(format!("revokeMyApiKey failed: {}", e)))?;
+        json_result(result)
+    }
 }
 
 // ─── Helper: parse modality string ───
@@ -11493,10 +11743,10 @@ impl ServerHandler for TenzroMcpServer {
              • load_audio_model — Register an ASR ONNX (encoder+decoder+tokenizer)\n\
              • unload_audio_model — Drop an ASR model\n\n\
              Multi-modal AI — Video:\n\
-             • video_embed — Clip-level video embedding (wave-1 catalog empty pending license clearance)\n\
+             • video_embed — Clip-level video embedding (V-JEPA 2 family advertised; loader gated on ONNX export)\n\
              • list_video_models — List loaded video encoders\n\
-             • list_video_catalog — Browse curated video catalog (empty wave 1)\n\
-             • load_video_model — Register a video encoder ONNX (wave-1 stub)\n\
+             • list_video_catalog — Browse curated video catalog (V-JEPA 2 ViT-L / ViT-H / ViT-g)\n\
+             • load_video_model — Register a video encoder ONNX (returns -32004 until per-model export lands)\n\
              • unload_video_model — Drop a video encoder\n\n\
              Agent Memory:\n\
              • memory_grant — Add a memory (vector + BM25 indexed) for an agent\n\

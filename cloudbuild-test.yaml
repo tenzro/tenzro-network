@@ -6,11 +6,11 @@
 # then runs `cargo test` on the targeted crates. Output appears in the
 # Cloud Build log; the build exits non-zero on test failure.
 #
-# Usage (per CLAUDE.md hard rule, requires explicit per-command authorization):
+# Usage:
 #
 #   gcloud builds submit \
 #     --config=cloudbuild-test.yaml \
-#     --project=tenzro-operator-project \
+#     --project=<your-gcp-project> \
 #     --machine-type=n1-highcpu-32 \
 #     --disk-size=200 \
 #     --timeout=3600s \

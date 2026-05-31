@@ -1,0 +1,22 @@
+[package]
+name = "glass_pumpkin"
+version = "1.9.0"
+edition = "2024"
+authors = ["Michael Lodder <redmike7@gmail.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/mikelodder7/glass_pumpkin"
+description = "A cryptographically secure prime number generator based on rust's own num-bigint and num-integer (vendored 1.9.0, core2 dep removed — see /vendor/glass_pumpkin/README.md)"
+
+[features]
+default = ["std", "getrandom"]
+std = ["once_cell/std"]
+getrandom = ["dep:getrandom"]
+no_std = ["once_cell/critical-section"]
+
+[dependencies]
+num-bigint = { version = "0.4", default-features = false, features = ["rand"] }
+num-integer = { version = "0.1", default-features = false }
+num-traits = { version = "0.2", default-features = false }
+once_cell = { version = "1.21", default-features = false, features = ["alloc"] }
+rand_core = "0.6"
+getrandom = { version = "0.4", optional = true, features = ["std"] }

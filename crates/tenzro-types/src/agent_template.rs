@@ -563,6 +563,31 @@ pub struct HardCaps {
     pub per_day_value: u128,
 }
 
+/// One account in an [`ExecutionStep::SvmDispatch`] instruction.
+///
+/// Mirrors `solana_sdk::instruction::AccountMeta` byte-for-byte:
+/// `(pubkey, is_signer, is_writable)`. Solana programs read accounts
+/// positionally — order is part of the program's ABI and the
+/// declaration order in the template must match the program's
+/// expectations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SvmAccountMeta {
+    /// Base58 account address. Supports `{{var}}` substitution at
+    /// run time.
+    pub pubkey: String,
+
+    /// Whether this account must sign the transaction. The agent's
+    /// own wallet pubkey is supplied as the fee-payer signer by the
+    /// node handler and does NOT need to be listed here.
+    #[serde(default)]
+    pub is_signer: bool,
+
+    /// Whether the program may write to this account's data or
+    /// lamports. Accounts not declared writable are passed read-only.
+    #[serde(default)]
+    pub is_writable: bool,
+}
+
 /// A single declarative step in an `ExecutionSpec`. Each variant maps
 /// directly to an existing subsystem invocation.
 ///
@@ -581,6 +606,37 @@ pub enum ExecutionStep {
         /// Hex-encoded calldata template with optional `{{var}}` substitutions
         calldata_template: String,
         gas_limit: u64,
+    },
+
+    /// Hand-craft a Solana-style instruction and dispatch it through
+    /// `MultiVmRuntime::execute_transaction(VmType::Svm, ...)`.
+    ///
+    /// Mirrors the canonical `solana_sdk::instruction::Instruction`
+    /// shape — a program id, a list of account metas, and an opaque
+    /// instruction-data byte buffer. The executor renders the data
+    /// buffer via the same `{{var}}` substitution rule used by
+    /// `EvmDispatch::calldata_template`, then routes the assembled
+    /// transaction to `tenzro_svmDispatch` (DPoP-authenticated).
+    SvmDispatch {
+        /// Base58 program id (Solana account address of the program
+        /// to invoke). Substituted against the agent context at run
+        /// time, so deployers may parameterize via `{{program_id}}`.
+        program_id: String,
+
+        /// Ordered account metas — order matters; the program reads
+        /// them positionally. Each meta names the account, whether it
+        /// signs the transaction, and whether the program may mutate
+        /// it. Each `pubkey` string supports `{{var}}` substitution.
+        accounts: Vec<SvmAccountMeta>,
+
+        /// Hex-encoded instruction-data template. `0x` prefix
+        /// optional. Substituted with `{{var}}` before being decoded
+        /// to bytes and handed to the program. The agent's wallet
+        /// public key is always implicitly the fee payer and is added
+        /// as the first signer account by the node's
+        /// `tenzro_svmDispatch` handler — the template does not need
+        /// to encode it.
+        instruction_data_template: String,
     },
 
     /// Move tokens across chains via `BridgeRouter::compare_fees` →

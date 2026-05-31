@@ -34,14 +34,22 @@ use chrono::{Duration as ChronoDuration, Utc};
 use tenzro_agent::{AgentRuntime, RegisteredAgent, SpendingPolicy};
 use tenzro_crypto::keys::{KeyPair, KeyType};
 use tenzro_identity::{DelegationScope, IdentityRegistry, TenzroIdentity, TimeBound};
-use tenzro_types::agent_template::{AgentTemplate, DelegationSpec, ExecutionSpec};
+use tenzro_types::agent_template::{
+    AgentTemplate, DelegationSpec, ExecutionBackend, ExecutionSpec,
+};
 use tenzro_types::identity::KycTier;
 use tenzro_types::primitives::Address;
 
+use crate::auth::{AgentAuthRequest, AgentCredentials, AuthIssuer};
 use crate::error::AgentKitError;
 use crate::registry::RegistryClient;
 use crate::resolver::{DiscoveredResources, TemplateResolver};
 use crate::spec::parse_kyc_tier;
+
+/// Default agent JWT TTL — one week. Long enough for a multi-step
+/// rebalance loop to complete without re-issuance; short enough that a
+/// stolen token decays before most controllers would notice.
+const DEFAULT_AGENT_TOKEN_TTL_SECS: u64 = 7 * 24 * 3600;
 
 /// Per-spawn arguments supplied by the caller.
 #[derive(Debug, Clone)]
@@ -97,6 +105,32 @@ pub struct SpawnedAgent {
 
     /// Frozen copy of the spawn-time context map for executor use.
     pub context: HashMap<String, String>,
+
+    /// DPoP-bound JWT credentials issued by the configured [`AuthIssuer`]
+    /// at spawn time. When the spawner is constructed without an issuer
+    /// (`AgentSpawner::new`), this stays `None` and the executor falls
+    /// back to its hardcoded "lacks DPoP credentials" failure path.
+    ///
+    /// **Not persisted.** `AgentCredentials` carries an `Arc<dyn DpopSigner>`
+    /// trait object that cannot serialize. Across a persistence boundary
+    /// the agent loses its authority and must be re-issued by calling
+    /// back into the controller — this is intentional (credentials are
+    /// short-lived, default 7d TTL, so re-issuance is the natural
+    /// recovery path and the agent should not retain its capability to
+    /// sign transactions across a crash boundary it didn't validate).
+    #[serde(skip)]
+    pub credentials: Option<AgentCredentials>,
+
+    /// Canton/Daml party id allocated for this agent on the configured
+    /// participant. `Some(party)` when the template's `ExecutionBackend` is
+    /// `Daml { .. }` — the executor passes this as `actAs` on every
+    /// DAML submission so the on-ledger signer is the agent (not the
+    /// operator's default party). `None` for non-DAML backends.
+    ///
+    /// The allocation is performed via the node's `tenzro_allocateParty`
+    /// RPC during the spawn pipeline; the participant returns the canonical
+    /// `partyId :: participantId` identifier which we store verbatim.
+    pub canton_party_id: Option<String>,
 }
 
 impl SpawnedAgent {
@@ -119,6 +153,14 @@ impl SpawnedAgent {
     pub fn wallet_id(&self) -> &str {
         &self.agent.wallet_id
     }
+
+    /// Returns the Canton/Daml party allocated for this agent at spawn
+    /// time, if the template's backend is `Daml`. The executor consumes
+    /// this on every `DamlSubmit` step so the on-ledger `actAs` is the
+    /// agent, not the operator's default party.
+    pub fn canton_party_id(&self) -> Option<&str> {
+        self.canton_party_id.as_deref()
+    }
 }
 
 /// Performs the spawn pipeline. Stateless — one struct per spawn is fine.
@@ -128,6 +170,13 @@ pub struct AgentSpawner {
     identity_registry: Arc<IdentityRegistry>,
     agent_runtime: Arc<AgentRuntime>,
     resolver: TemplateResolver,
+    /// Optional auth issuer. When set, the spawner mints a DPoP-bound JWT
+    /// for the machine identity at the end of the pipeline so the executor
+    /// can dispatch authenticated `tenzro_signAndSendTransaction` /
+    /// `tenzro_svmDispatch` / Canton commands on the agent's behalf.
+    /// When `None`, the executor falls back to its hardcoded "lacks DPoP
+    /// credentials" error.
+    auth_issuer: Option<Arc<dyn AuthIssuer>>,
 }
 
 impl std::fmt::Debug for AgentSpawner {
@@ -137,12 +186,18 @@ impl std::fmt::Debug for AgentSpawner {
             .field("identity_registry", &"IdentityRegistry { .. }")
             .field("agent_runtime", &"AgentRuntime { .. }")
             .field("resolver", &self.resolver)
+            .field("auth_issuer", &self.auth_issuer.as_ref().map(|_| "AuthIssuer { .. }"))
             .finish()
     }
 }
 
 impl AgentSpawner {
-    /// Constructs a new spawner around shared subsystems.
+    /// Constructs a new spawner around shared subsystems with no auth
+    /// issuer wired. The executor's authenticated dispatch paths
+    /// (EvmDispatch / SvmDispatch / DamlSubmit) will reject any step that
+    /// requires signing because the resulting [`SpawnedAgent`] has no
+    /// credentials embedded. Use [`AgentSpawner::with_auth_issuer`] for
+    /// the full path.
     pub fn new(
         registry: Arc<RegistryClient>,
         identity_registry: Arc<IdentityRegistry>,
@@ -154,6 +209,27 @@ impl AgentSpawner {
             identity_registry,
             agent_runtime,
             resolver,
+            auth_issuer: None,
+        }
+    }
+
+    /// Constructs a spawner with a DPoP-capable auth issuer wired.
+    /// The machine identity will receive a fresh JWT + DPoP signer at the
+    /// end of the spawn pipeline, scoped to the template's
+    /// [`DelegationSpec`] and good for [`DEFAULT_AGENT_TOKEN_TTL_SECS`].
+    pub fn with_auth_issuer(
+        registry: Arc<RegistryClient>,
+        identity_registry: Arc<IdentityRegistry>,
+        agent_runtime: Arc<AgentRuntime>,
+        auth_issuer: Arc<dyn AuthIssuer>,
+    ) -> Self {
+        let resolver = TemplateResolver::new(registry.clone());
+        Self {
+            registry,
+            identity_registry,
+            agent_runtime,
+            resolver,
+            auth_issuer: Some(auth_issuer),
         }
     }
 
@@ -342,6 +418,85 @@ impl AgentSpawner {
             "agent registered and activated"
         );
 
+        // 5b. Allocate a Canton/Daml party for the agent when the template's
+        //     backend is DAML-backed. The on-ledger `actAs` of every contract
+        //     this agent submits will be this party — not the operator's
+        //     participant-default party. The participant returns a canonical
+        //     `partyId :: participantId` identifier which is stored verbatim
+        //     on `SpawnedAgent.canton_party_id` and consumed by the executor's
+        //     DAML dispatch path.
+        //
+        //     Failure here aborts the spawn; the registered identities + agent
+        //     are not torn down (they're orphan but harmless — the agent has
+        //     no credentials yet and cannot submit). For non-DAML backends
+        //     this step is a no-op and `canton_party_id` stays `None`.
+        let canton_party_id = if matches!(spec.backend, ExecutionBackend::Daml { .. }) {
+            // Use the agent runtime id as the party-id hint — it's already
+            // unique-per-spawn (a UUID minted by `AgentRuntime`) and ties the
+            // on-ledger party back to the agent for forensic correlation.
+            let hint = format!("agent-{}", registered.identity.agent_id);
+            let display = template.name.clone();
+            let result: serde_json::Value = self
+                .registry
+                .call_raw(
+                    "tenzro_allocateParty",
+                    serde_json::json!({
+                        "party_id_hint": hint,
+                        "display_name": display,
+                    }),
+                )
+                .await?;
+            let party_id = result
+                .get("party_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AgentKitError::Other(format!(
+                    "tenzro_allocateParty returned unexpected shape: {result}"
+                )))?
+                .to_string();
+            tracing::info!(
+                target: "tenzro_agent_kit::spawner",
+                machine_did = %machine.did,
+                party_id = %party_id,
+                "Canton party allocated for DAML-backed agent"
+            );
+            Some(party_id)
+        } else {
+            None
+        };
+
+        // 6. Mint DPoP-bound JWT credentials for the machine identity.
+        //    This is the final step so a credential-issuance failure leaves
+        //    no partial side-effects beyond the registered identities (which
+        //    are themselves recoverable / re-registrable). When no issuer
+        //    is wired the executor handles the missing-credentials case.
+        let credentials = if let Some(issuer) = self.auth_issuer.as_ref() {
+            let request = AgentAuthRequest {
+                bearer_did: machine.did.to_string(),
+                controller_did: controller.did.to_string(),
+                max_transaction_value: spec.delegation.max_transaction_value,
+                max_daily_spend: spec.delegation.max_daily_spend,
+                allowed_operations: spec.delegation.allowed_operations.clone(),
+                allowed_chains: spec.delegation.allowed_chains.clone(),
+                ttl_secs: DEFAULT_AGENT_TOKEN_TTL_SECS,
+            };
+            let creds = issuer.issue(request).await?;
+            tracing::info!(
+                target: "tenzro_agent_kit::spawner",
+                machine_did = %machine.did,
+                jkt = %creds.jkt,
+                expires_at_unix = creds.expires_at_unix,
+                "DPoP-bound JWT credentials minted for agent"
+            );
+            Some(creds)
+        } else {
+            tracing::warn!(
+                target: "tenzro_agent_kit::spawner",
+                machine_did = %machine.did,
+                "no AuthIssuer wired — agent will fail signed-dispatch steps"
+            );
+            None
+        };
+
         Ok(SpawnedAgent {
             template,
             controller,
@@ -349,6 +504,8 @@ impl AgentSpawner {
             agent: registered,
             discovered,
             context: args.context,
+            credentials,
+            canton_party_id,
         })
     }
 }

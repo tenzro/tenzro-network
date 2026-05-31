@@ -69,6 +69,7 @@
 //! See [`NodeConfig`] for available configuration options.
 
 pub mod a2a;
+pub mod agent_kit_auth;
 pub mod api_key;
 pub mod block_sync;
 pub mod commission_policy;
@@ -76,6 +77,8 @@ pub mod config;
 pub mod cortex_gossip;
 pub mod erc8004_mirror;
 pub mod erc8004_reputation_dispatcher;
+pub mod erc8004_daml_mirror;
+pub mod erc8004_svm_mirror;
 pub mod error;
 pub mod escrow_resolver_bridge;
 pub mod eu_ai_disclosure;

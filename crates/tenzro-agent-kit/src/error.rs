@@ -85,6 +85,11 @@ pub enum AgentKitError {
     #[error("payment error: {0}")]
     Payment(String),
 
+    /// AuthIssuer / DPoP credential failure (missing issuer at spawn,
+    /// JWT mint failure, DPoP proof signing failure).
+    #[error("auth error: {0}")]
+    Auth(String),
+
     /// Catch-all
     #[error("agent kit error: {0}")]
     Other(String),

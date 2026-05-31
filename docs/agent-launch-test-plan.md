@@ -213,4 +213,4 @@ Must be green before Phase B opens:
 - Faucet config: `config/genesis-local.toml:31-36`
 - SeedAgent system: `crates/tenzro-token/src/seed_agent/`
 - Agent kit templates: `crates/tenzro-agent-kit/reference_templates/`
-- Multi-modal catalogs: `crates/tenzro-model/src/` (7 catalogs, see CLAUDE.md `tenzro-model` section)
+- Multi-modal catalogs: `crates/tenzro-model/src/{vision_catalog,forecast_catalog,text_embedding_catalog,segmentation_catalog,detection_catalog,audio_catalog,video_catalog}.rs`

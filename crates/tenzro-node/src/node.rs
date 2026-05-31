@@ -25,7 +25,8 @@ use tenzro_crypto::{KeyPair, KeyType};
 use tenzro_identity::IdentityRegistry;
 use tenzro_model::{
     AudioRuntime, DetectionRuntime, HfDownloader, InferenceRouter, ModelRegistry, ModelRuntime,
-    ProviderManager, SegmentationRuntime, TextEmbeddingRuntime, TimeseriesRuntime, VideoRuntime,
+    ProviderManager, SegmentationRuntime, TextEmbeddingRuntime, TextSegmentationRuntime,
+    TimeseriesRuntime, VideoRuntime,
     VisionRuntime,
 };
 use tenzro_network::{MessagePayload, NetworkMessage, NetworkService, TenzroNetworkService};
@@ -1175,6 +1176,7 @@ pub struct TenzroNode {
     pub vision_runtime: Arc<VisionRuntime>,
     pub text_embedding_runtime: Arc<TextEmbeddingRuntime>,
     pub segmentation_runtime: Arc<SegmentationRuntime>,
+    pub text_segmentation_runtime: Arc<TextSegmentationRuntime>,
     pub detection_runtime: Arc<DetectionRuntime>,
     pub audio_runtime: Arc<AudioRuntime>,
     pub video_runtime: Arc<VideoRuntime>,
@@ -1202,6 +1204,14 @@ pub struct TenzroNode {
     /// returns a JSON-RPC `-32603` "dispatcher not yet bound" envelope to
     /// connecting peers.
     pub iroh_a2a_dispatcher: Option<Arc<tenzro_iroh::DeferredJsonRpcDispatcher>>,
+
+    /// Deferred MCP-over-iroh stream handler. Same chicken-and-egg pattern
+    /// as `iroh_a2a_dispatcher`: the `tenzro/mcp` ALPN is registered on the
+    /// iroh router at bind time backed by an unbound trampoline, then the
+    /// real `IrohMcpHandler` (which needs `Arc<TenzroNode>` to construct
+    /// `TenzroMcpServer` instances per session) is installed from `main.rs`
+    /// after `Arc::new(node)` exists.
+    pub iroh_mcp_handler: Option<Arc<tenzro_iroh::DeferredMcpHandler>>,
 
     // Identity & Payments (TDIP + MPP/x402)
     identity_registry: Option<Arc<IdentityRegistry>>,
@@ -1258,24 +1268,37 @@ pub struct TenzroNode {
     /// `tenzro_vm::precompiles::ZkCommitmentRegistry`.
     zk_commitment_registry: Arc<tenzro_vm::precompiles::ZkCommitmentRegistry>,
 
-    /// ERC-8004 IdentityRegistry (precompile 0x101a). Populated by EVM calls
-    /// to `registerAgent` and consumed by the agent runtime auto-mirror so
-    /// every TDIP-registered agent gets a native on-chain ERC-8004 record.
-    erc8004_identity: Option<Arc<tenzro_vm::Erc8004IdentityRegistry>>,
-
-    /// ERC-8004 ReputationRegistry (precompile 0x101b).
-    erc8004_reputation: Option<Arc<tenzro_vm::Erc8004ReputationRegistry>>,
-
-    /// ERC-8004 ValidationRegistry (precompile 0x101c).
-    erc8004_validation: Option<Arc<tenzro_vm::Erc8004ValidationRegistry>>,
-
     /// ERC-8004 on-chain agent-registry mirror (DID → sequential `agentId`).
-    /// Populated when [`Self::erc8004_identity`] is wired during identity init.
+    /// Populated during identity init with `NativeErc8004Mirror`, which
+    /// dispatches signed EVM transactions to the canonical
+    /// `IdentityRegistry` proxy at `addresses::IDENTITY_REGISTRY`.
     /// Settlement-outcome dispatchers read this to resolve a TDIP machine DID
     /// to the `uint256 agentId` allocated at registration time, which keys the
     /// `submitFeedback` row written into the on-chain `ReputationRegistry`.
     erc8004_agent_registry:
         Option<Arc<dyn tenzro_identity::erc8004::OnChainAgentRegistry>>,
+
+    /// Per-node `erc8004-system` secp256k1 signer used by the two
+    /// internal writers that have no caller signature: the TDIP
+    /// `NativeErc8004Mirror::mirror_register_agent` path (fired from
+    /// inside `IdentityRegistry::register_machine_with_fee`) and the
+    /// Stripe SPT reputation dispatcher
+    /// (`handle_process_spt_settlement_outcome` →
+    /// `erc8004_reputation_dispatcher::dispatch_settlement_outcome`).
+    /// Both run inside the node's trust boundary; `msg.sender` on the
+    /// resulting EVM tx is the validator's `erc8004-system` address.
+    /// User-facing RPC writes (`tenzro_registerAgent`,
+    /// `submitFeedback`, `requestValidation`) stay caller-signed and
+    /// do **not** use this signer — see the
+    /// `project_erc8004_evm_architecture` memory for the locked
+    /// signing-key decisions.
+    ///
+    /// The signer bakes the loopback JSON-RPC URL and chain_id at
+    /// construction time; submission goes through the node's own
+    /// `eth_sendRawTransaction`. `None` until storage is initialised
+    /// (the URL needs `self.config.rpc_addr` and the genesis
+    /// `chain_id` must be loaded first).
+    erc8004_system_signer: Option<Arc<tenzro_bridge::evm_signer::EvmTransactionSigner>>,
 
     // Monitoring
     health_monitor: Arc<HealthMonitor>,
@@ -1476,12 +1499,14 @@ impl TenzroNode {
             vision_runtime: Arc::new(VisionRuntime::new()),
             text_embedding_runtime: Arc::new(TextEmbeddingRuntime::new()),
             segmentation_runtime: Arc::new(SegmentationRuntime::new()),
+            text_segmentation_runtime: Arc::new(TextSegmentationRuntime::new()),
             detection_runtime: Arc::new(DetectionRuntime::new()),
             audio_runtime: Arc::new(AudioRuntime::new()),
             video_runtime: Arc::new(VideoRuntime::new()),
             training_runtime: Arc::new(tenzro_training::TrainingRuntime::new()),
             iroh_resolver: None,
             iroh_a2a_dispatcher: None,
+            iroh_mcp_handler: None,
             identity_registry: None,
             payment_gateway: None,
             x402_server: None,
@@ -1494,10 +1519,8 @@ impl TenzroNode {
             tee_provider: None,
             tee_registry: None,
             zk_commitment_registry: Arc::new(tenzro_vm::precompiles::ZkCommitmentRegistry::new()),
-            erc8004_identity: None,
-            erc8004_reputation: None,
-            erc8004_validation: None,
             erc8004_agent_registry: None,
+            erc8004_system_signer: None,
             health_monitor,
             metrics,
             event_loop_tx: None,
@@ -1830,15 +1853,12 @@ impl TenzroNode {
                 info!("NFT_FACTORY precompile wired to persistent NftRegistry (CF_NFTS)");
             }
 
-            // ERC-8004 system contracts (0x101a / 0x101b / 0x101c).
-            // The handles are stashed on Node so the agent runtime auto-mirror
-            // (see init_ai_infrastructure) can write through to the on-chain
-            // IdentityRegistry whenever a TDIP agent is registered.
-            let (identity, reputation, validation) =
-                vm_runtime.precompiles().register_erc8004_precompiles();
-            self.erc8004_identity = Some(identity);
-            self.erc8004_reputation = Some(reputation);
-            self.erc8004_validation = Some(validation);
+            // ERC-8004 system contracts are predeployed at genesis as
+            // canonical OpenZeppelin-ERC721 proxies (see
+            // `addresses::IDENTITY_REGISTRY` / `REPUTATION_REGISTRY` /
+            // `VALIDATION_REGISTRY`); writes flow through standard EVM
+            // transactions dispatched by `NativeErc8004Mirror` and read
+            // through the `process_erc8004_registered_logs` event listener.
         }
 
         // 10. Initialize identity registry (TDIP)
@@ -2122,6 +2142,62 @@ impl TenzroNode {
             kv,
         )?);
         self.snapshot_store = Some(snapshot_store);
+
+        // Provision the per-node ERC-8004 system signer. Loads the
+        // secp256k1 key from `{data_dir}/validator_erc8004_system_key`
+        // — silently generated on first boot or after a clean upgrade,
+        // per the `load_or_generate_erc8004_system_key` contract — and
+        // wires an `EvmTransactionSigner` pointed at this node's own
+        // loopback JSON-RPC. Used by two node-internal writers (TDIP
+        // mirror + Stripe SPT reputation dispatcher); never used for
+        // user-facing RPC writes.
+        //
+        // Construction is best-effort: a key-decode or signer-init
+        // failure logs a warning and leaves `erc8004_system_signer =
+        // None`, which in turn leaves the ERC-8004 mirror disabled at
+        // `init_identity()` — but the rest of the node still boots.
+        let chain_id = self
+            .config
+            .genesis
+            .as_ref()
+            .map(|g| g.chain_id)
+            .unwrap_or(1337);
+        let loopback_rpc_url = format!("http://{}", self.config.rpc_addr);
+        match crate::keygen::load_or_generate_erc8004_system_key(&self.config.data_dir) {
+            Ok(key_bytes) => {
+                match tenzro_bridge::evm_signer::EvmTransactionSigner::new(
+                    &key_bytes,
+                    chain_id,
+                    loopback_rpc_url.clone(),
+                ) {
+                    Ok(signer) => {
+                        let signer = Arc::new(signer);
+                        info!(
+                            target: "tenzro::erc8004",
+                            address = %signer.sender_address(),
+                            chain_id,
+                            rpc = %loopback_rpc_url,
+                            "erc8004-system signer ready (mirror + SPT dispatcher write path)"
+                        );
+                        self.erc8004_system_signer = Some(signer);
+                    }
+                    Err(e) => {
+                        warn!(
+                            target: "tenzro::erc8004",
+                            error = %e,
+                            "erc8004-system signer init failed — mirror + SPT dispatcher will be disabled"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    target: "tenzro::erc8004",
+                    error = %e,
+                    "erc8004-system key load/generate failed — mirror + SPT dispatcher will be disabled"
+                );
+            }
+        }
 
         Ok(())
     }
@@ -3488,10 +3564,17 @@ impl TenzroNode {
 
         let a2a_dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> = a2a_deferred;
 
+        // MCP-over-iroh: same trampoline pattern. The real handler
+        // (`mcp::iroh_transport::IrohMcpHandler`) needs `Arc<TenzroNode>`
+        // and is installed from `main.rs` after `Arc::new(node)`.
+        let mcp_deferred = Arc::new(tenzro_iroh::DeferredMcpHandler::new());
+        self.iroh_mcp_handler = Some(mcp_deferred.clone());
+        let mcp_handler: Arc<dyn tenzro_iroh::McpStreamHandler> = mcp_deferred;
+
         match tenzro_iroh::IrohBackedResolver::bind_with_jsonrpc(
             &cfg,
             Some(a2a_dispatcher),
-            None, // MCP-over-iroh deferred — rmcp StreamableHttpService too deep
+            Some(mcp_handler),
         )
         .await
         {
@@ -3500,17 +3583,17 @@ impl TenzroNode {
                     info!(
                         pkarr_relay = %cfg.pkarr_relay_url.as_ref().unwrap(),
                         bind_addr = %cfg.bind_addr,
-                        "Tenzro iroh resolver bound (TDIP-anchored, Pkarr discovery via Tenzro relay, A2A ALPN registered)"
+                        "Tenzro iroh resolver bound (TDIP-anchored, Pkarr discovery via Tenzro relay, A2A + MCP ALPNs registered)"
                     );
                 } else if cfg.secret_key_seed.is_some() {
                     info!(
                         bind_addr = %cfg.bind_addr,
-                        "Tenzro iroh resolver bound (TDIP-anchored, n0-dns discovery only, A2A ALPN registered)"
+                        "Tenzro iroh resolver bound (TDIP-anchored, n0-dns discovery only, A2A + MCP ALPNs registered)"
                     );
                 } else {
                     info!(
                         bind_addr = %cfg.bind_addr,
-                        "Tenzro iroh resolver bound (ephemeral key, in-memory blob store, A2A ALPN registered)"
+                        "Tenzro iroh resolver bound (ephemeral key, in-memory blob store, A2A + MCP ALPNs registered)"
                     );
                 }
                 self.iroh_resolver = Some(resolver);
@@ -3520,9 +3603,10 @@ impl TenzroNode {
                     "Iroh resolver bind failed ({}); continuing without iroh data plane",
                     e
                 );
-                // Bind failed — drop the deferred dispatcher handle since
-                // no router will ever call into it.
+                // Bind failed — drop the deferred dispatcher handles since
+                // no router will ever call into them.
                 self.iroh_a2a_dispatcher = None;
+                self.iroh_mcp_handler = None;
             }
         }
 
@@ -3953,9 +4037,20 @@ impl TenzroNode {
         std::fs::create_dir_all(&models_dir).map_err(|e| {
             NodeError::Internal(format!("Failed to create models directory: {}", e))
         })?;
-        let hf_downloader = Arc::new(HfDownloader::new(models_dir));
+        let hf_downloader = match self.iroh_resolver.as_ref() {
+            Some(resolver) => {
+                let fetcher = crate::model_blob_fetcher_bridge::IrohBlobFetcher::arc(
+                    Arc::clone(resolver),
+                );
+                info!("HuggingFace downloader wired with iroh peer-first blob fetcher");
+                Arc::new(HfDownloader::new(models_dir).with_blob_fetcher(fetcher))
+            }
+            None => {
+                info!("HuggingFace downloader initialized (no iroh resolver — HF CDN only)");
+                Arc::new(HfDownloader::new(models_dir))
+            }
+        };
         self.hf_downloader = Some(hf_downloader);
-        info!("HuggingFace downloader initialized");
 
         // Initialize model runtime (candle GGUF inference)
         let model_runtime = Arc::new(ModelRuntime::new());
@@ -4798,19 +4893,133 @@ impl TenzroNode {
         }
 
         // Wire ERC-8004 auto-mirror: when a TDIP machine identity is
-        // registered, write an `AgentRecord` straight into the precompile-
-        // backed `Erc8004IdentityRegistry` so EVM contracts at 0x101a see
-        // the agent immediately. Only wires if the VM precompile registry
-        // was initialized (it is, in normal node bootstraps).
-        if let Some(erc8004_identity) = self.erc8004_identity.clone() {
-            let mirror = Arc::new(crate::erc8004_mirror::NativeErc8004Mirror::new(
-                erc8004_identity,
-            ));
-            registry = registry.with_on_chain_agent_registry(mirror.clone());
-            self.erc8004_agent_registry = Some(
-                mirror as Arc<dyn tenzro_identity::erc8004::OnChainAgentRegistry>,
+        // registered, submit a signed `register(string agentURI)` EVM
+        // tx against the canonical IdentityRegistry proxy predeployed
+        // at `addresses::IDENTITY_REGISTRY`. Returns immediately; the
+        // tx is dispatched in a detached `tokio::spawn`. The off-chain
+        // `did → agentId` index is populated by
+        // `event_loop::process_erc8004_registered_logs` when the
+        // resulting `Registered(uint256,string,address)` event lands
+        // in a finalized block.
+        //
+        // Requires both storage (for the DID index in CF_IDENTITIES)
+        // and the per-node `erc8004-system` signer (loaded or
+        // silent-generated from `{data_dir}/validator_erc8004_system_key`).
+        // The signer bakes the loopback JSON-RPC URL + chain_id so
+        // submission goes through this node's own `eth_sendRawTransaction`.
+        match (&self.storage, &self.erc8004_system_signer) {
+            (Some(storage), Some(signer)) => {
+                let mirror = Arc::new(crate::erc8004_mirror::NativeErc8004Mirror::new(
+                    signer.clone(),
+                    storage.clone() as Arc<dyn KvStore>,
+                ));
+                registry = registry.with_on_chain_agent_registry(mirror.clone());
+                self.erc8004_agent_registry = Some(
+                    mirror as Arc<dyn tenzro_identity::erc8004::OnChainAgentRegistry>,
+                );
+                info!(
+                    target: "tenzro::erc8004",
+                    "ERC-8004 auto-mirror wired: TDIP machine registrations \
+                     dispatch signed EVM tx to canonical IdentityRegistry proxy"
+                );
+            }
+            (None, _) => {
+                warn!(
+                    target: "tenzro::erc8004",
+                    "ERC-8004 auto-mirror NOT wired: storage unavailable \
+                     (no DID index backing store)"
+                );
+            }
+            (_, None) => {
+                warn!(
+                    target: "tenzro::erc8004",
+                    "ERC-8004 auto-mirror NOT wired: erc8004-system signer \
+                     unavailable (init_storage must run before init_identity)"
+                );
+            }
+        }
+
+        // Parallel SVM mirror wiring: every TDIP machine registration is
+        // also reflected into the canonical QuantuLabs
+        // `agent_registry_8004` Anchor program. Storage-only (no Solana
+        // transport configured by default) — calldata is buffered to the
+        // pending-tx queue under `erc8004_svm_pending_tx:` and drained
+        // once an operator attaches a `SvmMirrorTransport` impl.
+        if let Some(storage) = &self.storage {
+            let svm_mirror = Arc::new(
+                crate::erc8004_svm_mirror::NativeErc8004SvmMirror::new(
+                    storage.clone() as Arc<dyn KvStore>,
+                ),
             );
-            info!("ERC-8004 auto-mirror wired: TDIP machine registrations replicate to 0x101a");
+            registry = registry.with_on_chain_agent_svm_registry(svm_mirror);
+            info!(
+                target: "tenzro::erc8004::svm",
+                "ERC-8004 SVM auto-mirror wired: TDIP machine registrations \
+                 buffer Anchor calldata to pending-tx queue (no Solana \
+                 transport configured)"
+            );
+        } else {
+            warn!(
+                target: "tenzro::erc8004::svm",
+                "ERC-8004 SVM auto-mirror NOT wired: storage unavailable \
+                 (no DID index backing store)"
+            );
+        }
+
+        // Parallel DAML mirror wiring: every TDIP machine registration is
+        // also reflected into the in-tree Canton/DAML port of the canonical
+        // ERC-8004 IdentityRegistry (`vendor/erc8004-daml/`). Storage-only
+        // (no Canton transport configured by default) — the full Canton v2
+        // `submit-and-wait` command JSON is buffered to the pending-tx
+        // queue under `erc8004_daml_pending_tx:` and drained once an
+        // operator attaches a `DamlMirrorTransport` impl + supplies the
+        // participant-side admin party id, admin contract id, and compiled
+        // DAR package id via the node config.
+        //
+        // The DAML mirror is wiring-gated on the operator-supplied
+        // `node_config.erc8004_daml`: without that config block we skip
+        // wiring (rather than buffering with placeholder party ids that
+        // would never be drainable). This mirrors how Canton itself is
+        // opt-in operator infrastructure.
+        if let (Some(storage), Some(daml_cfg)) =
+            (&self.storage, self.config.erc8004_daml.as_ref())
+        {
+            let mirror_cfg = crate::erc8004_daml_mirror::DamlMirrorConfig {
+                package_ids: tenzro_identity::erc8004_daml::DamlPackageIds::new_single(
+                    daml_cfg.package_id.clone(),
+                ),
+                admin_party: daml_cfg.admin_party.clone(),
+                admin_contract_id: daml_cfg.admin_contract_id.clone(),
+                default_controller_party: daml_cfg.default_controller_party.clone(),
+            };
+            let daml_mirror = Arc::new(
+                crate::erc8004_daml_mirror::NativeErc8004DamlMirror::new(
+                    storage.clone() as Arc<dyn KvStore>,
+                    mirror_cfg,
+                ),
+            );
+            registry = registry.with_on_chain_agent_daml_registry(daml_mirror);
+            info!(
+                target: "tenzro::erc8004::daml",
+                "ERC-8004 DAML auto-mirror wired: TDIP machine registrations \
+                 buffer Canton submit-and-wait command JSON to pending-tx \
+                 queue (no Canton transport configured)"
+            );
+        } else if self.storage.is_some() {
+            // Common case: storage is up, but no operator has supplied
+            // Canton wiring. Stay silent at debug to avoid log spam on
+            // the typical pre-Canton fleet.
+            tracing::debug!(
+                target: "tenzro::erc8004::daml",
+                "ERC-8004 DAML auto-mirror skipped: no erc8004_daml config block \
+                 (Canton participant not configured)"
+            );
+        } else {
+            warn!(
+                target: "tenzro::erc8004::daml",
+                "ERC-8004 DAML auto-mirror NOT wired: storage unavailable \
+                 (no DID index backing store)"
+            );
         }
 
         // Wire the AgentBond lookup (Spec 9). When set, every receipt
@@ -4955,11 +5164,36 @@ impl TenzroNode {
         if let (Some(identity_registry), Some(agent_runtime)) =
             (self.identity_registry.clone(), self.agent_runtime.clone())
         {
-            let kit = tenzro_agent_kit::AgentKit::new(
-                rpc_url.clone(),
-                identity_registry.clone(),
-                agent_runtime.clone(),
-            );
+            // Wire the canonical `AuthIssuer` adapter (`NodeAuthIssuer`)
+            // when the `AuthEngine` is available. `init_auth()` runs
+            // earlier in `start()` so by the time we land here the
+            // engine is either present and ready, or the operator
+            // explicitly disabled auth — in which case every
+            // authenticated dispatch step (EVM / SVM / DAML) on the
+            // spawned agent will fail loudly per `auth.rs` docstring.
+            // We never silently fall back to an unauthenticated path.
+            let kit = if let Some(engine) = self.auth_engine.clone() {
+                let issuer: std::sync::Arc<dyn tenzro_agent_kit::AuthIssuer> =
+                    std::sync::Arc::new(crate::agent_kit_auth::NodeAuthIssuer::new(engine));
+                info!("AgentKit wired with NodeAuthIssuer (DPoP-bound credentials enabled)");
+                tenzro_agent_kit::AgentKit::with_auth_issuer(
+                    rpc_url.clone(),
+                    identity_registry.clone(),
+                    agent_runtime.clone(),
+                    issuer,
+                )
+            } else {
+                warn!(
+                    "AgentKit initialized WITHOUT AuthIssuer — \
+                     spawned agents will not receive DPoP-bound credentials; \
+                     authenticated dispatch steps will fail at runtime"
+                );
+                tenzro_agent_kit::AgentKit::new(
+                    rpc_url.clone(),
+                    identity_registry.clone(),
+                    agent_runtime.clone(),
+                )
+            };
             self.agent_kit = Some(Arc::new(kit));
             info!("AgentKit runtime initialized");
 
@@ -6382,24 +6616,35 @@ impl TenzroNode {
         self.spt_ceiling_cache.clone()
     }
 
-    /// Returns the native ERC-8004 [`ReputationRegistry`] handle (precompile
-    /// `0x101b`). Stripe SPT settlement-outcome dispatchers use this to
-    /// cross-write `submitFeedback(agentId, rating, contextUri)` rows that
-    /// surface payment reliability on-chain. Returns `None` when the EVM
-    /// runtime has not yet wired the precompile (pre-init or non-EVM
-    /// configurations).
-    pub fn erc8004_reputation(&self) -> Option<&Arc<tenzro_vm::Erc8004ReputationRegistry>> {
-        self.erc8004_reputation.as_ref()
+    /// Returns the per-node `erc8004-system` secp256k1 signer used by
+    /// the two internal writers (TDIP mirror + Stripe SPT reputation
+    /// dispatcher) to submit signed EVM tx against the canonical
+    /// ERC-8004 proxies. Returns `None` when storage / signer init
+    /// failed at `init_storage()` time — both internal write paths
+    /// log-and-drop when this is absent.
+    ///
+    /// User-facing RPC writes (`tenzro_registerAgent`,
+    /// `submitFeedback`, `requestValidation`) do **not** consume this
+    /// signer; they are caller-signed via `eth_sendRawTransaction`.
+    pub fn erc8004_system_signer(
+        &self,
+    ) -> Option<&Arc<tenzro_bridge::evm_signer::EvmTransactionSigner>> {
+        self.erc8004_system_signer.as_ref()
     }
 
-    /// Returns the [`OnChainAgentRegistry`] mirror that resolves TDIP machine
-    /// DIDs to their sequential `uint256 agentId` allocated by the on-chain
-    /// `Erc8004IdentityRegistry` precompile (`0x101a`). Settlement-outcome
+    /// Returns the [`OnChainAgentRegistry`] mirror that resolves TDIP
+    /// machine DIDs to their sequential `uint256 agentId` allocated by
+    /// the canonical on-chain `IdentityRegistry` proxy
+    /// (`addresses::IDENTITY_REGISTRY`). Settlement-outcome
     /// dispatchers consult this before writing reputation rows so the
-    /// `submitFeedback` subject word matches the `agentId` returned by
-    /// `register(...)` at machine-identity registration time. Returns `None`
-    /// when the EVM precompile registry was not wired (pre-init or non-EVM
-    /// configurations).
+    /// `submitFeedback` subject word matches the `agentId` assigned at
+    /// machine-identity registration time. Lookups read the off-chain
+    /// `did → agentId` index in `CF_IDENTITIES` populated by
+    /// `event_loop::process_erc8004_registered_logs`; callers MUST
+    /// tolerate `None` for DIDs whose mirror tx has not yet been
+    /// included in a finalized block. Returns `None` when the mirror
+    /// wiring was skipped at `init_identity()` (no storage, no
+    /// signer).
     ///
     /// [`OnChainAgentRegistry`]: tenzro_identity::erc8004::OnChainAgentRegistry
     pub fn erc8004_agent_registry(

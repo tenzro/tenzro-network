@@ -61,6 +61,8 @@ pub mod seed_agent;
 pub mod erc7683;
 pub mod erc7579;
 pub mod pq_hybrid;
+pub mod admin;
+pub mod key;
 
 // Re-export command types
 pub use node::NodeCommand;
@@ -104,7 +106,8 @@ pub use wormhole::WormholeCommand;
 pub use cct::CctCommand;
 pub use train::TrainCommand;
 pub use multimodal::{
-    DetectCommand, EmbedTextCommand, EmbedVideoCommand, SegmentCommand, TranscribeCommand,
+    DetectCommand, EmbedTextCommand, EmbedVideoCommand, SegmentCommand, TextSegmentCommand,
+    TranscribeCommand,
 };
 pub use auth::AuthCommand;
 pub use x402::X402Command;
@@ -123,3 +126,5 @@ pub use seed_agent::SeedAgentCommand;
 pub use erc7683::Erc7683Command;
 pub use erc7579::Erc7579Command;
 pub use pq_hybrid::PqHybridCommand;
+pub use admin::AdminCommand;
+pub use key::KeyCommand;

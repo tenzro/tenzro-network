@@ -15,21 +15,41 @@
 //!
 //! ## Persisted files
 //!
-//! All three are written to `{data_dir}/` with mode `0o600` on Unix:
+//! All are written to `{data_dir}/` with mode `0o600` on Unix:
 //!
 //! | File | Contents | Pubkey derivation |
 //! |------|----------|-------------------|
 //! | `validator_key` | Ed25519 keypair bytes (`KeyPair::to_bytes()`) | 32-byte Ed25519 public key |
 //! | `validator_pq_key` | 32-byte ML-DSA-65 seed | 1952-byte ML-DSA-65 verifying key |
 //! | `validator_bls_key` | 32-byte BLS12-381 secret scalar | 48-byte G1-compressed `min_pk` pubkey |
+//! | `validator_erc8004_system_key` | 32-byte secp256k1 secret scalar | 20-byte EVM address (Keccak-256 of uncompressed pubkey) |
+//!
+//! ## `validator_erc8004_system_key` — special case
+//!
+//! Unlike the three validator-identity keys, the `erc8004-system` key is
+//! a per-node EVM-submitter key used only for **two internal writers**
+//! that lack a caller signature: the TDIP `NativeErc8004Mirror`
+//! register dispatch and the Stripe SPT reputation dispatcher (see
+//! `project_erc8004_evm_architecture` decision). Losing or rotating
+//! this key does not fork the validator's consensus stake — it only
+//! changes the `msg.sender` on those two internal write paths.
+//!
+//! For that reason `load_or_generate_erc8004_system_key()` is
+//! **idempotent and silent-on-miss**: if the file is absent it is
+//! generated and persisted in place, so existing data dirs upgraded
+//! from a pre-ERC-8004-mirror binary do not require operator
+//! intervention. This silent-generate exemption explicitly does NOT
+//! extend to the three validator-identity keys above.
 //!
 //! ## Genesis v3 schema
 //!
-//! The three pubkeys correspond one-to-one with the three mandatory
-//! fields on `GenesisValidator` (`public_key`, `pq_public_key`,
-//! `bls_public_key`). The `init` subcommand emits a ready-to-paste
-//! `[[validators]]` TOML stanza so an operator can assemble genesis v3
-//! without manually deriving any of the three pubkeys.
+//! The three validator-identity pubkeys correspond one-to-one with the
+//! three mandatory fields on `GenesisValidator` (`public_key`,
+//! `pq_public_key`, `bls_public_key`). The `init` subcommand emits a
+//! ready-to-paste `[[validators]]` TOML stanza so an operator can
+//! assemble genesis v3 without manually deriving any of the three
+//! pubkeys. The `erc8004-system` key is purely node-local and never
+//! appears in genesis.
 
 use std::path::Path;
 
@@ -196,6 +216,65 @@ pub fn load_validator_bls_key(data_dir: &Path) -> Result<BlsKeyPair> {
         .map_err(|e| NodeError::Other(format!("decode {}: {}", key_path.display(), e)))
 }
 
+/// Load the per-node ERC-8004 system secp256k1 key from
+/// `{data_dir}/validator_erc8004_system_key`, generating it in place if
+/// the file does not exist.
+///
+/// Unlike the three validator-identity keys, this key is silent-generate
+/// on miss — see the module-level rustdoc for why losing/rotating it
+/// does not fork the validator's consensus stake.
+///
+/// Returns the raw 32-byte secp256k1 secret scalar, suitable for passing
+/// directly to
+/// [`tenzro_bridge::evm_signer::EvmTransactionSigner::new`].
+pub fn load_or_generate_erc8004_system_key(data_dir: &Path) -> Result<[u8; 32]> {
+    use k256::SecretKey;
+
+    std::fs::create_dir_all(data_dir)
+        .map_err(|e| NodeError::Other(format!("create data_dir {}: {}", data_dir.display(), e)))?;
+
+    let key_path = data_dir.join("validator_erc8004_system_key");
+
+    if key_path.exists() {
+        let bytes = std::fs::read(&key_path)
+            .map_err(|e| NodeError::Other(format!("read {}: {}", key_path.display(), e)))?;
+        if bytes.len() != 32 {
+            return Err(NodeError::Other(format!(
+                "{} has wrong length {} (expected 32)",
+                key_path.display(),
+                bytes.len()
+            )));
+        }
+        // Validate as a well-formed secp256k1 scalar (rejects 0 and
+        // values >= curve order). We only care that decoding succeeds —
+        // the returned key is discarded; the caller receives the raw
+        // bytes.
+        let mut buf = [0u8; 32];
+        buf.copy_from_slice(&bytes);
+        SecretKey::from_slice(&buf).map_err(|e| {
+            NodeError::Other(format!(
+                "{} is not a valid secp256k1 scalar: {}",
+                key_path.display(),
+                e
+            ))
+        })?;
+        return Ok(buf);
+    }
+
+    // Silent-generate path. Fresh secp256k1 key, persisted at 0o600.
+    let sk = SecretKey::random(&mut rand::rngs::OsRng);
+    let bytes = sk.to_bytes();
+    write_secret(&key_path, &bytes)?;
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    tracing::info!(
+        target: "tenzro::keygen",
+        path = %key_path.display(),
+        "generated fresh erc8004-system secp256k1 key (first boot or missing-file recovery)"
+    );
+    Ok(out)
+}
+
 fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(path, bytes)
         .map_err(|e| NodeError::Other(format!("write {}: {}", path.display(), e)))?;
@@ -270,6 +349,31 @@ mod tests {
             }
             Err(other) => panic!("expected KeyMissing, got {:?}", other),
             Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn erc8004_system_key_generates_on_miss() {
+        let dir = tempdir().unwrap();
+        let key1 = load_or_generate_erc8004_system_key(dir.path()).expect("generate");
+        assert_eq!(key1.len(), 32);
+        assert_ne!(key1, [0u8; 32], "generated key must not be all zeros");
+
+        // Subsequent calls return the same persisted bytes (idempotent).
+        let key2 = load_or_generate_erc8004_system_key(dir.path()).expect("reload");
+        assert_eq!(key1, key2, "second load must match first generation");
+    }
+
+    #[test]
+    fn erc8004_system_key_rejects_wrong_length() {
+        let dir = tempdir().unwrap();
+        let key_path = dir.path().join("validator_erc8004_system_key");
+        std::fs::write(&key_path, b"too-short").unwrap();
+        match load_or_generate_erc8004_system_key(dir.path()) {
+            Err(NodeError::Other(msg)) => {
+                assert!(msg.contains("wrong length"), "unexpected error: {}", msg);
+            }
+            other => panic!("expected length error, got {:?}", other.map(|_| "Ok")),
         }
     }
 

@@ -93,6 +93,7 @@ fn load_bundled_manifests() -> Result<Vec<AgentTemplate>, AgentKitError> {
         include_str!("../reference_templates/multi_chain_portfolio_manager.json"),
         include_str!("../reference_templates/intelligent_payment_router.json"),
         include_str!("../reference_templates/cross_chain_liquidity_aggregator.json"),
+        include_str!("../reference_templates/solana_jupiter_swap.json"),
         include_str!("../reference_templates/autonomous_rwa_custodian.json"),
         include_str!("../reference_templates/agentic_inference_marketplace.json"),
         // Tenzro Train (decentralized verifiable foundation-model training)
@@ -123,9 +124,10 @@ mod tests {
     #[test]
     fn bundled_manifests_parse() {
         let manifests = load_bundled_manifests().expect("bundled manifests should parse");
-        // 10 original templates + 3 Tenzro Train trainer templates +
+        // 10 original templates + 1 Solana Jupiter swap +
+        // 3 Tenzro Train trainer templates +
         // 4 multi-modal inference templates (forecast, vision, audio, video).
-        assert_eq!(manifests.len(), 17);
+        assert_eq!(manifests.len(), 18);
         assert!(manifests.iter().all(|t| !t.name.is_empty()));
         assert!(manifests.iter().all(|t| t.execution_spec.is_some()));
     }

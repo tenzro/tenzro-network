@@ -194,14 +194,35 @@ pub struct HfArtifactDownloader {
 /// helpers (`model_path`, `is_downloaded`, `downloaded_size`,
 /// `verify_download` with size tolerance). For multi-file ONNX bundles
 /// or single-file ONNX, use [`HfArtifactDownloader::download`] directly.
+///
+/// When wired with [`HfDownloader::with_blob_fetcher`], a runtime-supplied
+/// [`PeerHint`] is tried before the HF CDN (same pattern as
+/// [`HfArtifactDownloader`]). Successful HF downloads are opportunistically
+/// published so neighbours can fetch by content hash next time.
 pub struct HfDownloader {
     storage_path: PathBuf,
+    blob_fetcher: Option<Arc<dyn BlobFetcher>>,
 }
 
 impl HfDownloader {
     /// Create a new downloader that stores models at the given path.
     pub fn new(storage_path: PathBuf) -> Self {
-        Self { storage_path }
+        Self {
+            storage_path,
+            blob_fetcher: None,
+        }
+    }
+
+    /// Attach a [`BlobFetcher`] so the downloader can fetch and publish
+    /// over `tenzro://` URIs. Returns `self` for builder-style chaining.
+    pub fn with_blob_fetcher(mut self, fetcher: Arc<dyn BlobFetcher>) -> Self {
+        self.blob_fetcher = Some(fetcher);
+        self
+    }
+
+    /// Returns true if a [`BlobFetcher`] is wired.
+    pub fn has_blob_fetcher(&self) -> bool {
+        self.blob_fetcher.is_some()
     }
 
     /// Get the local file path for a model.
@@ -236,16 +257,78 @@ impl HfDownloader {
 
     /// Download a model from HuggingFace Hub.
     ///
-    /// Streams the GGUF file from the HF CDN to
+    /// When `peer_hint` is `Some` and a [`BlobFetcher`] is wired, the
+    /// downloader first tries to pull the GGUF over `tenzro://` from a
+    /// peer. On any peer-side failure (or absent hint / fetcher) it
+    /// falls back to streaming the GGUF file from the HF CDN to
     /// `<storage_path>/<model_id>.gguf` via a tmp-rename for atomicity.
+    /// On successful HF-CDN downloads, the bytes are opportunistically
+    /// published via the wired [`BlobFetcher`] so neighbours can fetch
+    /// from us next time.
+    ///
     /// Progress updates are sent via `progress_tx`.
     pub async fn download_model(
         &self,
         entry: &HfModelEntry,
+        peer_hint: Option<&PeerHint>,
         progress_tx: watch::Sender<DownloadProgress>,
     ) -> Result<PathBuf> {
         let dest_path = self.model_path(&entry.id);
         let tmp_path = dest_path.with_extension("gguf.tmp");
+
+        // Peer-fetch path — only when a fetcher AND a hint are both present.
+        if let (Some(fetcher), Some(hint)) = (self.blob_fetcher.as_ref(), peer_hint) {
+            debug!(
+                target: "tenzro_model::peer_fetch",
+                "{}: trying peer fetch via {}",
+                entry.id, hint.tenzro_uri
+            );
+            match fetcher.fetch(&hint.tenzro_uri).await {
+                Ok(bytes) => {
+                    // Defense-in-depth SHA-256 check on top of the
+                    // transport's own BLAKE3 verification.
+                    let sha_ok = match hint.sha256_hex.as_deref() {
+                        Some(expected) => match verify_sha256(&bytes, expected) {
+                            Ok(()) => true,
+                            Err(actual) => {
+                                warn!(
+                                    target: "tenzro_model::peer_fetch",
+                                    "{}: peer fetch SHA-256 mismatch (got {}), falling back to HF CDN",
+                                    entry.id, actual
+                                );
+                                false
+                            }
+                        },
+                        None => true,
+                    };
+
+                    if sha_ok {
+                        write_bytes_atomic(
+                            &entry.id,
+                            &bytes,
+                            &dest_path,
+                            &tmp_path,
+                            &progress_tx,
+                        )
+                        .await?;
+                        info!(
+                            "{}: served from peer ({} bytes via {})",
+                            entry.id,
+                            bytes.len(),
+                            hint.tenzro_uri
+                        );
+                        return Ok(dest_path);
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        target: "tenzro_model::peer_fetch",
+                        "{}: peer fetch failed ({}), falling back to HF CDN",
+                        entry.id, e
+                    );
+                }
+            }
+        }
 
         download_one_file(
             &entry.id,
@@ -263,6 +346,32 @@ impl HfDownloader {
             // Log but don't delete — the file may still be usable if the catalog
             // size is slightly off. Callers can decide whether to retry.
             warn!("Download verification warning for {}: {}", entry.id, e);
+        }
+
+        // Opportunistic publish so neighbours can fetch from us next time.
+        if let Some(fetcher) = self.blob_fetcher.as_ref() {
+            match tokio::fs::read(&dest_path).await {
+                Ok(bytes) => {
+                    let bytes = Bytes::from(bytes);
+                    match fetcher.publish(bytes).await {
+                        Ok(uri) => debug!(
+                            target: "tenzro_model::peer_fetch",
+                            "{}: published to peer store as {}",
+                            entry.id, uri
+                        ),
+                        Err(e) => debug!(
+                            target: "tenzro_model::peer_fetch",
+                            "{}: opportunistic publish failed ({}), not fatal",
+                            entry.id, e
+                        ),
+                    }
+                }
+                Err(e) => debug!(
+                    target: "tenzro_model::peer_fetch",
+                    "{}: skipped publish (read failed: {})",
+                    entry.id, e
+                ),
+            }
         }
 
         Ok(dest_path)

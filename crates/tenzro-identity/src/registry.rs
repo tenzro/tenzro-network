@@ -191,6 +191,23 @@ pub struct IdentityRegistry {
     /// the precompile at `0x101a` on Tenzro). The hook is best-effort —
     /// failures are logged but never roll back the TDIP registration.
     on_chain_agent_registry: Option<Arc<dyn crate::erc8004::OnChainAgentRegistry>>,
+    /// Optional ERC-8004 SVM (Solana) mirror.
+    ///
+    /// When set, every machine identity registration is also reflected
+    /// into the canonical QuantuLabs `agent_registry_8004` Anchor program
+    /// (see [`crate::erc8004_svm::addresses::AGENT_REGISTRY_PROGRAM_ID_MAINNET_BETA`]).
+    /// Best-effort, same semantics as the EVM mirror: failures are
+    /// logged but never fail the TDIP registration.
+    on_chain_agent_svm_registry: Option<Arc<dyn crate::erc8004_svm::OnChainAgentSvmRegistry>>,
+    /// Optional ERC-8004 DAML (Canton) mirror.
+    ///
+    /// When set, every machine identity registration is also reflected
+    /// into the canonical `Tenzro.Erc8004.Identity.RegistryAdmin.Register`
+    /// choice (see `vendor/erc8004-daml/`). Best-effort, same semantics
+    /// as the EVM and SVM mirrors: failures are logged but never fail
+    /// the TDIP registration.
+    on_chain_agent_daml_registry:
+        Option<Arc<dyn crate::erc8004_daml::OnChainAgentDamlRegistry>>,
     /// Optional AgentBond lookup (Spec 9). When wired, the principal-chain
     /// resolver populates `actor_bond` and `controller_bond_aggregate` on
     /// every receipt. Implemented by `tenzro_token::bond::BondManager` at
@@ -214,6 +231,8 @@ impl IdentityRegistry {
             revocation_broadcaster: None,
             delegation_policy: DelegationPolicy::default(),
             on_chain_agent_registry: None,
+            on_chain_agent_svm_registry: None,
+            on_chain_agent_daml_registry: None,
             bond_lookup: None,
         }
     }
@@ -233,6 +252,8 @@ impl IdentityRegistry {
             revocation_broadcaster: None,
             delegation_policy: DelegationPolicy::default(),
             on_chain_agent_registry: None,
+            on_chain_agent_svm_registry: None,
+            on_chain_agent_daml_registry: None,
             bond_lookup: None,
         }
     }
@@ -252,6 +273,8 @@ impl IdentityRegistry {
             revocation_broadcaster: None,
             delegation_policy: DelegationPolicy::default(),
             on_chain_agent_registry: None,
+            on_chain_agent_svm_registry: None,
+            on_chain_agent_daml_registry: None,
             bond_lookup: None,
         }
     }
@@ -352,6 +375,8 @@ impl IdentityRegistry {
             revocation_broadcaster: None,
             delegation_policy: DelegationPolicy::default(),
             on_chain_agent_registry: None,
+            on_chain_agent_svm_registry: None,
+            on_chain_agent_daml_registry: None,
             bond_lookup: None,
         }
     }
@@ -428,6 +453,36 @@ impl IdentityRegistry {
         self
     }
 
+    /// Wires a Solana-side ERC-8004 mirror so every machine identity
+    /// registration is reflected into the canonical QuantuLabs
+    /// `agent_registry_8004` Anchor program at
+    /// [`crate::erc8004_svm::addresses::AGENT_REGISTRY_PROGRAM_ID_MAINNET_BETA`].
+    /// Best-effort, same semantics as
+    /// [`Self::with_on_chain_agent_registry`]: failures are logged but
+    /// never fail the TDIP registration.
+    pub fn with_on_chain_agent_svm_registry(
+        mut self,
+        registry: Arc<dyn crate::erc8004_svm::OnChainAgentSvmRegistry>,
+    ) -> Self {
+        self.on_chain_agent_svm_registry = Some(registry);
+        self
+    }
+
+    /// Wires a Canton/DAML-side ERC-8004 mirror so every machine
+    /// identity registration is reflected into the in-tree
+    /// `Tenzro.Erc8004.Identity.RegistryAdmin.Register` choice (see
+    /// `vendor/erc8004-daml/`). Best-effort, same semantics as
+    /// [`Self::with_on_chain_agent_registry`] and
+    /// [`Self::with_on_chain_agent_svm_registry`]: failures are logged
+    /// but never fail the TDIP registration.
+    pub fn with_on_chain_agent_daml_registry(
+        mut self,
+        registry: Arc<dyn crate::erc8004_daml::OnChainAgentDamlRegistry>,
+    ) -> Self {
+        self.on_chain_agent_daml_registry = Some(registry);
+        self
+    }
+
     /// Wires an AgentBond lookup (Spec 9). When set, the principal-chain
     /// resolver populates `actor_bond` and `controller_bond_aggregate` on
     /// every receipt. Implemented by `tenzro_token::bond::BondManager` at
@@ -443,6 +498,45 @@ impl IdentityRegistry {
     }
 
     /// Persists an identity to storage (write-through)
+    /// Apply a canonical ERC-8004 `Registered(uint256 indexed agentId,
+    /// string agentURI, address indexed owner)` event to the cached TDIP
+    /// identity record + persistent store.
+    ///
+    /// Called by the node's `erc8004_event_listener` once the
+    /// `register(string agentURI)` tx submitted by `NativeErc8004Mirror`
+    /// is included on-chain. Patches `IdentityData::Machine.erc8004_agent_id`
+    /// on the in-memory `DashMap` and re-serializes the record to
+    /// `CF_IDENTITIES`.
+    ///
+    /// Returns `Ok(true)` if a matching identity existed and was patched;
+    /// `Ok(false)` if no identity is cached under `did` (e.g. the event
+    /// fired against a TDIP record on a different node). Errors only on
+    /// non-machine identities (humans don't carry an `erc8004_agent_id`).
+    ///
+    /// Idempotent — re-applying the same event is a no-op write of the
+    /// same value.
+    pub fn apply_erc8004_registered_event(
+        &self,
+        did: &str,
+        agent_id: u64,
+    ) -> Result<bool> {
+        let Some(mut entry) = self.identities.get_mut(did) else {
+            return Ok(false);
+        };
+        if !entry.is_machine() {
+            return Err(IdentityError::VerificationFailed(format!(
+                "ERC-8004 Registered event applied to non-machine DID '{}'",
+                did
+            )));
+        }
+        entry.set_erc8004_agent_id(agent_id);
+        let patched = entry.clone();
+        // Release the DashMap write guard before any other map access.
+        drop(entry);
+        self.persist_identity(did, &patched);
+        Ok(true)
+    }
+
     fn persist_identity(&self, did: &str, identity: &TenzroIdentity) {
         if let Some(ref store) = self.storage {
             match bincode::serialize(identity) {
@@ -727,7 +821,7 @@ impl IdentityRegistry {
         })?;
         let binding = binder.provision_wallet(&did_string).await?;
 
-        let mut identity = TenzroIdentity {
+        let identity = TenzroIdentity {
             did,
             public_keys: vec![PublicKeyInfo {
                 key_id: "key-1".to_string(),
@@ -786,11 +880,12 @@ impl IdentityRegistry {
             self.persist_identity(controller_did, &snapshot);
         }
 
-        // Mirror first so we can patch the allocated ERC-8004 agentId onto the
-        // identity before persisting and inserting into the in-memory store.
-        if let Some(agent_id) = self.mirror_to_erc8004(&did_string, &identity) {
-            identity.set_erc8004_agent_id(agent_id);
-        }
+        // Dispatch the ERC-8004 mirror as a detached signed-tx submission.
+        // The allocated `agentId` is NOT available synchronously — the off-chain
+        // `Registered(uint256,string,address)` event listener in `tenzro-node`
+        // patches `IdentityData::Machine.erc8004_agent_id` on the cached TDIP
+        // record once the mirror tx is included.
+        self.mirror_to_erc8004(&did_string, &identity);
 
         self.persist_identity(&did_string, &identity);
         self.identities.insert(did_string, identity.clone());
@@ -838,7 +933,7 @@ impl IdentityRegistry {
         let (wallet_address, wallet_id, pq_verifying_key, bls_verifying_key) =
             self.provision_or_default(&did_string).await?;
 
-        let mut identity = TenzroIdentity {
+        let identity = TenzroIdentity {
             did,
             public_keys: vec![PublicKeyInfo {
                 key_id: "key-1".to_string(),
@@ -888,11 +983,12 @@ impl IdentityRegistry {
             self.persist_identity(controller_did, &controller);
         }
 
-        // Mirror first so we can patch the allocated ERC-8004 agentId onto the
-        // identity before persisting and inserting into the in-memory store.
-        if let Some(agent_id) = self.mirror_to_erc8004(&did_string, &identity) {
-            identity.set_erc8004_agent_id(agent_id);
-        }
+        // Dispatch the ERC-8004 mirror as a detached signed-tx submission.
+        // The allocated `agentId` is NOT available synchronously — the off-chain
+        // `Registered(uint256,string,address)` event listener in `tenzro-node`
+        // patches `IdentityData::Machine.erc8004_agent_id` on the cached TDIP
+        // record once the mirror tx is included.
+        self.mirror_to_erc8004(&did_string, &identity);
 
         self.persist_identity(&did_string, &identity);
         self.identities.insert(did_string, identity.clone());
@@ -927,7 +1023,7 @@ impl IdentityRegistry {
         let (wallet_address, wallet_id, pq_verifying_key, bls_verifying_key) =
             self.provision_or_default(&did_string).await?;
 
-        let mut identity = TenzroIdentity {
+        let identity = TenzroIdentity {
             did,
             public_keys: vec![PublicKeyInfo {
                 key_id: "key-1".to_string(),
@@ -964,11 +1060,12 @@ impl IdentityRegistry {
             did_string, capabilities, fee_required / 1_000_000_000_000_000_000
         );
 
-        // Mirror first so we can patch the allocated ERC-8004 agentId onto the
-        // identity before persisting and inserting into the in-memory store.
-        if let Some(agent_id) = self.mirror_to_erc8004(&did_string, &identity) {
-            identity.set_erc8004_agent_id(agent_id);
-        }
+        // Dispatch the ERC-8004 mirror as a detached signed-tx submission.
+        // The allocated `agentId` is NOT available synchronously — the off-chain
+        // `Registered(uint256,string,address)` event listener in `tenzro-node`
+        // patches `IdentityData::Machine.erc8004_agent_id` on the cached TDIP
+        // record once the mirror tx is included.
+        self.mirror_to_erc8004(&did_string, &identity);
 
         self.persist_identity(&did_string, &identity);
         self.identities.insert(did_string, identity.clone());
@@ -1046,7 +1143,7 @@ impl IdentityRegistry {
         // public marker derived from the DID so audit logs can correlate.
         let wallet_id = format!("byok-{}", &did_string[did_string.len().saturating_sub(12)..]);
 
-        let mut identity = TenzroIdentity {
+        let identity = TenzroIdentity {
             did,
             public_keys: vec![PublicKeyInfo {
                 key_id: "key-1".to_string(),
@@ -1085,9 +1182,10 @@ impl IdentityRegistry {
             fee_required / 1_000_000_000_000_000_000
         );
 
-        if let Some(agent_id) = self.mirror_to_erc8004(&did_string, &identity) {
-            identity.set_erc8004_agent_id(agent_id);
-        }
+        // Dispatch the ERC-8004 mirror as a detached signed-tx submission.
+        // The allocated `agentId` is NOT available synchronously — see the
+        // companion mirror calls earlier in this file for the rationale.
+        self.mirror_to_erc8004(&did_string, &identity);
 
         self.persist_identity(&did_string, &identity);
         self.identities.insert(did_string, identity.clone());
@@ -1098,17 +1196,27 @@ impl IdentityRegistry {
     }
 
     /// Mirror a freshly-registered machine identity into the on-chain
-    /// ERC-8004 IdentityRegistry, if a mirror is wired. Best-effort —
-    /// any error is logged at warn level and dropped so the TDIP
-    /// registration succeeds regardless.
+    /// ERC-8004 IdentityRegistry contract at
+    /// [`tenzro_identity::erc8004::addresses::IDENTITY_REGISTRY`], if a
+    /// mirror is wired. Best-effort — any error is logged at warn level
+    /// and dropped so the TDIP registration succeeds regardless.
     ///
-    /// On success, returns the freshly-allocated sequential `agentId`
-    /// so the caller can persist it onto the TDIP machine identity.
-    fn mirror_to_erc8004(&self, did_string: &str, identity: &TenzroIdentity) -> Option<u64> {
-        let registry = self.on_chain_agent_registry.as_ref()?;
+    /// The on-chain `agentId` is **not** returned synchronously: the
+    /// mirror dispatches a signed EIP-1559 tx as a detached tokio task
+    /// and the `agentId` is allocated by the contract at inclusion time.
+    /// The off-chain event listener (`Registered(uint256,string,address)`)
+    /// in `tenzro-node` is responsible for writing the resulting
+    /// `(did → agentId)` pair into the `erc8004_did_index:` keyspace and
+    /// patching `IdentityData::Machine.erc8004_agent_id` on the cached
+    /// TDIP record. Callers that need the `agentId` immediately should
+    /// poll via `OnChainAgentRegistry::lookup_agent_id_by_did`.
+    fn mirror_to_erc8004(&self, did_string: &str, identity: &TenzroIdentity) {
+        let Some(registry) = self.on_chain_agent_registry.as_ref() else {
+            return;
+        };
         // Only machines are mirrored — humans don't have an ERC-8004 record.
         if !identity.is_machine() {
-            return None;
+            return;
         }
         // Map the bound wallet's hex string to a 20-byte EVM address. If the
         // wallet binder produced a non-EVM placeholder (legacy stub), zero out
@@ -1118,22 +1226,61 @@ impl IdentityRegistry {
         // Metadata URI = the canonical DID URL. Future: route through a
         // gateway that resolves to the W3C DID document JSON.
         let metadata_uri = format!("did:{}", did_string.trim_start_matches("did:"));
-        match registry.mirror_register_agent(did_string, &agent_address, &metadata_uri) {
-            Ok(agent_id) => {
-                tracing::debug!(
-                    "ERC-8004 mirror: {} -> agent_id={}",
-                    did_string,
-                    agent_id
-                );
-                Some(agent_id)
-            }
-            Err(e) => {
+        if let Err(e) =
+            registry.mirror_register_agent(did_string, &agent_address, &metadata_uri)
+        {
+            tracing::warn!(
+                "ERC-8004 mirror dispatch failed for {}: {} (TDIP registration unaffected)",
+                did_string,
+                e
+            );
+        } else {
+            tracing::debug!(
+                "ERC-8004 mirror dispatched for {}: signed tx submitted, agentId arrives via event",
+                did_string,
+            );
+        }
+
+        // Parallel SVM mirror — same best-effort semantics. The Anchor
+        // program assigns the asset Pubkey at instruction inclusion time;
+        // the off-chain event listener in `tenzro-node`
+        // (`process_erc8004_svm_agent_registered_logs`) is responsible
+        // for writing the resulting `(did → asset)` pair into the
+        // `erc8004_svm_did_index:` keyspace.
+        if let Some(svm_registry) = self.on_chain_agent_svm_registry.as_ref() {
+            if let Err(e) = svm_registry.mirror_register_agent(did_string, &metadata_uri) {
                 tracing::warn!(
-                    "ERC-8004 mirror failed for {}: {} (TDIP registration unaffected)",
+                    "ERC-8004 SVM mirror dispatch failed for {}: {} (TDIP registration unaffected)",
                     did_string,
                     e
                 );
-                None
+            } else {
+                tracing::debug!(
+                    "ERC-8004 SVM mirror dispatched for {}: signed Anchor ix submitted, asset arrives via event",
+                    did_string,
+                );
+            }
+        }
+
+        // Parallel DAML mirror — same best-effort semantics. The DAML
+        // `RegistryAdmin.Register` choice allocates `agentId` from the
+        // admin-controlled counter at submit-and-wait inclusion time;
+        // the off-chain Canton event listener in `tenzro-node`
+        // (`process_erc8004_daml_registered_events`) is responsible for
+        // writing the resulting `(did → agentId)` pair into the
+        // `erc8004_daml_did_index:` keyspace.
+        if let Some(daml_registry) = self.on_chain_agent_daml_registry.as_ref() {
+            if let Err(e) = daml_registry.mirror_register_agent(did_string, &metadata_uri) {
+                tracing::warn!(
+                    "ERC-8004 DAML mirror dispatch failed for {}: {} (TDIP registration unaffected)",
+                    did_string,
+                    e
+                );
+            } else {
+                tracing::debug!(
+                    "ERC-8004 DAML mirror dispatched for {}: submit-and-wait command queued, agentId arrives via event",
+                    did_string,
+                );
             }
         }
     }

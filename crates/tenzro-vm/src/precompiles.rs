@@ -67,20 +67,6 @@ pub const PRECOMPILE_VRF_VERIFY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 /// Phase 2: extends to verifying syncer signature + attestation chain.
 pub const PRECOMPILE_TRAINING_VERIFY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x08, 0];
 
-/// ERC-8004 IdentityRegistry system contract (0x101a) — `registerAgent` /
-/// `getAgent` for native Tenzro agent discovery, ABI-compatible with the
-/// Ethereum reference contracts. A Tenzro agent registered via TDIP can also
-/// resolve here without bridging to Ethereum.
-pub const PRECOMPILE_ERC8004_IDENTITY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1a, 0];
-/// ERC-8004 ReputationRegistry system contract (0x101b) — `submitFeedback` /
-/// `getFeedback` for cross-agent reputation, ABI-compatible with the Ethereum
-/// reference contracts.
-pub const PRECOMPILE_ERC8004_REPUTATION: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1b, 0];
-/// ERC-8004 ValidationRegistry system contract (0x101c) — `validationRequest`
-/// / `validationResponse` / `getValidation` for verifiable agent work
-/// attestation, ABI-compatible with the Ethereum reference contracts.
-pub const PRECOMPILE_ERC8004_VALIDATION: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1c, 0];
-
 // ERC-7579 modular validator precompiles. Re-exported from `crate::erc7579`
 // so that the registry-side wiring can reach them without an extra import.
 pub use crate::erc7579::{
@@ -519,52 +505,6 @@ impl PrecompileRegistry {
         }
 
         tracing::info!("Registered token system precompiles (0x1001-0x1003, 0x1006)");
-    }
-
-    /// Register the ERC-8004 system contracts (0x101a / 0x101b / 0x101c).
-    ///
-    /// Returns the three registry handles so that the agent runtime can
-    /// auto-mirror native TDIP agent registrations into the on-chain
-    /// IdentityRegistry (see `tenzro-node` AI infrastructure wiring).
-    ///
-    /// - `0x101a`: IdentityRegistry — `registerAgent` / `getAgent`
-    /// - `0x101b`: ReputationRegistry — `submitFeedback` / `getFeedback`
-    /// - `0x101c`: ValidationRegistry — `validationRequest` / `validationResponse` / `getValidation`
-    pub fn register_erc8004_precompiles(
-        &self,
-    ) -> (
-        Arc<crate::evm::erc8004::Erc8004IdentityRegistry>,
-        Arc<crate::evm::erc8004::Erc8004ReputationRegistry>,
-        Arc<crate::evm::erc8004::Erc8004ValidationRegistry>,
-    ) {
-        use crate::evm::erc8004::{
-            create_erc8004_identity_precompile, create_erc8004_reputation_precompile,
-            create_erc8004_validation_precompile, Erc8004IdentityRegistry,
-            Erc8004ReputationRegistry, Erc8004ValidationRegistry,
-        };
-
-        let identity = Arc::new(Erc8004IdentityRegistry::new());
-        let reputation = Arc::new(Erc8004ReputationRegistry::new());
-        let validation = Arc::new(Erc8004ValidationRegistry::new());
-
-        self.register(
-            PRECOMPILE_ERC8004_IDENTITY.to_vec(),
-            create_erc8004_identity_precompile(identity.clone()),
-        );
-        self.register(
-            PRECOMPILE_ERC8004_REPUTATION.to_vec(),
-            create_erc8004_reputation_precompile(reputation.clone()),
-        );
-        self.register(
-            PRECOMPILE_ERC8004_VALIDATION.to_vec(),
-            create_erc8004_validation_precompile(validation.clone()),
-        );
-
-        tracing::info!(
-            "Registered ERC-8004 system contracts (0x101a IdentityRegistry, 0x101b ReputationRegistry, 0x101c ValidationRegistry)"
-        );
-
-        (identity, reputation, validation)
     }
 
     /// Register the ERC-7579 modular validator precompiles

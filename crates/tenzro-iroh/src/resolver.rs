@@ -24,7 +24,9 @@ use tokio::sync::Mutex;
 
 use crate::config::TenzroIrohConfig;
 use crate::error::{IrohError, IrohResult};
-use crate::jsonrpc::{JsonRpcDispatcher, JsonRpcProtocol, ALPN_A2A, ALPN_MCP};
+use crate::jsonrpc::{
+    JsonRpcDispatcher, JsonRpcProtocol, McpProtocol, McpStreamHandler, ALPN_A2A, ALPN_MCP,
+};
 use crate::tdip::derive_iroh_secret_key_from_ed25519;
 use tenzro_types::tenzro_uri::TenzroUri;
 
@@ -255,7 +257,7 @@ impl IrohBackedResolver {
     pub async fn bind_with_jsonrpc(
         cfg: &TenzroIrohConfig,
         a2a: Option<Arc<dyn JsonRpcDispatcher>>,
-        mcp: Option<Arc<dyn JsonRpcDispatcher>>,
+        mcp: Option<Arc<dyn McpStreamHandler>>,
     ) -> IrohResult<Arc<Self>> {
         // Same bind decision as `bind_with_config` — see comments there.
         let endpoint = if cfg.pkarr_relay_url.is_none()
@@ -272,12 +274,12 @@ impl IrohBackedResolver {
     }
 
     /// Stand up an in-memory blob store + iroh-blobs ALPN router on top of
-    /// an already-bound endpoint, optionally registering A2A / MCP
-    /// JSON-RPC dispatchers on the same router.
+    /// an already-bound endpoint, optionally registering an A2A JSON-RPC
+    /// dispatcher and an MCP session handler on the same router.
     fn with_endpoint(
         endpoint: Endpoint,
         a2a: Option<Arc<dyn JsonRpcDispatcher>>,
-        mcp: Option<Arc<dyn JsonRpcDispatcher>>,
+        mcp: Option<Arc<dyn McpStreamHandler>>,
     ) -> IrohResult<Arc<Self>> {
         let store = MemStore::new();
         let blobs = BlobsProtocol::new(&store, None);
@@ -285,8 +287,8 @@ impl IrohBackedResolver {
         if let Some(dispatcher) = a2a {
             builder = builder.accept(ALPN_A2A, JsonRpcProtocol::a2a(dispatcher));
         }
-        if let Some(dispatcher) = mcp {
-            builder = builder.accept(ALPN_MCP, JsonRpcProtocol::mcp(dispatcher));
+        if let Some(handler) = mcp {
+            builder = builder.accept(ALPN_MCP, McpProtocol::new(handler));
         }
         let router = builder.spawn();
         let downloader = Downloader::new(&*store, &endpoint);

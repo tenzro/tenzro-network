@@ -176,15 +176,18 @@ fn audio_catalog_is_non_empty_and_well_formed() {
 }
 
 #[test]
-fn video_catalog_is_empty_in_wave_1() {
-    // Wave 1 ships an empty video catalog — no permissive ONNX-shippable
-    // encoder-only video model exists in the 2026 OSS landscape.
-    // The runtime scaffolding ships ready; entries land later.
+fn video_catalog_advertises_vjepa2_family() {
+    // The video catalog advertises V-JEPA 2 ViT-L (MIT), ViT-H (MIT),
+    // and ViT-g (Apache-2.0) — all LicenseTier::Permissive. Loading
+    // currently rejects at `tenzro_loadVideoModel` (-32004) because
+    // facebook/vjepa2-* ships safetensors only; the catalog exists so
+    // discovery, CLI listing, and MCP enumeration return the right
+    // options once the ONNX export step lands.
     let catalog = get_video_catalog();
-    assert!(
-        catalog.is_empty(),
-        "video catalog should be empty in wave 1; got {} entries",
-        catalog.len()
+    let ids: Vec<&str> = catalog.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["vjepa2-vitl-256", "vjepa2-vith-256", "vjepa2-vitg-384"],
     );
 }
 

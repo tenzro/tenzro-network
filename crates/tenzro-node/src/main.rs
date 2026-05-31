@@ -599,6 +599,7 @@ async fn main() -> Result<()> {
     // `TaskManager` — tasks created over either transport land in the same
     // table.
     let a2a_addr = config.a2a_addr.clone();
+    let iroh_mcp_web_state = web_state.clone();
     let a2a_state = a2a::server::build_a2a_state(&a2a_addr, node_arc.clone(), web_state);
 
     // Phase D2 (#223): install the iroh-side A2A dispatcher. The iroh
@@ -612,6 +613,20 @@ async fn main() -> Result<()> {
             Arc::new(a2a::iroh_transport::IrohA2aDispatcher::new(a2a_state.clone()));
         deferred.set(dispatcher);
         info!("A2A dispatcher installed on iroh transport (ALPN tenzro/a2a, Phase D2)");
+    }
+
+    // Phase D2 follow-up: install the iroh-side MCP handler. The iroh
+    // router registered the `tenzro/mcp` ALPN at bind time backed by a
+    // deferred handler (see `init_ai_infrastructure`); now that we have
+    // `Arc<TenzroNode>` + `Arc<WebState>` we swap the real one in. Each
+    // inbound bi-stream becomes a full rmcp session (`AsyncRwTransport`
+    // line-delimited JSON-RPC — same wire format as stdio MCP).
+    if let Some(deferred) = node_arc.iroh_mcp_handler.as_ref() {
+        let handler: Arc<dyn tenzro_iroh::McpStreamHandler> = Arc::new(
+            mcp::iroh_transport::IrohMcpHandler::new(node_arc.clone(), iroh_mcp_web_state),
+        );
+        deferred.set(handler);
+        info!("MCP handler installed on iroh transport (ALPN tenzro/mcp, Phase D2)");
     }
 
     let a2a_shutdown_rx = shutdown_tx.subscribe();

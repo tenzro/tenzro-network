@@ -1,0 +1,86 @@
+# rsync exclude list for the tenzro-network root mirror.
+#
+# Used when syncing ~/AI/tenzronetwork/ → ~/Documents/tenzro-github/tenzro-network/.
+# Subdirectory mirrors (tenzro-cli, sdk repos, etc.) use rsync-excludes-sub.txt
+# instead — that one also excludes .gitignore and .github/ so each mirror keeps
+# its own copy.
+#
+# Invocation:
+#   rsync -a \
+#     --exclude-from=tools/sync/rsync-excludes-root.txt \
+#     /Users/hilarl/AI/tenzronetwork/ \
+#     /Users/hilarl/Documents/tenzro-github/tenzro-network/
+#
+# Do NOT pass --delete or --delete-excluded — that can wipe the destination's
+# .git/ directory and sever the local clone from the remote.
+
+# Internal AI-assistant instructions and memory
+CLAUDE.md
+.claude/
+
+# Git metadata (preserve the mirror's own)
+.git/
+
+# Build outputs (any language)
+target/
+node_modules/
+dist/
+build/
+.next/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+*.egg-info/
+.venv/
+venv/
+.coverage
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Secrets
+.env
+.env.*
+.vercel/
+
+# Logs
+*.log
+
+# Runtime data
+crates/tenzro-node/data/
+data/
+
+# Surfaces with their own publish path / mirror
+website/
+apps/
+sdk/
+
+# Operator-specific deployment IaC (our GCE fleet, project IDs, subnets).
+# Other operators bring their own IaC; see deploy/validator-deployment.md
+# for the IaC-agnostic operator guide.
+deploy/terraform/gce_validators/
+
+# Operator-specific runbooks, IaC, and scripts (Tenzro Labs testnet specifics:
+# GCP project IDs, bucket names, validator hostnames, fleet topology).
+# Other operators bring their own runbooks; the public-facing equivalents are
+# deploy/validator-deployment.md and docs/operators/OPERATOR_GUIDE.md.
+deploy/README.md
+deploy/terraform/main.tf
+deploy/kubernetes/
+docs/operators/INCIDENT_DRILLS.md
+scripts/deploy-testnet.sh
+tools/genkeys/
+
+# Internal audit / planning artifacts that cite CLAUDE.md extensively as a
+# doc-drift source — scoped to internal use only.
+tools/doc-audit/
+docs/architecture/gap-matrix.md
+docs/architecture/agentic-internet.md
+docs/architecture/prior-art.md

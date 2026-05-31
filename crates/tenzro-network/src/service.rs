@@ -2694,7 +2694,7 @@ mod tests {
         // *iff* the ports match — `extract_port` is transport-agnostic on
         // the comparison key, which is what we want for a node that
         // simultaneously listens on both transports at the same port (the
-        // tenzro-node universal default per CLAUDE.md).
+        // tenzro-node universal default).
         let listen = vec![ma("/ip4/0.0.0.0/udp/9000/quic-v1")];
         let observed = ma("/ip4/35.184.63.8/tcp/9000");
         assert!(is_observed_port_one_of_ours(&observed, &listen));

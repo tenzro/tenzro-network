@@ -291,6 +291,165 @@ async fn write_frame(send: &mut SendStream, body: &[u8]) -> IrohResult<()> {
     Ok(())
 }
 
+/// MCP-over-iroh per-stream handler trait.
+///
+/// MCP (Model Context Protocol) is *not* a request/response protocol — it is
+/// a session-bound bidirectional JSON-RPC channel (Initialize handshake,
+/// `tools/list`, `tools/call`, server-initiated notifications, etc.). The
+/// [`JsonRpcDispatcher`] one-shot trampoline above is sufficient for A2A's
+/// `message/send` / `tasks/send` request/response shape but throws away
+/// MCP's session state after a single round-trip.
+///
+/// `McpStreamHandler` is the alternative: instead of reading a single
+/// length-prefixed request and writing a single response, the handler is
+/// handed the *raw bidirectional QUIC stream pair* and runs the full
+/// rmcp `ServerHandler::serve(transport)` loop over it for the lifetime
+/// of the stream.
+///
+/// Implemented in `tenzro-node::mcp::iroh_transport::IrohMcpHandler`,
+/// which adapts iroh `(SendStream, RecvStream)` into rmcp's
+/// `AsyncRwTransport` (line-delimited JSON-RPC) and feeds it into
+/// `TenzroMcpServer::serve(...)`. Keeping the trait here keeps
+/// `tenzro-iroh` rmcp-free.
+#[async_trait]
+pub trait McpStreamHandler: Send + Sync + std::fmt::Debug + 'static {
+    /// Run a full MCP session over one iroh bi-stream.
+    ///
+    /// The handler owns the stream for its full lifetime — it runs the
+    /// rmcp Initialize handshake, dispatches inbound tool calls, emits
+    /// notifications, and finally closes both stream halves when the
+    /// session terminates. Returning `Err` aborts the session with a
+    /// QUIC-level reset; clean session termination should return `Ok(())`.
+    async fn serve_stream(
+        self: Arc<Self>,
+        send: SendStream,
+        recv: RecvStream,
+    ) -> IrohResult<()>;
+}
+
+/// `iroh::ProtocolHandler` adapter for MCP-over-iroh.
+///
+/// Unlike [`JsonRpcProtocol`] (which runs the one-shot
+/// [`JsonRpcDispatcher`] per stream), `McpProtocol` accepts inbound
+/// bi-streams and hands each to an [`McpStreamHandler`] for the full
+/// rmcp session lifecycle (Initialize → tools/list → tools/call →
+/// notifications → Shutdown).
+///
+/// Each stream is a fresh MCP session, served on its own tokio task so
+/// concurrent peers / concurrent sessions from the same peer never block
+/// each other.
+#[derive(Debug, Clone)]
+pub struct McpProtocol {
+    handler: Arc<dyn McpStreamHandler>,
+}
+
+impl McpProtocol {
+    /// Wrap an [`McpStreamHandler`] for registration under [`ALPN_MCP`].
+    pub fn new(handler: Arc<dyn McpStreamHandler>) -> Self {
+        Self { handler }
+    }
+}
+
+impl ProtocolHandler for McpProtocol {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        let remote = conn.remote_id();
+        debug!(
+            target: "tenzro_iroh::jsonrpc",
+            alpn = "mcp",
+            remote = %remote,
+            "accepted iroh MCP connection",
+        );
+
+        loop {
+            let (send, recv) = match conn.accept_bi().await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    trace!(
+                        target: "tenzro_iroh::jsonrpc",
+                        alpn = "mcp",
+                        error = %e,
+                        "remote closed MCP connection",
+                    );
+                    return Ok(());
+                }
+            };
+
+            let handler = self.handler.clone();
+            tokio::spawn(async move {
+                if let Err(e) = handler.serve_stream(send, recv).await {
+                    warn!(
+                        target: "tenzro_iroh::jsonrpc",
+                        alpn = "mcp",
+                        error = %e,
+                        "iroh MCP session terminated with error",
+                    );
+                }
+            });
+        }
+    }
+}
+
+/// Deferred [`McpStreamHandler`] trampoline — same chicken-and-egg
+/// resolution as [`DeferredJsonRpcDispatcher`].
+///
+/// Allows `IrohBackedResolver::bind_with_jsonrpc` to register the
+/// `tenzro/mcp` ALPN at bind time before `TenzroMcpServer` (which needs
+/// `Arc<TenzroNode>`) is constructible. Calls before [`Self::set`] is
+/// invoked close the stream cleanly without serving an MCP session.
+#[derive(Debug, Clone)]
+pub struct DeferredMcpHandler {
+    inner: Arc<RwLock<Option<Arc<dyn McpStreamHandler>>>>,
+}
+
+impl DeferredMcpHandler {
+    /// Create an unbound handler.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Install the real backing handler. Idempotent.
+    pub fn set(&self, handler: Arc<dyn McpStreamHandler>) {
+        *self.inner.write() = Some(handler);
+    }
+
+    /// Has a real handler been installed?
+    pub fn is_ready(&self) -> bool {
+        self.inner.read().is_some()
+    }
+}
+
+impl Default for DeferredMcpHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl McpStreamHandler for DeferredMcpHandler {
+    async fn serve_stream(
+        self: Arc<Self>,
+        mut send: SendStream,
+        _recv: RecvStream,
+    ) -> IrohResult<()> {
+        let backing = self.inner.read().clone();
+        match backing {
+            Some(h) => h.serve_stream(send, _recv).await,
+            None => {
+                // Server-not-ready: emit a single JSON-RPC error line in
+                // rmcp's `AsyncRwTransport` wire format (newline-delimited
+                // JSON) and close the stream so the client gets a defined
+                // failure rather than a hung session.
+                let body = b"{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"mcp handler not yet bound\"},\"id\":null}\n";
+                let _ = send.write_all(body).await;
+                let _ = send.finish();
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Client-side JSON-RPC-over-iroh caller.
 ///
 /// Opens a bidirectional stream against `remote` on the given ALPN,

@@ -83,12 +83,6 @@ pub use precompiles::{
     PRECOMPILE_TEE_VERIFY, PRECOMPILE_ZK_VERIFY, PRECOMPILE_MODEL_INFERENCE, PRECOMPILE_SETTLEMENT,
     PRECOMPILE_TNZO_BRIDGE, PRECOMPILE_TOKEN_FACTORY, PRECOMPILE_CROSS_VM_BRIDGE,
     PRECOMPILE_STAKING, PRECOMPILE_GOVERNANCE, PRECOMPILE_NFT_FACTORY,
-    PRECOMPILE_ERC8004_IDENTITY, PRECOMPILE_ERC8004_REPUTATION, PRECOMPILE_ERC8004_VALIDATION,
-};
-pub use evm::erc8004::{
-    AgentRecord as Erc8004AgentRecord, Erc8004IdentityRegistry, Erc8004ReputationRegistry,
-    Erc8004ValidationRegistry, FeedbackEntry as Erc8004FeedbackEntry,
-    ValidationEntry as Erc8004ValidationEntry,
 };
 pub use state_adapter::{StateAdapter, PersistentState, CacheStats};
 pub use evm::EvmExecutor;

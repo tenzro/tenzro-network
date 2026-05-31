@@ -6,23 +6,21 @@
 # consumed by the Tenzro `VideoRuntime` when the resulting artifact is
 # registered (`tenzro_loadVideoModel` RPC).
 #
-# As of April 2026 the OSS landscape has no permissive +
-# ONNX-shippable encoder-only video model. Every entry below is
-# tentative pending license clarification or export-pipeline
-# verification — see `notes` for the specific blocker. The harness
-# ships now so adding entries later is mechanical.
+# V-JEPA 2 base is MIT-licensed per the model cards on
+# `facebook/vjepa2-vitl-fpc64-256` and sibling repos. VideoMAE remains
+# CC-BY-NC-4.0 and is gated behind `--accept-non-commercial`.
 
 [[target]]
-id = "vjepa-2-1-base"
-hf_repo = "facebook/vjepa2"
-arch = "vjepa2"                  # ViT-L/16 with 3D-conv stem, predictor stripped
-license = "TBD"                  # license unclear on the model card as of 2026-04
+id = "vjepa2-vitl-fpc64-256"
+hf_repo = "facebook/vjepa2-vitl-fpc64-256"
+arch = "vjepa2"                  # ViT-L/16 base encoder, no fine-tuning head
+license = "MIT"
 params = "300M"
-frame_size = 224
-num_frames = 16
+frame_size = 256
+num_frames = 64                  # native fpc — V-JEPA 2 pretrained at 64 frames
 fps = 4
 embedding_dim = 1024
-notes = "Tier B — encoder-only export (predictor head dropped). License needs clarification with Meta before this can be redistributed under tenzro/ org."
+notes = "Base encoder. We trace with skip_predictor=True so only the encoder graph is exported (predictor head dropped). Mean-pool over the sequence axis to get a [B, 1024] clip embedding for retrieval/similarity. Native input is `pixel_values_videos: [B, 64, 3, 256, 256]` float32."
 
 [[target]]
 id = "videomae-base"
@@ -34,4 +32,4 @@ frame_size = 224
 num_frames = 16
 fps = 4
 embedding_dim = 768
-notes = "Tier A — straight encoder export, well-understood. License is CC-BY-NC-4.0 → registry will gate behind --accept-non-commercial. Kept as a working baseline while Meta/V-JEPA license shakes out."
+notes = "Tier A — straight encoder export, well-understood. License is CC-BY-NC-4.0 → registry will gate behind --accept-non-commercial."

@@ -92,6 +92,15 @@ pub enum InferencePayload {
         /// Opaque prompt blob — decoded by the segmentation runtime.
         prompts_json: String,
     },
+    /// SAM 3 text-promptable segmentation: image + text label (+ optional
+    /// box) → detection-shaped (bbox, score, mask) triples.
+    TextSegment {
+        model_id: String,
+        image_bytes: Vec<u8>,
+        /// Serialized `TextSegmentConfig` — decoded by the
+        /// text-segmentation runtime.
+        config_json: String,
+    },
     /// DETR-family detection: image + threshold → boxes.
     Detect {
         model_id: String,
@@ -122,6 +131,7 @@ impl InferencePayload {
             | Self::VisionSimilarity { model_id, .. }
             | Self::TextEmbed { model_id, .. }
             | Self::Segment { model_id, .. }
+            | Self::TextSegment { model_id, .. }
             | Self::Detect { model_id, .. }
             | Self::Transcribe { model_id, .. }
             | Self::VideoEmbed { model_id, .. } => model_id,
@@ -144,6 +154,7 @@ impl InferencePayload {
             Self::VisionEmbed { .. }
             | Self::VisionSimilarity { .. }
             | Self::Segment { .. }
+            | Self::TextSegment { .. }
             | Self::Detect { .. } => ModelModality::Image,
             Self::Transcribe { .. } => ModelModality::Audio,
             Self::VideoEmbed { .. } => ModelModality::Video,

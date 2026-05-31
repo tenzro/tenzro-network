@@ -1,14 +1,18 @@
 # Tenzro Network Deployment
 
-> **Status (2026-05-18):** The canonical Tenzro testnet runs on a **tri-continental
-> 10-VM GCE fleet** managed by `deploy/terraform/gce_validators/`, **not** on GKE.
-> The Kubernetes manifests and GKE Terraform under this directory are **legacy
-> reference material** retained for operators who want to deploy a K8s-based
-> network of their own. They are not the current testnet topology.
+> **Start here:** [`validator-deployment.md`](validator-deployment.md) — the
+> IaC-agnostic operator guide for running a Tenzro validator fleet on any
+> cloud (GCE, EC2, Azure, Hetzner, bare metal, mixed). Covers sizing, port
+> requirements, container image build, per-VM systemd layout, key generation,
+> rolling upgrades, and observability.
 >
-> For the live fleet layout, build, and rollout procedure, see the **Deployment**
-> section of `CLAUDE.md` at the repo root. For operator-facing setup on any cloud
-> (GCE, EC2, Azure, plain VMs), see `docs/operators/OPERATOR_GUIDE.md`.
+> For per-node config reference, key rotation, snapshot/state-sync, and
+> incident response, see [`../docs/operators/OPERATOR_GUIDE.md`](../docs/operators/OPERATOR_GUIDE.md).
+>
+> The Kubernetes manifests and GKE Terraform under this directory are
+> **legacy reference material** retained as an example for operators who
+> prefer Kubernetes. They are not required, and most validator deployments
+> use plain VMs + systemd as described in `validator-deployment.md`.
 
 ## Legacy GKE Deployment (reference, not current)
 

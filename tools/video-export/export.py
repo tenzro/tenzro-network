@@ -11,8 +11,9 @@ count, `H = W = frame_size`, and `D = embedding_dim` from
 targets.toml.
 
 Supported architectures:
-- vjepa2:   V-JEPA 2 / 2.1 ViT-L/16 with 3D-conv stem (license TBD,
-            Meta).
+- vjepa2:   V-JEPA 2 ViT-L/16 with 3D-conv stem (MIT, Meta). The
+            wrapper passes `skip_predictor=True` so only the encoder
+            graph is traced.
 - videomae: VideoMAE ViT-B/16 with tubelet patch embedding
             (CC-BY-NC-4.0, MCG-NJU).
 
@@ -102,7 +103,14 @@ def export_vjepa2(target: Target, out_path: Path, opset: int) -> Path:
             # video: [B, T, 3, H, W] → encoder returns last_hidden_state
             # of shape [B, N_tokens, D]; mean-pool over tokens to a
             # single embedding [B, D] for the runtime.
-            out = self.inner(pixel_values_videos=video)
+            #
+            # `skip_predictor=True` drops the JEPA predictor forward so
+            # the traced graph contains only the encoder — exactly what
+            # the runtime needs for retrieval/similarity embeddings.
+            out = self.inner(
+                pixel_values_videos=video,
+                skip_predictor=True,
+            )
             tokens = out.last_hidden_state
             return tokens.mean(dim=1)
 

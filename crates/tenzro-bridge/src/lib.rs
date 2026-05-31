@@ -85,6 +85,7 @@
 
 pub mod canton;
 pub mod canton_auth;
+pub mod cggmp24_mpc;
 pub mod chainlink_ccip;
 pub mod circuit_breaker;
 pub mod debridge;
@@ -100,6 +101,7 @@ pub mod traits;
 pub mod wormhole;
 
 // Re-export commonly used types
+pub use cggmp24_mpc::{Cggmp24Signer, InMemoryMpcTransport, MpcMessage, MpcTransport, PartyId};
 pub use circuit_breaker::CircuitBreaker;
 pub use error::{BridgeError, Result};
 pub use evm_signer::{EvmTransactionSigner, EvmSignerConfig};

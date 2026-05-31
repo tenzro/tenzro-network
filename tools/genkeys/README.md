@@ -78,8 +78,7 @@ cp ~/tenzro-phaseA-keys/genesis-prod.toml \
    ~/AI/tenzronetwork/config/genesis-prod.toml
 ```
 
-Per CLAUDE.md, the actual `git commit` of `config/genesis-prod.toml`
-requires explicit per-command authorization.
+Review the file diff before committing.
 
 ## Upload secrets to GCP Secret Manager
 
@@ -104,8 +103,9 @@ The Secret Manager **containers** are created by
 you upload payloads. After `apply`, the containers exist with zero
 versions; `gcloud secrets versions add` populates them.
 
-Per CLAUDE.md, each `gcloud secrets versions add` invocation is a cross-
-boundary action and requires explicit per-command authorization.
+Each `gcloud secrets versions add` invocation writes a new secret
+version. Run them one at a time and verify the per-VM payload is
+correct before proceeding to the next.
 
 ## Set the Terraform bootstrap peer ID
 
