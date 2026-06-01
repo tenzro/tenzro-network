@@ -1407,6 +1407,21 @@ mod tests {
 
         // First: only SessionKey installed → passes.
         let other = vec![0xBDu8; 20];
+        // Install SessionKey config for `other` before registering the module —
+        // SessionKeyValidator keeps configs in its own map keyed by account, and
+        // the registry install only registers the validator handle.
+        session_validator.install_for(
+            other.clone(),
+            SessionKeyConfig {
+                session_pubkey: pk_session,
+                allowed_targets: vec![target],
+                allowed_selectors: vec![selector],
+                valid_after: 0,
+                valid_until: 0,
+                max_value_per_call: None,
+                max_total_value: None,
+            },
+        );
         attest_module(&reg, session_addr);
         reg.install(
             other.clone(),

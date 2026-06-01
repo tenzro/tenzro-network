@@ -53,6 +53,11 @@ pub const CF_APPROVALS: &str = "approvals";
 /// hold directly (e.g. Canton devnet JWT). Keys: `apikey:<sha256_hex>` →
 /// JSON `ApiKeyRecord` (subject DID, scopes, created_at, revoked_at).
 pub const CF_API_KEYS: &str = "api_keys";
+/// Tenzro Bridge MPC: TEE-sealed DKLS23 threshold-ECDSA keyshares.
+/// Keys: `mpc/keyshare/<group_id_hex>/<epoch_le_u64_hex>` → JSON
+/// `KeyshareEnvelope` (sealed `Party<C>` ciphertext + public coordinates);
+/// `mpc/keyshare/by_group/<group_id_hex>` → JSON `Vec<u64>` (epoch index).
+pub const CF_MPC_KEYSHARES: &str = "mpc_keyshares";
 
 /// Key-value store trait
 pub trait KvStore: Send + Sync {
@@ -144,6 +149,7 @@ impl RocksDbStore {
             ColumnFamilyDescriptor::new(CF_AUDIT, Options::default()),
             ColumnFamilyDescriptor::new(CF_APPROVALS, Options::default()),
             ColumnFamilyDescriptor::new(CF_API_KEYS, Options::default()),
+            ColumnFamilyDescriptor::new(CF_MPC_KEYSHARES, Options::default()),
         ]
     }
 

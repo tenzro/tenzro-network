@@ -174,7 +174,7 @@ impl SealedSecp256k1Key {
 
     /// 65-byte uncompressed SEC1 encoding (`0x04 || X || Y`).
     pub fn pubkey_uncompressed(&self) -> [u8; 65] {
-        let point = self.verifying_key.to_encoded_point(false);
+        let point = self.verifying_key.to_sec1_point(false);
         let bytes = point.as_bytes();
         debug_assert_eq!(bytes.len(), 65);
         let mut out = [0u8; 65];
@@ -197,7 +197,7 @@ impl SealedSecp256k1Key {
 /// Computes the Ethereum address from a secp256k1 verifying key.
 fn derive_eth_address(vk: &VerifyingKey) -> [u8; 20] {
     use sha3::{Digest as Sha3Digest, Keccak256};
-    let point = vk.to_encoded_point(false);
+    let point = vk.to_sec1_point(false);
     let pubkey_bytes = point.as_bytes();
     // Strip the 0x04 SEC1 prefix; Keccak-256 over the 64-byte (X || Y) tail.
     let hash = Keccak256::digest(&pubkey_bytes[1..]);

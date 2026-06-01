@@ -10,6 +10,14 @@ use ed25519_dalek::{
 };
 use k256::ecdsa::SigningKey as Secp256k1SigningKey;
 use rand::rngs::OsRng;
+// `getrandom 0.4` exposes `SysRng: TryCryptoRng` over `rand_core 0.10`,
+// which is the `CryptoRng` flavour `ecdsa 0.17-rc.18` consumes (transitively
+// via `signature 3.0.0`'s rand_core feature). Wrapping with
+// `rand_core::UnwrapErr(SysRng)` adapts the fallible `TryCryptoRng` to the
+// infallible `CryptoRng` that `SigningKey::random` requires. We keep
+// `rand::rngs::OsRng` in scope for ed25519-dalek 2.x, which still pins
+// `rand_core 0.6`.
+use getrandom_0_4::{rand_core::UnwrapErr, SysRng};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -218,7 +226,12 @@ impl KeyPair {
                 })
             }
             KeyType::Secp256k1 => {
-                let signing_key = Secp256k1SigningKey::random(&mut OsRng);
+                // k256 0.14-rc's `SigningKey::random` is deprecated in favour of the
+                // `Generate` trait. `Generate::generate_from_rng` takes a rand_core 0.10
+                // `CryptoRng`; lift `SysRng: TryCryptoRng` via `UnwrapErr`.
+                use ::k256::elliptic_curve::Generate;
+                let signing_key: Secp256k1SigningKey =
+                    Secp256k1SigningKey::generate_from_rng(&mut UnwrapErr(SysRng));
                 let verifying_key = signing_key.verifying_key();
 
                 let secret_key = SecretKey::new(
@@ -227,7 +240,7 @@ impl KeyPair {
                 );
 
                 // Use uncompressed public key (65 bytes)
-                let public_key_point = verifying_key.to_encoded_point(false);
+                let public_key_point = verifying_key.to_sec1_point(false);
                 let public_key = PublicKey::new(
                     KeyType::Secp256k1,
                     public_key_point.as_bytes().to_vec(),
@@ -293,7 +306,7 @@ impl KeyPair {
                 let verifying_key = signing_key.verifying_key();
 
                 // Use uncompressed public key (65 bytes)
-                let public_key_point = verifying_key.to_encoded_point(false);
+                let public_key_point = verifying_key.to_sec1_point(false);
                 let public_key = PublicKey::new(
                     KeyType::Secp256k1,
                     public_key_point.as_bytes().to_vec(),

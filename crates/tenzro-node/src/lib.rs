@@ -94,6 +94,7 @@ pub mod delegation_scope_oracle;
 pub mod epoch_state_store;
 pub mod metrics;
 pub mod model_blob_fetcher_bridge;
+pub mod mpc_libp2p_adapter;
 pub mod node;
 pub mod rpc;
 pub mod rpc_integrations;

@@ -338,10 +338,12 @@ mod tests {
     fn test_p256_sec1_uncompressed_round_trip() {
         // Build a valid P-256 key from scratch using the p256 crate, then
         // serialize as SEC1 uncompressed and feed through our encoder.
+        use ::p256::elliptic_curve::Generate;
+        use getrandom_0_4::{SysRng, rand_core::UnwrapErr};
         use p256::ecdsa::SigningKey as P256Sk;
-        let sk = P256Sk::random(&mut rand::rngs::OsRng);
+        let sk = P256Sk::generate_from_rng(&mut UnwrapErr(SysRng));
         let vk = sk.verifying_key();
-        let encoded = vk.to_encoded_point(false); // uncompressed
+        let encoded = vk.to_sec1_point(false); // uncompressed
         let sec1 = encoded.as_bytes().to_vec();
         assert_eq!(sec1.len(), 65);
         assert_eq!(sec1[0], 0x04);
@@ -368,10 +370,12 @@ mod tests {
 
     #[test]
     fn test_p384_sec1_uncompressed_round_trip() {
+        use ::p384::elliptic_curve::Generate;
+        use getrandom_0_4::{SysRng, rand_core::UnwrapErr};
         use p384::ecdsa::SigningKey as P384Sk;
-        let sk = P384Sk::random(&mut rand::rngs::OsRng);
+        let sk = P384Sk::generate_from_rng(&mut UnwrapErr(SysRng));
         let vk = sk.verifying_key();
-        let encoded = vk.to_encoded_point(false);
+        let encoded = vk.to_sec1_point(false);
         let sec1 = encoded.as_bytes().to_vec();
         assert_eq!(sec1.len(), 97); // 1 + 48 + 48
         assert_eq!(sec1[0], 0x04);

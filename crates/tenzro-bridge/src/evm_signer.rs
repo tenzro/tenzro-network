@@ -5,16 +5,18 @@
 //! on-chain transactions.
 
 use crate::error::{BridgeError, Result};
+use crate::mpc::sign::ThresholdSigner;
 use k256::ecdsa::{RecoveryId, Signature, SigningKey, signature::hazmat::PrehashSigner};
 use reqwest::Client;
 use serde_json::json;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tenzro_tee::SealedSecp256k1Key;
 use tracing::{debug, info};
 
 /// Backing key material for an [`EvmTransactionSigner`].
 ///
-/// Two variants:
+/// Three variants:
 ///
 /// - [`SignerBackend::RawKey`] — secp256k1 private key sitting in process
 ///   memory. Used for development, local testing, and any deployment that
@@ -24,22 +26,40 @@ use tracing::{debug, info};
 ///   SEV-SNP or Intel TDX enclave via [`SealedSecp256k1Key`]. The private
 ///   scalar lives in `Zeroizing<[u8; 32]>` inside the wrapper and is
 ///   reproducible only inside the same VM image (measurement-bound).
+/// - [`SignerBackend::ThresholdKey`] — DKLS23 t-of-n distributed signer.
+///   No single party holds the full private scalar; signatures are
+///   produced by a quorum drawn from the MPC group via
+///   `committee::build_committee_bound_sign_config` and driven through a
+///   `SignSession` over libp2p. The handle is constructed by the node
+///   layer (which owns the keyshare store, sealer, transport, and chain
+///   entropy source) and passed in via [`Self::with_threshold_signer`].
+///   This is the production posture for bridge custody once Phase D
+///   wave 2 is fully wired.
 ///
-/// Both variants expose the same `sign_prehash` interface and produce the
-/// same 20-byte Ethereum address derivation (Keccak-256 of the uncompressed
-/// secp256k1 public key tail), so the surrounding RLP / nonce / gas logic
-/// is identical.
+/// All three variants expose the same `sign_prehash` interface and produce
+/// the same 20-byte Ethereum address derivation (Keccak-256 of the
+/// uncompressed secp256k1 public key tail), so the surrounding RLP /
+/// nonce / gas logic is identical. The `ThresholdKey` variant is async
+/// (libp2p round-trip); the other two are sync internally but exposed
+/// through the same `async fn sign_prehash` for a uniform call site.
 pub enum SignerBackend {
     /// In-memory secp256k1 key (dev / non-TEE deployments).
     RawKey(SigningKey),
-    /// TEE-sealed secp256k1 key (production bridge custody).
+    /// TEE-sealed secp256k1 key (single-key production custody).
     SealedKey(SealedSecp256k1Key),
+    /// DKLS23 threshold signer handle (Phase D wave 2 production custody).
+    ThresholdKey(Arc<dyn ThresholdSigner>),
 }
 
 impl SignerBackend {
     /// Signs a 32-byte digest, returning the ECDSA signature plus recovery
     /// id needed to construct the Ethereum `v`.
-    fn sign_prehash(&self, digest: &[u8; 32]) -> Result<(Signature, RecoveryId)> {
+    ///
+    /// `RawKey` and `SealedKey` are sync internally but awaited as
+    /// completed futures so the call site is uniform across all three
+    /// variants. `ThresholdKey` actually awaits a libp2p round-trip
+    /// through the DKLS23 sign session.
+    async fn sign_prehash(&self, digest: &[u8; 32]) -> Result<(Signature, RecoveryId)> {
         match self {
             SignerBackend::RawKey(sk) => sk
                 .sign_prehash(digest)
@@ -47,6 +67,30 @@ impl SignerBackend {
             SignerBackend::SealedKey(sealed) => sealed
                 .sign_prehash(digest)
                 .map_err(|e| BridgeError::AdapterError(format!("Sealed signing failed: {}", e))),
+            SignerBackend::ThresholdKey(handle) => {
+                let output = handle.sign_prehash(*digest).await.map_err(|e| {
+                    BridgeError::AdapterError(format!("Threshold signing failed: {}", e))
+                })?;
+                // Reassemble the k256 `Signature` + `RecoveryId` from the
+                // `(r, s, v)` triple so downstream RLP encoding is
+                // identical to the single-key path.
+                let mut rs = [0u8; 64];
+                rs[..32].copy_from_slice(&output.r);
+                rs[32..].copy_from_slice(&output.s);
+                let signature = Signature::from_slice(&rs).map_err(|e| {
+                    BridgeError::AdapterError(format!(
+                        "Threshold signature decode failed: {}",
+                        e
+                    ))
+                })?;
+                let recovery_id = RecoveryId::from_byte(output.v).ok_or_else(|| {
+                    BridgeError::AdapterError(format!(
+                        "Threshold signature carried invalid recovery id: {}",
+                        output.v
+                    ))
+                })?;
+                Ok((signature, recovery_id))
+            }
         }
     }
 }
@@ -94,7 +138,7 @@ impl EvmTransactionSigner {
 
         // Derive address from public key: keccak256(uncompressed_pubkey[1..])[12..]
         let verifying_key = signing_key.verifying_key();
-        let public_key_bytes = verifying_key.to_encoded_point(false);
+        let public_key_bytes = verifying_key.to_sec1_point(false);
         let public_key_uncompressed = &public_key_bytes.as_bytes()[1..]; // skip 0x04 prefix
 
         let address_hash = keccak256(public_key_uncompressed);
@@ -175,10 +219,44 @@ impl EvmTransactionSigner {
         }
     }
 
-    /// Returns whether the underlying key is TEE-sealed (production
-    /// posture) or a raw in-memory key (dev posture).
+    /// Creates a new EVM transaction signer wrapping a DKLS23 threshold
+    /// signing handle.
+    ///
+    /// The handle is constructed by the node layer (which owns the
+    /// `Arc<dyn KeyshareStore>`, `Arc<dyn KeyshareSealer>`, libp2p
+    /// transport factory, and finalized-block-hash source used as
+    /// `chain_entropy`). The 20-byte sender address comes directly from
+    /// the handle's group public key — no secret material crosses this
+    /// API.
+    ///
+    /// This is the production posture for Phase D wave 2 bridge custody:
+    /// no single party holds the full private scalar; signatures are
+    /// produced by a quorum drawn from the MPC group.
+    pub fn with_threshold_signer(
+        signer: Arc<dyn ThresholdSigner>,
+        chain_id: u64,
+        rpc_url: String,
+    ) -> Self {
+        let sender_address = signer.sender_address();
+        Self::with_backend(
+            SignerBackend::ThresholdKey(signer),
+            sender_address,
+            chain_id,
+            rpc_url,
+        )
+    }
+
+    /// Returns whether the underlying key is TEE-sealed (single-key
+    /// production posture) or a raw in-memory key (dev posture).
     pub fn is_tee_sealed(&self) -> bool {
         matches!(self.backend, SignerBackend::SealedKey(_))
+    }
+
+    /// Returns whether the underlying key is a DKLS23 threshold signer
+    /// (Phase D wave 2 production posture — no single party holds the
+    /// full private scalar).
+    pub fn is_threshold(&self) -> bool {
+        matches!(self.backend, SignerBackend::ThresholdKey(_))
     }
 
     /// Returns the sender address as a hex string (0x-prefixed)
@@ -341,15 +419,17 @@ impl EvmTransactionSigner {
         );
 
         // Encode EIP-1559 transaction
-        let raw_tx = self.encode_eip1559_transaction(
-            nonce,
-            max_priority_fee,
-            max_fee_per_gas,
-            gas_limit,
-            to,
-            value,
-            calldata,
-        )?;
+        let raw_tx = self
+            .encode_eip1559_transaction(
+                nonce,
+                max_priority_fee,
+                max_fee_per_gas,
+                gas_limit,
+                to,
+                value,
+                calldata,
+            )
+            .await?;
 
         // Submit via eth_sendRawTransaction
         let tx_hex = format!("0x{}", hex::encode(&raw_tx));
@@ -395,7 +475,12 @@ impl EvmTransactionSigner {
     ///
     /// EIP-1559 tx RLP:
     /// 0x02 || rlp([chain_id, nonce, max_priority_fee, max_fee, gas_limit, to, value, data, access_list, v, r, s])
-    fn encode_eip1559_transaction(
+    ///
+    /// `async` because the underlying `sign_prehash` may be a DKLS23
+    /// distributed signing session (`SignerBackend::ThresholdKey`) that
+    /// drives a libp2p round-trip. Raw and TEE-sealed backends complete
+    /// synchronously inside the future.
+    async fn encode_eip1559_transaction(
         &self,
         nonce: u64,
         max_priority_fee_per_gas: u128,
@@ -434,8 +519,8 @@ impl EvmTransactionSigner {
 
         let msg_hash = keccak256(&signing_input);
 
-        // Sign the hash with secp256k1 (raw or TEE-sealed backend)
-        let (signature, recovery_id) = self.backend.sign_prehash(&msg_hash)?;
+        // Sign the hash with secp256k1 (raw / TEE-sealed / threshold backend)
+        let (signature, recovery_id) = self.backend.sign_prehash(&msg_hash).await?;
 
         let sig_bytes = signature.to_bytes();
         let r = &sig_bytes[..32];
@@ -744,8 +829,8 @@ mod tests {
         assert!(!signer.is_tee_sealed(), "RawKey backend must not report TEE-sealed");
     }
 
-    #[test]
-    fn test_eip1559_transaction_encoding() {
+    #[tokio::test]
+    async fn test_eip1559_transaction_encoding() {
         let private_key = [0x01u8; 32];
         let signer = EvmTransactionSigner::new(
             &private_key,
@@ -753,21 +838,202 @@ mod tests {
             "http://localhost:8545".to_string(),
         ).unwrap();
 
-        let result = signer.encode_eip1559_transaction(
-            0,                       // nonce
-            2_000_000_000,           // max priority fee (2 gwei)
-            30_000_000_000,          // max fee per gas (30 gwei)
-            21_000,                  // gas limit
-            "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
-            0,                       // value
-            &[],                     // empty data
-        );
+        let result = signer
+            .encode_eip1559_transaction(
+                0,                       // nonce
+                2_000_000_000,           // max priority fee (2 gwei)
+                30_000_000_000,          // max fee per gas (30 gwei)
+                21_000,                  // gas limit
+                "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+                0,                       // value
+                &[],                     // empty data
+            )
+            .await;
 
         assert!(result.is_ok());
         let raw_tx = result.unwrap();
         // EIP-1559 tx starts with 0x02
         assert_eq!(raw_tx[0], 0x02);
         // Should be a valid RLP-encoded transaction
+        assert!(raw_tx.len() > 100);
+    }
+
+    /// Stub [`ThresholdSigner`] used to verify the [`SignerBackend::ThresholdKey`]
+    /// wiring without standing up a full DKLS23 session. Returns a fixed
+    /// dummy signature shaped like a valid k256 output so the surrounding
+    /// RLP encode + signature-decode round-trip can be exercised
+    /// end-to-end.
+    struct StubThresholdSigner {
+        address: [u8; 20],
+    }
+
+    #[async_trait::async_trait]
+    impl ThresholdSigner for StubThresholdSigner {
+        fn sender_address(&self) -> [u8; 20] {
+            self.address
+        }
+
+        async fn sign_prehash(
+            &self,
+            _msg_hash: [u8; 32],
+        ) -> std::result::Result<crate::mpc::sign::SignOutput, crate::mpc::sign::SignError> {
+            // Construct a (r, s, v) triple that round-trips through
+            // `Signature::from_slice`. The actual scalar values are not
+            // cryptographically meaningful — this exercises only the
+            // backend's signature decode path.
+            //
+            // r and s must each fit in [1, n) where n is the secp256k1
+            // group order. Using small constants well below n is safe.
+            let mut r = [0u8; 32];
+            let mut s = [0u8; 32];
+            r[31] = 0x01;
+            s[31] = 0x01;
+            Ok(crate::mpc::sign::SignOutput { r, s, v: 0 })
+        }
+    }
+
+    #[test]
+    fn test_threshold_backend_is_threshold() {
+        let stub = Arc::new(StubThresholdSigner {
+            address: [0x11; 20],
+        });
+        let signer = EvmTransactionSigner::with_threshold_signer(
+            stub,
+            1,
+            "http://localhost:8545".to_string(),
+        );
+        assert!(signer.is_threshold(), "ThresholdKey backend must report is_threshold()");
+        assert!(
+            !signer.is_tee_sealed(),
+            "ThresholdKey backend must NOT report is_tee_sealed()"
+        );
+        assert_eq!(signer.sender_address_bytes(), &[0x11; 20]);
+    }
+
+    /// Stub that returns an out-of-range recovery id so the decode-path
+    /// failure handling can be exercised. `RecoveryId::from_byte` accepts
+    /// `0..=3`; values ≥ 4 must surface as an `AdapterError`.
+    struct BadRecoveryIdStub;
+    #[async_trait::async_trait]
+    impl ThresholdSigner for BadRecoveryIdStub {
+        fn sender_address(&self) -> [u8; 20] {
+            [0x33; 20]
+        }
+        async fn sign_prehash(
+            &self,
+            _msg_hash: [u8; 32],
+        ) -> std::result::Result<crate::mpc::sign::SignOutput, crate::mpc::sign::SignError> {
+            let mut r = [0u8; 32];
+            let mut s = [0u8; 32];
+            r[31] = 0x01;
+            s[31] = 0x01;
+            Ok(crate::mpc::sign::SignOutput { r, s, v: 99 })
+        }
+    }
+
+    /// Stub that returns a malformed (all-zero) signature blob. k256's
+    /// `Signature::from_slice` rejects zero scalars, surfacing as an
+    /// `AdapterError`.
+    struct ZeroSignatureStub;
+    #[async_trait::async_trait]
+    impl ThresholdSigner for ZeroSignatureStub {
+        fn sender_address(&self) -> [u8; 20] {
+            [0x44; 20]
+        }
+        async fn sign_prehash(
+            &self,
+            _msg_hash: [u8; 32],
+        ) -> std::result::Result<crate::mpc::sign::SignOutput, crate::mpc::sign::SignError> {
+            Ok(crate::mpc::sign::SignOutput {
+                r: [0u8; 32],
+                s: [0u8; 32],
+                v: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_threshold_backend_rejects_invalid_recovery_id() {
+        let stub = Arc::new(BadRecoveryIdStub);
+        let signer = EvmTransactionSigner::with_threshold_signer(
+            stub,
+            1,
+            "http://localhost:8545".to_string(),
+        );
+        let result = signer
+            .encode_eip1559_transaction(
+                0,
+                2_000_000_000,
+                30_000_000_000,
+                21_000,
+                "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+                0,
+                &[],
+            )
+            .await;
+        assert!(result.is_err(), "out-of-range recovery id must fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("invalid recovery id"),
+            "expected recovery-id error, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_threshold_backend_rejects_zero_signature() {
+        let stub = Arc::new(ZeroSignatureStub);
+        let signer = EvmTransactionSigner::with_threshold_signer(
+            stub,
+            1,
+            "http://localhost:8545".to_string(),
+        );
+        let result = signer
+            .encode_eip1559_transaction(
+                0,
+                2_000_000_000,
+                30_000_000_000,
+                21_000,
+                "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+                0,
+                &[],
+            )
+            .await;
+        assert!(result.is_err(), "all-zero signature must fail decode");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("signature decode failed"),
+            "expected decode error, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_threshold_backend_signs_eip1559_transaction() {
+        let stub = Arc::new(StubThresholdSigner {
+            address: [0x22; 20],
+        });
+        let signer = EvmTransactionSigner::with_threshold_signer(
+            stub,
+            1,
+            "http://localhost:8545".to_string(),
+        );
+
+        let result = signer
+            .encode_eip1559_transaction(
+                0,
+                2_000_000_000,
+                30_000_000_000,
+                21_000,
+                "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+                0,
+                &[],
+            )
+            .await;
+
+        assert!(result.is_ok(), "threshold-signed encode must succeed: {:?}", result.err());
+        let raw_tx = result.unwrap();
+        assert_eq!(raw_tx[0], 0x02);
         assert!(raw_tx.len() > 100);
     }
 }

@@ -45,6 +45,11 @@ p384 = { workspace = true }
 rsa = { workspace = true }
 ecdsa = { workspace = true }
 signature = { workspace = true }
+# `rsa` 0.9 implements `signature` 2.x's `Verifier` / `Signer` / `RandomizedSigner`
+# traits, not the v3 line pulled by ecdsa 0.17-rc.18. Both versions are needed
+# at separate RFC 9421 call sites — the v3 traits come from the workspace
+# `signature` pin (above); the v2 traits come from `signature_v2`.
+signature_v2 = { package = "signature", version = "2.2", features = ["std"] }
 sha2 = { workspace = true }
 sha3 = { workspace = true }
 hmac = "0.12"
@@ -52,6 +57,9 @@ subtle = { workspace = true }
 spki = { workspace = true }
 rlp = { workspace = true }
 rand = { workspace = true }
+# getrandom 0.4's SysRng impls rand_core 0.10's TryCryptoRng; wrap in UnwrapErr
+# to satisfy the CryptoRng bound on ecdsa 0.17-rc.18 SigningKey::generate_from_rng.
+getrandom_0_4 = { package = "getrandom", version = "0.4", features = ["std"] }
 
 [dev-dependencies]
 criterion = { workspace = true }

@@ -76,6 +76,10 @@ frost-secp256k1 = { workspace = true }
 ed25519-dalek = { workspace = true }
 aes-gcm = { workspace = true }
 k256 = { workspace = true }
+# getrandom 0.4 → SysRng impls rand_core 0.10's TryCryptoRng; wrap in
+# UnwrapErr to satisfy the `CryptoRng` bound that k256/p256 0.14-rc's
+# `SecretKey::random` requires (signature 3.0.0 → rand_core ^0.10).
+getrandom_0_4 = { package = "getrandom", version = "0.4", features = ["std"] }
 
 [features]
 default = []

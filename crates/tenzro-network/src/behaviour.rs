@@ -29,6 +29,7 @@ use std::time::Duration;
 use crate::block_sync_proto::{self, BlockSyncBehaviour};
 use crate::consensus_direct_proto::{self, ConsensusDirectBehaviour};
 use crate::gossip::{validate_gossip_message, MessageDeduplicator, MessageValidation};
+use crate::mpc_relay::{self, MpcRelayBehaviour};
 
 /// Topics on which ONLY validators may publish. Enforced in the gossip validation
 /// pipeline (`service.rs`) and by the peer scoring system (invalid messages → P4 penalty).
@@ -71,6 +72,14 @@ pub struct TenzroBehaviour {
     /// because every publisher has been migrated here. See
     /// `consensus_direct_proto.rs` for the wire types and concurrency limits.
     pub consensus_direct: ConsensusDirectBehaviour,
+
+    /// MPC relay request/response protocol (`/tenzro/mpc/req-resp/1.0.0`).
+    /// Carries DKLS23 round messages (DKG, signing, refresh, re-key)
+    /// between MPC quorum members addressed by TDIP DID. The bridge-side
+    /// `Transport` trait in `tenzro_bridge::mpc::transport` is implemented
+    /// by a node-layer adapter that calls into this behaviour. See
+    /// `mpc_relay.rs` for the wire types and concurrency limits.
+    pub mpc_relay: MpcRelayBehaviour,
 
     // ─── NAT traversal stack (libp2p 2026 reference design) ────────────────
     //
@@ -311,6 +320,13 @@ impl TenzroBehaviour {
         // mesh entirely and get per-message delivery semantics.
         let consensus_direct = consensus_direct_proto::new_behaviour();
 
+        // MPC relay protocol: per-quorum overlay for DKLS23 round messages
+        // (DKG, signing, refresh, re-key). Addresses peers by TDIP DID via a
+        // node-injected resolver; the wire is point-to-point only — broadcast
+        // rounds are unrolled into per-peer messages by the bridge-side
+        // session driver.
+        let mpc_relay = mpc_relay::new_behaviour();
+
         // ─── NAT traversal stack ──────────────────────────────────────────
         //
         // Build only the halves the role asked for. Fields are wrapped in
@@ -383,6 +399,7 @@ impl TenzroBehaviour {
             allow_block_list,
             block_sync,
             consensus_direct,
+            mpc_relay,
             relay,
             relay_client,
             autonat_client,

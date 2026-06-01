@@ -13,6 +13,12 @@ use k256::ecdsa::{
     Signature as Secp256k1Signature, SigningKey as Secp256k1SigningKey,
     VerifyingKey as Secp256k1VerifyingKey,
 };
+// ed25519-dalek 2 brings `signature::Signer`/`Verifier` v2.x into scope via
+// its re-exports above. k256 0.14 / ecdsa 0.17-rc.18 implements the v3.x
+// traits. Import the v3 traits under disambiguating aliases so the Secp256k1
+// signer/verifier call sites resolve unambiguously without breaking the
+// Ed25519 sites that still need v2.
+use signature::{Signer as Sigv3Signer, Verifier as Sigv3Verifier};
 use serde::{Deserialize, Serialize};
 
 /// A signature in Tenzro Network.
@@ -235,7 +241,7 @@ impl Secp256k1SignerImpl {
 
 impl Signer for Secp256k1SignerImpl {
     fn sign(&self, message: &[u8]) -> Result<Signature> {
-        let signature: Secp256k1Signature = self.signing_key.sign(message);
+        let signature: Secp256k1Signature = Sigv3Signer::sign(&self.signing_key, message);
         Ok(Signature::new(
             KeyType::Secp256k1,
             signature.to_bytes().to_vec(),
@@ -287,8 +293,7 @@ impl Verifier for Secp256k1VerifierImpl {
         // SECURITY (Issue #7 - RESOLVED): k256's verify() uses constant-time comparison
         // internally via the `subtle` crate to prevent timing side-channel attacks during
         // signature verification. No additional constant-time checks needed.
-        self.verifying_key
-            .verify(message, &sig)
+        Sigv3Verifier::verify(&self.verifying_key, message, &sig)
             .map_err(|_| CryptoError::VerificationFailed)?;
 
         Ok(())

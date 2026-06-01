@@ -392,6 +392,52 @@ pub trait NetworkService: Send + Sync {
     async fn subscribe_consensus_direct(
         &self,
     ) -> Result<mpsc::UnboundedReceiver<ConsensusMessage>>;
+
+    /// Installs the DID-to-PeerId resolver used by the MPC relay overlay.
+    ///
+    /// The resolver is consulted on every outbound `send_mpc_relay_message`
+    /// (to find the PeerId for `to_did`) and on every inbound MPC request
+    /// (to audit that `from_did` is in fact controlled by the sending peer).
+    /// A missing resolver causes outbound sends to fail with
+    /// `NetworkError::InvalidConfig` and inbound messages to be rejected
+    /// with `MpcRelayError::UnknownSender` — the relay is fail-closed.
+    ///
+    /// Idempotent — calling twice replaces the prior resolver.
+    async fn set_mpc_did_resolver(
+        &self,
+        resolver: std::sync::Arc<dyn crate::mpc_relay::MpcDidResolver>,
+    ) -> Result<()>;
+
+    /// Sends one MPC round message to the peer that controls `to_did`.
+    ///
+    /// Resolves `to_did` through the installed `MpcDidResolver`; returns
+    /// `Err(NetworkError::PeerNotFound)` if the DID does not resolve. The
+    /// returned `Ok(())` means the request was handed to the libp2p
+    /// request-response codec — not that the peer has acknowledged it. The
+    /// MPC session driver on the other side will reply `Ack`/`Error`
+    /// asynchronously; transport-level failures (peer unreachable, timeout)
+    /// surface through the codec's `OutboundFailure` event and are logged
+    /// by the event loop. The bridge-side session driver's per-message
+    /// receive timer is the authoritative end-to-end deadline.
+    async fn send_mpc_relay_message(
+        &self,
+        message: crate::mpc_relay::MpcRelayRequest,
+    ) -> Result<()>;
+
+    /// Subscribes to inbound MPC relay round messages.
+    ///
+    /// Only one subscriber is supported at a time — calling twice replaces
+    /// the previous channel. The subscriber MUST drain the receiver
+    /// continuously; if the channel is full or dropped, the event loop
+    /// responds to the sending peer with `MpcRelayError::NoSubscriber` so
+    /// the sender's session driver can fast-fail and abort the session
+    /// rather than wait for a per-round timeout. The receiver delivers
+    /// `MpcRelayRequest` envelopes that have already been audited
+    /// (`from_did` ↔ peer-ID match verified against the installed DID
+    /// resolver) — the consumer can trust the `from_did` field.
+    async fn subscribe_mpc_relay(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<crate::mpc_relay::MpcRelayRequest>>;
 }
 
 /// Commands sent to the network service
@@ -515,6 +561,26 @@ enum NetworkCommand {
     /// node — calling twice replaces the previous channel.
     SubscribeConsensusDirect {
         response: oneshot::Sender<Result<mpsc::UnboundedReceiver<ConsensusMessage>>>,
+    },
+    /// Installs the DID-to-PeerId resolver used by the MPC relay overlay.
+    /// Idempotent — calling twice replaces the prior resolver.
+    SetMpcDidResolver {
+        resolver: std::sync::Arc<dyn crate::mpc_relay::MpcDidResolver>,
+        response: oneshot::Sender<Result<()>>,
+    },
+    /// Dispatches one MPC round message to the peer that controls
+    /// `message.to_did`. The `to_did` is resolved through the installed
+    /// `MpcDidResolver`; failure to resolve returns `PeerNotFound`.
+    SendMpcRelayMessage {
+        message: crate::mpc_relay::MpcRelayRequest,
+        response: oneshot::Sender<Result<()>>,
+    },
+    /// Subscribes to inbound MPC relay round messages. One subscriber per
+    /// node — calling twice replaces the previous channel.
+    SubscribeMpcRelay {
+        response: oneshot::Sender<
+            Result<mpsc::UnboundedReceiver<crate::mpc_relay::MpcRelayRequest>>,
+        >,
     },
     Shutdown {
         response: oneshot::Sender<Result<()>>,
@@ -1051,6 +1117,32 @@ impl NetworkService for TenzroNetworkService {
         self.send_command(|response| NetworkCommand::ConnectedValidatorCount { response })
             .await
     }
+
+    async fn set_mpc_did_resolver(
+        &self,
+        resolver: std::sync::Arc<dyn crate::mpc_relay::MpcDidResolver>,
+    ) -> Result<()> {
+        self.send_command(|response| NetworkCommand::SetMpcDidResolver { resolver, response })
+            .await
+    }
+
+    async fn send_mpc_relay_message(
+        &self,
+        message: crate::mpc_relay::MpcRelayRequest,
+    ) -> Result<()> {
+        self.send_command(move |response| NetworkCommand::SendMpcRelayMessage {
+            message,
+            response,
+        })
+        .await
+    }
+
+    async fn subscribe_mpc_relay(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<crate::mpc_relay::MpcRelayRequest>> {
+        self.send_command(|response| NetworkCommand::SubscribeMpcRelay { response })
+            .await
+    }
 }
 
 /// Event loop state
@@ -1106,6 +1198,25 @@ struct EventLoopState {
     /// overflow with `ConsensusDirectError::ServerBusy` rather than queueing.
     /// Decremented on `ResponseSent` / `InboundFailure`.
     consensus_direct_inbound_inflight: HashMap<PeerId, usize>,
+    /// Subscriber channel for inbound MPC relay round messages. `None` until
+    /// the node-level MPC adapter attaches via `SubscribeMpcRelay`. Inbound
+    /// requests arriving while this is `None` are answered with
+    /// `MpcRelayError::NoSubscriber`.
+    mpc_relay_subscriber: Option<mpsc::UnboundedSender<crate::mpc_relay::MpcRelayRequest>>,
+    /// Latched once `SubscribeMpcRelay` runs. Same rationale as
+    /// `consensus_direct_subscriber_ever_attached`.
+    mpc_relay_subscriber_ever_attached: bool,
+    /// Per-peer count of currently-in-flight inbound MPC relay streams.
+    /// Enforces `mpc_relay::MAX_INBOUND_STREAMS_PER_PEER`; overflow is
+    /// rejected with `MpcRelayError::ServerBusy`. Decremented on
+    /// `ResponseSent` / `InboundFailure`.
+    mpc_relay_inbound_inflight: HashMap<PeerId, usize>,
+    /// DID-to-PeerId resolver for the MPC relay overlay. `None` until the
+    /// node-level adapter installs it via `SetMpcDidResolver`. Missing
+    /// resolver causes outbound sends to fail and inbound messages to be
+    /// rejected with `MpcRelayError::UnknownSender` — the relay is
+    /// fail-closed.
+    mpc_did_resolver: Option<std::sync::Arc<dyn crate::mpc_relay::MpcDidResolver>>,
     /// Tally of `observed_addr` reports received via Identify, keyed by the
     /// reported external multiaddr → set of distinct peer IDs that have
     /// reported it. Once a candidate accumulates reports from at least
@@ -1353,6 +1464,10 @@ async fn run_event_loop(
         consensus_direct_subscriber: None,
         consensus_direct_subscriber_ever_attached: false,
         consensus_direct_inbound_inflight: HashMap::new(),
+        mpc_relay_subscriber: None,
+        mpc_relay_subscriber_ever_attached: false,
+        mpc_relay_inbound_inflight: HashMap::new(),
+        mpc_did_resolver: None,
         observed_addrs: HashMap::new(),
         advertised_external_addrs: preconfigured_external,
         bootstrap_peers,
@@ -1833,6 +1948,232 @@ fn handle_consensus_direct_event(
     }
 }
 
+/// Handles inbound and outbound events from the MPC relay
+/// request-response codec (`/tenzro/mpc/req-resp/1.0.0`).
+///
+/// Mirrors `handle_consensus_direct_event` with one extra step: every
+/// inbound `MpcRelayRequest` is audited against the installed
+/// `MpcDidResolver` — the sender's claimed `from_did` must round-trip back
+/// to the connection's `PeerId`. A mismatch (or a missing resolver) means
+/// either no identity is bound or the sender is spoofing a DID they don't
+/// control; either way we reject with `MpcRelayError::UnknownSender` so the
+/// session driver on the other side fails fast.
+fn handle_mpc_relay_event(
+    state: &mut EventLoopState,
+    event: request_response::Event<
+        crate::mpc_relay::MpcRelayRequest,
+        crate::mpc_relay::MpcRelayResponse,
+    >,
+) {
+    use crate::mpc_relay::{MpcRelayError, MpcRelayResponse, MAX_INBOUND_STREAMS_PER_PEER};
+    use request_response::{Event as RrEvent, Message};
+    match event {
+        RrEvent::Message {
+            peer,
+            message: Message::Request {
+                request_id: _,
+                request,
+                channel,
+            },
+            ..
+        } => {
+            // Per-peer inbound concurrency cap. Reject overflow synchronously
+            // with ServerBusy — queueing would cause the requester's
+            // per-round timeout to fire while the request sits in our
+            // backlog (same rationale as consensus-direct).
+            let inflight = state
+                .mpc_relay_inbound_inflight
+                .entry(peer)
+                .or_insert(0);
+            if *inflight >= MAX_INBOUND_STREAMS_PER_PEER {
+                tracing::warn!(
+                    %peer,
+                    limit = MAX_INBOUND_STREAMS_PER_PEER,
+                    "mpc-relay: rejecting overflow inbound stream"
+                );
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .mpc_relay
+                    .send_response(
+                        channel,
+                        MpcRelayResponse::Error(MpcRelayError::ServerBusy {
+                            limit: MAX_INBOUND_STREAMS_PER_PEER,
+                        }),
+                    );
+                return;
+            }
+
+            // Sender-DID audit. The relay is fail-closed: no resolver means
+            // no identity binding is wired, so we cannot prove who the peer
+            // claims to be. Either way the inbound message is rejected
+            // before it reaches the session pipeline.
+            let claimed_did = request.from_did.clone();
+            let audit_ok = match state.mpc_did_resolver.as_ref() {
+                None => {
+                    tracing::warn!(
+                        %peer,
+                        claimed_did = %claimed_did,
+                        "mpc-relay: rejecting inbound — no DID resolver installed"
+                    );
+                    false
+                }
+                Some(resolver) => match resolver.did_for_peer_id(&peer) {
+                    Some(actual_did) if actual_did == claimed_did => true,
+                    Some(actual_did) => {
+                        tracing::warn!(
+                            %peer,
+                            claimed_did = %claimed_did,
+                            actual_did = %actual_did,
+                            "mpc-relay: from_did does not match peer's bound DID — rejecting"
+                        );
+                        false
+                    }
+                    None => {
+                        tracing::warn!(
+                            %peer,
+                            claimed_did = %claimed_did,
+                            "mpc-relay: peer has no bound DID — rejecting"
+                        );
+                        false
+                    }
+                },
+            };
+            if !audit_ok {
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .mpc_relay
+                    .send_response(
+                        channel,
+                        MpcRelayResponse::Error(MpcRelayError::UnknownSender),
+                    );
+                return;
+            }
+
+            // No subscriber attached — fast-fail so the sending session
+            // driver can abort rather than wait for a per-round timeout.
+            // Pre-attach is normal during bootstrap (the bridge attaches
+            // the MPC subscriber only after the keyshare store loads).
+            let Some(tx) = state.mpc_relay_subscriber.as_ref() else {
+                if state.mpc_relay_subscriber_ever_attached {
+                    tracing::warn!(
+                        %peer,
+                        "mpc-relay: subscriber was dropped — replying NoSubscriber"
+                    );
+                } else {
+                    tracing::debug!(
+                        %peer,
+                        "mpc-relay: inbound during bootstrap window \
+                         (subscriber not yet attached) — replying NoSubscriber"
+                    );
+                }
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .mpc_relay
+                    .send_response(
+                        channel,
+                        MpcRelayResponse::Error(MpcRelayError::NoSubscriber),
+                    );
+                return;
+            };
+
+            // Forward into the session pipeline and Ack synchronously. The
+            // Ack means "we accepted the round message into our pipeline",
+            // not "we completed the protocol round".
+            let send_result = tx.send(request);
+            if send_result.is_err() {
+                tracing::warn!(
+                    %peer,
+                    "mpc-relay: subscriber dropped — replying NoSubscriber"
+                );
+                state.mpc_relay_subscriber = None;
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .mpc_relay
+                    .send_response(
+                        channel,
+                        MpcRelayResponse::Error(MpcRelayError::NoSubscriber),
+                    );
+                return;
+            }
+
+            *inflight += 1;
+
+            let _ = state
+                .swarm
+                .behaviour_mut()
+                .mpc_relay
+                .send_response(channel, MpcRelayResponse::Ack);
+        }
+        RrEvent::Message {
+            peer,
+            message: Message::Response {
+                request_id,
+                response,
+            },
+            ..
+        } => match response {
+            MpcRelayResponse::Ack => {
+                tracing::trace!(%peer, %request_id, "mpc-relay ack");
+            }
+            MpcRelayResponse::Error(err) => {
+                tracing::warn!(
+                    %peer,
+                    %request_id,
+                    %err,
+                    "mpc-relay: peer returned error response"
+                );
+            }
+        },
+        RrEvent::OutboundFailure {
+            peer,
+            request_id,
+            error,
+            ..
+        } => {
+            tracing::warn!(
+                %peer,
+                %request_id,
+                %error,
+                "mpc-relay outbound failure"
+            );
+        }
+        RrEvent::InboundFailure {
+            peer,
+            request_id,
+            error,
+            ..
+        } => {
+            tracing::debug!(
+                %peer,
+                %request_id,
+                %error,
+                "mpc-relay inbound failure"
+            );
+            if let Some(count) = state.mpc_relay_inbound_inflight.get_mut(&peer)
+                && *count > 0
+            {
+                *count -= 1;
+            }
+        }
+        RrEvent::ResponseSent { peer, request_id, .. } => {
+            tracing::trace!(
+                %peer,
+                %request_id,
+                "mpc-relay response flushed to wire"
+            );
+            if let Some(count) = state.mpc_relay_inbound_inflight.get_mut(&peer)
+                && *count > 0
+            {
+                *count -= 1;
+            }
+        }
+    }
+}
+
 /// Handles swarm events
 async fn handle_swarm_event(
     state: &mut EventLoopState,
@@ -2146,6 +2487,9 @@ async fn handle_swarm_event(
             }
             TenzroBehaviourEvent::ConsensusDirect(rr_event) => {
                 handle_consensus_direct_event(state, rr_event);
+            }
+            TenzroBehaviourEvent::MpcRelay(rr_event) => {
+                handle_mpc_relay_event(state, rr_event);
             }
             TenzroBehaviourEvent::AutonatClient(autonat::v2::client::Event {
                 tested_addr,
@@ -2633,6 +2977,35 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
                 }
             };
             let _ = response.send(Ok(count));
+        }
+        NetworkCommand::SetMpcDidResolver { resolver, response } => {
+            state.mpc_did_resolver = Some(resolver);
+            let _ = response.send(Ok(()));
+        }
+        NetworkCommand::SendMpcRelayMessage { message, response } => {
+            let result = match state.mpc_did_resolver.as_ref() {
+                None => Err(NetworkError::InvalidConfig(
+                    "mpc-relay send requires an installed MpcDidResolver".to_string(),
+                )),
+                Some(resolver) => match resolver.peer_id_for_did(&message.to_did) {
+                    None => Err(NetworkError::PeerNotFound(message.to_did.clone())),
+                    Some(peer) => {
+                        let _req_id = state
+                            .swarm
+                            .behaviour_mut()
+                            .mpc_relay
+                            .send_request(&peer, message);
+                        Ok(())
+                    }
+                },
+            };
+            let _ = response.send(result);
+        }
+        NetworkCommand::SubscribeMpcRelay { response } => {
+            let (tx, rx) = mpsc::unbounded_channel();
+            state.mpc_relay_subscriber = Some(tx);
+            state.mpc_relay_subscriber_ever_attached = true;
+            let _ = response.send(Ok(rx));
         }
         NetworkCommand::Shutdown { response } => {
             // Respond before the outer loop observes the Shutdown variant and breaks.

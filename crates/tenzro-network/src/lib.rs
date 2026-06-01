@@ -71,6 +71,7 @@ pub mod error;
 pub mod gossip;
 pub mod message;
 pub mod metrics;
+pub mod mpc_relay;
 pub mod peer_manager;
 pub mod peer_status;
 pub mod service;
@@ -86,6 +87,10 @@ pub use block_sync_proto::{
 pub use consensus_direct_proto::{
     ConsensusDirectBehaviour, ConsensusDirectError, ConsensusDirectRequest,
     ConsensusDirectResponse, CONSENSUS_DIRECT_PROTOCOL,
+};
+pub use mpc_relay::{
+    session_topic as mpc_session_topic, MpcDidResolver, MpcRelayBehaviour, MpcRelayError,
+    MpcRelayRequest, MpcRelayResponse, MPC_RELAY_GOSSIP_TOPIC_PREFIX, MPC_RELAY_PROTOCOL,
 };
 pub use config::NetworkConfig;
 pub use discovery::{BootstrapConfig, DiscoveryConfig, ProviderType};

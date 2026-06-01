@@ -86,9 +86,8 @@ fn sign_mpp_credential(
     let pq_public_key_bytes = pq.verifying_key_bytes().to_vec();
     let hybrid = InMemoryHybridSigner::new(Box::new(classical), pq);
     let composite = hybrid.sign(&message).expect("hybrid sign");
-    let pq_signature = composite.pq.expect("pq sig");
 
-    (public_key_bytes, composite.classical, pq_public_key_bytes, pq_signature)
+    (public_key_bytes, composite.classical, pq_public_key_bytes, composite.pq)
 }
 
 /// Build a settlement-engine `ServiceProof` carrying a real Ed25519 signature
