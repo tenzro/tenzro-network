@@ -188,6 +188,93 @@ impl SlashingCallback for StakingSlashingCallback {
     }
 }
 
+/// Bridges the MPC layer's `MpcSlashingCallback` trait to the token layer's
+/// `StakingManager`. Symmetric to [`StakingSlashingCallback`] but driven by
+/// admitted MPC abort evidence (see `tenzro_bridge::mpc::abort::admit_evidence`)
+/// rather than consensus equivocation.
+///
+/// By the time `report_abort` is called, the abort packet has already cleared
+/// witness-quorum and signature checks — the bridge is the authoritative slash
+/// dispatch. Slash amount is 10% of the accused operator's TNZO stake (mirrors
+/// the equivocation rate).
+///
+/// Operator-DID → on-chain Address resolution flows through
+/// `IdentityRegistry::resolve(&did).map(|i| i.wallet_address)`. Aborts naming a
+/// DID that does not resolve are logged at WARN and dropped (admission cannot
+/// see the registry, so a stale/unknown DID is possible).
+pub struct MpcAbortSlashingCallback {
+    staking: Arc<StakingManager>,
+    identity_registry: Arc<IdentityRegistry>,
+}
+
+impl MpcAbortSlashingCallback {
+    pub fn new(
+        staking: Arc<StakingManager>,
+        identity_registry: Arc<IdentityRegistry>,
+    ) -> Self {
+        Self { staking, identity_registry }
+    }
+}
+
+impl tenzro_bridge::mpc::abort::MpcSlashingCallback for MpcAbortSlashingCallback {
+    fn report_abort(&self, evidence: &tenzro_bridge::mpc::abort::MpcAbortEvidence) {
+        let accused_did = &evidence.accused_did;
+
+        let operator_address = match self.identity_registry.resolve(accused_did) {
+            Ok(identity) => identity.wallet_address,
+            Err(e) => {
+                tracing::warn!(
+                    accused_did = %accused_did,
+                    error = %e,
+                    "MPC abort evidence references DID that does not resolve in identity registry; dropping"
+                );
+                return;
+            }
+        };
+
+        let slash_amount = self
+            .staking
+            .get_stake(&operator_address)
+            .map(|info| info.amount / 10)
+            .unwrap_or(0);
+
+        if slash_amount == 0 {
+            tracing::warn!(
+                accused_did = %accused_did,
+                operator = %operator_address,
+                category = ?evidence.category,
+                "MPC abort admitted but operator has no stake to slash"
+            );
+            return;
+        }
+
+        let reason = format!(
+            "MPC identifiable abort: category={:?} severity={:?} context={}",
+            evidence.category, evidence.severity, evidence.context,
+        );
+
+        match self.staking.slash(&operator_address, slash_amount, reason, Address::default()) {
+            Ok(()) => {
+                tracing::warn!(
+                    accused_did = %accused_did,
+                    operator = %operator_address,
+                    slash_amount = slash_amount,
+                    category = ?evidence.category,
+                    "Slashed MPC operator for identifiable abort"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    accused_did = %accused_did,
+                    operator = %operator_address,
+                    error = %e,
+                    "Failed to slash MPC operator for identifiable abort"
+                );
+            }
+        }
+    }
+}
+
 /// Bridges the token layer's `ProposalExecutor` trait to the node's actual
 /// subsystems. Mirrors `StakingSlashingCallback`: the trait lives in
 /// `tenzro-token` so the engine stays free of node-level cross-crate refs;

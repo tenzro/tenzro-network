@@ -1586,7 +1586,7 @@ fn recover_eoa_from_7702_signature(auth: &Eip7702Authorization) -> Result<Vec<u8
         .map_err(|_| VmError::InvalidSignature)?;
 
     // Ethereum address = keccak256(uncompressed_pubkey[1..])[12..32]
-    let encoded = recovered.to_encoded_point(false);
+    let encoded = recovered.to_sec1_point(false);
     let pubkey_no_prefix = &encoded.as_bytes()[1..];
     let mut hasher = Keccak256::new();
     hasher.update(pubkey_no_prefix);
@@ -2311,7 +2311,7 @@ mod tests {
 
         // Expected Ethereum address: keccak256(uncompressed_pubkey[1..])[12..32]
         let vk = sk.verifying_key();
-        let encoded = vk.to_encoded_point(false);
+        let encoded = vk.to_sec1_point(false);
         let pk_no_prefix = &encoded.as_bytes()[1..];
         let mut hasher = Keccak256::new();
         hasher.update(pk_no_prefix);

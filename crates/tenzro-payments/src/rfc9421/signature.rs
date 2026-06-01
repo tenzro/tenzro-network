@@ -42,7 +42,13 @@ use tenzro_crypto::signatures::{Ed25519SignerImpl, Ed25519VerifierImpl, Signatur
 use tracing::debug;
 
 use sha2::{Digest, Sha256, Sha512};
-use signature::{Signer as DalekSigner, Verifier as DalekVerifier};
+// `signature` 3.x is implemented by `ecdsa` 0.17-rc.18 (k256/p256/p384). The
+// older `signature` 2.x is what `rsa` 0.9 still implements. Both versions ship
+// the same trait names (`Signer`, `Verifier`, `RandomizedSigner`) and the
+// trait scope is decided at the call site — alias each version explicitly so
+// the resolver picks the right one per algorithm family.
+use signature::{Signer as Sigv3Signer, Verifier as Sigv3Verifier};
+use signature_v2::{Signer as Sigv2Signer, Verifier as Sigv2Verifier};
 use subtle::ConstantTimeEq;
 
 /// Supported RFC 9421 signature algorithms (§3.3 + the algorithm registry).
@@ -671,7 +677,7 @@ fn verify_ecdsa_p256(public_key_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> R
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid P-256 signature: {}", e)))?;
     let _ = vk; // silence if both branches fail
     let vk2: P256Vk = parse_p256_verifying_key(public_key_bytes)?;
-    DalekVerifier::verify(&vk2, msg, &sig)
+    Sigv3Verifier::verify(&vk2, msg, &sig)
         .map_err(|e| PaymentError::Rfc9421Error(format!("P-256 signature verification failed: {}", e)))?;
     Ok(())
 }
@@ -692,7 +698,7 @@ fn parse_p256_verifying_key(bytes: &[u8]) -> Result<p256::ecdsa::VerifyingKey> {
 fn sign_ecdsa_p256(private_key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>> {
     use p256::ecdsa::Signature as P256Sig;
     let sk = parse_p256_signing_key(private_key_bytes)?;
-    let sig: P256Sig = DalekSigner::sign(&sk, msg);
+    let sig: P256Sig = Sigv3Signer::sign(&sk, msg);
     Ok(sig.to_bytes().to_vec())
 }
 
@@ -713,7 +719,7 @@ fn verify_ecdsa_p384(public_key_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> R
     let sig = P384Sig::from_slice(sig_bytes)
         .or_else(|_| P384Sig::from_der(sig_bytes))
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid P-384 signature: {}", e)))?;
-    DalekVerifier::verify(&vk, msg, &sig)
+    Sigv3Verifier::verify(&vk, msg, &sig)
         .map_err(|e| PaymentError::Rfc9421Error(format!("P-384 signature verification failed: {}", e)))?;
     Ok(())
 }
@@ -732,7 +738,7 @@ fn parse_p384_verifying_key(bytes: &[u8]) -> Result<p384::ecdsa::VerifyingKey> {
 fn sign_ecdsa_p384(private_key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>> {
     use p384::ecdsa::Signature as P384Sig;
     let sk = parse_p384_signing_key(private_key_bytes)?;
-    let sig: P384Sig = DalekSigner::sign(&sk, msg);
+    let sig: P384Sig = Sigv3Signer::sign(&sk, msg);
     Ok(sig.to_bytes().to_vec())
 }
 
@@ -762,7 +768,8 @@ where
     let vk: PssVk<H> = PssVk::<H>::new(pk);
     let sig = PssSig::try_from(sig_bytes)
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid RSA-PSS signature: {}", e)))?;
-    DalekVerifier::verify(&vk, msg, &sig)
+    // rsa 0.9 impls the `signature` 2.x `Verifier` — use the v2 alias.
+    Sigv2Verifier::verify(&vk, msg, &sig)
         .map_err(|e| PaymentError::Rfc9421Error(format!("RSA-PSS signature verification failed: {}", e)))?;
     Ok(())
 }
@@ -775,7 +782,8 @@ where
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::RsaPrivateKey;
     use rand::rngs::OsRng;
-    use signature::RandomizedSigner;
+    // rsa 0.9 impls `signature` 2.x's `RandomizedSigner` (not v3).
+    use signature_v2::RandomizedSigner;
 
     let sk = RsaPrivateKey::from_pkcs8_der(private_key_bytes)
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid RSA private key (PKCS#8 DER): {}", e)))?;
@@ -794,7 +802,8 @@ fn verify_rsa_pkcs1v15(public_key_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) ->
     let vk: Pkcs1Vk<Sha256> = Pkcs1Vk::<Sha256>::new(pk);
     let sig = Pkcs1Sig::try_from(sig_bytes)
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid RSA-v1.5 signature: {}", e)))?;
-    DalekVerifier::verify(&vk, msg, &sig)
+    // rsa 0.9 impls the `signature` 2.x `Verifier` — use the v2 alias.
+    Sigv2Verifier::verify(&vk, msg, &sig)
         .map_err(|e| PaymentError::Rfc9421Error(format!("RSA-v1.5 signature verification failed: {}", e)))?;
     Ok(())
 }
@@ -807,7 +816,8 @@ fn sign_rsa_pkcs1v15(private_key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>> {
     let sk = RsaPrivateKey::from_pkcs8_der(private_key_bytes)
         .map_err(|e| PaymentError::Rfc9421Error(format!("invalid RSA private key (PKCS#8 DER): {}", e)))?;
     let signing_key: Pkcs1Sk<Sha256> = Pkcs1Sk::<Sha256>::new(sk);
-    let sig: Pkcs1Sig = DalekSigner::sign(&signing_key, msg);
+    // rsa 0.9 impls the `signature` 2.x `Signer` — use the v2 alias.
+    let sig: Pkcs1Sig = Sigv2Signer::sign(&signing_key, msg);
     Ok(<Pkcs1Sig as Into<Box<[u8]>>>::into(sig).to_vec())
 }
 
@@ -979,14 +989,15 @@ mod tests {
 
     #[test]
     fn test_round_trip_sign_verify_ecdsa_p256() {
+        use ::p256::elliptic_curve::Generate;
+        use getrandom_0_4::{SysRng, rand_core::UnwrapErr};
         use p256::ecdsa::SigningKey;
         use p256::pkcs8::EncodePrivateKey;
-        use rand::rngs::OsRng;
 
-        let sk = SigningKey::random(&mut OsRng);
+        let sk = SigningKey::generate_from_rng(&mut UnwrapErr(SysRng));
         let private_pkcs8 = sk.to_pkcs8_der().unwrap().as_bytes().to_vec();
         let vk = sk.verifying_key();
-        let public_sec1 = vk.to_encoded_point(false).as_bytes().to_vec();
+        let public_sec1 = vk.to_sec1_point(false).as_bytes().to_vec();
 
         let request_parts = RequestParts::for_request("POST", "api.example.com", "/test")
             .with_query("a=1&b=2");
@@ -1020,14 +1031,15 @@ mod tests {
 
     #[test]
     fn test_round_trip_sign_verify_ecdsa_p384() {
+        use ::p384::elliptic_curve::Generate;
+        use getrandom_0_4::{SysRng, rand_core::UnwrapErr};
         use p384::ecdsa::SigningKey;
         use p384::pkcs8::EncodePrivateKey;
-        use rand::rngs::OsRng;
 
-        let sk = SigningKey::random(&mut OsRng);
+        let sk = SigningKey::generate_from_rng(&mut UnwrapErr(SysRng));
         let private_pkcs8 = sk.to_pkcs8_der().unwrap().as_bytes().to_vec();
         let vk = sk.verifying_key();
-        let public_sec1 = vk.to_encoded_point(false).as_bytes().to_vec();
+        let public_sec1 = vk.to_sec1_point(false).as_bytes().to_vec();
 
         let request_parts = RequestParts::for_request("GET", "x.example.com", "/r");
 

@@ -262,7 +262,12 @@ pub fn load_or_generate_erc8004_system_key(data_dir: &Path) -> Result<[u8; 32]> 
     }
 
     // Silent-generate path. Fresh secp256k1 key, persisted at 0o600.
-    let sk = SecretKey::random(&mut rand::rngs::OsRng);
+    // `SecretKey::random` is deprecated in k256 0.14-rc; use the `Generate`
+    // trait (re-exported from `elliptic_curve`). `SysRng: TryCryptoRng` is
+    // lifted to `CryptoRng` via `UnwrapErr`.
+    use getrandom_0_4::{rand_core::UnwrapErr, SysRng};
+    use ::k256::elliptic_curve::Generate;
+    let sk: SecretKey = SecretKey::generate_from_rng(&mut UnwrapErr(SysRng));
     let bytes = sk.to_bytes();
     write_secret(&key_path, &bytes)?;
     let mut out = [0u8; 32];

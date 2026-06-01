@@ -11,6 +11,7 @@ tenzro-types = { workspace = true }
 tenzro-token = { workspace = true }
 tenzro-crypto = { workspace = true }
 tenzro-tee = { workspace = true }
+tenzro-storage = { workspace = true }
 tenzro-workflow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
@@ -26,19 +27,32 @@ hex = { workspace = true }
 tonic = "0.12"
 prost = { workspace = true }
 sha2 = { workspace = true }
-sha3 = "0.10"
+sha3 = { workspace = true }
 parking_lot = { workspace = true }
-k256 = { version = "0.13", features = ["ecdsa"] }
+k256 = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 base64 = "0.22"
 
-# CGGMP24 t-of-n threshold-ECDSA — Phase D bridge signer foundation. The
-# vendored glass_pumpkin (at vendor/glass_pumpkin) drops the yanked `core2`
-# dep — see workspace-root [patch.crates-io] for the rationale.
-cggmp24 = { workspace = true }
-cggmp24-keygen = { workspace = true }
-round-based = { workspace = true }
-generic-ec = { workspace = true }
+# DKLS23 keyshare sealing + transport wire encoding.
+bincode = { workspace = true }
+aes-gcm = { workspace = true }
+hkdf = "0.12"
+rand = { workspace = true }
+zeroize = { workspace = true }
+
+# DKLS23 t-of-n threshold-ECDSA — Phase D wave 2 bridge signer.
+# See workspace-root deps for the design rationale (0xCarbon dkls23-secp256k1).
+dkls23-secp256k1 = { workspace = true }
+dkls23-core = { workspace = true }
+
+[features]
+default = []
+# TEE-rooted IKM extraction for `TeeKeyshareSealer::derive_auto`. When neither
+# feature is enabled, sealer construction fails closed with `TeeNotAvailable`
+# (no-simulation policy). Concrete wiring lands alongside the node-layer
+# threshold-signer impl; the feature gates are the API seam.
+intel-tdx = ["tenzro-tee/intel-tdx"]
+amd-sev-snp = ["tenzro-tee/amd-sev-snp"]
 
 [dev-dependencies]
 tenzro-crypto = { workspace = true }

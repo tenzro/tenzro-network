@@ -36,7 +36,11 @@
 use crate::error::{CryptoError, Result};
 use p256::ecdsa::signature::hazmat::{PrehashSigner, PrehashVerifier};
 use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
-use rand::rngs::OsRng;
+// See `keys.rs` for the rand_core 0.9 vs rand 0.8 split rationale —
+// `RandCoreOsRng` is the `TryCryptoRng` from rand_core 0.9 that, once lifted
+// via `.unwrap_err()`, satisfies the `CryptoRng` bound on
+// `ecdsa::signing::SigningKey::random` in the RustCrypto 0.14-RC line.
+use getrandom_0_4::{rand_core::UnwrapErr, SysRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::ZeroizeOnDrop;
@@ -65,8 +69,12 @@ pub struct P256KeyPair {
 impl P256KeyPair {
     /// Generate a fresh P-256 keypair using the OS CSPRNG.
     pub fn generate() -> Self {
+        // p256 0.14-rc's `SigningKey::random` is deprecated; use the `Generate`
+        // trait (re-exported via `elliptic_curve::Generate`). `SysRng` is the
+        // rand_core 0.10 entropy source.
+        use ::p256::elliptic_curve::Generate;
         Self {
-            signing_key: SigningKey::random(&mut OsRng),
+            signing_key: SigningKey::generate_from_rng(&mut UnwrapErr(SysRng)),
         }
     }
 
@@ -90,7 +98,7 @@ impl P256KeyPair {
 
     /// 64-byte raw public key (`x ‖ y`).
     pub fn public_key_bytes(&self) -> [u8; P256_PUBLIC_KEY_LEN] {
-        let encoded = self.signing_key.verifying_key().to_encoded_point(false);
+        let encoded = self.signing_key.verifying_key().to_sec1_point(false);
         let bytes = encoded.as_bytes();
         debug_assert_eq!(bytes.len(), P256_PUBLIC_KEY_SEC1_LEN);
         debug_assert_eq!(bytes[0], 0x04);
@@ -101,7 +109,7 @@ impl P256KeyPair {
 
     /// 65-byte SEC1 uncompressed public key (`0x04 ‖ x ‖ y`).
     pub fn public_key_sec1(&self) -> [u8; P256_PUBLIC_KEY_SEC1_LEN] {
-        let encoded = self.signing_key.verifying_key().to_encoded_point(false);
+        let encoded = self.signing_key.verifying_key().to_sec1_point(false);
         let mut out = [0u8; P256_PUBLIC_KEY_SEC1_LEN];
         out.copy_from_slice(encoded.as_bytes());
         out
@@ -212,7 +220,9 @@ impl P256Signature {
     pub fn normalize_s(&self) -> Result<Self> {
         let sig = Signature::from_slice(&self.bytes)
             .map_err(|e| CryptoError::InvalidSignature(e.to_string()))?;
-        let normalized = sig.normalize_s().unwrap_or(sig);
+        // k256/p256 0.14: `normalize_s()` returns `Signature` directly (no
+        // `Option`). It's a no-op when `s` is already in the low half.
+        let normalized = sig.normalize_s();
         Ok(Self::from_signature(&normalized))
     }
 }
@@ -253,7 +263,7 @@ impl P256Verifier {
 
     /// 64-byte raw public key (`x ‖ y`).
     pub fn public_key_bytes(&self) -> [u8; P256_PUBLIC_KEY_LEN] {
-        let encoded = self.verifying_key.to_encoded_point(false);
+        let encoded = self.verifying_key.to_sec1_point(false);
         let bytes = encoded.as_bytes();
         let mut out = [0u8; P256_PUBLIC_KEY_LEN];
         out.copy_from_slice(&bytes[1..]);

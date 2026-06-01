@@ -625,7 +625,7 @@ fn precompile_ecrecover(input: &[u8], _gas_limit: u64) -> Result<PrecompileResul
 
     // Compute Ethereum address from public key (keccak256(pubkey)[12..])
     use sha3::{Digest, Keccak256};
-    let pubkey_bytes = recovered_key.to_encoded_point(false);
+    let pubkey_bytes = recovered_key.to_sec1_point(false);
     let pubkey_uncompressed = &pubkey_bytes.as_bytes()[1..]; // Skip 0x04 prefix
 
     let mut hasher = Keccak256::new();
@@ -3344,16 +3344,17 @@ mod tests {
 
     #[test]
     fn test_p256verify_round_trip_valid_signature() {
+        use ::p256::elliptic_curve::Generate;
+        use getrandom_0_4::{SysRng, rand_core::UnwrapErr};
         use p256::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
-        use rand::rngs::OsRng;
         use sha2::{Digest, Sha256};
 
-        let signing_key = SigningKey::random(&mut OsRng);
+        let signing_key = SigningKey::generate_from_rng(&mut UnwrapErr(SysRng));
         let verifying_key = signing_key.verifying_key();
         let hash = Sha256::digest(b"tenzro-eip7951-roundtrip");
         let signature: p256::ecdsa::Signature = signing_key.sign_prehash(&hash).unwrap();
 
-        let encoded = verifying_key.to_encoded_point(false);
+        let encoded = verifying_key.to_sec1_point(false);
         let bytes = encoded.as_bytes();
         assert_eq!(bytes[0], 0x04);
 

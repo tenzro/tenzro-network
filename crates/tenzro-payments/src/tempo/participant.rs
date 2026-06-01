@@ -152,7 +152,7 @@ impl EvmTransaction {
 /// hashes with Keccak-256, and takes the last 20 bytes.
 pub fn signing_key_to_address(signing_key: &SigningKey) -> [u8; 20] {
     let verifying_key = VerifyingKey::from(signing_key);
-    let encoded = verifying_key.to_encoded_point(false);
+    let encoded = verifying_key.to_sec1_point(false);
     // Skip the 0x04 prefix byte, hash the 64-byte x||y
     let hash = Keccak256::digest(&encoded.as_bytes()[1..]);
     let mut addr = [0u8; 20];
@@ -1044,7 +1044,7 @@ mod tests {
 
         let recovered_key =
             VerifyingKey::recover_from_prehash(&tx_hash, &signature, recid).unwrap();
-        let recovered_point = recovered_key.to_encoded_point(false);
+        let recovered_point = recovered_key.to_sec1_point(false);
         let recovered_hash = Keccak256::digest(&recovered_point.as_bytes()[1..]);
         let mut recovered_addr = [0u8; 20];
         recovered_addr.copy_from_slice(&recovered_hash[12..]);

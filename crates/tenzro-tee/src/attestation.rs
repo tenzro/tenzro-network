@@ -888,7 +888,10 @@ pub fn verify_ecdsa_p384_raw_pubkey(
 /// P-384 point from the leaf certificate.
 pub fn extract_ec_point_from_spki(spki_der: &[u8]) -> Option<Vec<u8>> {
     use spki::SubjectPublicKeyInfoRef;
-    use der::Decode;
+    // spki 0.8 re-exports its bundled `der` crate; use it to pick up the
+    // matching `Decode` impl rather than the workspace `der = "0.7"` pin
+    // (which lives alongside x509-cert 0.2 — different version subgraph).
+    use spki::der::Decode;
 
     let spki = SubjectPublicKeyInfoRef::from_der(spki_der).ok()?;
     let bit_str = spki.subject_public_key.as_bytes()?;
@@ -948,8 +951,11 @@ fn verify_rsa_pss_signature(
     use rsa::{RsaPublicKey, pss::VerifyingKey as PssVerifyingKey};
     use rsa::pss::Signature as PssSignature;
     use sha2::Sha384;
-    use spki::DecodePublicKey;
-    use signature::Verifier;
+    // rsa 0.9 still uses spki 0.7 (and signature 2.x). p256/p384 0.14-rc use
+    // spki 0.8 (and signature 3.x). Import each version under its own alias
+    // at the call site that consumes it.
+    use spki_v07::DecodePublicKey;
+    use signature_v2::Verifier;
 
     let rsa_key = RsaPublicKey::from_public_key_der(public_key_spki)
         .map_err(|e| TeeError::CertificateValidationFailed(
