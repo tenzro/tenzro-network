@@ -156,8 +156,31 @@ pub async fn payment_gate_handler(
                             "Payment verified and settled: receipt_id={}, amount={}",
                             receipt.receipt_id, receipt.amount
                         );
+
+                        // x402 V2: emit the canonical settlement-receipt body
+                        // as the `X-PAYMENT-RESPONSE` header (base64-encoded
+                        // JSON) per the Coinbase upstream spec. The receipt
+                        // body is stashed into `extra["x_payment_response"]`
+                        // by the protocol implementation (see
+                        // `X402PaymentServer::settle`). Other protocols leave
+                        // it absent and the header is simply not emitted.
+                        let x_payment_response = receipt
+                            .extra
+                            .get("x_payment_response")
+                            .and_then(|v| serde_json::to_string(v).ok())
+                            .map(|s| {
+                                use base64::{engine::general_purpose, Engine as _};
+                                general_purpose::STANDARD.encode(s.as_bytes())
+                            });
+
                         // Forward the request to the next handler
-                        Ok(next.run(request).await)
+                        let mut response = next.run(request).await;
+                        if let Some(b64) = x_payment_response
+                            && let Ok(val) = axum::http::HeaderValue::from_str(&b64)
+                        {
+                            response.headers_mut().insert("X-PAYMENT-RESPONSE", val);
+                        }
+                        Ok(response)
                     }
                     Err(e) => {
                         warn!("Payment verification failed: {}", e);

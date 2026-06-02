@@ -689,11 +689,12 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "id": "video-embed",
                 "name": "Video Embeddings",
                 "description": (
-                    "Video embedding scaffolding via Tenzro-served encoders. "
-                    "Wave 1 ships the runtime + RPC surface; the catalog is "
-                    "intentionally empty until a permissive ONNX-shippable "
-                    "video encoder lands. Until then, agents fall back to "
-                    "pooling vision-encoder embeddings over sampled frames."
+                    "Video embedding via Tenzro-served encoders. The native "
+                    "video catalog is empty (no permissive ONNX-shippable "
+                    "encoder available); the runtime ships a "
+                    "VisionFallbackVideoEncoder that samples frames via ffmpeg, "
+                    "embeds each through a registered vision encoder "
+                    "(DINOv3 / SigLIP2 / CLIP), and mean-pools the result."
                 ),
                 "tags": ["video", "embedding", "vjepa", "videomae", "ai"],
                 "examples": [

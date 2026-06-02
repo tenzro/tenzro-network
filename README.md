@@ -339,7 +339,30 @@ cargo run --bin tenzro -- --help
 
 - Rust 1.85+ (see `rust-toolchain.toml`)
 - C/C++ compiler (for RocksDB, libp2p)
-- pkg-config, libssl-dev (Linux)
+- `cmake` (for `llama-cpp-sys-2`)
+- `protoc` — Protocol Buffers compiler ≥ 3.12 (required by `lance-encoding`, pulled in transitively via the agent-memory vector tier)
+- `pkg-config`, `libssl-dev` (Linux)
+
+Install `protoc`:
+
+```bash
+# macOS
+brew install protobuf
+
+# Debian / Ubuntu
+sudo apt-get install -y protobuf-compiler
+
+# Fedora / RHEL
+sudo dnf install -y protobuf-compiler
+
+# Arch
+sudo pacman -S --needed protobuf
+
+# Rust-only (no system package manager)
+cargo install protoc-bin-vendored-cli
+```
+
+Verify with `protoc --version` (must print `libprotoc 3.12` or newer). See [`docs/GUIDE.md`](docs/GUIDE.md#2-toolchain-installation) for the full per-platform toolchain.
 
 ### Docker
 

@@ -1368,6 +1368,9 @@ pub(crate) async fn handle_request(
         "tenzro_processSptGrantedTokenDeactivated" => crate::rpc_integrations::handle_process_spt_granted_token_deactivated(node, request.params).await,
         // Stripe SPT settlement-outcome webhook → ERC-8004 ReputationRegistry cross-write at precompile 0x101b
         "tenzro_processSptSettlementOutcome" => crate::rpc_integrations::handle_process_spt_settlement_outcome(node, request.params).await,
+        // Visa TAP agent-payer-auth success → ERC-8004 ReputationRegistry cross-write at precompile 0x101b (PayerAuth-only; BrowserAuth is identity proof, not payment). Gated behind the `visa-tap` cargo feature.
+        #[cfg(feature = "visa-tap")]
+        "tenzro_processTapPayerAuthOutcome" => crate::rpc_integrations::handle_process_tap_payer_auth_outcome(node, request.params).await,
 
         // ERC-8004 — Trustless Agents Registry
         "tenzro_erc8004DeriveAgentId" => crate::rpc_integrations::handle_erc8004_derive_agent_id(node, request.params).await,

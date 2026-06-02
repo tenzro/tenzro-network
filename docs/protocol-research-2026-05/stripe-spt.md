@@ -67,19 +67,19 @@ Stripe owns the card-rail. Tenzro owns the identity + mandate + cryptographic-ca
 
 **Out of scope:** Tenzro becoming a card issuer. We federate into Stripe Issuing's directory the same way we federate into Mastercard KYA / Visa TAP — DID `service` entry + reputation cross-write. No card-rail settlement code, no MDES tokenization, no fiat vault.
 
-## Implementation order
+## Implementation
 
-1. **DONE — Stripe Payment Intents base path.** `crates/tenzro-payments/src/mpp/stripe.rs:131` `create_payment_intent` (POST `/v1/payment_intents` with `Idempotency-Key` header at `:158`); `:228` confirm path; `:450` `verify_webhook_signature` HMAC-SHA256 per RFC 2104. This is what every SPT path eventually settles through.
-2. **TODO — `crates/tenzro-payments/src/mpp/stripe_spt.rs`.** New module:
+1. **Stripe Payment Intents base path.** `crates/tenzro-payments/src/mpp/stripe.rs:131` `create_payment_intent` (POST `/v1/payment_intents` with `Idempotency-Key` header at `:158`); `:228` confirm path; `:450` `verify_webhook_signature` HMAC-SHA256 per RFC 2104. This is what every SPT path eventually settles through.
+2. **`crates/tenzro-payments/src/mpp/stripe_spt.rs`** — full SPT primitive module:
    - `SharedPaymentIssuedToken` / `SharedPaymentGrantedToken` types
-   - `UsageLimits { currency, max_amount, expires_at }` parser
+   - `UsageLimits { currency, max_amount, expires_at }`
    - `SptStatus` enum: `RequiresAction | Active | Used | Deactivated`
-   - `create_issued_token()`, `retrieve_granted_token()`, `revoke_issued_token()` methods on `StripeClient`
-   - `confirm_intent_with_spt(spt_id, amount, currency)` → POSTs `payment_method_data[shared_payment_granted_token]=spt_id`, `confirm=true`
-3. **TODO — SPT-aware `PaymentProtocol::verify_credential` extension.** When an MPP credential carries a `granted_token` field, verify the SPT exists, is `active`, and `usage_limits.max_amount ≥ challenge.amount` *before* TDIP delegation enforcement.
-4. **TODO — SPT webhook event dispatcher.** Extend the existing webhook verifier (`stripe.rs:450`) to route `shared_payment.issued_token.*` and `shared_payment.granted_token.deactivated` to typed handlers; revoke events trigger TDIP `apply_remote_revocation()` cascade.
-5. **TODO — `SERVICE_TYPE_STRIPE_SPT = "StripeSPT"` in `crates/tenzro-identity/src/kya.rs`.** Sits alongside `SERVICE_TYPE_MASTERCARD_KYA` (`:51`) and `SERVICE_TYPE_VISA_TAP` (`:55`). Update `is_kya_service_type()` to include it. (KYA isn't a perfect umbrella term — SPT is a token primitive not a directory — but co-locating the federation-pointer constants keeps the DID-document service-type registry in one place.)
-6. **TODO — `tenzro_stripeSptProtocolInfo` RPC.** Mirrors `tenzro_mastercardKyaProtocolInfo` / `tenzro_visaTapProtocolInfo` shape; advertises the federation surface, supported lifecycle states, three-ceiling enforcement claim, ERC-8004 cross-write entry point.
-7. **TODO — Three-ceiling integration in `IdentityPaymentBinder`.** Add an `SptCeilingResolver` trait alongside `SpendingPolicyResolver` (`crates/tenzro-payments/src/identity_binding.rs:71`). When a credential carries a granted-token reference, resolver retrieves Stripe's `usage_limits` and the binder rejects if any of (DelegationScope | SpendingPolicy | SPT cap) fails.
-8. **TODO — ERC-8004 feedback emission on SPT outcomes.** Wire SPT webhook → `ReputationRegistry.submitFeedback` calldata builder (cite: `crates/tenzro-identity/src/erc8004.rs`).
-9. **OUT OF SCOPE:** card issuance, MDES/VTS network tokenisation, fiat dispute/chargeback flow, Stripe-side KYC. We federate; we do not become an issuer.
+   - `StripeClient::create_issued_token() / retrieve_granted_token() / revoke_issued_token() / confirm_intent_with_spt(spt_id, amount, currency)` — last POSTs `payment_method_data[shared_payment_granted_token]=spt_id` with `confirm=true`.
+3. **SPT-aware credential verification.** When an MPP credential carries a `granted_token` field, the gateway verifies the SPT exists, is `active`, and `usage_limits.max_amount ≥ challenge.amount` *before* TDIP delegation enforcement.
+4. **SPT webhook event dispatcher.** The webhook verifier (`stripe.rs:450`) routes `shared_payment.issued_token.*` and `shared_payment.granted_token.deactivated` to typed handlers; revoke events trigger TDIP `apply_remote_revocation()` cascade via `crates/tenzro-node/src/spt_revocation_dispatcher.rs`.
+5. **`SERVICE_TYPE_STRIPE_SPT = "StripeSPT"`** in `crates/tenzro-identity/src/kya.rs` next to `SERVICE_TYPE_MASTERCARD_KYA` and `SERVICE_TYPE_VISA_TAP`; covered by `is_kya_service_type()`. (KYA isn't a perfect umbrella term — SPT is a token primitive not a directory — but co-locating the federation-pointer constants keeps the DID-document service-type registry in one place.)
+6. **`tenzro_stripeSptProtocolInfo` RPC.** Handler at `crates/tenzro-node/src/rpc_integrations.rs::handle_stripe_spt_protocol_info`; mirrors `tenzro_mastercardKyaProtocolInfo` / `tenzro_visaTapProtocolInfo` shape; advertises the federation surface, supported lifecycle states, four-ceiling enforcement, and the ERC-8004 cross-write entry point.
+7. **Four-ceiling integration in `IdentityPaymentBinder`.** `SptCeilingResolver` trait sits alongside `SpendingPolicyResolver` (`crates/tenzro-payments/src/identity_binding.rs`). When a credential carries a granted-token reference, the resolver retrieves Stripe's `usage_limits` and the binder rejects if any of (DelegationScope | SpendingPolicy | SPT cap | AP2 cart_total) fails. Node-side bridge: `crates/tenzro-node/src/spt_ceiling_bridge.rs`.
+8. **ERC-8004 feedback emission on SPT outcomes.** Settlement-outcome webhook events (`payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.dispute.created`, `charge.dispute.closed`) dispatch through `crates/tenzro-node/src/erc8004_reputation_dispatcher.rs::dispatch_settlement_outcome` → `ReputationRegistry.submitFeedback` at precompile `0x101b`. Driven by RPC `tenzro_processSptSettlementOutcome` (`handle_process_spt_settlement_outcome` in `rpc_integrations.rs`).
+
+**Out of scope:** card issuance, MDES/VTS network tokenisation, fiat dispute/chargeback flow, Stripe-side KYC. We federate; we do not become an issuer.

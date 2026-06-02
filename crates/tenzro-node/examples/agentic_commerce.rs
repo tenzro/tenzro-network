@@ -30,7 +30,10 @@ use tenzro_payments::mpp::MppPaymentServer;
 use tenzro_payments::traits::PaymentProtocol;
 use tenzro_payments::types::PaymentCredential;
 use tenzro_payments::x402::payment_required::X402PaymentRequirement;
-use tenzro_payments::x402::{X402Facilitator, X402PaymentPayload, X402PaymentRequired};
+use tenzro_payments::x402::{
+    ExactAuthorization, ExactSchemePayload, X402Facilitator, X402PaymentPayload,
+    X402PaymentRequired,
+};
 
 use tenzro_settlement::engine::{SettlementConfig, SettlementEngine};
 
@@ -282,53 +285,94 @@ async fn x402_pay_resource() -> Result<(), Box<dyn std::error::Error>> {
 
     let facilitator = X402Facilitator::new(vec!["tenzro".to_string()]);
 
-    let requirement = X402PaymentRequirement {
-        chain: "tenzro".to_string(),
-        asset: "USDC".to_string(),
-        amount: "1000".to_string(),
-        recipient: "0xrecipient".to_string(),
-        expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-        // Default scheme is `tenzro-hybrid` — Ed25519 signature over the
-        // canonical preimage (chain || asset || amount || recipient || payer).
-        extra: serde_json::json!({"scheme": "tenzro-hybrid"}),
-    };
+    // x402 V2 wire shape (Coinbase upstream): top-level scheme + CAIP-2
+    // network + camelCase payTo / maxAmountRequired / maxTimeoutSeconds.
+    let requirement = X402PaymentRequirement::new(
+        "tenzro-hybrid",
+        "tenzro",
+        "1000",
+        "0xrecipient",
+        "USDC",
+        "https://api.tenzro.network/paid/resource",
+        "Walkthrough resource",
+        "application/json",
+        300,
+    );
     let requirements = X402PaymentRequired::new(vec![requirement.clone()]);
 
     // Build a real Ed25519-signed payload so the facilitator's scheme
-    // dispatch (now verified through SchemeRegistry) accepts it.
+    // dispatch (verified through SchemeRegistry) accepts it. V2 preimage:
+    // network || asset || max_amount_required || pay_to || payer.
     let kp = KeyPair::generate(KeyType::Ed25519)?;
     let payer_hex = hex::encode(kp.public_key().as_bytes());
 
     let mut signing_message = Vec::new();
-    signing_message.extend_from_slice(requirement.chain.as_bytes());
+    signing_message.extend_from_slice(requirement.network.as_bytes());
     signing_message.extend_from_slice(requirement.asset.as_bytes());
-    signing_message.extend_from_slice(requirement.amount.as_bytes());
-    signing_message.extend_from_slice(requirement.recipient.as_bytes());
+    signing_message.extend_from_slice(requirement.max_amount_required.as_bytes());
+    signing_message.extend_from_slice(requirement.pay_to.as_bytes());
     signing_message.extend_from_slice(payer_hex.as_bytes());
 
     let signer = Ed25519SignerImpl::new(kp)?;
     let signature = signer.sign(&signing_message)?;
 
-    let mut payload = X402PaymentPayload::new(
-        "tenzro",
-        "USDC",
-        "1000",
-        &payer_hex,
-        hex::encode(&signing_message),
+    let authorization = ExactAuthorization {
+        from: payer_hex.clone(),
+        to: requirement.pay_to.clone(),
+        value: requirement.max_amount_required.clone(),
+        valid_after: 0,
+        valid_before: u64::MAX,
+        nonce: format!("0x{}", hex::encode([0u8; 32])),
+    };
+    let payload = X402PaymentPayload::new(
+        &requirement.scheme,
+        &requirement.network,
+        ExactSchemePayload {
+            signature: hex::encode(signature.as_bytes()),
+            authorization,
+        },
     );
-    payload.signature = hex::encode(signature.as_bytes());
 
     let accepted = facilitator.verify(&requirements, &payload).await?;
     println!("→ valid payload accepted = {}", accepted);
 
-    let underpay = X402PaymentPayload::new("tenzro", "USDC", "500", &payer_hex, "auth-blob");
+    let underpay_auth = ExactAuthorization {
+        from: payer_hex.clone(),
+        to: requirement.pay_to.clone(),
+        value: "500".to_string(),
+        valid_after: 0,
+        valid_before: u64::MAX,
+        nonce: format!("0x{}", hex::encode([1u8; 32])),
+    };
+    let underpay = X402PaymentPayload::new(
+        &requirement.scheme,
+        &requirement.network,
+        ExactSchemePayload {
+            signature: hex::encode(signature.as_bytes()),
+            authorization: underpay_auth,
+        },
+    );
     let underpay_accepted = facilitator.verify(&requirements, &underpay).await?;
     println!("→ underpaid payload accepted = {}", underpay_accepted);
 
-    let wrong_chain =
-        X402PaymentPayload::new("ethereum", "USDC", "1000", &payer_hex, "auth-blob");
-    let wrong_chain_accepted = facilitator.verify(&requirements, &wrong_chain).await?;
-    println!("→ wrong-chain payload accepted = {}", wrong_chain_accepted);
+    let wrong_network_auth = ExactAuthorization {
+        from: payer_hex.clone(),
+        to: requirement.pay_to.clone(),
+        value: requirement.max_amount_required.clone(),
+        valid_after: 0,
+        valid_before: u64::MAX,
+        nonce: format!("0x{}", hex::encode([2u8; 32])),
+    };
+    let wrong_network = X402PaymentPayload::new(
+        &requirement.scheme,
+        "ethereum",
+        ExactSchemePayload {
+            signature: hex::encode(signature.as_bytes()),
+            authorization: wrong_network_auth,
+        },
+    );
+    let wrong_network_accepted = facilitator.verify(&requirements, &wrong_network).await?;
+    println!("→ wrong-network payload accepted = {}", wrong_network_accepted);
 
     let settle_ref = facilitator.settle(&requirements, &payload).await?;
     println!("→ settled, reference = {settle_ref}");

@@ -204,8 +204,8 @@ tenzro detect --model rf-detr-medium --image ./photo.png --threshold 0.5
 tenzro transcribe --model whisper-large-v3-turbo --audio ./clip.wav
 
 # Video embedding (tenzro_videoEmbed)
-# Wave 1: catalog empty, scaffolding only
-tenzro embed-video --model <pending> --video ./clip.mp4
+# Native catalog is empty; register a vision-pooled fallback (DINOv3 / SigLIP2 / CLIP) to embed clips
+tenzro embed-video --model dinov3-vitb16-pooled --video ./clip.mp4
 ```
 
 License-tier gating applies on first load: CommercialCustom models (DINOv3, SAM, Gemma) require `--accept-license <id>`; non-commercial models require `--accept-non-commercial`.

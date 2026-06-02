@@ -43,7 +43,7 @@ use dkls23_core::protocols::dkg::{
 };
 use dkls23_core::protocols::dkg_session::DkgSession;
 use dkls23_core::protocols::{Abort, AbortKind, Parameters, PartyIndex};
-use dkls23_secp256k1::{compute_eth_address, Party};
+use dkls23_secp256k1::compute_eth_address;
 use k256::elliptic_curve::sec1::ToSec1Point;
 use k256::Secp256k1;
 use serde::{Deserialize, Serialize};

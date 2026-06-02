@@ -11,8 +11,8 @@ pub mod coinbase;
 pub mod receipt;
 pub mod scheme;
 
-pub use payment_required::X402PaymentRequired;
-pub use payment_payload::X402PaymentPayload;
+pub use payment_required::{X402PaymentRequired, X402PaymentRequirement, X402_WIRE_VERSION};
+pub use payment_payload::{ExactAuthorization, ExactSchemePayload, X402PaymentPayload};
 pub use facilitator::X402Facilitator;
 pub use server::X402PaymentServer;
 pub use client::X402Client;

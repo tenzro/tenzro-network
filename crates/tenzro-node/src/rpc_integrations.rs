@@ -1069,6 +1069,151 @@ pub(crate) async fn handle_process_spt_settlement_outcome(
     })
 }
 
+/// `tenzro_processTapPayerAuthOutcome` — record a Visa TAP-mediated
+/// payment outcome as an ERC-8004 `ReputationRegistry::submitFeedback`
+/// row.
+///
+/// Gated behind the `visa-tap` cargo feature on `tenzro-payments`; the
+/// `tenzro-node` `visa-tap` feature forwards to it. When the feature is
+/// disabled, the RPC dispatch in [`crate::rpc`] returns `MethodNotFound`
+/// rather than calling this handler.
+///
+/// Mirrors [`handle_process_spt_settlement_outcome`] for the TAP rail.
+/// The caller has already verified an `agent-payer-auth`-tagged TAP
+/// signature at the CDN proxy seam and observed the downstream
+/// settlement outcome; this RPC files the resulting reputation row
+/// under the agent's allocated ERC-8004 `agentId`.
+///
+/// Why a TAP-specific handler rather than a generic
+/// `tenzro_processReputationOutcome` over both rails: the upstream
+/// wire shapes differ (TAP gives a [`VerificationResult`] with
+/// `verified_tag` discrimination; SPT gives a webhook event with
+/// lifecycle/settlement split). Operators driving the handler from a
+/// verified TAP signature paste `agent_did` + `agent_key_id` + the
+/// outcome they observed; they don't synthesize a Stripe webhook
+/// shape. Per-rail handlers keep each call site self-documenting.
+///
+/// PayerAuth-only: BrowserAuth verifications are identity proofs, not
+/// payment outcomes — the dispatcher rejects them so registry
+/// consumers can keep "this agent identified itself" separate from
+/// "this agent moved value." The handler rejects them earlier with a
+/// clearer diagnostic.
+///
+/// Params:
+/// ```json
+/// {
+///   "agent_did": "did:tenzro:machine:controller:abc...",
+///   "agent_key_id": "k_...",
+///   "outcome": "succeeded",          // or "settlement_failed"
+///   "merchant_id": "merchant-abc"    // optional, recorded in contextUri
+/// }
+/// ```
+///
+/// Returns:
+/// ```json
+/// {
+///   "machine_did": "...",
+///   "agent_key_id": "...",
+///   "outcome": "succeeded",
+///   "agent_id": 42,
+///   "rating": 100,
+///   "written": true
+/// }
+/// ```
+#[cfg(feature = "visa-tap")]
+pub(crate) async fn handle_process_tap_payer_auth_outcome(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_payments::visa_tap::{AgentTag, VerificationResult};
+
+    use crate::tap_reputation_dispatcher::{dispatch_payer_auth_outcome, TapOutcome};
+
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let agent_did = params
+        .get("agent_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| invalid_params("missing string field 'agent_did'"))?
+        .to_string();
+    let agent_key_id = params
+        .get("agent_key_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| invalid_params("missing string field 'agent_key_id'"))?
+        .to_string();
+    let outcome_str = params
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| invalid_params("missing string field 'outcome'"))?;
+    let merchant_id = params
+        .get("merchant_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let outcome = match outcome_str {
+        "succeeded" => TapOutcome::Succeeded,
+        "settlement_failed" => TapOutcome::SettlementFailed,
+        other => {
+            return Err(invalid_params(format!(
+                "unknown outcome {:?} — expected 'succeeded' or 'settlement_failed'",
+                other
+            )));
+        }
+    };
+
+    // Build a synthetic VerificationResult for the dispatcher. The
+    // caller has already verified the TAP signature at their own seam;
+    // this RPC is the post-verification audit cross-write, so we
+    // construct the result shape the dispatcher's guards expect (
+    // verified=true, PayerAuth tag, agent_did present) directly from
+    // the caller's input. The dispatcher still validates these
+    // invariants in-depth — if a caller bug ever produces a malformed
+    // result, the dispatcher catches it before any tx is spawned.
+    let result = VerificationResult {
+        verified: true,
+        agent_key_id,
+        agent_did: Some(agent_did),
+        verified_tag: Some(AgentTag::PayerAuth),
+        stages_passed: vec!["caller_verified".to_string()],
+    };
+
+    let signer = node.erc8004_system_signer().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "ERC-8004 system signer not initialized on this node — \
+                  TAP reputation dispatch is unavailable (check init_storage logs)"
+            .to_string(),
+        data: None,
+    })?;
+
+    let agent_registry = node.erc8004_agent_registry().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "ERC-8004 OnChainAgentRegistry mirror not initialized on this node — \
+                  cannot resolve machine DID to sequential agentId"
+            .to_string(),
+        data: None,
+    })?;
+
+    let outcome = dispatch_payer_auth_outcome(
+        &result,
+        outcome,
+        merchant_id.as_deref(),
+        signer,
+        agent_registry,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("TAP reputation cross-write failed: {}", e),
+        data: None,
+    })?;
+
+    serde_json::to_value(outcome).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Failed to serialize TAP reputation outcome: {}", e),
+        data: None,
+    })
+}
+
 /// `tenzro_ap2ReportMandateViolation` — file an insurance claim against
 /// the AgentBond bound to an AP2 CheckoutMandate when the agent
 /// violates the mandate's terms (overspend, merchant whitelist breach,

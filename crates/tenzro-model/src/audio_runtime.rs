@@ -1,6 +1,6 @@
 //! Audio (ASR) runtime backed by ONNX Runtime.
 //!
-//! Three concrete transcriber families cover the wave-1 catalog:
+//! Four concrete transcriber families cover the full catalog:
 //!
 //! - **Moonshine v2** (`MoonshineTranscriber`) — raw 16 kHz waveform input,
 //!   encoder + autoregressive decoder loop with merged-decoder KV-cache
@@ -19,10 +19,14 @@
 //!   frame; duration logits select how many frames to skip.
 //!   `vocab.txt` is parsed line-by-line (`token id`, last entry
 //!   `<blk> N` marks the blank index).
+//! - **NVIDIA Canary 1B Flash** (`CanaryTranscriber`) — NeMo Conformer
+//!   AED (attention encoder-decoder). Supports English, German, Spanish,
+//!   French with cross-lingual translation. SentencePiece detokenize.
 //!
-//! `AudioRuntime` exposes `load_moonshine`, `load_whisper`, and
-//! `load_parakeet` to construct these from on-disk ONNX bundles
-//! produced by Optimum / transformers.js / istupakov-onnx-asr exports.
+//! `AudioRuntime` exposes `load_moonshine`, `load_whisper`,
+//! `load_parakeet`, and `load_canary` to construct these from on-disk
+//! ONNX bundles produced by Optimum / transformers.js /
+//! istupakov-onnx-asr / NeMo exports.
 
 use std::path::Path;
 use std::sync::Arc;

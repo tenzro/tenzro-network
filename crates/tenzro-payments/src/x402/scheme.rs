@@ -10,9 +10,9 @@
 //! | `erc7710`          | ERC-7710 redeem of a pre-issued delegation                 |
 //!
 //! The [`SchemeRegistry`] looks up a [`SchemeBackend`] by id and delegates
-//! credential verification to it. The server reads the scheme from
-//! `challenge.extra["scheme"]` (set when the challenge is minted via
-//! [`X402PaymentRequirement::new`](super::payment_required::X402PaymentRequirement::new)).
+//! credential verification to it. The credential-form path reads the scheme
+//! from `challenge.extra["scheme"]`; the payload-form path reads it from the
+//! top-level `requirement.scheme` field (Coinbase x402 V2 wire shape).
 //!
 //! The default registry registered by [`X402PaymentServer::new`](super::server::X402PaymentServer::new)
 //! contains:
@@ -186,18 +186,18 @@ impl SchemeRegistry {
         })
     }
 
-    /// Look up the backend declared by a requirement's `extra["scheme"]`
-    /// field. Falls back to [`DEFAULT_SCHEME`] when absent. Used by the
-    /// facilitator's payload-form verification path.
+    /// Look up the backend declared by a requirement's top-level `scheme`
+    /// field (Coinbase x402 V2 wire shape). Falls back to [`DEFAULT_SCHEME`]
+    /// when empty. Used by the facilitator's payload-form verification path.
     pub fn lookup_for_requirement(
         &self,
         requirement: &X402PaymentRequirement,
     ) -> Result<Arc<dyn SchemeBackend>> {
-        let id = requirement
-            .extra
-            .get("scheme")
-            .and_then(|v| v.as_str())
-            .unwrap_or(DEFAULT_SCHEME);
+        let id = if requirement.scheme.is_empty() {
+            DEFAULT_SCHEME
+        } else {
+            requirement.scheme.as_str()
+        };
         self.get(id).ok_or_else(|| {
             PaymentError::VerificationFailed(format!(
                 "No x402 scheme backend registered for id '{}'",
@@ -282,31 +282,37 @@ impl SchemeBackend for TenzroHybridBackend {
         requirement: &X402PaymentRequirement,
         payload: &X402PaymentPayload,
     ) -> Result<()> {
-        // Wire format: classical Ed25519 over the canonical preimage produced
-        // by X402Client::create_signed_payload — chain || asset || amount ||
-        // recipient || payer. The PQ leg is bound to the wallet's identity
-        // out-of-band (see x402::client) and is not on the x402 wire (yet).
-        if payload.signature.is_empty() {
+        // Wire format (Coinbase x402 V2): nested ExactSchemePayload with
+        // classical Ed25519 signature over the canonical preimage produced
+        // by X402Client::create_signed_payload — network || asset ||
+        // max_amount_required || pay_to || payer. The payer address is
+        // carried in payload.payload.authorization.from. The PQ leg is bound
+        // to the wallet's identity out-of-band (see x402::client) and is
+        // not on the x402 wire (yet).
+        let inner = &payload.payload;
+        if inner.signature.is_empty() {
             return Err(PaymentError::VerificationFailed(
                 "tenzro-hybrid payload missing signature".to_string(),
             ));
         }
 
-        let sig_bytes = hex::decode(&payload.signature).map_err(|e| {
+        let sig_hex = inner.signature.strip_prefix("0x").unwrap_or(&inner.signature);
+        let sig_bytes = hex::decode(sig_hex).map_err(|e| {
             PaymentError::VerificationFailed(format!("Invalid signature hex: {}", e))
         })?;
 
-        let pk_hex = payload.payer.strip_prefix("0x").unwrap_or(&payload.payer);
+        let payer = &inner.authorization.from;
+        let pk_hex = payer.strip_prefix("0x").unwrap_or(payer.as_str());
         let pk_bytes = hex::decode(pk_hex).map_err(|e| {
             PaymentError::VerificationFailed(format!("Invalid payer address hex: {}", e))
         })?;
 
         let mut message = Vec::new();
-        message.extend_from_slice(requirement.chain.as_bytes());
+        message.extend_from_slice(requirement.network.as_bytes());
         message.extend_from_slice(requirement.asset.as_bytes());
-        message.extend_from_slice(requirement.amount.as_bytes());
-        message.extend_from_slice(requirement.recipient.as_bytes());
-        message.extend_from_slice(payload.payer.as_bytes());
+        message.extend_from_slice(requirement.max_amount_required.as_bytes());
+        message.extend_from_slice(requirement.pay_to.as_bytes());
+        message.extend_from_slice(payer.as_bytes());
 
         use tenzro_crypto::keys::{KeyType, PublicKey};
         use tenzro_crypto::signatures::{Ed25519VerifierImpl, Signature, Verifier};
@@ -327,7 +333,7 @@ impl SchemeBackend for TenzroHybridBackend {
 
         debug!(
             "tenzro-hybrid verified payload from payer {} for {} {}",
-            payload.payer, requirement.amount, requirement.asset
+            payer, requirement.max_amount_required, requirement.asset
         );
         Ok(())
     }
@@ -773,12 +779,20 @@ impl SchemeBackend for Erc7710Backend {
         requirement: &X402PaymentRequirement,
         payload: &X402PaymentPayload,
     ) -> Result<()> {
-        // Payload-form ERC-7710 carries the redemption proof in
-        // `payload.authorization`. We require it to be non-empty before
-        // dispatching to the configured verifier.
-        if payload.authorization.is_empty() {
+        // Payload-form ERC-7710 (Coinbase x402 V2 wire): the redemption proof
+        // travels in `payload.payload.signature` as an opaque scheme-specific
+        // blob; the EIP-3009-style authorization substructure carries the
+        // standard from/to/value/valid_after/valid_before/nonce binding. Both
+        // must be non-empty before we dispatch to the configured verifier.
+        let inner = &payload.payload;
+        if inner.signature.is_empty() {
             return Err(PaymentError::VerificationFailed(
-                "erc7710 payload missing authorization (redemption proof)".to_string(),
+                "erc7710 payload missing signature (redemption proof)".to_string(),
+            ));
+        }
+        if inner.authorization.from.is_empty() {
+            return Err(PaymentError::VerificationFailed(
+                "erc7710 payload missing authorization.from".to_string(),
             ));
         }
         self.verifier

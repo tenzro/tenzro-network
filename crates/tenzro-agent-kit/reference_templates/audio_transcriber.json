@@ -1,7 +1,7 @@
 {
   "template_id": "ref-audio-transcriber-v1",
   "name": "Audio Transcriber",
-  "description": "Reference template for an autonomous ASR agent that transcribes audio (WAV/MP3/FLAC) using Tenzro-served ASR models — Moonshine v2 for on-device, Distil-Whisper for fast English, Whisper-large-v3-turbo as flagship, Parakeet-TDT and Canary for multilingual. Settles per-second pricing via x402 to the serving provider. Wave 1 status: the AudioRuntime is scaffolding only — `tenzro_transcribe` returns ProviderNotAvailable until the ORT-backed transcribers ship in the next wave. The template + execution spec are stable; only the underlying runtime is pending.",
+  "description": "Reference template for an autonomous ASR agent that transcribes audio (WAV/MP3/FLAC) using Tenzro-served ASR models — Moonshine v2 for on-device, Distil-Whisper for fast English, Whisper-large-v3-turbo as flagship, Parakeet-TDT and Canary for multilingual. Settles per-second pricing via x402 to the serving provider.",
   "template_type": "autonomous",
   "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
   "version": "1.0.0",
