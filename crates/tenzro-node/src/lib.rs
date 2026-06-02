@@ -94,7 +94,9 @@ pub mod delegation_scope_oracle;
 pub mod epoch_state_store;
 pub mod metrics;
 pub mod model_blob_fetcher_bridge;
+pub mod mpc_keyshare_store;
 pub mod mpc_libp2p_adapter;
+pub mod mpc_threshold_signer;
 pub mod node;
 pub mod rpc;
 pub mod rpc_integrations;
@@ -104,6 +106,8 @@ pub mod spending_policy_bridge;
 pub mod spt_ceiling_bridge;
 pub mod spt_revocation_dispatcher;
 pub mod streaming;
+#[cfg(feature = "visa-tap")]
+pub mod tap_reputation_dispatcher;
 pub mod web;
 pub mod workflow_runtime;
 

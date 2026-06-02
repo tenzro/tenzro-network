@@ -351,6 +351,64 @@ pub struct BridgeAdapterConfig {
     /// etc. Defaults to `"tenzro/bridge/evm-signer"` if unset.
     #[serde(default)]
     pub tee_label: Option<String>,
+
+    /// DKLS23 t-of-n threshold-ECDSA backend (Phase D wave 2).
+    ///
+    /// When set, takes precedence over both `tee_sealed` and the raw-key
+    /// paths: the bridge signer dispatches every signing request through
+    /// the node-layer `NodeThresholdSigner`, which closes over the local
+    /// `KeyshareEnvelope` (RocksDB-persisted), a `KeyshareSealer`
+    /// (TEE-rooted in production), the libp2p `/tenzro/mpc/v1` transport,
+    /// and a chain-anchored entropy source (finalized block hash) for
+    /// committee draw. No single party — including this node — holds the
+    /// full private scalar.
+    #[serde(default)]
+    pub mpc_threshold: Option<MpcThresholdConfig>,
+}
+
+/// Per-adapter DKLS23 t-of-n threshold-signer configuration.
+///
+/// All fields describe the *signing group* this adapter belongs to. The
+/// actual share material lives in RocksDB under `CF_MPC_KEYSHARES` keyed
+/// by `group_id` and is loaded at signing time by `NodeKeyshareStore`.
+///
+/// `local_did` identifies *this node* within `group_members`; every signing
+/// attempt runs a chain-anchored committee draw and this node either
+/// participates, observes (sufficient quorum drawn without it), or surfaces
+/// `UnderQuorum` (group too small to assemble `threshold` participants).
+#[derive(Clone, Serialize, Deserialize, Default, Debug)]
+pub struct MpcThresholdConfig {
+    /// Hex-encoded 32-byte DKLS23 group identifier (stable across epoch
+    /// boundaries — only share material rotates on refresh).
+    #[serde(default)]
+    pub group_id_hex: String,
+
+    /// This node's DID within the signing group. Must be a member of
+    /// `group_members`.
+    #[serde(default)]
+    pub local_did: String,
+
+    /// All party DIDs in the signing group, in canonical order. Length
+    /// must equal `total_parties`.
+    #[serde(default)]
+    pub group_members: Vec<String>,
+
+    /// Hex-encoded 33-byte SEC1-compressed secp256k1 group public key
+    /// (matches `KeyshareEnvelope::group_public_key_compressed`). The
+    /// derived 20-byte Ethereum address becomes the bridge signer's
+    /// `sender_address`.
+    #[serde(default)]
+    pub group_public_key_hex: String,
+
+    /// Signing threshold `t` — at least `t` parties must cooperate to
+    /// produce a signature. Invariant: `2 <= threshold <= total_parties`.
+    #[serde(default)]
+    pub threshold: u8,
+
+    /// Total party count `n` — there are exactly `n` keyshares in the
+    /// distribution. Invariant: `threshold <= total_parties <= 32`.
+    #[serde(default)]
+    pub total_parties: u8,
 }
 
 impl BridgeAdapterConfig {
@@ -397,6 +455,7 @@ impl std::fmt::Debug for BridgeAdapterConfig {
             .field("private_key_env", &self.private_key_env)
             .field("tee_sealed", &self.tee_sealed)
             .field("tee_label", &self.tee_label)
+            .field("mpc_threshold", &self.mpc_threshold)
             .finish()
     }
 }
@@ -453,6 +512,18 @@ pub struct PaymentsConfig {
     /// Useful for testing against a Stripe mock server.
     #[serde(default)]
     pub stripe_api_base: Option<String>,
+
+    /// Operator-supplied canonical Tempo L1 TIP-20 stablecoin addresses,
+    /// keyed by symbol (e.g. `"USDC" -> "0xabc..."`). When present, these
+    /// override the placeholder addresses seeded by `init_token()` so the
+    /// `TokenRegistry` `by_tempo_address` index resolves the same `TokenId`
+    /// regardless of whether routing comes from this node or from a peer
+    /// citing the operator's canonical Tempo issuance.
+    ///
+    /// Addresses must be 20-byte EVM-style hex with optional `0x` prefix;
+    /// malformed entries are logged and skipped at startup.
+    #[serde(default)]
+    pub tempo_stablecoins: std::collections::HashMap<String, String>,
 }
 
 impl Default for PaymentsConfig {
@@ -466,6 +537,7 @@ impl Default for PaymentsConfig {
             paid_routes: Vec::new(),
             stripe_api_key: None,
             stripe_api_base: None,
+            tempo_stablecoins: std::collections::HashMap::new(),
         }
     }
 }
@@ -486,6 +558,7 @@ impl std::fmt::Debug for PaymentsConfig {
                 &if self.stripe_api_key.is_some() { "<redacted>" } else { "<unset>" },
             )
             .field("stripe_api_base", &self.stripe_api_base)
+            .field("tempo_stablecoins", &self.tempo_stablecoins)
             .finish()
     }
 }

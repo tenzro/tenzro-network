@@ -184,8 +184,8 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0
 - **TaskMarketplace**: postTask, listTasks, getTask, cancelTask, submitQuote
 - **AgentMarketplace**: listAgentTemplates, registerAgentTemplate, getAgentTemplate, updateAgentTemplate, spawnAgentFromTemplate, runAgentTemplate, rateAgentTemplate, searchAgentTemplates, getAgentTemplateStats
 - **TokenRegistry**: createToken, getToken, listTokens, crossVmTransfer, wrapTnzo, getTokenBalance, deployContract
-- **Adaptive Burn**: getBurnRateConfig, getSupplyMetrics, getBurnRateRecommendation, listAdaptiveBurnProposals (read-only dial surface; auto-proposal generator and EIP-1559 fee-market consumer wire alongside the governance executor)
-- **SeedAgent Treasury**: getTreasuryEarmark, getSeedAgentCharter, listSeedAgentCharters, listSeedAgents, getNetworkActivity (read-only earmark and registry; off-chain provisioning daemon and governance-executor mutation paths land in a later wave)
+- **Adaptive Burn**: getBurnRateConfig, getSupplyMetrics, getBurnRateRecommendation, listAdaptiveBurnProposals — dial surface plus `AutoProposalGenerator` and EIP-1559 fee-market consumer wired through the governance executor
+- **SeedAgent Treasury**: getTreasuryEarmark, getSeedAgentCharter, listSeedAgentCharters, listSeedAgents, getNetworkActivity, getSeedAgentDaemonStatus — earmark, registry, off-chain `SeedAgentDaemon` (6h poll, monthly refill, charter-sunset pause, leader-gate), governance-executor mutation paths, and the `tenzro/seed-agents` gossipsub topic
 - **AgentBond / Insurance**: post_agent_bond / get_agent_bond / file_insurance_claim — stake-bonding for agents and insurance pool for cart-mandate fraud
 - **Training (Tenzro Train)**: tenzro_training_postTask, listRuns, getRun, getReceipt, enrollTrainer, submitOuterGradient, finalizeRound
 

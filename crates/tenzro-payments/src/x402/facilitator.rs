@@ -66,14 +66,15 @@ impl X402Facilitator {
 
     /// Verifies a payment payload against requirements.
     ///
-    /// Pipeline:
-    /// 1. Chain is supported by this facilitator.
+    /// Pipeline (Coinbase x402 V2 wire):
+    /// 1. Network is supported by this facilitator (payload.network).
     /// 2. A requirement in `requirements.accepts` matches the payload's
-    ///    `(chain, asset)` pair.
-    /// 3. The paid amount is `>=` the required amount.
+    ///    `(network, scheme)` pair.
+    /// 3. The paid amount (`payload.payload.authorization.value`) is `>=`
+    ///    `requirement.max_amount_required`.
     /// 4. The requirement has not expired.
     /// 5. The configured [`SchemeBackend`] (selected from
-    ///    `requirement.extra["scheme"]`) accepts the payload.
+    ///    `requirement.scheme`) accepts the payload.
     ///
     /// Returns `Ok(true)` only if all five checks pass. Scheme-specific
     /// failures bubble up as `Ok(false)` rather than `Err` so the
@@ -84,34 +85,35 @@ impl X402Facilitator {
         requirements: &X402PaymentRequired,
         payload: &X402PaymentPayload,
     ) -> Result<bool> {
-        info!("Verifying x402 payment from {}", payload.payer);
+        let payer = &payload.payload.authorization.from;
+        info!("Verifying x402 payment from {}", payer);
 
-        // 1. Check chain is supported
-        if !self.supported_chains.contains(&payload.chain) {
-            debug!("Unsupported chain: {}", payload.chain);
+        // 1. Check network is supported
+        if !self.supported_chains.contains(&payload.network) {
+            debug!("Unsupported network: {}", payload.network);
             return Ok(false);
         }
 
-        // 2. Find matching requirement
+        // 2. Find matching requirement on (network, scheme).
         let requirement = requirements
             .accepts
             .iter()
-            .find(|r| r.chain == payload.chain && r.asset == payload.asset);
+            .find(|r| r.network == payload.network && r.scheme == payload.scheme);
 
         let requirement = match requirement {
             Some(r) => r,
             None => {
                 debug!(
-                    "No matching requirement for chain={} asset={}",
-                    payload.chain, payload.asset
+                    "No matching requirement for network={} scheme={}",
+                    payload.network, payload.scheme
                 );
                 return Ok(false);
             }
         };
 
         // 3. Verify amount matches
-        let required_amount: u128 = requirement.amount.parse().unwrap_or(0);
-        let payload_amount: u128 = payload.amount.parse().unwrap_or(0);
+        let required_amount: u128 = requirement.max_amount_required.parse().unwrap_or(0);
+        let payload_amount: u128 = payload.payload.authorization.value.parse().unwrap_or(0);
 
         if payload_amount < required_amount {
             debug!(
@@ -133,7 +135,7 @@ impl X402Facilitator {
             Ok(()) => {
                 info!(
                     "x402 payment verified from {} under scheme '{}'",
-                    payload.payer,
+                    payer,
                     backend.name()
                 );
                 Ok(true)
@@ -142,7 +144,7 @@ impl X402Facilitator {
                 debug!(
                     "Scheme '{}' rejected payload from {}: {}",
                     backend.name(),
-                    payload.payer,
+                    payer,
                     e
                 );
                 Ok(false)
@@ -168,16 +170,17 @@ impl X402Facilitator {
         requirements: &X402PaymentRequired,
         payload: &X402PaymentPayload,
     ) -> Result<String> {
-        info!("Settling x402 payment on chain {}", payload.chain);
+        let payer = &payload.payload.authorization.from;
+        info!("Settling x402 payment on network {}", payload.network);
 
         let requirement = requirements
             .accepts
             .iter()
-            .find(|r| r.chain == payload.chain && r.asset == payload.asset)
+            .find(|r| r.network == payload.network && r.scheme == payload.scheme)
             .ok_or_else(|| {
                 PaymentError::SettlementError(format!(
-                    "No matching requirement for settlement: chain={} asset={}",
-                    payload.chain, payload.asset
+                    "No matching requirement for settlement: network={} scheme={}",
+                    payload.network, payload.scheme
                 ))
             })?;
 
@@ -188,7 +191,7 @@ impl X402Facilitator {
             debug!(
                 "Scheme '{}' settled payload from {} as tx {}",
                 backend.name(),
-                payload.payer,
+                payer,
                 tx_hash
             );
             return Ok(tx_hash);
@@ -196,18 +199,21 @@ impl X402Facilitator {
 
         // 2. Tenzro-native path: route through the local SettlementEngine.
         if let Some(engine) = &self.settlement_engine {
-            let amount: u128 = payload.amount.parse().unwrap_or(0);
+            let amount: u128 = payload.payload.authorization.value.parse().unwrap_or(0);
             let amount_u64 = u64::try_from(amount).map_err(|_| {
                 PaymentError::SettlementError("Amount exceeds u64 range".to_string())
             })?;
 
-            let payer_bytes = hex::decode(
-                payload.payer.strip_prefix("0x").unwrap_or(&payload.payer),
-            )
-            .unwrap_or_default();
+            let payer_hex = payer.strip_prefix("0x").unwrap_or(payer.as_str());
+            let payer_bytes = hex::decode(payer_hex).unwrap_or_default();
             let mut payer_arr = [0u8; 32];
             let len = payer_bytes.len().min(32);
             payer_arr[32 - len..].copy_from_slice(&payer_bytes[..len]);
+
+            // Bind the canonical EIP-3009 authorization tuple as the proof
+            // body — the facilitator-side opaque blob.
+            let auth_proof = serde_json::to_vec(&payload.payload.authorization)
+                .map_err(|e| PaymentError::SerializationError(e.to_string()))?;
 
             let request = tenzro_types::settlement::SettlementRequest::new(
                 Address::new([0u8; 32]), // Provider (facilitator) address
@@ -219,7 +225,7 @@ impl X402Facilitator {
                 amount_u64,
                 ServiceProof {
                     proof_type: ProofType::Cryptographic,
-                    proof_data: payload.authorization.as_bytes().to_vec(),
+                    proof_data: auth_proof,
                     signatures: vec![],
                     attestation: None,
                 },
@@ -242,6 +248,7 @@ impl X402Facilitator {
 mod tests {
     use super::*;
     use crate::types::{PaymentChallenge, PaymentCredential};
+    use crate::x402::payment_payload::{ExactAuthorization, ExactSchemePayload};
     use crate::x402::payment_required::X402PaymentRequirement;
     use crate::x402::scheme::SchemeBackend;
     use async_trait::async_trait;
@@ -249,51 +256,81 @@ mod tests {
     use tenzro_crypto::keys::{KeyPair, KeyType};
     use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
 
-    /// Sign a payload under the canonical tenzro-hybrid preimage. Consumes
-    /// `kp` because `Ed25519SignerImpl::new` takes a `KeyPair` by value.
+    fn empty_payload(scheme: &str, network: &str, value: &str, payer: &str) -> X402PaymentPayload {
+        X402PaymentPayload::new(
+            scheme,
+            network,
+            ExactSchemePayload::new(ExactAuthorization {
+                from: payer.to_string(),
+                to: "0xrecipient".to_string(),
+                value: value.to_string(),
+                valid_after: 0,
+                valid_before: u64::MAX,
+                nonce: "0x".to_string()
+                    + &hex::encode([0u8; 32]),
+            }),
+        )
+    }
+
+    /// Sign a payload under the canonical tenzro-hybrid V2 preimage:
+    /// `network || asset || max_amount_required || pay_to || payer_hex`.
+    /// Consumes `kp` because `Ed25519SignerImpl::new` takes a `KeyPair` by
+    /// value.
     fn sign_tenzro_hybrid_payload(
         requirement: &X402PaymentRequirement,
-        amount: &str,
+        value: &str,
         kp: KeyPair,
     ) -> X402PaymentPayload {
         let payer_hex = hex::encode(kp.public_key().as_bytes());
+
         let mut msg = Vec::new();
-        msg.extend_from_slice(requirement.chain.as_bytes());
+        msg.extend_from_slice(requirement.network.as_bytes());
         msg.extend_from_slice(requirement.asset.as_bytes());
-        msg.extend_from_slice(amount.as_bytes());
-        msg.extend_from_slice(requirement.recipient.as_bytes());
+        msg.extend_from_slice(requirement.max_amount_required.as_bytes());
+        msg.extend_from_slice(requirement.pay_to.as_bytes());
         msg.extend_from_slice(payer_hex.as_bytes());
 
         let signer = Ed25519SignerImpl::new(kp).unwrap();
         let sig = signer.sign(&msg).unwrap();
 
-        let mut payload = X402PaymentPayload::new(
-            &requirement.chain,
-            &requirement.asset,
-            amount,
-            &payer_hex,
-            hex::encode(&msg),
-        );
-        payload.signature = hex::encode(sig.as_bytes());
-        payload
+        let authorization = ExactAuthorization {
+            from: payer_hex,
+            to: requirement.pay_to.clone(),
+            value: value.to_string(),
+            valid_after: 0,
+            valid_before: u64::MAX,
+            nonce: "0x".to_string() + &hex::encode([0u8; 32]),
+        };
+
+        X402PaymentPayload::new(
+            &requirement.scheme,
+            &requirement.network,
+            ExactSchemePayload {
+                signature: hex::encode(sig.as_bytes()),
+                authorization,
+            },
+        )
     }
 
     fn tenzro_hybrid_requirement(amount: &str) -> X402PaymentRequirement {
-        X402PaymentRequirement {
-            chain: "tenzro".to_string(),
-            asset: "USDC".to_string(),
-            amount: amount.to_string(),
-            recipient: "0xrecipient".to_string(),
-            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-            extra: serde_json::json!({"scheme": "tenzro-hybrid"}),
-        }
+        X402PaymentRequirement::new(
+            "tenzro-hybrid",
+            "tenzro",
+            amount,
+            "0xrecipient",
+            "USDC",
+            "https://api.tenzro.network/paid/resource",
+            "Test resource",
+            "application/json",
+            300,
+        )
     }
 
     #[tokio::test]
     async fn test_facilitator_rejects_unsupported_chain() {
         let facilitator = X402Facilitator::new(vec!["tenzro".to_string()]);
         let requirements = X402PaymentRequired::new(vec![tenzro_hybrid_requirement("1000")]);
-        let payload = X402PaymentPayload::new("ethereum", "USDC", "1000", "0xpayer", "auth");
+        let payload = empty_payload("tenzro-hybrid", "ethereum", "1000", "0xpayer");
 
         let result = facilitator.verify(&requirements, &payload).await.unwrap();
         assert!(!result);
@@ -303,7 +340,7 @@ mod tests {
     async fn test_facilitator_rejects_insufficient_amount() {
         let facilitator = X402Facilitator::new(vec!["tenzro".to_string()]);
         let requirements = X402PaymentRequired::new(vec![tenzro_hybrid_requirement("1000")]);
-        let payload = X402PaymentPayload::new("tenzro", "USDC", "500", "0xpayer", "auth");
+        let payload = empty_payload("tenzro-hybrid", "tenzro", "500", "0xpayer");
 
         let result = facilitator.verify(&requirements, &payload).await.unwrap();
         assert!(!result);
@@ -329,7 +366,7 @@ mod tests {
 
         // No signature populated — under the new scheme-dispatch contract
         // tenzro-hybrid rejects this.
-        let payload = X402PaymentPayload::new("tenzro", "USDC", "1000", "0xpayer", "auth");
+        let payload = empty_payload("tenzro-hybrid", "tenzro", "1000", "0xpayer");
         let result = facilitator.verify(&requirements, &payload).await.unwrap();
         assert!(!result, "unsigned tenzro-hybrid payload must be rejected");
     }
@@ -343,9 +380,9 @@ mod tests {
         let kp = KeyPair::generate(KeyType::Ed25519).unwrap();
         let mut payload = sign_tenzro_hybrid_payload(&requirement, "1000", kp);
         // Flip a byte in the signature.
-        let mut sig_bytes = hex::decode(&payload.signature).unwrap();
+        let mut sig_bytes = hex::decode(&payload.payload.signature).unwrap();
         sig_bytes[0] ^= 0xFF;
-        payload.signature = hex::encode(&sig_bytes);
+        payload.payload.signature = hex::encode(&sig_bytes);
 
         let result = facilitator.verify(&requirements, &payload).await.unwrap();
         assert!(!result, "tampered signature must be rejected");
@@ -414,19 +451,22 @@ mod tests {
         let mut registry = crate::x402::scheme::SchemeRegistry::with_defaults();
         registry.register("counting", backend.clone());
 
-        let facilitator = X402Facilitator::new(vec!["tenzro".to_string()])
-            .with_scheme_registry(registry);
+        let facilitator =
+            X402Facilitator::new(vec!["tenzro".to_string()]).with_scheme_registry(registry);
 
-        let requirement = X402PaymentRequirement {
-            chain: "tenzro".to_string(),
-            asset: "USDC".to_string(),
-            amount: "1000".to_string(),
-            recipient: "0xrecipient".to_string(),
-            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-            extra: serde_json::json!({"scheme": "counting"}),
-        };
+        let requirement = X402PaymentRequirement::new(
+            "counting",
+            "tenzro",
+            "1000",
+            "0xrecipient",
+            "USDC",
+            "https://api.tenzro.network/paid/resource",
+            "Counting backend test",
+            "application/json",
+            300,
+        );
         let requirements = X402PaymentRequired::new(vec![requirement]);
-        let payload = X402PaymentPayload::new("tenzro", "USDC", "1000", "0xpayer", "auth");
+        let payload = empty_payload("counting", "tenzro", "1000", "0xpayer");
 
         let accepted = facilitator.verify(&requirements, &payload).await.unwrap();
         assert!(accepted, "counting backend was set to accept");
@@ -440,16 +480,19 @@ mod tests {
     #[tokio::test]
     async fn test_facilitator_rejects_unknown_scheme() {
         let facilitator = X402Facilitator::new(vec!["tenzro".to_string()]);
-        let requirement = X402PaymentRequirement {
-            chain: "tenzro".to_string(),
-            asset: "USDC".to_string(),
-            amount: "1000".to_string(),
-            recipient: "0xrecipient".to_string(),
-            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-            extra: serde_json::json!({"scheme": "not-a-real-scheme"}),
-        };
+        let requirement = X402PaymentRequirement::new(
+            "not-a-real-scheme",
+            "tenzro",
+            "1000",
+            "0xrecipient",
+            "USDC",
+            "https://api.tenzro.network/paid/resource",
+            "Unknown scheme test",
+            "application/json",
+            300,
+        );
         let requirements = X402PaymentRequired::new(vec![requirement]);
-        let payload = X402PaymentPayload::new("tenzro", "USDC", "1000", "0xpayer", "auth");
+        let payload = empty_payload("not-a-real-scheme", "tenzro", "1000", "0xpayer");
 
         let err = facilitator.verify(&requirements, &payload).await.unwrap_err();
         assert!(

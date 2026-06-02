@@ -8,9 +8,10 @@
 //! 5. Parse PAYMENT-RESPONSE header from success response
 
 use crate::error::{PaymentError, Result};
-use crate::x402::payment_payload::X402PaymentPayload;
+use crate::x402::payment_payload::{ExactAuthorization, ExactSchemePayload, X402PaymentPayload};
 use crate::x402::payment_required::X402PaymentRequired;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tenzro_wallet::wallet::WalletId;
 use tenzro_wallet::WalletService;
 use tracing::{debug, info};
@@ -99,15 +100,17 @@ impl X402Client {
             url
         );
 
-        // Find a matching requirement for a chain we support
+        // Find a matching requirement for a network we support (V2 wire uses
+        // CAIP-2 `network`; we still call them "chains" in the constructor
+        // for callers, but the wire field is `network`).
         let requirement = requirements
             .accepts
             .iter()
-            .find(|r| self.supported_chains.contains(&r.chain))
+            .find(|r| self.supported_chains.contains(&r.network))
             .ok_or_else(|| {
                 PaymentError::ChallengeError(format!(
-                    "No supported chain found in requirements. Server offers: {:?}, we support: {:?}",
-                    requirements.accepts.iter().map(|r| &r.chain).collect::<Vec<_>>(),
+                    "No supported network found in requirements. Server offers: {:?}, we support: {:?}",
+                    requirements.accepts.iter().map(|r| &r.network).collect::<Vec<_>>(),
                     self.supported_chains
                 ))
             })?;
@@ -142,50 +145,76 @@ impl X402Client {
         Ok(retry_response)
     }
 
-    /// Creates a signed payment payload for a requirement
+    /// Creates a signed payment payload for a requirement.
+    ///
+    /// Wire shape (Coinbase x402 V2): the payload is a nested
+    /// `ExactSchemePayload` carrying the EIP-3009-style authorization
+    /// substructure `{from, to, value, validAfter, validBefore, nonce}` and
+    /// the canonical signature over the scheme-specific preimage. For
+    /// `tenzro-hybrid` that preimage is
+    /// `network || asset || max_amount_required || pay_to || payer_address`.
     async fn create_signed_payload(
         &self,
         requirement: &crate::x402::payment_required::X402PaymentRequirement,
     ) -> Result<X402PaymentPayload> {
-        let mut payload = X402PaymentPayload::new(
-            &requirement.chain,
-            &requirement.asset,
-            &requirement.amount,
-            &self.payer_address,
-            "", // authorization will be the signed message
-        );
-
-        // Sign the payload if we have a wallet
-        if let (Some(wallet_service), Some(wallet_id)) = (&self.wallet_service, &self.wallet_id) {
-            // Construct the message to sign
-            let mut message = Vec::new();
-            message.extend_from_slice(requirement.chain.as_bytes());
-            message.extend_from_slice(requirement.asset.as_bytes());
-            message.extend_from_slice(requirement.amount.as_bytes());
-            message.extend_from_slice(requirement.recipient.as_bytes());
-            message.extend_from_slice(self.payer_address.as_bytes());
-
-            // Wave 3d: wallet now produces a hybrid signature. The x402 wire
-            // format is fixed by Coinbase and only carries a single signature
-            // string, so we emit the classical leg here. The ML-DSA-65 leg is
-            // still computed and bound to the wallet's identity for internal
-            // audit; an x402 extension may surface it once standardised.
-            let hybrid_sig = wallet_service
-                .sign_data(wallet_id, &message)
-                .await
-                .map_err(|e| {
-                    PaymentError::CredentialError(format!("Failed to sign payment: {}", e))
+        let (wallet_service, wallet_id) =
+            self.wallet_service
+                .as_ref()
+                .zip(self.wallet_id.as_ref())
+                .ok_or_else(|| {
+                    PaymentError::CredentialError(
+                        "Wallet service required for x402 payments — call with_wallet() first"
+                            .to_string(),
+                    )
                 })?;
 
-            payload.signature = hex::encode(&hybrid_sig.classical);
-            payload.authorization = hex::encode(&message);
-        } else {
-            return Err(PaymentError::CredentialError(
-                "Wallet service required for x402 payments — call with_wallet() first".to_string(),
-            ));
-        }
+        // Canonical preimage matches `TenzroHybridBackend::verify_payload`.
+        let mut message = Vec::new();
+        message.extend_from_slice(requirement.network.as_bytes());
+        message.extend_from_slice(requirement.asset.as_bytes());
+        message.extend_from_slice(requirement.max_amount_required.as_bytes());
+        message.extend_from_slice(requirement.pay_to.as_bytes());
+        message.extend_from_slice(self.payer_address.as_bytes());
 
-        Ok(payload)
+        // Wave 3d: wallet produces a hybrid signature. The x402 wire format
+        // only carries a single signature string per the Coinbase V2 spec, so
+        // we emit the classical leg here. The ML-DSA-65 leg is still computed
+        // and bound to the wallet's identity for internal audit; an x402
+        // extension may surface it once standardised.
+        let hybrid_sig = wallet_service
+            .sign_data(wallet_id, &message)
+            .await
+            .map_err(|e| PaymentError::CredentialError(format!("Failed to sign payment: {}", e)))?;
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let valid_before = now.saturating_add(requirement.max_timeout_seconds);
+
+        // 32-byte random nonce.
+        let mut nonce_bytes = [0u8; 32];
+        use rand::RngCore;
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce_hex = format!("0x{}", hex::encode(nonce_bytes));
+
+        let authorization = ExactAuthorization {
+            from: self.payer_address.clone(),
+            to: requirement.pay_to.clone(),
+            value: requirement.max_amount_required.clone(),
+            valid_after: 0,
+            valid_before,
+            nonce: nonce_hex,
+        };
+
+        Ok(X402PaymentPayload::new(
+            &requirement.scheme,
+            &requirement.network,
+            ExactSchemePayload {
+                signature: hex::encode(&hybrid_sig.classical),
+                authorization,
+            },
+        ))
     }
 
     /// Returns the payer address

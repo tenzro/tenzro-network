@@ -11169,7 +11169,7 @@ impl TenzroMcpServer {
 
     // ─── Multi-modal: Audio ASR ───
 
-    #[tool(description = "List ASR (speech-to-text) models currently loaded on this node. Note: the audio transcriber runtime is scaffolding only — `transcribe` returns ProviderNotAvailable until the ORT-backed Whisper / Moonshine / Parakeet / Canary implementations land in the next wave.")]
+    #[tool(description = "List ASR (speech-to-text) models currently loaded on this node. The catalog covers Moonshine v2, Distil-Whisper, Whisper-large-v3-turbo, Parakeet-TDT-0.6B-v3, and Canary-1B-Flash, all backed by ORT sessions.")]
     async fn list_audio_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,

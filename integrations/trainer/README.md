@@ -36,8 +36,11 @@ training loop for Decoupled DiLoCo, paired with the Rust protocol layer in
 
 ## Phase 1 scope
 
-- **Modality:** timeseries first (TimesFM-class 200M models). Language and
-  vision adapters are stubs that share the same outer-gradient + RPC plumbing.
+- **Modalities:** timeseries (TimesFM-class 200M models), language (Qwen 3 0.6B
+  default via `transformers.AutoModelForCausalLM`; swap to any catalog LM via
+  `architecture.metadata.hf_repo`), and vision (`timm` ViT-B/16 default; swap
+  via `architecture.metadata.timm_model`). All share the same outer-gradient
+  + RPC plumbing.
 - **Trust tier:** Open (no TEE attestation). Trust comes from stake bonding +
   redundant fragment assignment + Mean aggregation across K-of-M trainers.
 - **Aggregation:** the *Rust* syncer applies `AggregationRule::Mean` to the

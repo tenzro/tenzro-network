@@ -117,6 +117,14 @@ pub struct CheckoutMandate {
     /// Optional allow-list of resource categories (merchant-defined tags).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_categories: Vec<String>,
+    /// Optional whitelist of settlement chains (rail identifiers, e.g.
+    /// `"tenzro"`, `"tempo"`, `"base"`, `"ethereum"`). Empty = any chain
+    /// admitted; non-empty = the child PaymentMandate's `chain` must be a
+    /// member. Lets the principal pre-authorize a cart only on rails they
+    /// trust (e.g. opt out of L2s with no fraud-proof window, opt in to
+    /// Tempo for stablecoin settlement).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_chains: Vec<String>,
     /// Maximum number of charges this mandate may cover. `None` = single
     /// charge only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,6 +205,7 @@ impl CheckoutMandate {
             asset: asset.into(),
             allowed_merchants: Vec::new(),
             allowed_categories: Vec::new(),
+            accepted_chains: Vec::new(),
             max_uses: Some(1),
             issued_at: now,
             expires_at: now + chrono::Duration::seconds(ttl_secs),
@@ -216,6 +225,14 @@ impl CheckoutMandate {
 
     pub fn with_allowed_categories(mut self, categories: Vec<String>) -> Self {
         self.allowed_categories = categories;
+        self
+    }
+
+    /// Restrict settlement to a specific set of chains / rails. Empty (the
+    /// default) admits any chain; non-empty makes the child PaymentMandate's
+    /// `chain` membership a hard precondition of `validate()`.
+    pub fn with_accepted_chains(mut self, chains: Vec<String>) -> Self {
+        self.accepted_chains = chains;
         self
     }
 
@@ -882,6 +899,18 @@ impl MandateValidator {
             }
         }
 
+        // Settlement rail whitelist (Tenzro extension). When the principal
+        // pins `accepted_chains`, the agent's chosen rail must be a member;
+        // empty list = any chain admitted.
+        if !checkout.accepted_chains.is_empty()
+            && !checkout.accepted_chains.contains(&payment.chain)
+        {
+            return Err(PaymentError::VerificationFailed(format!(
+                "chain {} not in checkout accepted_chains list",
+                payment.chain
+            )));
+        }
+
         Ok(())
     }
 
@@ -1296,6 +1325,89 @@ mod tests {
         let mut payment = make_payment("checkout-1", "did:tenzro:machine:shopper", 100);
         payment.total_amount = 999; // tamper
         assert!(payment.check_total().is_err());
+    }
+
+    #[test]
+    fn validator_rejects_chain_not_in_accepted_list() {
+        let principal = principal_signer();
+        let agent = Ed25519SignerImpl::generate().unwrap();
+        let agent_did = "did:tenzro:machine:shopper";
+
+        // Principal pins the settlement rail whitelist to {tenzro, tempo}.
+        let checkout = make_checkout(agent_did, 10_000)
+            .with_accepted_chains(vec!["tenzro".into(), "tempo".into()]);
+        let checkout_vdc = Vdc::sign(
+            &principal,
+            "did:tenzro:human:principal",
+            MandatePayload::Checkout(checkout.clone()),
+        )
+        .unwrap();
+
+        // Agent picks "ethereum" — not on the whitelist.
+        let mut payment = make_payment(&checkout.mandate_id, agent_did, 5_000);
+        payment.chain = "ethereum".into();
+        let payment_vdc =
+            Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
+
+        let err = MandateValidator::new()
+            .validate(&checkout_vdc, &payment_vdc)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("accepted_chains"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validator_accepts_when_chain_in_accepted_list() {
+        let principal = principal_signer();
+        let agent = Ed25519SignerImpl::generate().unwrap();
+        let agent_did = "did:tenzro:machine:shopper";
+
+        // Whitelist includes the chain the agent ends up picking.
+        let checkout = make_checkout(agent_did, 10_000)
+            .with_accepted_chains(vec!["tenzro".into(), "tempo".into()]);
+        let checkout_vdc = Vdc::sign(
+            &principal,
+            "did:tenzro:human:principal",
+            MandatePayload::Checkout(checkout.clone()),
+        )
+        .unwrap();
+
+        // `make_payment` defaults `chain = "tenzro"`.
+        let payment = make_payment(&checkout.mandate_id, agent_did, 5_000);
+        let payment_vdc =
+            Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
+
+        MandateValidator::new()
+            .validate(&checkout_vdc, &payment_vdc)
+            .unwrap();
+    }
+
+    #[test]
+    fn validator_accepts_when_accepted_chains_empty() {
+        let principal = principal_signer();
+        let agent = Ed25519SignerImpl::generate().unwrap();
+        let agent_did = "did:tenzro:machine:shopper";
+
+        // Empty whitelist = any chain admitted.
+        let checkout = make_checkout(agent_did, 10_000);
+        assert!(checkout.accepted_chains.is_empty());
+        let checkout_vdc = Vdc::sign(
+            &principal,
+            "did:tenzro:human:principal",
+            MandatePayload::Checkout(checkout.clone()),
+        )
+        .unwrap();
+
+        let mut payment = make_payment(&checkout.mandate_id, agent_did, 5_000);
+        payment.chain = "ethereum".into(); // exotic rail, but whitelist is open
+        let payment_vdc =
+            Vdc::sign(&agent, agent_did, MandatePayload::Payment(payment)).unwrap();
+
+        MandateValidator::new()
+            .validate(&checkout_vdc, &payment_vdc)
+            .unwrap();
     }
 
     // -----------------------------------------------------------------

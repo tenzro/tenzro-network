@@ -123,16 +123,25 @@ fn bench_x402_payload_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("x402_payload_creation");
     group.sample_size(100);
 
-    use tenzro_payments::x402::X402PaymentPayload;
+    use tenzro_payments::x402::{ExactAuthorization, ExactSchemePayload, X402PaymentPayload};
 
     group.bench_function("create_payload", |b| {
         b.iter(|| {
+            let authorization = ExactAuthorization {
+                from: black_box("0xaabbccdd").to_string(),
+                to: black_box("0xrecipient").to_string(),
+                value: black_box("1000").to_string(),
+                valid_after: 0,
+                valid_before: u64::MAX,
+                nonce: black_box("0x".to_string() + &"00".repeat(32)),
+            };
             black_box(X402PaymentPayload::new(
-                black_box("base"),
-                black_box("USDC"),
-                black_box("1000"),
-                black_box("0xaabbccdd"),
-                black_box("0xdeadbeef"),
+                black_box("exact-eip3009"),
+                black_box("eip155:8453"),
+                ExactSchemePayload {
+                    signature: black_box("0xdeadbeef").to_string(),
+                    authorization,
+                },
             ));
         });
     });

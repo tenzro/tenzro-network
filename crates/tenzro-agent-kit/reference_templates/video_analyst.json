@@ -1,7 +1,7 @@
 {
   "template_id": "ref-video-analyst-v1",
   "name": "Video Analyst",
-  "description": "Autonomous agent that ingests short video clips, extracts frame embeddings via Tenzro-served video encoders, and routes the resulting feature vector to downstream consumers (search index, anomaly detector, A2A peer). Wave 1 ships the routing scaffolding — the Tenzro video catalog ships empty until a permissive ONNX-shippable encoder lands. Until then the agent dispatches frames to vision encoders (DINOv3, SigLIP2) and pools them.",
+  "description": "Autonomous agent that ingests short video clips, extracts frame embeddings via Tenzro-served encoders (vision-pooled fallback over DINOv3 / SigLIP2 / CLIP, plus any native video encoder registered in the runtime), and routes the resulting feature vector to downstream consumers (search index, anomaly detector, A2A peer).",
   "template_type": "autonomous",
   "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
   "version": "1.0.0",

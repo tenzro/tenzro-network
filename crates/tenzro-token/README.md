@@ -182,8 +182,8 @@ Production-ready components:
 - Stake-weighted governance with real voting power tracking
 - Multisig treasury with approval threshold enforcement
 - Liquid staking with overflow-safe u128 arithmetic
-- Adaptive burn dial with read-only RPC surface and write-through persistence; auto-proposal generator and EIP-1559 fee-market consumer wire in alongside the governance executor in a later wave
-- SeedAgent treasury earmark with read-only RPC surface and write-through persistence; off-chain provisioning daemon, governance-executor mutation paths, monthly decay enforcement at refill, sunset wind-down sweep, and the `tenzro_seed_agents/1.0.0` gossipsub topic land in a later wave
+- Adaptive burn dial with read-only RPC surface, write-through persistence, EIP-1559 fee-market consumer, `AutoProposalGenerator`, and `SupplyMetricsSnapshot` aggregator (base-fee burn + slash inflow) wired through the governance executor
+- SeedAgent treasury earmark with read-only RPC surface, write-through persistence, off-chain `SeedAgentDaemon` (6h poll + monthly refill + charter-sunset pause + leader-gate), governance-executor mutation paths, monthly decay enforcement at refill, sunset wind-down sweep (Paused → Quarantined → Terminated → surplus disposal), and the `tenzro/seed-agents` gossipsub topic
 
 ## Dependencies
 

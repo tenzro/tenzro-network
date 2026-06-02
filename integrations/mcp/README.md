@@ -218,7 +218,7 @@ Per-modality `list_*_catalog`, `list_*_models`, `load_*_model`, `unload_*_model`
 - **Segmentation** — `list_segmentation_catalog`, `list_segmentation_models`, `load_segmentation_model`, `unload_segmentation_model`, `segment` (SAM 3 / 3.1, SAM 2 base/large, EdgeSAM, MobileSAM)
 - **Detection** — `list_detection_catalog`, `list_detection_models`, `load_detection_model`, `unload_detection_model`, `detect` (RF-DETR n/s/m/b/l/2xl, D-FINE n/s/m/l/x)
 - **Audio (ASR)** — `list_audio_catalog`, `list_audio_models`, `load_audio_model`, `unload_audio_model`, `transcribe` (Moonshine v2 tiny/base, Distil-Whisper small.en/medium.en/large-v3, Whisper-large-v3-turbo, Parakeet-TDT-0.6B-v3, Canary-1B-Flash)
-- **Video** — `list_video_catalog`, `list_video_models`, `load_video_model`, `unload_video_model`, `video_embed` (encoder scaffolding only — wave 1 catalog empty)
+- **Video** — `list_video_catalog`, `list_video_models`, `load_video_model`, `unload_video_model`, `video_embed` (native catalog empty; pooled-vision fallback via DINOv3 / SigLIP2 / CLIP through `VisionFallbackVideoEncoder`)
 
 ### Staking & Governance (7 tools)
 

@@ -2779,10 +2779,11 @@ impl TenzroNode {
         }
 
         // Register canonical Tempo L1 TIP-20 stablecoins so the catalog reflects
-        // Tempo as a first-class settlement venue. Addresses are placeholders pending
-        // canonical Tempo issuance directory; deterministic so seeing-the-symbol
-        // gives downstream consumers a stable token_id.
-        // Once Stripe/Paradigm publish official issuance addresses, swap in cleanly.
+        // Tempo as a first-class settlement venue. Operator-supplied addresses
+        // from `[payments] tempo_stablecoins` take precedence; symbols not
+        // overridden fall back to deterministic placeholders so seeing-the-symbol
+        // still gives downstream consumers a stable token_id pending canonical
+        // Stripe/Paradigm issuance.
         for (symbol, name, decimals, addr_seed) in [
             ("USDC", "USD Coin (Tempo)", 6u8, 0xC1u8),
             ("PYUSD", "PayPal USD (Tempo)", 6u8, 0xC2u8),
@@ -2793,10 +2794,47 @@ impl TenzroNode {
             if token_registry.get_by_symbol(symbol).is_some() {
                 continue;
             }
-            // Deterministic placeholder address: 19-byte zero-pad + per-symbol seed byte.
-            // Will be replaced via governance when canonical issuance lands.
-            let mut addr = [0u8; 20];
-            addr[19] = addr_seed;
+
+            // Operator override path: parse `0x...` hex (20 bytes). On malformed
+            // input log + skip — don't fall through to the placeholder, since
+            // the operator's intent was to pin a canonical address.
+            let addr = if let Some(operator_hex) =
+                self.config.payments.tempo_stablecoins.get(symbol)
+            {
+                let trimmed = operator_hex.trim_start_matches("0x");
+                match hex::decode(trimmed) {
+                    Ok(bytes) if bytes.len() == 20 => {
+                        let mut a = [0u8; 20];
+                        a.copy_from_slice(&bytes);
+                        info!(
+                            "Tempo TIP-20 {} using operator-supplied address 0x{}",
+                            symbol, trimmed
+                        );
+                        a
+                    }
+                    Ok(bytes) => {
+                        warn!(
+                            "Tempo TIP-20 {} operator address has wrong length ({} bytes, want 20); skipping",
+                            symbol,
+                            bytes.len()
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Tempo TIP-20 {} operator address is malformed hex ({}); skipping",
+                            symbol, e
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                // Deterministic placeholder: 19-byte zero-pad + per-symbol seed byte.
+                let mut a = [0u8; 20];
+                a[19] = addr_seed;
+                a
+            };
+
             if let Err(e) = token_registry.register_tip20(symbol, name, decimals, addr, None) {
                 warn!("Tempo TIP-20 {} registration: {}", symbol, e);
             }
@@ -4644,18 +4682,27 @@ impl TenzroNode {
     }
 
     /// Builds an `EvmTransactionSigner` from a [`BridgeAdapterConfig`],
-    /// dispatching between TEE-sealed and raw-key paths based on the
-    /// `tee_sealed` flag. Returns `None` when neither a sealed key is
-    /// requested nor a raw private key is available — the adapter then
-    /// runs in quote-only mode.
+    /// dispatching in priority order:
+    ///   1. `mpc_threshold` → DKLS23 t-of-n threshold ECDSA (Phase D wave 2)
+    ///   2. `tee_sealed`    → TEE-derived single-key (Phase D wave 1)
+    ///   3. raw / env       → in-memory secp256k1 key (dev only)
+    ///
+    /// Returns `None` when none of the above produce a working signer —
+    /// the adapter then runs in quote-only mode.
     ///
     /// Errors and missing-key conditions are logged at the call site so
     /// that adapter init can keep going (e.g., LayerZero stays quote-only
     /// while CCIP gets a working signer).
     async fn build_bridge_signer(
+        &self,
         adapter_name: &str,
         cfg: &crate::config::BridgeAdapterConfig,
     ) -> Option<EvmTransactionSigner> {
+        if let Some(mpc_cfg) = cfg.mpc_threshold.as_ref() {
+            return self
+                .build_threshold_bridge_signer(adapter_name, cfg, mpc_cfg)
+                .await;
+        }
         if cfg.tee_sealed {
             let label = cfg.tee_label_bytes();
             match EvmTransactionSigner::with_tee_sealed(
@@ -4720,6 +4767,239 @@ impl TenzroNode {
         }
     }
 
+    /// Build an `EvmTransactionSigner` backed by a node-layer
+    /// `NodeThresholdSigner` (DKLS23 t-of-n threshold ECDSA).
+    ///
+    /// Wires together — for this single adapter — the four dependencies the
+    /// bridge crate intentionally does NOT depend on directly:
+    /// `NodeKeyshareStore` (RocksDB), `TeeKeyshareSealer` (TEE-rooted in
+    /// production, fails closed off-hardware), `NetworkMpcSurface` (libp2p
+    /// `/tenzro/mpc/v1` request_response), and `BlockStoreEntropyProvider`
+    /// (HotStuff-2 finalized block hash for grinding-resistant committee
+    /// draw).
+    ///
+    /// Returns `None` on any wiring failure — the adapter then runs in
+    /// quote-only mode. Per `feedback_no_simulation_in_testnet`, the
+    /// sealer construction errors loudly (no fallback to an in-memory
+    /// keyshare sealer in production).
+    async fn build_threshold_bridge_signer(
+        &self,
+        adapter_name: &str,
+        cfg: &crate::config::BridgeAdapterConfig,
+        mpc_cfg: &crate::config::MpcThresholdConfig,
+    ) -> Option<EvmTransactionSigner> {
+        use tenzro_bridge::mpc::sealing::TeeKeyshareSealer;
+        use tenzro_bridge::mpc::setup::{MpcCurve, MpcParameters};
+        use tenzro_bridge::mpc::store::GroupId;
+
+        // -------- Prerequisite: storage + network must be initialized -----
+        let storage = match self.storage.as_ref() {
+            Some(s) => s.clone(),
+            None => {
+                warn!(
+                    "{} threshold signer requires storage to be initialized — adapter will be \
+                     quote-only",
+                    adapter_name
+                );
+                return None;
+            }
+        };
+        let network = match self.network.as_ref() {
+            Some(n) => n.clone(),
+            None => {
+                warn!(
+                    "{} threshold signer requires network to be initialized — adapter will be \
+                     quote-only",
+                    adapter_name
+                );
+                return None;
+            }
+        };
+
+        // -------- Parse hex-encoded group identifier ----------------------
+        let group_id_bytes = match hex::decode(&mpc_cfg.group_id_hex) {
+            Ok(b) if b.len() == 32 => b,
+            Ok(b) => {
+                warn!(
+                    "{} threshold signer: group_id_hex decoded to {} bytes, expected 32 — \
+                     adapter will be quote-only",
+                    adapter_name,
+                    b.len()
+                );
+                return None;
+            }
+            Err(e) => {
+                warn!(
+                    "{} threshold signer: group_id_hex decode failed: {} — adapter will be \
+                     quote-only",
+                    adapter_name, e
+                );
+                return None;
+            }
+        };
+        let mut group_id_arr = [0u8; 32];
+        group_id_arr.copy_from_slice(&group_id_bytes);
+        let group_id = GroupId(group_id_arr);
+
+        // -------- Parse hex-encoded group public key ----------------------
+        let group_public_key_compressed =
+            match hex::decode(&mpc_cfg.group_public_key_hex) {
+                Ok(b) if b.len() == 33 => b,
+                Ok(b) => {
+                    warn!(
+                        "{} threshold signer: group_public_key_hex decoded to {} bytes, \
+                         expected 33 (SEC1-compressed) — adapter will be quote-only",
+                        adapter_name,
+                        b.len()
+                    );
+                    return None;
+                }
+                Err(e) => {
+                    warn!(
+                        "{} threshold signer: group_public_key_hex decode failed: {} — adapter \
+                         will be quote-only",
+                        adapter_name, e
+                    );
+                    return None;
+                }
+            };
+
+        // -------- Validate parameters + group membership ------------------
+        let parameters = match MpcParameters::new(
+            MpcCurve::Secp256k1,
+            mpc_cfg.threshold,
+            mpc_cfg.total_parties,
+        ) {
+            Some(p) => p,
+            None => {
+                warn!(
+                    "{} threshold signer: invalid MpcParameters threshold={} total_parties={} \
+                     (need 2 <= t <= n <= 32) — adapter will be quote-only",
+                    adapter_name, mpc_cfg.threshold, mpc_cfg.total_parties
+                );
+                return None;
+            }
+        };
+        if mpc_cfg.group_members.len() != mpc_cfg.total_parties as usize {
+            warn!(
+                "{} threshold signer: group_members.len()={} but total_parties={} — adapter \
+                 will be quote-only",
+                adapter_name,
+                mpc_cfg.group_members.len(),
+                mpc_cfg.total_parties
+            );
+            return None;
+        }
+        if mpc_cfg.local_did.is_empty() {
+            warn!(
+                "{} threshold signer: local_did is empty — adapter will be quote-only",
+                adapter_name
+            );
+            return None;
+        }
+        if !mpc_cfg.group_members.iter().any(|d| d == &mpc_cfg.local_did) {
+            warn!(
+                "{} threshold signer: local_did={} is not a member of group_members — adapter \
+                 will be quote-only",
+                adapter_name, mpc_cfg.local_did
+            );
+            return None;
+        }
+
+        // -------- Build the four runtime dependencies ---------------------
+        let keyshare_store = std::sync::Arc::new(
+            crate::mpc_keyshare_store::NodeKeyshareStore::new(storage.clone()),
+        );
+
+        // Production-posture sealer: TEE-rooted IKM. Fails closed
+        // off-hardware (no-simulation policy).
+        let sealer: std::sync::Arc<dyn tenzro_bridge::mpc::sealing::KeyshareSealer> =
+            match TeeKeyshareSealer::derive_auto().await {
+                Ok(s) => std::sync::Arc::new(s),
+                Err(e) => {
+                    warn!(
+                        "{} threshold signer: TEE keyshare sealer unavailable: {} — adapter \
+                         will be quote-only (no raw-IKM fallback in production)",
+                        adapter_name, e
+                    );
+                    return None;
+                }
+            };
+
+        let surface: std::sync::Arc<
+            dyn tenzro_bridge::mpc::libp2p_relay::MpcLibp2pSurface,
+        > = match crate::mpc_libp2p_adapter::NetworkMpcSurface::new(network).await {
+            Ok(s) => std::sync::Arc::new(s),
+            Err(e) => {
+                warn!(
+                    "{} threshold signer: network MPC surface subscription failed: {} — \
+                     adapter will be quote-only",
+                    adapter_name, e
+                );
+                return None;
+            }
+        };
+
+        let block_store = match tenzro_storage::block_store::BlockStoreImpl::new(
+            storage,
+        ) {
+            Ok(bs) => std::sync::Arc::new(bs),
+            Err(e) => {
+                warn!(
+                    "{} threshold signer: block store construction failed: {} — adapter will \
+                     be quote-only",
+                    adapter_name, e
+                );
+                return None;
+            }
+        };
+        let chain_entropy: std::sync::Arc<
+            dyn crate::mpc_threshold_signer::ChainEntropyProvider,
+        > = std::sync::Arc::new(
+            crate::mpc_threshold_signer::BlockStoreEntropyProvider::new(block_store),
+        );
+
+        // -------- Construct + dispatch ------------------------------------
+        let signer = match crate::mpc_threshold_signer::NodeThresholdSigner::new(
+            group_id,
+            mpc_cfg.local_did.clone(),
+            mpc_cfg.group_members.clone(),
+            group_public_key_compressed,
+            parameters,
+            keyshare_store,
+            sealer,
+            surface,
+            chain_entropy,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    "{} threshold signer construction failed: {} — adapter will be quote-only",
+                    adapter_name, e
+                );
+                return None;
+            }
+        };
+
+        let sender_address = signer.cached_sender_address();
+        let evm_signer = EvmTransactionSigner::with_threshold_signer(
+            std::sync::Arc::new(signer),
+            cfg.chain_id,
+            cfg.rpc_url.clone(),
+        );
+        info!(
+            "{} signer configured (DKLS23 threshold {}-of-{}): chain_id={}, sender=0x{}, \
+             group_id={}",
+            adapter_name,
+            mpc_cfg.threshold,
+            mpc_cfg.total_parties,
+            cfg.chain_id,
+            hex::encode(sender_address),
+            group_id.to_hex()
+        );
+        Some(evm_signer)
+    }
+
     async fn init_bridge(&mut self) -> Result<()> {
         info!("Initializing bridge router...");
 
@@ -4745,7 +5025,7 @@ impl TenzroNode {
                 );
                 let mut adapter = LayerZeroAdapter::new(lz_config);
 
-                if let Some(signer) = Self::build_bridge_signer("LayerZero", lz_cfg).await {
+                if let Some(signer) = self.build_bridge_signer("LayerZero", lz_cfg).await {
                     adapter = adapter.with_signer(signer);
                 }
 
@@ -4760,7 +5040,7 @@ impl TenzroNode {
                     CcipConfig::ethereum_mainnet(FeeToken::Native),
                 );
 
-                if let Some(signer) = Self::build_bridge_signer("CCIP", ccip_cfg).await {
+                if let Some(signer) = self.build_bridge_signer("CCIP", ccip_cfg).await {
                     adapter = adapter.with_signer(signer);
                 }
 
@@ -4779,7 +5059,7 @@ impl TenzroNode {
                 );
                 let mut adapter = DeBridgeAdapter::new(debridge_config);
 
-                if let Some(signer) = Self::build_bridge_signer("deBridge", db_cfg).await {
+                if let Some(signer) = self.build_bridge_signer("deBridge", db_cfg).await {
                     adapter = adapter.with_signer(signer);
                 }
 
@@ -4792,7 +5072,7 @@ impl TenzroNode {
             && lifi_cfg.enabled {
                 let mut adapter = LiFiAdapter::new(LiFiConfig::default());
 
-                if let Some(signer) = Self::build_bridge_signer("LI.FI", lifi_cfg).await {
+                if let Some(signer) = self.build_bridge_signer("LI.FI", lifi_cfg).await {
                     adapter = adapter.with_signer(signer);
                 }
 
@@ -4815,7 +5095,7 @@ impl TenzroNode {
                 );
                 let mut adapter = WormholeAdapter::new(wormhole_config);
 
-                if let Some(signer) = Self::build_bridge_signer("Wormhole", wh_cfg).await {
+                if let Some(signer) = self.build_bridge_signer("Wormhole", wh_cfg).await {
                     adapter = adapter.with_signer(signer);
                 }
 
@@ -4836,7 +5116,7 @@ impl TenzroNode {
                 let mut cct_ccip_adapter = ChainlinkCcipAdapter::new(
                     CcipConfig::ethereum_mainnet(FeeToken::Native),
                 );
-                if let Some(signer) = Self::build_bridge_signer("CCT-CCIP", ccip_cfg).await {
+                if let Some(signer) = self.build_bridge_signer("CCT-CCIP", ccip_cfg).await {
                     cct_ccip_adapter = cct_ccip_adapter.with_signer(signer);
                 }
                 let cct_bridge = TnzoCctBridge::new(
@@ -5177,19 +5457,35 @@ impl TenzroNode {
         gateway.register_protocol(x402_server.clone());
         self.x402_server = Some(x402_server);
 
-        // Register Visa TAP server (RFC 9421 HTTP Message Signatures)
+        // Register Visa TAP server (RFC 9421 HTTP Message Signatures).
+        //
+        // The TAP verifier requires an `AgentRegistryClient` to resolve
+        // `keyid` parameters to public keys. We pass the TDIP identity
+        // registry wrapped in `DidResolverAgentRegistry::did_only` so
+        // that DID-form keyids (`did:tenzro:machine:*`) resolve against
+        // our local registry. Non-DID keyids are rejected — Tenzro-only
+        // mesh until JWKS federation lands.
         #[cfg(feature = "visa-tap")]
         {
-            use tenzro_payments::visa_tap::VisaTapServer;
-            let visa_tap_server = VisaTapServer::new(
-                "0x0000000000000000000000000000000000000001",
-                "api.tenzro.network",
-            )
-            .with_default_asset("TNZO")
-            .with_default_chain("tenzro")
-            .with_challenge_store(challenge_store.clone());
-            gateway.register_protocol(Arc::new(visa_tap_server));
-            info!("Registered Visa TAP payment protocol");
+            use tenzro_payments::rfc9421::TenzroAgentRegistry;
+            use tenzro_payments::visa_tap::{DidResolverAgentRegistry, VisaTapServer};
+
+            if let Some(ref identity_registry) = self.identity_registry {
+                let did_resolver = Arc::new(TenzroAgentRegistry::new(identity_registry.clone()));
+                let agent_registry = Arc::new(DidResolverAgentRegistry::did_only(did_resolver));
+                let visa_tap_server = VisaTapServer::new(
+                    "api.tenzro.network".to_string(),
+                    "0x0000000000000000000000000000000000000001".to_string(),
+                    agent_registry,
+                )
+                .with_default_asset("TNZO".to_string())
+                .with_default_chain("tenzro".to_string())
+                .with_challenge_store(challenge_store.clone());
+                gateway.register_protocol(Arc::new(visa_tap_server));
+                info!("Registered Visa TAP payment protocol (DID-resolver agent registry)");
+            } else {
+                warn!("Skipping Visa TAP protocol registration — identity registry not available");
+            }
         }
 
         // Register Mastercard Agent Pay server (KYA + agentic tokens)

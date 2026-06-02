@@ -145,7 +145,7 @@ The Tenzro A2A agent exposes 40 skills covering blockchain, AI, identity, paymen
 | **Segmentation** | `segmentation` | SAM 3 / 3.1, SAM 2, EdgeSAM, MobileSAM |
 | **Detection** | `detection` | RF-DETR, D-FINE object detection |
 | **Audio** | `audio` | ASR via Moonshine v2, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT, Canary |
-| **Video** | `video` | Frame-extraction + per-frame embedding scaffolding (wave 1) |
+| **Video** | `video` | Frame-extraction + per-frame embedding via `VisionFallbackVideoEncoder` (pooled vision encoders) |
 | **Agent Spawning** | `agent_spawning` | Spawn sub-agents with own DID and wallet (up to 50) |
 | **Swarm Orchestration** | `swarm_orchestration` | Create agent swarms for parallel task execution |
 | **Agent Lifecycle** | `lifecycle` | Driver of `Created → Active → Suspended → Terminated` state transitions, including parent→children spawn-tree audit |
