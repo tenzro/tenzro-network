@@ -2886,6 +2886,158 @@ async def caip19(
 
 
 # ---------------------------------------------------------------------------
+# Canton / DAML (15 tools — Canton 3.5+ JSON Ledger API)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def canton_list_domains() -> dict:
+    """List the Canton synchronizer domains this node is configured against."""
+    return await rpc_call("tenzro_listCantonDomains", {})
+
+
+@mcp.tool
+async def canton_list_contracts(
+    template_ids: list[str],
+    query: dict | None = None,
+) -> dict:
+    """Query active DAML contracts. `template_ids` must contain at least one
+    template id (Canton 3.5+ rejects empty filter sets). Optional `query`
+    applies a structural filter against `createArguments` client-side."""
+    params: dict = {"template_ids": template_ids}
+    if query is not None:
+        params["query"] = query
+    return await rpc_call("tenzro_listDamlContracts", params)
+
+
+@mcp.tool
+async def canton_submit_command(
+    command_type: str,
+    template_id: str,
+    arguments: dict | None = None,
+    contract_id: str | None = None,
+    choice: str | None = None,
+    choice_argument: dict | None = None,
+) -> dict:
+    """Submit a DAML create or exercise command."""
+    params: dict = {
+        "command_type": command_type,
+        "template_id": template_id,
+    }
+    if arguments is not None:
+        params["arguments"] = arguments
+    if contract_id is not None:
+        params["contract_id"] = contract_id
+    if choice is not None:
+        params["choice"] = choice
+    if choice_argument is not None:
+        params["choice_argument"] = choice_argument
+    return await rpc_call("tenzro_submitDamlCommand", params)
+
+
+@mcp.tool
+async def canton_allocate_party(
+    party_id_hint: str, display_name: str | None = None
+) -> dict:
+    """Allocate a new party on the participant. Returns the fully-qualified
+    party id `<hint>::<participant-hash>`."""
+    params: dict = {"party_id_hint": party_id_hint}
+    if display_name:
+        params["display_name"] = display_name
+    return await rpc_call("tenzro_allocateParty", params)
+
+
+@mcp.tool
+async def canton_upload_dar(dar_content_base64: str) -> dict:
+    """Upload a DAR (DAML Archive) to the participant via POST /v2/packages
+    (Canton 3.5+ JSON Ledger API). `dar_content_base64` is base64-encoded
+    DAR file bytes. Returns Canton's structured response — typically the
+    list of package ids that got installed."""
+    return await rpc_call(
+        "tenzro_canton_uploadDar", {"dar_content_base64": dar_content_base64}
+    )
+
+
+@mcp.tool
+async def canton_list_parties() -> dict:
+    """List every party known to the participant via GET /v2/parties/known.
+    Note: on the Tenzro DevNet the `daml_ledger_api` scope may not grant
+    read access to the party registry; expect `{partyDetails: []}` in
+    that case."""
+    return await rpc_call("tenzro_canton_listParties", {})
+
+
+@mcp.tool
+async def canton_health() -> dict:
+    """Combined health probe — `/livez`, `/readyz`, `/v2/version`. Returns
+    `{alive, ready, ready_detail, version}` where `version` carries
+    Canton CIP feature flags when reachable."""
+    return await rpc_call("tenzro_canton_health", {})
+
+
+@mcp.tool
+async def canton_version() -> dict:
+    """Returns participant version + CIP feature flags via GET /v2/version
+    (Canton 3.5+)."""
+    return await rpc_call("tenzro_canton_version", {})
+
+
+@mcp.tool
+async def canton_get_transaction(update_id: str) -> dict:
+    """Fetch a Canton transaction tree by update id. The update id must
+    be a hex string (Canton 3.5+ rejects bare labels)."""
+    return await rpc_call(
+        "tenzro_canton_getTransaction", {"update_id": update_id}
+    )
+
+
+@mcp.tool
+async def canton_list_packages() -> dict:
+    """List every DAML package installed on the participant via
+    GET /v2/packages. Returns `{packageIds: [<hex>...]}`. Useful for
+    capability discovery before contract creation."""
+    return await rpc_call("tenzro_canton_listPackages", {})
+
+
+@mcp.tool
+async def canton_coin_balance() -> dict:
+    """Returns the Canton Coin (CIP-56) balance for the participant's
+    party by summing every `Splice.Amulet:Amulet` contract the party
+    is a stakeholder on. Returns `{party, amulet_count,
+    total_initial_amount, token_standard:"CIP-56"}`."""
+    return await rpc_call("tenzro_canton_coinBalance", {})
+
+
+@mcp.tool
+async def canton_fee_schedule() -> dict:
+    """Returns the participant's Canton fee schedule sourced from the
+    latest `Splice.AmuletRules:AmuletRules` contract."""
+    return await rpc_call("tenzro_canton_feeSchedule", {})
+
+
+@mcp.tool
+async def canton_connected_synchronizers() -> dict:
+    """Returns the synchronizers the participant's party is currently
+    connected to via GET /v2/state/connected-synchronizers. Each entry
+    includes `synchronizerAlias`, `synchronizerId`, and `permission`
+    (SUBMISSION / CONFIRMATION / OBSERVATION). `reconnect()`-style
+    synchronizer subscription management is a Canton Admin Console gRPC
+    operation that the JSON Ledger API does not expose."""
+    return await rpc_call("tenzro_canton_connectedSynchronizers", {})
+
+
+@mcp.tool
+async def canton_get_my_user() -> dict:
+    """Returns the OAuth principal's Canton user record via
+    GET /v2/users/<client_id>@clients (CIP-26 User Management).
+    The Tenzro node derives the user id from its OAuth client id;
+    Canton 3.5.1 has no /users/me alias (returns 404 USER_NOT_FOUND).
+    Returns `{user: {id, primaryParty, isDeactivated, metadata,
+    identityProviderId}}`."""
+    return await rpc_call("tenzro_canton_getMyUser", {})
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

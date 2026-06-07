@@ -1006,36 +1006,95 @@ async def handle_events(text: str, metadata: dict = None) -> str:
 async def handle_canton(text: str, metadata: dict = None) -> str:
     t = text.lower()
 
+    # ── Live read-side methods (Canton 3.5+ JSON Ledger API) ──
+
+    if "health" in t or "livez" in t or "readyz" in t:
+        result = await rpc_call("tenzro_canton_health", {})
+        return f"Canton health:\n{json.dumps(result, indent=2)}"
+
+    if "version" in t or "feature" in t:
+        result = await rpc_call("tenzro_canton_version", {})
+        return f"Canton version + features:\n{json.dumps(result, indent=2)}"
+
+    if "my user" in t or "myuser" in t or "primary party" in t or "who am i" in t:
+        result = await rpc_call("tenzro_canton_getMyUser", {})
+        return f"Canton user record:\n{json.dumps(result, indent=2)}"
+
+    if "list party" in t or "list parties" in t or "known party" in t or "known parties" in t:
+        result = await rpc_call("tenzro_canton_listParties", {})
+        return f"Canton parties:\n{json.dumps(result, indent=2)}"
+
+    if "list package" in t or "list packages" in t or "installed package" in t or "dar list" in t:
+        result = await rpc_call("tenzro_canton_listPackages", {})
+        return f"Canton installed packages:\n{json.dumps(result, indent=2)}"
+
+    if "coin balance" in t or "amulet" in t or "cip-56" in t or "cip 56" in t:
+        result = await rpc_call("tenzro_canton_coinBalance", {})
+        return f"Canton Coin balance (CIP-56):\n{json.dumps(result, indent=2)}"
+
+    if "fee schedule" in t or "amulet rules" in t or "amuletrules" in t:
+        result = await rpc_call("tenzro_canton_feeSchedule", {})
+        return f"Canton fee schedule:\n{json.dumps(result, indent=2)}"
+
+    if "connected synchronizer" in t or "synchronizer subscription" in t or "connected domain" in t:
+        result = await rpc_call("tenzro_canton_connectedSynchronizers", {})
+        return f"Connected synchronizers:\n{json.dumps(result, indent=2)}"
+
     if "domain" in t:
         result = await rpc_call("tenzro_listCantonDomains", {})
         return f"Canton domains:\n{json.dumps(result, indent=2)}"
 
-    if "contract" in t:
-        # The Canton v2 active-contracts endpoint requires at least one
-        # template id. Surface the requirement to the caller — we don't
-        # guess a default template here.
+    # ── Methods requiring explicit input — guide the caller ──
+
+    if "upload" in t and "dar" in t:
         return (
-            "To list DAML contracts, provide one or more template ids, e.g.\n"
-            '  "List DAML contracts for template Tenzro.Workflow:WorkflowAnchor"\n'
-            "Use the Canton MCP server at canton-mcp.tenzro.network/mcp for "
-            "full active-contracts query support."
+            "Upload a DAR via tenzro_canton_uploadDar { dar_content_base64 }.\n"
+            "  - base64-encode the .dar file bytes\n"
+            "  - Canton 3.5+ JSON Ledger API: POST /v2/packages\n"
+            "  - returns the installed package ids\n"
+            "Use the canton-mcp.tenzro.network/mcp `canton_upload_dar` tool for direct upload."
+        )
+
+    if "transaction" in t and ("get" in t or "lookup" in t or "fetch" in t):
+        return (
+            "Fetch a Canton transaction by hex update id:\n"
+            "  tenzro_canton_getTransaction { update_id: '<hex>' }"
+        )
+
+    if "allocate" in t and "party" in t:
+        return (
+            "Allocate a new Canton party:\n"
+            "  tenzro_allocateParty { party_id_hint, display_name? }\n"
+            "Returns the fully-qualified party id `<hint>::<participant-hash>`."
+        )
+
+    if "contract" in t:
+        return (
+            "List DAML contracts (template id required):\n"
+            "  tenzro_listDamlContracts { template_ids: ['<template>'], query?: {...} }\n"
+            "Example: 'List contracts for template #splice-amulet:Splice.Amulet:Amulet'."
         )
 
     if "submit" in t or "command" in t:
         return (
-            "To submit a DAML command, provide:\n"
-            "  - Command type: create or exercise\n"
-            "  - Template ID (for create)\n"
-            "  - Contract ID (for exercise)\n"
-            "  - Payload (JSON)\n"
-            "Use the Canton MCP server at canton-mcp.tenzro.network/mcp for full access."
+            "Submit a DAML command:\n"
+            "  tenzro_submitDamlCommand { command_type: 'create'|'exercise', template_id, ... }\n"
+            "Use the canton-mcp.tenzro.network/mcp `canton_submit_command` tool for full access."
         )
 
     return (
-        "Canton / DAML operations:\n"
-        "  - 'List Canton domains'\n"
-        "  - 'List DAML contracts'\n"
-        "  - 'Submit a DAML command'"
+        "Canton / DAML operations (Canton 3.5+ JSON Ledger API):\n"
+        "  Reads (no args):\n"
+        "    - 'Canton health' / 'Canton version' / 'Canton my user'\n"
+        "    - 'Canton list parties' / 'list packages' / 'connected synchronizers'\n"
+        "    - 'Canton coin balance' / 'Canton fee schedule' / 'List domains'\n"
+        "  Reads (with args):\n"
+        "    - 'List DAML contracts for template <tid>'\n"
+        "    - 'Get Canton transaction <hex-update-id>'\n"
+        "  Writes:\n"
+        "    - 'Allocate Canton party'\n"
+        "    - 'Submit DAML command'\n"
+        "    - 'Upload DAR'"
     )
 
 

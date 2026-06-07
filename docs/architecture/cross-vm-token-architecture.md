@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-Tenzro Ledger is a multi-VM L1 blockchain supporting EVM (revm), SVM (solana_rbpf), and DAML (Canton 3.x). This document describes the implemented architecture for cross-VM token interoperability based on the Sei V2 pointer model.
+Tenzro Ledger is a multi-VM L1 blockchain supporting EVM (revm), SVM (solana_rbpf), and DAML (Canton 3.5+). This document describes the implemented architecture for cross-VM token interoperability based on the Sei V2 pointer model.
 
 ## Design Principles
 

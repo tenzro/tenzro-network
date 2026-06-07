@@ -45,6 +45,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tenzro_types::primitives::Hash;
 use tenzro_workflow::{
     approval::{ApprovalDecision, ApprovalGate, ApprovalRequest, Decision},
@@ -75,6 +76,27 @@ pub struct CantonAdapter {
     /// the adapter falls back to the static `config.jwt_token` — used for
     /// local Canton instances that accept unsigned tokens or no auth.
     token_provider: Option<Arc<CantonTokenProvider>>,
+    /// Resolved fully-qualified party id for `config.act_as_party`, cached
+    /// after the first successful lookup against
+    /// `/v2/state/active-contracts`. Canton 3.4+ rejects the bare party
+    /// hint as a filter / requesting-party key — only the `<hint>::<participant-hash>`
+    /// form is accepted. Populated lazily by `resolve_act_as_party_fq()`.
+    resolved_act_as_party_fq: Arc<RwLock<Option<String>>>,
+}
+
+/// Recursively walks a `serde_json::Value` looking for any string field
+/// whose value starts with `prefix`. Used by
+/// [`CantonAdapter::resolve_act_as_party_fq`] to fish the fully-qualified
+/// form of a party hint out of the participant's own active contracts.
+fn find_party_with_prefix(value: &serde_json::Value, prefix: &str) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) if s.starts_with(prefix) => Some(s.clone()),
+        serde_json::Value::Array(arr) => arr.iter().find_map(|v| find_party_with_prefix(v, prefix)),
+        serde_json::Value::Object(map) => {
+            map.values().find_map(|v| find_party_with_prefix(v, prefix))
+        }
+        _ => None,
+    }
 }
 
 impl CantonAdapter {
@@ -90,6 +112,7 @@ impl CantonAdapter {
             http_client,
             pending_transfers: Arc::new(DashMap::new()),
             token_provider: None,
+            resolved_act_as_party_fq: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -281,6 +304,425 @@ impl CantonAdapter {
 
         info!("Canton: Party allocated successfully, party_id={}", party_id);
         Ok(party_id)
+    }
+
+    /// Uploads a DAR (DAML Archive) to the participant via the Canton 3.4+
+    /// JSON Ledger API endpoint `POST /v2/packages`. The body is raw DAR
+    /// bytes with `Content-Type: application/octet-stream`; the participant
+    /// installs the contained DAML packages and they become available for
+    /// contract creation on the next round trip.
+    ///
+    /// Returns Canton's structured response (typically a list of package
+    /// hashes / package ids that got installed). Surfaces upstream errors
+    /// like `INVALID_DAR` verbatim so callers can see the actual cause.
+    pub async fn upload_dar(&self, dar_bytes: Vec<u8>) -> Result<serde_json::Value> {
+        let dar_size = dar_bytes.len();
+
+        // `build_request` sets `Content-Type: application/json`
+        // automatically; for DAR uploads we need
+        // `application/octet-stream` instead, and Canton rejects
+        // requests that carry both headers
+        // (`HTTP 400: HTTP message must not contain more than one Content-Type header`).
+        // So we build the request manually here: URL + bearer +
+        // octet-stream body.
+        let url = format!("{}/packages", self.json_api_url());
+        let mut builder = self
+            .http_client
+            .post(url)
+            .header("Content-Type", "application/octet-stream")
+            .body(dar_bytes);
+        if let Some(ref provider) = self.token_provider {
+            let bearer = provider.bearer().await?;
+            builder = builder.bearer_auth(bearer);
+        } else if let Some(ref token) = self.config.jwt_token {
+            builder = builder.bearer_auth(token);
+        }
+
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| {
+                let cls = Self::classify_reqwest_error(&e);
+                error!("Canton DAR upload failed: {}", cls);
+                BridgeError::AdapterError(format!("Canton DAR upload failed: {}", cls))
+            })?;
+
+        let status = response.status();
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| BridgeError::AdapterError(format!(
+                "Failed to read Canton upload response: {}",
+                Self::classify_reqwest_error(&e)
+            )))?;
+
+        if !status.is_success() {
+            // Pass through the structured Canton error (e.g. INVALID_DAR)
+            // so the caller sees the real reason.
+            let parsed: serde_json::Value = serde_json::from_str(&body_text)
+                .unwrap_or_else(|_| serde_json::json!({ "raw": body_text }));
+            error!(
+                "Canton DAR upload returned HTTP {}: {}",
+                status, parsed
+            );
+            return Err(BridgeError::AdapterError(format!(
+                "Canton DAR upload HTTP {}: {}",
+                status, parsed
+            )));
+        }
+
+        let parsed: serde_json::Value = serde_json::from_str(&body_text)
+            .unwrap_or_else(|_| serde_json::json!({ "raw": body_text }));
+        info!("Canton: DAR uploaded ({} bytes)", dar_size);
+        Ok(parsed)
+    }
+
+    /// Lists every party known to the participant via
+    /// `GET /v2/parties/known`. Returns `partyDetails` array verbatim.
+    ///
+    /// Note: on the Tenzro-operated DevNet the `daml_ledger_api` scope
+    /// does NOT grant read access to the party registry; this call may
+    /// return `{"partyDetails":[]}` even when parties exist. Use
+    /// active-contracts queries to discover party FQ ids in that case.
+    pub async fn list_parties(&self) -> Result<serde_json::Value> {
+        let response = self
+            .build_request(reqwest::Method::GET, "/parties/known")
+            .await?
+            .send()
+            .await
+            .map_err(|e| BridgeError::AdapterError(format!(
+                "Canton list-parties failed: {}",
+                Self::classify_reqwest_error(&e)
+            )))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(BridgeError::AdapterError(format!(
+                "Canton list-parties HTTP {}: {}",
+                status, Self::sanitize_canton_http_error(status, body.len())
+            )));
+        }
+
+        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
+            "Invalid Canton list-parties response: {}",
+            Self::classify_reqwest_error(&e)
+        )))
+    }
+
+    /// Health probe combining `GET /livez` and `GET /readyz` on the
+    /// JSON Ledger API root. `/livez` confirms the API is reachable;
+    /// `/readyz` returns a text payload like `"[+] ledger ok (SERVING)\nreadyz check passed"`
+    /// that confirms the participant's ledger service is actually
+    /// serving traffic. Together they give a richer signal than either
+    /// alone — verified working against Canton 3.5.1 DevNet.
+    pub async fn get_health(&self) -> Result<serde_json::Value> {
+        let root = self.json_api_url_root();
+        // /livez — cheap reachability check.
+        let livez = self
+            .http_client
+            .get(format!("{}/livez", root))
+            .send()
+            .await
+            .ok();
+        let alive = livez
+            .as_ref()
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+
+        // /readyz — service-level readiness.
+        let readyz_resp = self
+            .http_client
+            .get(format!("{}/readyz", root))
+            .send()
+            .await
+            .ok();
+        let (ready, ready_detail) = match readyz_resp {
+            Some(r) => {
+                let ok = r.status().is_success();
+                let text = r.text().await.unwrap_or_default();
+                (ok, text)
+            }
+            None => (false, String::new()),
+        };
+
+        // /v2/version — populate participant version metadata when reachable.
+        let version_resp = self
+            .build_request(reqwest::Method::GET, "/version")
+            .await
+            .ok();
+        let version: Option<serde_json::Value> = match version_resp {
+            Some(rb) => match rb.send().await {
+                Ok(r) if r.status().is_success() => r.json().await.ok(),
+                _ => None,
+            },
+            None => None,
+        };
+
+        Ok(serde_json::json!({
+            "alive": alive,
+            "ready": ready,
+            "ready_detail": ready_detail,
+            "version": version,
+        }))
+    }
+
+    /// Returns participant version + feature flags via `GET /v2/version`.
+    /// Canton 3.5+ returns rich CIP / experimental feature descriptors;
+    /// useful for capability discovery before calling newer endpoints.
+    pub async fn get_version(&self) -> Result<serde_json::Value> {
+        let response = self
+            .build_request(reqwest::Method::GET, "/version")
+            .await?
+            .send()
+            .await
+            .map_err(|e| BridgeError::AdapterError(format!(
+                "Canton version probe failed: {}",
+                Self::classify_reqwest_error(&e)
+            )))?;
+        if !response.status().is_success() {
+            return Err(BridgeError::AdapterError(format!(
+                "Canton version probe HTTP {}",
+                response.status()
+            )));
+        }
+        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
+            "Invalid Canton version response: {}",
+            Self::classify_reqwest_error(&e)
+        )))
+    }
+
+    /// Fetches the participant's transaction tree by update id via
+    /// `GET /v2/updates/transaction-tree-by-id/{updateId}` (Canton 3.4+).
+    /// Requires `requestingParties` query param — uses the resolved
+    /// `act_as_party` FQ id.
+    pub async fn get_transaction(&self, update_id: &str) -> Result<serde_json::Value> {
+        let party_fq = self.resolve_act_as_party_fq().await?;
+        let endpoint = format!(
+            "/updates/transaction-tree-by-id/{}?requestingParties={}",
+            urlencoding::encode(update_id),
+            urlencoding::encode(&party_fq),
+        );
+        let response = self
+            .build_request(reqwest::Method::GET, &endpoint)
+            .await?
+            .send()
+            .await
+            .map_err(|e| BridgeError::AdapterError(format!(
+                "Canton get-transaction failed: {}",
+                Self::classify_reqwest_error(&e)
+            )))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(BridgeError::AdapterError(format!(
+                "Canton get-transaction HTTP {}: {}",
+                status, Self::sanitize_canton_http_error(status, body.len())
+            )));
+        }
+
+        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
+            "Invalid Canton get-transaction response: {}",
+            Self::classify_reqwest_error(&e)
+        )))
+    }
+
+    /// Returns the Canton Coin (CIP-56) balance for the resolved
+    /// `act_as_party` by summing every `Splice.Amulet:Amulet` contract
+    /// the party is a stakeholder on. Result is a JSON object with
+    /// `{ party, amulet_count, total_initial_amount, total_current_amount? }`.
+    pub async fn get_canton_coin_balance(&self) -> Result<serde_json::Value> {
+        let contracts = self
+            .query_active_contracts(
+                vec!["#splice-amulet:Splice.Amulet:Amulet".to_string()],
+                serde_json::Value::Null,
+            )
+            .await?;
+
+        let party_fq = self.resolve_act_as_party_fq().await.ok();
+        let amulet_count = contracts.len();
+        let mut total_initial: f64 = 0.0;
+        for c in &contracts {
+            if let Some(amount) = c.payload.get("amount") {
+                if let Some(init) = amount.get("initialAmount").and_then(|v| v.as_str()) {
+                    if let Ok(parsed) = init.parse::<f64>() {
+                        total_initial += parsed;
+                    }
+                }
+            }
+        }
+        Ok(serde_json::json!({
+            "party": party_fq,
+            "amulet_count": amulet_count,
+            "total_initial_amount": total_initial.to_string(),
+            "token_standard": "CIP-56",
+        }))
+    }
+
+    /// Returns this participant's Canton fee schedule via the Splice
+    /// `AmuletConfig` active contract. Sums the `transferConfig` from
+    /// the most-recent `Splice.AmuletRules:AmuletRules` contract.
+    pub async fn get_fee_schedule(&self) -> Result<serde_json::Value> {
+        let contracts = self
+            .query_active_contracts(
+                vec!["#splice-amulet:Splice.AmuletRules:AmuletRules".to_string()],
+                serde_json::Value::Null,
+            )
+            .await?;
+        if contracts.is_empty() {
+            return Ok(serde_json::json!({
+                "schedule": null,
+                "note": "no AmuletRules contracts visible to this party",
+            }));
+        }
+        Ok(serde_json::json!({
+            "rules_count": contracts.len(),
+            "latest": contracts.first().map(|c| &c.payload),
+        }))
+    }
+
+    /// Returns a JSON description of the configured synchronizers
+    /// suitable for surfacing to MCP / A2A clients.
+    pub fn list_synchronizers_json(&self) -> serde_json::Value {
+        let chains = Self::get_supported_synchronizers(&self.config.synchronizer_ids);
+        serde_json::json!({
+            "enabled": true,
+            "domains": chains.into_iter().map(|c| serde_json::json!({
+                "id": c.chain_id,
+                "name": c.name,
+                "native_token": c.native_token,
+                "finality_time_secs": c.finality_time_secs,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Returns the synchronizers the resolved party is currently
+    /// connected to via `GET /v2/state/connected-synchronizers?party=...`
+    /// (Canton 3.5+). Each entry includes `synchronizerAlias`,
+    /// `synchronizerId`, and `permission` (one of
+    /// `PARTICIPANT_PERMISSION_SUBMISSION` / `..._CONFIRMATION` /
+    /// `..._OBSERVATION`).
+    ///
+    /// `reconnect()`-style synchronizer subscription management is a
+    /// Canton Admin Console gRPC operation that the JSON Ledger API
+    /// does not expose — operators must run
+    /// `<participant>.synchronizers.reconnect_all()` from a Canton
+    /// console. This method returns the *current* connection state
+    /// rather than performing a reconnect; callers can poll it after
+    /// an operator-triggered reconnect to confirm subscriptions are back.
+    pub async fn connected_synchronizers(&self) -> Result<serde_json::Value> {
+        let party_fq = self.resolve_act_as_party_fq().await?;
+        let endpoint = format!(
+            "/state/connected-synchronizers?party={}",
+            urlencoding::encode(&party_fq),
+        );
+        let response = self
+            .build_request(reqwest::Method::GET, &endpoint)
+            .await?
+            .send()
+            .await
+            .map_err(|e| BridgeError::AdapterError(format!(
+                "Canton connected-synchronizers query failed: {}",
+                Self::classify_reqwest_error(&e)
+            )))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(BridgeError::AdapterError(format!(
+                "Canton connected-synchronizers HTTP {}: {}",
+                status, Self::sanitize_canton_http_error(status, body.len())
+            )));
+        }
+
+        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
+            "Invalid Canton connected-synchronizers response: {}",
+            Self::classify_reqwest_error(&e)
+        )))
+    }
+
+    /// Lists every DAML package installed on the participant via
+    /// `GET /v2/packages`. Returns `{ packageIds: [<hex>, ...] }`.
+    /// Useful for capability discovery before contract creation —
+    /// confirms the DAR carrying a desired template has been uploaded.
+    pub async fn list_packages(&self) -> Result<serde_json::Value> {
+        let response = self
+            .build_request(reqwest::Method::GET, "/packages")
+            .await?
+            .send()
+            .await
+            .map_err(|e| BridgeError::AdapterError(format!(
+                "Canton list-packages query failed: {}",
+                Self::classify_reqwest_error(&e)
+            )))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(BridgeError::AdapterError(format!(
+                "Canton list-packages HTTP {}: {}",
+                status, Self::sanitize_canton_http_error(status, body.len())
+            )));
+        }
+
+        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
+            "Invalid Canton list-packages response: {}",
+            Self::classify_reqwest_error(&e)
+        )))
+    }
+
+    /// Returns the OAuth principal's user record via
+    /// `GET /v2/users/{userId}` where `userId = <client_id>@clients`
+    /// (Canton 3.5+ User Management Service / CIP-26).
+    ///
+    /// Returns `id`, `primaryParty`, `isDeactivated`,
+    /// `identityProviderId`, plus metadata. The participant has no
+    /// `/v2/users/me` alias — it returns 404 `USER_NOT_FOUND` — so we
+    /// construct the explicit id from the token provider's client id.
+    pub async fn get_my_user(&self) -> Result<serde_json::Value> {
+        let user_id = match self.token_provider.as_ref() {
+            Some(p) => format!("{}@clients", p.client_id()),
+            None => return Err(BridgeError::AdapterError(
+                "Canton get-my-user requires an OAuth2 token provider to derive the user id; this adapter was constructed without one".to_string()
+            )),
+        };
+        let path = format!("/users/{}", urlencoding::encode(&user_id));
+        let response = self
+            .build_request(reqwest::Method::GET, &path)
+            .await?
+            .send()
+            .await
+            .map_err(|e| BridgeError::AdapterError(format!(
+                "Canton get-my-user failed: {}",
+                Self::classify_reqwest_error(&e)
+            )))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(BridgeError::AdapterError(format!(
+                "Canton get-my-user HTTP {}: {}",
+                status, Self::sanitize_canton_http_error(status, body.len())
+            )));
+        }
+        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
+            "Invalid Canton get-my-user response: {}",
+            Self::classify_reqwest_error(&e)
+        )))
+    }
+
+    /// Returns the JSON API root URL (without `/v2`). Used by helpers
+    /// that need to hit non-versioned endpoints like `/livez`.
+    fn json_api_url_root(&self) -> String {
+        let scheme = if self.config.tls_enabled { "https" } else { "http" };
+        if self.config.json_api_port == 443 || self.config.json_api_port == 80 {
+            format!("{}://{}", scheme, self.config.participant_host)
+        } else {
+            format!(
+                "{}://{}:{}",
+                scheme, self.config.participant_host, self.config.json_api_port
+            )
+        }
     }
 
     /// Generates a unique command ID for Canton command deduplication.
@@ -602,9 +1044,13 @@ impl CantonAdapter {
     /// requesting party's view. We treat the absence of a CreatedEvent or
     /// the presence of an ArchivedEvent as "not found" for bridge purposes.
     pub async fn fetch_contract(&self, contract_id: &str) -> Result<Option<JsonApiContract>> {
+        // Canton 3.4+ also rejects bare party hints in
+        // `requestingParties`, so resolve to FQ form first. The
+        // resolver caches after the first successful lookup.
+        let party_fq = self.resolve_act_as_party_fq().await?;
         let request_body = JsonApiFetchRequest {
             contract_id: contract_id.to_string(),
-            requesting_parties: vec![self.config.act_as_party.clone()],
+            requesting_parties: vec![party_fq],
         };
 
         debug!(
@@ -652,6 +1098,183 @@ impl CantonAdapter {
         Ok(fetch_response.into_contract())
     }
 
+    /// Fetches the participant's current ledger-end offset via
+    /// `GET /v2/state/ledger-end`. Canton 3.4+ requires `activeAtOffset`
+    /// on every `/v2/state/active-contracts` request to be a JSON number
+    /// — null / empty-string / negative are rejected with HTTP 400.
+    ///
+    /// We re-fetch on every query rather than cache, because Canton
+    /// rejects offsets older than the participant's pruning horizon
+    /// with `INVALID_ARGUMENT`. The cost is one extra HTTP round trip
+    /// per query — acceptable for the wallet / dashboard use case.
+    async fn fetch_ledger_end(&self) -> Result<i64> {
+        let response = self
+            .build_request(reqwest::Method::GET, "/state/ledger-end")
+            .await?
+            .send()
+            .await
+            .map_err(|e| {
+                let cls = Self::classify_reqwest_error(&e);
+                error!("Canton ledger-end fetch failed: {}", cls);
+                BridgeError::AdapterError(format!(
+                    "Canton ledger-end fetch failed: {}",
+                    cls
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            let sanitized = Self::sanitize_canton_http_error(status, error_text.len());
+            error!("Canton ledger-end error: {}", sanitized);
+            return Err(BridgeError::AdapterError(sanitized));
+        }
+
+        #[derive(Deserialize)]
+        struct LedgerEnd {
+            offset: i64,
+        }
+        let parsed: LedgerEnd = response.json().await.map_err(|e| {
+            let cls = Self::classify_reqwest_error(&e);
+            BridgeError::AdapterError(format!(
+                "Invalid Canton ledger-end response: {}",
+                cls
+            ))
+        })?;
+        Ok(parsed.offset)
+    }
+
+    /// Resolves `config.act_as_party` (a bare party hint like
+    /// `"tenzro-validator-1"`) to its fully-qualified Canton form
+    /// (`"tenzro-validator-1::<participant-hash>"`). Cached after the
+    /// first successful lookup; subsequent calls are O(1) under a read
+    /// lock.
+    ///
+    /// **2026 / Canton 3.5+ resolution path** (in order of preference):
+    /// 1. `GET /v2/users/{userId}` where `userId = <client_id>@clients`
+    ///    — the canonical 2026 lookup for OAuth2 client-credentials
+    ///    callers. Canton 3.5+ User Management Service (CIP-26)
+    ///    exposes `primaryParty` for the authenticated principal.
+    ///    Verified working against `json.devnet.tenzro.network`
+    ///    returning shape `{user: {id, primaryParty: "<hint>::<hash>", ...}}`.
+    ///    (There is no `/users/me` alias on Canton 3.5.1 — that
+    ///    endpoint returns 404 `USER_NOT_FOUND`.)
+    /// 2. Fallback: scan active contracts for any party string
+    ///    starting with `<hint>::`. Used only when the user lookup
+    ///    fails or the primary party doesn't match our hint.
+    /// 3. Last resort: return the bare hint. Caller will see the
+    ///    structured Canton error if Canton rejects it.
+    async fn resolve_act_as_party_fq(&self) -> Result<String> {
+        // Fast path: cached value.
+        if let Some(fq) = self.resolved_act_as_party_fq.read().await.clone() {
+            return Ok(fq);
+        }
+
+        let hint = &self.config.act_as_party;
+        let prefix = format!("{}::", hint);
+
+        // Preferred path: User-management service with the
+        // client-credentials user id `<client_id>@clients`. The token
+        // provider knows the client_id; the bare config doesn't, so we
+        // ask the provider when it exists.
+        if let Some(ref provider) = self.token_provider {
+            let user_id = format!("{}@clients", provider.client_id());
+            // urlencoding handles the `@` so the endpoint resolves.
+            let path = format!(
+                "/users/{}",
+                urlencoding::encode(&user_id)
+            );
+            if let Ok(user_resp) = self
+                .build_request(reqwest::Method::GET, &path)
+                .await
+            {
+                if let Ok(resp) = user_resp.send().await {
+                    if resp.status().is_success() {
+                        if let Ok(body) = resp.json::<serde_json::Value>().await {
+                            if let Some(primary) = body
+                                .get("user")
+                                .and_then(|u| u.get("primaryParty"))
+                                .and_then(|p| p.as_str())
+                            {
+                                if primary.starts_with(&prefix) {
+                                    let fq = primary.to_string();
+                                    let mut guard =
+                                        self.resolved_act_as_party_fq.write().await;
+                                    *guard = Some(fq.clone());
+                                    debug!(
+                                        "Canton: resolved act_as_party '{}' to FQ via /v2/users/{{client_id}}@clients",
+                                        hint
+                                    );
+                                    return Ok(fq);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: wildcard active-contracts scan.
+        let offset = self.fetch_ledger_end().await?;
+        let request_body = serde_json::json!({
+            "filter": {
+                "filtersForAnyParty": {
+                    "cumulative": [{
+                        "identifierFilter": {
+                            "WildcardFilter": {
+                                "value": { "includeCreatedEventBlob": false }
+                            }
+                        }
+                    }]
+                }
+            },
+            "verbose": true,
+            "activeAtOffset": offset,
+        });
+
+        let response = self
+            .build_request(reqwest::Method::POST, "/state/active-contracts")
+            .await?
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| {
+                let cls = Self::classify_reqwest_error(&e);
+                BridgeError::AdapterError(format!(
+                    "Canton party-resolve query failed: {}",
+                    cls
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            return Ok(hint.clone());
+        }
+
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            let cls = Self::classify_reqwest_error(&e);
+            BridgeError::AdapterError(format!(
+                "Invalid Canton party-resolve response: {}",
+                cls
+            ))
+        })?;
+
+        if let Some(arr) = body.as_array() {
+            for item in arr {
+                if let Some(fq) = find_party_with_prefix(item, &prefix) {
+                    let mut guard = self.resolved_act_as_party_fq.write().await;
+                    *guard = Some(fq.clone());
+                    debug!(
+                        "Canton: resolved act_as_party '{}' to FQ via active-contracts scan",
+                        hint
+                    );
+                    return Ok(fq);
+                }
+            }
+        }
+
+        Ok(hint.clone())
+    }
+
     /// Queries the active contract set via POST /v2/state/active-contracts.
     ///
     /// The legacy `/v1/query` JSON predicate filter does not exist in v2. The
@@ -665,6 +1288,14 @@ impl CantonAdapter {
         template_ids: Vec<String>,
         query: serde_json::Value,
     ) -> Result<Vec<JsonApiContract>> {
+        // Resolve the bare party hint to its fully-qualified form first
+        // — Canton 3.4+ rejects unresolved hints in `filtersByParty`.
+        let party_fq = self.resolve_act_as_party_fq().await?;
+
+        // Then fetch the current ledger-end offset. Canton rejects null
+        // / empty-string / stale offsets on this endpoint.
+        let offset = self.fetch_ledger_end().await?;
+
         // The v2 ActiveContractsRequest needs a TransactionFilter where every
         // requesting party gets an InclusiveFilters listing the templates the
         // caller is interested in. Canton 3.4+ uses `identifierFilter` wrappers
@@ -682,7 +1313,7 @@ impl CantonAdapter {
             }))
             .collect();
         filters_by_party.insert(
-            self.config.act_as_party.clone(),
+            party_fq,
             serde_json::json!({
                 "cumulative": cumulative_filters,
             }),
@@ -691,7 +1322,7 @@ impl CantonAdapter {
         let request_body = serde_json::json!({
             "filter": { "filtersByParty": filters_by_party },
             "verbose": true,
-            "activeAtOffset": serde_json::Value::Null,
+            "activeAtOffset": offset,
         });
 
         debug!(
@@ -725,11 +1356,32 @@ impl CantonAdapter {
             return Err(BridgeError::AdapterError(sanitized));
         }
 
-        let query_response: JsonApiQueryResponse = response.json().await.map_err(|e| {
+        // Canton 3.4+ returns a bare top-level JSON array of contract
+        // entries on success; older drafts of the v2 spec wrapped them
+        // in `{ "contractEntries": [...] }` or `{ "results": [...] }`.
+        // We decode to `serde_json::Value` first so we can accept any
+        // of the three shapes without re-pinning the contract.
+        let body: serde_json::Value = response.json().await.map_err(|e| {
             let cls = Self::classify_reqwest_error(&e);
             error!("Failed to parse Canton JSON Ledger API v2 query response: {}", cls);
             BridgeError::AdapterError(format!("Invalid JSON Ledger API v2 response: {}", cls))
         })?;
+
+        let query_response = if body.is_array() {
+            // Live shape: top-level array.
+            JsonApiQueryResponse {
+                contract_entries: body.as_array().cloned().unwrap_or_default(),
+                results: Vec::new(),
+            }
+        } else {
+            // Legacy wrapper shape.
+            serde_json::from_value(body).map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Unexpected Canton response shape: {}",
+                    e
+                ))
+            })?
+        };
 
         // Apply the client-side payload filter — match every (key, value) in
         // `query` against the contract's createArguments.
@@ -2128,7 +2780,8 @@ impl JsonApiQueryResponse {
                     .map(String::from)
                     .unwrap_or_default();
                 let payload = created
-                    .get("createArguments")
+                    .get("createArgument")
+                    .or_else(|| created.get("createArguments"))
                     .or_else(|| created.get("arguments"))
                     .or_else(|| created.get("payload"))
                     .cloned()

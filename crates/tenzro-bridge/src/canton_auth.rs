@@ -107,6 +107,15 @@ impl std::fmt::Debug for CantonTokenProvider {
 }
 
 impl CantonTokenProvider {
+    /// Returns the OAuth2 client id this provider authenticates as.
+    /// Used by `CantonAdapter` to construct the user-id for
+    /// `GET /v2/users/{userId}` lookups (Canton User Management Service
+    /// gives client-credentials callers a user record at
+    /// `<client_id>@clients`).
+    pub fn client_id(&self) -> &str {
+        &self.config.client_id
+    }
+
     /// Construct a new token provider. Does not fetch a token eagerly;
     /// the first call to [`bearer`] triggers the exchange.
     pub fn new(config: CantonAuthConfig) -> Arc<Self> {

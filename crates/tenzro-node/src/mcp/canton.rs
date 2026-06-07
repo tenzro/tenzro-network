@@ -523,33 +523,42 @@ impl CantonMcpServer {
         }))
     }
 
-    #[tool(description = "Query active DAML contracts on a Canton participant via the JSON Ledger API v2. Filters by template ID and party. Returns contract IDs, payloads, signatories, and observers.")]
+    #[tool(description = "Query active DAML contracts on a Canton participant via the JSON Ledger API v2 (Canton 3.5+). Filters by template ID and party. Returns contract IDs, payloads, signatories, and observers. The `party` argument must be the fully-qualified party id (`<hint>::<participant-hash>`) — Canton 3.5+ rejects bare hints.")]
     async fn canton_list_contracts(
         &self,
         Parameters(params): Parameters<CantonListContractsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        // Canton 3.5+ requires `activeAtOffset` as a JSON number — null
+        // / empty-string get rejected with HTTP 400. Fetch the current
+        // ledger-end first.
+        let offset = self.fetch_ledger_end_offset().await?;
         let body = serde_json::json!({
             "filter": {
                 "filtersByParty": {
                     params.party.clone(): {
                         "cumulative": [{
                             "identifierFilter": {
-                                "templateFilter": {
-                                    "templateIds": [params.template_id]
+                                "TemplateFilter": {
+                                    "value": { "templateId": params.template_id }
                                 }
                             }
                         }]
                     }
                 }
-            }
+            },
+            "verbose": true,
+            "activeAtOffset": offset
         });
 
         let response = self
             .ledger_post("/state/active-contracts", &body)
             .await?;
 
-        // Extract contracts from response — handles both v2 response shapes
-        let contracts = if let Some(entries) = response.get("contractEntries") {
+        // Canton 3.5+ returns a bare top-level JSON array; older drafts
+        // wrapped in `{contractEntries:...}` or `{results:...}`.
+        let contracts = if response.is_array() {
+            response.clone()
+        } else if let Some(entries) = response.get("contractEntries") {
             entries.clone()
         } else if let Some(results) = response.get("results") {
             results.clone()
@@ -560,8 +569,34 @@ impl CantonMcpServer {
         json_result(serde_json::json!({
             "party": params.party,
             "template_id": params.template_id,
+            "active_at_offset": offset,
             "contracts": contracts,
         }))
+    }
+
+    /// Helper: fetch the participant's current ledger-end offset.
+    async fn fetch_ledger_end_offset(&self) -> std::result::Result<i64, ErrorData> {
+        let url = format!("{}/v2/state/ledger-end", self.ledger_api_url);
+        let mut builder = self.http.get(&url);
+        if let Some(ref token) = self.jwt_token {
+            builder = builder.bearer_auth(token);
+        }
+        let resp = builder
+            .send()
+            .await
+            .map_err(|e| err_internal(format!("Canton ledger-end fetch failed: {}", e)))?;
+        if !resp.status().is_success() {
+            return Err(err_internal(format!(
+                "Canton ledger-end fetch HTTP {}",
+                resp.status()
+            )));
+        }
+        let body: serde_json::Value = resp.json().await.map_err(|e| {
+            err_internal(format!("Invalid Canton ledger-end response: {}", e))
+        })?;
+        body.get("offset")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| err_internal("Canton ledger-end response missing 'offset' field".to_string()))
     }
 
     #[tool(description = "Get create and archive events for a specific DAML contract via the JSON Ledger API v2. Returns the contract lifecycle events including creation arguments, signatories, and archive status.")]
@@ -734,22 +769,27 @@ impl CantonMcpServer {
         &self,
         Parameters(params): Parameters<CantonGetBalanceParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        // Query active Holding contracts for the party (CIP-56 standard)
-        // Canton 3.x JSON Ledger API v2 uses identifierFilter wrapping templateFilter
+        // Query active Holding contracts for the party (CIP-56 standard).
+        // Canton 3.5+ requires `activeAtOffset` as a JSON number and
+        // tagged `TemplateFilter` wrappers (uppercase, singular
+        // `templateId`).
+        let offset = self.fetch_ledger_end_offset().await?;
         let body = serde_json::json!({
             "filter": {
                 "filtersByParty": {
                     params.party.clone(): {
                         "cumulative": [{
                             "identifierFilter": {
-                                "templateFilter": {
-                                    "templateIds": ["Splice.Amulet:Amulet"]
+                                "TemplateFilter": {
+                                    "value": { "templateId": "#splice-amulet:Splice.Amulet:Amulet" }
                                 }
                             }
                         }]
                     }
                 }
-            }
+            },
+            "verbose": true,
+            "activeAtOffset": offset
         });
 
         let response = self
@@ -758,13 +798,17 @@ impl CantonMcpServer {
 
         match response {
             Ok(data) => {
-                // Sum up amounts from all active Holding/Amulet contracts
-                let contracts = data
-                    .get("contractEntries")
-                    .or_else(|| data.get("results"))
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
+                // Canton 3.5+ returns a bare top-level array; older drafts
+                // wrapped in `{contractEntries:...}` or `{results:...}`.
+                let contracts = if data.is_array() {
+                    data.as_array().cloned().unwrap_or_default()
+                } else {
+                    data.get("contractEntries")
+                        .or_else(|| data.get("results"))
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                };
 
                 let mut total_balance = 0.0f64;
                 for contract in &contracts {
@@ -993,13 +1037,16 @@ impl CantonMcpServer {
 
         let dar_size = dar_bytes.len();
 
-        let filename = params
+        let _filename = params
             .filename
             .unwrap_or_else(|| "package.dar".to_string());
 
-        // Upload via Admin API using raw binary body with octet-stream content type.
-        // Canton's PackageService accepts DAR bytes directly at /admin/packages/upload-dar.
-        let url = format!("{}/admin/packages/upload-dar", self.admin_api_url);
+        // Canton 3.5+ JSON Ledger API: POST /v2/packages with raw DAR
+        // bytes and `Content-Type: application/octet-stream`. The
+        // legacy `/admin/packages/upload-dar` path is only on the gRPC
+        // Admin API, which the Tenzro-operated devnet
+        // (`json.devnet.tenzro.network`) does not expose.
+        let url = format!("{}/v2/packages", self.ledger_api_url);
         let mut builder = self
             .http
             .post(&url)
@@ -1032,7 +1079,7 @@ impl CantonMcpServer {
 
         json_result(serde_json::json!({
             "success": true,
-            "filename": filename,
+            "filename": _filename,
             "size_bytes": dar_size,
             "response": response,
         }))
