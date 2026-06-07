@@ -783,6 +783,52 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "outputModes": ["application/json"],
             },
             {
+                "id": "canton",
+                "name": "Canton / DAML (3.5+ JSON Ledger API)",
+                "description": (
+                    "Canton 3.5+ JSON Ledger API surface proxied through the "
+                    "Tenzro node — the caller never sees the upstream Auth0 "
+                    "secret. Reads: list synchronizer domains, query active "
+                    "DAML contracts (with the live ledger-end offset attached "
+                    "automatically and the participant's fully-qualified party "
+                    "id resolved via CIP-26 User Management), list parties + "
+                    "installed packages, combined health probe "
+                    "(/livez + /readyz + /v2/version), CIP-56 Canton Coin "
+                    "balance, AmuletRules fee schedule, connected "
+                    "synchronizers, transaction-tree lookup, OAuth principal's "
+                    "user record. Writes: submit-and-wait DAML create / "
+                    "exercise commands, allocate party, upload DAR via "
+                    "POST /v2/packages with a single Content-Type header "
+                    "(Canton 3.5+ rejects duplicates; the legacy "
+                    "/admin/packages/upload-dar path is gRPC-only and NOT "
+                    "exposed on the Tenzro-operated DevNet). Requires an "
+                    "API key with the `canton` scope at the Tenzro node."
+                ),
+                "tags": [
+                    "canton", "daml", "3.5", "json-ledger-api",
+                    "cip-26", "cip-56", "amulet", "splice",
+                    "dar-upload", "fee-schedule", "synchronizer",
+                    "active-contracts", "submit-and-wait", "participant",
+                ],
+                "examples": [
+                    "Canton health",
+                    "Canton version",
+                    "Canton my user",
+                    "List Canton parties",
+                    "List Canton installed packages",
+                    "Canton coin balance",
+                    "Canton fee schedule",
+                    "Canton connected synchronizers",
+                    "List DAML contracts for template #splice-amulet:Splice.Amulet:Amulet",
+                    "Get Canton transaction <hex-update-id>",
+                    "Allocate Canton party party_id_hint=manexus-test",
+                    "Upload DAR <base64-bytes>",
+                    "Submit DAML create on template …",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
                 "id": "agent-memory",
                 "name": "Agent Memory Tier",
                 "description": (

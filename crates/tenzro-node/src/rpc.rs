@@ -1157,6 +1157,17 @@ pub(crate) async fn handle_request(
         "tenzro_listDamlContracts" | "tenzro_canton_listMirroredContracts" => handle_list_daml_contracts(node, request.params).await,
         "tenzro_submitDamlCommand" => handle_submit_daml_command(node, request.params).await,
         "tenzro_allocateParty" => handle_allocate_party(node, request.params).await,
+        // Canton 3.5+ JSON Ledger API extension methods (M11 — Canton-fix wave).
+        "tenzro_canton_uploadDar" => handle_canton_upload_dar(node, request.params).await,
+        "tenzro_canton_listParties" => handle_canton_list_parties(node).await,
+        "tenzro_canton_health" => handle_canton_health(node).await,
+        "tenzro_canton_version" => handle_canton_version(node).await,
+        "tenzro_canton_getTransaction" => handle_canton_get_transaction(node, request.params).await,
+        "tenzro_canton_listPackages" => handle_canton_list_packages(node).await,
+        "tenzro_canton_coinBalance" => handle_canton_coin_balance(node).await,
+        "tenzro_canton_feeSchedule" => handle_canton_fee_schedule(node).await,
+        "tenzro_canton_connectedSynchronizers" => handle_canton_connected_synchronizers(node).await,
+        "tenzro_canton_getMyUser" => handle_canton_get_my_user(node).await,
 
         // API key management — operator (admin-token-gated)
         "tenzro_createApiKey" => handle_create_api_key(node, request.params).await,
@@ -19453,6 +19464,245 @@ async fn handle_allocate_party(
         "party_id": party_id,
         "party_id_hint": party_id_hint,
     }))
+}
+
+// ── Canton 3.5+ JSON Ledger API extension handlers (M11 wave) ────────
+//
+// These ten handlers expose the bridge adapter's new Canton 3.5+ methods
+// as JSON-RPC endpoints. Each is canton-scoped (requires
+// `X-Tenzro-Api-Key` with `canton` scope; gating happens upstream in the
+// dispatch layer) and short-circuits early when Canton is disabled.
+
+async fn handle_canton_upload_dar(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let dar_b64 = params
+        .get("dar_content_base64")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing dar_content_base64 (base64-encoded DAR bytes)".to_string(),
+            data: None,
+        })?;
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let dar_bytes = B64.decode(dar_b64).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid base64 DAR content: {}", e),
+        data: None,
+    })?;
+    let adapter = canton_adapter_or_err(node)?;
+    let result = adapter.upload_dar(dar_bytes).await.map_err(|e| {
+        tracing::error!("Canton upload_dar failed: {}", e);
+        JsonRpcError {
+            code: -32000,
+            message: format!("Canton upload_dar failed: {}", e),
+            data: None,
+        }
+    })?;
+    Ok(result)
+}
+
+async fn handle_canton_list_parties(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let adapter = canton_adapter_or_err(node)?;
+    adapter.list_parties().await.map_err(|e| {
+        tracing::error!("Canton list_parties failed: {}", e);
+        JsonRpcError {
+            code: -32000,
+            message: format!("Canton list_parties failed: {}", e),
+            data: None,
+        }
+    })
+}
+
+async fn handle_canton_health(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Ok(serde_json::json!({
+            "alive": false,
+            "ready": false,
+            "ready_detail": "Canton/DAML disabled on this node",
+            "version": null,
+        }));
+    }
+    let adapter = canton_adapter_or_err(node)?;
+    adapter.get_health().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Canton health probe failed: {}", e),
+        data: None,
+    })
+}
+
+async fn handle_canton_version(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let adapter = canton_adapter_or_err(node)?;
+    adapter.get_version().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Canton version probe failed: {}", e),
+        data: None,
+    })
+}
+
+async fn handle_canton_get_transaction(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let update_id = params
+        .get("update_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing update_id (hex string)".to_string(),
+            data: None,
+        })?;
+    let adapter = canton_adapter_or_err(node)?;
+    adapter.get_transaction(update_id).await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Canton get_transaction failed: {}", e),
+        data: None,
+    })
+}
+
+async fn handle_canton_list_packages(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let adapter = canton_adapter_or_err(node)?;
+    adapter.list_packages().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Canton list_packages failed: {}", e),
+        data: None,
+    })
+}
+
+async fn handle_canton_coin_balance(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let adapter = canton_adapter_or_err(node)?;
+    adapter.get_canton_coin_balance().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Canton coin_balance query failed: {}", e),
+        data: None,
+    })
+}
+
+async fn handle_canton_fee_schedule(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let adapter = canton_adapter_or_err(node)?;
+    adapter.get_fee_schedule().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Canton fee_schedule query failed: {}", e),
+        data: None,
+    })
+}
+
+async fn handle_canton_connected_synchronizers(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let adapter = canton_adapter_or_err(node)?;
+    adapter.connected_synchronizers().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Canton connected_synchronizers query failed: {}", e),
+        data: None,
+    })
+}
+
+async fn handle_canton_get_my_user(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let adapter = canton_adapter_or_err(node)?;
+    adapter.get_my_user().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Canton get_my_user failed: {}", e),
+        data: None,
+    })
 }
 
 // ── API key management handlers ─────────────────────────────────────

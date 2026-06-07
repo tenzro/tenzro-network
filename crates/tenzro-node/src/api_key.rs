@@ -480,7 +480,15 @@ pub fn required_scope_for_method(method: &str) -> Option<ApiKeyScope> {
     // caller must hold a key with the `canton` scope. Both `*Canton*`
     // and `*Daml*` method names route to the same upstream — the gate
     // must catch both substrings.
-    if method.starts_with("tenzro_") && (method.contains("Canton") || method.contains("Daml")) {
+    // Match both the legacy CamelCase form (`tenzro_listCantonDomains`,
+    // `tenzro_submitDamlCommand`) and the modern snake-case form
+    // (`tenzro_canton_uploadDar`, `tenzro_canton_health`, etc.).
+    if method.starts_with("tenzro_")
+        && (method.contains("Canton")
+            || method.contains("canton")
+            || method.contains("Daml")
+            || method.contains("daml"))
+    {
         return Some(ApiKeyScope::Canton);
     }
     None

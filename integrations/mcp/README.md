@@ -295,11 +295,26 @@ Per-modality `list_*_catalog`, `list_*_models`, `load_*_model`, `unload_*_model`
 - `register_compliance` — Register compliance rules
 - `freeze_address` — Freeze address for compliance
 
-### Canton (3 tools)
+### Canton / DAML (15 tools — Canton 3.5+ JSON Ledger API)
 
-- `list_canton_domains` — List Canton synchronization domains
-- `list_daml_contracts` — List active DAML contracts
-- `submit_daml_command` — Submit DAML command
+Reads:
+- `canton_list_domains` — List Canton synchronization domains the node is configured against
+- `canton_list_contracts` — Active-contracts query with `template_ids` filter (Canton 3.5+ requires a non-empty filter; the node attaches the resolved FQ party id automatically)
+- `canton_list_parties` — `GET /v2/parties/known`
+- `canton_list_packages` — `GET /v2/packages` — installed DAR package ids
+- `canton_health` — combined `/livez` + `/readyz` + `/v2/version` probe
+- `canton_version` — `GET /v2/version` — participant version + CIP feature flags (verified Canton 3.5.1)
+- `canton_get_my_user` — `GET /v2/users/<client_id>@clients` — OAuth principal's primary party (CIP-26 User Management)
+- `canton_coin_balance` — CIP-56 Canton Coin balance (sums every `Splice.Amulet:Amulet` contract the party signs)
+- `canton_fee_schedule` — latest `Splice.AmuletRules:AmuletRules` active contract
+- `canton_connected_synchronizers` — `GET /v2/state/connected-synchronizers` — currently-subscribed synchronizers with permission classes
+- `canton_get_transaction` — `GET /v2/updates/transaction-tree-by-id/{hex}?requestingParties=...`
+- `canton_get_events` — events for a specific contract id
+
+Writes:
+- `canton_submit_command` — DAML `create` / `exercise` via the JSON Ledger API submit-and-wait path
+- `canton_allocate_party` — `POST /v2/parties` — returns the fully-qualified party id `<hint>::<participant-hash>`
+- `canton_upload_dar` — DAR upload via `POST /v2/packages` with a single `Content-Type: application/octet-stream` header (Canton 3.5+ rejects duplicates). Legacy `/admin/packages/upload-dar` is NOT used — that's gRPC-only and not exposed on the Tenzro-operated DevNet.
 
 ### Verification (1 tool)
 
@@ -461,7 +476,7 @@ In addition to the main Tenzro MCP server, the node runs specialized servers for
 | **Tenzro** | 3001 | `/mcp` | 331 tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + AgentBond/insurance + agent memory |
 | **Solana** | 3003 | `/mcp` | 14 tools — Jupiter swaps, SPL tokens, Metaplex NFTs, SNS, staking |
 | **Ethereum** | 3004 | `/mcp` | 17 tools — Chainlink feeds, ENS, ERC-20, EAS, ERC-8004 |
-| **Canton** | 3005 | `/mcp` | 15 tools — DAML contracts, CIP-56 tokens, DvP settlement |
+| **Canton** | 3005 | `/mcp` | 15 tools — Canton 3.5+ JSON Ledger API (active-contracts queries with live offset + FQ party id, party / package / connected-synchronizer / version / health reads, CIP-56 Canton Coin balance, AmuletRules fee schedule, DAR upload via `/v2/packages`, submit-and-wait DAML commands, DvP settlement) |
 | **LayerZero** | 3006 | `/mcp` | 21 tools — V2 messaging, OFT, Stargate V2, Value Transfer API |
 | **Chainlink** | 3007 | `/mcp` | 21 tools — CCIP, data feeds, Data Streams, VRF v2.5, PoR, automation, Functions |
 | **Li.Fi** | 3008 | `/mcp` | 9 tools — cross-chain aggregation, quotes, routes, status |

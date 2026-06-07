@@ -42,7 +42,7 @@ Canton is an enterprise-grade blockchain network built on DAML (Digital Asset Mo
 ### DAML Contracts
 
 #### canton_submit_command
-Submit a DAML command (Create or Exercise) to the Canton 3.x JSON Ledger API v2 via /v2/commands/submit-and-wait-for-transaction. Uses identifierFilter for contract queries.
+Submit a DAML command (Create or Exercise) to the Canton 3.5+ JSON Ledger API v2 via /v2/commands/submit-and-wait-for-transaction. Uses identifierFilter for contract queries.
 
 **Parameters:**
 - `command_type` (string, required) — "create" or "exercise"

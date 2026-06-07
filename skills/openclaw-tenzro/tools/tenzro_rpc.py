@@ -4554,6 +4554,74 @@ def canton_get_fee_schedule(domain: str = None) -> dict:
                           params)
 
 
+# ── Canton 3.5+ JSON Ledger API extension wrappers ────────────────
+
+
+def canton_health() -> dict:
+    """Combined health probe — `/livez`, `/readyz`, `/v2/version`.
+    Returns `{alive, ready, ready_detail, version}` where `version`
+    carries Canton CIP feature flags when reachable."""
+    return _rpc("tenzro_canton_health", {})
+
+
+def canton_version() -> dict:
+    """Returns participant version + CIP feature flags via
+    `GET /v2/version` (Canton 3.5+)."""
+    return _rpc("tenzro_canton_version", {})
+
+
+def canton_list_packages() -> dict:
+    """List every DAML package installed on the participant via
+    `GET /v2/packages`. Returns `{packageIds: [<hex>...]}`."""
+    return _rpc("tenzro_canton_listPackages", {})
+
+
+def canton_get_my_user() -> dict:
+    """Returns the OAuth principal's Canton user record via
+    `GET /v2/users/me` (CIP-26). Returns `{user: {id, primaryParty,
+    isDeactivated, metadata, identityProviderId}}`."""
+    return _rpc("tenzro_canton_getMyUser", {})
+
+
+def canton_coin_balance() -> dict:
+    """Returns the Canton Coin (CIP-56) balance for the participant's
+    party by summing every `Splice.Amulet:Amulet` contract the party
+    is a stakeholder on. Returns `{party, amulet_count,
+    total_initial_amount, token_standard:'CIP-56'}`."""
+    return _rpc("tenzro_canton_coinBalance", {})
+
+
+def canton_connected_synchronizers() -> dict:
+    """Returns the synchronizers the participant's party is currently
+    connected to via `GET /v2/state/connected-synchronizers`. Each
+    entry includes `synchronizerAlias`, `synchronizerId`, and
+    `permission` (SUBMISSION / CONFIRMATION / OBSERVATION)."""
+    return _rpc("tenzro_canton_connectedSynchronizers", {})
+
+
+def canton_upload_dar_rpc(dar_content_base64: str) -> dict:
+    """Upload a DAR via the JSON-RPC route (Canton 3.5+ JSON Ledger
+    API: POST /v2/packages). Pass base64-encoded DAR bytes; the node
+    decodes + forwards. Returns Canton's structured response."""
+    return _rpc("tenzro_canton_uploadDar",
+                {"dar_content_base64": dar_content_base64})
+
+
+def canton_fee_schedule_rpc() -> dict:
+    """Returns the participant's Canton fee schedule via the JSON-RPC
+    route (Canton 3.5+: latest `Splice.AmuletRules:AmuletRules`
+    contract). Different from canton_get_fee_schedule (MCP-routed),
+    which proxies to the canton MCP server."""
+    return _rpc("tenzro_canton_feeSchedule", {})
+
+
+def canton_get_transaction_rpc(update_id: str) -> dict:
+    """Fetch a Canton transaction tree by hex update id via JSON-RPC.
+    Different from canton_get_transaction (MCP-routed) — Canton 3.5+
+    requires the update id to be a hex string."""
+    return _rpc("tenzro_canton_getTransaction", {"update_id": update_id})
+
+
 # ── Crypto ────────────────────────────────────────────────────────
 
 
@@ -7253,6 +7321,16 @@ COMMANDS = {
     "canton_get_fee_schedule": lambda args: canton_get_fee_schedule(
         args[0] if args else None,
     ),
+    # ── Canton 3.5+ JSON Ledger API extension wrappers ──
+    "canton_health": lambda args: canton_health(),
+    "canton_version": lambda args: canton_version(),
+    "canton_list_packages": lambda args: canton_list_packages(),
+    "canton_get_my_user": lambda args: canton_get_my_user(),
+    "canton_coin_balance": lambda args: canton_coin_balance(),
+    "canton_connected_synchronizers": lambda args: canton_connected_synchronizers(),
+    "canton_upload_dar_rpc": lambda args: canton_upload_dar_rpc(args[0]),
+    "canton_fee_schedule_rpc": lambda args: canton_fee_schedule_rpc(),
+    "canton_get_transaction_rpc": lambda args: canton_get_transaction_rpc(args[0]),
     # ── Ecosystem: deBridge ──
     "debridge_search_tokens": lambda args: debridge_search_tokens(args[0], args[1] if len(args) > 1 else None),
     "debridge_get_chains": lambda args: debridge_get_chains(),
