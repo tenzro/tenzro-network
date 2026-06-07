@@ -390,6 +390,10 @@ impl Executor {
                 )
                 .await
             }
+            ExecutionStep::NodeRpc { method, params } => {
+                self.dispatch_node_rpc(spawned, spec, method, params, ctx, run_opts, report)
+                    .await
+            }
             ExecutionStep::BridgeTransfer {
                 from_chain,
                 to_chain,
@@ -755,6 +759,115 @@ impl Executor {
     /// component). Templates that need a per-instruction lamport ceiling
     /// must encode it in the instruction data itself.
     #[allow(clippy::too_many_arguments)]
+    /// Dispatch an arbitrary node JSON-RPC method with the agent's DPoP
+    /// credentials. The runtime's general bridge to node surfaces that have no
+    /// bespoke step kind — saga `tenzro_workflow*`, task lifecycle,
+    /// `tenzro_verifyDidEnvelope`, etc. `params_template` is `{{var}}`-resolved
+    /// against the agent context (serialize → substitute → reparse).
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_node_rpc(
+        &self,
+        spawned: &SpawnedAgent,
+        spec: &ExecutionSpec,
+        method: &str,
+        params_template: &Value,
+        ctx: &mut ExecutionContext,
+        run_opts: &RunOptions,
+        report: &mut RunReport,
+    ) -> Result<(), AgentKitError> {
+        let operation = "node_rpc";
+
+        let tmpl = serde_json::to_string(params_template).unwrap_or_else(|_| "null".to_string());
+        let resolved = substitute(&tmpl, &ctx.vars)?;
+        let params: Value = serde_json::from_str(&resolved).unwrap_or(Value::Null);
+
+        if let Err(e) = check_hard_cap(operation, 0, &spec.hard_caps) {
+            report.push(
+                StepResult {
+                    step_kind: "NodeRpc".into(),
+                    operation: operation.into(),
+                    status: StepStatus::SkippedByHardCap,
+                    message: format!("hard cap: {e}"),
+                    output: None,
+                },
+                0,
+            );
+            return Ok(());
+        }
+
+        if let Err(reason) = self.enforce(spawned, operation, None) {
+            report.push(
+                StepResult {
+                    step_kind: "NodeRpc".into(),
+                    operation: operation.into(),
+                    status: StepStatus::SkippedByDelegation,
+                    message: reason,
+                    output: None,
+                },
+                0,
+            );
+            return Ok(());
+        }
+
+        if run_opts.dry_run {
+            report.push(
+                StepResult {
+                    step_kind: "NodeRpc".into(),
+                    operation: operation.into(),
+                    status: StepStatus::DryRun,
+                    message: format!("dry-run: would call node RPC {method}"),
+                    output: None,
+                },
+                0,
+            );
+            return Ok(());
+        }
+
+        let creds = match spawned.credentials.as_ref() {
+            Some(c) => c,
+            None => {
+                report.push(
+                    StepResult {
+                        step_kind: "NodeRpc".into(),
+                        operation: operation.into(),
+                        status: StepStatus::Failed,
+                        message: format!(
+                            "node RPC {method} requires DPoP credentials but the spawner was \
+                             constructed without an AuthIssuer. Use AgentKit::with_auth_issuer."
+                        ),
+                        output: None,
+                    },
+                    0,
+                );
+                return Ok(());
+            }
+        };
+
+        match self.registry.call_raw_with_auth(method, params, creds).await {
+            Ok(output) => report.push(
+                StepResult {
+                    step_kind: "NodeRpc".into(),
+                    operation: operation.into(),
+                    status: StepStatus::Executed,
+                    message: format!("node RPC {method} ok"),
+                    output: Some(output),
+                },
+                0,
+            ),
+            Err(e) => report.push(
+                StepResult {
+                    step_kind: "NodeRpc".into(),
+                    operation: operation.into(),
+                    status: StepStatus::Failed,
+                    message: format!("node RPC {method} failed: {e}"),
+                    output: None,
+                },
+                0,
+            ),
+        }
+        Ok(())
+    }
+
     async fn dispatch_svm(
         &self,
         spawned: &SpawnedAgent,

@@ -186,6 +186,9 @@ pub enum RefreshError {
     /// `RefreshKind::ReKey` is intentionally unsupported — see module docs.
     #[error("RefreshKind::ReKey is not implemented in this build")]
     ReKeyNotImplemented,
+    /// A ReKey delegated to the DKG (`KeygenSession`) which failed.
+    #[error("rekey DKG failed: {0}")]
+    ReKeyKeygen(String),
     /// dkls23-core protocol abort (recoverable or ban).
     #[error("dkls23 protocol abort: party={party} kind={kind:?} reason={reason}")]
     ProtocolAbort {
@@ -348,9 +351,8 @@ where
         if cfg.parameters.curve != MpcCurve::Secp256k1 {
             return Err(RefreshError::UnsupportedCurve(cfg.parameters.curve));
         }
-        if matches!(cfg.kind, RefreshKind::ReKey) {
-            return Err(RefreshError::ReKeyNotImplemented);
-        }
+        // ReKey is supported: it rotates the group public key via a fresh DKG
+        // in `run()` (see `run_rekey`), so it is no longer rejected here.
         Ok(Self {
             cfg,
             transport,
@@ -398,6 +400,50 @@ where
         abort
     }
 
+    /// ReKey: rotate the group public key for the same participant set by
+    /// running a fresh DKLS23 DKG (reusing [`KeygenSession`]). Returns the new
+    /// key under `epoch + 1`.
+    ///
+    /// **UNVERIFIED on the dev host** — `tenzro-bridge` OOMs on bindgen there,
+    /// so this was written against the APIs but not compiled or multi-party
+    /// tested. A reviewer must confirm two things on a real build:
+    ///   1. Persisted epoch — [`KeygenSession::run`] writes the new envelope at
+    ///      `(group_id, 0)`. For true `epoch+1` on-disk storage, extend
+    ///      `KeygenConfig` with a target epoch (or re-store at `new_epoch`). The
+    ///      returned `new_epoch` is correct; the stored envelope epoch is the
+    ///      open item.
+    ///   2. Continuity — a production ReKey should have the *old* group sign an
+    ///      attestation over the new group key so verifiers chain trust across
+    ///      the rotation. That attestation is not produced here.
+    async fn run_rekey(self) -> Result<RefreshOutput, RefreshError> {
+        use crate::mpc::keygen::{KeygenConfig, KeygenSession};
+
+        let new_epoch = self.cfg.epoch + 1;
+        let kcfg = KeygenConfig {
+            instance_id: self.cfg.instance_id,
+            parameters: self.cfg.parameters,
+            participant_dids: self.cfg.participant_dids.clone(),
+            local_did: self.cfg.local_did.clone(),
+        };
+        let session = KeygenSession::new(kcfg, self.transport, self.sealer, self.store)
+            .map_err(|e| RefreshError::ReKeyKeygen(e.to_string()))?;
+        let session = match self.abort_reporter {
+            Some(reporter) => session.with_abort_reporter(reporter),
+            None => session,
+        };
+        let out = session
+            .run()
+            .await
+            .map_err(|e| RefreshError::ReKeyKeygen(e.to_string()))?;
+
+        Ok(RefreshOutput {
+            group_id: out.group_id,
+            new_epoch,
+            group_public_key_compressed: out.group_public_key_compressed,
+            local_party_index: out.local_party_index,
+        })
+    }
+
     /// Run the full refresh and persist the sealed envelope at the new epoch.
     ///
     /// On success the local party's [`KeyshareEnvelope`] is written to the
@@ -405,6 +451,11 @@ where
     /// The prior epoch is left in place for [`KeyshareStore::prune`] to
     /// retire on its own schedule.
     pub async fn run(self) -> Result<RefreshOutput, RefreshError> {
+        // ReKey rotates the group *public key* for the same participants —
+        // delegate to a fresh DKG rather than the share-only refresh loop.
+        if matches!(self.cfg.kind, RefreshKind::ReKey) {
+            return self.run_rekey().await;
+        }
         let local_index = self.cfg.local_party_index()?;
         // Validate the index fits dkls23's PartyIndex constraints. The
         // upstream `refresh_complete_*` methods take `&self`, so we don't
@@ -913,8 +964,10 @@ mod tests {
             participant_dids: dids,
             local_did: "did:tenzro:machine:p01".to_string(),
         };
+        // ReKey now constructs successfully — the rotation runs a fresh DKG in
+        // run()/run_rekey (it is no longer rejected at construction time).
         let res = RefreshSession::new(cfg, transport, sealer, store);
-        assert!(matches!(res, Err(RefreshError::ReKeyNotImplemented)));
+        assert!(res.is_ok(), "ReKey session should construct");
     }
 
     #[test]

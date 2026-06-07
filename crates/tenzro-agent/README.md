@@ -68,7 +68,7 @@ let runtime = AgentRuntime::new()?;
 // Register agent with capabilities
 let creator = Address::from([1u8; 32]);
 let capabilities = vec![
-    Capability::Inference,
+    Capability::NaturalLanguageProcessing { languages: vec!["en".into()] },
     Capability::MultiAgentCoordination,
 ];
 
@@ -99,7 +99,9 @@ let message = AgentMessage::new(
 runtime.send_message(message).await?;
 
 // Query agent capabilities
-let agents_with_inference = runtime.find_agents_with_capability(&Capability::Inference);
+let agents_with_nlp = runtime.find_agents_with_capability(
+    &Capability::NaturalLanguageProcessing { languages: vec!["en".into()] },
+);
 println!("Found {} agents with inference capability", agents_with_inference.len());
 ```
 

@@ -2158,6 +2158,288 @@ def eip7702_protocol_info() -> dict:
     return _rpc("tenzro_eip7702ProtocolInfo")
 
 
+# ── Permit2 (SignatureTransfer) ─────────────────────────────────
+
+
+def permit2_domain_separator(chain_id: int) -> dict:
+    """Read the EIP-712 domain separator for the canonical Tenzro
+    Permit2 contract on `chain_id`."""
+    return _rpc("tenzro_permit2DomainSeparator", {"chain_id": int(chain_id)})
+
+
+def permit2_digest(chain_id: int, owner: str, token: str, amount: str,
+                   spender: str, nonce: str, deadline: int,
+                   witness: str = None,
+                   witness_type_string: str = None) -> dict:
+    """Compute the EIP-712 digest a user signs for a Permit2
+    SignatureTransfer. Optional witness binds the permit to a 32-byte
+    witness (used by ERC-7683 origin opens)."""
+    params = {
+        "chain_id": int(chain_id),
+        "owner": owner,
+        "token": token,
+        "amount": str(amount),
+        "spender": spender,
+        "nonce": str(nonce),
+        "deadline": int(deadline),
+    }
+    if witness:
+        params["witness"] = witness
+    if witness_type_string:
+        params["witness_type_string"] = witness_type_string
+    return _rpc("tenzro_permit2Digest", params)
+
+
+def permit2_verify_and_consume(chain_id: int, owner: str, token: str,
+                               amount: str, spender: str, nonce: str,
+                               deadline: int, signature: str,
+                               witness: str = None,
+                               witness_type_string: str = None) -> dict:
+    """Atomically verify a signed Permit2 message and consume its
+    (owner, nonce) bitmap slot."""
+    params = {
+        "chain_id": int(chain_id),
+        "owner": owner,
+        "token": token,
+        "amount": str(amount),
+        "spender": spender,
+        "nonce": str(nonce),
+        "deadline": int(deadline),
+        "signature": signature,
+    }
+    if witness:
+        params["witness"] = witness
+    if witness_type_string:
+        params["witness_type_string"] = witness_type_string
+    return _rpc("tenzro_permit2VerifyAndConsume", params)
+
+
+def permit2_nonce_used(owner: str, nonce: str) -> dict:
+    """Check whether a (owner, nonce) slot has been consumed."""
+    return _rpc("tenzro_permit2NonceUsed", {"owner": owner, "nonce": str(nonce)})
+
+
+# ── Secure-Mint Registry ────────────────────────────────────────
+
+
+def set_secure_mint_policy(asset_id: str, reserve: str, por_feed_id: str,
+                           attester_did: str, attestation_hash: str,
+                           attested_at: int, ttl_secs: int,
+                           circulating: str = None) -> dict:
+    """Set or update a Secure-Mint policy for a tokenized RWA. Enforces
+    per-token 1:1 reserve attestation `circulating + amount ≤ reserve`."""
+    params = {
+        "asset_id": asset_id,
+        "reserve": str(reserve),
+        "por_feed_id": por_feed_id,
+        "attester_did": attester_did,
+        "attestation_hash": attestation_hash,
+        "attested_at": int(attested_at),
+        "ttl_secs": int(ttl_secs),
+    }
+    if circulating is not None:
+        params["circulating"] = str(circulating)
+    return _rpc("tenzro_setSecureMintPolicy", params)
+
+
+def get_secure_mint_policy(asset_id: str) -> dict:
+    """Read the Secure-Mint policy for an asset."""
+    return _rpc("tenzro_getSecureMintPolicy", {"asset_id": asset_id})
+
+
+def clear_secure_mint_policy(asset_id: str) -> dict:
+    """Clear the Secure-Mint policy for an asset."""
+    return _rpc("tenzro_clearSecureMintPolicy", {"asset_id": asset_id})
+
+
+def secure_mint_check(asset_id: str, amount: str) -> dict:
+    """Read-only invariant check for a proposed mint."""
+    return _rpc("tenzro_secureMintCheck",
+                {"asset_id": asset_id, "amount": str(amount)})
+
+
+def secure_mint_apply(asset_id: str, amount: str) -> dict:
+    """Atomic check + circulating increment."""
+    return _rpc("tenzro_secureMintApply",
+                {"asset_id": asset_id, "amount": str(amount)})
+
+
+def secure_mint_record_burn(asset_id: str, amount: str) -> dict:
+    """Record a redemption (decrement circulating)."""
+    return _rpc("tenzro_secureMintRecordBurn",
+                {"asset_id": asset_id, "amount": str(amount)})
+
+
+# ── Hyperlane V3 (sovereign Tenzro-ISM) ─────────────────────────
+
+
+def hyperlane_list_chains() -> dict:
+    """List supported Hyperlane chains and their canonical domain ids."""
+    return _rpc("tenzro_hyperlaneListChains")
+
+
+def hyperlane_quote_dispatch(origin_domain: int, destination_domain: int,
+                             recipient: str, body_hex: str,
+                             sender: str = None,
+                             interchain_gas_payment: str = None) -> dict:
+    """Quote the interchain gas payment for a dispatch."""
+    params = {
+        "origin_domain": int(origin_domain),
+        "destination_domain": int(destination_domain),
+        "recipient": recipient,
+        "body_hex": body_hex,
+    }
+    if sender:
+        params["sender"] = sender
+    if interchain_gas_payment:
+        params["interchain_gas_payment"] = str(interchain_gas_payment)
+    return _rpc("tenzro_hyperlaneQuoteDispatch", params)
+
+
+def hyperlane_dispatch(origin_domain: int, destination_domain: int,
+                       recipient: str, body_hex: str,
+                       sender: str = None,
+                       interchain_gas_payment: str = None) -> dict:
+    """Dispatch a Hyperlane V3 message through the canonical Mailbox."""
+    params = {
+        "origin_domain": int(origin_domain),
+        "destination_domain": int(destination_domain),
+        "recipient": recipient,
+        "body_hex": body_hex,
+    }
+    if sender:
+        params["sender"] = sender
+    if interchain_gas_payment:
+        params["interchain_gas_payment"] = str(interchain_gas_payment)
+    return _rpc("tenzro_hyperlaneDispatch", params)
+
+
+def hyperlane_get_message(message_id: str) -> dict:
+    """Look up a Hyperlane message by id."""
+    return _rpc("tenzro_hyperlaneGetMessage", {"message_id": message_id})
+
+
+# ── Axelar GMP ──────────────────────────────────────────────────
+
+
+def axelar_list_chains() -> dict:
+    """List supported Axelar chains (EVM / Cosmos / Move / Stellar / XRPL)."""
+    return _rpc("tenzro_axelarListChains")
+
+
+def axelar_call_contract(source_chain: str, destination_chain: str,
+                         destination_address: str, payload_hex: str,
+                         gas_token: str = None,
+                         gas_amount: str = None) -> dict:
+    """Dispatch an Axelar `call_contract` GMP message."""
+    params = {
+        "source_chain": source_chain,
+        "destination_chain": destination_chain,
+        "destination_address": destination_address,
+        "payload_hex": payload_hex,
+    }
+    if gas_token:
+        params["gas_token"] = gas_token
+    if gas_amount:
+        params["gas_amount"] = str(gas_amount)
+    return _rpc("tenzro_axelarCallContract", params)
+
+
+def axelar_pay_gas(payload_hash: str, source_chain: str,
+                   destination_chain: str, destination_address: str,
+                   gas_token: str, gas_amount: str) -> dict:
+    """Pre-pay the Axelar Gas Service for an already-dispatched message."""
+    return _rpc("tenzro_axelarPayGas", {
+        "payload_hash": payload_hash,
+        "source_chain": source_chain,
+        "destination_chain": destination_chain,
+        "destination_address": destination_address,
+        "gas_token": gas_token,
+        "gas_amount": str(gas_amount),
+    })
+
+
+def axelar_get_message(payload_hash: str) -> dict:
+    """Look up an Axelar GMP message by payload hash."""
+    return _rpc("tenzro_axelarGetMessage", {"payload_hash": payload_hash})
+
+
+# ── Babylon Bitcoin Staking ─────────────────────────────────────
+
+
+def babylon_register_finality_provider(validator: str, btc_pk: str,
+                                       commission_bps: int) -> dict:
+    """Register a Tenzro validator as a Babylon finality provider."""
+    return _rpc("tenzro_babylonRegisterFinalityProvider", {
+        "validator": validator,
+        "btc_pk": btc_pk,
+        "commission_bps": int(commission_bps),
+    })
+
+
+def babylon_get_finality_provider(validator: str) -> dict:
+    """Read the Babylon finality-provider record for a Tenzro validator."""
+    return _rpc("tenzro_babylonGetFinalityProvider", {"validator": validator})
+
+
+def babylon_list_finality_providers() -> dict:
+    """List every registered Babylon finality provider."""
+    return _rpc("tenzro_babylonListFinalityProviders")
+
+
+def babylon_total_stake_for_provider(validator: str) -> dict:
+    """Sum BTC delegations for a finality provider."""
+    return _rpc("tenzro_babylonTotalStakeForProvider", {"validator": validator})
+
+
+def babylon_submit_finality_signature(validator: str, block_hash: str,
+                                      eots_signature: str) -> dict:
+    """Submit an EOTS over a Tenzro block hash."""
+    return _rpc("tenzro_babylonSubmitFinalitySignature", {
+        "validator": validator,
+        "block_hash": block_hash,
+        "eots_signature": eots_signature,
+    })
+
+
+def babylon_list_delegations(validator: str) -> dict:
+    """List BTC delegations for a finality provider."""
+    return _rpc("tenzro_babylonListDelegations", {"validator": validator})
+
+
+# ── CAIP discovery (ChainAgnostic/namespaces#184) ───────────────
+
+
+def caip2() -> dict:
+    """Get the CAIP-2 chain id for this node:
+    `tenzro:<lowercase hex of first 16 bytes of genesis block hash>`.
+    Returns includes EVM-compatible `evm_chain_id` sidecar."""
+    return _rpc("tenzro_caip2")
+
+
+def caip10(address: str) -> dict:
+    """Get the CAIP-10 account id for a Tenzro address.
+    Accepts hex or base58btc on input; normalises to canonical 64-hex."""
+    return _rpc("tenzro_caip10", {"address": address})
+
+
+def caip19(kind: str, token_id: str = None, collection_id: str = None,
+           nft_token_id: str = None) -> dict:
+    """Get the CAIP-19 asset id.
+    kind: 'slip44' (native TNZO, SLIP-44 coin index 1414421071),
+          'token' (Tenzro token registry id),
+          'nft' (collection id + nft_token_id).
+    """
+    params = {"kind": kind}
+    if token_id:
+        params["token_id"] = token_id
+    if collection_id:
+        params["collection_id"] = collection_id
+    if nft_token_id:
+        params["nft_token_id"] = nft_token_id
+    return _rpc("tenzro_caip19", params)
+
+
 # ── Tools Registry ──────────────────────────────────────────────
 
 
@@ -6093,6 +6375,162 @@ def training_get_sealed_manifest(task_id: str) -> dict:
 
 # ── CLI ───────────────────────────────────────────────────────────
 
+# ---------------------------------------------------------------------------
+# Saga workflow coordination + DID envelope verification
+# ---------------------------------------------------------------------------
+
+
+def workflow_open(workflow_id: str, orchestrator_did: str, steps_json: str) -> dict:
+    """Open a saga workflow. steps_json = JSON array of {id,executor_did?,compensation?}."""
+    return _rpc("tenzro_workflowOpen", {
+        "workflow_id": workflow_id,
+        "orchestrator_did": orchestrator_did,
+        "saga_steps": json.loads(steps_json),
+    })
+
+
+def workflow_step_execute(workflow_id: str, step_idx: int) -> dict:
+    return _rpc("tenzro_workflowStepExecute", {"workflow_id": workflow_id, "step_idx": step_idx})
+
+
+def workflow_step_verify(workflow_id: str, step_idx: int) -> dict:
+    return _rpc("tenzro_workflowStepVerify", {"workflow_id": workflow_id, "step_idx": step_idx})
+
+
+def workflow_step_compensate(workflow_id: str, step_idx: int, cascade: bool = False) -> dict:
+    return _rpc("tenzro_workflowStepCompensate", {
+        "workflow_id": workflow_id, "step_idx": step_idx, "cascade": cascade,
+    })
+
+
+def workflow_finalize(workflow_id: str) -> dict:
+    return _rpc("tenzro_workflowFinalize", {"workflow_id": workflow_id})
+
+
+def get_workflow_saga(workflow_id: str) -> dict:
+    return _rpc("tenzro_getWorkflowSaga", {"workflow_id": workflow_id})
+
+
+def verify_did_envelope(envelope_hex: str) -> dict:
+    """Verify a Tenzro DID envelope (hex header value) — did:tenzro/key/ethr/web."""
+    return _rpc("tenzro_verifyDidEnvelope", {"envelope": envelope_hex})
+
+
+# ---------------------------------------------------------------------------
+# Capital Intent + Reserve attestations (regulated capital allocation)
+# ---------------------------------------------------------------------------
+
+
+def capital_intent_open(intent: dict) -> dict:
+    """Open a Capital Intent — capital-markets analog of an AP2 Intent Mandate."""
+    return _rpc("tenzro_capitalIntentOpen", {"intent": intent})
+
+
+def capital_intent_quote(intent_id: str, solver_did: str, plan: str,
+                         price: int, eta_secs: int) -> dict:
+    return _rpc("tenzro_capitalIntentQuote", {
+        "intent_id": intent_id, "solver_did": solver_did,
+        "plan": plan, "price": price, "eta_secs": eta_secs,
+    })
+
+
+def capital_intent_assign(intent_id: str, solver_did: str = None,
+                          auto: bool = False, payer: str = None,
+                          payee: str = None) -> dict:
+    params = {"intent_id": intent_id}
+    if solver_did is not None:
+        params["solver_did"] = solver_did
+    if auto:
+        params["auto"] = True
+    if payer is not None:
+        params["payer"] = payer
+    if payee is not None:
+        params["payee"] = payee
+    return _rpc("tenzro_capitalIntentAssign", params)
+
+
+def capital_intent_execute(intent_id: str, leg: dict) -> dict:
+    return _rpc("tenzro_capitalIntentExecute", {"intent_id": intent_id, "leg": leg})
+
+
+def capital_intent_verify(intent_id: str) -> dict:
+    return _rpc("tenzro_capitalIntentVerify", {"intent_id": intent_id})
+
+
+def capital_intent_compensate(intent_id: str) -> dict:
+    return _rpc("tenzro_capitalIntentCompensate", {"intent_id": intent_id})
+
+
+def capital_intent_settle(intent_id: str, payee: str = None) -> dict:
+    params = {"intent_id": intent_id}
+    if payee is not None:
+        params["payee"] = payee
+    return _rpc("tenzro_capitalIntentSettle", params)
+
+
+def get_capital_intent(intent_id: str) -> dict:
+    return _rpc("tenzro_getCapitalIntent", {"intent_id": intent_id})
+
+
+def submit_reserve_attestation(attestation: dict) -> dict:
+    return _rpc("tenzro_submitReserveAttestation", {"attestation": attestation})
+
+
+def get_reserve(asset_id: str) -> dict:
+    return _rpc("tenzro_getReserve", {"asset_id": asset_id})
+
+
+def attested_mint(token_id: str, to: str, amount: str, caller: str) -> dict:
+    """1:1 backed token mint, gated by a fresh reserve attestation."""
+    return _rpc("tenzro_attestedMint", {
+        "token_id": token_id, "to": to, "amount": amount, "caller": caller,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Workflow durable reads (extends the saga write surface above)
+# ---------------------------------------------------------------------------
+
+
+def get_workflow(workflow_id: str) -> dict:
+    return _rpc("tenzro_getWorkflow", {"workflow_id": workflow_id})
+
+
+def get_workflow_lifecycle(workflow_id: str) -> dict:
+    return _rpc("tenzro_getWorkflowLifecycle", {"workflow_id": workflow_id})
+
+
+def get_workflow_receipt(workflow_id: str) -> dict:
+    return _rpc("tenzro_getWorkflowReceipt", {"workflow_id": workflow_id})
+
+
+def get_workflow_operational_metrics(workflow_id: str) -> dict:
+    return _rpc("tenzro_getWorkflowOperationalMetrics", {"workflow_id": workflow_id})
+
+
+def list_workflow_receipts(limit: int = None) -> dict:
+    params = {}
+    if limit is not None:
+        params["limit"] = limit
+    return _rpc("tenzro_listWorkflowReceipts", params)
+
+
+def list_workflows_by_creator(creator_did: str) -> dict:
+    return _rpc("tenzro_listWorkflowsByCreator", {"creator_did": creator_did})
+
+
+def list_workflows_by_participant(participant_did: str) -> dict:
+    return _rpc("tenzro_listWorkflowsByParticipant", {"participant_did": participant_did})
+
+
+def list_workflows_by_status(status: str) -> dict:
+    return _rpc("tenzro_listWorkflowsByStatus", {"status": status})
+
+
+def mirror_workflow_to_canton(workflow_id: str) -> dict:
+    return _rpc("tenzro_mirrorWorkflowToCanton", {"workflow_id": workflow_id})
+
+
 COMMANDS = {
     # Wallet & Balance
     "join_network": lambda args: join_as_micro_node(
@@ -6108,6 +6546,47 @@ COMMANDS = {
         int(args[2]),
     ),
     "faucet": lambda args: request_faucet(args[0]),
+    # Saga workflows + DID envelope verification
+    "workflow_open": lambda args: workflow_open(args[0], args[1], args[2]),
+    "workflow_execute": lambda args: workflow_step_execute(args[0], int(args[1])),
+    "workflow_verify": lambda args: workflow_step_verify(args[0], int(args[1])),
+    "workflow_compensate": lambda args: workflow_step_compensate(
+        args[0], int(args[1]), len(args) > 2 and args[2].lower() in ("1", "true", "yes")
+    ),
+    "workflow_finalize": lambda args: workflow_finalize(args[0]),
+    "get_workflow": lambda args: get_workflow(args[0]),
+    "get_workflow_saga": lambda args: get_workflow_saga(args[0]),
+    "get_workflow_lifecycle": lambda args: get_workflow_lifecycle(args[0]),
+    "get_workflow_receipt": lambda args: get_workflow_receipt(args[0]),
+    "get_workflow_metrics": lambda args: get_workflow_operational_metrics(args[0]),
+    "list_workflow_receipts": lambda args: list_workflow_receipts(int(args[0]) if args else None),
+    "list_workflows_by_creator": lambda args: list_workflows_by_creator(args[0]),
+    "list_workflows_by_participant": lambda args: list_workflows_by_participant(args[0]),
+    "list_workflows_by_status": lambda args: list_workflows_by_status(args[0]),
+    "mirror_workflow_to_canton": lambda args: mirror_workflow_to_canton(args[0]),
+    "verify_envelope": lambda args: verify_did_envelope(args[0]),
+    # Capital Intent (regulated capital allocation) + Reserve attestations
+    "capital_intent_open": lambda args: capital_intent_open(json.loads(args[0])),
+    "capital_intent_quote": lambda args: capital_intent_quote(
+        args[0], args[1], args[2], int(args[3]), int(args[4])
+    ),
+    "capital_intent_assign": lambda args: capital_intent_assign(
+        args[0],
+        solver_did=(args[1] if len(args) > 1 and args[1] else None),
+        auto=(len(args) > 2 and args[2].lower() in ("1", "true", "yes")),
+        payer=(args[3] if len(args) > 3 and args[3] else None),
+        payee=(args[4] if len(args) > 4 and args[4] else None),
+    ),
+    "capital_intent_execute": lambda args: capital_intent_execute(args[0], json.loads(args[1])),
+    "capital_intent_verify": lambda args: capital_intent_verify(args[0]),
+    "capital_intent_compensate": lambda args: capital_intent_compensate(args[0]),
+    "capital_intent_settle": lambda args: capital_intent_settle(
+        args[0], payee=(args[1] if len(args) > 1 and args[1] else None)
+    ),
+    "get_capital_intent": lambda args: get_capital_intent(args[0]),
+    "submit_reserve_attestation": lambda args: submit_reserve_attestation(json.loads(args[0])),
+    "get_reserve": lambda args: get_reserve(args[0]),
+    "attested_mint": lambda args: attested_mint(args[0], args[1], args[2], args[3]),
     # Node Status
     "status": lambda args: get_status(),
     "health": lambda args: get_health(),
@@ -6553,6 +7032,73 @@ COMMANDS = {
     "eip7702_build_designator": lambda args: eip7702_build_designator(args[0]),
     "eip7702_parse_designator": lambda args: eip7702_parse_designator(args[0]),
     "eip7702_protocol_info": lambda args: eip7702_protocol_info(),
+    # ── Permit2 ──
+    "permit2_domain_separator": lambda args: permit2_domain_separator(int(args[0])),
+    "permit2_digest": lambda args: permit2_digest(
+        int(args[0]), args[1], args[2], args[3], args[4], args[5], int(args[6]),
+        args[7] if len(args) > 7 else None,
+        args[8] if len(args) > 8 else None,
+    ),
+    "permit2_verify_and_consume": lambda args: permit2_verify_and_consume(
+        int(args[0]), args[1], args[2], args[3], args[4], args[5], int(args[6]), args[7],
+        args[8] if len(args) > 8 else None,
+        args[9] if len(args) > 9 else None,
+    ),
+    "permit2_nonce_used": lambda args: permit2_nonce_used(args[0], args[1]),
+    # ── Secure-Mint ──
+    "set_secure_mint_policy": lambda args: set_secure_mint_policy(
+        args[0], args[1], args[2], args[3], args[4], int(args[5]), int(args[6]),
+        args[7] if len(args) > 7 else None,
+    ),
+    "get_secure_mint_policy": lambda args: get_secure_mint_policy(args[0]),
+    "clear_secure_mint_policy": lambda args: clear_secure_mint_policy(args[0]),
+    "secure_mint_check": lambda args: secure_mint_check(args[0], args[1]),
+    "secure_mint_apply": lambda args: secure_mint_apply(args[0], args[1]),
+    "secure_mint_record_burn": lambda args: secure_mint_record_burn(args[0], args[1]),
+    # ── Hyperlane ──
+    "hyperlane_list_chains": lambda args: hyperlane_list_chains(),
+    "hyperlane_quote_dispatch": lambda args: hyperlane_quote_dispatch(
+        int(args[0]), int(args[1]), args[2], args[3],
+        args[4] if len(args) > 4 else None,
+        args[5] if len(args) > 5 else None,
+    ),
+    "hyperlane_dispatch": lambda args: hyperlane_dispatch(
+        int(args[0]), int(args[1]), args[2], args[3],
+        args[4] if len(args) > 4 else None,
+        args[5] if len(args) > 5 else None,
+    ),
+    "hyperlane_get_message": lambda args: hyperlane_get_message(args[0]),
+    # ── Axelar ──
+    "axelar_list_chains": lambda args: axelar_list_chains(),
+    "axelar_call_contract": lambda args: axelar_call_contract(
+        args[0], args[1], args[2], args[3],
+        args[4] if len(args) > 4 else None,
+        args[5] if len(args) > 5 else None,
+    ),
+    "axelar_pay_gas": lambda args: axelar_pay_gas(
+        args[0], args[1], args[2], args[3], args[4], args[5],
+    ),
+    "axelar_get_message": lambda args: axelar_get_message(args[0]),
+    # ── Babylon ──
+    "babylon_register_finality_provider": lambda args: babylon_register_finality_provider(
+        args[0], args[1], int(args[2]),
+    ),
+    "babylon_get_finality_provider": lambda args: babylon_get_finality_provider(args[0]),
+    "babylon_list_finality_providers": lambda args: babylon_list_finality_providers(),
+    "babylon_total_stake_for_provider": lambda args: babylon_total_stake_for_provider(args[0]),
+    "babylon_submit_finality_signature": lambda args: babylon_submit_finality_signature(
+        args[0], args[1], args[2],
+    ),
+    "babylon_list_delegations": lambda args: babylon_list_delegations(args[0]),
+    # ── CAIP discovery ──
+    "caip2": lambda args: caip2(),
+    "caip10": lambda args: caip10(args[0]),
+    "caip19": lambda args: caip19(
+        args[0],
+        args[1] if len(args) > 1 else None,
+        args[2] if len(args) > 2 else None,
+        args[3] if len(args) > 3 else None,
+    ),
     # ── Ecosystem: Solana ──
     "solana_swap": lambda args: solana_swap(
         args[0], args[1], int(args[2]),

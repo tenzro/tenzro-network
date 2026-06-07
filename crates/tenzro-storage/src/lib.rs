@@ -64,7 +64,7 @@ pub use account_store::{AccountStoreImpl, StateStoreImpl};
 pub use snapshot::{Snapshot, SnapshotManager, SnapshotMetadata, CompressionType, SnapshotRestorer, RestoredState, SnapshotEntry, serialize_snapshot_entries};
 pub use da::{
     compute_commitment, DaBackend, DaBackendId, DaBackendStatus, DaPointer, InlineFallbackBackend,
-    ReceiptEnvelope, ReceiptKind, ReceiptStorageMode, ReceiptSummary,
+    MandateRef, ReceiptEnvelope, ReceiptKind, ReceiptStorageMode, ReceiptSummary,
 };
 #[cfg(feature = "celestia")]
 pub use da::CelestiaBackend;

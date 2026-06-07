@@ -639,6 +639,21 @@ pub enum ExecutionStep {
         instruction_data_template: String,
     },
 
+    /// Invoke an arbitrary node JSON-RPC method with the agent's DPoP
+    /// credentials. Covers the saga `tenzro_workflow*` family, the task
+    /// lifecycle (`tenzro_postTask` / `tenzro_completeTask` / …),
+    /// `tenzro_verifyDidEnvelope`, and any other RPC the node exposes — the
+    /// runtime's general escape hatch so agent templates can drive newly-added
+    /// surfaces without a bespoke step kind. `params` is a JSON template with
+    /// `{{var}}` substitution against the agent context.
+    NodeRpc {
+        /// JSON-RPC method name (e.g. `"tenzro_workflowOpen"`).
+        method: String,
+        /// Params object/array template; `{{var}}`-substituted at run time.
+        #[serde(default)]
+        params: serde_json::Value,
+    },
+
     /// Move tokens across chains via `BridgeRouter::compare_fees` →
     /// pick the chosen route → call the winning adapter.
     BridgeTransfer {

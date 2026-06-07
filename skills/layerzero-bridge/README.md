@@ -1,6 +1,6 @@
 # Tenzro LayerZero MCP Server
 
-The most complete LayerZero V2 MCP server available. **20 tools** covering every LayerZero integration surface: low-level EndpointV2 messaging, OFT token transfers, Stargate V2 native bridging, and the new Value Transfer API.
+The most complete LayerZero V2 MCP server available. **21 tools** covering every LayerZero integration surface: low-level EndpointV2 messaging, OFT token transfers, Stargate V2 native bridging, and the new Value Transfer API.
 
 ## Quick Start
 

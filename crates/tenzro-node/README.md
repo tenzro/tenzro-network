@@ -12,9 +12,9 @@ The `tenzro-node` crate provides the complete node binary that integrates all Te
 - **Modular Architecture**: Clean separation of concerns across subsystems
 - **Health Monitoring**: Real-time health tracking for all subsystems
 - **Metrics Collection**: Performance metrics and statistics
-- **JSON-RPC API**: Standard API for querying and interacting with the node (350+ methods across 26+ namespaces: blockchain, EVM-compat, accounts, token, models, inference, forecast, vision, text-embedding, segmentation, detection, audio, video, settlement, escrow, agents, identity, network, governance, payments, ap2, staking, canton, task marketplace, agent marketplace, token registry, bridge/crosschain, deBridge, wormhole, cct, erc8004, NFT, compliance, events, TEE, ZK, VRF, skill/tool registry, onboarding)
-- **MCP Server**: Model Context Protocol server with 200+ tools (base + 24 multi-modal AI + 3 AgentBond/insurance) on `rmcp` Streamable HTTP transport at `/mcp`, port 3001
-- **A2A Server**: Agent-to-Agent protocol server with 33 skills (JSON-RPC 2.0, SSE streaming, Agent Card at port 3002)
+- **JSON-RPC API**: Standard API for querying and interacting with the node (470+ methods across 26+ namespaces: blockchain, EVM-compat, accounts, token, models, inference, forecast, vision, text-embedding, segmentation, detection, audio, video, settlement, escrow, agents, identity, network, governance, payments, ap2, staking, canton, task marketplace, agent marketplace, token registry, bridge/crosschain, deBridge, wormhole, cct, erc8004, NFT, compliance, events, TEE, ZK, VRF, skill/tool registry, onboarding)
+- **MCP Server**: Model Context Protocol server with 331 tools (base + 29 multi-modal AI + 3 AgentBond/insurance + 3 agent-memory) on `rmcp` Streamable HTTP transport at `/mcp`, port 3001
+- **A2A Server**: Agent-to-Agent protocol server with 41 skills (JSON-RPC 2.0, SSE streaming, Agent Card at port 3002)
 - **Web Verification API**: REST endpoints for ZK proof, TEE attestation, and transaction verification (port 8080)
 - **Graceful Shutdown**: Clean shutdown sequence for all subsystems
 - **TEE Integration**: Optional Trusted Execution Environment support (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU)
@@ -75,7 +75,7 @@ OPTIONS:
     -l, --listen-addr <ADDR>    Network listen address
     -b, --boot-nodes <NODES>    Bootstrap nodes (comma-separated multiaddrs)
         --log-level <LEVEL>     Log level [default: info]
-        --rpc-addr <ADDR>       RPC listen address [default: 127.0.0.1:8545]
+        --rpc-addr <ADDR>       RPC listen address [default: 0.0.0.0:8545]
         --web-addr <ADDR>       Web API listen address [default: 0.0.0.0:8080]
         --mcp-addr <ADDR>       MCP server listen address [default: 0.0.0.0:3001]
         --a2a-addr <ADDR>       A2A server listen address [default: 0.0.0.0:3002]
@@ -99,7 +99,7 @@ Create a configuration file (config.toml):
 role = "Validator"
 data_dir = "./data/validator"
 log_level = "info"
-rpc_addr = "127.0.0.1:8545"
+rpc_addr = "0.0.0.0:8545"
 web_addr = "0.0.0.0:8080"
 mcp_addr = "0.0.0.0:3001"
 a2a_addr = "0.0.0.0:3002"
@@ -146,9 +146,9 @@ Shutdown occurs in reverse order to ensure clean resource cleanup.
 
 ## JSON-RPC API
 
-The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0.1:8545`).
+The node exposes a JSON-RPC API on the configured RPC address (default: `0.0.0.0:8545`).
 
-### RPC Namespaces (350+ methods, 26+ namespaces)
+### RPC Namespaces (470+ methods, 26+ namespaces)
 
 - **Blockchain**: blockNumber, getBlock, getBlockRange (batch fetch for catch-up sync), getTransaction (returns `status: "pending" | "finalized"` so callers can distinguish in-mempool from block-included transactions), submitBlock
 - **Accounts**: createAccount, createWallet (chain-agnostic — see "Wallet model" below), getBalance, getNonce, listAccounts
@@ -259,7 +259,7 @@ The node runs a built-in [Model Context Protocol](https://modelcontextprotocol.i
 
 ### Available Tools (200+)
 
-The main Tenzro MCP server registers 200+ tools (base + 24 multi-modal AI + 3 AgentBond/insurance: `post_agent_bond`, `get_agent_bond`, `file_insurance_claim`) across wallet, identity, payments, inference, multi-modal AI (forecast, vision, text-embed, segment, detect, transcribe, video), staking, tokens, NFTs, bridges, cross-chain, deBridge, Li.Fi, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, events, and administrative categories. The table below lists representative tools — consult `crates/tenzro-node/src/mcp/server.rs` for the complete authoritative inventory.
+The main Tenzro MCP server registers 331 tools (base + 29 multi-modal AI + 3 AgentBond/insurance: `post_agent_bond`, `get_agent_bond`, `file_insurance_claim` + 3 agent-memory: `memory_grant`, `memory_recall`, `memory_archive`) across wallet, identity, payments, inference, multi-modal AI (forecast, vision, text-embed, segment, detect, transcribe, video), staking, tokens, NFTs, bridges, cross-chain, deBridge, Li.Fi, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, events, and administrative categories. The table below lists representative tools — consult `crates/tenzro-node/src/mcp/server.rs` for the complete authoritative inventory.
 
 | Category | Representative Tools |
 |----------|----------------------|
@@ -339,10 +339,10 @@ Five additional MCP servers provide direct blockchain interaction:
 | Server | Port | Description |
 |--------|------|-------------|
 | Solana MCP | 3003 | 14 tools: Jupiter, SPL, Metaplex, Bonfida SNS |
-| Ethereum MCP | 3004 | 16 tools: Chainlink, ENS, ERC-20, ERC-8004, EAS |
-| Canton MCP | 3005 | 14 tools: DAML, CIP-56, DvP, tokenization |
-| LayerZero MCP | 3006 | 20 tools: V2 messaging, OFT, Value Transfer API, Stargate V2 |
-| Chainlink MCP | 3007 | 20 tools: CCIP, data feeds, VRF v2.5, PoR, automation |
+| Ethereum MCP | 3004 | 17 tools: Chainlink, ENS, ERC-20, ERC-8004, EAS |
+| Canton MCP | 3005 | 15 tools: DAML, CIP-56, DvP, tokenization |
+| LayerZero MCP | 3006 | 21 tools: V2 messaging, OFT, Value Transfer API, Stargate V2 |
+| Chainlink MCP | 3007 | 21 tools: CCIP, data feeds, VRF v2.5, PoR, automation |
 | LI.FI MCP | 3008 | Cross-chain bridge aggregation |
 
 ## Health & Metrics

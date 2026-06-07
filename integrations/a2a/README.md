@@ -112,7 +112,7 @@ local tip against peer-reported network tips (gossiped on
 
 ## Agent Skills
 
-The Tenzro A2A agent exposes 40 skills covering blockchain, AI, identity, payments, lifecycle, bonds, and agent orchestration. The Agent Card at `tenzro_a2a_server/agent_card.py` is the authoritative source for skill IDs and descriptions.
+The Tenzro A2A agent exposes 49 skills covering blockchain, AI, identity, payments, lifecycle, bonds, capital markets, multi-party workflows, EVM primitives, cross-chain reach, BTC-secured staking, chain-agnostic discovery, and agent orchestration. The Agent Card at `tenzro_a2a_server/agent_card.py` is the authoritative source for skill IDs and descriptions.
 
 ### Core Blockchain
 
@@ -332,7 +332,7 @@ TENZRO_RPC_URL=http://localhost:8545 tenzro-a2a-server --port 3002
 ### Test the server
 
 ```bash
-curl https://localhost:3002/.well-known/agent.json
+curl http://localhost:3002/.well-known/agent.json
 ```
 
 ## Configuration

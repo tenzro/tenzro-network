@@ -86,7 +86,7 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 
 **AI Models & Inference:** `list_models`, `chat`, `inference_request`, `serve_model`, `stop_model`, `download_model`, `list_model_endpoints`
 
-**Multi-Modal Inference (19 wrappers across 7 modalities):**
+**Multi-Modal Inference (17 wrappers across 7 modalities):**
 - **Forecast** — `list_forecast_catalog`, `list_forecast_models`, `load_forecast_model`, `forecast` (TimesFM 2.5)
 - **Vision** — `list_vision_catalog`, `vision_embed`, `vision_similarity` (CLIP, SigLIP2, DINOv3)
 - **Text Embedding** — `list_text_embedding_catalog`, `text_embed` (Qwen3-Embedding, EmbeddingGemma, BGE-M3, Snowflake Arctic)
@@ -103,7 +103,17 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 
 **Settlement & Payments:** `settle`, `get_settlement`, `create_escrow`, `release_escrow`, `refund_escrow`, `get_escrow`, `open_payment_channel`, `pay_mpp`, `pay_x402` — escrow `create`/`release`/`refund` are signed `CreateEscrow`/`ReleaseEscrow`/`RefundEscrow` transactions submitted via `tenzro_signAndSendTransaction` (consensus-mediated, payer-only authorization)
 
-**Bridge & Cross-Chain:** `bridge_tokens`, `bridge_quote`, `get_bridge_routes`, `list_bridge_adapters`
+**Bridge & Cross-Chain:** `bridge_tokens`, `bridge_quote`, `get_bridge_routes`, `list_bridge_adapters`. Adapter coverage spans LayerZero V2, Chainlink CCIP, deBridge DLN, Li.Fi aggregator, Wormhole NTT, Canton, Hyperlane V3 (sovereign Tenzro-validator-set ISM), Axelar GMP (Cosmos / Move / Stellar reach), and Babylon (Bitcoin staking finality-providers).
+
+**Capital Intent (regulated capital allocation):** `capital_intent_open`, `capital_intent_quote`, `capital_intent_assign`, `capital_intent_execute`, `capital_intent_verify`, `capital_intent_compensate`, `capital_intent_settle`, `get_capital_intent`, `submit_reserve_attestation`, `get_reserve`, `attested_mint`.
+
+**Multi-party Workflows (saga + AP2 / x402 / MPP mandate binding):** `workflow_open`, `workflow_step_execute`, `workflow_step_verify`, `workflow_step_compensate`, `workflow_finalize`, `workflow_mirror_to_canton`, `verify_did_envelope`, `get_workflow`, `get_workflow_saga`, `get_workflow_lifecycle`, `get_workflow_receipt`, `get_workflow_operational_metrics`, `list_workflows_by_creator`, `list_workflows_by_participant`, `list_workflows_by_status`, `list_workflow_receipts`.
+
+**EVM Primitives (EIP-7702 / Permit2 / Secure-Mint):** `install_7702_delegation`, `get_7702_delegation`, `revoke_7702_delegation` (Pectra Type-4 delegation registry); `permit2_domain_separator`, `permit2_digest`, `permit2_verify_and_consume`, `permit2_nonce_used` (Permit2 `SignatureTransfer` with optional witness binding for ERC-7683 origin opens); `set_secure_mint_policy`, `get_secure_mint_policy`, `clear_secure_mint_policy`, `secure_mint_check`, `secure_mint_apply`, `secure_mint_record_burn` (per-token 1:1 reserve-attestation invariant for tokenized RWAs).
+
+**ERC-7683 Cross-Chain Intents:** `open_7683_order`, `get_7683_order`, `list_7683_orders`, `record_fill_7683`, `get_fill_7683`, `list_fills_7683`.
+
+**CAIP Discovery:** `caip2`, `caip10`, `caip19` — Tenzro CAIP namespace identifiers (`ChainAgnostic/namespaces#184`). CAIP-2 reference is the lowercase hex of the first 16 bytes of the genesis block hash; CAIP-19 supports `slip44` (SLIP-44 coin index 1414421071), `token`, and `nft` asset namespaces.
 
 **AgentBond & Insurance (Spec 9):** `post_agent_bond`, `increase_agent_bond`, `withdraw_agent_bond`, `get_agent_bond`, `list_agent_bonds`, `file_insurance_claim`, `get_insurance_claim`, `list_insurance_claims`, `get_insurance_pool`
 
@@ -119,13 +129,13 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 
 **Solana (14 tools):** `solana_swap`, `solana_get_price`, `solana_stake`, `solana_get_yield`, `solana_get_balance`, `solana_get_token_accounts`, `solana_transfer`, `solana_get_token_info`, `solana_get_nft`, `solana_get_nfts_by_owner`, `solana_get_slot`, `solana_get_tps`, `solana_get_transaction`, `solana_resolve_domain`
 
-**Ethereum (16 tools):** `eth_get_price_chainlink`, `eth_get_gas_price_ext`, `eth_estimate_gas_ext`, `eth_get_fee_history`, `eth_get_erc20_balance`, `eth_get_tx`, `eth_get_block_info`, `eth_get_receipt`, `eth_resolve_ens`, `eth_lookup_ens`, `eth_call_contract`, `eth_encode_function`, `eth_register_agent_8004`, `eth_lookup_agent_8004`, `eth_get_attestation`
+**Ethereum (17 tools):** `eth_get_price_chainlink`, `eth_get_gas_price_ext`, `eth_estimate_gas_ext`, `eth_get_fee_history`, `eth_get_erc20_balance`, `eth_get_tx`, `eth_get_block_info`, `eth_get_receipt`, `eth_resolve_ens`, `eth_lookup_ens`, `eth_call_contract`, `eth_encode_function`, `eth_register_agent_8004`, `eth_lookup_agent_8004`, `eth_get_attestation`
 
-**LayerZero (20 tools):** `lz_quote_fee`, `lz_send_message`, `lz_track_message`, `lz_get_message`, `lz_oft_quote`, `lz_oft_send`, `lz_oft_list`, `lz_encode_options`, `lz_transfer_quote`, `lz_transfer_build`, `lz_transfer_status`, `lz_transfer_chains`, `lz_transfer_tokens`, `lz_stargate_quote`, `lz_stargate_send`, `lz_get_deployments`, `lz_list_dvns`, `lz_get_messages_by_address`, `lz_list_chains`, `lz_get_chain_rpc`
+**LayerZero (21 tools):** `lz_quote_fee`, `lz_send_message`, `lz_track_message`, `lz_get_message`, `lz_oft_quote`, `lz_oft_send`, `lz_oft_list`, `lz_encode_options`, `lz_transfer_quote`, `lz_transfer_build`, `lz_transfer_status`, `lz_transfer_chains`, `lz_transfer_tokens`, `lz_stargate_quote`, `lz_stargate_send`, `lz_get_deployments`, `lz_list_dvns`, `lz_get_messages_by_address`, `lz_list_chains`, `lz_get_chain_rpc`
 
-**Chainlink (20 tools):** `ccip_get_fee`, `ccip_send_message`, `ccip_track_message`, `ccip_get_supported_chains`, `ccip_get_supported_tokens`, `ccip_get_lanes`, `ccip_get_token_pool`, `ccip_get_rate_limits`, `chainlink_get_price`, `chainlink_list_feeds`, `ds_get_report`, `ds_list_feeds`, `vrf_request_random`, `vrf_get_subscription`, `por_get_reserve`, `por_list_feeds`, `chainlink_check_upkeep`, `chainlink_get_upkeep_info`, `chainlink_estimate_functions_cost`, `chainlink_get_subscription`
+**Chainlink (21 tools):** `ccip_get_fee`, `ccip_send_message`, `ccip_track_message`, `ccip_get_supported_chains`, `ccip_get_supported_tokens`, `ccip_get_lanes`, `ccip_get_token_pool`, `ccip_get_rate_limits`, `chainlink_get_price`, `chainlink_list_feeds`, `ds_get_report`, `ds_list_feeds`, `vrf_request_random`, `vrf_get_subscription`, `por_get_reserve`, `por_list_feeds`, `chainlink_check_upkeep`, `chainlink_get_upkeep_info`, `chainlink_estimate_functions_cost`, `chainlink_get_subscription`
 
-**Canton (14 tools):** `canton_submit_command`, `canton_list_contracts`, `canton_get_events`, `canton_get_transaction`, `canton_allocate_party`, `canton_list_parties`, `canton_list_domains_ext`, `canton_get_health`, `canton_get_balance_ext`, `canton_transfer`, `canton_create_asset`, `canton_dvp_settle`, `canton_upload_dar`, `canton_get_fee_schedule`
+**Canton (15 tools):** `canton_submit_command`, `canton_list_contracts`, `canton_get_events`, `canton_get_transaction`, `canton_allocate_party`, `canton_list_parties`, `canton_list_domains_ext`, `canton_get_health`, `canton_get_balance_ext`, `canton_transfer`, `canton_create_asset`, `canton_dvp_settle`, `canton_upload_dar`, `canton_get_fee_schedule`
 
 **Li.Fi (9 tools):** `lifi_get_quote`, `lifi_get_routes`, `lifi_get_status`, `lifi_get_chains`, `lifi_get_tokens`, `lifi_get_connections`, `lifi_get_tools`, `lifi_get_token_balance`, `lifi_execute_route`
 

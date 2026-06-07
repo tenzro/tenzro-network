@@ -12,7 +12,7 @@ Ethereum ecosystem skill for the Tenzro Network. Backed by the Tenzro Ethereum M
 | Local endpoint | `http://localhost:3004/mcp` |
 | Transport | Streamable HTTP |
 
-## Tools (16)
+## Tools (17)
 
 `eth_get_price` (Chainlink feeds), `eth_get_gas_price`, `eth_estimate_gas`, `eth_get_fee_history`, `eth_get_balance`, `eth_get_token_balance` (ERC-20), `eth_get_transaction`, `eth_get_block`, `eth_get_transaction_receipt`, `eth_resolve_ens`, `eth_lookup_ens`, `eth_call_contract`, `eth_encode_function` (ABI encoding), `eth_register_agent_8004`, `eth_lookup_agent_8004` (ERC-8004), `eth_get_attestation` (EAS).
 

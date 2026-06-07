@@ -25,12 +25,14 @@ use commands::{
     DetectCommand, EmbedTextCommand, EmbedVideoCommand, SegmentCommand, TextSegmentCommand,
     TranscribeCommand,
     AuthCommand,
-    X402Command, ReputationCommand, ApprovalCommand, DisputeCommand, ProvenanceCommand,
+    X402Command, ReputationCommand, ApprovalCommand, DisputeCommand, InteropCommand, CapitalCommand, ProvenanceCommand,
     BondCommand, InsuranceCommand, CapabilityCommand,
     ValidatorCommand, MemoryCommand, IrohCommand,
     AdaptiveBurnCommand, SeedAgentCommand, Erc7683Command, Erc7579Command, PqHybridCommand,
     AdminCommand,
     KeyCommand,
+    WorkflowCommand, Eip7702Command, Permit2Command, SecureMintCommand,
+    HyperlaneCommand, AxelarCommand, BabylonCommand, CaipCommand,
 };
 
 /// Tenzro Network CLI — node operation, wallet management, provider tools
@@ -263,6 +265,14 @@ enum Command {
     #[command(subcommand)]
     Dispute(DisputeCommand),
 
+    /// Agent interop: saga workflows + DID envelope verification
+    #[command(subcommand)]
+    Interop(InteropCommand),
+
+    /// Capital Intent: agentic capital allocation over tokenized assets
+    #[command(subcommand)]
+    Capital(CapitalCommand),
+
     /// C2PA-style content provenance manifests (EU AI Act §50(2))
     #[command(subcommand)]
     Provenance(ProvenanceCommand),
@@ -318,6 +328,38 @@ enum Command {
     /// Self-managed API keys: list-mine / revoke-mine (subject-gated via `X-Tenzro-Api-Key`)
     #[command(subcommand)]
     Key(KeyCommand),
+
+    /// Multi-party saga workflows: open / step / verify / compensate / finalize / mirror-to-canton / verify-did-envelope
+    #[command(subcommand)]
+    Workflow(WorkflowCommand),
+
+    /// EIP-7702 (Set EOA Account Code) helpers: signing-hash / build-designator / parse-designator / protocol-info
+    #[command(subcommand)]
+    Eip7702(Eip7702Command),
+
+    /// Permit2 SignatureTransfer: domain-separator / digest / verify-and-consume / nonce-used
+    #[command(subcommand)]
+    Permit2(Permit2Command),
+
+    /// Secure-Mint registry: set-policy / get-policy / clear-policy / check / apply / record-burn
+    #[command(subcommand)]
+    SecureMint(SecureMintCommand),
+
+    /// Hyperlane V3 messaging with sovereign Tenzro-ISM: list-chains / dispatch / quote-dispatch / get-message
+    #[command(subcommand)]
+    Hyperlane(HyperlaneCommand),
+
+    /// Axelar GMP cross-chain calls: list-chains / call-contract / pay-gas / get-message
+    #[command(subcommand)]
+    Axelar(AxelarCommand),
+
+    /// Babylon Bitcoin staking finality providers: register / list / submit / total-stake / delegations
+    #[command(subcommand)]
+    Babylon(BabylonCommand),
+
+    /// CAIP discovery (`ChainAgnostic/namespaces#184`): caip2 / caip10 / caip19
+    #[command(subcommand)]
+    Caip(CaipCommand),
 
     /// Interactive chat with AI models
     Chat(ChatCmd),
@@ -467,6 +509,8 @@ async fn main() -> Result<()> {
         Command::Reputation(cmd) => cmd.execute().await?,
         Command::Approval(cmd) => cmd.execute().await?,
         Command::Dispute(cmd) => cmd.execute().await?,
+        Command::Interop(cmd) => cmd.execute().await?,
+        Command::Capital(cmd) => cmd.execute().await?,
         Command::Provenance(cmd) => cmd.execute().await?,
         Command::Bond(cmd) => cmd.execute().await?,
         Command::Insurance(cmd) => cmd.execute().await?,
@@ -481,6 +525,14 @@ async fn main() -> Result<()> {
         Command::PqHybrid(cmd) => cmd.execute().await?,
         Command::Admin(cmd) => cmd.execute().await?,
         Command::Key(cmd) => cmd.execute().await?,
+        Command::Workflow(cmd) => cmd.execute().await?,
+        Command::Eip7702(cmd) => cmd.execute().await?,
+        Command::Permit2(cmd) => cmd.execute().await?,
+        Command::SecureMint(cmd) => cmd.execute().await?,
+        Command::Hyperlane(cmd) => cmd.execute().await?,
+        Command::Axelar(cmd) => cmd.execute().await?,
+        Command::Babylon(cmd) => cmd.execute().await?,
+        Command::Caip(cmd) => cmd.execute().await?,
         Command::Faucet(cmd) => execute_faucet(cmd).await?,
         Command::Chat(cmd) => execute_chat(cmd).await?,
         Command::Hardware(cmd) => commands::hardware::execute(&cmd.format).await?,

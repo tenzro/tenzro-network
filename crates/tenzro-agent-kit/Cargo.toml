@@ -45,5 +45,17 @@ uuid = { workspace = true }
 # in its `lazy_static` DEFAULT_RUNTIME which breaks under modern rustc.
 jmespath = { package = "jmespath_community", version = "0.1" }
 
+# Optional WASI 0.2 component host for sandboxed agent skills.
+tenzro-wasm = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enable the sandboxed WASI 0.2 component runtime for agent skills.
+# When enabled, `SkillTemplate` entries with `runtime: "agent-skill"`
+# are dispatched through `tenzro-wasm::SkillRuntime` instead of the
+# native Rust / Python paths.
+wasi-skills = ["dep:tenzro-wasm", "dep:bytes"]
+
 [dev-dependencies]
 tokio = { workspace = true }

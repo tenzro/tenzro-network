@@ -8,7 +8,7 @@ Cryptographic primitives for the Tenzro Network.
 
 ## Modules
 
-**9 modules:** bls, encryption, error, frost, hash, keys, rng, signatures, vrf
+**13 modules:** bls, composite, encryption, error, frost, hash, keys, p256, pq, rng, signatures, vrf, webauthn
 
 ### Key Generation
 - `KeyPair` - Ed25519 and Secp256k1 key pair generation

@@ -812,7 +812,7 @@ Native TNZO gas is the default rail. Stablecoin paymasters provide a second rail
 
 ### 10. AgentBond Surety + Insurance Pool
 
-Every autonomous agent posts a slashable TNZO bond at registration. Bonds are released through the same `DelegationScope` / `IdentityRegistry::enforce_operation` path that bounds spending, with a governance-controlled minimum. Slashed bonds flow into an on-chain insurance pool that pays out on file-able claims — typed as `tenzro_postAgentBond`, `tenzro_getAgentBond`, and `tenzro_fileInsuranceClaim` on the JSON-RPC, MCP, and A2A surfaces. This puts the cost of bad agent behavior onto the agent itself, while making victims whole from a pool funded by misbehavior — closing the externality that classical staking-only systems leave open.
+Every autonomous agent posts a slashable TNZO bond at registration. Bonds are released through the same `DelegationScope` / `IdentityRegistry::enforce_operation` path that bounds spending, with a governance-controlled minimum. Bond posts and increases flow through signed `PostAgentBond` / `IncreaseAgentBond` typed transactions; reads (`tenzro_getAgentBond`, `tenzro_listAgentBondsByController`) and claims (`tenzro_fileInsuranceClaim`) are JSON-RPC, MCP, and A2A surfaces. Slashed bonds flow into an on-chain insurance pool that pays out on file-able claims, putting the cost of bad agent behavior onto the agent itself while making victims whole from a pool funded by misbehavior — closing the externality that classical staking-only systems leave open.
 
 ### 11. SeedAgent Treasury Earmark
 

@@ -90,6 +90,11 @@ pub enum AgentKitError {
     #[error("auth error: {0}")]
     Auth(String),
 
+    /// Sandboxed skill execution failed (WASI component runtime). Only
+    /// emitted when the kit is built with `--features wasi-skills`.
+    #[error("sandboxed skill execution failed: {0}")]
+    ExecutionFailed(String),
+
     /// Catch-all
     #[error("agent kit error: {0}")]
     Other(String),

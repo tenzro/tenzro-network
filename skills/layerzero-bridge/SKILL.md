@@ -59,7 +59,7 @@ LayerZero is an omnichain interoperability protocol enabling cross-chain messagi
 | MegaETH | 30398 | rpc.megaeth.com |
 | Tron | 30420 | api.trongrid.io/jsonrpc |
 
-## Tools (20)
+## Tools (21)
 
 ### Messaging (4 tools)
 

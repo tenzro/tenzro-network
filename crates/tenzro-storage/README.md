@@ -8,7 +8,7 @@ The `tenzro-storage` crate provides a comprehensive storage infrastructure for t
 
 ## Features
 
-- **RocksDB Integration**: High-performance persistent storage with 28 column families
+- **RocksDB Integration**: High-performance persistent storage with 30 column families
 - **`KvStore` trait**: `get`, `put`, `delete`, `get_keys_with_prefix`, `write_batch`, `write_batch_sync` — used by upper-layer registries for write-through persistence and startup hydration
 - **Merkle Patricia Trie**: Efficient state commitment and cryptographic proof generation
 - **Block Storage**: Fast indexing and retrieval of blocks by hash and height
@@ -57,9 +57,10 @@ The storage layer uses RocksDB with the following column families:
 
 High-volume receipts (inference, agent message, channel updates) ship a commitment + pointer instead of the full payload; sensitive low-volume receipts (kill-switch, governance, escrow, lifecycle) stay inline.
 
-- `ReceiptEnvelope { kind, storage_mode, inline_summary, inline_payload, da_pointer, commitment }` - Receipts either embed the payload (`Inline`) or record a pointer to an external DA layer (`OffloadedDA`). `commitment` is always `SHA-256(canonical_payload)` regardless of mode
+- `ReceiptEnvelope { kind, storage_mode, inline_summary, inline_payload, da_pointer, commitment, mandate_ref }` - Receipts either embed the payload (`Inline`) or record a pointer to an external DA layer (`OffloadedDA`). `commitment` is always `SHA-256(canonical_payload)` regardless of mode. The optional `mandate_ref` ties the receipt to a signed off-chain mandate (AP2 cart, x402 challenge, MPP session, Stripe SPT, Visa TAP, Mastercard Agent Pay, Capital Intent, Workflow step) closing the audit loop from intent → settlement
+- `MandateRef { protocol, mandate_hash, issuer_did, mandate_uri?, expires_at }` - Reference to a signed off-chain mandate authorizing the receipt; convenience constructors `MandateRef::ap2_cart(hash, did)` and `MandateRef::x402(hash, did)`; attach via `ReceiptEnvelope::with_mandate(mandate_ref)`
 - `ReceiptKind` - `SettlementEscrow | SettlementChannel | Inference | AgentMessage | KillSwitch | Lifecycle | Governance` with per-kind `default_mode()`
-- `DaPointer { backend, namespace, locator, commitment_kzg, attestation_root }` - Reference to an external DA layer (EigenDA / Celestia / Avail)
+- `DaPointer { backend, namespace, locator, commitment_kzg, attestation_root }` - Reference to an external DA layer (IrohBlobs / EigenDA / Celestia / Avail)
 - `DaBackendId`, `DaBackendStatus`
 - `#[async_trait] DaBackend` trait - `submit` / `fetch` / `verify_availability`
 - `InlineFallbackBackend` - Safe default; refuses offload until external backends are wired behind feature flags

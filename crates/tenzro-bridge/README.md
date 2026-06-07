@@ -1,6 +1,6 @@
 # Tenzro Bridge
 
-Cross-chain bridge adapters for Tenzro Network — LayerZero, Chainlink CCIP, deBridge, Canton, Wormhole, and Chainlink CCT.
+Cross-chain bridge adapters for Tenzro Network — LayerZero V2, Chainlink CCIP + CCT, deBridge DLN, Canton, Wormhole NTT (with on-Tenzro Guardian quorum verification), Li.Fi aggregator, Hyperlane V3 (sovereign Tenzro-validator-set ISM), Axelar GMP (Cosmos / Move / Stellar reach), and Babylon Bitcoin staking (finality-providers protocol).
 
 ## Overview
 
@@ -62,6 +62,27 @@ The `tenzro-bridge` crate provides a unified interface for cross-chain interoper
 - **Security**: Aggregates execution across underlying liquidity venues
 - **Patterns**: Quote / route / execute via Li.Fi public API
 - **Best for**: Optimal-route asset swaps across heterogeneous bridges
+
+### Hyperlane V3
+- **Type**: Modular cross-chain messaging
+- **Security**: Sovereign Tenzro-validator-set ISM — Tenzro consensus has the final say over inbound message security rather than delegating to a third-party validator quorum
+- **Patterns**: Mailbox `dispatch` / `process`. Message id = `SHA-256(encoded)` over the canonical envelope `version || nonce || origin || sender || dest || recipient || body`
+- **Chains**: Ethereum, Polygon, Arbitrum, Optimism, Base, Avalanche, BSC, Celo, Moonbeam, Mantle, Blast, Scroll, Zircuit, Fraxtal, Mode, Linea, Manta, zkSync, Tenzro
+- **Best for**: Long-tail app-chain coverage at low cost
+
+### Axelar GMP
+- **Type**: General Message Passing
+- **Security**: Axelar validator network
+- **Patterns**: `callContract(destinationChain, destinationContractAddress, payload)`; Gas Service pre-pay. Payload-hash acts as the GMP correlation id
+- **Chains**: 30+ canonical Axelar chains including Cosmos (Osmosis, Cosmos Hub, Juno, Neutron, Injective, Kujira, Crescent, Evmos, Kava), Move (Aptos, Sui), Stellar, XRP Ledger, Hyperliquid, Filecoin EVM, plus the standard EVM L1/L2 set
+- **Best for**: Cosmos / Move / Stellar reach that the other adapters don't cover
+
+### Babylon Bitcoin Staking
+- **Type**: Bitcoin-secured finality-providers protocol (not a token bridge)
+- **Security**: BTC delegations timelocked on Bitcoin L1; equivocation slashed via EOTS (Extractable One-Time Signatures)
+- **Patterns**: `register_finality_provider(validator_address, btc_pk, commission_bps)`, `BtcDelegation` tracking, `submit_finality_signature` (EOTS over Tenzro block hash), `total_stake_for_provider`
+- **Networks**: Babylon Mainnet (`bbn-1`), Testnet (`bbn-test-5`), Devnet
+- **Best for**: Tenzro validators that want BTC economic security alongside TNZO stake
 
 ## Architecture
 
@@ -341,7 +362,7 @@ Run the test suite:
 cargo test -p tenzro-bridge
 ```
 
-Test coverage: 61 tests passing.
+Test coverage: extensive (`cargo test -p tenzro-bridge` for the current count).
 
 ## Production Status
 

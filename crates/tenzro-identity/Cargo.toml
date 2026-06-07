@@ -24,6 +24,15 @@ chrono = { workspace = true }
 hex = { workspace = true }
 bs58 = { workspace = true }
 
+# Chain-derivation layer (stellar/xrpl/EVM address encoding + additive HD
+# derivation). Versions reuse the workspace pins.
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+ripemd = { workspace = true }
+k256 = { workspace = true }
+ed25519-dalek = { workspace = true }
+curve25519-dalek = { workspace = true }
+
 # CARv1 + IPLD/DAG-CBOR for portable identity export bundles (C.6).
 serde_ipld_dagcbor = { workspace = true }
 cid = { workspace = true }

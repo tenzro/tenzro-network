@@ -235,10 +235,10 @@ use std::path::PathBuf;
 
 let downloader = HfDownloader::new(PathBuf::from("/models"));
 
-// Download a model
+// Download a model from the Tenzro catalog
 let handle = downloader.download_model(
-    "meta-llama/Llama-3.2-1B-Instruct",
-    Some("llama-3.2-1b-instruct-q4_k_m.gguf".to_string()),
+    "unsloth/Qwen3.5-0.8B-GGUF",
+    Some("Qwen3.5-0.8B-Q4_K_M.gguf".to_string()),
 ).await?;
 
 // Monitor progress

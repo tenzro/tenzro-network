@@ -53,7 +53,7 @@ For the full ecosystem context — what AP2, x402, ERC-8004, and CIP-56 are doin
                                    | JSON-RPC + HTTP
                     +--------------v----------------------+
                     |           tenzro-node               |
-                    |  RPC (350+) + MCP (200+) + A2A (33) |
+                    |  RPC (490+) + MCP (330+) + A2A (42) |
                     +--------------+----------------------+
                                    |
         +----------+---------------+---------------+----------+
@@ -72,21 +72,21 @@ For the full ecosystem context — what AP2, x402, ERC-8004, and CIP-56 are doin
    +----------+--------+---------------+-----------+------------+
 ```
 
-## Workspace — 24 Crates
+## Workspace — 26 Crates
 
 | Crate | Description |
 |-------|-------------|
 | **tenzro-types** | Core types, constants, primitives (zero internal deps) |
 | **tenzro-crypto** | Ed25519, Secp256k1, AES-256-GCM, X25519, BLS12-381, FROST-Ed25519 threshold signatures (RFC 9591), VRF (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI) |
-| **tenzro-tee** | TEE abstraction: Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC with X.509 cert chain verification |
+| **tenzro-tee** | TEE abstraction: Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC, Intel Tiber Trust Authority with X.509 cert chain verification |
 | **tenzro-zk** | Plonky3 STARKs over the KoalaBear field (Poseidon2 + FRI), three pre-built AIRs (inference / settlement / identity), no trusted setup, post-quantum sound |
 | **tenzro-network** | libp2p P2P networking (control plane): gossipsub, Kademlia DHT, peer management, rate limiting, Identify + AutoNAT v2 + Circuit-Relay v2 + DCUtR for permissionless NAT traversal |
 | **tenzro-iroh** | iroh data plane (content-addressed transport): `IrohBackedResolver` over QUIC + iroh-blobs, DA backend, gradient store, sealed-shard store, A2A-over-iroh on the `tenzro/a2a` ALPN. Resolves `tenzro://{blob,gradient,shard,manifest,memory}/...`. TDIP-anchored Pkarr discovery (EndpointId byte-identical to TDIP key) |
 | **tenzro-storage** | RocksDB with column families, Merkle Patricia Trie, snapshots, fsync durability |
 | **tenzro-wallet** | FROST-Ed25519 (RFC 9591) 2-of-3 threshold wallets + ML-DSA-65 hybrid PQ leg, Argon2id keystore, transaction builder, nonce management, key zeroization |
 | **tenzro-auth** | Authentication engine: AAP (Agent Authentication Protocol), DPoP, RAR (Rich Authorization Requests) |
-| **tenzro-consensus** | HotStuff-2 BFT: two-phase commit, TEE-weighted leader selection, equivocation detection + slashing |
-| **tenzro-vm** | Multi-VM: EVM (revm) + SVM (solana_rbpf) + DAML, Block-STM parallel execution, EIP-1559, ERC-4337 AA, 17 precompiles (incl. VRF at 0x1007) |
+| **tenzro-consensus** | HotStuff-2 BFT: three-phase PREPARE → COMMIT → DECIDE, TEE-weighted leader selection (1.5×), equivocation detection + slashing |
+| **tenzro-vm** | Multi-VM: EVM (revm) + SVM (solana_rbpf) + DAML, Block-STM parallel execution, EIP-1559, ERC-4337 AA, ERC-7579 modular validators, **EIP-7702 Type-4 delegation registry**, **Permit2 SignatureTransfer + witness** (ERC-7683-ready gasless flows), **Secure-Mint precompile** (1:1 reserve-attestation invariant for tokenized assets), standard EVM + EIP-2537 BLS12-381 + Tenzro precompiles (TEE_VERIFY, ZK_VERIFY, VRF_VERIFY at 0x1007) |
 | **tenzro-token** | TNZO token economics: treasury, staking, governance, epoch rewards, liquid staking (stTNZO) |
 | **tenzro-identity** | TDIP: unified human/machine identity, W3C DID documents, verifiable credentials, delegation scopes, GDPR Article 17 right-to-erasure (`tenzro_forgetIdentity`) |
 | **tenzro-payments** | Agentic payment protocols. **Crypto rails (settle on-chain):** AP2 v0.2 (Google/FIDO) mandate sign + verify + validate-pair, MPP (Stripe + Tempo) sessions, x402 v1 (Coinbase) HTTP 402, Stripe SPT (SharedPaymentToken) issuance + verify with TDIP cap-resolver + ERC-8004 ReputationRegistry cross-write, Tempo (EIP-155 signing), ERC-8004 v0.6+ Trustless Agents Registry (Identity / Reputation / Validation, 22 surfaces). **Card rails (Tenzro provides identity + delegation + audit; card networks settle fiat):** Visa TAP (Trusted Agent Protocol), Mastercard Agent Pay. HTTP 402 middleware, RFC 9421 HTTP message signatures. |
@@ -96,10 +96,12 @@ For the full ecosystem context — what AP2, x402, ERC-8004, and CIP-56 are doin
 | **tenzro-cortex** | Recurrent-depth reasoning workers (RDT/MoE): HTTP sidecar architecture, signed receipts, attestation suite, gossip-based worker discovery, depth-priced billing |
 | **tenzro-training** | Tenzro Train protocol layer (Decoupled DiLoCo): aggregation rules (Mean, TrimmedMean, CoordinateMedian, Krum), Nesterov outer optimizer, syncer state machine, on-chain run-root commitments. Pairs with the Python reference trainer at `integrations/trainer/`. |
 | **tenzro-settlement** | Escrow, micropayment channels, batch settlement, dispute resolution |
-| **tenzro-bridge** | Cross-chain: Wormhole NTT, LayerZero V2, Chainlink CCIP, deBridge DLN, Li.Fi, Canton DAML |
+| **tenzro-bridge** | Cross-chain: Wormhole NTT (Guardian quorum verifier), LayerZero V2, Chainlink CCIP + CCT, deBridge DLN, Li.Fi, Canton DAML, Hyperlane V3 (sovereign Tenzro-ISM), Axelar GMP (Cosmos / Move / Stellar reach), Babylon Bitcoin staking |
 | **tenzro-events** | Event sourcing and subscription system with replay, webhooks, websockets |
-| **tenzro-node** | Full node binary: JSON-RPC (264+ methods), MCP (196 tools), A2A (24 skills), Web API |
-| **tenzro-cli** | CLI tool: 48 command modules with interactive mode and full RPC coverage |
+| **tenzro-workflow** | Multi-party workflow runtime: orchestrates Canton DAML receipts, on-chain transaction selectors `0x01000040`–`0x0100004B` |
+| **tenzro-wasm** | WASI 0.2 component host for sandboxed agent skills and MCP tools: language-agnostic, capability-based, deterministic fuel metering, content-addressed component identity |
+| **tenzro-node** | Full node binary: JSON-RPC (490+ methods), MCP (330+ tools), A2A (42 skills), Web API |
+| **tenzro-cli** | CLI tool: 63 command modules with interactive mode and full RPC coverage |
 
 ## Quick Start
 
@@ -177,21 +179,21 @@ The node exposes 4 protocol servers, plus 6 ecosystem MCP servers:
 
 | Server | Port | Protocol | Endpoints |
 |--------|------|----------|-----------|
-| **JSON-RPC** | 8545 | HTTP | 264+ methods across 26+ namespaces (EVM-compatible + Tenzro extensions, incl. multi-modal AI: forecast, vision, text-embed, segmentation, detection, audio, video) |
+| **JSON-RPC** | 8545 | HTTP | 490+ methods across 26+ namespaces (EVM-compatible + Tenzro extensions, incl. multi-modal AI: forecast, vision, text-embed, segmentation, detection, audio, video; CAIP discovery; EIP-7702 delegation; Permit2; Secure-Mint; Capital Intent; Workflow) |
 | **Web API** | 8080 | REST | Verification, status, faucet, health |
-| **MCP** | 3001 | Streamable HTTP | 196 tools + OAuth 2.1 |
-| **A2A** | 3002 | JSON-RPC + SSE | Agent Card with 24 skills, task streaming |
+| **MCP** | 3001 | Streamable HTTP | 331 tools + OAuth 2.1 |
+| **A2A** | 3002 | JSON-RPC + SSE | Agent Card with 42 skills, task streaming |
 
 ### Ecosystem MCP Servers
 
 | Server | Port | Tools | Coverage |
 |--------|------|-------|----------|
 | **Solana** | 3003 | 14 | Jupiter swaps, SPL tokens, Metaplex NFTs, Bonfida SNS |
-| **Ethereum** | 3004 | 16 | Chainlink feeds, ENS, ERC-8004 agents, EAS attestations |
-| **Canton** | 3005 | 14 | DAML contracts, CIP-56 tokens, DvP settlement |
-| **LayerZero** | 3006 | 20 | V2 messaging, OFT, Stargate, Value Transfer API |
-| **Chainlink** | 3007 | 20 | CCIP, data feeds/streams, VRF v2.5, automation, functions |
-| **LI.FI** | 3008 | 9 | 66-chain aggregation, routing, gas estimation |
+| **Ethereum** | 3004 | 17 | Chainlink feeds, ENS, ERC-8004 agents, EAS attestations |
+| **Canton** | 3005 | 15 | DAML contracts, CIP-56 tokens, DvP settlement |
+| **LayerZero** | 3006 | 21 | V2 messaging, OFT, Stargate, Value Transfer API |
+| **Chainlink** | 3007 | 21 | CCIP, data feeds/streams, VRF v2.5, automation, functions |
+| **LI.FI** | 3008 | 9 | Cross-chain aggregation, routing, gas estimation |
 
 ### Authentication (Tiered)
 
@@ -286,7 +288,7 @@ This means a single agent identity can compose a card-rail TAP payment, an x402 
 | Component | Repository | Description |
 |-----------|------------|-------------|
 | **MCP Server** (Python) | [tenzro/tenzro-mcp-server](https://github.com/tenzro/tenzro-mcp-server) | 152 tools, FastMCP 3.2 |
-| **A2A Server** (Python) | [tenzro/tenzro-a2a-server](https://github.com/tenzro/tenzro-a2a-server) | 24 skills, FastAPI |
+| **A2A Server** (Python) | [tenzro/tenzro-a2a-server](https://github.com/tenzro/tenzro-a2a-server) | 42 skills, FastAPI |
 | **TenzroClaw** (Python) | [tenzro/TenzroClaw](https://github.com/tenzro/TenzroClaw) | 303 commands, OpenClaw skill |
 | **Rust SDK** | [tenzro/tenzro-sdk-rust](https://github.com/tenzro/tenzro-sdk-rust) | 41 modules |
 | **TypeScript SDK** | [tenzro/tenzro-sdk-typescript](https://github.com/tenzro/tenzro-sdk-typescript) | 36 modules |
@@ -312,7 +314,7 @@ This means a single agent identity can compose a card-rail TAP payment, an x402 
 | LI.FI MCP | https://lifi-mcp.tenzro.network/mcp |
 | Documentation | https://tenzro.com/docs |
 
-**Infrastructure**: GKE cluster, 3 validator StatefulSet + 1 RPC Deployment, Caddy reverse proxy with automatic TLS.
+**Infrastructure**: Tenzro Labs operates the initial public RPC, Web API, MCP, A2A, and ecosystem MCP endpoints on `tenzro.network` with PQ-hybrid X25519MLKEM768 TLS at the edge while the validator set decentralizes. The repository is the reference implementation — anyone can run a node and join.
 
 **Genesis**: 1,000,000,000 TNZO total supply. Faucet: 100 TNZO per request, 24h cooldown.
 
@@ -322,10 +324,10 @@ This means a single agent identity can compose a card-rail TAP payment, an x402 
 # Build all crates
 cargo build
 
-# Run all tests (51 suites, 0 failures)
+# Run all tests
 cargo test --workspace
 
-# Run clippy (zero warnings)
+# Run clippy
 cargo clippy --workspace
 
 # Run node locally
@@ -378,8 +380,9 @@ docker run -p 8545:8545 -p 8080:8080 -p 3001:3001 -p 3002:3002 \
 
 ### Kubernetes
 
+The repository ships reference manifests under `deploy/kubernetes/` for self-hosting on any conformant cluster. The canonical deployment is Docker on a host with systemd; `deploy/terraform/` ships reference infrastructure-as-code.
+
 ```bash
-# Deploy to GKE (requires kubectl configured)
 kubectl apply -f deploy/kubernetes/
 ```
 

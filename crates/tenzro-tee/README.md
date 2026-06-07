@@ -65,6 +65,7 @@ Control which TEE vendors to compile:
 - `amd-sev-snp` - Enable AMD SEV-SNP support (requires `reqwest`)
 - `aws-nitro` - Enable AWS Nitro support
 - `nvidia-gpu` - Enable NVIDIA GPU support (requires `reqwest`)
+- `intel-tiber` - Enable Intel Tiber Trust Authority hosted attestation (implies `intel-tdx`)
 - `all-tees` - Enable all vendors (default)
 
 ## Usage
@@ -112,16 +113,20 @@ let is_valid = verifier.verify(&attestation)?;
 ### Enclave Encryption
 
 ```rust
-use tenzro_tee::enclave_crypto::{encrypt_in_enclave, decrypt_in_enclave};
-use tenzro_types::tee::TeeVendor;
+use tenzro_tee::enclave_crypto::{enclave_encrypt_aes256gcm, enclave_decrypt_aes256gcm};
+use uuid::Uuid;
 
-// Encrypt data inside TEE
-let key_id = "my-key-uuid";
+// Vendor tag binds the derived AES key to a specific TEE family.
+// Use the vendor's `enclave_vendor_tag()` helper to obtain this (e.g. `b"intel-tdx"`).
+let key_id = Uuid::new_v4();
+let vendor_tag: &[u8] = b"intel-tdx";
 let plaintext = b"sensitive data";
-let ciphertext = encrypt_in_enclave(key_id, plaintext, TeeVendor::IntelTDX)?;
 
-// Decrypt data inside TEE
-let decrypted = decrypt_in_enclave(key_id, &ciphertext, TeeVendor::IntelTDX)?;
+// Encrypt: nonce(12) || ciphertext || tag(16)
+let ciphertext = enclave_encrypt_aes256gcm(&key_id, vendor_tag, plaintext)?;
+
+// Decrypt with the same key_id + vendor_tag
+let decrypted = enclave_decrypt_aes256gcm(&key_id, vendor_tag, &ciphertext)?;
 assert_eq!(plaintext, &decrypted[..]);
 ```
 

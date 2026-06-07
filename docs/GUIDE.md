@@ -154,7 +154,7 @@ cargo build --release -p tenzro-node -p tenzro-cli
 ### 3.1 Build the full workspace (optional)
 
 ```bash
-cargo build            # debug, all 23 crates
+cargo build            # debug, all 25 crates
 cargo test --workspace # full test suite
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -195,14 +195,15 @@ Ports opened on the node:
 
 | Port | Service | Scope |
 |------|---------|-------|
-| 9000 | libp2p P2P | 0.0.0.0 |
-| 8545 | JSON-RPC | 127.0.0.1 (default) |
+| 9000 | libp2p P2P (TCP + QUIC) | 0.0.0.0 |
+| 8545 | JSON-RPC | 0.0.0.0 (default) |
 | 8080 | Web verification API | 0.0.0.0 |
 | 3001 | MCP server | 0.0.0.0 |
 | 3002 | A2A server | 0.0.0.0 |
+| 3003–3008 | Ecosystem MCP servers (Solana, Ethereum, Canton, LayerZero, Chainlink, Li.Fi) | 0.0.0.0 |
 | 9090 | Prometheus `/metrics` | 0.0.0.0 |
 
-Open RPC to LAN/Docker with `--rpc-addr 0.0.0.0:8545`.
+Restrict RPC to loopback with `--rpc-addr 127.0.0.1:8545`. The default binds to all interfaces; expose only behind a reverse proxy or firewall.
 
 ### 4.2 Light client / user node
 
@@ -277,11 +278,12 @@ role = "validator"
 log_level = "info"
 
 [network]
-listen_addr = "/ip4/0.0.0.0/tcp/9000"
-boot_nodes = ["/dns4/bootnode-1.tenzro.network/tcp/9000/p2p/12D3Koo..."]
+listen_addr = "/ip4/0.0.0.0/tcp/9000,/ip4/0.0.0.0/udp/9000/quic-v1"
+# Bootstrap peers: omit to use the public testnet seeds; override with your own multiaddrs
+# for a private deployment.
 
 [rpc]
-addr = "127.0.0.1:8545"
+addr = "0.0.0.0:8545"
 
 [mcp]
 addr = "0.0.0.0:3001"
@@ -493,7 +495,7 @@ tenzro model download gemma3-270m
 watch -n 1 'free -h && nproc && ps -eo pid,rss,comm --sort=-rss | head -20'
 ```
 
-A cold build compiles 23 workspace crates plus hundreds of dependencies and may take 20+ minutes on a laptop.
+A cold build compiles 25 workspace crates plus hundreds of dependencies and may take 20+ minutes on a laptop.
 
 ### 9.14 Clean rebuild when everything is wedged
 
@@ -605,7 +607,7 @@ Logs go to stderr in human-readable format. Pipe to `jq` for structured filterin
 
 ### 14.2 RPC exposure
 
-By default the JSON-RPC server binds to `127.0.0.1:8545`. Exposing RPC to the public internet without authentication is dangerous: clients can drain wallets, submit transactions, and call privileged methods. If you must expose RPC:
+By default the JSON-RPC server binds to `0.0.0.0:8545`. Exposing RPC to the public internet without authentication is dangerous: clients can drain wallets, submit transactions, and call privileged methods. If you do not need it externally, restrict it to loopback (`--rpc-addr 127.0.0.1:8545`). If you must expose RPC:
 
 - Bind to a VPN/Tailscale interface, not `0.0.0.0`.
 - Front with a reverse proxy that enforces auth (the testnet uses Caddy).

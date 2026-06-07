@@ -309,6 +309,31 @@ async fn agent_card_handler(
     Json(state.agent_card.clone())
 }
 
+/// Serve a bridged Agent Card for an arbitrary DID at
+/// `GET /agents/:did/.well-known/agent.json`. Resolves the DID through the node
+/// registry (404 if unknown) and returns the node's card rebranded for that
+/// agent — A2A discovery of a Tenzro agent by DID (agent-interop-protocol-
+/// bridge.md, bridged AgentCard hosting).
+async fn hosted_agent_card_handler(
+    State(state): State<Arc<A2aState>>,
+    axum::extract::Path(did): axum::extract::Path<String>,
+) -> Result<Json<AgentCard>, axum::http::StatusCode> {
+    let registry = state
+        .node
+        .identity_registry()
+        .ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+    registry
+        .resolve(&did)
+        .map_err(|_| axum::http::StatusCode::NOT_FOUND)?;
+    let mut card = state.agent_card.clone();
+    card.name = format!("Tenzro Agent ({did})");
+    card.description = format!(
+        "Bridged A2A agent card for {did}, hosted by the Tenzro Network. {}",
+        card.description
+    );
+    Ok(Json(card))
+}
+
 /// Main JSON-RPC 2.0 dispatcher at `POST /a2a`
 async fn jsonrpc_handler(
     State(state): State<Arc<A2aState>>,
@@ -2421,6 +2446,10 @@ pub async fn start_a2a_server_with_shutdown(
 
     let app = Router::new()
         .route("/.well-known/agent.json", get(agent_card_handler))
+        .route(
+            "/agents/:did/.well-known/agent.json",
+            get(hosted_agent_card_handler),
+        )
         .route("/a2a", post(jsonrpc_handler))
         .route("/a2a/stream", post(stream_handler))
         .with_state(state)

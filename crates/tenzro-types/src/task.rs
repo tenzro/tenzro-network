@@ -76,6 +76,112 @@ pub enum TaskPriority {
     Urgent,
 }
 
+/// The class of proof a task completion must carry to be accepted.
+///
+/// These variants map 1:1 onto `tenzro_settlement::SettlementEngine`'s proof
+/// dispatch (ZeroKnowledge / TeeAttestation / Cryptographic / Oracle / Merkle).
+/// We keep a self-contained copy here so `tenzro-types` does not depend on the
+/// settlement crate (settlement depends on types, not the reverse).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ProofRequirement {
+    /// A zero-knowledge proof, optionally pinned to a circuit and/or the model
+    /// the inference was claimed to run on.
+    ZeroKnowledge {
+        #[serde(default)]
+        circuit_id: Option<String>,
+        #[serde(default)]
+        model_id: Option<String>,
+    },
+    /// A TEE attestation report, optionally restricted to a provider/enclave class.
+    TeeAttestation {
+        #[serde(default)]
+        provider_class: Option<String>,
+    },
+    /// A plain cryptographic signature over the result by the provider.
+    Cryptographic,
+    /// An oracle-signed attestation of the result.
+    Oracle,
+    /// A Merkle inclusion proof against a poster-pinned root. The completion
+    /// proof's `proof_data` must be `leaf(32) ‖ leaf_index(u32-le, 4) ‖
+    /// siblings(32·k)`; the task layer recomputes the positional SHA-256 root
+    /// and requires it to equal `expected_root`.
+    Merkle {
+        /// Hex Merkle root (poster-supplied, trusted task state) the inclusion
+        /// proof must reproduce. `0x` prefix optional; compared case-insensitively.
+        expected_root: String,
+    },
+}
+
+/// Structured acceptance criteria for a task (lifecycle Stage 1 / P1).
+///
+/// When present on a `TaskInfo`, `tenzro_completeTask` validates the submitted
+/// output and, if `required_proof` is set, routes the completion proof through
+/// the `SettlementEngine` proof dispatch before releasing escrow.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AcceptanceCriteria {
+    /// Proof the completion must carry (None = free-form, no proof gate).
+    #[serde(default)]
+    pub required_proof: Option<ProofRequirement>,
+    /// Required output MIME/format, e.g. "markdown", "application/json".
+    #[serde(default)]
+    pub format: Option<String>,
+    /// Minimum word count of the textual output.
+    #[serde(default)]
+    pub min_word_count: Option<u64>,
+    /// Sections/keys that must be present in the output.
+    #[serde(default)]
+    pub required_sections: Vec<String>,
+    /// Arbitrary additional structured constraints (free-form key/value).
+    #[serde(default)]
+    pub constraints: HashMap<String, String>,
+}
+
+/// A Merkle inclusion proof that a provider holds an ERC-8004 reputation leaf
+/// at or above some score, without an RPC round-trip to read the registry
+/// (lifecycle Stage 2 / P3). The poster recomputes the root from
+/// `leaf` + `merkle_path` and compares it to the on-chain `ReputationRegistry`
+/// root for `registry_root`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReputationProof {
+    /// ERC-8004 agent id (decimal string) the leaf belongs to.
+    pub agent_id: String,
+    /// Score claimed by this proof.
+    pub claimed_score: u32,
+    /// Expected Merkle root (hex), matched against the registry's published root.
+    pub registry_root: String,
+    /// Hex-encoded leaf preimage hash for `(agent_id, claimed_score)`.
+    pub leaf: String,
+    /// Sibling hashes (hex) from leaf to root, in order.
+    pub merkle_path: Vec<String>,
+    /// Index of the leaf in the tree (determines left/right hashing order).
+    pub leaf_index: u64,
+}
+
+/// Dispute state attached to a task (lifecycle P4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskDispute {
+    /// Who raised the dispute.
+    pub raised_by: Address,
+    /// Human-readable reason.
+    pub reason: String,
+    /// When it was raised.
+    pub raised_at: Timestamp,
+    /// Resolution once an oracle/governance hook arbitrates (None while open).
+    #[serde(default)]
+    pub resolution: Option<DisputeResolution>,
+}
+
+/// Outcome of an arbitrated task dispute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisputeResolution {
+    /// Escrow released to the assignee (provider wins).
+    ReleaseToProvider,
+    /// Escrow refunded to the poster (poster wins).
+    RefundToPoster,
+}
+
 
 /// A task posted to the Tenzro Network task marketplace
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +239,21 @@ pub struct TaskInfo {
 
     /// Transaction hash of the task posting (for escrow reference)
     pub tx_hash: Option<String>,
+
+    /// Structured acceptance criteria / proof spec (Stage 1, P1). When present,
+    /// completion must satisfy these constraints and, if `required_proof` is
+    /// set, carry a proof verified by the `SettlementEngine`.
+    #[serde(default)]
+    pub acceptance_criteria: Option<AcceptanceCriteria>,
+
+    /// Escrow id that locks the reward once the task is assigned (Stage 3, P0).
+    /// `None` until `tenzro_assignTask` funds the escrow vault.
+    #[serde(default)]
+    pub escrow_id: Option<String>,
+
+    /// Dispute state (P4). `None` unless `tenzro_disputeTask` was called.
+    #[serde(default)]
+    pub dispute: Option<TaskDispute>,
 }
 
 impl TaskInfo {
@@ -165,6 +286,9 @@ impl TaskInfo {
             priority: TaskPriority::Normal,
             metadata: HashMap::new(),
             tx_hash: None,
+            acceptance_criteria: None,
+            escrow_id: None,
+            dispute: None,
         }
     }
 
@@ -208,6 +332,16 @@ pub struct TaskQuote {
 
     /// Optional notes from the provider
     pub notes: Option<String>,
+
+    /// Optional TEE attestation bound to this quote (base64-encoded attestation
+    /// report), so the poster can prefer attested providers (Stage 2, P3).
+    #[serde(default)]
+    pub provider_attestation: Option<String>,
+
+    /// Optional Merkle proof that the provider's ERC-8004 reputation is at or
+    /// above a threshold, avoiding an RPC round-trip to the registry (P3).
+    #[serde(default)]
+    pub provider_reputation_proof: Option<ReputationProof>,
 }
 
 /// Filter parameters for listing tasks

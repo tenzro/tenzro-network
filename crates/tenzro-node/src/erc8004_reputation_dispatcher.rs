@@ -178,19 +178,9 @@ pub fn dispatch_settlement_outcome(
         })?,
     };
 
-    // 3. Resolve the machine DID to its allocated ERC-8004 `agentId`
-    //    via the off-chain DID index. No fallback: if the DID has not
-    //    been mirrored (or the Registered event has not yet been
-    //    indexed), we error out and let the caller retry.
-    let agent_id = agent_registry.lookup_agent_id_by_did(machine_did).ok_or_else(|| {
-        NodeError::Other(format!(
-            "ERC-8004 reputation dispatcher: machine DID {} has no allocated \
-             agentId on the on-chain mirror — register the machine identity \
-             and wait for the Registered event before submitting settlement outcomes",
-            machine_did
-        ))
-    })?;
-
+    // 3. Resolve the outcome to a 0..=100 score and an audit context URI,
+    //    then hand off to the protocol-neutral dispatch core (which resolves
+    //    the agentId, builds calldata, and spawns the detached signed tx).
     let rating = outcome.reputation_score() as i8;
     let context_uri = match payment_intent_id {
         Some(pi) => format!(
@@ -206,50 +196,8 @@ pub fn dispatch_settlement_outcome(
         ),
     };
 
-    // 4. Build calldata synchronously — pure, no I/O. This is the only
-    //    step that can fail in-line; everything else moves to the spawn.
-    let calldata = abi::encode_submit_feedback(
-        selectors::SUBMIT_FEEDBACK,
-        agent_id,
-        rating,
-        &context_uri,
-    );
-
-    // 5. Detached signed-tx submission. The system key signs, the node's
-    //    own loopback JSON-RPC receives the raw tx, the canonical
-    //    ReputationRegistry proxy processes the append. Transport /
-    //    signing failures inside the spawn are logged and dropped — the
-    //    Stripe webhook acknowledgement is decoupled from on-chain
-    //    inclusion latency.
-    let signer = Arc::clone(signer);
-    let to = reputation_registry_hex();
-    let did_owned = machine_did.to_string();
-    let outcome_str = outcome.as_str().to_string();
-
-    tokio::spawn(async move {
-        match signer.send_transaction(&to, &calldata, 0).await {
-            Ok(tx_hash) => {
-                tracing::info!(
-                    target: "tenzro::erc8004::reputation",
-                    machine_did = %did_owned,
-                    agent_id = agent_id,
-                    rating = rating,
-                    outcome = %outcome_str,
-                    tx_hash = %tx_hash,
-                    "ERC-8004 submitFeedback tx submitted"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "tenzro::erc8004::reputation",
-                    machine_did = %did_owned,
-                    agent_id = agent_id,
-                    error = %e,
-                    "ERC-8004 submitFeedback tx submission failed (Stripe webhook ack unaffected)"
-                );
-            }
-        }
-    });
+    let agent_id =
+        dispatch_reputation_feedback(machine_did, rating, &context_uri, signer, agent_registry)?;
 
     info!(
         machine_did = %machine_did,
@@ -268,6 +216,83 @@ pub fn dispatch_settlement_outcome(
         rating,
         written: true,
     })
+}
+
+/// Protocol-neutral ERC-8004 reputation-feedback dispatch — the shared core
+/// beneath every settlement path that feeds reputation.
+///
+/// `dispatch_settlement_outcome` (Stripe SPT) is one caller; the native
+/// task-marketplace `tenzro_completeTask` path, the x402 payment-receipt path,
+/// the AP2 mandate-fulfilment path, and the A2A `tasks/complete` path are the
+/// others (interop-bridge doc Layer 3 / Phase 7 — "broadcast the same dispatch
+/// shape to non-Stripe outcomes"). All of them converge here so there is
+/// exactly one place that resolves a DID → `agentId` and writes a
+/// `submitFeedback(agentId, rating, contextUri)` row through the canonical
+/// `ReputationRegistry` proxy with the node's `erc8004-system` key as
+/// `msg.sender`.
+///
+/// `rating` is the 0..=100 reputation score cast to the on-chain `int8`
+/// (always non-negative in our outcome model). `context_uri` is a free-form
+/// audit string linking back to the originating event (task id, x402 tx hash,
+/// AP2 mandate hash, …). Returns the resolved `agentId`.
+///
+/// No-fallback discipline: a DID with no allocated `agentId` is an error, not a
+/// silent drop — the caller should register the machine identity and retry.
+/// Submission is detached (`tokio::spawn`); transport/signing failures inside
+/// the spawn are logged and dropped, decoupling the caller from inclusion
+/// latency.
+pub fn dispatch_reputation_feedback(
+    machine_did: &str,
+    rating: i8,
+    context_uri: &str,
+    signer: &Arc<EvmTransactionSigner>,
+    agent_registry: &Arc<dyn OnChainAgentRegistry>,
+) -> Result<u64> {
+    let agent_id = agent_registry.lookup_agent_id_by_did(machine_did).ok_or_else(|| {
+        NodeError::Other(format!(
+            "ERC-8004 reputation dispatch: machine DID {} has no allocated \
+             agentId on the on-chain mirror — register the machine identity \
+             and wait for the Registered event before submitting feedback",
+            machine_did
+        ))
+    })?;
+
+    // Build calldata synchronously — pure, no I/O.
+    let calldata =
+        abi::encode_submit_feedback(selectors::SUBMIT_FEEDBACK, agent_id, rating, context_uri);
+
+    // Detached signed-tx submission via the erc8004-system key.
+    let signer = Arc::clone(signer);
+    let to = reputation_registry_hex();
+    let did_owned = machine_did.to_string();
+    let ctx_owned = context_uri.to_string();
+
+    tokio::spawn(async move {
+        match signer.send_transaction(&to, &calldata, 0).await {
+            Ok(tx_hash) => {
+                tracing::info!(
+                    target: "tenzro::erc8004::reputation",
+                    machine_did = %did_owned,
+                    agent_id = agent_id,
+                    rating = rating,
+                    context = %ctx_owned,
+                    tx_hash = %tx_hash,
+                    "ERC-8004 submitFeedback tx submitted"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "tenzro::erc8004::reputation",
+                    machine_did = %did_owned,
+                    agent_id = agent_id,
+                    error = %e,
+                    "ERC-8004 submitFeedback tx submission failed"
+                );
+            }
+        }
+    });
+
+    Ok(agent_id)
 }
 
 #[cfg(test)]

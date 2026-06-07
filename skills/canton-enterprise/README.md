@@ -12,7 +12,7 @@ Canton (DAML 3.x) enterprise skill for the Tenzro Network. Backed by the Tenzro 
 | Local endpoint | `http://localhost:3005/mcp` |
 | Transport | Streamable HTTP |
 
-## Tools (14)
+## Tools (15)
 
 `canton_submit_command` (JSON Ledger API v2), `canton_list_contracts`, `canton_get_events`, `canton_get_transaction`, `canton_allocate_party`, `canton_list_parties`, `canton_list_domains`, `canton_get_health`, `canton_get_balance` (CIP-56), `canton_transfer`, `canton_create_asset`, `canton_dvp_settle`, `canton_upload_dar`, `canton_get_fee_schedule`.
 

@@ -8,3 +8,6 @@ pub mod lifi;
 pub mod oauth;
 pub mod server;
 pub mod solana;
+
+#[cfg(feature = "wasi-skills")]
+pub mod wasm_tools;

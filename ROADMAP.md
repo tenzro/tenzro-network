@@ -27,7 +27,7 @@ Cross-references:
 
 ## Phase A — Testnet Stability
 
-**Goal:** the live testnet (`rpc.tenzro.network` + 10 GCE validators tri-continental) is operationally boring. Fleet stays up across deploys. NAT-traversal works for community joiners. The MCP surface emits structured output the way the 2025-06-18 spec expects. The first real DA backend (Celestia) is live behind `ReceiptEnvelope` retrofits. Audio modality stops being a placeholder.
+**Goal:** the live public testnet (`rpc.tenzro.network` and friends) is operationally boring — endpoints stay up across deploys, NAT-traversal works for community joiners. The MCP surface emits structured output the way the 2025-06-18 spec expects. The first real DA backend (Celestia) is live behind `ReceiptEnvelope` retrofits. Audio modality stops being a placeholder.
 
 ### A.1 In scope
 
@@ -57,10 +57,10 @@ Cross-references:
 
 **Agent / MCP**
 
-- Migrate every `#[tool]` handler's response type to derive `schemars::JsonSchema`. Emit `outputSchema` + `structuredContent` per the 2025-06-18 spec. All 246 tools. [GAP §4, top gap #1] [DESIGN §6.1]
+- Migrate every `#[tool]` handler's response type to derive `schemars::JsonSchema`. Emit `outputSchema` + `structuredContent` per the 2025-06-18 spec. All 331 tools. [GAP §4, top gap #1] [DESIGN §6.1]
 - Reconcile A2A skill count between Rust and Python — single canonical skill list in `proto/tenzro/v1` referenced by both. [GAP §4 doc-drift]
 - Fix stale `tools = 20` literal at `server.rs:10218` → emit the real registered-tool count. [GAP §4 doc-drift]
-- CLAUDE.md correctness pass — three doc-drift fixes: ERC-8004 `agentId` is sequential u64 (not keccak256), MCP server advertises `V_2025_11_25` (not `2025-03-26`), A2A skill count converges on the canonical Rust/Python-shared list. [DESIGN §9.6] [#141 partial]
+- Internal documentation correctness pass — three doc-drift fixes: ERC-8004 `agentId` is sequential u64 (not keccak256), MCP server advertises `V_2025_11_25` (not `2025-03-26`), A2A skill count converges on the canonical Rust/Python-shared list. [DESIGN §9.6] [#141 partial]
 
 **Multi-modal**
 
@@ -94,10 +94,10 @@ Phase A is complete when all of these are green:
 4. **`/ready` reflects consensus state** — endpoint returns 503 during state-sync, 200 only when caught up and contributing votes. Verified via deploy rollover (new pod stays 503 until it joins quorum).
 5. **`ReceiptEnvelope` retrofit complete for Inference + Settlement + SettlementChannel + AgentMessage** — every write produces an envelope; verifier (`tenzro_verifyDaPointer`) returns `available:true` for any envelope written under `OffloadedDA` mode.
 6. **Celestia backend ships green** — `verify_availability` round-trips work for all four retrofit writers. Blob inclusion proofs verify against current Celestia mainnet headers.
-7. **All 246 MCP tools return `structuredContent` + `outputSchema`** — a validating MCP client (e.g., the OpenAI Agents SDK in strict mode) iterates every tool, calls it with valid input, and validates the response against the emitted schema. Zero string-typed JSON responses.
+7. **All 331 MCP tools return `structuredContent` + `outputSchema`** — a validating MCP client (e.g., the OpenAI Agents SDK in strict mode) iterates every tool, calls it with valid input, and validates the response against the emitted schema. Zero string-typed JSON responses.
 8. **Audio runtime catalogues real transcribers** — `tenzro_listAudioCatalog` returns ≥ 5 entries (Moonshine v2 base, Distil-Whisper small.en, Whisper-large-v3-turbo, Parakeet-TDT-0.6B-v3, Canary-1B-Flash). `tenzro_transcribe` returns a non-stub result for each.
 9. **ProviderManifest carries hardware + geography** — `tenzro_listProviders` response includes `gpu_model` / `vram_gb` / `cpu_cores` / `ram_gb` / `country` / `region` per provider entry. Self-signature on the manifest verifies against the provider's on-chain DID.
-10. **Memory and docs are consistent** — gap-matrix doc-drift items resolved in CLAUDE.md; stale memories refreshed; new memories indexed; rsync excludes updated.
+10. **Memory and docs are consistent** — gap-matrix doc-drift items resolved in internal docs; stale memories refreshed; new memories indexed; rsync excludes updated.
 
 ### A.4 Dependencies
 
@@ -235,7 +235,7 @@ Phase B's bridge-custody hardening therefore stops at TEE-sealing the existing `
 
 ### C.3 Acceptance criteria
 
-1. **Intel Tiber Trust Authority round-trip** — a TDX quote on validator-7 (asia-southeast1) is appraised by ITA, returns a composite token; verifier on validator-0 accepts the composite token without consulting Intel directly. Latency ≤ 2s round-trip.
+1. **Intel Tiber Trust Authority round-trip** — a TDX quote on one node is appraised by ITA, returns a composite token; a verifier on another node accepts the composite token without consulting Intel directly. Latency ≤ 2s round-trip.
 2. **Three DA backends register concurrently** — Celestia + EigenDA + Avail all return `available:true` for the same `Inference` envelope. Single-backend outage does not break verification.
 3. **TEE+ZK composition end-to-end** — an inference request runs in a TDX enclave; the response carries a Plonky3 STARK + the enclave's hybrid signature; verifier checks both; both must verify.
 4. **Tenzro Train Phase 1 produces a converged model on testnet** — a public training run on a 200M TimesFM-class model, distributed across ≥ 3 worker nodes (Python trainer instances), produces a final safetensors checkpoint whose forecast loss on a held-out test set beats a random-init baseline by ≥ 20% absolute. `TrainingReceipt` chain is verifiable.
@@ -323,12 +323,12 @@ Phase B's bridge-custody hardening therefore stops at TEE-sealing the existing `
 
 Items that aren't phase-bounded. Always-on.
 
-- **Documentation parity** — every code change that touches a user-facing surface (RPC, MCP, A2A, SDK, CLI) updates `SPECIFICATION.md` / `CLAUDE.md` / SDK docstrings in the same commit. Drift is fixed in the commit that introduces it, not in a later sweep.
+- **Documentation parity** — every code change that touches a user-facing surface (RPC, MCP, A2A, SDK, CLI) updates `SPECIFICATION.md` and SDK docstrings in the same commit. Drift is fixed in the commit that introduces it, not in a later sweep.
 - **Cookbook examples** — every new RPC / MCP tool / A2A skill ships with a Cookbook example (Rust SDK + TS SDK + Python OpenClaw skill) in the same PR.
 - **Memory hygiene** — memories get refreshed when their referenced code state changes. Stale memory entries are an audit item every quarter.
 - **Gap-matrix re-baseline** — when a major piece of work lands (phase boundary, large refactor), the gap matrix is regenerated against the new code state. The gap matrix is the audit point for design ↔ code coherence.
 - **Operational drills** — fleet failover (kill validator-0, watch the network promote a new leader), DA-backend outage simulation (block Celestia, watch EigenDA pick up), key-rotation drills (rotate a FROST share, verify continuity). Run quarterly.
-- **Pre-launch hygiene** — no version bumps, no backcompat shims, no dead code, no `#[deprecated]`, no `_unused` fields. Pre-mainnet rules per `CLAUDE.md` "Pre-Launch Code Hygiene." Mainnet flips these rules: after mainnet genesis, breaking changes require a deprecation cycle.
+- **Pre-launch hygiene** — no version bumps, no backcompat shims, no dead code, no `#[deprecated]`, no `_unused` fields. These rules apply pre-mainnet. Mainnet flips them: after mainnet genesis, breaking changes require a deprecation cycle.
 
 ---
 
