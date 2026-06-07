@@ -61,8 +61,11 @@
 pub mod car;
 pub mod credential;
 pub mod delegation;
+pub mod derivation;
 pub mod did;
 pub mod document;
+pub mod envelope;
+pub mod erc7683;
 pub mod erc8004;
 pub mod erc8004_daml;
 pub mod erc8004_svm;
@@ -80,7 +83,14 @@ pub use credential::{
     sign_credential_hybrid, CredentialProof, TenzroCredentialType, VerifiableCredential,
 };
 pub use delegation::{DelegationEntry, DelegationScope, TimeBound};
+pub use derivation::{
+    evm_address, stellar_strkey, xrpl_classic_address, ChainDerivation, DerivationError,
+    TargetChain, TargetCurve,
+};
 pub use did::{DidType, TenzroDid};
+pub use envelope::{
+    canonical_preimage, params_hash, verify_envelope, EnvelopeError, TenzroDidEnvelope,
+};
 pub use document::{DidDocument, DidService, VerificationMethod};
 pub use erc8004::{
     agent_id_from_uint256_be, agent_id_to_uint256_be, AgentRecord, Erc8004Adapter,

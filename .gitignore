@@ -53,6 +53,15 @@ docs/recognition-roadmap.md
 docs/architecture/agentic-internet.md
 docs/architecture/gap-matrix.md
 docs/architecture/prior-art.md
+docs/architecture/sota-gap-analysis-2026-06.md
+docs/operators/
+docs/agent-launch-test-plan.md
+docs/landscape-2026.md
+docs/protocol-coverage-2026-05.md
+docs/protocol-coverage-2026-06.md
+docs/protocol-research-2026-05/
+docs/papers/
+docs/pitch/
 # Internal architecture/research drafts at repo root (never published)
 ARCHITECTURE-*.md
 ROADMAP*.md

@@ -79,7 +79,7 @@ Create `my-config.json`:
   "role": "Validator",
   "data_dir": "./data/my-node",
   "log_level": "info",
-  "rpc_addr": "127.0.0.1:8545",
+  "rpc_addr": "0.0.0.0:8545",
   "web_addr": "0.0.0.0:8080",
   "mcp_addr": "0.0.0.0:3001",
   "a2a_addr": "0.0.0.0:3002",
@@ -88,7 +88,8 @@ Create `my-config.json`:
   "health_enabled": true,
   "network": {
     "listen_addresses": [
-      "/ip4/0.0.0.0/tcp/30333"
+      "/ip4/0.0.0.0/tcp/9000",
+      "/ip4/0.0.0.0/udp/9000/quic-v1"
     ],
     "boot_nodes": [],
     "max_peers": 50,
@@ -163,11 +164,10 @@ To connect to the Tenzro testnet:
 ./target/release/tenzro-node \
   --role light-client \
   --data-dir ./data/testnet \
-  --boot-nodes "/ip4/testnet.tenzro.com/tcp/30333/p2p/12D3KooWExamplePeerID" \
   --log-level info
 ```
 
-(Replace the boot node address with the actual testnet bootstrap nodes)
+The binary's default `--boot-nodes` list points at the live tri-continental testnet seeds; override it only for a private deployment.
 
 ## Monitoring Your Node
 
@@ -242,7 +242,7 @@ chmod 755 ./data/validator
 
 ### Low Peer Count
 
-1. Check your firewall allows TCP/UDP on port 30333
+1. Check your firewall allows TCP and UDP on port 9000 (libp2p TCP + QUIC)
 2. Add boot nodes with `--boot-nodes`
 3. Wait a few minutes for peer discovery
 

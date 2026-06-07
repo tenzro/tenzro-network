@@ -1,6 +1,6 @@
 # Tenzro Chainlink MCP Server
 
-The most complete Chainlink MCP server available. **20 tools** covering the full Chainlink product surface: CCIP cross-chain messaging with token pools, on-chain Data Feeds, sub-second Data Streams, VRF v2.5 verifiable randomness, Proof of Reserve, Automation, and Functions.
+The most complete Chainlink MCP server available. **21 tools** covering the full Chainlink product surface: CCIP cross-chain messaging with token pools, on-chain Data Feeds, sub-second Data Streams, VRF v2.5 verifiable randomness, Proof of Reserve, Automation, and Functions.
 
 ## Quick Start
 

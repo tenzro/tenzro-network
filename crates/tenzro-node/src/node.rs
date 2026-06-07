@@ -1355,6 +1355,24 @@ pub struct TenzroNode {
     /// `tenzro_vm::precompiles::ZkCommitmentRegistry`.
     zk_commitment_registry: Arc<tenzro_vm::precompiles::ZkCommitmentRegistry>,
 
+    /// EIP-7702 Type-4 delegation registry. Records active authority →
+    /// target delegations applied via `tenzro_install7702Delegation`.
+    /// The EVM executor consults this through
+    /// [`tenzro_vm::eip7702::DelegationRegistry::resolve_target`] when an
+    /// account's code field begins with the `0xef0100` designator.
+    eip7702_delegation_registry: Arc<tenzro_vm::eip7702::DelegationRegistry>,
+
+    /// Permit2 nonce bitmap. Tracks signed-and-spent permit nonces per
+    /// owner so a relayer cannot replay a signature that has already
+    /// been used. See [`tenzro_vm::permit2::Permit2NonceBitmap`].
+    permit2_nonce_bitmap: Arc<tenzro_vm::permit2::Permit2NonceBitmap>,
+
+    /// Secure-Mint registry. Holds per-token reserve attestations and
+    /// enforces `circulating + amount ≤ reserve` on every gated mint.
+    /// Tokens without a registered policy are unaffected. See
+    /// [`tenzro_vm::secure_mint::SecureMintRegistry`].
+    secure_mint_registry: Arc<tenzro_vm::secure_mint::SecureMintRegistry>,
+
     /// ERC-8004 on-chain agent-registry mirror (DID → sequential `agentId`).
     /// Populated during identity init with `NativeErc8004Mirror`, which
     /// dispatches signed EVM transactions to the canonical
@@ -1606,6 +1624,9 @@ impl TenzroNode {
             tee_provider: None,
             tee_registry: None,
             zk_commitment_registry: Arc::new(tenzro_vm::precompiles::ZkCommitmentRegistry::new()),
+            eip7702_delegation_registry: Arc::new(tenzro_vm::eip7702::DelegationRegistry::new()),
+            permit2_nonce_bitmap: Arc::new(tenzro_vm::permit2::Permit2NonceBitmap::new()),
+            secure_mint_registry: Arc::new(tenzro_vm::secure_mint::SecureMintRegistry::new()),
             erc8004_agent_registry: None,
             erc8004_system_signer: None,
             health_monitor,
@@ -7119,6 +7140,27 @@ impl TenzroNode {
     /// Returns the storage backend if initialized
     pub fn storage(&self) -> Option<&Arc<RocksDbStore>> {
         self.storage.as_ref()
+    }
+
+    /// Returns the EIP-7702 delegation registry handle.
+    pub fn eip7702_delegation_registry(
+        &self,
+    ) -> Arc<tenzro_vm::eip7702::DelegationRegistry> {
+        self.eip7702_delegation_registry.clone()
+    }
+
+    /// Returns the Permit2 nonce bitmap handle.
+    pub fn permit2_nonce_bitmap(
+        &self,
+    ) -> Arc<tenzro_vm::permit2::Permit2NonceBitmap> {
+        self.permit2_nonce_bitmap.clone()
+    }
+
+    /// Returns the Secure-Mint registry handle.
+    pub fn secure_mint_registry(
+        &self,
+    ) -> Arc<tenzro_vm::secure_mint::SecureMintRegistry> {
+        self.secure_mint_registry.clone()
     }
 
     /// Returns the Cosmos-style snapshot ABCI store if initialized.

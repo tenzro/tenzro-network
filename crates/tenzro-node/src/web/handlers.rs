@@ -133,6 +133,148 @@ impl WebState {
 /// The handler reconstructs a [`tenzro_zk::Proof`] envelope from the request,
 /// dispatches to the right AIR by `circuit_id`, and runs the full off-chain
 /// Plonky3 verifier. Returns `valid: true` only on cryptographic success.
+/// Build the `did.json` URL for a `did:web` identifier.
+/// `did:web:host` → `https://host/.well-known/did.json`;
+/// `did:web:host:a:b` → `https://host/a/b/did.json`; `%3A` in the host decodes
+/// to `:` (port).
+fn did_web_url(did: &str) -> Option<String> {
+    let rest = did.strip_prefix("did:web:")?;
+    let mut parts = rest.split(':');
+    let host = parts.next()?.replace("%3A", ":").replace("%3a", ":");
+    if host.is_empty() {
+        return None;
+    }
+    let path: Vec<&str> = parts.collect();
+    if path.is_empty() {
+        Some(format!("https://{host}/.well-known/did.json"))
+    } else {
+        Some(format!("https://{host}/{}/did.json", path.join("/")))
+    }
+}
+
+/// Resolve a `did:web` DID document over HTTPS and verify the envelope against
+/// its Ed25519 verification method. Network lives here (not in tenzro-identity).
+pub(crate) async fn verify_did_web_envelope(
+    envelope: &tenzro_identity::envelope::TenzroDidEnvelope,
+) -> VerificationResponse {
+    fn fail(did: &str, msg: String) -> VerificationResponse {
+        VerificationResponse {
+            valid: false,
+            details: serde_json::json!({ "error": msg, "did": did }),
+            verified_at: Utc::now().to_rfc3339(),
+        }
+    }
+    let url = match did_web_url(&envelope.did) {
+        Some(u) => u,
+        None => return fail(&envelope.did, "malformed did:web identifier".to_string()),
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let resp = match client.get(&url).send().await.and_then(|r| r.error_for_status()) {
+        Ok(r) => r,
+        Err(e) => return fail(&envelope.did, format!("did:web fetch failed: {e}")),
+    };
+    let doc: serde_json::Value = match resp.json().await {
+        Ok(j) => j,
+        Err(e) => return fail(&envelope.did, format!("did.json parse failed: {e}")),
+    };
+    let key = match tenzro_identity::envelope::ed25519_from_did_document(&doc) {
+        Some(k) => k,
+        None => return fail(&envelope.did, "no Ed25519 verification method in did.json".to_string()),
+    };
+    match tenzro_identity::envelope::verify_envelope_with_key(envelope, &key) {
+        Ok(()) => VerificationResponse {
+            valid: true,
+            details: serde_json::json!({
+                "did": envelope.did, "method": envelope.method, "resolved_via": "did:web",
+            }),
+            verified_at: Utc::now().to_rfc3339(),
+        },
+        Err(e) => fail(&envelope.did, e.to_string()),
+    }
+}
+
+/// `POST /verify/did-envelope` — verify a protocol-neutral Tenzro DID envelope
+/// carried in the `X-Tenzro-DID-Envelope` header (compact carriage codec)
+/// against the node's identity registry. Returns `valid: true` plus the
+/// resolved DID/method, or `valid: false` plus the reason. `did:key` signers
+/// verify without a registry entry (key is carried in the identifier).
+///
+/// This is the first concrete bridge to adopt the shared
+/// `tenzro_identity::envelope` core (agent-interop-protocol-bridge.md Layer 1).
+pub async fn verify_did_envelope(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Json<VerificationResponse> {
+    let now = || Utc::now().to_rfc3339();
+
+    let hv = match headers
+        .get("x-tenzro-did-envelope")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(s) => s,
+        None => {
+            return Json(VerificationResponse {
+                valid: false,
+                details: serde_json::json!({ "error": "missing X-Tenzro-DID-Envelope header" }),
+                verified_at: now(),
+            })
+        }
+    };
+
+    let envelope = match tenzro_identity::envelope::TenzroDidEnvelope::from_header_value(hv) {
+        Ok(e) => e,
+        Err(e) => {
+            return Json(VerificationResponse {
+                valid: false,
+                details: serde_json::json!({ "error": format!("malformed envelope: {e}") }),
+                verified_at: now(),
+            })
+        }
+    };
+
+    // did:web signers resolve over the network — no registry entry needed.
+    if envelope.did.starts_with("did:web:") {
+        return Json(verify_did_web_envelope(&envelope).await);
+    }
+
+    let node = match &state.node {
+        Some(n) => n,
+        None => {
+            return Json(VerificationResponse {
+                valid: false,
+                details: serde_json::json!({ "error": "node not available" }),
+                verified_at: now(),
+            })
+        }
+    };
+    let registry = match node.identity_registry() {
+        Some(r) => r,
+        None => {
+            return Json(VerificationResponse {
+                valid: false,
+                details: serde_json::json!({ "error": "identity registry not initialized" }),
+                verified_at: now(),
+            })
+        }
+    };
+
+    match tenzro_identity::envelope::verify_envelope(&envelope, &**registry) {
+        Ok(()) => Json(VerificationResponse {
+            valid: true,
+            details: serde_json::json!({ "did": envelope.did, "method": envelope.method }),
+            verified_at: now(),
+        }),
+        Err(e) => Json(VerificationResponse {
+            valid: false,
+            details: serde_json::json!({ "error": e.to_string(), "did": envelope.did }),
+            verified_at: now(),
+        }),
+    }
+}
+
 pub async fn verify_zk_proof(
     Json(request): Json<VerifyZkProofRequest>,
 ) -> Json<VerificationResponse> {

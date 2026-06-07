@@ -705,6 +705,38 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "outputModes": ["application/json"],
             },
             {
+                "id": "capital",
+                "name": "Capital Intent (regulated capital allocation)",
+                "description": (
+                    "Capital Intents are the capital-markets analog of an "
+                    "AP2 Intent Mandate — a signed, expiring authorization "
+                    "to acquire / exit / rebalance / hedge / yield a basket "
+                    "of tokenized assets subject to regulatory regime, KYA "
+                    "ceilings, and per-leg constraints. Solvers bid via "
+                    "tenzro_capitalIntentQuote; an assigner (principal or "
+                    "delegate) picks via tenzro_capitalIntentAssign (auto "
+                    "rank by ERC-8004 reputation + price + eta). Lifecycle: "
+                    "Open → Quote → Assign → Execute → Verify (or "
+                    "Compensate) → Settle. 1:1 asset backing flows through "
+                    "tenzro_submitReserveAttestation / tenzro_getReserve, "
+                    "gating tenzro_attestedMint."
+                ),
+                "tags": [
+                    "capital-intent", "regulated", "tokenized-assets",
+                    "reserve", "attested-mint", "ap2", "erc8004",
+                ],
+                "examples": [
+                    "Open a Capital Intent to acquire a basket of tokenized treasuries",
+                    "Submit a solver bid against intent_id=0x…",
+                    "Auto-assign intent_id=0x… by reputation + price + eta",
+                    "Execute leg {venue, asset_id, side, quantity, unit_price}",
+                    "Submit a reserve attestation for asset_id=0x… (source=custody)",
+                    "Get current reserve for asset_id=0x…",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
                 "id": "workflow",
                 "name": "Canton-Native Workflows",
                 "description": (
@@ -864,6 +896,200 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "Record fill for order 0x… (origin_chain, filler, proof_route, outputs[])",
                     "Get fill record for order 0x… origin_chain=1",
                     "List every recorded ERC-7683 fill on this node",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "eip7702",
+                "name": "EIP-7702 (Set EOA Account Code)",
+                "description": (
+                    "Pectra Type-4 delegation registry helper surface. "
+                    "Stateless helpers: compute the secp256k1 signing "
+                    "hash over MAGIC(0x05) || rlp([chain_id, "
+                    "delegate_address, nonce]), build the 23-byte "
+                    "designator (0xef0100 || delegate_address) written "
+                    "into the EOA's code slot once an authorization is "
+                    "accepted, and decode arbitrary code to extract a "
+                    "delegate when it is a valid 7702 designator. "
+                    "Sign the returned hash with the EOA's secp256k1 "
+                    "private key out of band."
+                ),
+                "tags": [
+                    "eip-7702", "pectra", "delegation", "eoa", "evm",
+                    "secp256k1", "smart-account",
+                ],
+                "examples": [
+                    "Compute the EIP-7702 signing hash for (chain_id, delegate_address, nonce)",
+                    "Build the 23-byte designator for delegate_address=0x…",
+                    "Decode code 0xef0100… and return the delegate address",
+                    "Read EIP-7702 protocol info (tx type, magic, signing scheme)",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "permit2",
+                "name": "Permit2 SignatureTransfer",
+                "description": (
+                    "Permit2 EIP-712 SignatureTransfer surface on the "
+                    "canonical Tenzro Permit2 verifying contract "
+                    "(0x0000…00001023). Read the per-chain domain "
+                    "separator, compute the digest a user signs "
+                    "(with optional witness binding — used by ERC-7683 "
+                    "origin opens to bind the permit to a specific "
+                    "cross-chain order), atomically verify a signed "
+                    "permit and consume its (owner, nonce) bitmap "
+                    "slot, and read nonce-consumption state. Nonce "
+                    "bitmap follows the Uniswap word/bit layout so "
+                    "users can sign multiple permits in parallel."
+                ),
+                "tags": [
+                    "permit2", "signature-transfer", "eip-712",
+                    "gasless", "uniswap", "witness", "erc-7683",
+                ],
+                "examples": [
+                    "Read the Permit2 domain separator for chain_id=1337",
+                    "Compute the EIP-712 digest for a permit (owner, token, amount, spender, nonce, deadline)",
+                    "Compute the digest for a permit with a 32-byte ERC-7683 witness",
+                    "Verify and consume a signed permit",
+                    "Check whether (owner, nonce) has been consumed",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "secure-mint",
+                "name": "Secure-Mint Registry",
+                "description": (
+                    "Per-token 1:1 reserve-attestation invariant for "
+                    "tokenized real-world assets (xStocks-class "
+                    "equities, treasuries, stablecoins). Enforces "
+                    "`circulating + amount ≤ reserve` at every mint. "
+                    "Policies carry the PoR feed id, attester DID, "
+                    "attestation hash, attested_at timestamp, and "
+                    "ttl_secs; the read-only check is non-mutating "
+                    "while apply atomically updates `circulating`. "
+                    "Reserved EVM precompile slot at 0x0000…00001024."
+                ),
+                "tags": [
+                    "secure-mint", "rwa", "tokenized-assets",
+                    "reserve-attestation", "1-to-1", "xstocks", "por",
+                ],
+                "examples": [
+                    "Set a Secure-Mint policy for asset_id=0x… (reserve, por_feed_id, attester_did, …)",
+                    "Read the current Secure-Mint policy for asset_id=0x…",
+                    "Read-only check whether a mint of 1000 units of asset_id=0x… is allowed",
+                    "Atomically apply a mint of 1000 units (increment circulating)",
+                    "Record a burn of 250 units (decrement circulating)",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "hyperlane",
+                "name": "Hyperlane V3 (Sovereign Tenzro-ISM)",
+                "description": (
+                    "Permissionless interchain messaging over the "
+                    "Hyperlane V3 Mailbox with a sovereign "
+                    "Tenzro-validator-set Interchain Security Module. "
+                    "Inbound messages are verified against the active "
+                    "Tenzro validator BLS / ML-DSA set; outbound "
+                    "messages dispatch through the canonical Mailbox. "
+                    "Coverage: Ethereum, Polygon, Arbitrum, Optimism, "
+                    "Base, Avalanche, BSC, Mantle, Blast, Scroll, "
+                    "Linea, Manta, zkSync, Celo, Moonbeam, Mode, "
+                    "Fraxtal, and Tenzro."
+                ),
+                "tags": [
+                    "hyperlane", "v3", "ism", "messaging", "mailbox",
+                    "cross-chain", "tenzro-ism",
+                ],
+                "examples": [
+                    "List supported Hyperlane chains and their domain ids",
+                    "Quote interchain gas for dispatch to destination_domain=10",
+                    "Dispatch a Hyperlane message (origin, dest, recipient, body_hex)",
+                    "Look up a Hyperlane message by message_id",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "axelar",
+                "name": "Axelar GMP",
+                "description": (
+                    "Axelar General Message Passing surface — reach "
+                    "into 30+ chains spanning EVM, Cosmos (Osmosis, "
+                    "Cosmos Hub, Juno, Neutron, Injective, Kujira, "
+                    "Crescent, Evmos), Move (Aptos, Sui), Stellar, "
+                    "XRP Ledger, Hyperliquid, Filecoin EVM, and Kava. "
+                    "Uses the canonical call_contract entrypoint with "
+                    "a Gas Service pre-pay; correlation id is "
+                    "keccak256(payload)."
+                ),
+                "tags": [
+                    "axelar", "gmp", "cosmos", "move", "stellar",
+                    "xrpl", "cross-chain",
+                ],
+                "examples": [
+                    "List supported Axelar chains and their gateway addresses",
+                    "Dispatch an Axelar call_contract (source, destination, destination_address, payload_hex)",
+                    "Pre-pay Axelar gas for an already-dispatched message",
+                    "Look up an Axelar GMP message by payload_hash",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "babylon",
+                "name": "Babylon Bitcoin Staking",
+                "description": (
+                    "Babylon finality-providers protocol surface so "
+                    "Tenzro validators can be BTC-secured. Register a "
+                    "Tenzro validator as a Babylon finality provider, "
+                    "look up registered providers, sum BTC delegations, "
+                    "submit EOTS (Extractable One-Time Signatures) over "
+                    "Tenzro block hashes (slashable on equivocation), "
+                    "and list BTC delegations per provider."
+                ),
+                "tags": [
+                    "babylon", "bitcoin-staking", "finality-providers",
+                    "eots", "btc", "staking", "shared-security",
+                ],
+                "examples": [
+                    "Register a Tenzro validator as a Babylon finality provider",
+                    "List every registered Babylon finality provider",
+                    "Read total BTC stake for finality provider 0x…",
+                    "Submit an EOTS over a Tenzro block hash",
+                    "List BTC delegations for finality provider 0x…",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "caip",
+                "name": "Chain-Agnostic Discovery (CAIP)",
+                "description": (
+                    "Tenzro CAIP namespace identifiers per the "
+                    "submitted `ChainAgnostic/namespaces#184`. CAIP-2 "
+                    "chain id is `tenzro:<lowercase hex of first 16 "
+                    "bytes of the genesis block hash>` with an "
+                    "EVM-compatible `evm_chain_id` sidecar. CAIP-10 "
+                    "account ids accept hex or base58btc on input and "
+                    "normalise to canonical 64-hex Tenzro addresses. "
+                    "CAIP-19 supports `slip44` (SLIP-44 coin index "
+                    "1414421071), `token`, and `nft` asset namespaces."
+                ),
+                "tags": [
+                    "caip", "caip-2", "caip-10", "caip-19",
+                    "chain-agnostic", "casa", "slip-44", "discovery",
+                ],
+                "examples": [
+                    "Get the CAIP-2 chain id for this node",
+                    "Get the CAIP-10 account id for an address (hex or base58btc)",
+                    "Get the CAIP-19 asset id for kind=slip44 (native TNZO)",
+                    "Get the CAIP-19 asset id for kind=token, token_id=0x…",
+                    "Get the CAIP-19 asset id for kind=nft, collection_id=0x…, nft_token_id=42",
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],

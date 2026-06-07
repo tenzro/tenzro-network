@@ -42,6 +42,9 @@ pub mod canton;
 pub mod identity;
 pub mod fees;
 pub mod task;
+pub mod saga;
+pub mod capital_intent;
+pub mod reserve;
 pub mod marketplace;
 pub mod agent_template;
 pub mod skill;
@@ -82,7 +85,15 @@ pub use canton::{
 };
 pub use identity::{KycTier, PaymentProtocolId, IdentityType};
 pub use fees::{ServiceFeeSchedule, NetworkCommissionRates};
-pub use task::{TaskInfo, TaskStatus, TaskType, TaskPriority, TaskQuote, TaskFilter};
+pub use task::{TaskInfo, TaskStatus, TaskType, TaskPriority, TaskQuote, TaskFilter,
+    AcceptanceCriteria, ProofRequirement, ReputationProof, TaskDispute, DisputeResolution};
+pub use saga::{SagaWorkflow, SagaStep, SagaStepStatus, SagaStatus};
+pub use capital_intent::{
+    CapitalIntent, CapitalIntentRecord, CapitalIntentStatus, CapitalQuote, CapitalLeg, LegStatus,
+    Objective, Constraints, ComplianceReq, Authorization, SettlementReq, RegRegime, Side,
+    AssetWeight, VenueQuote, best_execution_ok,
+};
+pub use reserve::{ReserveAttestation, ReserveSource};
 pub use agent_template::{AgentTemplate, AgentTemplateStatus, AgentTemplateType, AgentCapability, AgentRuntimeRequirements, AgentPricingModel, AgentExample, AgentTemplateFilter, AgentTemplateInstance};
 pub use skill::{SkillDefinition, SkillStatus, SkillFilter, SkillInvocationResult};
 pub use tool::{ToolDefinition, ToolStatus, ToolFilter, ToolInvocationResult};

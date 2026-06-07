@@ -81,6 +81,9 @@ mod resolver;
 mod spawner;
 mod spec;
 
+#[cfg(feature = "wasi-skills")]
+pub mod wasm;
+
 pub use auth::{AgentAuthRequest, AgentCredentials, AuthIssuer, DpopSigner};
 pub use bootstrap::{bootstrap_reference_templates, BootstrapReport};
 pub use error::AgentKitError;

@@ -1,0 +1,39 @@
+[package]
+name = "tenzro-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WASI 0.2 component host for Tenzro Network — sandboxed, capability-based, deterministic runtime for agent skills, tools, and MCP servers"
+
+[dependencies]
+tenzro-types = { workspace = true }
+
+# Async + error plumbing.
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+dashmap = { workspace = true }
+
+# Wasmtime + WASI 0.2 component model.
+# Pinned to the workspace-level version so the desktop app, the node, and
+# the agent kit all share a single Wasmtime build.
+wasmtime = { version = "27", default-features = false, features = [
+    "component-model",
+    "async",
+    "cranelift",
+    "parallel-compilation",
+    "pooling-allocator",
+    "cache",
+] }
+wasmtime-wasi = { version = "27" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

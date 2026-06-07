@@ -95,6 +95,61 @@ def route_message(text: str) -> str:
         return "wormhole"
     if any(k in t for k in ["cct pool", "cct pools", "chainlink cross-chain token", "lockrelease pool", "burnmint pool"]):
         return "cct"
+    if any(k in t for k in [
+        "capital intent", "capital allocation", "reserve attestation",
+        "attested mint", "tokenized asset", "1:1 backed", "regulated capital",
+    ]):
+        return "capital"
+    if any(k in t for k in [
+        "saga workflow", "multi-party workflow", "multi-agent workflow",
+        "workflow open", "workflow step", "workflow finalize",
+        "compensate step", "verify step", "obligation", "approval gate",
+        "fee route", "privacy domain",
+    ]):
+        return "workflow"
+    if any(k in t for k in [
+        "did envelope", "did-envelope", "verify envelope", "signed envelope",
+    ]):
+        return "verification"
+
+    # ------------------------------------------------------------------
+    # Tier 2d: EVM primitives + cross-chain reach + CAIP discovery
+    # ------------------------------------------------------------------
+    if any(k in t for k in [
+        "eip-7702", "eip7702", "7702 delegation", "set eoa code", "eoa code",
+        "delegation designator", "pectra delegation",
+    ]):
+        return "eip7702"
+    if any(k in t for k in [
+        "permit2", "signaturetransfer", "signature transfer", "permit2 nonce",
+        "permit2 digest", "permit2 witness",
+    ]):
+        return "permit2"
+    if any(k in t for k in [
+        "secure-mint", "secure mint", "reserve attestation", "por feed",
+        "proof of reserve", "1:1 backing", "tokenized rwa", "xstock",
+        "tokenized equity", "tokenized treasury",
+    ]):
+        return "secure-mint"
+    if any(k in t for k in [
+        "hyperlane", "tenzro-ism", "hyperlane mailbox", "sovereign ism",
+    ]):
+        return "hyperlane"
+    if any(k in t for k in [
+        "axelar", "gmp", "call contract", "axelar gas service",
+        "cosmos chain", "stellar reach", "xrpl reach",
+    ]):
+        return "axelar"
+    if any(k in t for k in [
+        "babylon", "finality provider", "bitcoin staking", "btc staking",
+        "eots", "extractable one-time signature",
+    ]):
+        return "babylon"
+    if any(k in t for k in [
+        "caip", "caip-2", "caip-10", "caip-19", "chain-agnostic",
+        "slip-44", "slip44 coin", "asset namespace", "casa",
+    ]):
+        return "caip"
 
     # ------------------------------------------------------------------
     # Tier 3: Single-keyword domain routes

@@ -25,13 +25,14 @@ use crate::node::{TenzroNode, detect_hardware, ModelDownloadStatus, UserResource
 use crate::event_loop::NodeEvent;
 use tenzro_crypto::{KeyPair, KeyType};
 use tenzro_model::{
-    get_audio_catalog, get_audio_model_by_id, get_detection_catalog, get_forecast_catalog,
-    get_model_by_id, get_model_catalog, get_segmentation_catalog, get_text_embedding_catalog,
+    get_audio_catalog, get_audio_model_by_id, get_detection_catalog, get_detection_model_by_id,
+    get_forecast_catalog, get_model_by_id, get_model_catalog, get_segmentation_catalog,
+    get_segmentation_model_by_id, get_text_embedding_catalog, get_text_embedding_model_by_id,
     get_text_segmentation_catalog, get_text_segmentation_model_by_id, get_video_catalog,
-    get_vision_catalog, get_vision_model_by_id, ChatMessage as ModelChatMessage, ForecastConfig,
-    GenerationConfig, ImageEmbedConfig, ImageNormalization, SegmentPrompt, TextEmbedConfig,
-    TextSegmentBoxPrompt, TextSegmentConfig, ToolDefinition as RuntimeToolDefinition,
-    TranscribeConfig, VideoEmbedConfig, WhisperFamily,
+    get_vision_catalog, get_vision_model_by_id, ChatMessage as ModelChatMessage, DetrFamily,
+    ForecastConfig, GenerationConfig, ImageEmbedConfig, ImageNormalization, SamFamily, SegmentPrompt,
+    TextEmbedConfig, TextEncoderFamily, TextSegmentBoxPrompt, TextSegmentConfig,
+    ToolDefinition as RuntimeToolDefinition, TranscribeConfig, VideoEmbedConfig, WhisperFamily,
 };
 use tenzro_model::hf_download::{ArtifactSpec, DownloadProgress, DownloadState, HfArtifactDownloader};
 use tenzro_network::{NetworkMessage, MessagePayload, NetworkService};
@@ -436,6 +437,9 @@ fn requires_admin_token(method: &str) -> bool {
             | "tenzro_unstake"
             | "tenzro_unstakeTokens"
             | "tenzro_registerProvider"
+            | "tenzro_produceSnapshot"
+            | "tenzro_setDraining"
+            | "tenzro_gossipStats"
     )
 }
 
@@ -698,13 +702,17 @@ pub(crate) async fn handle_request(
         // surface from a JSON-RPC client. The choice of which workflows
         // mirror to which synchronizer is operator-driven (per workflow);
         // these are deliberately not auto-fired by the post-execute scan.
-        "tenzro_mirrorWorkflowToCanton" => {
+        // `tenzro_canton_mirrorReceipt` is the canton-workflow doc name for
+        // mirroring a workflow/receipt to Canton; aliased here.
+        "tenzro_mirrorWorkflowToCanton" | "tenzro_canton_mirrorReceipt" => {
             handle_mirror_workflow_to_canton(node, request.params).await
         }
         "tenzro_mirrorObligationToCanton" => {
             handle_mirror_obligation_to_canton(node, request.params).await
         }
-        "tenzro_consumeDamlEvents" => handle_consume_daml_events(node).await,
+        // `tenzro_canton_streamEvents` is the canton-workflow doc name for
+        // consuming/streaming DAML ledger events; aliased here.
+        "tenzro_consumeDamlEvents" | "tenzro_canton_streamEvents" => handle_consume_daml_events(node).await,
         // Spec 4: ERC-7683 cross-chain intent settler. Wave 1 ships protocol
         // primitives + read RPCs against CF_SETTLEMENTS. Settler precompiles,
         // EIP-712 verification, escrow integration, gossipsub indexing, and
@@ -712,6 +720,10 @@ pub(crate) async fn handle_request(
         // respective subsystems.
         "tenzro_get7683Order" => handle_get_7683_order(node, request.params).await,
         "tenzro_list7683Orders" => handle_list_7683_orders(node, request.params).await,
+        // Origin-side ERC-7683 write path. Constructs a `Tenzro7683Order`
+        // envelope in `OrderState::Open`, persists under `7683_origin:`,
+        // and returns the canonical 32-byte order id.
+        "tenzro_open7683Order" => handle_open_7683_order(node, request.params).await,
         // Spec 4: ERC-7683 destination-side fill RPCs. `recordFill7683` is
         // the idempotency-guarded write path the destination settler uses
         // to commit a fill record (rejects double-fill). `getFill7683` and
@@ -728,7 +740,9 @@ pub(crate) async fn handle_request(
         // signed PauseAgent / QuarantineAgent / TerminateAgent
         // transactions, not these RPCs.
         "tenzro_agentHeartbeat" => handle_agent_heartbeat(node, request.params).await,
-        "tenzro_suspendAgent" => handle_suspend_agent(node, request.params).await,
+        // `tenzro_deregisterAgent` is a documented alias for suspending an agent
+        // (removing it from the active registry); both names dispatch here.
+        "tenzro_suspendAgent" | "tenzro_deregisterAgent" => handle_suspend_agent(node, request.params).await,
         "tenzro_resumeAgent" => handle_resume_agent(node, request.params).await,
         "tenzro_listKillSwitchByAgent" => handle_list_kill_switch_by_agent(node, request.params).await,
         "tenzro_listKillSwitchByController" => handle_list_kill_switch_by_controller(node, request.params).await,
@@ -905,13 +919,53 @@ pub(crate) async fn handle_request(
         // RFC 7517 / RFC 7518 — JWK Set publication (mirrors GET /.well-known/jwks.json)
         "tenzro_listAgentJwks" => handle_list_agent_jwks(node).await,
         "tenzro_getAgentJwk" => handle_get_agent_jwk(node, request.params).await,
-        "tenzro_addCredential" => handle_add_credential(node, request.params).await,
+        // `tenzro_issueCredential` is the TDIP-spec name for adding a verifiable
+        // credential to an identity; aliased onto the shipped add-credential handler.
+        "tenzro_addCredential" | "tenzro_issueCredential" => handle_add_credential(node, request.params).await,
         "tenzro_addService" => handle_add_service(node, request.params).await,
-        "tenzro_setUsername" => handle_set_username(node, request.params).await,
+        // `tenzro_registerUsername` is the TDIP-spec name for binding a username
+        // to an identity; aliased onto the shipped set-username handler.
+        "tenzro_setUsername" | "tenzro_registerUsername" => handle_set_username(node, request.params).await,
         "tenzro_resolveUsername" => handle_resolve_username(node, request.params).await,
+        // `tenzro_updateIdentity` is the did:tenzro spec §3.3 name for a
+        // controller-signed identity update. The implementation dispatches
+        // to the existing field-level update handlers based on the
+        // supplied `update` field.
+        "tenzro_updateIdentity" => handle_update_identity(node, request.params).await,
 
         // Node methods
         "tenzro_nodeInfo" | "tenzro_getNodeStatus" => handle_node_info(node).await,
+        // CAIP discovery — wallets and exchanges read these to learn the
+        // canonical chain-agnostic identifiers for this Tenzro chain.
+        "tenzro_caip2" => handle_caip2(node).await,
+        "tenzro_caip10" => handle_caip10(node, request.params).await,
+        "tenzro_caip19" => handle_caip19(node, request.params).await,
+        // EIP-7702 Type-4 delegation primitives. Wallets construct a
+        // signed `Authorization` per the Pectra spec and submit it
+        // through `tenzro_install7702Delegation`; the registry handles
+        // signature recovery, chain-id + nonce checks, and atomic
+        // install / revoke.
+        "tenzro_install7702Delegation" => crate::rpc_integrations::handle_install_7702_delegation(node, request.params).await,
+        "tenzro_get7702Delegation" => crate::rpc_integrations::handle_get_7702_delegation(node, request.params).await,
+        "tenzro_revoke7702Delegation" => crate::rpc_integrations::handle_revoke_7702_delegation(node, request.params).await,
+        // Permit2 SignatureTransfer primitives. Relayers and solvers
+        // build gasless flows on top of the Tenzro Permit2 precompile
+        // (`0x0000…00001023`); the RPCs below let off-chain clients
+        // verify permits, derive digests, and consume nonces before
+        // submitting the on-chain pull.
+        "tenzro_permit2DomainSeparator" => crate::rpc_integrations::handle_permit2_domain_separator(node, request.params).await,
+        "tenzro_permit2Digest" => crate::rpc_integrations::handle_permit2_digest(node, request.params).await,
+        "tenzro_permit2VerifyAndConsume" => crate::rpc_integrations::handle_permit2_verify_and_consume(node, request.params).await,
+        "tenzro_permit2NonceUsed" => crate::rpc_integrations::handle_permit2_nonce_used(node, request.params).await,
+        // Secure-Mint registry — per-token 1:1 reserve-attestation
+        // policies plus the `circulating + amount ≤ reserve` invariant
+        // gate enforced by the EVM precompile at `0x0000…00001024`.
+        "tenzro_setSecureMintPolicy" => crate::rpc_integrations::handle_set_secure_mint_policy(node, request.params).await,
+        "tenzro_getSecureMintPolicy" => crate::rpc_integrations::handle_get_secure_mint_policy(node, request.params).await,
+        "tenzro_clearSecureMintPolicy" => crate::rpc_integrations::handle_clear_secure_mint_policy(node, request.params).await,
+        "tenzro_secureMintCheck" => crate::rpc_integrations::handle_secure_mint_check(node, request.params).await,
+        "tenzro_secureMintApply" => crate::rpc_integrations::handle_secure_mint_apply(node, request.params).await,
+        "tenzro_secureMintRecordBurn" => crate::rpc_integrations::handle_secure_mint_record_burn(node, request.params).await,
         "tenzro_peerCount" => handle_peer_count(node).await,
         "tenzro_syncing" => handle_syncing(node).await,
         "tenzro_getNetworkStats" => handle_get_network_stats(node).await,
@@ -927,6 +981,12 @@ pub(crate) async fn handle_request(
         "tenzro_applySnapshotChunk" => {
             handle_apply_snapshot_chunk(node, request.params).await
         }
+        // Operator admin surface (admin-token-gated). `tenzro_produceSnapshot`
+        // backs `tenzro node snapshot`, `tenzro_setDraining` backs
+        // `tenzro node drain`, `tenzro_gossipStats` backs `tenzro node gossip-stats`.
+        "tenzro_produceSnapshot" => handle_produce_snapshot(node).await,
+        "tenzro_setDraining" => handle_set_draining(node, request.params).await,
+        "tenzro_gossipStats" => handle_gossip_stats(node).await,
 
         // Provider methods
         "tenzro_participate" => handle_participate(node, request.params).await,
@@ -959,7 +1019,9 @@ pub(crate) async fn handle_request(
         // act-chain cascade. Every transitively-affected JTI gets its
         // own audit row with `cascaded: true`.
         "tenzro_revokeJwt" => handle_revoke_jwt(node, request.params).await,
-        "tenzro_revokeDid" => handle_revoke_did(node, request.params).await,
+        // `tenzro_revokeIdentity` is the TDIP/did-method-spec name; aliased onto
+        // the shipped revoke-DID handler.
+        "tenzro_revokeDid" | "tenzro_revokeIdentity" => handle_revoke_did(node, request.params).await,
         // TDIP/GDPR Article 17 right-to-erasure: hard-delete a previously
         // revoked identity from the registry and persistent storage. The
         // identity must already be `Revoked` — call `tenzro_revokeDid`
@@ -996,15 +1058,18 @@ pub(crate) async fn handle_request(
         "tenzro_loadVisionModel" => handle_load_vision_model(node, request.params).await,
         "tenzro_unloadVisionModel" => handle_unload_vision_model(node, request.params).await,
         "tenzro_listVisionModels" => handle_list_vision_models(node).await,
-        "tenzro_imageEmbed" => handle_image_embed(node, request.params).await,
-        "tenzro_imageTextSimilarity" => handle_image_text_similarity(node, request.params).await,
+        // `tenzro_visionEmbed` / `tenzro_visionSimilarity` are documented aliases
+        // for the image embedding / image-text similarity handlers.
+        "tenzro_imageEmbed" | "tenzro_visionEmbed" => handle_image_embed(node, request.params).await,
+        "tenzro_imageTextSimilarity" | "tenzro_visionSimilarity" => handle_image_text_similarity(node, request.params).await,
         "tenzro_listVisionCatalog" => handle_list_vision_catalog().await,
         // Text embeddings (ONNX runtime — Qwen3-Embedding, EmbeddingGemma, BGE-M3)
         "tenzro_loadTextEmbeddingModel" => handle_load_text_embedding_model(node, request.params).await,
         "tenzro_unloadTextEmbeddingModel" => handle_unload_text_embedding_model(node, request.params).await,
         "tenzro_listTextEmbeddingModels" => handle_list_text_embedding_models(node).await,
         "tenzro_listTextEmbeddingCatalog" => handle_list_text_embedding_catalog().await,
-        "tenzro_textEmbed" => handle_text_embed(node, request.params).await,
+        // `tenzro_embed` is the chat-api doc shorthand for text embedding.
+        "tenzro_textEmbed" | "tenzro_embed" => handle_text_embed(node, request.params).await,
         // Segmentation (ONNX runtime — SAM 2, EdgeSAM, MobileSAM)
         "tenzro_loadSegmentationModel" => handle_load_segmentation_model(node, request.params).await,
         "tenzro_unloadSegmentationModel" => handle_unload_segmentation_model(node, request.params).await,
@@ -1088,7 +1153,8 @@ pub(crate) async fn handle_request(
 
         // Canton/DAML methods
         "tenzro_listCantonDomains" => handle_list_canton_domains(node).await,
-        "tenzro_listDamlContracts" => handle_list_daml_contracts(node, request.params).await,
+        // `tenzro_canton_listMirroredContracts` is the canton-workflow doc name.
+        "tenzro_listDamlContracts" | "tenzro_canton_listMirroredContracts" => handle_list_daml_contracts(node, request.params).await,
         "tenzro_submitDamlCommand" => handle_submit_daml_command(node, request.params).await,
         "tenzro_allocateParty" => handle_allocate_party(node, request.params).await,
 
@@ -1165,6 +1231,33 @@ pub(crate) async fn handle_request(
         "tenzro_quoteTask" => handle_quote_task(node, request.params).await,
         "tenzro_assignTask" => handle_assign_task(node, request.params).await,
         "tenzro_completeTask" => handle_complete_task(node, request.params).await,
+        "tenzro_disputeTask" => handle_dispute_task(node, request.params).await,
+
+        // Multi-agent saga workflow coordination (Tier-3)
+        "tenzro_workflowOpen" => handle_workflow_open(node, request.params).await,
+        "tenzro_workflowStepExecute" => handle_workflow_step_execute(node, request.params).await,
+        "tenzro_workflowStepVerify" => handle_workflow_step_verify(node, request.params).await,
+        "tenzro_workflowStepCompensate" => handle_workflow_step_compensate(node, request.params).await,
+        "tenzro_workflowFinalize" => handle_workflow_finalize(node, request.params).await,
+        "tenzro_getWorkflowSaga" => handle_get_workflow_saga(node, request.params).await,
+
+        // DID envelope verification (JSON-RPC mirror of POST /verify/did-envelope)
+        "tenzro_verifyDidEnvelope" => handle_verify_did_envelope(node, request.params).await,
+
+        // Capital Intent standard (agentic capital allocation over tokenized assets)
+        "tenzro_capitalIntentOpen" => handle_capital_intent_open(node, request.params).await,
+        "tenzro_capitalIntentQuote" => handle_capital_intent_quote(node, request.params).await,
+        "tenzro_capitalIntentAssign" => handle_capital_intent_assign(node, request.params).await,
+        "tenzro_capitalIntentExecute" => handle_capital_intent_execute(node, request.params).await,
+        "tenzro_capitalIntentVerify" => handle_capital_intent_verify(node, request.params).await,
+        "tenzro_capitalIntentSettle" => handle_capital_intent_settle(node, request.params).await,
+        "tenzro_capitalIntentCompensate" => handle_capital_intent_compensate(node, request.params).await,
+        "tenzro_getCapitalIntent" => handle_get_capital_intent(node, request.params).await,
+
+        // Proof-of-Reserve + attested-mint (1:1 backing invariant)
+        "tenzro_submitReserveAttestation" => handle_submit_reserve_attestation(node, request.params).await,
+        "tenzro_attestedMint" => handle_attested_mint(node, request.params).await,
+        "tenzro_getReserve" => handle_get_reserve(node, request.params).await,
 
         // Agent template marketplace methods
         "tenzro_registerAgentTemplate" => handle_register_agent_template(node, request.params).await,
@@ -1230,7 +1323,8 @@ pub(crate) async fn handle_request(
 
         // Bridge methods
         "tenzro_bridgeTokens" => handle_bridge_tokens(node, request.params).await,
-        "tenzro_bridgeQuote" => handle_bridge_quote(node, request.params).await,
+        // `tenzro_quoteBridge` is the incident-drills doc name for a bridge quote.
+        "tenzro_bridgeQuote" | "tenzro_quoteBridge" => handle_bridge_quote(node, request.params).await,
         "tenzro_getBridgeRoutes" => handle_get_bridge_routes(node, request.params).await,
         "tenzro_bridgeRoutes" => handle_bridge_routes(node, request.params).await,
         "tenzro_bridgeStatus" => handle_bridge_status(node, request.params).await,
@@ -1345,7 +1439,9 @@ pub(crate) async fn handle_request(
         // AP2 — Agent Payments Protocol
         "tenzro_ap2SignMandate" => handle_ap2_sign_mandate(node, request.params, auth_ctx).await,
         "tenzro_ap2VerifyMandate" => crate::rpc_integrations::handle_ap2_verify_mandate(node, request.params).await,
-        "tenzro_ap2ValidateMandatePair" => crate::rpc_integrations::handle_ap2_validate_mandate_pair(node, request.params).await,
+        // `tenzro_validateMandatePair` is the bridge/SPEC-doc name; aliased onto
+        // the shipped AP2 mandate-pair validator.
+        "tenzro_ap2ValidateMandatePair" | "tenzro_validateMandatePair" => crate::rpc_integrations::handle_ap2_validate_mandate_pair(node, request.params).await,
         "tenzro_ap2ProtocolInfo" => crate::rpc_integrations::handle_ap2_protocol_info(node, request.params).await,
         "tenzro_ap2ReportMandateViolation" => crate::rpc_integrations::handle_ap2_report_mandate_violation(node, request.params).await,
 
@@ -7492,6 +7588,232 @@ fn tenzro_7683_order_to_json(order: &tenzro_types::intent_7683::Tenzro7683Order)
     })
 }
 
+/// `tenzro_open7683Order` — open a Tenzro-origin ERC-7683 cross-chain order.
+///
+/// Constructs a [`tenzro_types::intent_7683::Tenzro7683Order`] envelope in
+/// [`tenzro_types::intent_7683::OrderState::Open`], persists it under the
+/// `7683_origin:` keyspace in `CF_SETTLEMENTS`, and returns the canonical
+/// 32-byte order id. Subsequent fills are recorded via the existing
+/// `tenzro_recordFill7683` / `tenzro_getFill7683` surface; reads of the
+/// envelope go through `tenzro_get7683Order` / `tenzro_list7683Orders`.
+///
+/// Params (all required):
+/// - `settlement_contract`: 32-byte hex address of the settler contract.
+/// - `swapper`: 32-byte hex address of the user opening the order.
+/// - `nonce`: u64 monotonic nonce per swapper.
+/// - `origin_chain_id`: u32 CAIP-2 numeric chain id of the order's origin.
+/// - `fill_deadline`: u32 Unix-second deadline by which a fill must land.
+/// - `order_data_type`: 32-byte hex Keccak-256 typehash of `order_data`.
+/// - `order_data`: hex-encoded opaque payload (Tenzro orders encode a
+///   bincode `TenzroOrderData`; foreign origins encode their own type).
+/// - `escrow_id`: 32-byte hex id of the `EscrowManager` escrow already
+///   locking the swapper's inputs. The caller is responsible for opening
+///   the escrow before calling this RPC.
+/// - `proof_route`: one of `layerzero`, `wormhole`, `debridge`,
+///   `hyperlane` — the bridge route that will ferry the destination-side
+///   fill proof back to origin.
+///
+/// On success returns `{ opened: true, order_id: "0x..." }`. Idempotent:
+/// a second call with the same `(swapper, nonce, origin_chain_id,
+/// fill_deadline, order_data_type, order_data)` returns the same
+/// `order_id` and `{ opened: false }` if an envelope already exists.
+async fn handle_open_7683_order(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::intent_7683::{
+        compute_order_id, order_storage_key, CrossChainOrder, FillInstruction, Output,
+        OrderState, ProofRoute, ResolvedCrossChainOrder, Tenzro7683Order, TenzroOrderData,
+    };
+    use tenzro_types::primitives::Timestamp;
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let settlement_contract = parse_hex_address_param(&params, "settlement_contract")?;
+    let swapper = parse_hex_address_param(&params, "swapper")?;
+    let nonce = params
+        .get("nonce")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing nonce (u64)".to_string(),
+            data: None,
+        })?;
+    let origin_chain_id = params
+        .get("origin_chain_id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing origin_chain_id (u32)".to_string(),
+            data: None,
+        })? as u32;
+    let fill_deadline = params
+        .get("fill_deadline")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing fill_deadline (u32)".to_string(),
+            data: None,
+        })? as u32;
+    let order_data_type = parse_hex_hash_param(&params, "order_data_type")?;
+    let order_data_hex = params
+        .get("order_data")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing order_data (hex)".to_string(),
+            data: None,
+        })?;
+    let order_data = hex::decode(order_data_hex.trim_start_matches("0x")).map_err(|e| {
+        JsonRpcError {
+            code: -32602,
+            message: format!("Invalid order_data hex: {}", e),
+            data: None,
+        }
+    })?;
+    let escrow_id = parse_hex_hash_param(&params, "escrow_id")?;
+    let proof_route_str = params
+        .get("proof_route")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing proof_route".to_string(),
+            data: None,
+        })?;
+    let proof_route = match proof_route_str {
+        "layerzero" => ProofRoute::LayerZero,
+        "wormhole" => ProofRoute::Wormhole,
+        "debridge" => ProofRoute::DeBridge,
+        "hyperlane" => ProofRoute::Hyperlane,
+        other => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "Unknown proof_route '{}' — expected one of layerzero, wormhole, debridge, hyperlane",
+                    other
+                ),
+                data: None,
+            });
+        }
+    };
+
+    let order = CrossChainOrder {
+        settlement_contract,
+        swapper,
+        nonce,
+        origin_chain_id,
+        fill_deadline,
+        order_data_type,
+        order_data: order_data.clone(),
+    };
+    let order_id = compute_order_id(&order);
+    let storage_key = order_storage_key(&order_id);
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    // Idempotency — if an envelope at this id exists, return it without
+    // mutation.
+    if let Some(_existing) = storage
+        .get(CF_SETTLEMENTS, &storage_key)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?
+    {
+        return Ok(serde_json::json!({
+            "opened": false,
+            "order_id": format!("0x{}", hex::encode(order_id.as_bytes())),
+        }));
+    }
+
+    // Resolve `min_received` / `max_spent` / `fill_instructions` from the
+    // TenzroOrderData payload when the order is Tenzro-native. Foreign
+    // origin payloads are stored verbatim and resolved by their own
+    // settler.
+    let (max_spent, min_received, fill_instructions) =
+        if let Ok(td) = bincode::deserialize::<TenzroOrderData>(&order_data) {
+            let max_spent: Vec<Output> = td
+                .outputs
+                .iter()
+                .cloned()
+                .map(|o| Output {
+                    token: o.token,
+                    amount: o.amount,
+                    recipient: o.recipient,
+                    chain_id: o.chain_id,
+                })
+                .collect();
+            let min_received: Vec<Output> = td
+                .inputs
+                .iter()
+                .map(|t| Output {
+                    token: t.token.clone(),
+                    amount: t.amount,
+                    recipient: swapper.as_bytes().try_into().unwrap_or([0u8; 32]),
+                    chain_id: origin_chain_id,
+                })
+                .collect();
+            let fill_instructions = vec![FillInstruction {
+                destination_chain_id: td.dest_chain_id,
+                destination_settler: [0u8; 32],
+                origin_data: order_data.clone(),
+            }];
+            (max_spent, min_received, fill_instructions)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
+
+    let resolved = ResolvedCrossChainOrder {
+        settlement_contract,
+        swapper,
+        nonce,
+        origin_chain_id,
+        fill_deadline,
+        max_spent,
+        min_received,
+        fill_instructions,
+    };
+
+    let envelope = Tenzro7683Order {
+        order_id,
+        state: OrderState::Open,
+        resolved,
+        escrow_id,
+        opened_at: Timestamp::now(),
+        fill_deadline,
+        filler: None,
+        fill_proof_hash: None,
+        proof_route,
+    };
+
+    let bytes = serde_json::to_vec(&envelope).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to serialize order envelope: {}", e),
+        data: None,
+    })?;
+    storage
+        .put(CF_SETTLEMENTS, &storage_key, &bytes)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Storage write error: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "opened": true,
+        "order_id": format!("0x{}", hex::encode(order_id.as_bytes())),
+    }))
+}
+
 /// `tenzro_get7683Order` — fetch a single ERC-7683 cross-chain order envelope
 /// by `order_id` (Agent-Swarm Spec 4 — wave 1, read path).
 ///
@@ -9422,6 +9744,76 @@ async fn handle_add_service(
     }))
 }
 
+/// `tenzro_updateIdentity` — controller-signed update per did:tenzro spec
+/// §3.3. The implementation dispatches to the per-field handlers based on
+/// an `update` discriminator. Accepted shapes:
+///
+/// ```jsonc
+/// { "did": "...", "update": { "kind": "credential",    ...credential payload  } }
+/// { "did": "...", "update": { "kind": "service",       ...service entry      } }
+/// { "did": "...", "update": { "kind": "resource",      ...resource entry     } }
+/// { "did": "...", "update": { "kind": "claim",         ...claim payload      } }
+/// { "did": "...", "update": { "kind": "username",      "username": "..." } }
+/// ```
+async fn handle_update_identity(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let outer = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let update = outer
+        .get("update")
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing `update` field".to_string(),
+            data: None,
+        })?
+        .clone();
+    let kind = update
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing `update.kind` (credential | service | resource | claim | username)".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    // Build a per-handler param object that merges the outer `did` plus
+    // every field on the inner update body other than `kind`.
+    let mut merged = serde_json::Map::new();
+    if let Some(did) = outer.get("did").cloned() {
+        merged.insert("did".into(), did);
+    }
+    if let Value::Object(map) = update {
+        for (k, v) in map {
+            if k == "kind" {
+                continue;
+            }
+            merged.insert(k, v);
+        }
+    }
+    let dispatch_params = Some(Value::Object(merged));
+
+    match kind.as_str() {
+        "credential" => handle_add_credential(node, dispatch_params).await,
+        "service" => handle_add_service(node, dispatch_params).await,
+        "resource" => handle_add_resource(node, dispatch_params).await,
+        "claim" => handle_add_identity_claim(node, dispatch_params).await,
+        "username" => handle_set_username(node, dispatch_params).await,
+        other => Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "Unknown update kind '{other}' — expected credential | service | resource | claim | username"
+            ),
+            data: None,
+        }),
+    }
+}
+
 async fn handle_set_username(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -10025,6 +10417,313 @@ async fn handle_node_info(node: &Arc<TenzroNode>) -> std::result::Result<Value, 
     Ok(serde_json::to_value(status).unwrap())
 }
 
+/// Tenzro SLIP-44 coin index for the native TNZO coin.
+///
+/// Registered upstream as `satoshilabs/slips#2015`. The pre-registration
+/// string `tenzro` is also accepted by spec until that PR merges; the
+/// canonical CAIP-19 form is the integer.
+const TENZRO_SLIP44_COIN_INDEX: u32 = 1_414_421_071;
+
+/// Read the genesis block hash from storage. Returns `None` when the
+/// node has not finished its first-boot genesis write yet. Used by the
+/// CAIP-2 RPC and any future identifier that derives from the genesis.
+async fn read_genesis_block_hash(node: &Arc<TenzroNode>) -> Option<tenzro_types::primitives::Hash> {
+    use tenzro_storage::BlockStore;
+    use tenzro_storage::block_store::BlockStoreImpl;
+
+    let storage = node.storage()?;
+    let block_store = BlockStoreImpl::new(storage.clone()).ok()?;
+    block_store
+        .get_block_by_height(tenzro_types::primitives::BlockHeight(0))
+        .await
+        .ok()
+        .flatten()
+        .map(|block| block.hash())
+}
+
+/// Compute the Tenzro CAIP-2 reference per the submitted namespace spec:
+/// lowercase hex of the first 16 bytes of the genesis block hash. Returns
+/// `None` when the genesis block has not been written to storage yet.
+async fn caip2_reference(node: &Arc<TenzroNode>) -> Option<String> {
+    let hash = read_genesis_block_hash(node).await?;
+    let bytes = hash.as_bytes();
+    let prefix_len = bytes.len().min(16);
+    Some(hex::encode(&bytes[..prefix_len]))
+}
+
+/// `tenzro_caip2` — Return the canonical CAIP-2 identifier for this chain
+/// per the `tenzro` namespace spec
+/// (`ChainAgnostic/namespaces/blob/main/tenzro/caip2.md`):
+/// `tenzro:<lowercase hex of genesis_hash[0..16]>`.
+///
+/// The integer chain id (`eth_chainId`) is **not** the CAIP-2 reference
+/// but is surfaced alongside as `evm_chain_id` so EVM tooling can read
+/// it without a second round-trip.
+async fn handle_caip2(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let evm_chain_id = node
+        .config()
+        .genesis
+        .as_ref()
+        .map(|g| g.chain_id)
+        .unwrap_or(1337);
+    match caip2_reference(node).await {
+        Some(reference) => Ok(serde_json::json!({
+            "caip2": format!("tenzro:{}", reference),
+            "namespace": "tenzro",
+            "reference": reference,
+            "evm_chain_id": evm_chain_id,
+            "spec": "https://github.com/ChainAgnostic/namespaces/blob/main/tenzro/caip2.md",
+        })),
+        None => Ok(serde_json::json!({
+            "caip2": Value::Null,
+            "namespace": "tenzro",
+            "reference": Value::Null,
+            "evm_chain_id": evm_chain_id,
+            "uninitialized": true,
+            "note": "Genesis block not yet written to storage; caip2 will populate after the first finalized block.",
+            "spec": "https://github.com/ChainAgnostic/namespaces/blob/main/tenzro/caip2.md",
+        })),
+    }
+}
+
+/// `tenzro_caip10` — Return the CAIP-10 account identifier for an address
+/// on this Tenzro chain per the `tenzro` namespace spec
+/// (`ChainAgnostic/namespaces/blob/main/tenzro/caip10.md`).
+///
+/// Hex (`0x` + 64 chars) is the canonical form; base58btc is also
+/// accepted on input. Tenzro addresses are 32 bytes (the same address is
+/// reachable through the EVM, SVM, and Canton/DAML façades).
+///
+/// Params: `{ "address": "0x...64hex" | "<base58btc>" }`.
+async fn handle_caip10(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let address_in = params
+        .get("address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing address".to_string(),
+            data: None,
+        })?;
+    let (canonical_hex, input_form) = normalize_caip10_address(address_in)?;
+    let evm_chain_id = node
+        .config()
+        .genesis
+        .as_ref()
+        .map(|g| g.chain_id)
+        .unwrap_or(1337);
+
+    let (caip10, caip2_value): (Value, Value) = match caip2_reference(node).await {
+        Some(reference) => (
+            Value::String(format!("tenzro:{}:0x{}", reference, canonical_hex)),
+            Value::String(format!("tenzro:{}", reference)),
+        ),
+        None => (Value::Null, Value::Null),
+    };
+
+    Ok(serde_json::json!({
+        "caip10": caip10,
+        "caip2": caip2_value,
+        "address": format!("0x{}", canonical_hex),
+        "input_form": input_form,
+        "evm_chain_id": evm_chain_id,
+        "spec": "https://github.com/ChainAgnostic/namespaces/blob/main/tenzro/caip10.md",
+    }))
+}
+
+/// Normalize a Tenzro address to canonical 64-hex form. Accepts:
+/// - `0x` + 64 lowercase hex characters (canonical).
+/// - 64 hex characters without prefix.
+/// - 43-44 char base58btc encoding of a 32-byte address.
+///
+/// Returns `(canonical_lowercase_hex_no_prefix, input_form_label)` where
+/// `input_form_label` is `"hex"` or `"base58btc"`.
+fn normalize_caip10_address(input: &str) -> std::result::Result<(String, &'static str), JsonRpcError> {
+    let trimmed = input.trim();
+    let hex_candidate = trimmed.trim_start_matches("0x");
+    let looked_hex = hex_candidate.len() == 64
+        && hex_candidate.chars().all(|c| c.is_ascii_hexdigit());
+    if looked_hex {
+        return Ok((hex_candidate.to_ascii_lowercase(), "hex"));
+    }
+    // Try base58btc.
+    if let Ok(bytes) = bs58::decode(trimmed).into_vec() {
+        if bytes.len() == 32 {
+            return Ok((hex::encode(bytes), "base58btc"));
+        }
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "base58btc address decoded to {} bytes, expected 32",
+                bytes.len()
+            ),
+            data: None,
+        });
+    }
+    Err(JsonRpcError {
+        code: -32602,
+        message: "address must be 0x + 64 hex chars or a 32-byte base58btc string".into(),
+        data: None,
+    })
+}
+
+/// `tenzro_caip19` — Return the CAIP-19 asset type identifier per the
+/// `tenzro` namespace spec
+/// (`ChainAgnostic/namespaces/blob/main/tenzro/caip19.md`).
+///
+/// `asset_namespace` ∈ `{slip44, token, nft}`:
+///
+/// - `slip44`: native TNZO coin. Reference is the SLIP-44 coin index
+///   (`1414421071`, decimal). The pre-registration string `tenzro` is
+///   accepted on input until `satoshilabs/slips#2015` merges.
+/// - `token`: fungible token registered in Tenzro's unified token
+///   registry. Reference is the 64-character lowercase hex of the
+///   32-byte token id.
+/// - `nft`: NFT, identified by `<collection_id_hex>/<token_id>` where
+///   `collection_id` is the 32-byte collection id (64-char hex). The
+///   optional `token_id` is appended as `/{decimal|64-char hex}`.
+///
+/// Params: `{ "asset_namespace": "slip44" | "token" | "nft",
+/// "asset_reference"?: "...", "token_id"?: "..." }`.
+async fn handle_caip19(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let asset_namespace = params
+        .get("asset_namespace")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing asset_namespace (slip44 | token | nft)".to_string(),
+            data: None,
+        })?;
+
+    let asset_reference = match asset_namespace {
+        "slip44" => {
+            let explicit = params
+                .get("asset_reference")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match explicit {
+                "" => TENZRO_SLIP44_COIN_INDEX.to_string(),
+                "tenzro" => "tenzro".to_string(),
+                other => {
+                    if let Ok(idx) = other.parse::<u32>() {
+                        idx.to_string()
+                    } else {
+                        return Err(JsonRpcError {
+                            code: -32602,
+                            message: format!(
+                                "slip44 asset_reference must be a decimal coin index (default {}) or the pre-registration string 'tenzro'; got {other}",
+                                TENZRO_SLIP44_COIN_INDEX
+                            ),
+                            data: None,
+                        });
+                    }
+                }
+            }
+        }
+        "token" => {
+            let raw = params
+                .get("asset_reference")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: "token asset_reference is required (32-byte token id, hex)".into(),
+                    data: None,
+                })?;
+            normalize_32byte_hex(raw, "asset_reference")?
+        }
+        "nft" => {
+            let raw = params
+                .get("asset_reference")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: "nft asset_reference is required (32-byte collection id, hex)".into(),
+                    data: None,
+                })?;
+            normalize_32byte_hex(raw, "asset_reference")?
+        }
+        other => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "Unknown asset_namespace '{other}' — expected one of slip44, token, nft"
+                ),
+                data: None,
+            });
+        }
+    };
+
+    let suffix = if asset_namespace == "nft" {
+        match params.get("token_id").and_then(|v| v.as_str()) {
+            Some(raw) => {
+                let raw = raw.trim();
+                if raw.chars().all(|c| c.is_ascii_digit()) {
+                    Some(raw.to_string())
+                } else {
+                    Some(normalize_32byte_hex(raw, "token_id")?)
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let chain_prefix_value = match caip2_reference(node).await {
+        Some(reference) => Value::String(format!("tenzro:{}", reference)),
+        None => Value::Null,
+    };
+
+    let caip19_value = if let Some(prefix) = chain_prefix_value.as_str() {
+        let mut s = format!("{}/{}:{}", prefix, asset_namespace, asset_reference);
+        if let Some(token_id) = &suffix {
+            s.push('/');
+            s.push_str(token_id);
+        }
+        Value::String(s)
+    } else {
+        Value::Null
+    };
+
+    Ok(serde_json::json!({
+        "caip19": caip19_value,
+        "caip2": chain_prefix_value,
+        "asset_namespace": asset_namespace,
+        "asset_reference": asset_reference,
+        "token_id": suffix,
+        "spec": "https://github.com/ChainAgnostic/namespaces/blob/main/tenzro/caip19.md",
+    }))
+}
+
+/// Normalize a 32-byte identifier (token id, collection id) to canonical
+/// 64-character lowercase hex. Accepts `0x` prefix or unprefixed forms.
+fn normalize_32byte_hex(input: &str, field: &str) -> std::result::Result<String, JsonRpcError> {
+    let stripped = input.trim().trim_start_matches("0x");
+    if stripped.len() != 64 || !stripped.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("{field} must be 32 bytes (64 hex chars)"),
+            data: None,
+        });
+    }
+    Ok(stripped.to_ascii_lowercase())
+}
+
 async fn handle_peer_count(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
     let status = node.status().await;
     Ok(serde_json::json!(format!("0x{:x}", status.peer_count)))
@@ -10211,6 +10910,119 @@ async fn handle_list_snapshots(
         data: None,
     })?;
     Ok(serde_json::json!({ "snapshots": summaries }))
+}
+
+/// `tenzro_produceSnapshot` — operator-triggered state-sync snapshot at the
+/// current chain tip. Mirrors the automatic snapshot the event loop emits
+/// every `SNAPSHOT_INTERVAL_BLOCKS` finalized blocks, but on demand. Backs
+/// `tenzro node snapshot`. Admin-token-gated. No params.
+async fn handle_produce_snapshot(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let store = node.snapshot_store().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "snapshot store not initialised".to_string(),
+        data: None,
+    })?;
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "storage not initialised".to_string(),
+        data: None,
+    })?;
+    let block_store = BlockStoreImpl::new(storage.clone()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("block store: {}", e),
+        data: None,
+    })?;
+    let block = block_store
+        .latest_block()
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("latest_block: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "no finalized block to snapshot".to_string(),
+            data: None,
+        })?;
+    let height = block.height().0;
+    let mut sr = [0u8; 32];
+    let bytes = block.header.state_root.as_bytes();
+    let n = bytes.len().min(32);
+    sr[..n].copy_from_slice(&bytes[..n]);
+    let store = store.clone();
+    // Snapshot production walks all column families and is I/O-bound; run it
+    // off the async runtime thread, mirroring the event-loop path.
+    let manifest = tokio::task::spawn_blocking(move || store.produce_at(height, sr))
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("snapshot task join: {}", e),
+            data: None,
+        })?
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("produce_at: {}", e),
+            data: None,
+        })?;
+    let manifest = serde_json::to_value(&manifest).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize manifest: {}", e),
+        data: None,
+    })?;
+    Ok(serde_json::json!({ "snapshot": manifest }))
+}
+
+/// `tenzro_setDraining` — toggle the consensus drain flag. While draining,
+/// this validator stops proposing blocks as leader but keeps voting on peers'
+/// proposals, so in-flight finality is unaffected. Backs `tenzro node drain`.
+/// Admin-token-gated. Optional param `draining` (bool, defaults to `true`).
+async fn handle_set_draining(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = unwrap_param_object(params);
+    let draining = p
+        .get("draining")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let consensus = node.consensus().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "consensus engine not running on this node".to_string(),
+        data: None,
+    })?;
+    consensus.set_draining(draining);
+    Ok(serde_json::json!({ "draining": consensus.is_draining() }))
+}
+
+/// `tenzro_gossipStats` — peer and gossipsub mesh statistics for operators.
+/// Backs `tenzro node gossip-stats`. Admin-token-gated. No params. Topics
+/// whose mesh cannot be queried (not subscribed on this node) are omitted.
+async fn handle_gossip_stats(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let fresh_peers = node.peer_status.fresh_peer_count();
+    let network_tip = node.peer_status.network_tip();
+    let mut topics = serde_json::Map::new();
+    if let Some(network) = node.network() {
+        for topic in [
+            "tenzro/consensus",
+            "tenzro/attestations",
+            "tenzro/blocks",
+            "tenzro/transactions",
+        ] {
+            if let Ok(n) = network.mesh_peer_count(topic).await {
+                topics.insert(topic.to_string(), serde_json::json!(n));
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "fresh_peers": fresh_peers,
+        "network_tip": network_tip,
+        "mesh_peers_by_topic": topics,
+    }))
 }
 
 /// `tenzro_getSnapshotManifest` — return the full manifest (including
@@ -14616,20 +15428,68 @@ async fn handle_list_vision_catalog() -> std::result::Result<Value, JsonRpcError
 
 /// `tenzro_loadTextEmbeddingModel`: register a text encoder by `model_id`.
 ///
-/// Wave 1 ships runtime scaffolding only — ONNX session loading is not yet
-/// wired here. Real text-embedding models (Qwen3-Embedding, EmbeddingGemma)
-/// require tokenizer.json + model.onnx and will be wired in a follow-up.
-/// This RPC currently returns a `not yet implemented` error so the surface
-/// is discoverable but does not silently lie about state.
+/// Loads the encoder into the `TextEmbeddingRuntime`. The ONNX session itself
+/// only loads when tenzro-model is built with `--features onnx`; otherwise
+/// `load_onnx` returns "ONNX backend not enabled" — the same contract as the
+/// wired vision/audio paths. Params: `{ model_id, path (model.onnx),
+/// tokenizer_path, family (qwen3|cls|mean|sentence_embedding), and either
+/// catalog_id OR (embedding_dim + max_sequence_length) }`.
 async fn handle_load_text_embedding_model(
-    _node: &Arc<TenzroNode>,
-    _params: Option<Value>,
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    Err(JsonRpcError {
-        code: -32004,
-        message: "text-embedding ONNX loading not yet wired in wave 1; runtime + catalog ship empty (see plan)".to_string(),
-        data: None,
-    })
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p.get("model_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("model_id"))?.to_string();
+    let onnx_path = p.get("path").or_else(|| p.get("onnx_path")).and_then(|v| v.as_str()).ok_or_else(|| missing_param("path"))?.to_string();
+    let tokenizer_path = p.get("tokenizer_path").and_then(|v| v.as_str()).ok_or_else(|| missing_param("tokenizer_path"))?.to_string();
+    let family = parse_text_encoder_family(p.get("family").and_then(|v| v.as_str()).ok_or_else(|| missing_param("family"))?)?;
+
+    let (embedding_dim, max_sequence_length) = if let Some(cid) = p.get("catalog_id").and_then(|v| v.as_str()) {
+        let e = get_text_embedding_model_by_id(cid)
+            .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Unknown catalog_id '{cid}'"), data: None })?;
+        (e.embedding_dim as usize, e.max_sequence_length as usize)
+    } else {
+        let ed = p.get("embedding_dim").and_then(|v| v.as_u64()).ok_or_else(|| missing_param("embedding_dim"))? as usize;
+        let ms = p.get("max_sequence_length").and_then(|v| v.as_u64()).ok_or_else(|| missing_param("max_sequence_length"))? as usize;
+        (ed, ms)
+    };
+
+    node.text_embedding_runtime
+        .load_onnx(model_id.clone(), onnx_path, tokenizer_path, family, embedding_dim, max_sequence_length)
+        .map_err(forecast_err)?;
+
+    Ok(serde_json::json!({
+        "model_id": model_id, "loaded": true,
+        "embedding_dim": embedding_dim, "max_sequence_length": max_sequence_length,
+    }))
+}
+
+/// Parse a text-encoder pooling family. The catalog stores a model-name family
+/// (e.g. "embeddinggemma"), so the runtime pooling kind is passed explicitly.
+fn parse_text_encoder_family(s: &str) -> std::result::Result<TextEncoderFamily, JsonRpcError> {
+    match s.to_ascii_lowercase().replace('-', "_").replace(' ', "_").as_str() {
+        "qwen3" => Ok(TextEncoderFamily::Qwen3),
+        "cls" => Ok(TextEncoderFamily::Cls),
+        "mean" => Ok(TextEncoderFamily::Mean),
+        "sentence_embedding" | "sentence" => Ok(TextEncoderFamily::SentenceEmbedding),
+        other => Err(JsonRpcError { code: -32602, message: format!("unknown text encoder family '{other}' (qwen3|cls|mean|sentence_embedding)"), data: None }),
+    }
+}
+
+fn parse_sam_family(s: &str) -> std::result::Result<SamFamily, JsonRpcError> {
+    match s.to_ascii_lowercase().replace('-', "_").replace(' ', "_").as_str() {
+        "sam1" | "sam" => Ok(SamFamily::Sam1),
+        "sam2" => Ok(SamFamily::Sam2),
+        other => Err(JsonRpcError { code: -32602, message: format!("unknown SAM family '{other}' (sam1|sam2)"), data: None }),
+    }
+}
+
+fn parse_detr_family(s: &str) -> std::result::Result<DetrFamily, JsonRpcError> {
+    match s.to_ascii_lowercase().replace('-', "_").replace(' ', "_").as_str() {
+        "rf_detr" | "rfdetr" => Ok(DetrFamily::RfDetr),
+        "d_fine" | "dfine" => Ok(DetrFamily::DFine),
+        other => Err(JsonRpcError { code: -32602, message: format!("unknown DETR family '{other}' (rf_detr|d_fine)"), data: None }),
+    }
 }
 
 /// `tenzro_unloadTextEmbeddingModel`: drop a registered text encoder.
@@ -14714,15 +15574,30 @@ async fn handle_text_embed(
 // ============================================================================
 
 /// `tenzro_loadSegmentationModel`: register a segmenter by `model_id`.
+///
+/// Params: `{ model_id, encoder_path, decoder_path, family (sam1|sam2), and
+/// either catalog_id OR input_size }`. The ONNX session loads only with
+/// `--features onnx` (else "ONNX backend not enabled").
 async fn handle_load_segmentation_model(
-    _node: &Arc<TenzroNode>,
-    _params: Option<Value>,
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    Err(JsonRpcError {
-        code: -32004,
-        message: "segmentation ONNX loading not yet wired in wave 1; runtime + catalog ship as scaffolding (see plan)".to_string(),
-        data: None,
-    })
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p.get("model_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("model_id"))?.to_string();
+    let encoder_path = p.get("encoder_path").and_then(|v| v.as_str()).ok_or_else(|| missing_param("encoder_path"))?.to_string();
+    let decoder_path = p.get("decoder_path").and_then(|v| v.as_str()).ok_or_else(|| missing_param("decoder_path"))?.to_string();
+    let family = parse_sam_family(p.get("family").and_then(|v| v.as_str()).ok_or_else(|| missing_param("family"))?)?;
+    let input_size = if let Some(cid) = p.get("catalog_id").and_then(|v| v.as_str()) {
+        get_segmentation_model_by_id(cid)
+            .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Unknown catalog_id '{cid}'"), data: None })?
+            .input_size
+    } else {
+        p.get("input_size").and_then(|v| v.as_u64()).ok_or_else(|| missing_param("input_size"))? as u32
+    };
+    node.segmentation_runtime
+        .load_onnx(model_id.clone(), encoder_path, decoder_path, family, input_size)
+        .map_err(forecast_err)?;
+    Ok(serde_json::json!({ "model_id": model_id, "loaded": true, "input_size": input_size }))
 }
 
 async fn handle_unload_segmentation_model(
@@ -14972,15 +15847,32 @@ async fn handle_text_segment(
 // Object detection — RF-DETR, D-FINE
 // ============================================================================
 
+/// `tenzro_loadDetectionModel`: register an object detector by `model_id`.
+///
+/// Params: `{ model_id, path, family (rf_detr|d_fine), and either catalog_id OR
+/// (input_size + num_classes) }`. The ONNX session loads only with
+/// `--features onnx` (else "ONNX backend not enabled").
 async fn handle_load_detection_model(
-    _node: &Arc<TenzroNode>,
-    _params: Option<Value>,
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    Err(JsonRpcError {
-        code: -32004,
-        message: "detection ONNX loading not yet wired in wave 1; runtime + catalog ship as scaffolding (see plan)".to_string(),
-        data: None,
-    })
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p.get("model_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("model_id"))?.to_string();
+    let path = p.get("path").and_then(|v| v.as_str()).ok_or_else(|| missing_param("path"))?.to_string();
+    let family = parse_detr_family(p.get("family").and_then(|v| v.as_str()).ok_or_else(|| missing_param("family"))?)?;
+    let (input_size, num_classes) = if let Some(cid) = p.get("catalog_id").and_then(|v| v.as_str()) {
+        let e = get_detection_model_by_id(cid)
+            .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Unknown catalog_id '{cid}'"), data: None })?;
+        (e.input_size, e.num_classes)
+    } else {
+        let is = p.get("input_size").and_then(|v| v.as_u64()).ok_or_else(|| missing_param("input_size"))? as u32;
+        let nc = p.get("num_classes").and_then(|v| v.as_u64()).ok_or_else(|| missing_param("num_classes"))? as u32;
+        (is, nc)
+    };
+    node.detection_runtime
+        .load_onnx(model_id.clone(), path, family, input_size, num_classes)
+        .map_err(forecast_err)?;
+    Ok(serde_json::json!({ "model_id": model_id, "loaded": true, "input_size": input_size, "num_classes": num_classes }))
 }
 
 async fn handle_unload_detection_model(
@@ -20552,6 +21444,301 @@ fn check_kill_switch_authorization(
 // ============================================================================
 // Task Marketplace handlers
 // ============================================================================
+//
+// Implements the 5-stage task-coordination lifecycle from
+// `docs/architecture/task-coordination-lifecycle.md`:
+//   Post → Quote → Escrow+Bind (assign) → Execute (off-network) → Settle+Rep.
+//
+// Escrow note: the task surface is node-mediated (like the existing direct
+// `token.transfer` settlement), so funds move on the `TnzoToken` ledger into a
+// deterministic key-less vault derived with the same domain separation the
+// Native VM uses (`tenzro-vm::derive_vault_address`). The `EscrowManager` is
+// updated via its VM-log reflection API (`reflect_escrow_*`) so the escrow is
+// queryable through `tenzro_getEscrow` without going through the legacy
+// in-memory balance ledger (which is not the source of truth).
+
+/// Derive the deterministic, key-less escrow vault address for a task escrow,
+/// mirroring the Native VM scheme `Address(SHA-256("tenzro/escrow/vault" || id))`.
+/// The vault has no private key; only the assign/complete/dispute handlers move
+/// funds in or out of it.
+fn task_escrow_vault(escrow_id: &str) -> tenzro_types::primitives::Address {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"tenzro/escrow/vault");
+    h.update(escrow_id.as_bytes());
+    let digest = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    tenzro_types::primitives::Address::new(out)
+}
+
+/// Map a `ReleaseConditions` requirement onto the right escrow release
+/// condition for a task. Task escrow always releases on a poster-accepted /
+/// proof-verified completion, and refunds on deadline+dispute, so we record
+/// `Custom` carrying the acceptance-criteria intent.
+fn task_release_conditions(task_id: &str) -> tenzro_types::settlement::ReleaseConditions {
+    tenzro_types::settlement::ReleaseConditions::Custom {
+        condition: format!("task_completion_accepted:{}", task_id),
+    }
+}
+
+/// Validate a completion `output` string against structured acceptance criteria.
+fn validate_acceptance_criteria(
+    criteria: &tenzro_types::AcceptanceCriteria,
+    output: &str,
+) -> std::result::Result<(), String> {
+    if let Some(min) = criteria.min_word_count {
+        let wc = output.split_whitespace().count() as u64;
+        if wc < min {
+            return Err(format!(
+                "output word count {} is below the required minimum {}",
+                wc, min
+            ));
+        }
+    }
+    for section in &criteria.required_sections {
+        if !output.contains(section.as_str()) {
+            return Err(format!("output is missing required section/key '{}'", section));
+        }
+    }
+    if let Some(fmt) = &criteria.format {
+        let f = fmt.to_ascii_lowercase();
+        if (f == "json" || f == "application/json")
+            && serde_json::from_str::<serde_json::Value>(output).is_err()
+        {
+            return Err("output is not valid JSON but acceptance_criteria.format requires JSON".into());
+        }
+    }
+    Ok(())
+}
+
+/// Assert that a submitted `ServiceProof`'s type satisfies the task's
+/// `ProofRequirement`, including the optional pinned circuit/model/enclave class.
+/// Recompute a positional SHA-256 Merkle root from `leaf` up through `siblings`.
+/// At each level the low bit of the running index selects order: even →
+/// H(node ‖ sibling), odd → H(sibling ‖ node). Same scheme as
+/// `verify_reputation_proof`.
+fn merkle_root_from_path(leaf: &[u8], leaf_index: u64, siblings: &[&[u8]]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut node = leaf.to_vec();
+    let mut idx = leaf_index;
+    for sib in siblings {
+        let mut h = Sha256::new();
+        if idx & 1 == 0 {
+            h.update(&node);
+            h.update(sib);
+        } else {
+            h.update(sib);
+            h.update(&node);
+        }
+        node = h.finalize().to_vec();
+        idx >>= 1;
+    }
+    node
+}
+
+fn proof_requirement_satisfied(
+    req: &tenzro_types::ProofRequirement,
+    proof: &tenzro_types::settlement::ServiceProof,
+) -> std::result::Result<(), String> {
+    use tenzro_types::settlement::ProofType;
+    use tenzro_types::ProofRequirement as R;
+    let type_ok = matches!(
+        (req, &proof.proof_type),
+        (R::ZeroKnowledge { .. }, ProofType::ZeroKnowledge)
+            | (R::TeeAttestation { .. }, ProofType::TeeAttestation)
+            | (R::Cryptographic, ProofType::Cryptographic)
+            | (R::Oracle, ProofType::Oracle)
+            | (R::Merkle { .. }, ProofType::Merkle)
+    );
+    if !type_ok {
+        return Err(format!(
+            "submitted proof type {:?} does not satisfy required proof {:?}",
+            proof.proof_type, req
+        ));
+    }
+    // TEE attestation must be present when a TEE proof is required.
+    if matches!(req, R::TeeAttestation { .. }) && proof.attestation.is_none() && proof.proof_data.is_empty() {
+        return Err("TEE attestation required but no attestation/proof_data present".into());
+    }
+    // Merkle: recompute the positional SHA-256 inclusion root from the proof and
+    // require it to equal the poster-pinned root from the acceptance criteria.
+    // proof_data layout: leaf(32) || leaf_index(u32-le, 4) || siblings(32*k).
+    if let R::Merkle { expected_root } = req {
+        let data = &proof.proof_data;
+        if data.len() < 36 || (data.len() - 36) % 32 != 0 {
+            return Err(
+                "merkle proof_data must be leaf(32) || leaf_index(u32-le) || siblings(32*k)".into(),
+            );
+        }
+        let leaf = &data[0..32];
+        let leaf_index = u32::from_le_bytes([data[32], data[33], data[34], data[35]]) as u64;
+        let siblings: Vec<&[u8]> = data[36..].chunks(32).collect();
+        let computed = hex::encode(merkle_root_from_path(leaf, leaf_index, &siblings));
+        let expected = expected_root
+            .strip_prefix("0x")
+            .unwrap_or(expected_root)
+            .to_ascii_lowercase();
+        if computed != expected {
+            return Err(format!(
+                "merkle inclusion proof root mismatch: computed {computed} != pinned {expected}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Parse a JSON `proof` parameter into a `ServiceProof`. Accepts a friendly
+/// shape: `{ "proof_type": "tee_attestation"|"zero_knowledge"|"cryptographic"
+/// |"oracle"|"merkle"|"multi_party", "data": <hex or base64>,
+/// "attestation": <hex|base64, optional>, "signatures": [ { "signer": <hex>,
+/// "signature": <hex>, "role": "provider"|"consumer"|"verifier"|"oracle" } ] }`.
+fn parse_service_proof(
+    value: &Value,
+) -> std::result::Result<tenzro_types::settlement::ServiceProof, String> {
+    use tenzro_types::settlement::{ProofSignature, ProofType, ServiceProof, SignerRole};
+
+    let decode_bytes = |s: &str| -> std::result::Result<Vec<u8>, String> {
+        let t = s.strip_prefix("0x").unwrap_or(s);
+        if let Ok(b) = hex::decode(t) {
+            return Ok(b);
+        }
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode(s)
+            .map_err(|_| "proof data is neither valid hex nor base64".to_string())
+    };
+
+    let proof_type = match value
+        .get("proof_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("cryptographic")
+    {
+        "tee_attestation" | "tee" => ProofType::TeeAttestation,
+        "zero_knowledge" | "zk" => ProofType::ZeroKnowledge,
+        "oracle" => ProofType::Oracle,
+        "merkle" => ProofType::Merkle,
+        "multi_party" | "multiparty" => ProofType::MultiParty,
+        _ => ProofType::Cryptographic,
+    };
+
+    let proof_data = match value.get("data").and_then(|v| v.as_str()) {
+        Some(s) => decode_bytes(s)?,
+        None => Vec::new(),
+    };
+
+    let attestation = match value.get("attestation").and_then(|v| v.as_str()) {
+        Some(s) => Some(decode_bytes(s)?),
+        None => None,
+    };
+
+    let mut signatures = Vec::new();
+    if let Some(arr) = value.get("signatures").and_then(|v| v.as_array()) {
+        for s in arr {
+            let signer_hex = s.get("signer").and_then(|v| v.as_str()).ok_or("signature missing signer")?;
+            let sig_hex = s.get("signature").and_then(|v| v.as_str()).ok_or("signature missing signature")?;
+            let signer = parse_address(signer_hex).map_err(|e| format!("bad signer address: {:?}", e.message))?;
+            let signature = decode_bytes(sig_hex)?;
+            let role = match s.get("role").and_then(|v| v.as_str()).unwrap_or("provider") {
+                "consumer" => SignerRole::Consumer,
+                "verifier" => SignerRole::Verifier,
+                "oracle" => SignerRole::Oracle,
+                _ => SignerRole::Provider,
+            };
+            signatures.push(ProofSignature { signer, signature, role });
+        }
+    }
+
+    Ok(ServiceProof {
+        proof_type,
+        proof_data,
+        signatures,
+        attestation,
+    })
+}
+
+/// Verify a quote-time `ReputationProof`: recompute the Merkle root from the
+/// leaf + sibling path (positional, SHA-256) and check it against the claimed
+/// registry root, and verify the leaf binds `(agent_id, claimed_score)`.
+fn verify_reputation_proof(
+    p: &tenzro_types::ReputationProof,
+) -> std::result::Result<(), String> {
+    use sha2::{Digest, Sha256};
+
+    // Bind the leaf to (agent_id, claimed_score): leaf = SHA-256(agent_id || score_le).
+    let expected_leaf = {
+        let mut h = Sha256::new();
+        h.update(p.agent_id.as_bytes());
+        h.update(p.claimed_score.to_le_bytes());
+        hex::encode(h.finalize())
+    };
+    let leaf_clean = p.leaf.strip_prefix("0x").unwrap_or(&p.leaf).to_ascii_lowercase();
+    if leaf_clean != expected_leaf {
+        return Err("reputation proof leaf does not bind (agent_id, claimed_score)".into());
+    }
+
+    let mut node = hex::decode(&leaf_clean).map_err(|_| "leaf not valid hex")?;
+    let mut idx = p.leaf_index;
+    for sib_hex in &p.merkle_path {
+        let sib = hex::decode(sib_hex.strip_prefix("0x").unwrap_or(sib_hex))
+            .map_err(|_| "merkle sibling not valid hex")?;
+        let mut h = Sha256::new();
+        if idx & 1 == 0 {
+            h.update(&node);
+            h.update(&sib);
+        } else {
+            h.update(&sib);
+            h.update(&node);
+        }
+        node = h.finalize().to_vec();
+        idx >>= 1;
+    }
+    let computed = hex::encode(&node);
+    let expected_root = p.registry_root.strip_prefix("0x").unwrap_or(&p.registry_root).to_ascii_lowercase();
+    if computed != expected_root {
+        return Err(format!(
+            "reputation proof root mismatch: computed {} != claimed {}",
+            computed, expected_root
+        ));
+    }
+    Ok(())
+}
+
+/// Dispatch ERC-8004 reputation feedback for a settled task, resolving the
+/// provider address → TDIP machine DID → on-chain `agentId`. Best-effort: if
+/// the node lacks the erc8004 system signer / agent registry, or the provider
+/// has no mirrored DID, this logs and returns without erroring the settlement.
+/// Returns the resolved `agentId` when a feedback tx was spawned.
+fn dispatch_task_reputation(
+    node: &Arc<TenzroNode>,
+    provider: &tenzro_types::primitives::Address,
+    score: u8,
+    context: &str,
+) -> Option<u64> {
+    let signer = node.erc8004_system_signer()?;
+    let registry = node.erc8004_agent_registry()?;
+    let id_registry = node.identity_registry()?;
+    let machine_did = match id_registry.find_did_by_address(provider) {
+        Some(d) => d,
+        None => {
+            info!(provider = %hex::encode(provider.as_bytes()), "task reputation skipped: provider address has no mirrored DID");
+            return None;
+        }
+    };
+    match crate::erc8004_reputation_dispatcher::dispatch_reputation_feedback(
+        &machine_did,
+        score as i8,
+        context,
+        signer,
+        registry,
+    ) {
+        Ok(agent_id) => Some(agent_id),
+        Err(e) => {
+            warn!(error = %e, "task reputation dispatch failed (settlement unaffected)");
+            None
+        }
+    }
+}
 
 async fn handle_post_task(
     node: &Arc<TenzroNode>,
@@ -20604,6 +21791,22 @@ async fn handle_post_task(
     }
     if let Some(pref) = params.get("preferred_model_id").and_then(|v| v.as_str()) {
         task.preferred_model_id = Some(pref.to_string());
+    }
+
+    // Stage 1 / P1: structured acceptance criteria (proof spec). Accepts the
+    // `acceptance_criteria` object directly as an `AcceptanceCriteria` so the
+    // completion path can gate output validation + proof verification on it.
+    if let Some(ac) = params.get("acceptance_criteria") {
+        match serde_json::from_value::<tenzro_types::AcceptanceCriteria>(ac.clone()) {
+            Ok(criteria) => task.acceptance_criteria = Some(criteria),
+            Err(e) => {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid acceptance_criteria: {}", e),
+                    data: None,
+                });
+            }
+        }
     }
 
     let storage = node.storage().ok_or_else(|| JsonRpcError {
@@ -20870,6 +22073,32 @@ async fn handle_quote_task(
     let confidence = params.get("confidence").and_then(|v| v.as_u64()).unwrap_or(80) as u8;
     let estimated_duration_secs = params.get("estimated_duration_secs").and_then(|v| v.as_u64()).unwrap_or(60);
 
+    // Stage 2 / P3: optional provider attestation + reputation proof.
+    let provider_attestation = params
+        .get("provider_attestation")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let provider_reputation_proof = match params.get("provider_reputation_proof") {
+        Some(v) if !v.is_null() => {
+            let proof: tenzro_types::ReputationProof =
+                serde_json::from_value(v.clone()).map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid provider_reputation_proof: {}", e),
+                    data: None,
+                })?;
+            // Verify the Merkle proof now so the poster can trust the claimed
+            // score without an RPC round-trip to the ReputationRegistry.
+            verify_reputation_proof(&proof).map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("provider_reputation_proof verification failed: {}", e),
+                data: None,
+            })?;
+            Some(proof)
+        }
+        _ => None,
+    };
+
     let now = chrono::Utc::now().timestamp() as u64;
     let quote = TaskQuote {
         task_id: task_id.to_string(),
@@ -20880,9 +22109,25 @@ async fn handle_quote_task(
         confidence,
         expires_at: now + 300, // 5-minute quote validity
         notes: params.get("notes").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        provider_attestation,
+        provider_reputation_proof,
     };
 
-    info!(task_id = %task_id, price = %price, "Quote submitted for task");
+    // Persist the quote under `quote:{task_id}:{provider}` in CF_TASKS so the
+    // assign path can resolve the agreed price + attestation by provider.
+    let quote_key = format!("quote:{}:{}", task_id, hex::encode(provider.as_bytes()));
+    let quote_bytes = serde_json::to_vec(&quote).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+    storage.put(CF_TASKS, quote_key.as_bytes(), &quote_bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    info!(task_id = %task_id, price = %price, "Quote submitted and persisted for task");
     Ok(serde_json::to_value(&quote).unwrap_or_else(|_| serde_json::json!({})))
 }
 
@@ -20941,10 +22186,80 @@ async fn handle_assign_task(
         });
     }
 
+    // Resolve the agreed price: explicit `quoted_price` param wins, else the
+    // persisted quote for this provider, else the task's max_price.
+    let quoted_price = parse_u128_amount(&params, "quoted_price");
+    let stored_quote_price = {
+        let quote_key = format!("quote:{}:{}", task_id, hex::encode(provider.as_bytes()));
+        storage
+            .get(CF_TASKS, quote_key.as_bytes())
+            .ok()
+            .flatten()
+            .and_then(|b| serde_json::from_slice::<tenzro_types::TaskQuote>(&b).ok())
+            .map(|q| q.price)
+    };
+    let final_price = quoted_price.or(stored_quote_price).unwrap_or(task.max_price);
+
     task.status = TaskStatus::Assigned;
     task.assignee = Some(provider);
-    if let Some(price) = parse_u128_amount(&params, "quoted_price") {
-        task.quoted_price = Some(price);
+    task.quoted_price = Some(final_price);
+
+    // Stage 3 / P0: Escrow + Bind. Lock `final_price` TNZO from the poster into
+    // a deterministic key-less vault and record the escrow in the EscrowManager
+    // index. Funds move on the TnzoToken ledger (node-mediated, like the
+    // existing direct settlement); the EscrowManager is updated via its VM-log
+    // reflection API so it's queryable via tenzro_getEscrow.
+    if final_price > 0 {
+        let token = node.token().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Token not initialized".to_string(),
+            data: None,
+        })?;
+        let escrow_mgr = node.escrow_manager().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Escrow manager not initialized".to_string(),
+            data: None,
+        })?;
+
+        // Compute the escrow expiry from the task deadline (unix seconds) if
+        // present, otherwise a 7-day default. Timestamp is in milliseconds.
+        let now_millis = chrono::Utc::now().timestamp_millis();
+        let expires_at = match task.deadline {
+            Some(secs) => tenzro_types::primitives::Timestamp::new((secs as i64) * 1000),
+            None => tenzro_types::primitives::Timestamp::new(now_millis + 7 * 24 * 60 * 60 * 1000),
+        };
+
+        let escrow = tenzro_settlement::EscrowAccount::new(
+            task.poster,
+            provider,
+            final_price,
+            tenzro_types::AssetId::tnzo(),
+            expires_at,
+            task_release_conditions(task_id),
+        );
+        let vault = task_escrow_vault(&escrow.escrow_id);
+
+        // Lock funds: poster → vault.
+        token.transfer(&task.poster, &vault, final_price).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Escrow lock transfer failed: {}", e),
+            data: None,
+        })?;
+
+        // Record the escrow in the off-chain index (write-through to CF_SETTLEMENTS).
+        escrow_mgr.reflect_escrow_created(escrow.clone()).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Escrow index write failed: {}", e),
+            data: None,
+        })?;
+
+        task.escrow_id = Some(escrow.escrow_id.clone());
+        info!(
+            task_id = %task_id,
+            escrow_id = %escrow.escrow_id,
+            amount = final_price,
+            "Task escrow funded (poster → vault)"
+        );
     }
 
     let updated = serde_json::to_vec(&task).map_err(|e| JsonRpcError {
@@ -20960,7 +22275,12 @@ async fn handle_assign_task(
     })?;
 
     info!(task_id = %task_id, "Task assigned to provider");
-    Ok(serde_json::json!({"task_id": task_id, "status": "assigned"}))
+    Ok(serde_json::json!({
+        "task_id": task_id,
+        "status": "assigned",
+        "escrow_id": task.escrow_id,
+        "escrowed_amount_wei": final_price.to_string(),
+    }))
 }
 
 async fn handle_complete_task(
@@ -21005,11 +22325,62 @@ async fn handle_complete_task(
         data: None,
     })?;
 
-    // Determine settlement amounts
+    // Only an assigned task can be completed. Reject terminal/unassigned states.
+    if !matches!(task.status, TaskStatus::Assigned | TaskStatus::InProgress) {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("Cannot complete task in status: {:?}", task.status),
+            data: None,
+        });
+    }
+
+    // Stage 5 / P1+P2: validate the output against acceptance criteria and, if
+    // a proof is required, route it through the SettlementEngine proof dispatch
+    // (ZK / TEE / crypto / oracle / merkle) before releasing escrow.
+    if let Some(criteria) = task.acceptance_criteria.clone() {
+        validate_acceptance_criteria(&criteria, &output).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("acceptance_criteria not met: {}", e),
+            data: None,
+        })?;
+
+        if let Some(required) = &criteria.required_proof {
+            let proof_value = params.get("proof").ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "task requires a completion proof but none was provided".to_string(),
+                data: None,
+            })?;
+            let proof = parse_service_proof(proof_value).map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("invalid completion proof: {}", e),
+                data: None,
+            })?;
+            proof_requirement_satisfied(required, &proof).map_err(|e| JsonRpcError {
+                code: -32000,
+                message: e,
+                data: None,
+            })?;
+            let engine = node.settlement().ok_or_else(|| JsonRpcError {
+                code: -32000,
+                message: "Settlement engine not initialized".to_string(),
+                data: None,
+            })?;
+            engine.verify_service_proof(&proof).map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("completion proof verification failed: {}", e),
+                data: None,
+            })?;
+            info!(task_id = %task_id, "completion proof verified via SettlementEngine");
+        }
+    }
+
+    // Determine settlement amounts.
     let final_price = task.quoted_price.unwrap_or(task.max_price);
     let remainder = task.max_price.saturating_sub(final_price);
 
-    // Perform token settlement if task was assigned and has a price
+    // Settlement. Prefer escrow release (vault → assignee) when the task was
+    // funded at assign time; otherwise fall back to the legacy direct transfer
+    // (poster → assignee) for tasks assigned before escrow funding existed.
     let settlement = if let Some(ref assignee) = task.assignee {
         if final_price > 0 {
             let token = node.token().ok_or_else(|| JsonRpcError {
@@ -21018,12 +22389,38 @@ async fn handle_complete_task(
                 data: None,
             })?;
 
-            // Transfer final_price from poster to assignee
-            token.transfer(&task.poster, assignee, final_price).map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Settlement transfer failed: {}", e),
-                data: None,
-            })?;
+            if let Some(ref escrow_id) = task.escrow_id {
+                let escrow_mgr = node.escrow_manager().ok_or_else(|| JsonRpcError {
+                    code: -32000,
+                    message: "Escrow manager not initialized".to_string(),
+                    data: None,
+                })?;
+                let escrow = escrow_mgr.get_escrow(escrow_id).map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Escrow not found for task: {}", e),
+                    data: None,
+                })?;
+                let vault = task_escrow_vault(escrow_id);
+                // Release: vault → assignee.
+                token.transfer(&vault, assignee, escrow.amount).map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Escrow release transfer failed: {}", e),
+                    data: None,
+                })?;
+                escrow_mgr.reflect_escrow_released(escrow_id).map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Escrow index update failed: {}", e),
+                    data: None,
+                })?;
+                info!(task_id = %task_id, escrow_id = %escrow_id, amount = escrow.amount, "Task escrow released (vault → assignee)");
+            } else {
+                // Legacy path: no escrow was funded — direct poster → assignee.
+                token.transfer(&task.poster, assignee, final_price).map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Settlement transfer failed: {}", e),
+                    data: None,
+                })?;
+            }
 
             let agent_balance = token.balance_of(assignee);
             let poster_balance = token.balance_of(&task.poster);
@@ -21039,13 +22436,33 @@ async fn handle_complete_task(
                 "final_price_wei": final_price.to_string(),
                 "remainder_wei": remainder.to_string(),
                 "agent_balance_wei": agent_balance.to_string(),
-                "poster_balance_wei": poster_balance.to_string()
+                "poster_balance_wei": poster_balance.to_string(),
+                "via": if task.escrow_id.is_some() { "escrow_release" } else { "direct_transfer" }
             })
         } else {
             serde_json::json!({"final_price_wei": "0", "remainder_wei": "0"})
         }
     } else {
         serde_json::json!({"skipped": "no assignee"})
+    };
+
+    // Stage 5 / P2: ERC-8004 reputation feedback for the provider, regardless
+    // of whether settlement came via SPT or native TNZO. Success score is
+    // configurable (`outcome_score`, 0..=100), default 100.
+    let outcome_score = params
+        .get("outcome_score")
+        .and_then(|v| v.as_u64())
+        .map(|v| v.min(100) as u8)
+        .unwrap_or(100);
+    let reputation_agent_id = if let Some(ref assignee) = task.assignee {
+        dispatch_task_reputation(
+            node,
+            assignee,
+            outcome_score,
+            &format!("tenzro_task:completed task_id={}", task_id),
+        )
+    } else {
+        None
     };
 
     task.status = TaskStatus::Completed;
@@ -21067,8 +22484,1122 @@ async fn handle_complete_task(
     Ok(serde_json::json!({
         "task_id": task_id,
         "status": "completed",
-        "settlement": settlement
+        "settlement": settlement,
+        "reputation_agent_id": reputation_agent_id,
     }))
+}
+
+/// `tenzro_disputeTask` (P4) — raise or arbitrate a dispute on an assigned task.
+///
+/// Two modes:
+///  - **Raise** (no `resolution` param): records a `TaskDispute`, flips the task
+///    to `Disputed`. The escrow stays locked in the vault — no funds move.
+///  - **Arbitrate** (`resolution` = `"release_to_provider"` | `"refund_to_poster"`):
+///    the oracle/governance arbiter's decision is executed against the escrow
+///    vault: release → assignee or refund → poster, the escrow index is
+///    updated, the task moves to its terminal state, and an ERC-8004 reputation
+///    row is written (full score on release, chargeback score on refund).
+async fn handle_dispute_task(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{DisputeResolution, TaskDispute, TaskInfo, TaskStatus};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let task_id = params.get("task_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing task_id".to_string(),
+        data: None,
+    })?;
+
+    let raised_by = parse_address(
+        params.get("raised_by").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing raised_by address".to_string(),
+            data: None,
+        })?,
+    )?;
+
+    let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    let bytes = storage
+        .get(CF_TASKS, format!("task:{}", task_id).as_bytes())
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {}", e), data: None })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Task not found: {}", task_id),
+            data: None,
+        })?;
+
+    let mut task: TaskInfo = serde_json::from_slice(&bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Deserialization error: {}", e),
+        data: None,
+    })?;
+
+    if !matches!(task.status, TaskStatus::Assigned | TaskStatus::InProgress | TaskStatus::Disputed) {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("Cannot dispute task in status: {:?}", task.status),
+            data: None,
+        });
+    }
+
+    let resolution = match params.get("resolution").and_then(|v| v.as_str()) {
+        Some("release_to_provider") => Some(DisputeResolution::ReleaseToProvider),
+        Some("refund_to_poster") => Some(DisputeResolution::RefundToPoster),
+        Some(other) => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!("Unknown resolution '{}': expected release_to_provider | refund_to_poster", other),
+                data: None,
+            });
+        }
+        None => None,
+    };
+
+    // Record (or update) the dispute.
+    task.dispute = Some(TaskDispute {
+        raised_by,
+        reason: reason.clone(),
+        raised_at: tenzro_types::primitives::Timestamp::now(),
+        resolution: resolution.clone(),
+    });
+
+    let mut payout_summary = serde_json::json!({"funds_moved": false});
+
+    match resolution {
+        None => {
+            // Raise only: lock stays, task → Disputed.
+            task.status = TaskStatus::Disputed;
+        }
+        Some(decision) => {
+            // Arbitrate: act on the escrow vault per the arbiter's decision.
+            if let Some(ref escrow_id) = task.escrow_id {
+                let token = node.token().ok_or_else(|| JsonRpcError {
+                    code: -32000,
+                    message: "Token not initialized".to_string(),
+                    data: None,
+                })?;
+                let escrow_mgr = node.escrow_manager().ok_or_else(|| JsonRpcError {
+                    code: -32000,
+                    message: "Escrow manager not initialized".to_string(),
+                    data: None,
+                })?;
+                let escrow = escrow_mgr.get_escrow(escrow_id).map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Escrow not found: {}", e),
+                    data: None,
+                })?;
+                let vault = task_escrow_vault(escrow_id);
+
+                match decision {
+                    DisputeResolution::ReleaseToProvider => {
+                        let assignee = task.assignee.ok_or_else(|| JsonRpcError {
+                            code: -32000,
+                            message: "Disputed task has no assignee to release to".to_string(),
+                            data: None,
+                        })?;
+                        token.transfer(&vault, &assignee, escrow.amount).map_err(|e| JsonRpcError {
+                            code: -32000,
+                            message: format!("Dispute release transfer failed: {}", e),
+                            data: None,
+                        })?;
+                        escrow_mgr.reflect_escrow_released(escrow_id).map_err(|e| JsonRpcError {
+                            code: -32000,
+                            message: format!("Escrow index update failed: {}", e),
+                            data: None,
+                        })?;
+                        // Provider prevailed → full reputation credit.
+                        dispatch_task_reputation(
+                            node,
+                            &assignee,
+                            100,
+                            &format!("tenzro_task:dispute_resolved_release task_id={}", task_id),
+                        );
+                        task.status = TaskStatus::Completed;
+                        payout_summary = serde_json::json!({
+                            "funds_moved": true,
+                            "direction": "vault_to_provider",
+                            "amount_wei": escrow.amount.to_string()
+                        });
+                    }
+                    DisputeResolution::RefundToPoster => {
+                        token.transfer(&vault, &task.poster, escrow.amount).map_err(|e| JsonRpcError {
+                            code: -32000,
+                            message: format!("Dispute refund transfer failed: {}", e),
+                            data: None,
+                        })?;
+                        escrow_mgr.reflect_escrow_refunded(escrow_id).map_err(|e| JsonRpcError {
+                            code: -32000,
+                            message: format!("Escrow index update failed: {}", e),
+                            data: None,
+                        })?;
+                        // Provider lost the dispute → chargeback-equivalent score (0).
+                        if let Some(ref assignee) = task.assignee {
+                            dispatch_task_reputation(
+                                node,
+                                assignee,
+                                0,
+                                &format!("tenzro_task:dispute_resolved_refund task_id={}", task_id),
+                            );
+                        }
+                        task.status = TaskStatus::Cancelled;
+                        payout_summary = serde_json::json!({
+                            "funds_moved": true,
+                            "direction": "vault_to_poster",
+                            "amount_wei": escrow.amount.to_string()
+                        });
+                    }
+                }
+            } else {
+                return Err(JsonRpcError {
+                    code: -32000,
+                    message: "Cannot arbitrate: task has no funded escrow".to_string(),
+                    data: None,
+                });
+            }
+        }
+    }
+
+    let updated = serde_json::to_vec(&task).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+    storage.put(CF_TASKS, format!("task:{}", task_id).as_bytes(), &updated).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Storage error: {}", e),
+        data: None,
+    })?;
+
+    info!(task_id = %task_id, status = ?task.status, "Task dispute processed");
+    Ok(serde_json::json!({
+        "task_id": task_id,
+        "status": format!("{:?}", task.status).to_lowercase(),
+        "payout": payout_summary,
+    }))
+}
+
+// ============================================================================
+// Multi-agent saga workflow coordination (Tier-3) handlers
+// ============================================================================
+//
+// Implements the chain-anchored saga primitives from
+// `docs/architecture/multi-agent-workflow-coordination.md`:
+//   workflowOpen → (per step) StepExecute → StepVerify | StepCompensate
+//                → workflowFinalize.
+// Each step carries an optional per-step escrow that Execute funds (payer →
+// vault), Verify releases (vault → payee), and Compensate refunds (vault →
+// payer) — reusing the same node-mediated token-vault + EscrowManager
+// reflection mechanism as the task lifecycle. Verify also emits an ERC-8004
+// reputation row for the step executor.
+
+const SAGA_KEY_PREFIX: &str = "saga:";
+
+fn saga_key(workflow_id: &str) -> Vec<u8> {
+    format!("{}{}", SAGA_KEY_PREFIX, workflow_id).into_bytes()
+}
+
+// ===========================================================================
+// Capital Intent standard (docs/architecture/capital-intent.md)
+// Agentic capital allocation over tokenized assets. Reuses the saga escrow +
+// ERC-8004 patterns; persists CapitalIntentRecord under CF_SETTLEMENTS.
+// ===========================================================================
+
+/// Extract the TDIP/ERC-8004 reputation (0–1000) from a resolved machine
+/// identity; 0 for non-machine / unscored identities. Used to rank solver bids.
+fn agent_reputation(identity: &tenzro_identity::TenzroIdentity) -> u32 {
+    match &identity.identity_data {
+        tenzro_identity::IdentityData::Machine { reputation, .. } => *reputation,
+        _ => 0,
+    }
+}
+
+const CAPITAL_INTENT_PREFIX: &str = "capital_intent:";
+
+fn capital_intent_key(intent_id: &str) -> Vec<u8> {
+    format!("{}{}", CAPITAL_INTENT_PREFIX, intent_id).into_bytes()
+}
+
+fn load_capital_intent(
+    node: &Arc<TenzroNode>,
+    intent_id: &str,
+) -> std::result::Result<tenzro_types::CapitalIntentRecord, JsonRpcError> {
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not available".to_string(), data: None,
+    })?;
+    let bytes = storage
+        .get(CF_SETTLEMENTS, &capital_intent_key(intent_id))
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {e}"), data: None })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602, message: format!("Capital intent not found: {intent_id}"), data: None,
+        })?;
+    serde_json::from_slice(&bytes).map_err(|e| JsonRpcError {
+        code: -32000, message: format!("Deserialization error: {e}"), data: None,
+    })
+}
+
+fn save_capital_intent(
+    node: &Arc<TenzroNode>,
+    rec: &tenzro_types::CapitalIntentRecord,
+) -> std::result::Result<(), JsonRpcError> {
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Storage not available".to_string(), data: None,
+    })?;
+    let bytes = serde_json::to_vec(rec).map_err(|e| JsonRpcError {
+        code: -32000, message: format!("Serialization error: {e}"), data: None,
+    })?;
+    storage
+        .put(CF_SETTLEMENTS, &capital_intent_key(&rec.intent.intent_id), &bytes)
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {e}"), data: None })
+}
+
+/// `tenzro_capitalIntentOpen(intent)` — open a signed capital intent. Verifies
+/// the principal's signature (if present) over the canonical signing payload and
+/// enforces the AP2 authorization ceiling, then persists in `Open`.
+async fn handle_capital_intent_open(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::CapitalIntentStatus;
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let intent_val = params.get("intent").cloned().unwrap_or(params.clone());
+    let intent: tenzro_types::CapitalIntent = serde_json::from_value(intent_val).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("invalid capital intent: {e}"), data: None,
+    })?;
+
+    // Authorization ceiling must be set.
+    if intent.authorization.max_total_notional == 0 {
+        return Err(JsonRpcError { code: -32602, message: "authorization.max_total_notional must be > 0".to_string(), data: None });
+    }
+    // Reject duplicate.
+    if node.storage().and_then(|s| s.get(CF_SETTLEMENTS, &capital_intent_key(&intent.intent_id)).ok().flatten()).is_some() {
+        return Err(JsonRpcError { code: -32000, message: format!("Capital intent already exists: {}", intent.intent_id), data: None });
+    }
+    // Verify the principal's signature over the canonical payload (if provided).
+    if !intent.signature.is_empty() {
+        if let Some(registry) = node.identity_registry() {
+            if let Ok(identity) = registry.resolve(&intent.principal_did) {
+                if let Some(ed) = identity.public_keys.iter().find(|pk| pk.key_type == "Ed25519" && pk.public_key.len() == 32) {
+                    use tenzro_crypto::keys::{KeyType, PublicKey};
+                    use tenzro_crypto::signatures::{verify, Signature};
+                    let pk = PublicKey::new(KeyType::Ed25519, ed.public_key.clone());
+                    let sig = Signature::new(KeyType::Ed25519, intent.signature.clone());
+                    verify(&pk, &intent.signing_payload(), &sig).map_err(|_| JsonRpcError {
+                        code: -32001, message: "capital intent signature did not verify".to_string(), data: None,
+                    })?;
+                }
+            }
+        }
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let rec = tenzro_types::CapitalIntentRecord {
+        intent,
+        status: CapitalIntentStatus::Open,
+        solver_did: None,
+        quotes: Vec::new(),
+        legs: Vec::new(),
+        escrow_id: None,
+        filled_notional: 0,
+        receipt: None,
+        created_at: now,
+        updated_at: now,
+    };
+    save_capital_intent(node, &rec)?;
+    info!(intent_id = %rec.intent.intent_id, "Capital intent opened");
+    Ok(serde_json::to_value(&rec).unwrap_or_else(|_| serde_json::json!({"intent_id": rec.intent.intent_id})))
+}
+
+/// `tenzro_capitalIntentQuote(intent_id, solver_did, plan, price, eta_secs)` —
+/// a solver bids to fulfil the intent.
+async fn handle_capital_intent_quote(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{CapitalIntentStatus, CapitalQuote};
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let intent_id = params.get("intent_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("intent_id"))?;
+    let mut rec = load_capital_intent(node, intent_id)?;
+    if rec.is_terminal() {
+        return Err(JsonRpcError { code: -32000, message: "intent is terminal".to_string(), data: None });
+    }
+    let quote = CapitalQuote {
+        intent_id: intent_id.to_string(),
+        solver_did: params.get("solver_did").and_then(|v| v.as_str()).ok_or_else(|| missing_param("solver_did"))?.to_string(),
+        plan: params.get("plan").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        price: parse_u128_amount(&params, "price").unwrap_or(0),
+        eta_secs: params.get("eta_secs").and_then(|v| v.as_u64()).unwrap_or(0),
+        quoted_at: chrono::Utc::now().timestamp(),
+    };
+    rec.quotes.push(quote);
+    rec.status = CapitalIntentStatus::Quoting;
+    rec.updated_at = chrono::Utc::now().timestamp();
+    save_capital_intent(node, &rec)?;
+    Ok(serde_json::json!({ "intent_id": intent_id, "status": "quoting", "quotes": rec.quotes.len() }))
+}
+
+/// `tenzro_capitalIntentAssign(intent_id, solver_did, payer?)` — assign a solver
+/// and (if a payer funding address is given) lock the principal escrow up to the
+/// authorized ceiling.
+async fn handle_capital_intent_assign(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::CapitalIntentStatus;
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let intent_id = params.get("intent_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("intent_id"))?;
+    let mut rec = load_capital_intent(node, intent_id)?;
+    if rec.is_terminal() {
+        return Err(JsonRpcError { code: -32000, message: "intent is terminal".to_string(), data: None });
+    }
+
+    // Solver selection: explicit `solver_did`, OR auto-rank the received quotes
+    // by ERC-8004 reputation (then lowest price, then fastest eta) when
+    // `solver_did` is omitted or `auto: true`. Reuses TDIP machine reputation.
+    let auto = params.get("auto").and_then(|v| v.as_bool()).unwrap_or(false);
+    let solver_did = match params.get("solver_did").and_then(|v| v.as_str()) {
+        Some(s) if !auto => s.to_string(),
+        _ => rec
+            .quotes
+            .iter()
+            .max_by_key(|q| {
+                let rep = node
+                    .identity_registry()
+                    .and_then(|r| r.resolve(&q.solver_did).ok())
+                    .map(|id| agent_reputation(&id))
+                    .unwrap_or(0);
+                (rep, std::cmp::Reverse(q.price), std::cmp::Reverse(q.eta_secs))
+            })
+            .map(|q| q.solver_did.clone())
+            .ok_or_else(|| JsonRpcError {
+                code: -32000,
+                message: "no quotes available to auto-select a solver".to_string(),
+                data: None,
+            })?,
+    };
+
+    // Optional escrow lock of the authorized ceiling (payer -> vault).
+    if let Some(payer_s) = params.get("payer").and_then(|v| v.as_str()) {
+        let payer = parse_address(payer_s)?;
+        let vault_payee = parse_address(params.get("payee").and_then(|v| v.as_str()).unwrap_or(payer_s))?;
+        let amount = rec.intent.authorization.max_total_notional;
+        let token = node.token().ok_or_else(|| JsonRpcError { code: -32000, message: "Token not initialized".to_string(), data: None })?;
+        let escrow_mgr = node.escrow_manager().ok_or_else(|| JsonRpcError { code: -32000, message: "Escrow manager not initialized".to_string(), data: None })?;
+        let expires_at = tenzro_types::primitives::Timestamp::new(
+            chrono::Utc::now().timestamp_millis() + 7 * 24 * 60 * 60 * 1000,
+        );
+        let escrow = tenzro_settlement::EscrowAccount::new(
+            payer, vault_payee, amount, tenzro_types::AssetId::tnzo(), expires_at,
+            tenzro_types::settlement::ReleaseConditions::Custom { condition: format!("capital_intent_settled:{intent_id}") },
+        );
+        let vault = task_escrow_vault(&escrow.escrow_id);
+        token.transfer(&payer, &vault, amount).map_err(|e| JsonRpcError {
+            code: -32000, message: format!("Capital escrow lock failed: {e}"), data: None,
+        })?;
+        escrow_mgr.reflect_escrow_created(escrow.clone()).map_err(|e| JsonRpcError {
+            code: -32000, message: format!("Escrow index write failed: {e}"), data: None,
+        })?;
+        rec.escrow_id = Some(escrow.escrow_id.clone());
+    }
+
+    rec.solver_did = Some(solver_did.clone());
+    rec.status = CapitalIntentStatus::Assigned;
+    rec.updated_at = chrono::Utc::now().timestamp();
+    save_capital_intent(node, &rec)?;
+    info!(intent_id = %intent_id, solver = %solver_did, "Capital intent assigned");
+    Ok(serde_json::json!({ "intent_id": intent_id, "status": "assigned", "solver_did": solver_did, "escrow_id": rec.escrow_id }))
+}
+
+/// `tenzro_capitalIntentExecute(intent_id, leg)` — record one executed
+/// settlement leg (the solver calls this per leg as it fills the objective). The
+/// solver supplies venue/asset/side/quantity/unit_price (+ settlement_ref/proof).
+async fn handle_capital_intent_execute(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{CapitalIntentStatus, CapitalLeg, LegStatus, Side, VenueQuote, best_execution_ok};
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let intent_id = params.get("intent_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("intent_id"))?;
+    let mut rec = load_capital_intent(node, intent_id)?;
+    if rec.is_terminal() {
+        return Err(JsonRpcError { code: -32000, message: "intent is terminal".to_string(), data: None });
+    }
+    let leg = params.get("leg").ok_or_else(|| missing_param("leg"))?;
+    let side = match leg.get("side").and_then(|v| v.as_str()).unwrap_or("buy") {
+        "sell" => Side::Sell,
+        _ => Side::Buy,
+    };
+    let quantity = leg.get("quantity").and_then(|v| v.as_u64()).map(|q| q as u128)
+        .or_else(|| leg.get("quantity").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+        .unwrap_or(0);
+    let unit_price = leg.get("unit_price").and_then(|v| v.as_u64()).map(|p| p as u128)
+        .or_else(|| leg.get("unit_price").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+        .unwrap_or(0);
+    // Best-execution proof: the solver may supply the venue quotes it observed;
+    // we record them and flag whether the chosen price is best for the side.
+    let venue_quotes: Vec<VenueQuote> = leg.get("venue_quotes")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let best_execution_verified = best_execution_ok(side, unit_price, &venue_quotes);
+    let capital_leg = CapitalLeg {
+        venue: leg.get("venue").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        asset_id: leg.get("asset_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        side,
+        quantity,
+        unit_price,
+        settlement_ref: leg.get("settlement_ref").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        proof: leg.get("proof").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        venue_quotes,
+        best_execution_verified,
+        status: LegStatus::Settled,
+        updated_at: chrono::Utc::now().timestamp(),
+    };
+    rec.filled_notional = rec.filled_notional.saturating_add(quantity.saturating_mul(unit_price));
+    rec.legs.push(capital_leg);
+    rec.status = CapitalIntentStatus::Executing;
+    rec.updated_at = chrono::Utc::now().timestamp();
+    save_capital_intent(node, &rec)?;
+    Ok(serde_json::json!({ "intent_id": intent_id, "status": "executing", "legs": rec.legs.len(), "filled_notional": rec.filled_notional.to_string() }))
+}
+
+/// `tenzro_capitalIntentVerify(intent_id)` — mark proofs verified; transitions to
+/// `Verifying` once all recorded legs are settled.
+async fn handle_capital_intent_verify(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::CapitalIntentStatus;
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let intent_id = params.get("intent_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("intent_id"))?;
+    let mut rec = load_capital_intent(node, intent_id)?;
+    if !rec.all_legs_settled() {
+        return Err(JsonRpcError { code: -32000, message: "not all legs settled".to_string(), data: None });
+    }
+    rec.status = CapitalIntentStatus::Verifying;
+    rec.updated_at = chrono::Utc::now().timestamp();
+    save_capital_intent(node, &rec)?;
+    Ok(serde_json::json!({ "intent_id": intent_id, "status": "verifying", "legs": rec.legs.len() }))
+}
+
+/// `tenzro_capitalIntentSettle(intent_id, payee?)` — release escrow to the solver,
+/// write ERC-8004 reputation, finalize the intent with a receipt.
+async fn handle_capital_intent_settle(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use sha2::{Digest, Sha256};
+    use tenzro_types::CapitalIntentStatus;
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let intent_id = params.get("intent_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("intent_id"))?;
+    let mut rec = load_capital_intent(node, intent_id)?;
+
+    // Release escrow (vault -> payee/solver) if one was locked and still funded.
+    if let Some(escrow_id) = rec.escrow_id.clone() {
+        if let (Some(token), Some(escrow_mgr)) = (node.token(), node.escrow_manager()) {
+            if let Ok(escrow) = escrow_mgr.get_escrow(&escrow_id) {
+                if escrow.status == tenzro_settlement::EscrowStatus::Funded {
+                    let payee = params.get("payee").and_then(|v| v.as_str()).map(parse_address).transpose()?.unwrap_or(escrow.payee);
+                    let vault = task_escrow_vault(&escrow_id);
+                    token.transfer(&vault, &payee, escrow.amount).map_err(|e| JsonRpcError {
+                        code: -32000, message: format!("Capital escrow release failed: {e}"), data: None,
+                    })?;
+                    escrow_mgr.reflect_escrow_released(&escrow_id).map_err(|e| JsonRpcError {
+                        code: -32000, message: format!("Escrow index update failed: {e}"), data: None,
+                    })?;
+                }
+            }
+        }
+    }
+
+    // ERC-8004 reputation for the solver that fulfilled the intent.
+    if let (Some(signer), Some(registry), Some(solver_did)) = (
+        node.erc8004_system_signer(), node.erc8004_agent_registry(), rec.solver_did.clone(),
+    ) {
+        if let Err(e) = crate::erc8004_reputation_dispatcher::dispatch_reputation_feedback(
+            &solver_did, 100i8, &format!("tenzro_capital_intent:settled {intent_id}"), signer, registry,
+        ) {
+            warn!(error = %e, "capital intent reputation dispatch failed (settlement unaffected)");
+        }
+    }
+
+    // Receipt over intent id + legs.
+    let mut h = Sha256::new();
+    h.update(intent_id.as_bytes());
+    for l in &rec.legs {
+        h.update(l.asset_id.as_bytes());
+        h.update(l.quantity.to_be_bytes());
+        h.update(l.unit_price.to_be_bytes());
+    }
+    rec.receipt = Some(hex::encode(h.finalize()));
+    rec.status = CapitalIntentStatus::Settled;
+    rec.updated_at = chrono::Utc::now().timestamp();
+    save_capital_intent(node, &rec)?;
+    info!(intent_id = %intent_id, "Capital intent settled");
+    Ok(serde_json::json!({ "intent_id": intent_id, "status": "settled", "receipt": rec.receipt }))
+}
+
+/// `tenzro_capitalIntentCompensate(intent_id)` — refund the principal escrow and
+/// mark the intent failed (saga compensation for a non-fulfillable intent).
+async fn handle_capital_intent_compensate(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{CapitalIntentStatus, LegStatus};
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let intent_id = params.get("intent_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("intent_id"))?;
+    let mut rec = load_capital_intent(node, intent_id)?;
+
+    let mut refunded = None;
+    if let Some(escrow_id) = rec.escrow_id.clone() {
+        if let (Some(token), Some(escrow_mgr)) = (node.token(), node.escrow_manager()) {
+            if let Ok(escrow) = escrow_mgr.get_escrow(&escrow_id) {
+                if escrow.status == tenzro_settlement::EscrowStatus::Funded {
+                    let vault = task_escrow_vault(&escrow_id);
+                    token.transfer(&vault, &escrow.payer, escrow.amount).map_err(|e| JsonRpcError {
+                        code: -32000, message: format!("Capital escrow refund failed: {e}"), data: None,
+                    })?;
+                    escrow_mgr.reflect_escrow_refunded(&escrow_id).map_err(|e| JsonRpcError {
+                        code: -32000, message: format!("Escrow index update failed: {e}"), data: None,
+                    })?;
+                    refunded = Some(escrow_id);
+                }
+            }
+        }
+    }
+    for l in &mut rec.legs {
+        if l.status == LegStatus::Settled {
+            l.status = LegStatus::Compensated;
+        }
+    }
+    rec.status = CapitalIntentStatus::Failed;
+    rec.updated_at = chrono::Utc::now().timestamp();
+    save_capital_intent(node, &rec)?;
+    Ok(serde_json::json!({ "intent_id": intent_id, "status": "failed", "refunded_escrow": refunded }))
+}
+
+/// `tenzro_getCapitalIntent(intent_id)` — read the intent record.
+async fn handle_get_capital_intent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let intent_id = params.get("intent_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("intent_id"))?;
+    let rec = load_capital_intent(node, intent_id)?;
+    Ok(serde_json::to_value(&rec).unwrap_or_else(|_| serde_json::json!({"intent_id": intent_id})))
+}
+
+// ===========================================================================
+// Proof-of-Reserve + attested-mint (1:1 backing invariant)
+// docs/architecture/agentic-economy-coordination.md (attested-mint gap)
+// ===========================================================================
+
+const RESERVE_PREFIX: &str = "reserve:";
+
+fn reserve_key(asset_id: &str) -> Vec<u8> {
+    format!("{}{}", RESERVE_PREFIX, asset_id).into_bytes()
+}
+
+/// `tenzro_submitReserveAttestation(attestation)` — record a signed reserve
+/// statement backing a tokenized asset. Verifies the attestor's Ed25519
+/// signature (when present) over the canonical payload, then persists it. The
+/// attestor should be a registered `TrustedIssuer` / oracle / TEE quote signer.
+async fn handle_submit_reserve_attestation(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let att_val = params.get("attestation").cloned().unwrap_or(params.clone());
+    let att: tenzro_types::ReserveAttestation = serde_json::from_value(att_val).map_err(|e| JsonRpcError {
+        code: -32602, message: format!("invalid reserve attestation: {e}"), data: None,
+    })?;
+    if !att.signature.is_empty() {
+        if let Some(registry) = node.identity_registry() {
+            if let Ok(identity) = registry.resolve(&att.attestor_did) {
+                if let Some(ed) = identity.public_keys.iter().find(|pk| pk.key_type == "Ed25519" && pk.public_key.len() == 32) {
+                    use tenzro_crypto::keys::{KeyType, PublicKey};
+                    use tenzro_crypto::signatures::{verify, Signature};
+                    let pk = PublicKey::new(KeyType::Ed25519, ed.public_key.clone());
+                    let sig = Signature::new(KeyType::Ed25519, att.signature.clone());
+                    verify(&pk, &att.signing_payload(), &sig).map_err(|_| JsonRpcError {
+                        code: -32001, message: "reserve attestation signature did not verify".to_string(), data: None,
+                    })?;
+                }
+            }
+        }
+    }
+    let storage = node.storage().ok_or_else(|| JsonRpcError { code: -32000, message: "Storage not available".to_string(), data: None })?;
+    let bytes = serde_json::to_vec(&att).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })?;
+    storage.put(CF_SETTLEMENTS, &reserve_key(&att.asset_id), &bytes).map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {e}"), data: None })?;
+    info!(asset = %att.asset_id, reserves = att.reserves, "Reserve attestation recorded");
+    Ok(serde_json::json!({ "asset_id": att.asset_id, "reserves": att.reserves.to_string(), "source": att.source.as_str() }))
+}
+
+/// `tenzro_attestedMint(token_id, to, amount, caller)` — mint a tokenized asset
+/// ONLY if the post-mint supply stays within the latest attested reserves
+/// (1:1 backing as a protocol invariant). Reuses `TokenRegistry::mint_token`.
+async fn handle_attested_mint(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let token_hex = params.get("token_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("token_id"))?;
+    let to = parse_address(params.get("to").and_then(|v| v.as_str()).ok_or_else(|| missing_param("to"))?)?;
+    let caller = parse_address(params.get("caller").and_then(|v| v.as_str()).ok_or_else(|| missing_param("caller"))?)?;
+    let amount = parse_u128_amount(&params, "amount").ok_or_else(|| missing_param("amount"))?;
+
+    // token id (32-byte hex)
+    let token_bytes_v = hex::decode(token_hex.trim_start_matches("0x")).map_err(|e| JsonRpcError { code: -32602, message: format!("invalid token_id hex: {e}"), data: None })?;
+    if token_bytes_v.len() != 32 {
+        return Err(JsonRpcError { code: -32602, message: "token_id must be 32 bytes".to_string(), data: None });
+    }
+    let mut token_bytes = [0u8; 32];
+    token_bytes.copy_from_slice(&token_bytes_v);
+    let token_id = tenzro_token::TokenId::new(token_bytes);
+
+    // load reserve attestation (keyed by the token hex)
+    let storage = node.storage().ok_or_else(|| JsonRpcError { code: -32000, message: "Storage not available".to_string(), data: None })?;
+    let att_bytes = storage.get(CF_SETTLEMENTS, &reserve_key(token_hex)).map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {e}"), data: None })?
+        .ok_or_else(|| JsonRpcError { code: -32001, message: format!("no reserve attestation for asset {token_hex}; attested-mint blocked"), data: None })?;
+    let att: tenzro_types::ReserveAttestation = serde_json::from_slice(&att_bytes).map_err(|e| JsonRpcError { code: -32000, message: format!("Deserialization error: {e}"), data: None })?;
+
+    // enforce 1:1 backing invariant against current supply
+    let registry = node.token_registry().ok_or_else(|| JsonRpcError { code: -32000, message: "Token registry not initialized".to_string(), data: None })?;
+    let current_supply = registry.get(&token_id).map(|d| d.total_supply).unwrap_or(0);
+    let new_supply = current_supply.saturating_add(amount);
+    if !att.covers(new_supply) {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: format!("attested-mint rejected: post-mint supply {new_supply} exceeds attested reserves {} for asset {token_hex}", att.reserves),
+            data: None,
+        });
+    }
+    registry.mint_token(&token_id, &to.0, amount, &caller.0).map_err(|e| JsonRpcError { code: -32000, message: format!("mint failed: {e}"), data: None })?;
+    info!(asset = %token_hex, amount, new_supply, reserves = att.reserves, "Attested mint executed");
+    Ok(serde_json::json!({ "token_id": token_hex, "minted": amount.to_string(), "new_supply": new_supply.to_string(), "reserves": att.reserves.to_string(), "backed": true }))
+}
+
+/// `tenzro_getReserve(asset_id)` — read the current reserve attestation.
+async fn handle_get_reserve(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let asset_id = params.get("asset_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("asset_id"))?;
+    let storage = node.storage().ok_or_else(|| JsonRpcError { code: -32000, message: "Storage not available".to_string(), data: None })?;
+    let bytes = storage.get(CF_SETTLEMENTS, &reserve_key(asset_id)).map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {e}"), data: None })?
+        .ok_or_else(|| JsonRpcError { code: -32602, message: format!("no reserve attestation for {asset_id}"), data: None })?;
+    let att: tenzro_types::ReserveAttestation = serde_json::from_slice(&bytes).map_err(|e| JsonRpcError { code: -32000, message: format!("Deserialization error: {e}"), data: None })?;
+    Ok(serde_json::to_value(&att).unwrap_or_else(|_| serde_json::json!({"asset_id": asset_id})))
+}
+
+/// `tenzro_verifyDidEnvelope(envelope)` — verify a Tenzro DID envelope supplied
+/// as a hex header-value string (`TenzroDidEnvelope::to_header_value`). Supports
+/// did:tenzro (registry), did:key, did:ethr (recoverable secp256k1), and did:web
+/// (resolved over HTTPS). JSON-RPC mirror of `POST /verify/did-envelope` so CLI
+/// and SDK clients can verify envelopes uniformly. Returns `{valid, did, method}`
+/// or `{valid:false, did, error}`.
+async fn handle_verify_did_envelope(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let hv = params.get("envelope").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing envelope (hex header value)".to_string(), data: None,
+    })?;
+    let env = tenzro_identity::envelope::TenzroDidEnvelope::from_header_value(hv).map_err(|e| {
+        JsonRpcError { code: -32602, message: format!("malformed envelope: {e}"), data: None }
+    })?;
+    // did:web resolves over the network; reuse the shared web-layer resolver.
+    if env.did.starts_with("did:web:") {
+        let resp = crate::web::handlers::verify_did_web_envelope(&env).await;
+        return Ok(serde_json::to_value(&resp).unwrap_or_else(|_| serde_json::json!({"valid": false})));
+    }
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Identity registry not initialized".to_string(), data: None,
+    })?;
+    match tenzro_identity::envelope::verify_envelope(&env, &**registry) {
+        Ok(()) => Ok(serde_json::json!({ "valid": true, "did": env.did, "method": env.method })),
+        Err(e) => Ok(serde_json::json!({ "valid": false, "did": env.did, "error": e.to_string() })),
+    }
+}
+
+fn load_saga(
+    node: &Arc<TenzroNode>,
+    workflow_id: &str,
+) -> std::result::Result<tenzro_types::SagaWorkflow, JsonRpcError> {
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let bytes = storage
+        .get(CF_SETTLEMENTS, &saga_key(workflow_id))
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {}", e), data: None })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Saga workflow not found: {}", workflow_id),
+            data: None,
+        })?;
+    serde_json::from_slice(&bytes).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Deserialization error: {}", e),
+        data: None,
+    })
+}
+
+fn save_saga(
+    node: &Arc<TenzroNode>,
+    saga: &tenzro_types::SagaWorkflow,
+) -> std::result::Result<(), JsonRpcError> {
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let bytes = serde_json::to_vec(saga).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+    storage
+        .put(CF_SETTLEMENTS, &saga_key(&saga.workflow_id), &bytes)
+        .map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {}", e), data: None })
+}
+
+/// `tenzro_workflowOpen(workflow_id, orchestrator_did, participants[], saga_steps[])`
+async fn handle_workflow_open(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{SagaStatus, SagaStep, SagaWorkflow};
+
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+
+    let workflow_id = params.get("workflow_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing workflow_id".to_string(), data: None,
+    })?.to_string();
+
+    let orchestrator_did = params.get("orchestrator_did").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing orchestrator_did".to_string(), data: None,
+    })?.to_string();
+
+    let participants: Vec<String> = params
+        .get("participants")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    let steps_in = params.get("saga_steps").and_then(|v| v.as_array()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing saga_steps".to_string(), data: None,
+    })?;
+    if steps_in.is_empty() {
+        return Err(JsonRpcError { code: -32602, message: "saga_steps must be non-empty".to_string(), data: None });
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let steps: Vec<SagaStep> = steps_in
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let id = s.get("id").and_then(|v| v.as_str()).map(|x| x.to_string()).unwrap_or_else(|| format!("step_{}", i));
+            let executor_did = s.get("executor_did").and_then(|v| v.as_str()).map(|x| x.to_string());
+            let compensation = s.get("compensation").and_then(|v| v.as_str()).unwrap_or("none").to_string();
+            SagaStep::new(id, executor_did, compensation, now)
+        })
+        .collect();
+
+    // Reject duplicate workflow_id.
+    if node.storage().and_then(|s| s.get(CF_SETTLEMENTS, &saga_key(&workflow_id)).ok().flatten()).is_some() {
+        return Err(JsonRpcError { code: -32000, message: format!("Saga workflow already exists: {}", workflow_id), data: None });
+    }
+
+    let saga = SagaWorkflow {
+        workflow_id: workflow_id.clone(),
+        orchestrator_did,
+        participants,
+        steps,
+        status: SagaStatus::Open,
+        receipt: None,
+        created_at: now,
+        updated_at: now,
+    };
+    save_saga(node, &saga)?;
+    info!(workflow_id = %workflow_id, steps = saga.steps.len(), "Saga workflow opened");
+    Ok(serde_json::to_value(&saga).unwrap_or_else(|_| serde_json::json!({"workflow_id": workflow_id})))
+}
+
+/// Resolve a step index from params and bounds-check it against the saga.
+fn saga_step_idx(saga: &tenzro_types::SagaWorkflow, params: &Value) -> std::result::Result<usize, JsonRpcError> {
+    let idx = params.get("step_idx").and_then(|v| v.as_u64()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing step_idx".to_string(), data: None,
+    })? as usize;
+    if idx >= saga.steps.len() {
+        return Err(JsonRpcError { code: -32602, message: format!("step_idx {} out of range", idx), data: None });
+    }
+    Ok(idx)
+}
+
+/// `tenzro_workflowStepExecute(workflow_id, step_idx, proof?, escrow_amount?, payer?, payee?)`
+async fn handle_workflow_step_execute(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{SagaStatus, SagaStepStatus};
+
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let workflow_id = params.get("workflow_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing workflow_id".to_string(), data: None,
+    })?;
+    let mut saga = load_saga(node, workflow_id)?;
+    let idx = saga_step_idx(&saga, &params)?;
+
+    if saga.steps[idx].status != SagaStepStatus::Pending {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("step {} is not Pending (status {:?})", idx, saga.steps[idx].status),
+            data: None,
+        });
+    }
+
+    // Optional per-step escrow funding (payer → vault).
+    let escrow_amount = parse_u128_amount(&params, "escrow_amount").unwrap_or(0);
+    if escrow_amount > 0 {
+        let payer = parse_address(params.get("payer").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+            code: -32602, message: "escrow_amount set but payer missing".to_string(), data: None,
+        })?)?;
+        let payee = parse_address(params.get("payee").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+            code: -32602, message: "escrow_amount set but payee missing".to_string(), data: None,
+        })?)?;
+        let token = node.token().ok_or_else(|| JsonRpcError { code: -32000, message: "Token not initialized".to_string(), data: None })?;
+        let escrow_mgr = node.escrow_manager().ok_or_else(|| JsonRpcError { code: -32000, message: "Escrow manager not initialized".to_string(), data: None })?;
+
+        let expires_at = tenzro_types::primitives::Timestamp::new(
+            chrono::Utc::now().timestamp_millis() + 7 * 24 * 60 * 60 * 1000,
+        );
+        let escrow = tenzro_settlement::EscrowAccount::new(
+            payer,
+            payee,
+            escrow_amount,
+            tenzro_types::AssetId::tnzo(),
+            expires_at,
+            tenzro_types::settlement::ReleaseConditions::Custom {
+                condition: format!("saga_step_verified:{}:{}", workflow_id, idx),
+            },
+        );
+        let vault = task_escrow_vault(&escrow.escrow_id);
+        token.transfer(&payer, &vault, escrow_amount).map_err(|e| JsonRpcError {
+            code: -32000, message: format!("Step escrow lock failed: {}", e), data: None,
+        })?;
+        escrow_mgr.reflect_escrow_created(escrow.clone()).map_err(|e| JsonRpcError {
+            code: -32000, message: format!("Escrow index write failed: {}", e), data: None,
+        })?;
+        saga.steps[idx].escrow_id = Some(escrow.escrow_id.clone());
+        saga.steps[idx].escrow_amount = escrow_amount;
+    }
+
+    saga.steps[idx].execute_proof = params.get("proof").map(|v| v.to_string());
+    saga.steps[idx].status = SagaStepStatus::Executing;
+    saga.steps[idx].updated_at = chrono::Utc::now().timestamp();
+    if saga.status == SagaStatus::Open {
+        saga.status = SagaStatus::Running;
+    }
+    saga.updated_at = chrono::Utc::now().timestamp();
+    save_saga(node, &saga)?;
+    info!(workflow_id = %workflow_id, step = idx, escrow = escrow_amount, "Saga step executing");
+    Ok(serde_json::json!({"workflow_id": workflow_id, "step_idx": idx, "status": "executing", "escrow_id": saga.steps[idx].escrow_id}))
+}
+
+/// `tenzro_workflowStepVerify(workflow_id, step_idx, witness_signatures[], outcome_score?)`
+async fn handle_workflow_step_verify(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::SagaStepStatus;
+
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let workflow_id = params.get("workflow_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing workflow_id".to_string(), data: None,
+    })?;
+    let mut saga = load_saga(node, workflow_id)?;
+    let idx = saga_step_idx(&saga, &params)?;
+
+    if saga.steps[idx].status != SagaStepStatus::Executing {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("step {} is not Executing (status {:?})", idx, saga.steps[idx].status),
+            data: None,
+        });
+    }
+
+    let witnesses: Vec<String> = params
+        .get("witness_signatures")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    // Release per-step escrow (vault → payee).
+    if let Some(escrow_id) = saga.steps[idx].escrow_id.clone() {
+        let token = node.token().ok_or_else(|| JsonRpcError { code: -32000, message: "Token not initialized".to_string(), data: None })?;
+        let escrow_mgr = node.escrow_manager().ok_or_else(|| JsonRpcError { code: -32000, message: "Escrow manager not initialized".to_string(), data: None })?;
+        let escrow = escrow_mgr.get_escrow(&escrow_id).map_err(|e| JsonRpcError {
+            code: -32000, message: format!("Step escrow not found: {}", e), data: None,
+        })?;
+        let vault = task_escrow_vault(&escrow_id);
+        token.transfer(&vault, &escrow.payee, escrow.amount).map_err(|e| JsonRpcError {
+            code: -32000, message: format!("Step escrow release failed: {}", e), data: None,
+        })?;
+        escrow_mgr.reflect_escrow_released(&escrow_id).map_err(|e| JsonRpcError {
+            code: -32000, message: format!("Escrow index update failed: {}", e), data: None,
+        })?;
+    }
+
+    // ERC-8004 reputation for the step executor (resolve DID → agentId).
+    let outcome_score = params.get("outcome_score").and_then(|v| v.as_u64()).map(|v| v.min(100) as u8).unwrap_or(100);
+    if let (Some(signer), Some(registry), Some(executor_did)) = (
+        node.erc8004_system_signer(),
+        node.erc8004_agent_registry(),
+        saga.steps[idx].executor_did.clone(),
+    ) {
+        if let Err(e) = crate::erc8004_reputation_dispatcher::dispatch_reputation_feedback(
+            &executor_did,
+            outcome_score as i8,
+            &format!("tenzro_saga:step_verified workflow={} step={}", workflow_id, idx),
+            signer,
+            registry,
+        ) {
+            warn!(error = %e, "saga step reputation dispatch failed (verification unaffected)");
+        }
+    }
+
+    saga.steps[idx].verify_witnesses = witnesses;
+    saga.steps[idx].status = SagaStepStatus::Verified;
+    saga.steps[idx].updated_at = chrono::Utc::now().timestamp();
+    saga.updated_at = chrono::Utc::now().timestamp();
+    save_saga(node, &saga)?;
+    info!(workflow_id = %workflow_id, step = idx, "Saga step verified");
+    Ok(serde_json::json!({"workflow_id": workflow_id, "step_idx": idx, "status": "verified"}))
+}
+
+/// `tenzro_workflowStepCompensate(workflow_id, step_idx, compensation_proof?, cascade?)`
+async fn handle_workflow_step_compensate(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{SagaStatus, SagaStepStatus};
+
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let workflow_id = params.get("workflow_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing workflow_id".to_string(), data: None,
+    })?;
+    let mut saga = load_saga(node, workflow_id)?;
+    let idx = saga_step_idx(&saga, &params)?;
+    let cascade = params.get("cascade").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Compensate the named step, and (if cascade) every executed/verified step
+    // with a lower index, in reverse order — the saga-rollback pattern.
+    let targets: Vec<usize> = if cascade { (0..=idx).rev().collect() } else { vec![idx] };
+
+    let mut refunded = Vec::new();
+    for t in targets {
+        let st = saga.steps[t].status.clone();
+        if !matches!(st, SagaStepStatus::Executing | SagaStepStatus::Verified) {
+            continue;
+        }
+        // Refund per-step escrow (vault → payer).
+        if let Some(escrow_id) = saga.steps[t].escrow_id.clone() {
+            let token = node.token().ok_or_else(|| JsonRpcError { code: -32000, message: "Token not initialized".to_string(), data: None })?;
+            let escrow_mgr = node.escrow_manager().ok_or_else(|| JsonRpcError { code: -32000, message: "Escrow manager not initialized".to_string(), data: None })?;
+            // Only refund if still funded (a Verified step already released).
+            if let Ok(escrow) = escrow_mgr.get_escrow(&escrow_id) {
+                if escrow.status == tenzro_settlement::EscrowStatus::Funded {
+                    let vault = task_escrow_vault(&escrow_id);
+                    token.transfer(&vault, &escrow.payer, escrow.amount).map_err(|e| JsonRpcError {
+                        code: -32000, message: format!("Step escrow refund failed: {}", e), data: None,
+                    })?;
+                    escrow_mgr.reflect_escrow_refunded(&escrow_id).map_err(|e| JsonRpcError {
+                        code: -32000, message: format!("Escrow index update failed: {}", e), data: None,
+                    })?;
+                    refunded.push(escrow_id);
+                }
+            }
+        }
+        saga.steps[t].status = SagaStepStatus::Compensated;
+        saga.steps[t].updated_at = chrono::Utc::now().timestamp();
+    }
+
+    saga.status = SagaStatus::Compensating;
+    saga.updated_at = chrono::Utc::now().timestamp();
+    save_saga(node, &saga)?;
+    info!(workflow_id = %workflow_id, step = idx, cascade = cascade, refunds = refunded.len(), "Saga step compensated");
+    Ok(serde_json::json!({"workflow_id": workflow_id, "step_idx": idx, "status": "compensated", "refunded_escrows": refunded}))
+}
+
+/// `tenzro_workflowFinalize(workflow_id)` — all steps Verified → Completed.
+async fn handle_workflow_finalize(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{SagaStatus, SagaStepStatus};
+
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let workflow_id = params.get("workflow_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing workflow_id".to_string(), data: None,
+    })?;
+    let mut saga = load_saga(node, workflow_id)?;
+
+    if saga.all_verified() {
+        // Final receipt = SHA-256 over (workflow_id || each step id+status).
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"tenzro/saga/receipt");
+        h.update(saga.workflow_id.as_bytes());
+        for s in &saga.steps {
+            h.update(s.id.as_bytes());
+            h.update(format!("{:?}", s.status).as_bytes());
+        }
+        saga.receipt = Some(hex::encode(h.finalize()));
+        saga.status = SagaStatus::Completed;
+    } else if saga.steps.iter().any(|s| s.status == SagaStepStatus::Failed) {
+        saga.status = SagaStatus::Failed;
+    } else {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: "Cannot finalize: not all steps are Verified".to_string(),
+            data: None,
+        });
+    }
+    saga.updated_at = chrono::Utc::now().timestamp();
+    save_saga(node, &saga)?;
+    info!(workflow_id = %workflow_id, status = ?saga.status, "Saga workflow finalized");
+    Ok(serde_json::to_value(&saga).unwrap_or_else(|_| serde_json::json!({"workflow_id": workflow_id})))
+}
+
+/// `tenzro_getWorkflowSaga(workflow_id)` — read the saga state.
+async fn handle_get_workflow_saga(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError { code: -32602, message: "Missing params".to_string(), data: None })?;
+    let workflow_id = params.get("workflow_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing workflow_id".to_string(), data: None,
+    })?;
+    let saga = load_saga(node, workflow_id)?;
+    Ok(serde_json::to_value(&saga).unwrap_or_else(|_| serde_json::json!({})))
 }
 
 // ============================================================================

@@ -24,6 +24,7 @@ members = [
     "crates/tenzro-cortex",
     "crates/tenzro-training",
     "crates/tenzro-iroh",
+    "crates/tenzro-wasm",
     "crates/tenzro-node",
     "crates/tenzro-cli",
     "tools/genkeys",
@@ -63,6 +64,7 @@ tenzro-events = { path = "crates/tenzro-events" }
 tenzro-cortex = { path = "crates/tenzro-cortex" }
 tenzro-training = { path = "crates/tenzro-training" }
 tenzro-iroh = { path = "crates/tenzro-iroh" }
+tenzro-wasm = { path = "crates/tenzro-wasm" }
 tenzro-identity = { path = "crates/tenzro-identity" }
 tenzro-payments = { path = "crates/tenzro-payments" }
 tenzro-agent-kit = { path = "crates/tenzro-agent-kit" }

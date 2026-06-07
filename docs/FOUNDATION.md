@@ -76,7 +76,7 @@ The Foundation, once constituted, will be responsible for three distinct but int
 
 The decentralized protocol enabling AI inference marketplace, TEE services, and agent autonomy:
 
-- Protocol specification and reference implementation (23 Rust crates)
+- Protocol specification and reference implementation (26 Rust crates)
 - Client applications (desktop app, CLI, SDKs)
 - Provider onboarding and marketplace health
 - Payment protocol integrations (MPP, x402, AP2, Tempo)
@@ -714,7 +714,7 @@ The Foundation is responsible for:
 
 The Foundation commissions external security audits:
 
-- Pre-mainnet audit of all 23 crates
+- Pre-mainnet audit of all 26 crates
 - Annual audit of consensus and cryptographic subsystems
 - Bridge adapter audits before enabling cross-chain transfers
 - Smart contract / precompile audits before VM activation

@@ -257,18 +257,17 @@ Validators are authenticated for consensus-critical topics via `ValidatorRegistr
 - Validator-only topics: `tenzro/consensus`, `tenzro/blocks` (for block proposals), `tenzro/attestations`
 - Non-validators are rejected from these topics
 
-## Message Types (11 total)
+## Message Types (15 variants)
 
 - `Ping` / `Pong` - Health checks
-- `Block(Block)` - Block propagation
-- `Transaction(SignedTransaction)` - Transaction broadcasting
-- `ConsensusMessage` - Proposals, votes, QCs
-- `AttestationMessage` - TEE attestations
-- `ModelRegistrationMessage` - Model announcements
-- `InferenceRequestMessage` / `InferenceResponseMessage` - Inference operations
-- `StatusMessage` - Node status
-- `ProviderAnnouncementMessage` - Provider registration
-- `AgentAnnouncementMessage` - Agent discovery
+- `Block(Block)` / `BlockRequest(Hash)` / `BlockResponse(Option<Block>)` - Block propagation + targeted fetch
+- `Transaction(SignedTransaction)` / `TransactionRequest(Hash)` / `TransactionResponse(Option<SignedTransaction>)` - Transaction broadcast + targeted fetch
+- `Attestation(AttestationMessage)` - TEE attestations
+- `ModelRegistration(ModelRegistrationMessage)` - Model announcements
+- `InferenceRequest(InferenceRequestMessage)` / `InferenceResponse(InferenceResponseMessage)` - Inference operations
+- `Status(StatusMessage)` - Node status
+- `ProviderAnnouncement(ProviderAnnouncementMessage)` - Provider registration
+- `AgentAnnouncement(AgentAnnouncementMessage)` - Agent discovery
 
 ## Dependencies
 

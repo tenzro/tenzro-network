@@ -69,12 +69,12 @@ deploy/terraform/gce_validators/
 
 # Operator-specific runbooks, IaC, and scripts (Tenzro Labs testnet specifics:
 # GCP project IDs, bucket names, validator hostnames, fleet topology).
-# Other operators bring their own runbooks; the public-facing equivalents are
-# deploy/validator-deployment.md and docs/operators/OPERATOR_GUIDE.md.
+# Other operators bring their own runbooks; the public-facing equivalent is
+# deploy/validator-deployment.md.
 deploy/README.md
 deploy/terraform/main.tf
 deploy/kubernetes/
-docs/operators/INCIDENT_DRILLS.md
+docs/operators/
 scripts/deploy-testnet.sh
 tools/genkeys/
 
@@ -84,3 +84,17 @@ tools/doc-audit/
 docs/architecture/gap-matrix.md
 docs/architecture/agentic-internet.md
 docs/architecture/prior-art.md
+docs/architecture/sota-gap-analysis-2026-06.md
+docs/recognition-commands.md
+docs/recognition-roadmap.md
+docs/upstream-registrations.md
+docs/upstream-staging/
+
+# Internal research, pitch, and time-stamped landscape docs.
+docs/agent-launch-test-plan.md
+docs/landscape-2026.md
+docs/protocol-coverage-2026-05.md
+docs/protocol-coverage-2026-06.md
+docs/protocol-research-2026-05/
+docs/papers/
+docs/pitch/

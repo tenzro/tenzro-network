@@ -66,6 +66,9 @@ pub mod aa_delegation_validator;
 pub mod aa_tee_bound_validator;
 pub mod aa_bootstrap_paymaster;
 pub mod erc7579;
+pub mod eip7702;
+pub mod permit2;
+pub mod secure_mint;
 pub mod cross_vm_bridge;
 
 // Re-export commonly used types

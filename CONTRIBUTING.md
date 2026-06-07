@@ -102,6 +102,7 @@ Several crates use feature flags for optional functionality:
   - `amd-sev-snp` — AMD SEV-SNP provider
   - `aws-nitro` — AWS Nitro Enclaves provider
   - `nvidia-gpu` — NVIDIA Confidential Computing provider
+  - `intel-tiber` — Intel Tiber Trust Authority hosted attestation
 
 - **tenzro-payments:**
   - `mpp` (default) — Machine Payments Protocol
@@ -394,22 +395,25 @@ tenzro-types (foundation — no internal deps)
   │     ├── tenzro-zk → types, crypto
   │     ├── tenzro-wallet → types, crypto
   │     ├── tenzro-network → types, crypto
+  │     ├── tenzro-auth → types, crypto
   │     └── tenzro-bridge → types, crypto, token
   ├── tenzro-storage → types
   │     ├── tenzro-vm → types, storage
   │     ├── tenzro-token → types, storage
+  │     ├── tenzro-events → types, storage
   │     └── tenzro-settlement → types, token, wallet, storage
   ├── tenzro-consensus → types, crypto
   ├── tenzro-identity → types, crypto, wallet
   ├── tenzro-payments → types, crypto, identity, settlement, bridge, wallet
   ├── tenzro-agent → types, crypto, wallet, identity
   ├── tenzro-agent-kit → types, agent
-  ├── tenzro-auth → types, crypto, identity
-  ├── tenzro-cortex → types, agent, model
-  ├── tenzro-training → types, crypto, network
+  ├── tenzro-cortex → types, crypto, network, model
+  ├── tenzro-iroh → types, crypto, network, storage
+  ├── tenzro-wasm → types
+  ├── tenzro-training → types, crypto, storage, network, vm, model
+  ├── tenzro-workflow → types, crypto, storage, vm, settlement
   ├── tenzro-model → types, network
-  ├── tenzro-events → types
-  └── tenzro-node → ALL 21 crates above
+  └── tenzro-node → ALL 24 crates above
       └── tenzro-cli → types, crypto, wallet, node
 ```
 
@@ -418,7 +422,7 @@ tenzro-types (foundation — no internal deps)
 2. Never create circular dependencies
 3. Lower-level crates cannot depend on higher-level crates
 4. `tenzro-node` integrates all subsystems but no other crate depends on it (except `tenzro-cli`)
-5. The workspace has 23 crates total (22 libraries + tenzro-cli)
+5. The workspace has 26 crates total (25 libraries + tenzro-cli), plus `tools/genkeys` as a workspace member
 
 ### When to Create a New Crate
 

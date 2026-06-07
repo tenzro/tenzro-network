@@ -2370,6 +2370,346 @@ async def handle_lifecycle(text: str, metadata: dict = None) -> str:
     )
 
 
+async def handle_capital(text: str, metadata: dict = None) -> str:
+    t = text.lower()
+    if "open" in t or "create" in t:
+        return (
+            "Open a Capital Intent (capital-markets analog of an AP2 Intent Mandate):\n"
+            "  RPC: tenzro_capitalIntentOpen\n"
+            "  Payload (CapitalIntent): { objective: { kind, basket | target },\n"
+            "                            constraints: { max_price?, max_eta_secs?, ... },\n"
+            "                            compliance: { reg_regime?, required_kya?, jurisdictions? },\n"
+            "                            authorization: { principal_did, signature, expires_at },\n"
+            "                            settlement_req: { payer, payee?, asset_id, amount } }\n"
+            "  objective.kind ∈ { acquire | exit | rebalance | hedge | yield }."
+        )
+    if "quote" in t or "bid" in t:
+        return (
+            "Submit a solver bid against an opened intent:\n"
+            "  RPC: tenzro_capitalIntentQuote\n"
+            "  Required: { intent_id, solver_did, plan, price, eta_secs }"
+        )
+    if "assign" in t or "select" in t or "pick" in t:
+        return (
+            "Assign a Capital Intent to a solver:\n"
+            "  RPC: tenzro_capitalIntentAssign\n"
+            "  Required: { intent_id }\n"
+            "  Optional: { solver_did, auto: true (auto-rank by ERC-8004 + price + eta), payer, payee }"
+        )
+    if "execute" in t or "leg" in t:
+        return (
+            "Execute a leg of an assigned intent:\n"
+            "  RPC: tenzro_capitalIntentExecute\n"
+            "  Required: { intent_id, leg: { venue, asset_id, side: 'acquire' | 'exit',\n"
+            "                                quantity, unit_price, settlement_ref?, proof? } }"
+        )
+    if "verify" in t:
+        return "Verify a step: tenzro_capitalIntentVerify { intent_id }"
+    if "compensat" in t or "roll" in t or "rollback" in t:
+        return "Compensate (roll back) a step: tenzro_capitalIntentCompensate { intent_id }"
+    if "settle" in t or "release" in t:
+        return (
+            "Settle the intent — release escrow to the payee:\n"
+            "  RPC: tenzro_capitalIntentSettle { intent_id, payee? }"
+        )
+    if "get" in t:
+        return "Read intent state: tenzro_getCapitalIntent { intent_id }"
+    if "reserve" in t and "attest" in t:
+        return (
+            "Reserve attestations (1:1 backing for tokenized assets):\n"
+            "  Submit:  tenzro_submitReserveAttestation { attestation }\n"
+            "  Read:    tenzro_getReserve { asset_id }\n"
+            "  attestation shape: { asset_id, source, amount, attester_did,\n"
+            "                       signature, attested_at, proof? }"
+        )
+    if "mint" in t and ("attest" in t or "back" in t):
+        return (
+            "Attested mint — token issuance gated by a fresh reserve attestation:\n"
+            "  RPC: tenzro_attestedMint { token_id, to, amount, caller }"
+        )
+    return (
+        "Capital Intent (regulated capital allocation) — capital-markets analog of an AP2 Intent Mandate.\n"
+        "  - 'Open a Capital Intent'    (tenzro_capitalIntentOpen)\n"
+        "  - 'Submit a solver quote'    (tenzro_capitalIntentQuote)\n"
+        "  - 'Auto-assign intent'       (tenzro_capitalIntentAssign auto=true)\n"
+        "  - 'Execute leg'              (tenzro_capitalIntentExecute)\n"
+        "  - 'Verify step'              (tenzro_capitalIntentVerify)\n"
+        "  - 'Compensate step'          (tenzro_capitalIntentCompensate)\n"
+        "  - 'Settle intent'            (tenzro_capitalIntentSettle)\n"
+        "  - 'Submit reserve attestation' (tenzro_submitReserveAttestation)\n"
+        "  - 'Attested mint'            (tenzro_attestedMint)"
+    )
+
+
+async def handle_workflow(text: str, metadata: dict = None) -> str:
+    t = text.lower()
+    if "open" in t or "start" in t or "create" in t:
+        return (
+            "Open a multi-agent saga workflow:\n"
+            "  RPC: tenzro_workflowOpen\n"
+            "  Payload: { creator_did, participants[], steps[{step_id, status}], metadata? }"
+        )
+    if "execute" in t and "step" in t:
+        return (
+            "Execute a step (Pending → Executing, optionally lock per-step escrow):\n"
+            "  RPC: tenzro_workflowStepExecute { workflow_id, step_id, escrow_amount? }"
+        )
+    if "verify" in t and "step" in t:
+        return "Verify a step's outcome: tenzro_workflowStepVerify { workflow_id, step_id }"
+    if "compensat" in t and "step" in t:
+        return "Compensate a step (roll back): tenzro_workflowStepCompensate { workflow_id, step_id }"
+    if "finaliz" in t:
+        return (
+            "Finalize the workflow — emits a WorkflowReceipt when all steps complete:\n"
+            "  RPC: tenzro_workflowFinalize { workflow_id }"
+        )
+    if "saga" in t:
+        return "Read the underlying saga (step state): tenzro_getWorkflowSaga { workflow_id }"
+    if "lifecycle" in t:
+        return "Read the lifecycle record: tenzro_getWorkflowLifecycle { workflow_id }"
+    if "receipt" in t:
+        if "list" in t:
+            return "List recent workflow receipts: tenzro_listWorkflowReceipts { limit? }"
+        return "Read the workflow receipt: tenzro_getWorkflowReceipt { workflow_id }"
+    if "metric" in t:
+        return "Read operational metrics: tenzro_getWorkflowOperationalMetrics { workflow_id }"
+    if "canton" in t or "mirror" in t:
+        return "Mirror a workflow to Canton DAML: tenzro_mirrorWorkflowToCanton { workflow_id }"
+    if "creator" in t:
+        return "List workflows by creator DID: tenzro_listWorkflowsByCreator { creator_did }"
+    if "participant" in t:
+        return "List workflows by participant DID: tenzro_listWorkflowsByParticipant { participant_did }"
+    if "status" in t:
+        return "List workflows by status: tenzro_listWorkflowsByStatus { status }"
+    if "envelope" in t:
+        return "Verify a DID-signed envelope: tenzro_verifyDidEnvelope { envelope }"
+    return (
+        "Multi-agent saga workflows — Execute → Verify → Compensate step lifecycles.\n"
+        "  - 'Open workflow'            (tenzro_workflowOpen)\n"
+        "  - 'Execute step'             (tenzro_workflowStepExecute)\n"
+        "  - 'Verify step'              (tenzro_workflowStepVerify)\n"
+        "  - 'Compensate step'          (tenzro_workflowStepCompensate)\n"
+        "  - 'Finalize workflow'        (tenzro_workflowFinalize)\n"
+        "  - 'Get workflow'             (tenzro_getWorkflow / getWorkflowSaga / getWorkflowLifecycle)\n"
+        "  - 'List receipts'            (tenzro_listWorkflowReceipts)\n"
+        "  - 'List by creator/participant/status' (tenzro_listWorkflowsBy*)\n"
+        "  - 'Mirror to Canton'         (tenzro_mirrorWorkflowToCanton)\n"
+        "  - 'Verify DID envelope'      (tenzro_verifyDidEnvelope)"
+    )
+
+
+async def handle_eip7702(text: str, metadata: dict = None) -> str:
+    t = text.lower()
+    if "signing" in t or "signing hash" in t:
+        return (
+            "Compute the EIP-7702 secp256k1 signing hash for an authorization tuple:\n"
+            "  RPC: tenzro_eip7702SigningHash { chain_id, delegate_address, nonce }\n"
+            "  Returns: signing_hash (32-byte keccak), signing_data, magic_byte=0x05\n"
+            "  Sign the hash with the EOA's secp256k1 private key out of band."
+        )
+    if "designator" in t and ("build" in t or "construct" in t):
+        return (
+            "Build the 23-byte EIP-7702 designator (0xef0100 || delegate_address):\n"
+            "  RPC: tenzro_eip7702BuildDesignator { delegate_address }"
+        )
+    if "parse" in t or "decode" in t:
+        return (
+            "Decode account code; report the delegate address if it is a valid 7702 designator:\n"
+            "  RPC: tenzro_eip7702ParseDesignator { code }"
+        )
+    if "protocol" in t or "info" in t:
+        return (
+            "Read EIP-7702 static protocol metadata:\n"
+            "  RPC: tenzro_eip7702ProtocolInfo"
+        )
+    return (
+        "EIP-7702 (Set EOA Account Code) helpers — Pectra Type-4 delegation registry.\n"
+        "  - 'Signing hash'         (tenzro_eip7702SigningHash)\n"
+        "  - 'Build designator'     (tenzro_eip7702BuildDesignator)\n"
+        "  - 'Parse designator'     (tenzro_eip7702ParseDesignator)\n"
+        "  - 'Protocol info'        (tenzro_eip7702ProtocolInfo)"
+    )
+
+
+async def handle_permit2(text: str, metadata: dict = None) -> str:
+    t = text.lower()
+    if "domain" in t and "separator" in t:
+        return (
+            "Read the per-chain Permit2 EIP-712 domain separator:\n"
+            "  RPC: tenzro_permit2DomainSeparator { chain_id }\n"
+            "  Verifying contract: 0x0000…00001023 (canonical Tenzro Permit2)"
+        )
+    if "digest" in t:
+        return (
+            "Compute the EIP-712 digest a user signs:\n"
+            "  RPC: tenzro_permit2Digest { chain_id, owner, token, amount, spender, nonce, deadline, witness?, witness_type_string? }\n"
+            "  Witness is optional — used by ERC-7683 origin opens to bind the permit to a specific cross-chain order."
+        )
+    if "verify" in t or "consume" in t:
+        return (
+            "Atomically verify a signed Permit2 message and consume its (owner, nonce) slot:\n"
+            "  RPC: tenzro_permit2VerifyAndConsume { chain_id, owner, token, amount, spender, nonce, deadline, signature, witness?, witness_type_string? }"
+        )
+    if "nonce" in t and "used" in t:
+        return (
+            "Check whether a (owner, nonce) slot has been consumed:\n"
+            "  RPC: tenzro_permit2NonceUsed { owner, nonce }"
+        )
+    return (
+        "Permit2 SignatureTransfer (canonical Tenzro Permit2 at 0x0000…00001023).\n"
+        "  - 'Domain separator'     (tenzro_permit2DomainSeparator)\n"
+        "  - 'Digest'               (tenzro_permit2Digest)\n"
+        "  - 'Verify and consume'   (tenzro_permit2VerifyAndConsume)\n"
+        "  - 'Nonce used'           (tenzro_permit2NonceUsed)"
+    )
+
+
+async def handle_secure_mint(text: str, metadata: dict = None) -> str:
+    t = text.lower()
+    if "set" in t and "polic" in t:
+        return (
+            "Set or update a Secure-Mint policy for a tokenized asset:\n"
+            "  RPC: tenzro_setSecureMintPolicy { asset_id, reserve, circulating?, por_feed_id, attester_did, attestation_hash, attested_at, ttl_secs }"
+        )
+    if "get" in t and "polic" in t:
+        return "Read the Secure-Mint policy: tenzro_getSecureMintPolicy { asset_id }"
+    if "clear" in t and "polic" in t:
+        return "Clear the Secure-Mint policy: tenzro_clearSecureMintPolicy { asset_id }"
+    if "check" in t:
+        return (
+            "Read-only invariant check for a proposed mint:\n"
+            "  RPC: tenzro_secureMintCheck { asset_id, amount }"
+        )
+    if "apply" in t or "mint" in t:
+        return (
+            "Atomically check the 1:1 invariant and increment circulating:\n"
+            "  RPC: tenzro_secureMintApply { asset_id, amount }"
+        )
+    if "burn" in t or "redemption" in t:
+        return (
+            "Record a redemption (decrement circulating):\n"
+            "  RPC: tenzro_secureMintRecordBurn { asset_id, amount }"
+        )
+    return (
+        "Secure-Mint registry — per-token 1:1 reserve-attestation invariant for tokenized RWAs.\n"
+        "  - 'Set policy'           (tenzro_setSecureMintPolicy)\n"
+        "  - 'Get / clear policy'   (tenzro_getSecureMintPolicy / clearSecureMintPolicy)\n"
+        "  - 'Check'                (tenzro_secureMintCheck)\n"
+        "  - 'Apply'                (tenzro_secureMintApply)\n"
+        "  - 'Record burn'          (tenzro_secureMintRecordBurn)"
+    )
+
+
+async def handle_hyperlane(text: str, metadata: dict = None) -> str:
+    t = text.lower()
+    if "list" in t and "chain" in t:
+        return "List supported Hyperlane chains: tenzro_hyperlaneListChains"
+    if "quote" in t:
+        return (
+            "Quote interchain gas for a dispatch:\n"
+            "  RPC: tenzro_hyperlaneQuoteDispatch { origin_domain, destination_domain, recipient, body_hex, sender?, interchain_gas_payment? }"
+        )
+    if "dispatch" in t or "send" in t:
+        return (
+            "Dispatch a Hyperlane V3 message through the canonical Mailbox:\n"
+            "  RPC: tenzro_hyperlaneDispatch { origin_domain, destination_domain, recipient, body_hex, sender?, interchain_gas_payment? }"
+        )
+    if "message" in t or "lookup" in t or "get" in t:
+        return "Look up a Hyperlane message: tenzro_hyperlaneGetMessage { message_id }"
+    return (
+        "Hyperlane V3 messaging — sovereign Tenzro-validator-set ISM.\n"
+        "  - 'List chains'          (tenzro_hyperlaneListChains)\n"
+        "  - 'Quote dispatch'       (tenzro_hyperlaneQuoteDispatch)\n"
+        "  - 'Dispatch'             (tenzro_hyperlaneDispatch)\n"
+        "  - 'Get message'          (tenzro_hyperlaneGetMessage)"
+    )
+
+
+async def handle_axelar(text: str, metadata: dict = None) -> str:
+    t = text.lower()
+    if "list" in t and "chain" in t:
+        return (
+            "List supported Axelar chains (30+ across EVM / Cosmos / Move / Stellar / XRPL):\n"
+            "  RPC: tenzro_axelarListChains"
+        )
+    if "call" in t and "contract" in t:
+        return (
+            "Dispatch an Axelar GMP call_contract message:\n"
+            "  RPC: tenzro_axelarCallContract { source_chain, destination_chain, destination_address, payload_hex, gas_token?, gas_amount? }"
+        )
+    if "pay" in t and "gas" in t:
+        return (
+            "Pre-pay the Axelar Gas Service for a previously-dispatched message:\n"
+            "  RPC: tenzro_axelarPayGas { payload_hash, source_chain, destination_chain, destination_address, gas_token, gas_amount }"
+        )
+    if "message" in t or "lookup" in t or "get" in t:
+        return "Look up an Axelar GMP message: tenzro_axelarGetMessage { payload_hash }"
+    return (
+        "Axelar GMP — Cosmos / Move / Stellar / XRPL reach via call_contract + Gas Service.\n"
+        "  - 'List chains'          (tenzro_axelarListChains)\n"
+        "  - 'Call contract'        (tenzro_axelarCallContract)\n"
+        "  - 'Pay gas'              (tenzro_axelarPayGas)\n"
+        "  - 'Get message'          (tenzro_axelarGetMessage)"
+    )
+
+
+async def handle_babylon(text: str, metadata: dict = None) -> str:
+    t = text.lower()
+    if "register" in t and "finality" in t:
+        return (
+            "Register a Tenzro validator as a Babylon finality provider:\n"
+            "  RPC: tenzro_babylonRegisterFinalityProvider { validator, btc_pk, commission_bps }"
+        )
+    if "list" in t and "finality" in t:
+        return "List registered finality providers: tenzro_babylonListFinalityProviders"
+    if "total" in t and ("stake" in t or "delegation" in t):
+        return (
+            "Sum BTC delegations for a finality provider:\n"
+            "  RPC: tenzro_babylonTotalStakeForProvider { validator }"
+        )
+    if "submit" in t and "finality" in t:
+        return (
+            "Submit an EOTS over a Tenzro block hash (slashable on equivocation):\n"
+            "  RPC: tenzro_babylonSubmitFinalitySignature { validator, block_hash, eots_signature }"
+        )
+    if "delegation" in t:
+        return "List BTC delegations for a finality provider: tenzro_babylonListDelegations { validator }"
+    return (
+        "Babylon Bitcoin staking — Tenzro validators economically secured by native BTC.\n"
+        "  - 'Register finality provider'  (tenzro_babylonRegisterFinalityProvider)\n"
+        "  - 'List finality providers'     (tenzro_babylonListFinalityProviders)\n"
+        "  - 'Total stake'                 (tenzro_babylonTotalStakeForProvider)\n"
+        "  - 'Submit finality signature'   (tenzro_babylonSubmitFinalitySignature)\n"
+        "  - 'List delegations'            (tenzro_babylonListDelegations)"
+    )
+
+
+async def handle_caip(text: str, metadata: dict = None) -> str:
+    t = text.lower()
+    if "caip-2" in t or "caip2" in t or "chain id" in t:
+        return (
+            "Get the CAIP-2 chain id (`tenzro:<lowercase hex of first 16 bytes of genesis block hash>`):\n"
+            "  RPC: tenzro_caip2"
+        )
+    if "caip-10" in t or "caip10" in t or "account id" in t:
+        return (
+            "Get the CAIP-10 account id (accepts hex or base58btc on input, normalises to canonical 64-hex):\n"
+            "  RPC: tenzro_caip10 { address }"
+        )
+    if "caip-19" in t or "caip19" in t or "asset id" in t or "asset_namespace" in t:
+        return (
+            "Get the CAIP-19 asset id (supports `slip44` / `token` / `nft` asset namespaces):\n"
+            "  RPC: tenzro_caip19 { kind, token_id?, collection_id?, nft_token_id? }\n"
+            "  Native TNZO: kind=slip44 (SLIP-44 coin index 1414421071)."
+        )
+    return (
+        "Tenzro CAIP namespace identifiers per ChainAgnostic/namespaces#184.\n"
+        "  - 'CAIP-2'               (tenzro_caip2)\n"
+        "  - 'CAIP-10'              (tenzro_caip10 { address })\n"
+        "  - 'CAIP-19'              (tenzro_caip19 { kind, token_id?, collection_id?, nft_token_id? })"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Handler dispatch table
 # ---------------------------------------------------------------------------
@@ -2416,5 +2756,14 @@ HANDLERS: dict[str, callable] = {
     "wormhole": handle_wormhole,
     "cct": handle_cct,
     "auth": handle_auth,
+    "capital": handle_capital,
+    "workflow": handle_workflow,
+    "eip7702": handle_eip7702,
+    "permit2": handle_permit2,
+    "secure-mint": handle_secure_mint,
+    "hyperlane": handle_hyperlane,
+    "axelar": handle_axelar,
+    "babylon": handle_babylon,
+    "caip": handle_caip,
     "help": handle_help,
 }

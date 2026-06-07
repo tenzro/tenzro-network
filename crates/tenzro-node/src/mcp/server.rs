@@ -1656,6 +1656,172 @@ pub struct Eip7702ParseDesignatorParams {
     pub code: String,
 }
 
+// ─── Permit2 Params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Permit2DomainSeparatorParams {
+    #[schemars(description = "EIP-155 chain ID for the Permit2 domain separator")]
+    pub chain_id: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Permit2DigestParams {
+    pub chain_id: u64,
+    #[schemars(description = "20-byte token owner (0x-prefixed hex)")]
+    pub owner: String,
+    #[schemars(description = "20-byte ERC-20 token address (0x-prefixed hex)")]
+    pub token: String,
+    #[schemars(description = "Amount (decimal string)")]
+    pub amount: String,
+    #[schemars(description = "20-byte spender (0x-prefixed hex)")]
+    pub spender: String,
+    #[schemars(description = "Nonce — 256-bit-per-word bitmap position as decimal string")]
+    pub nonce: String,
+    #[schemars(description = "Unix-seconds deadline")]
+    pub deadline: u64,
+    #[schemars(description = "Optional 32-byte witness (0x-prefixed hex). When present, binds the permit to the witness — used by ERC-7683 origin opens.")]
+    pub witness: Option<String>,
+    #[schemars(description = "Optional EIP-712 witness type string. Required when `witness` is present.")]
+    pub witness_type_string: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Permit2VerifyAndConsumeParams {
+    pub chain_id: u64,
+    pub owner: String,
+    pub token: String,
+    pub amount: String,
+    pub spender: String,
+    pub nonce: String,
+    pub deadline: u64,
+    #[schemars(description = "65-byte ECDSA signature (0x-prefixed hex)")]
+    pub signature: String,
+    pub witness: Option<String>,
+    pub witness_type_string: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Permit2NonceUsedParams {
+    pub owner: String,
+    pub nonce: String,
+}
+
+// ─── Secure-Mint Params ───
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SecureMintSetPolicyParams {
+    pub asset_id: String,
+    #[schemars(description = "Reserve (u128 decimal string)")]
+    pub reserve: String,
+    pub circulating: Option<String>,
+    pub por_feed_id: String,
+    pub attester_did: String,
+    pub attestation_hash: String,
+    pub attested_at: u64,
+    pub ttl_secs: u64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SecureMintAssetIdParams {
+    pub asset_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SecureMintAssetAmountParams {
+    pub asset_id: String,
+    #[schemars(description = "Amount (u128 decimal string)")]
+    pub amount: String,
+}
+
+// ─── Hyperlane Params ───
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HyperlaneDispatchParams {
+    pub origin_domain: u32,
+    pub destination_domain: u32,
+    #[schemars(description = "32-byte destination recipient (0x-prefixed hex)")]
+    pub recipient: String,
+    #[schemars(description = "Arbitrary message body (0x-prefixed hex)")]
+    pub body_hex: String,
+    pub sender: Option<String>,
+    pub interchain_gas_payment: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct HyperlaneGetMessageParams {
+    pub message_id: String,
+}
+
+// ─── Axelar Params ───
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AxelarCallContractParams {
+    pub source_chain: String,
+    pub destination_chain: String,
+    pub destination_address: String,
+    pub payload_hex: String,
+    pub gas_token: Option<String>,
+    pub gas_amount: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AxelarPayGasParams {
+    pub payload_hash: String,
+    pub source_chain: String,
+    pub destination_chain: String,
+    pub destination_address: String,
+    pub gas_token: String,
+    pub gas_amount: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AxelarGetMessageParams {
+    pub payload_hash: String,
+}
+
+// ─── Babylon Params ───
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BabylonRegisterFinalityProviderParams {
+    pub validator: String,
+    #[schemars(description = "33-byte BTC public key (0x-prefixed hex)")]
+    pub btc_pk: String,
+    pub commission_bps: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct BabylonValidatorParams {
+    pub validator: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BabylonSubmitFinalitySignatureParams {
+    pub validator: String,
+    pub block_hash: String,
+    #[schemars(description = "EOTS signature over the block hash (0x-prefixed hex)")]
+    pub eots_signature: String,
+}
+
+// ─── CAIP Params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Caip10Params {
+    #[schemars(description = "Tenzro account address — accepts hex or base58btc on input; normalised to canonical 64-hex.")]
+    pub address: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Caip19Params {
+    #[schemars(description = "Asset namespace: 'slip44', 'token', or 'nft'.")]
+    pub kind: String,
+    #[schemars(description = "32-byte token id (hex) — required for kind='token' or as the collection id for kind='nft'.")]
+    pub token_id: Option<String>,
+    #[schemars(description = "Alias for `token_id` when used with kind='nft'.")]
+    pub collection_id: Option<String>,
+    #[schemars(description = "NFT token id (decimal or hex) — required for kind='nft'.")]
+    pub nft_token_id: Option<String>,
+}
+
 // ─── Auth-engine approval workflow Params ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2962,6 +3128,161 @@ fn attestation_to_mcp_json(att: &tenzro_agent::capabilities::CapabilityAttestati
     })
 }
 
+// ─── Saga workflow coordination params (MCP surface for tenzro_workflow* RPCs) ───
+// Field names mirror the RPC handlers exactly so each struct serializes straight
+// into the JSON-RPC params.
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct WorkflowOpenParams {
+    #[schemars(description = "Caller-chosen workflow id (e.g. \"wf_abc123\"); must be unique")]
+    pub workflow_id: String,
+    #[schemars(description = "DID of the orchestrator opening the workflow")]
+    pub orchestrator_did: String,
+    #[serde(default)]
+    #[schemars(description = "Participant DIDs (orchestrator + step executors)")]
+    pub participants: Vec<String>,
+    #[schemars(description = "Ordered steps; each an object {id?, executor_did?, compensation?}")]
+    pub saga_steps: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct WorkflowStepExecuteParams {
+    #[schemars(description = "Workflow id")]
+    pub workflow_id: String,
+    #[schemars(description = "Zero-based index of the step to execute")]
+    pub step_idx: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Opaque execution-proof reference recorded at execute")]
+    pub proof: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Optional per-step escrow amount to lock (smallest unit)")]
+    pub escrow_amount: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Payer address (required when escrow_amount is set)")]
+    pub payer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Payee address (required when escrow_amount is set)")]
+    pub payee: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct WorkflowStepVerifyParams {
+    #[schemars(description = "Workflow id")]
+    pub workflow_id: String,
+    #[schemars(description = "Zero-based index of the step to verify")]
+    pub step_idx: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Witness signatures / references recorded at verify")]
+    pub witness_signatures: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Outcome score 0..=100 fed to ERC-8004 reputation (default 100)")]
+    pub outcome_score: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct WorkflowStepCompensateParams {
+    #[schemars(description = "Workflow id")]
+    pub workflow_id: String,
+    #[schemars(description = "Zero-based index of the step to compensate")]
+    pub step_idx: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "If true, also compensate every lower-index executed/verified step in reverse order")]
+    pub cascade: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct WorkflowFinalizeParams {
+    #[schemars(description = "Workflow id (all steps must be Verified to finalize)")]
+    pub workflow_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct GetWorkflowSagaParams {
+    #[schemars(description = "Workflow id to read")]
+    pub workflow_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct VerifyDidEnvelopeParams {
+    #[schemars(description = "Hex-encoded Tenzro DID envelope (the X-Tenzro-DID-Envelope header value / TenzroDidEnvelope::to_header_value output)")]
+    pub envelope: String,
+}
+
+// ─── Capital Intent params (agentic capital allocation over tokenized assets) ───
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct CapitalIntentOpenParams {
+    #[schemars(description = "CapitalIntent object: {intent_id, principal_did, objective{kind,...}, constraints, compliance{reg_regime,min_kyc_tier,accredited_only}, authorization{max_total_notional,...}, settlement, signature?}")]
+    pub intent: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct CapitalIntentQuoteParams {
+    pub intent_id: String,
+    pub solver_did: String,
+    #[serde(default)]
+    pub plan: String,
+    #[serde(default)]
+    pub price: u64,
+    #[serde(default)]
+    pub eta_secs: u64,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct CapitalIntentAssignParams {
+    pub intent_id: String,
+    /// Explicit solver. Omit (or set `auto`) to auto-rank quotes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_did: Option<String>,
+    /// Auto-select the best quote by ERC-8004 reputation, then price, then eta.
+    #[serde(default)]
+    pub auto: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payee: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct ReserveAttestationParams {
+    #[schemars(description = "ReserveAttestation: {asset_id, reserves, source(issuer|tee|chainlink_por|oracle), attestor_did, attested_at, signature?}")]
+    pub attestation: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct AttestedMintParams {
+    #[schemars(description = "32-byte token id (hex)")]
+    pub token_id: String,
+    pub to: String,
+    #[schemars(description = "Amount to mint (decimal string, smallest unit)")]
+    pub amount: String,
+    pub caller: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct GetReserveParams {
+    pub asset_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct CapitalIntentExecuteParams {
+    pub intent_id: String,
+    #[schemars(description = "Leg: {venue, asset_id, side(buy|sell), quantity, unit_price, settlement_ref?, proof?}")]
+    pub leg: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct CapitalIntentIdParams {
+    pub intent_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct CapitalIntentSettleParams {
+    pub intent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payee: Option<String>,
+}
+
 #[tool_router]
 impl TenzroMcpServer {
     pub fn new(node: Arc<TenzroNode>, web_state: Arc<WebState>) -> Self {
@@ -3456,6 +3777,235 @@ impl TenzroMcpServer {
         let result = rpc_dispatch(&self.node, "tenzro_getAgentDailySpend", req)
             .await
             .map_err(|e| err_internal(format!("getAgentDailySpend failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Saga Workflow Coordination ───
+
+    #[tool(description = "Open a multi-agent saga workflow: declare ordered steps (each with an Execute→Verify→Compensate lifecycle) plus optional per-step escrow. Returns the opened saga. Mirrors tenzro_workflowOpen.")]
+    async fn workflow_open(
+        &self,
+        Parameters(params): Parameters<WorkflowOpenParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_workflowOpen", req)
+            .await
+            .map_err(|e| err_internal(format!("workflowOpen failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Execute a saga step: transition it Pending→Executing and, if escrow_amount is set, lock a per-step escrow (payer→vault). Mirrors tenzro_workflowStepExecute.")]
+    async fn workflow_step_execute(
+        &self,
+        Parameters(params): Parameters<WorkflowStepExecuteParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_workflowStepExecute", req)
+            .await
+            .map_err(|e| err_internal(format!("workflowStepExecute failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Verify a saga step: transition it Executing→Verified, release any per-step escrow (vault→payee), and emit ERC-8004 reputation feedback for the step executor. Mirrors tenzro_workflowStepVerify.")]
+    async fn workflow_step_verify(
+        &self,
+        Parameters(params): Parameters<WorkflowStepVerifyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_workflowStepVerify", req)
+            .await
+            .map_err(|e| err_internal(format!("workflowStepVerify failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Compensate a saga step (and, with cascade=true, every lower-index executed/verified step in reverse order), refunding still-funded per-step escrow (vault→payer). Mirrors tenzro_workflowStepCompensate.")]
+    async fn workflow_step_compensate(
+        &self,
+        Parameters(params): Parameters<WorkflowStepCompensateParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_workflowStepCompensate", req)
+            .await
+            .map_err(|e| err_internal(format!("workflowStepCompensate failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Finalize a saga workflow once all steps are Verified: compute the receipt hash and mark it Completed. Mirrors tenzro_workflowFinalize.")]
+    async fn workflow_finalize(
+        &self,
+        Parameters(params): Parameters<WorkflowFinalizeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_workflowFinalize", req)
+            .await
+            .map_err(|e| err_internal(format!("workflowFinalize failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read the current state of a saga workflow (steps, statuses, escrows, receipt). Mirrors tenzro_getWorkflowSaga.")]
+    async fn get_workflow_saga(
+        &self,
+        Parameters(params): Parameters<GetWorkflowSagaParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_getWorkflowSaga", req)
+            .await
+            .map_err(|e| err_internal(format!("getWorkflowSaga failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Verify a Tenzro DID envelope carried as a tool argument (the hex X-Tenzro-DID-Envelope value). Supports did:tenzro (registry), did:key, did:ethr (recoverable secp256k1), and did:web (resolved over HTTPS). Returns {valid, did, method} or {valid:false, error}. MCP-native carriage: tool calls expose no HTTP headers, so the envelope rides as an argument.")]
+    async fn verify_did_envelope(
+        &self,
+        Parameters(params): Parameters<VerifyDidEnvelopeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let env = tenzro_identity::envelope::TenzroDidEnvelope::from_header_value(&params.envelope)
+            .map_err(|e| err_internal(format!("malformed envelope: {e}")))?;
+        if env.did.starts_with("did:web:") {
+            let resp = crate::web::handlers::verify_did_web_envelope(&env).await;
+            let v = serde_json::to_value(&resp)
+                .map_err(|e| err_internal(format!("serialize: {e}")))?;
+            return json_result(v);
+        }
+        let registry = self
+            .node
+            .identity_registry()
+            .ok_or_else(|| err_internal("identity registry not initialized"))?;
+        let out = match tenzro_identity::envelope::verify_envelope(&env, &**registry) {
+            Ok(()) => serde_json::json!({ "valid": true, "did": env.did, "method": env.method }),
+            Err(e) => serde_json::json!({ "valid": false, "did": env.did, "error": e.to_string() }),
+        };
+        json_result(out)
+    }
+
+    // ─── Capital Intent (agentic capital allocation over tokenized assets) ───
+
+    #[tool(description = "Open a signed Capital Intent — regulated capital allocation over tokenized assets (the capital-markets analog of an AP2 Intent Mandate; objective = acquire/exit/rebalance/hedge/yield, with reg regime + KYC + ceilings). Mirrors tenzro_capitalIntentOpen.")]
+    async fn capital_intent_open(
+        &self,
+        Parameters(params): Parameters<CapitalIntentOpenParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_capitalIntentOpen", req)
+            .await.map_err(|e| err_internal(format!("capitalIntentOpen failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Submit a solver bid to fulfil a capital intent (ranked by ERC-8004 + KYA). Mirrors tenzro_capitalIntentQuote.")]
+    async fn capital_intent_quote(
+        &self,
+        Parameters(params): Parameters<CapitalIntentQuoteParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_capitalIntentQuote", req)
+            .await.map_err(|e| err_internal(format!("capitalIntentQuote failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Assign a solver to a capital intent; if `payer` is set, lock the principal escrow up to the authorized ceiling. Mirrors tenzro_capitalIntentAssign.")]
+    async fn capital_intent_assign(
+        &self,
+        Parameters(params): Parameters<CapitalIntentAssignParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_capitalIntentAssign", req)
+            .await.map_err(|e| err_internal(format!("capitalIntentAssign failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Record one executed settlement leg of a capital intent. Mirrors tenzro_capitalIntentExecute.")]
+    async fn capital_intent_execute(
+        &self,
+        Parameters(params): Parameters<CapitalIntentExecuteParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_capitalIntentExecute", req)
+            .await.map_err(|e| err_internal(format!("capitalIntentExecute failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Verify a capital intent's proofs (requires all legs settled). Mirrors tenzro_capitalIntentVerify.")]
+    async fn capital_intent_verify(
+        &self,
+        Parameters(params): Parameters<CapitalIntentIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_capitalIntentVerify", req)
+            .await.map_err(|e| err_internal(format!("capitalIntentVerify failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Settle a capital intent: release escrow to the solver, write ERC-8004 feedback, finalize with a receipt. Mirrors tenzro_capitalIntentSettle.")]
+    async fn capital_intent_settle(
+        &self,
+        Parameters(params): Parameters<CapitalIntentSettleParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_capitalIntentSettle", req)
+            .await.map_err(|e| err_internal(format!("capitalIntentSettle failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Compensate (refund the principal escrow and fail) a capital intent. Mirrors tenzro_capitalIntentCompensate.")]
+    async fn capital_intent_compensate(
+        &self,
+        Parameters(params): Parameters<CapitalIntentIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_capitalIntentCompensate", req)
+            .await.map_err(|e| err_internal(format!("capitalIntentCompensate failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read a capital intent record (status, quotes, legs, escrow, receipt). Mirrors tenzro_getCapitalIntent.")]
+    async fn get_capital_intent(
+        &self,
+        Parameters(params): Parameters<CapitalIntentIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_getCapitalIntent", req)
+            .await.map_err(|e| err_internal(format!("getCapitalIntent failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Proof-of-Reserve + attested-mint (1:1 backing invariant) ───
+
+    #[tool(description = "Record a signed Proof-of-Reserve attestation backing a tokenized asset, so attested-mint can enforce 1:1 backing. Mirrors tenzro_submitReserveAttestation.")]
+    async fn submit_reserve_attestation(
+        &self,
+        Parameters(params): Parameters<ReserveAttestationParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_submitReserveAttestation", req)
+            .await.map_err(|e| err_internal(format!("submitReserveAttestation failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Mint a tokenized asset ONLY if post-mint supply <= attested reserves (1:1 backing as a protocol invariant). Rejects with no/insufficient reserves. Mirrors tenzro_attestedMint.")]
+    async fn attested_mint(
+        &self,
+        Parameters(params): Parameters<AttestedMintParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_attestedMint", req)
+            .await.map_err(|e| err_internal(format!("attestedMint failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read the current reserve attestation for a tokenized asset. Mirrors tenzro_getReserve.")]
+    async fn get_reserve(
+        &self,
+        Parameters(params): Parameters<GetReserveParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params).map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_getReserve", req)
+            .await.map_err(|e| err_internal(format!("getReserve failed: {}", e)))?;
         json_result(result)
     }
 
@@ -5474,6 +6024,10 @@ impl TenzroMcpServer {
             confidence: params.confidence.unwrap_or(80),
             expires_at: now + 3600, // 1 hour expiry
             notes: params.notes.clone(),
+            // The MCP quote tool does not yet surface TEE attestation or an
+            // ERC-8004 reputation proof; the RPC path (tenzro_quoteTask) does.
+            provider_attestation: None,
+            provider_reputation_proof: None,
         };
 
         // Persist quote to storage
@@ -9723,6 +10277,415 @@ impl TenzroMcpServer {
         )
         .await
         .map_err(|e| err_internal(format!("eip7702ProtocolInfo failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Permit2 Tools (SignatureTransfer) ───
+
+    #[tool(description = "Read the EIP-712 domain separator for the canonical Tenzro Permit2 contract (0x0000…00001023) on `chain_id`. Returns `{domain_separator, verifying_contract, chain_id}`.")]
+    async fn permit2_domain_separator(
+        &self,
+        Parameters(params): Parameters<Permit2DomainSeparatorParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_permit2DomainSeparator",
+            serde_json::json!({ "chain_id": params.chain_id }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("permit2DomainSeparator failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Compute the EIP-712 digest a user signs for a Permit2 SignatureTransfer. If `witness` is provided, binds the permit to that 32-byte witness (used by ERC-7683 origin opens to bind to a specific cross-chain order). Returns `{digest, struct_hash, domain_separator}`.")]
+    async fn permit2_digest(
+        &self,
+        Parameters(params): Parameters<Permit2DigestParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_permit2Digest",
+            serde_json::to_value(&params).unwrap_or(serde_json::Value::Null),
+        )
+        .await
+        .map_err(|e| err_internal(format!("permit2Digest failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Atomically verify a signed Permit2 message and consume its (owner, nonce) bitmap slot. Returns `{consumed, word_pos, bit_pos}`.")]
+    async fn permit2_verify_and_consume(
+        &self,
+        Parameters(params): Parameters<Permit2VerifyAndConsumeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_permit2VerifyAndConsume",
+            serde_json::to_value(&params).unwrap_or(serde_json::Value::Null),
+        )
+        .await
+        .map_err(|e| err_internal(format!("permit2VerifyAndConsume failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Check whether a (owner, nonce) Permit2 slot has been consumed. Returns `{used, owner, nonce}`.")]
+    async fn permit2_nonce_used(
+        &self,
+        Parameters(params): Parameters<Permit2NonceUsedParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_permit2NonceUsed",
+            serde_json::json!({ "owner": params.owner, "nonce": params.nonce }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("permit2NonceUsed failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Secure-Mint Tools ───
+
+    #[tool(description = "Set or update a Secure-Mint policy for a tokenized real-world asset. Enforces per-token 1:1 reserve attestation `circulating + amount ≤ reserve` at every mint.")]
+    async fn set_secure_mint_policy(
+        &self,
+        Parameters(params): Parameters<SecureMintSetPolicyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_setSecureMintPolicy",
+            serde_json::to_value(&params).unwrap_or(serde_json::Value::Null),
+        )
+        .await
+        .map_err(|e| err_internal(format!("setSecureMintPolicy failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read the Secure-Mint policy for an asset.")]
+    async fn get_secure_mint_policy(
+        &self,
+        Parameters(params): Parameters<SecureMintAssetIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getSecureMintPolicy",
+            serde_json::json!({ "asset_id": params.asset_id }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getSecureMintPolicy failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Clear the Secure-Mint policy for an asset.")]
+    async fn clear_secure_mint_policy(
+        &self,
+        Parameters(params): Parameters<SecureMintAssetIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_clearSecureMintPolicy",
+            serde_json::json!({ "asset_id": params.asset_id }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("clearSecureMintPolicy failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read-only invariant check for a proposed mint. Returns `{would_succeed, reserve, circulating, headroom, reason?}`.")]
+    async fn secure_mint_check(
+        &self,
+        Parameters(params): Parameters<SecureMintAssetAmountParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_secureMintCheck",
+            serde_json::json!({ "asset_id": params.asset_id, "amount": params.amount }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("secureMintCheck failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Atomic check + circulating increment. Use after the invariant check has passed off-chain.")]
+    async fn secure_mint_apply(
+        &self,
+        Parameters(params): Parameters<SecureMintAssetAmountParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_secureMintApply",
+            serde_json::json!({ "asset_id": params.asset_id, "amount": params.amount }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("secureMintApply failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Record a redemption — decrements circulating. Call after the off-chain burn is finalized.")]
+    async fn secure_mint_record_burn(
+        &self,
+        Parameters(params): Parameters<SecureMintAssetAmountParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_secureMintRecordBurn",
+            serde_json::json!({ "asset_id": params.asset_id, "amount": params.amount }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("secureMintRecordBurn failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Hyperlane V3 Tools (sovereign Tenzro-validator-set ISM) ───
+
+    #[tool(description = "List supported Hyperlane chains and their canonical domain ids. Coverage: Ethereum, Polygon, Arbitrum, Optimism, Base, Avalanche, BSC, Mantle, Blast, Scroll, Linea, Manta, zkSync, Celo, Moonbeam, Mode, Fraxtal, Tenzro.")]
+    async fn hyperlane_list_chains(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_hyperlaneListChains",
+            serde_json::Value::Null,
+        )
+        .await
+        .map_err(|e| err_internal(format!("hyperlaneListChains failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Quote the interchain gas payment for a Hyperlane dispatch.")]
+    async fn hyperlane_quote_dispatch(
+        &self,
+        Parameters(params): Parameters<HyperlaneDispatchParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_hyperlaneQuoteDispatch",
+            serde_json::to_value(&params).unwrap_or(serde_json::Value::Null),
+        )
+        .await
+        .map_err(|e| err_internal(format!("hyperlaneQuoteDispatch failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Dispatch a Hyperlane V3 message through the canonical Mailbox. Tenzro runs a sovereign Tenzro-validator-set ISM, so inbound messages on Tenzro are verified against the active Tenzro validator BLS / ML-DSA set.")]
+    async fn hyperlane_dispatch(
+        &self,
+        Parameters(params): Parameters<HyperlaneDispatchParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_hyperlaneDispatch",
+            serde_json::to_value(&params).unwrap_or(serde_json::Value::Null),
+        )
+        .await
+        .map_err(|e| err_internal(format!("hyperlaneDispatch failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Look up a Hyperlane message by id.")]
+    async fn hyperlane_get_message(
+        &self,
+        Parameters(params): Parameters<HyperlaneGetMessageParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_hyperlaneGetMessage",
+            serde_json::json!({ "message_id": params.message_id }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("hyperlaneGetMessage failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Axelar GMP Tools ───
+
+    #[tool(description = "List supported Axelar chains. Reach spans 30+ chains: EVM, Cosmos (Osmosis, Cosmos Hub, Juno, Neutron, Injective, Kujira, Crescent, Evmos), Move (Aptos, Sui), Stellar, XRP Ledger, Hyperliquid, Filecoin EVM, Kava.")]
+    async fn axelar_list_chains(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_axelarListChains",
+            serde_json::Value::Null,
+        )
+        .await
+        .map_err(|e| err_internal(format!("axelarListChains failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Dispatch an Axelar GMP `call_contract` message. Correlation id is `keccak256(payload)`.")]
+    async fn axelar_call_contract(
+        &self,
+        Parameters(params): Parameters<AxelarCallContractParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_axelarCallContract",
+            serde_json::to_value(&params).unwrap_or(serde_json::Value::Null),
+        )
+        .await
+        .map_err(|e| err_internal(format!("axelarCallContract failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Pre-pay the Axelar Gas Service for a previously-dispatched message.")]
+    async fn axelar_pay_gas(
+        &self,
+        Parameters(params): Parameters<AxelarPayGasParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_axelarPayGas",
+            serde_json::to_value(&params).unwrap_or(serde_json::Value::Null),
+        )
+        .await
+        .map_err(|e| err_internal(format!("axelarPayGas failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Look up an Axelar GMP message by payload hash.")]
+    async fn axelar_get_message(
+        &self,
+        Parameters(params): Parameters<AxelarGetMessageParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_axelarGetMessage",
+            serde_json::json!({ "payload_hash": params.payload_hash }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("axelarGetMessage failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Babylon Bitcoin Staking Tools ───
+
+    #[tool(description = "Register a Tenzro validator as a Babylon finality provider. Tenzro validators are then economically secured by native BTC delegations through Babylon's finality-providers protocol.")]
+    async fn babylon_register_finality_provider(
+        &self,
+        Parameters(params): Parameters<BabylonRegisterFinalityProviderParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_babylonRegisterFinalityProvider",
+            serde_json::to_value(&params).unwrap_or(serde_json::Value::Null),
+        )
+        .await
+        .map_err(|e| err_internal(format!("babylonRegisterFinalityProvider failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read the Babylon finality-provider record for a Tenzro validator.")]
+    async fn babylon_get_finality_provider(
+        &self,
+        Parameters(params): Parameters<BabylonValidatorParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_babylonGetFinalityProvider",
+            serde_json::json!({ "validator": params.validator }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("babylonGetFinalityProvider failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List every registered Babylon finality provider.")]
+    async fn babylon_list_finality_providers(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_babylonListFinalityProviders",
+            serde_json::Value::Null,
+        )
+        .await
+        .map_err(|e| err_internal(format!("babylonListFinalityProviders failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Sum BTC delegations for a finality provider.")]
+    async fn babylon_total_stake_for_provider(
+        &self,
+        Parameters(params): Parameters<BabylonValidatorParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_babylonTotalStakeForProvider",
+            serde_json::json!({ "validator": params.validator }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("babylonTotalStakeForProvider failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Submit an EOTS (Extractable One-Time Signature) over a Tenzro block hash. Equivocation slashes the BTC delegations bonded to the finality provider.")]
+    async fn babylon_submit_finality_signature(
+        &self,
+        Parameters(params): Parameters<BabylonSubmitFinalitySignatureParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_babylonSubmitFinalitySignature",
+            serde_json::to_value(&params).unwrap_or(serde_json::Value::Null),
+        )
+        .await
+        .map_err(|e| err_internal(format!("babylonSubmitFinalitySignature failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List BTC delegations for a finality provider.")]
+    async fn babylon_list_delegations(
+        &self,
+        Parameters(params): Parameters<BabylonValidatorParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_babylonListDelegations",
+            serde_json::json!({ "validator": params.validator }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("babylonListDelegations failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── CAIP Discovery Tools (ChainAgnostic/namespaces#184) ───
+
+    #[tool(description = "Get the CAIP-2 chain id for this node: `tenzro:<lowercase hex of the first 16 bytes of the genesis block hash>`. Returns `{chain_id, namespace, reference, evm_chain_id}` — the `evm_chain_id` sidecar is for EVM tooling.")]
+    async fn caip2(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_caip2", serde_json::Value::Null)
+            .await
+            .map_err(|e| err_internal(format!("caip2 failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Get the CAIP-10 account id for a Tenzro address. Accepts hex or base58btc on input; normalises to canonical 64-hex.")]
+    async fn caip10(
+        &self,
+        Parameters(params): Parameters<Caip10Params>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_caip10",
+            serde_json::json!({ "address": params.address }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("caip10 failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Get the CAIP-19 asset id. Asset namespaces: `slip44` (native TNZO, SLIP-44 coin index 1414421071), `token` (Tenzro token registry id, 32-byte hex), `nft` (collection id + nft_token_id).")]
+    async fn caip19(
+        &self,
+        Parameters(params): Parameters<Caip19Params>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_caip19",
+            serde_json::to_value(&params).unwrap_or(serde_json::Value::Null),
+        )
+        .await
+        .map_err(|e| err_internal(format!("caip19 failed: {}", e)))?;
         json_result(result)
     }
 

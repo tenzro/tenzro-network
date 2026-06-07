@@ -125,7 +125,48 @@ impl Default for BurnRateConfig {
     }
 }
 
+/// The burn/treasury split of a single fee amount (`burn + treasury == amount`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeeSplit {
+    /// Amount destroyed (burned).
+    pub burn: u128,
+    /// Amount routed to `NetworkTreasury`.
+    pub treasury: u128,
+}
+
+impl FeeSplit {
+    /// `burn + treasury`.
+    pub fn total(&self) -> u128 {
+        self.burn.saturating_add(self.treasury)
+    }
+}
+
+/// Split `amount` by `burn_bps`: `burn = floor(amount * bps / 10_000)`, and
+/// `treasury = amount - burn` so the two always sum to `amount` exactly — any
+/// rounding dust goes to the treasury rather than being lost.
+fn split_amount(amount: u128, burn_bps: u16) -> FeeSplit {
+    let bps = burn_bps.min(10_000) as u128;
+    let burn = amount.saturating_mul(bps) / 10_000;
+    FeeSplit {
+        burn,
+        treasury: amount.saturating_sub(burn),
+    }
+}
+
 impl BurnRateConfig {
+    /// Split a base-fee amount into (burn, treasury) per `base_fee_burn_bps`.
+    pub fn split_base_fee(&self, amount: u128) -> FeeSplit {
+        split_amount(amount, self.base_fee_burn_bps)
+    }
+    /// Split a Spec-6 local-fee amount per `local_fee_burn_bps`.
+    pub fn split_local_fee(&self, amount: u128) -> FeeSplit {
+        split_amount(amount, self.local_fee_burn_bps)
+    }
+    /// Split a paymaster-sponsored amount per `paymaster_burn_bps`.
+    pub fn split_paymaster(&self, amount: u128) -> FeeSplit {
+        split_amount(amount, self.paymaster_burn_bps)
+    }
+
     /// Treasury share of base fee = 10_000 - burn share.
     pub fn base_fee_treasury_bps(&self) -> u16 {
         10_000_u16.saturating_sub(self.base_fee_burn_bps)
@@ -926,6 +967,30 @@ impl AutoProposalGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fee_split_is_exact_with_dust_to_treasury() {
+        // Genesis = 100% burn.
+        let c = BurnRateConfig::default();
+        let s = c.split_base_fee(1_000);
+        assert_eq!((s.burn, s.treasury), (1_000, 0));
+        assert_eq!(s.total(), 1_000);
+
+        // 50/50 on an odd amount: floor to burn, remainder (dust) to treasury.
+        let c2 = BurnRateConfig { base_fee_burn_bps: 5_000, ..Default::default() };
+        let s2 = c2.split_base_fee(1_001);
+        assert_eq!((s2.burn, s2.treasury), (500, 501));
+        assert_eq!(s2.total(), 1_001);
+
+        // 0% burn → everything to treasury.
+        let c3 = BurnRateConfig { base_fee_burn_bps: 0, ..Default::default() };
+        let s3 = c3.split_base_fee(777);
+        assert_eq!((s3.burn, s3.treasury), (0, 777));
+
+        // local + paymaster use their own dials (genesis 100% burn).
+        assert_eq!(c.split_local_fee(42), FeeSplit { burn: 42, treasury: 0 });
+        assert_eq!(c.split_paymaster(42), FeeSplit { burn: 42, treasury: 0 });
+    }
 
     fn metrics_with_rolling(bps: i32) -> SupplyMetricsSnapshot {
         SupplyMetricsSnapshot {

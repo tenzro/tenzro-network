@@ -53,6 +53,20 @@ pub const DEFAULT_WORMHOLESCAN_API: &str = "https://api.wormholescan.io";
 /// Default Guardian RPC base URL (mainnet Guardian-0).
 pub const DEFAULT_GUARDIAN_RPC: &str = "https://wormhole-v2-mainnet-api.mcf.rocks";
 
+/// A single Guardian signature on a VAA.
+///
+/// Wire layout: `guardian_index(1) || r(32) || s(32) || v(1)` per the
+/// Wormhole core spec. `v` is the recovery id (0 or 1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardianSignature {
+    /// Index into the active Guardian set.
+    pub guardian_index: u8,
+    /// 64-byte ECDSA signature (r || s); wire is a `Vec<u8>` of length 64.
+    pub signature: Vec<u8>,
+    /// Recovery id (0 or 1).
+    pub recovery_id: u8,
+}
+
 /// A Wormhole VAA (Verified Action Approval).
 ///
 /// Canonical binary encoding:
@@ -79,8 +93,35 @@ pub struct Vaa {
     pub payload: Vec<u8>,
     /// Timestamp of the observation (Unix seconds).
     pub timestamp: u32,
-    /// Number of Guardian signatures present (threshold is ceil(2/3 * N) of the active set).
+    /// Number of Guardian signatures present (legacy field kept for wire compat).
     pub guardian_signatures: u8,
+    /// Parsed Guardian signatures (present when the VAA was decoded from
+    /// the canonical binary form). Empty when the VAA was constructed
+    /// from a non-signed source.
+    #[serde(default)]
+    pub signatures: Vec<GuardianSignature>,
+}
+
+/// The active Wormhole Guardian set. The set rotates via on-chain
+/// governance VAAs; relying parties fetch the active set from the
+/// destination Core Bridge or from `wormholescan.io/api/v1/guardian-set`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardianSet {
+    /// Guardian set index — must match `Vaa.guardian_set_index`.
+    pub index: u32,
+    /// 20-byte secp256k1 public-key addresses, ordered by guardian index.
+    pub guardians: Vec<[u8; 20]>,
+    /// Expiry of the guardian set (Unix seconds). `0` means active.
+    #[serde(default)]
+    pub expiration_time: u64,
+}
+
+impl GuardianSet {
+    /// Quorum size: `floor(2 * len / 3) + 1`. Matches Wormhole's
+    /// on-chain `quorum()` definition.
+    pub fn quorum(&self) -> usize {
+        (self.guardians.len() * 2) / 3 + 1
+    }
 }
 
 impl Vaa {
@@ -94,12 +135,9 @@ impl Vaa {
         )
     }
 
-    /// Compute the Keccak-256-style "body" digest used as VAA fingerprint.
-    ///
-    /// We use SHA-256 here since keccak is available via `tenzro_crypto` but
-    /// we intentionally keep this crate free of that dep. This fingerprint is
-    /// used only for local dedup/tracking — on-chain verification is done by
-    /// the destination Core Bridge contract over the signed body.
+    /// Compute the SHA-256 "body" digest used as a local fingerprint.
+    /// Distinct from [`Self::signing_digest`] — this is for local dedup
+    /// only, not Guardian signature recovery.
     pub fn body_digest(&self) -> Hash {
         let mut h = Sha256::new();
         h.update(self.timestamp.to_be_bytes());
@@ -112,6 +150,147 @@ impl Vaa {
         let out: [u8; 32] = h.finalize().into();
         Hash(out)
     }
+
+    /// Compute the double-Keccak-256 message digest that Guardians sign.
+    ///
+    /// Per the Wormhole core spec the signed message is
+    /// `keccak256(keccak256(body))`, where `body` is the canonical
+    /// encoding of the timestamp / nonce / emitter / sequence /
+    /// consistency_level / payload tail.
+    pub fn signing_digest(&self) -> [u8; 32] {
+        use sha3::{Digest as _, Keccak256};
+
+        let mut body = Vec::with_capacity(51 + self.payload.len());
+        body.extend_from_slice(&self.timestamp.to_be_bytes());
+        body.extend_from_slice(&self.nonce.to_be_bytes());
+        body.extend_from_slice(&self.emitter_chain.to_be_bytes());
+        body.extend_from_slice(&self.emitter_address);
+        body.extend_from_slice(&self.sequence.to_be_bytes());
+        body.push(self.consistency_level);
+        body.extend_from_slice(&self.payload);
+
+        let inner: [u8; 32] = Keccak256::digest(&body).into();
+        let outer: [u8; 32] = Keccak256::digest(inner).into();
+        outer
+    }
+
+    /// Verify the VAA against an active [`GuardianSet`].
+    ///
+    /// Performs full ECDSA-secp256k1 signature recovery for each
+    /// signature, requires the recovered Ethereum-style address to
+    /// match the guardian at `signature.guardian_index`, and requires
+    /// at least `guardian_set.quorum()` valid signatures.
+    ///
+    /// Returns `Ok(())` on success, `Err(BridgeError::AdapterError)`
+    /// on any failure with the specific reason in the message.
+    pub fn verify_quorum(&self, guardian_set: &GuardianSet) -> Result<()> {
+        if self.guardian_set_index != guardian_set.index {
+            return Err(BridgeError::AdapterError(format!(
+                "VAA guardian_set_index {} does not match active set index {}",
+                self.guardian_set_index, guardian_set.index
+            )));
+        }
+        if guardian_set.expiration_time != 0
+            && (guardian_set.expiration_time as i64)
+                < chrono::Utc::now().timestamp()
+        {
+            return Err(BridgeError::AdapterError(format!(
+                "guardian set {} is expired",
+                guardian_set.index
+            )));
+        }
+        if self.signatures.is_empty() {
+            return Err(BridgeError::AdapterError(
+                "VAA carries no signatures — cannot verify quorum".into(),
+            ));
+        }
+        let quorum = guardian_set.quorum();
+        if self.signatures.len() < quorum {
+            return Err(BridgeError::AdapterError(format!(
+                "VAA has {} signatures; quorum requires {}",
+                self.signatures.len(),
+                quorum
+            )));
+        }
+
+        let digest = self.signing_digest();
+        let mut seen = std::collections::HashSet::new();
+        let mut valid: usize = 0;
+
+        for sig in &self.signatures {
+            // Guardian indices must be unique within a VAA.
+            if !seen.insert(sig.guardian_index) {
+                return Err(BridgeError::AdapterError(format!(
+                    "duplicate guardian_index {} in signatures",
+                    sig.guardian_index
+                )));
+            }
+            let idx = sig.guardian_index as usize;
+            let expected_address = guardian_set
+                .guardians
+                .get(idx)
+                .ok_or_else(|| {
+                    BridgeError::AdapterError(format!(
+                        "guardian_index {idx} is out of range for set of size {}",
+                        guardian_set.guardians.len()
+                    ))
+                })?;
+
+            let sig64: &[u8; 64] = sig
+                .signature
+                .as_slice()
+                .try_into()
+                .map_err(|_| BridgeError::AdapterError(format!(
+                    "guardian {idx}: signature wrong length, expected 64 bytes got {}",
+                    sig.signature.len()
+                )))?;
+            let recovered = recover_eth_address(&digest, sig64, sig.recovery_id)?;
+            if &recovered != expected_address {
+                return Err(BridgeError::AdapterError(format!(
+                    "guardian {idx}: signature recovers to {}, expected {}",
+                    hex::encode(recovered),
+                    hex::encode(expected_address)
+                )));
+            }
+            valid += 1;
+        }
+
+        if valid < quorum {
+            return Err(BridgeError::AdapterError(format!(
+                "only {valid} valid signatures, quorum requires {quorum}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Recover the 20-byte Ethereum address from a secp256k1 ECDSA
+/// signature over `digest`.
+fn recover_eth_address(
+    digest: &[u8; 32],
+    sig64: &[u8; 64],
+    recovery_id: u8,
+) -> Result<[u8; 20]> {
+    use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey};
+    use sha3::{Digest as _, Keccak256};
+
+    let signature = K256Signature::from_slice(sig64.as_slice())
+        .map_err(|e| BridgeError::AdapterError(format!("invalid ECDSA signature bytes: {e}")))?;
+    let recid = RecoveryId::from_byte(recovery_id)
+        .ok_or_else(|| BridgeError::AdapterError(format!("invalid recovery id {recovery_id}")))?;
+    let vk = VerifyingKey::recover_from_prehash(digest, &signature, recid)
+        .map_err(|e| BridgeError::AdapterError(format!("recovery failed: {e}")))?;
+    let encoded = vk.to_sec1_point(false);
+    let public_key_bytes = encoded.as_bytes();
+    if public_key_bytes.len() != 65 || public_key_bytes[0] != 0x04 {
+        return Err(BridgeError::AdapterError(
+            "unexpected uncompressed public key shape".into(),
+        ));
+    }
+    let hashed: [u8; 32] = Keccak256::digest(&public_key_bytes[1..]).into();
+    let mut address = [0u8; 20];
+    address.copy_from_slice(&hashed[12..]);
+    Ok(address)
 }
 
 /// Wormhole Token Bridge transfer payload (payload type 1 or 3).
@@ -291,6 +470,16 @@ pub struct WormholeAdapter {
     /// Replay protection for inbound messages: set of seen
     /// `wormhole:<chain>:<payload_digest_hex>` keys.
     seen_messages: Arc<DashMap<String, ()>>,
+    /// Per-sender monotonic nonce tracker for inbound `TenzroMessage`
+    /// envelopes (the `TokenBridgePayload`-only path bypasses this).
+    inbound_nonce_tracker: Arc<crate::message_format::NonceTracker>,
+    /// Optionally-supplied active Wormhole Guardian set. When present
+    /// `verify_vaa` runs the full ECDSA-secp256k1 quorum check; when
+    /// absent the adapter defers verification to the destination Core
+    /// Bridge contract (the historical behavior). Held behind a
+    /// `parking_lot::RwLock` so a node can rotate the active set when
+    /// a `GuardianSetUpdated` governance VAA is observed.
+    guardian_set: Arc<parking_lot::RwLock<Option<GuardianSet>>>,
 }
 
 impl WormholeAdapter {
@@ -308,7 +497,38 @@ impl WormholeAdapter {
             sequences: Arc::new(DashMap::new()),
             signer: None,
             seen_messages: Arc::new(DashMap::new()),
+            inbound_nonce_tracker: Arc::new(crate::message_format::NonceTracker::new()),
+            guardian_set: Arc::new(parking_lot::RwLock::new(None)),
         }
+    }
+
+    /// Pin an active Wormhole Guardian set at construction time.
+    pub fn with_guardian_set(self, set: GuardianSet) -> Self {
+        *self.guardian_set.write() = Some(set);
+        self
+    }
+
+    /// Replace the active Guardian set in place. Used by the node when
+    /// a `GuardianSetUpdated` governance VAA is observed.
+    pub fn set_guardian_set(&self, set: GuardianSet) {
+        *self.guardian_set.write() = Some(set);
+    }
+
+    /// Read a snapshot of the active Guardian set.
+    pub fn active_guardian_set(&self) -> Option<GuardianSet> {
+        self.guardian_set.read().clone()
+    }
+
+    /// Verify a VAA against the adapter's pinned Guardian set. Returns
+    /// `Err` if no Guardian set has been configured.
+    pub fn verify_vaa(&self, vaa: &Vaa) -> Result<()> {
+        let guard = self.guardian_set.read();
+        let set = guard.as_ref().ok_or_else(|| {
+            BridgeError::AdapterError(
+                "no Guardian set configured — call with_guardian_set before verify_vaa".into(),
+            )
+        })?;
+        vaa.verify_quorum(set)
     }
 
     /// Attaches an EVM signer for real on-chain submission.
@@ -380,7 +600,8 @@ impl WormholeAdapter {
             consistency_level: self.config.consistency_level,
             payload,
             timestamp: (now.as_secs() as u32),
-            guardian_signatures: 0, // to be filled by Guardian network
+            guardian_signatures: 0, // populated by the Guardian network observation
+            signatures: Vec::new(),
         };
         let id = vaa.id();
         debug!("publish_message: emitted VAA id={}", id);
@@ -527,13 +748,44 @@ impl BridgeAdapter for WormholeAdapter {
         if payload.is_empty() {
             return Err(BridgeError::InvalidParameter("empty payload".into()));
         }
-        // Derive a replay-protection key from source chain + payload hash.
-        let digest: [u8; 32] = Sha256::digest(&payload).into();
-        let key = format!("wormhole:{}:{}", chain_id, hex::encode(digest));
-        if self.seen_messages.contains_key(&key) {
-            return Err(BridgeError::ReplayAttack(key));
+
+        // Layer 1: payload-hash dedup. Cheap and idempotent — catches
+        // duplicate observations of the same Wormhole VAA before the
+        // expensive cryptographic checks even start.
+        let payload_digest: [u8; 32] = Sha256::digest(&payload).into();
+        let dedup_key = format!("wormhole:{}:{}", chain_id, hex::encode(payload_digest));
+        if self.seen_messages.contains_key(&dedup_key) {
+            return Err(BridgeError::ReplayAttack(dedup_key));
         }
-        self.seen_messages.insert(key, ());
+
+        // Layer 2: when the payload is a TenzroMessage, run the same
+        // 6-step verification path the other adapters use — decode,
+        // validate, hash-check, signature-check, per-sender nonce
+        // monotonicity — so a Tenzro-side relying party can trust the
+        // inbound message without doing a separate destination-chain
+        // round-trip. Plain VAA payloads (Token Bridge transfers) are
+        // exempt: those are verified by the destination Core Bridge
+        // contract over the signed VAA body.
+        if let Ok(message) = crate::message_format::TenzroMessage::decode(&payload) {
+            message.validate()?;
+            if !message.verify_hash() {
+                return Err(BridgeError::InvalidParameter(
+                    "inbound TenzroMessage hash mismatch".into(),
+                ));
+            }
+            if message.signature.is_some()
+                && !message.verify_signature().unwrap_or(false)
+            {
+                return Err(BridgeError::InvalidParameter(
+                    "inbound TenzroMessage signature verification failed".into(),
+                ));
+            }
+            self.inbound_nonce_tracker
+                .check_and_update(&message.sender, message.nonce)
+                .map_err(|e| BridgeError::ReplayAttack(format!("nonce: {e}")))?;
+        }
+
+        self.seen_messages.insert(dedup_key, ());
         Ok(())
     }
 
@@ -639,6 +891,11 @@ impl WormholescanVaa {
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
             .map(|dt| dt.timestamp() as u32)
             .unwrap_or(0);
+        let parsed_sigs = self
+            .signatures
+            .as_ref()
+            .map(|raw| Self::parse_guardian_signatures(raw))
+            .unwrap_or_default();
         Ok(Vaa {
             version: self.version,
             guardian_set_index: self.guardian_set_index.max(0) as u32,
@@ -649,8 +906,49 @@ impl WormholescanVaa {
             consistency_level: 15,
             payload,
             timestamp,
-            guardian_signatures: self.signatures.as_ref().map_or(0, |s| s.len() as u8),
+            guardian_signatures: parsed_sigs.len() as u8,
+            signatures: parsed_sigs,
         })
+    }
+
+    /// Decode the Wormholescan signatures JSON array into the structured
+    /// `GuardianSignature` shape. Tolerant of multiple field-name
+    /// variants — Wormholescan has used `{guardianSetIndex, signature}`,
+    /// `{guardian_set_index, signature}`, `{index, signature}` over time.
+    fn parse_guardian_signatures(raw: &[serde_json::Value]) -> Vec<GuardianSignature> {
+        let mut out = Vec::with_capacity(raw.len());
+        for entry in raw {
+            let Some(obj) = entry.as_object() else { continue };
+            let idx_opt = obj
+                .get("guardianSetIndex")
+                .or_else(|| obj.get("guardian_set_index"))
+                .or_else(|| obj.get("index"))
+                .and_then(|v| v.as_u64());
+            let sig_hex_opt = obj
+                .get("signature")
+                .or_else(|| obj.get("sig"))
+                .and_then(|v| v.as_str());
+            let (Some(idx), Some(sig_hex)) = (idx_opt, sig_hex_opt) else {
+                continue;
+            };
+            let bytes = match hex::decode(sig_hex.trim_start_matches("0x")) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            if bytes.len() != 65 {
+                continue;
+            }
+            let sig: Vec<u8> = bytes[..64].to_vec();
+            let v_byte = bytes[64];
+            // Wormhole encodes `v` as 0 or 1; some sources add 27 (Ethereum legacy).
+            let recovery_id = if v_byte >= 27 { v_byte - 27 } else { v_byte };
+            out.push(GuardianSignature {
+                guardian_index: idx as u8,
+                signature: sig,
+                recovery_id,
+            });
+        }
+        out
     }
 }
 

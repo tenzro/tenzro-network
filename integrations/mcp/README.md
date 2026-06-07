@@ -3,14 +3,14 @@
 The official [Model Context Protocol](https://modelcontextprotocol.io) server for [Tenzro Network](https://tenzro.com) — giving AI agents direct access to blockchain operations, token management, cross-chain bridges, NFTs, identity, compliance, event streaming, and more.
 
 [![Python](https://img.shields.io/badge/python-3.10+-blue)](https://python.org)
-[![MCP](https://img.shields.io/badge/MCP-2024--11--05-blue)](https://modelcontextprotocol.io)
+[![MCP](https://img.shields.io/badge/MCP-2025--11--25-blue)](https://modelcontextprotocol.io)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
 ## Overview
 
 The Tenzro MCP server is an installable Python package that exposes blockchain and multi-modal AI tools across 19+ categories to any MCP-compatible AI agent (Claude, GPT, Cursor, Windsurf, etc.) via **stdio** or **Streamable HTTP** transport. Install with `pip install tenzro-mcp-server` and run locally, or connect directly to the live testnet endpoint. Agents can query balances, send transactions, mint NFTs, bridge tokens, check compliance, subscribe to events, run timeseries forecasts, embed images and text, segment and detect objects, transcribe audio, and interact with AI models — all through the standard MCP tool interface.
 
-The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **192 tools** (Tenzro Ledger + multi-modal AI + AgentBond/insurance + agent memory) and is the authoritative tool inventory; this Python distributable exposes a comparable subset over stdio + Streamable HTTP.
+The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **331 tools** (Tenzro Ledger + multi-modal AI + AgentBond/insurance + agent memory) and is the authoritative tool inventory; this Python distributable exposes a comparable subset over stdio + Streamable HTTP.
 
 **Testnet endpoint:** `https://mcp.tenzro.network/mcp`
 **Local:** `http://localhost:3001/mcp`
@@ -411,18 +411,59 @@ Per-modality `list_*_catalog`, `list_*_models`, `load_*_model`, `unload_*_model`
 - `debridge_create_tx` — Create cross-chain transaction
 - `debridge_same_chain_swap` — Execute same-chain swap
 
+### Capital Intent (regulated capital allocation)
+
+- `capital_intent_open` — Open a signed Capital Intent (capital-markets analog of an AP2 Intent Mandate)
+- `capital_intent_quote` — Solver submits a bid against an opened intent
+- `capital_intent_assign` — Auto-rank by ERC-8004 reputation, price, ETA
+- `capital_intent_execute` — Execute a leg
+- `capital_intent_verify` — Verify a step
+- `capital_intent_compensate` — Roll back a step
+- `capital_intent_settle` — Release escrow to the payee
+- `get_capital_intent` — Read intent state
+- `submit_reserve_attestation` — 1:1 backing attestation
+- `get_reserve` — Read latest reserve attestation
+- `attested_mint` — Token issuance gated by a fresh reserve attestation
+
+### Multi-party workflows
+
+- `workflow_open` — Declare a saga workflow with ordered steps
+- `workflow_step_execute` — Transition step Pending → Executing (with optional per-step escrow)
+- `workflow_step_verify` — Verify a step's outcome
+- `workflow_step_compensate` — Roll back a step
+- `workflow_finalize` — Emit on-chain WorkflowReceipt
+- `workflow_mirror_to_canton` — Mirror to a Canton synchronizer for DAML reconciliation
+- `verify_did_envelope` — Verify a DID-signed step payload
+- `get_workflow`, `get_workflow_saga`, `get_workflow_lifecycle`, `get_workflow_receipt`, `get_workflow_operational_metrics`
+- `list_workflows_by_creator`, `list_workflows_by_participant`, `list_workflows_by_status`, `list_workflow_receipts`
+
+### EVM-side primitives (EIP-7702 / Permit2 / Secure-Mint)
+
+- `install_7702_delegation`, `get_7702_delegation`, `revoke_7702_delegation` — Pectra Type-4 authority → target delegation registry
+- `permit2_domain_separator`, `permit2_digest`, `permit2_verify_and_consume`, `permit2_nonce_used` — Permit2 SignatureTransfer (optional witness for ERC-7683 origin opens)
+- `set_secure_mint_policy`, `get_secure_mint_policy`, `clear_secure_mint_policy`, `secure_mint_check`, `secure_mint_apply`, `secure_mint_record_burn` — per-token 1:1 reserve-attestation invariant for tokenized RWAs
+
+### Chain-agnostic discovery (CAIP)
+
+- `caip2`, `caip10`, `caip19` — Canonical Tenzro CAIP identifiers per the submitted `tenzro` namespace spec (`ChainAgnostic/namespaces#184`). CAIP-2 reference is the lowercase hex of the first 16 bytes of the genesis block hash; CAIP-19 supports `slip44` / `token` / `nft` asset namespaces.
+
+### ERC-7683 cross-chain intents
+
+- `open_7683_order`, `get_7683_order`, `list_7683_orders` — Origin-side opener + reads
+- `record_fill_7683`, `get_fill_7683`, `list_fills_7683` — Destination-side fill registry (idempotent)
+
 ## Ecosystem MCP Servers
 
 In addition to the main Tenzro MCP server, the node runs specialized servers for direct blockchain interaction:
 
 | Server | Port | Endpoint | Description |
 |--------|------|----------|-------------|
-| **Tenzro** | 3001 | `/mcp` | 192 tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + AgentBond/insurance + agent memory |
+| **Tenzro** | 3001 | `/mcp` | 331 tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + AgentBond/insurance + agent memory |
 | **Solana** | 3003 | `/mcp` | 14 tools — Jupiter swaps, SPL tokens, Metaplex NFTs, SNS, staking |
-| **Ethereum** | 3004 | `/mcp` | 16 tools — Chainlink feeds, ENS, ERC-20, EAS, ERC-8004 |
-| **Canton** | 3005 | `/mcp` | 14 tools — DAML contracts, CIP-56 tokens, DvP settlement |
-| **LayerZero** | 3006 | `/mcp` | 20 tools — V2 messaging, OFT, Stargate V2, Value Transfer API |
-| **Chainlink** | 3007 | `/mcp` | 20 tools — CCIP, data feeds, Data Streams, VRF v2.5, PoR, automation, Functions |
+| **Ethereum** | 3004 | `/mcp` | 17 tools — Chainlink feeds, ENS, ERC-20, EAS, ERC-8004 |
+| **Canton** | 3005 | `/mcp` | 15 tools — DAML contracts, CIP-56 tokens, DvP settlement |
+| **LayerZero** | 3006 | `/mcp` | 21 tools — V2 messaging, OFT, Stargate V2, Value Transfer API |
+| **Chainlink** | 3007 | `/mcp` | 21 tools — CCIP, data feeds, Data Streams, VRF v2.5, PoR, automation, Functions |
 | **Li.Fi** | 3008 | `/mcp` | 9 tools — cross-chain aggregation, quotes, routes, status |
 
 ## Programmatic Usage

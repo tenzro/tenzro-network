@@ -1557,7 +1557,7 @@ impl Eip7702Authorization {
 /// The signature must be 65 bytes: `r(32) || s(32) || y_parity(1)` with
 /// `y_parity ∈ {0, 1}`. The Ethereum address is the last 20 bytes of
 /// `keccak256(uncompressed_pubkey)`.
-fn recover_eoa_from_7702_signature(auth: &Eip7702Authorization) -> Result<Vec<u8>, VmError> {
+pub fn recover_eoa_from_7702_signature(auth: &Eip7702Authorization) -> Result<Vec<u8>, VmError> {
     use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
     use sha3::{Digest, Keccak256};
 

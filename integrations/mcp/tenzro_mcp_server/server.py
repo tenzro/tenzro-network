@@ -93,7 +93,7 @@ async def request_faucet(address: str) -> dict:
 @mcp.tool
 async def token_balance(address: str) -> dict:
     """Get the TNZO token balance for an address via the token subsystem."""
-    result = await rpc_call("tenzro_tokenBalance", [address])
+    result = await rpc_call("tenzro_tokenBalance", {"address": address})
     return {"address": address, "balance": result}
 
 
@@ -402,9 +402,9 @@ async def get_svm_cross_vm_program_info() -> dict:
 
 
 @mcp.tool
-async def get_transaction(tx_hash: str) -> dict:
-    """Look up a transaction by its hash. Returns type, sender, recipient, amount, and status."""
-    result = await rpc_call("eth_getTransactionByHash", [tx_hash])
+async def get_transaction_receipt(tx_hash: str) -> dict:
+    """Look up a transaction receipt by its hash. Returns sender, recipient, status, gas used, and logs."""
+    result = await rpc_call("eth_getTransactionReceipt", [tx_hash])
     return result
 
 
@@ -467,14 +467,14 @@ async def set_delegation_scope(
 @mcp.tool
 async def set_username(did: str, username: str) -> dict:
     """Set a human-readable username for a DID."""
-    result = await rpc_call("tenzro_setUsername", [did, username])
+    result = await rpc_call("tenzro_setUsername", {"did": did, "username": username})
     return result
 
 
 @mcp.tool
 async def resolve_username(username: str) -> dict:
     """Resolve a username to its associated DID and identity info."""
-    result = await rpc_call("tenzro_resolveUsername", [username])
+    result = await rpc_call("tenzro_resolveUsername", {"username": username})
     return result
 
 
@@ -741,7 +741,7 @@ async def open_payment_channel(
 @mcp.tool
 async def close_payment_channel(channel_id: str) -> dict:
     """Close a micropayment channel and settle the final balances on-chain."""
-    result = await rpc_call("tenzro_closePaymentChannel", [channel_id])
+    result = await rpc_call("tenzro_closePaymentChannel", {"channel_id": channel_id})
     return result
 
 
@@ -903,35 +903,35 @@ async def discover_models(
 @mcp.tool
 async def download_model(model_id: str) -> dict:
     """Download a model from the registry to the local node."""
-    result = await rpc_call("tenzro_downloadModel", [model_id])
+    result = await rpc_call("tenzro_downloadModel", {"model_id": model_id})
     return result
 
 
 @mcp.tool
 async def serve_model(model_id: str) -> dict:
     """Start serving a model for inference on this node."""
-    result = await rpc_call("tenzro_serveModel", [model_id])
+    result = await rpc_call("tenzro_serveModel", {"model_id": model_id})
     return result
 
 
 @mcp.tool
 async def stop_model(model_id: str) -> dict:
     """Stop serving a model on this node."""
-    result = await rpc_call("tenzro_stopModel", [model_id])
+    result = await rpc_call("tenzro_stopModel", {"model_id": model_id})
     return result
 
 
 @mcp.tool
 async def delete_model(model_id: str) -> dict:
     """Delete a downloaded model from the local node."""
-    result = await rpc_call("tenzro_deleteModel", [model_id])
+    result = await rpc_call("tenzro_deleteModel", {"model_id": model_id})
     return result
 
 
 @mcp.tool
 async def get_download_progress(model_id: str) -> dict:
     """Check the download progress of a model."""
-    result = await rpc_call("tenzro_getDownloadProgress", [model_id])
+    result = await rpc_call("tenzro_getDownloadProgress", {"model_id": model_id})
     return result
 
 
@@ -951,14 +951,14 @@ async def list_providers(provider_type: str = None) -> dict:
 @mcp.tool
 async def stake_tokens(amount: str, provider_type: str) -> dict:
     """Stake TNZO tokens as a Validator, ModelProvider, or TeeProvider."""
-    result = await rpc_call("tenzro_stake", [amount, provider_type])
+    result = await rpc_call("tenzro_stake", {"amount": amount, "provider_type": provider_type})
     return result
 
 
 @mcp.tool
 async def unstake_tokens(amount: str, provider_type: str) -> dict:
     """Unstake TNZO tokens and initiate the unbonding period."""
-    result = await rpc_call("tenzro_unstake", [amount, provider_type])
+    result = await rpc_call("tenzro_unstake", {"amount": amount, "provider_type": provider_type})
     return result
 
 
@@ -990,14 +990,14 @@ async def list_proposals() -> dict:
 @mcp.tool
 async def vote_on_proposal(proposal_id: str, vote: str) -> dict:
     """Vote on a governance proposal. vote is 'for', 'against', or 'abstain'."""
-    result = await rpc_call("tenzro_vote", [proposal_id, vote])
+    result = await rpc_call("tenzro_vote", {"proposal_id": proposal_id, "vote": vote})
     return result
 
 
 @mcp.tool
 async def get_voting_power(address: str) -> dict:
     """Get the voting power for an address based on staked TNZO."""
-    result = await rpc_call("tenzro_getVotingPower", [address])
+    result = await rpc_call("tenzro_getVotingPower", {"address": address})
     return result
 
 
@@ -1113,7 +1113,13 @@ async def create_token(
 @mcp.tool
 async def get_token_info(query: str) -> dict:
     """Look up a token by symbol, EVM address, or token ID."""
-    result = await rpc_call("tenzro_getToken", [query])
+    if query.startswith("0x") and len(query) == 42:
+        params = {"evm_address": query}
+    elif query.isdigit():
+        params = {"token_id": query}
+    else:
+        params = {"symbol": query}
+    result = await rpc_call("tenzro_getToken", params)
     return result
 
 
@@ -1162,16 +1168,22 @@ async def cross_vm_transfer(
 
 
 @mcp.tool
-async def wrap_tnzo(vm_type: str = "evm") -> dict:
-    """Wrap native TNZO to its VM representation (no-op in pointer model)."""
-    result = await rpc_call("tenzro_wrapTnzo", [vm_type])
+async def wrap_tnzo(address: str, amount: str, vm_type: str = "evm") -> dict:
+    """Wrap native TNZO to its VM representation for an address/amount.
+
+    ``amount`` is in wei (smallest unit). ``vm_type`` selects the target VM
+    representation ("evm", "svm", "tempo")."""
+    result = await rpc_call(
+        "tenzro_wrapTnzo",
+        {"address": address, "amount": amount, "to_vm": vm_type},
+    )
     return result
 
 
 @mcp.tool
 async def get_token_balance(address: str) -> dict:
     """Get TNZO balance across all VMs with decimal conversion."""
-    result = await rpc_call("tenzro_getTokenBalance", [address])
+    result = await rpc_call("tenzro_getTokenBalance", {"address": address})
     return result
 
 
@@ -1215,7 +1227,7 @@ async def list_tasks(
 @mcp.tool
 async def get_task(task_id: str) -> dict:
     """Get details of a specific task by its ID."""
-    result = await rpc_call("tenzro_getTask", [task_id])
+    result = await rpc_call("tenzro_getTask", {"task_id": task_id})
     return result
 
 
@@ -1232,7 +1244,7 @@ async def quote_task(task_id: str, price: str, model: str) -> dict:
 @mcp.tool
 async def assign_task(task_id: str, agent_id: str) -> dict:
     """Assign a task to a specific agent."""
-    result = await rpc_call("tenzro_assignTask", [task_id, agent_id])
+    result = await rpc_call("tenzro_assignTask", {"task_id": task_id, "provider": agent_id})
     return result
 
 
@@ -1249,7 +1261,7 @@ async def complete_task(task_id: str, result_data: str) -> dict:
 @mcp.tool
 async def cancel_task(task_id: str) -> dict:
     """Cancel a task in the marketplace."""
-    result = await rpc_call("tenzro_cancelTask", [task_id])
+    result = await rpc_call("tenzro_cancelTask", {"task_id": task_id})
     return result
 
 
@@ -1318,14 +1330,14 @@ async def create_swarm(
 @mcp.tool
 async def get_swarm_status(swarm_id: str) -> dict:
     """Get the current status and member list of an agent swarm."""
-    result = await rpc_call("tenzro_getSwarm", [swarm_id])
+    result = await rpc_call("tenzro_getSwarmStatus", {"swarm_id": swarm_id})
     return result
 
 
 @mcp.tool
 async def terminate_swarm(swarm_id: str) -> dict:
     """Terminate an agent swarm and release all members."""
-    result = await rpc_call("tenzro_terminateSwarm", [swarm_id])
+    result = await rpc_call("tenzro_terminateSwarm", {"swarm_id": swarm_id})
     return result
 
 
@@ -1339,14 +1351,16 @@ async def list_agents() -> dict:
 @mcp.tool
 async def get_agent_info(agent_id: str) -> dict:
     """Get detailed information about a specific agent."""
-    result = await rpc_call("tenzro_getAgentInfo", [agent_id])
+    result = await rpc_call("tenzro_getAgent", {"agent_id": agent_id})
     return result
 
 
 @mcp.tool
-async def deregister_agent(agent_id: str) -> dict:
-    """Deregister an agent from the network."""
-    result = await rpc_call("tenzro_deregisterAgent", [agent_id])
+async def deregister_agent(agent_id: str, reason: str = "Operator deregister") -> dict:
+    """Deregister (suspend) an agent from the active network registry."""
+    result = await rpc_call(
+        "tenzro_suspendAgent", {"agent_id": agent_id, "reason": reason}
+    )
     return result
 
 
@@ -1386,14 +1400,14 @@ async def list_agent_templates(template_type: str = None) -> dict:
 @mcp.tool
 async def get_agent_template(template_id: str) -> dict:
     """Get details of a specific agent template."""
-    result = await rpc_call("tenzro_getAgentTemplate", [template_id])
+    result = await rpc_call("tenzro_getAgentTemplate", {"template_id": template_id})
     return result
 
 
 @mcp.tool
 async def search_agent_templates(query: str) -> dict:
     """Search agent templates by name or description."""
-    result = await rpc_call("tenzro_searchAgentTemplates", [query])
+    result = await rpc_call("tenzro_searchAgentTemplates", {"query": query})
     return result
 
 
@@ -1568,7 +1582,7 @@ async def register_compliance(
 @mcp.tool
 async def freeze_address(token: str, address: str) -> dict:
     """Freeze an address for a specific token, preventing all transfers."""
-    result = await rpc_call("tenzro_freezeAddress", [token, address])
+    result = await rpc_call("tenzro_freezeAddress", {"token_id": token, "address": address})
     return result
 
 
@@ -1752,14 +1766,14 @@ async def register_skill(
 @mcp.tool
 async def search_skills(query: str) -> dict:
     """Search the skills registry by keyword or tag."""
-    result = await rpc_call("tenzro_searchSkills", [query])
+    result = await rpc_call("tenzro_searchSkills", {"query": query})
     return result
 
 
 @mcp.tool
 async def get_skill(skill_id: str) -> dict:
     """Get details of a specific skill by its ID."""
-    result = await rpc_call("tenzro_getSkill", [skill_id])
+    result = await rpc_call("tenzro_getSkill", {"skill_id": skill_id})
     return result
 
 
@@ -1804,14 +1818,14 @@ async def register_tool(
 @mcp.tool
 async def search_tools(query: str) -> dict:
     """Search the tools registry by keyword."""
-    result = await rpc_call("tenzro_searchTools", [query])
+    result = await rpc_call("tenzro_searchTools", {"query": query})
     return result
 
 
 @mcp.tool
 async def get_tool_info(tool_id: str) -> dict:
     """Get details of a specific registered tool by its ID."""
-    result = await rpc_call("tenzro_getTool", [tool_id])
+    result = await rpc_call("tenzro_getTool", {"tool_id": tool_id})
     return result
 
 
@@ -1844,14 +1858,14 @@ async def get_hardware_profile() -> dict:
 @mcp.tool
 async def get_skill_usage(skill_id: str) -> dict:
     """Get usage statistics for a registered skill."""
-    result = await rpc_call("tenzro_getSkillUsage", [skill_id])
+    result = await rpc_call("tenzro_getSkillUsage", {"skill_id": skill_id})
     return result
 
 
 @mcp.tool
 async def get_tool_usage(tool_id: str) -> dict:
     """Get usage statistics for a registered tool."""
-    result = await rpc_call("tenzro_getToolUsage", [tool_id])
+    result = await rpc_call("tenzro_getToolUsage", {"tool_id": tool_id})
     return result
 
 
@@ -2236,6 +2250,639 @@ async def debridge_same_chain_swap(
         params["sender"] = sender
     result = await rpc_call("tenzro_debridgeSameChainSwap", params)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Saga workflow coordination (mirrors the tenzro_workflow* RPCs / Rust MCP tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def workflow_open(
+    workflow_id: str,
+    orchestrator_did: str,
+    saga_steps: list,
+    participants: list | None = None,
+) -> dict:
+    """Open a multi-agent saga workflow. `saga_steps` is a list of
+    {id?, executor_did?, compensation?} objects; each step runs an
+    Execute -> Verify -> Compensate lifecycle with optional per-step escrow."""
+    params = {
+        "workflow_id": workflow_id,
+        "orchestrator_did": orchestrator_did,
+        "saga_steps": saga_steps,
+        "participants": participants or [],
+    }
+    return await rpc_call("tenzro_workflowOpen", params)
+
+
+@mcp.tool
+async def workflow_step_execute(
+    workflow_id: str,
+    step_idx: int,
+    proof: str | None = None,
+    escrow_amount: str | None = None,
+    payer: str | None = None,
+    payee: str | None = None,
+) -> dict:
+    """Execute a saga step (Pending -> Executing). If `escrow_amount` is set,
+    lock a per-step escrow (payer -> vault); `payer` and `payee` are required then."""
+    params: dict = {"workflow_id": workflow_id, "step_idx": step_idx}
+    if proof is not None:
+        params["proof"] = proof
+    if escrow_amount is not None:
+        params["escrow_amount"] = escrow_amount
+    if payer is not None:
+        params["payer"] = payer
+    if payee is not None:
+        params["payee"] = payee
+    return await rpc_call("tenzro_workflowStepExecute", params)
+
+
+@mcp.tool
+async def workflow_step_verify(
+    workflow_id: str,
+    step_idx: int,
+    witness_signatures: list | None = None,
+    outcome_score: int | None = None,
+) -> dict:
+    """Verify a saga step (Executing -> Verified): release any per-step escrow
+    (vault -> payee) and emit ERC-8004 reputation for the step executor."""
+    params: dict = {"workflow_id": workflow_id, "step_idx": step_idx}
+    if witness_signatures is not None:
+        params["witness_signatures"] = witness_signatures
+    if outcome_score is not None:
+        params["outcome_score"] = outcome_score
+    return await rpc_call("tenzro_workflowStepVerify", params)
+
+
+@mcp.tool
+async def workflow_step_compensate(
+    workflow_id: str,
+    step_idx: int,
+    cascade: bool = False,
+) -> dict:
+    """Compensate a saga step (refund vault -> payer). With cascade=True, also
+    compensate every lower-index executed/verified step in reverse order."""
+    return await rpc_call(
+        "tenzro_workflowStepCompensate",
+        {"workflow_id": workflow_id, "step_idx": step_idx, "cascade": cascade},
+    )
+
+
+@mcp.tool
+async def workflow_finalize(workflow_id: str) -> dict:
+    """Finalize a saga once all steps are Verified: compute the receipt hash and
+    mark the workflow Completed."""
+    return await rpc_call("tenzro_workflowFinalize", {"workflow_id": workflow_id})
+
+
+@mcp.tool
+async def get_workflow_saga(workflow_id: str) -> dict:
+    """Read a saga workflow's current state (steps, statuses, escrows, receipt)."""
+    return await rpc_call("tenzro_getWorkflowSaga", {"workflow_id": workflow_id})
+
+
+# ---------------------------------------------------------------------------
+# DID envelope verification
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def verify_did_envelope(envelope: str) -> dict:
+    """Verify a Tenzro DID envelope passed as a hex header value (the
+    X-Tenzro-DID-Envelope value). Supports did:tenzro (registry), did:key,
+    did:ethr (recoverable secp256k1), and did:web (resolved over HTTPS).
+    Returns {valid, did, method} or {valid: false, error}."""
+    return await rpc_call("tenzro_verifyDidEnvelope", {"envelope": envelope})
+
+
+# ---------------------------------------------------------------------------
+# Capital Intent standard (agentic capital allocation over tokenized assets)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def capital_intent_open(intent: dict) -> dict:
+    """Open a signed Capital Intent — regulated capital allocation over
+    tokenized assets (the capital-markets analog of an AP2 Intent Mandate).
+    `intent` matches the CapitalIntent schema: objective (acquire/exit/
+    rebalance/hedge/yield), constraints, compliance (reg_regime, min_kyc_tier),
+    authorization (ceilings), settlement."""
+    return await rpc_call("tenzro_capitalIntentOpen", {"intent": intent})
+
+
+@mcp.tool
+async def capital_intent_quote(
+    intent_id: str, solver_did: str, plan: str = "", price: int = 0, eta_secs: int = 0
+) -> dict:
+    """Solver bid to fulfil a capital intent (ranked by ERC-8004 + KYA)."""
+    return await rpc_call("tenzro_capitalIntentQuote", {
+        "intent_id": intent_id, "solver_did": solver_did,
+        "plan": plan, "price": price, "eta_secs": eta_secs,
+    })
+
+
+@mcp.tool
+async def capital_intent_assign(
+    intent_id: str, solver_did: str | None = None, auto: bool = False,
+    payer: str | None = None, payee: str | None = None
+) -> dict:
+    """Assign a solver. Omit solver_did or pass auto=True to auto-rank received
+    quotes by ERC-8004 reputation, then lowest price, then fastest eta. If payer
+    given, lock principal escrow up to the ceiling."""
+    params: dict = {"intent_id": intent_id}
+    if solver_did is not None:
+        params["solver_did"] = solver_did
+    if auto:
+        params["auto"] = True
+    if payer is not None:
+        params["payer"] = payer
+    if payee is not None:
+        params["payee"] = payee
+    return await rpc_call("tenzro_capitalIntentAssign", params)
+
+
+@mcp.tool
+async def capital_intent_execute(intent_id: str, leg: dict) -> dict:
+    """Record one executed settlement leg ({venue, asset_id, side, quantity,
+    unit_price, settlement_ref?, proof?})."""
+    return await rpc_call("tenzro_capitalIntentExecute", {"intent_id": intent_id, "leg": leg})
+
+
+@mcp.tool
+async def capital_intent_verify(intent_id: str) -> dict:
+    """Verify proofs / require all legs settled."""
+    return await rpc_call("tenzro_capitalIntentVerify", {"intent_id": intent_id})
+
+
+@mcp.tool
+async def capital_intent_settle(intent_id: str, payee: str | None = None) -> dict:
+    """Release escrow to the solver, write ERC-8004 feedback, finalize."""
+    params: dict = {"intent_id": intent_id}
+    if payee is not None:
+        params["payee"] = payee
+    return await rpc_call("tenzro_capitalIntentSettle", params)
+
+
+@mcp.tool
+async def capital_intent_compensate(intent_id: str) -> dict:
+    """Refund the principal escrow and fail the intent (saga compensation)."""
+    return await rpc_call("tenzro_capitalIntentCompensate", {"intent_id": intent_id})
+
+
+@mcp.tool
+async def get_capital_intent(intent_id: str) -> dict:
+    """Read a capital intent record (status, quotes, legs, escrow, receipt)."""
+    return await rpc_call("tenzro_getCapitalIntent", {"intent_id": intent_id})
+
+
+# ---------------------------------------------------------------------------
+# Proof-of-Reserve + attested-mint (1:1 backing invariant)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def submit_reserve_attestation(attestation: dict) -> dict:
+    """Record a signed reserve attestation backing a tokenized asset (PoR):
+    {asset_id, reserves, source(issuer|tee|chainlink_por|oracle), attestor_did,
+    attested_at, signature?}. Consumed by attested-mint to enforce 1:1 backing."""
+    return await rpc_call("tenzro_submitReserveAttestation", {"attestation": attestation})
+
+
+@mcp.tool
+async def attested_mint(token_id: str, to: str, amount: int, caller: str) -> dict:
+    """Mint a tokenized asset ONLY if post-mint supply <= attested reserves
+    (1:1 backing as a protocol invariant). Rejects if no reserve attestation or
+    if reserves are insufficient."""
+    return await rpc_call("tenzro_attestedMint", {
+        "token_id": token_id, "to": to, "amount": amount, "caller": caller,
+    })
+
+
+@mcp.tool
+async def get_reserve(asset_id: str) -> dict:
+    """Read the current reserve attestation for a tokenized asset."""
+    return await rpc_call("tenzro_getReserve", {"asset_id": asset_id})
+
+
+# ---------------------------------------------------------------------------
+# EIP-7702 (Set EOA Account Code) helpers
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def eip7702_signing_hash(
+    chain_id: int, delegate_address: str, nonce: int
+) -> dict:
+    """Compute the secp256k1 signing hash for an EIP-7702 authorization
+    tuple `(chain_id, delegate_address, nonce)`. Sign client-side with
+    the EOA's secp256k1 key."""
+    return await rpc_call(
+        "tenzro_eip7702SigningHash",
+        {"chain_id": chain_id, "delegate_address": delegate_address, "nonce": nonce},
+    )
+
+
+@mcp.tool
+async def eip7702_build_designator(delegate_address: str) -> dict:
+    """Build the 23-byte EIP-7702 designator
+    (`0xef0100 || delegate_address`)."""
+    return await rpc_call(
+        "tenzro_eip7702BuildDesignator", {"delegate_address": delegate_address}
+    )
+
+
+@mcp.tool
+async def eip7702_parse_designator(code: str) -> dict:
+    """Decode account code and extract the delegate address if it's
+    a valid EIP-7702 designator."""
+    return await rpc_call("tenzro_eip7702ParseDesignator", {"code": code})
+
+
+@mcp.tool
+async def eip7702_protocol_info() -> dict:
+    """Read static metadata about the EIP-7702 support surface."""
+    return await rpc_call("tenzro_eip7702ProtocolInfo", {})
+
+
+# ---------------------------------------------------------------------------
+# Permit2 SignatureTransfer
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def permit2_domain_separator(chain_id: int) -> dict:
+    """Read the per-chain Permit2 EIP-712 domain separator."""
+    return await rpc_call("tenzro_permit2DomainSeparator", {"chain_id": chain_id})
+
+
+@mcp.tool
+async def permit2_digest(
+    chain_id: int,
+    owner: str,
+    token: str,
+    amount: str,
+    spender: str,
+    nonce: str,
+    deadline: int,
+    witness: str | None = None,
+    witness_type_string: str | None = None,
+) -> dict:
+    """Compute the EIP-712 digest a user signs for a Permit2
+    SignatureTransfer (with optional witness binding for ERC-7683)."""
+    params = {
+        "chain_id": chain_id,
+        "owner": owner,
+        "token": token,
+        "amount": amount,
+        "spender": spender,
+        "nonce": nonce,
+        "deadline": deadline,
+    }
+    if witness:
+        params["witness"] = witness
+    if witness_type_string:
+        params["witness_type_string"] = witness_type_string
+    return await rpc_call("tenzro_permit2Digest", params)
+
+
+@mcp.tool
+async def permit2_verify_and_consume(
+    chain_id: int,
+    owner: str,
+    token: str,
+    amount: str,
+    spender: str,
+    nonce: str,
+    deadline: int,
+    signature: str,
+    witness: str | None = None,
+    witness_type_string: str | None = None,
+) -> dict:
+    """Atomically verify a signed Permit2 message and consume the
+    (owner, nonce) slot."""
+    params = {
+        "chain_id": chain_id,
+        "owner": owner,
+        "token": token,
+        "amount": amount,
+        "spender": spender,
+        "nonce": nonce,
+        "deadline": deadline,
+        "signature": signature,
+    }
+    if witness:
+        params["witness"] = witness
+    if witness_type_string:
+        params["witness_type_string"] = witness_type_string
+    return await rpc_call("tenzro_permit2VerifyAndConsume", params)
+
+
+@mcp.tool
+async def permit2_nonce_used(owner: str, nonce: str) -> dict:
+    """Check whether a (owner, nonce) slot has been consumed."""
+    return await rpc_call("tenzro_permit2NonceUsed", {"owner": owner, "nonce": nonce})
+
+
+# ---------------------------------------------------------------------------
+# Secure-Mint Registry — 1:1 reserve-attestation invariant for tokenized RWAs
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def set_secure_mint_policy(
+    asset_id: str,
+    reserve: str,
+    por_feed_id: str,
+    attester_did: str,
+    attestation_hash: str,
+    attested_at: int,
+    ttl_secs: int,
+    circulating: str | None = None,
+) -> dict:
+    """Set or update a Secure-Mint policy. Enforces
+    `circulating + amount <= reserve` at every mint."""
+    params = {
+        "asset_id": asset_id,
+        "reserve": reserve,
+        "por_feed_id": por_feed_id,
+        "attester_did": attester_did,
+        "attestation_hash": attestation_hash,
+        "attested_at": attested_at,
+        "ttl_secs": ttl_secs,
+    }
+    if circulating is not None:
+        params["circulating"] = circulating
+    return await rpc_call("tenzro_setSecureMintPolicy", params)
+
+
+@mcp.tool
+async def get_secure_mint_policy(asset_id: str) -> dict:
+    """Read the Secure-Mint policy for an asset."""
+    return await rpc_call("tenzro_getSecureMintPolicy", {"asset_id": asset_id})
+
+
+@mcp.tool
+async def clear_secure_mint_policy(asset_id: str) -> dict:
+    """Clear the Secure-Mint policy for an asset."""
+    return await rpc_call("tenzro_clearSecureMintPolicy", {"asset_id": asset_id})
+
+
+@mcp.tool
+async def secure_mint_check(asset_id: str, amount: str) -> dict:
+    """Read-only invariant check for a proposed mint."""
+    return await rpc_call(
+        "tenzro_secureMintCheck", {"asset_id": asset_id, "amount": amount}
+    )
+
+
+@mcp.tool
+async def secure_mint_apply(asset_id: str, amount: str) -> dict:
+    """Atomic check + circulating increment."""
+    return await rpc_call(
+        "tenzro_secureMintApply", {"asset_id": asset_id, "amount": amount}
+    )
+
+
+@mcp.tool
+async def secure_mint_record_burn(asset_id: str, amount: str) -> dict:
+    """Record a redemption (decrement circulating)."""
+    return await rpc_call(
+        "tenzro_secureMintRecordBurn", {"asset_id": asset_id, "amount": amount}
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hyperlane V3 (sovereign Tenzro-validator-set ISM)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def hyperlane_list_chains() -> dict:
+    """List supported Hyperlane chains and their canonical domain ids."""
+    return await rpc_call("tenzro_hyperlaneListChains", {})
+
+
+@mcp.tool
+async def hyperlane_quote_dispatch(
+    origin_domain: int,
+    destination_domain: int,
+    recipient: str,
+    body_hex: str,
+    sender: str | None = None,
+    interchain_gas_payment: str | None = None,
+) -> dict:
+    """Quote the interchain gas payment for a dispatch."""
+    params = {
+        "origin_domain": origin_domain,
+        "destination_domain": destination_domain,
+        "recipient": recipient,
+        "body_hex": body_hex,
+    }
+    if sender:
+        params["sender"] = sender
+    if interchain_gas_payment:
+        params["interchain_gas_payment"] = interchain_gas_payment
+    return await rpc_call("tenzro_hyperlaneQuoteDispatch", params)
+
+
+@mcp.tool
+async def hyperlane_dispatch(
+    origin_domain: int,
+    destination_domain: int,
+    recipient: str,
+    body_hex: str,
+    sender: str | None = None,
+    interchain_gas_payment: str | None = None,
+) -> dict:
+    """Dispatch a Hyperlane V3 message through the canonical Mailbox."""
+    params = {
+        "origin_domain": origin_domain,
+        "destination_domain": destination_domain,
+        "recipient": recipient,
+        "body_hex": body_hex,
+    }
+    if sender:
+        params["sender"] = sender
+    if interchain_gas_payment:
+        params["interchain_gas_payment"] = interchain_gas_payment
+    return await rpc_call("tenzro_hyperlaneDispatch", params)
+
+
+@mcp.tool
+async def hyperlane_get_message(message_id: str) -> dict:
+    """Look up a Hyperlane message by id."""
+    return await rpc_call("tenzro_hyperlaneGetMessage", {"message_id": message_id})
+
+
+# ---------------------------------------------------------------------------
+# Axelar GMP — Cosmos / Move / Stellar / XRPL reach
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def axelar_list_chains() -> dict:
+    """List supported Axelar chains."""
+    return await rpc_call("tenzro_axelarListChains", {})
+
+
+@mcp.tool
+async def axelar_call_contract(
+    source_chain: str,
+    destination_chain: str,
+    destination_address: str,
+    payload_hex: str,
+    gas_token: str | None = None,
+    gas_amount: str | None = None,
+) -> dict:
+    """Dispatch an Axelar GMP `call_contract` message."""
+    params = {
+        "source_chain": source_chain,
+        "destination_chain": destination_chain,
+        "destination_address": destination_address,
+        "payload_hex": payload_hex,
+    }
+    if gas_token:
+        params["gas_token"] = gas_token
+    if gas_amount:
+        params["gas_amount"] = gas_amount
+    return await rpc_call("tenzro_axelarCallContract", params)
+
+
+@mcp.tool
+async def axelar_pay_gas(
+    payload_hash: str,
+    source_chain: str,
+    destination_chain: str,
+    destination_address: str,
+    gas_token: str,
+    gas_amount: str,
+) -> dict:
+    """Pre-pay the Axelar Gas Service for a previously-dispatched message."""
+    return await rpc_call(
+        "tenzro_axelarPayGas",
+        {
+            "payload_hash": payload_hash,
+            "source_chain": source_chain,
+            "destination_chain": destination_chain,
+            "destination_address": destination_address,
+            "gas_token": gas_token,
+            "gas_amount": gas_amount,
+        },
+    )
+
+
+@mcp.tool
+async def axelar_get_message(payload_hash: str) -> dict:
+    """Look up an Axelar GMP message by payload hash."""
+    return await rpc_call(
+        "tenzro_axelarGetMessage", {"payload_hash": payload_hash}
+    )
+
+
+# ---------------------------------------------------------------------------
+# Babylon Bitcoin Staking
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def babylon_register_finality_provider(
+    validator: str, btc_pk: str, commission_bps: int
+) -> dict:
+    """Register a Tenzro validator as a Babylon finality provider."""
+    return await rpc_call(
+        "tenzro_babylonRegisterFinalityProvider",
+        {
+            "validator": validator,
+            "btc_pk": btc_pk,
+            "commission_bps": commission_bps,
+        },
+    )
+
+
+@mcp.tool
+async def babylon_get_finality_provider(validator: str) -> dict:
+    """Read the Babylon finality-provider record for a Tenzro validator."""
+    return await rpc_call(
+        "tenzro_babylonGetFinalityProvider", {"validator": validator}
+    )
+
+
+@mcp.tool
+async def babylon_list_finality_providers() -> dict:
+    """List every registered Babylon finality provider."""
+    return await rpc_call("tenzro_babylonListFinalityProviders", {})
+
+
+@mcp.tool
+async def babylon_total_stake_for_provider(validator: str) -> dict:
+    """Sum BTC delegations for a finality provider."""
+    return await rpc_call(
+        "tenzro_babylonTotalStakeForProvider", {"validator": validator}
+    )
+
+
+@mcp.tool
+async def babylon_submit_finality_signature(
+    validator: str, block_hash: str, eots_signature: str
+) -> dict:
+    """Submit an EOTS over a Tenzro block hash."""
+    return await rpc_call(
+        "tenzro_babylonSubmitFinalitySignature",
+        {
+            "validator": validator,
+            "block_hash": block_hash,
+            "eots_signature": eots_signature,
+        },
+    )
+
+
+@mcp.tool
+async def babylon_list_delegations(validator: str) -> dict:
+    """List BTC delegations for a finality provider."""
+    return await rpc_call(
+        "tenzro_babylonListDelegations", {"validator": validator}
+    )
+
+
+# ---------------------------------------------------------------------------
+# CAIP discovery (ChainAgnostic/namespaces#184)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def caip2() -> dict:
+    """Get the CAIP-2 chain id for this node:
+    `tenzro:<lowercase hex of the first 16 bytes of the genesis block
+    hash>`. Returns `{chain_id, namespace, reference, evm_chain_id}`."""
+    return await rpc_call("tenzro_caip2", {})
+
+
+@mcp.tool
+async def caip10(address: str) -> dict:
+    """Get the CAIP-10 account id. Accepts hex or base58btc;
+    normalises to canonical 64-hex."""
+    return await rpc_call("tenzro_caip10", {"address": address})
+
+
+@mcp.tool
+async def caip19(
+    kind: str,
+    token_id: str | None = None,
+    collection_id: str | None = None,
+    nft_token_id: str | None = None,
+) -> dict:
+    """Get the CAIP-19 asset id. `kind` is one of `slip44` /
+    `token` / `nft` per the submitted `tenzro` CAIP namespace."""
+    params = {"kind": kind}
+    if token_id:
+        params["token_id"] = token_id
+    if collection_id:
+        params["collection_id"] = collection_id
+    if nft_token_id:
+        params["nft_token_id"] = nft_token_id
+    return await rpc_call("tenzro_caip19", params)
 
 
 # ---------------------------------------------------------------------------

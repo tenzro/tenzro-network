@@ -2576,7 +2576,460 @@ pub(crate) async fn handle_eip7702_protocol_info(
         "signing_scheme": "secp256k1",
         "signature_format": "r(32) || s(32) || y_parity(1)",
         "preimage": "MAGIC(0x05) || rlp([chain_id, delegate_address, nonce])",
-        "note": "Full txtype 0x04 RLP decoding in eth_sendRawTransaction is a separate mainnet task; use tenzro_eip7702SigningHash + client-side secp256k1 signing + tenzro_eip7702BuildDesignator for now.",
+        "registry": {
+            "install_rpc": "tenzro_install7702Delegation",
+            "get_rpc": "tenzro_get7702Delegation",
+            "revoke_rpc": "tenzro_revoke7702Delegation",
+        },
+    }))
+}
+
+/// `tenzro_install7702Delegation` — install a signed EIP-7702
+/// authorization in the delegation registry. The registry verifies the
+/// `(chain_id, nonce)` tuple, recovers the authority via secp256k1, and
+/// records `authority → target` so subsequent EVM calls that reach the
+/// authority's code field see the delegation designator.
+///
+/// Params:
+/// - `authority`: 20-byte lowercase-hex EVM address that signed the
+///   authorization.
+/// - `chain_id`: u64.
+/// - `delegate_address`: 20-byte lowercase-hex EVM address whose code is
+///   borrowed. The zero address revokes any active delegation.
+/// - `nonce`: u64. Must equal the authority's current nonce.
+/// - `signature`: 65-byte lowercase-hex (`r ‖ s ‖ y_parity`) per the EIP.
+///
+/// Returns `{ installed: true, authority, target, chain_id, designator }`
+/// on success; the designator field is `null` when the delegation was
+/// revoked by delegating to the zero address.
+pub(crate) async fn handle_install_7702_delegation(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let authority_hex = params
+        .get("authority")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing authority"))?;
+    let authority = parse_eth_addr(authority_hex)?;
+    let mut auth20 = [0u8; 20];
+    if authority.len() != 20 {
+        return Err(invalid_params("authority must be 20 bytes"));
+    }
+    auth20.copy_from_slice(&authority);
+
+    let chain_id = params
+        .get("chain_id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| missing("Missing chain_id"))?;
+    let delegate_hex = params
+        .get("delegate_address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing delegate_address"))?;
+    let delegate = parse_eth_addr(delegate_hex)?;
+    let nonce = params
+        .get("nonce")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| missing("Missing nonce"))?;
+    let signature_hex = params
+        .get("signature")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing signature"))?;
+    let signature = hex::decode(signature_hex.trim_start_matches("0x"))
+        .map_err(|e| invalid_params(format!("invalid signature hex: {e}")))?;
+    if signature.len() != 65 {
+        return Err(invalid_params("signature must be 65 bytes"));
+    }
+
+    let auth = tenzro_vm::account_abstraction::Eip7702Authorization {
+        chain_id,
+        delegate_address: delegate.to_vec(),
+        nonce,
+        signature,
+    };
+
+    let registry = node.eip7702_delegation_registry();
+    let current_chain_id = node
+        .config()
+        .genesis
+        .as_ref()
+        .map(|g| g.chain_id)
+        .unwrap_or(1337);
+
+    // The caller is responsible for supplying the authority's current
+    // nonce — this RPC is exposed to relayers, not signers, so we don't
+    // attempt to resolve it from chain state here.
+    match registry.install(&auth, auth20, current_chain_id, nonce) {
+        Ok(pointer) => Ok(json!({
+            "installed": true,
+            "authority": format!("0x{}", hex::encode(auth20)),
+            "target": format!("0x{}", hex::encode(pointer.target)),
+            "chain_id": pointer.chain_id,
+            "authority_nonce": pointer.authority_nonce,
+            "designator": format!("0x{}", hex::encode(pointer.designator_bytes())),
+            "revoked_zero_target": pointer.target == [0u8; 20],
+        })),
+        Err(e) => Err(invalid_params(format!("delegation rejected: {e}"))),
+    }
+}
+
+/// `tenzro_get7702Delegation` — read the active delegation pointer for an
+/// EVM authority. Returns `{ delegated: false }` when no delegation is
+/// active. Params: `{ "authority": "0x..." }`.
+pub(crate) async fn handle_get_7702_delegation(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let authority_hex = params
+        .get("authority")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing authority"))?;
+    let authority = parse_eth_addr(authority_hex)?;
+    if authority.len() != 20 {
+        return Err(invalid_params("authority must be 20 bytes"));
+    }
+    let mut auth20 = [0u8; 20];
+    auth20.copy_from_slice(&authority);
+
+    let registry = node.eip7702_delegation_registry();
+    match registry.resolve_target(&auth20) {
+        Some(pointer) => Ok(json!({
+            "delegated": true,
+            "authority": format!("0x{}", hex::encode(auth20)),
+            "target": format!("0x{}", hex::encode(pointer.target)),
+            "chain_id": pointer.chain_id,
+            "authority_nonce": pointer.authority_nonce,
+            "designator": format!("0x{}", hex::encode(pointer.designator_bytes())),
+        })),
+        None => Ok(json!({
+            "delegated": false,
+            "authority": format!("0x{}", hex::encode(auth20)),
+        })),
+    }
+}
+
+/// `tenzro_revoke7702Delegation` — operator-side revocation path. Removes
+/// any active delegation for `authority` without requiring a signed
+/// authorization. Intended for social-recovery and explicit override
+/// flows; users seeking signed revocation should call
+/// `tenzro_install7702Delegation` with `delegate_address` set to the
+/// zero address. Params: `{ "authority": "0x..." }`.
+pub(crate) async fn handle_revoke_7702_delegation(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let authority_hex = params
+        .get("authority")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing authority"))?;
+    let authority = parse_eth_addr(authority_hex)?;
+    if authority.len() != 20 {
+        return Err(invalid_params("authority must be 20 bytes"));
+    }
+    let mut auth20 = [0u8; 20];
+    auth20.copy_from_slice(&authority);
+
+    let registry = node.eip7702_delegation_registry();
+    let removed = registry.revoke(&auth20);
+    Ok(json!({
+        "revoked": removed,
+        "authority": format!("0x{}", hex::encode(auth20)),
+    }))
+}
+
+/// Canonical Permit2 verifying contract address on Tenzro EVM. The
+/// 20-byte slot mirrors the Uniswap Permit2 layout: a precompile-level
+/// surface at `0x0000…00001023`.
+pub const TENZRO_PERMIT2_ADDRESS: [u8; 20] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x23,
+];
+
+/// `tenzro_permit2DomainSeparator` — return the Permit2 EIP-712 domain
+/// separator for this chain. Wallets compute this once and cache it.
+pub(crate) async fn handle_permit2_domain_separator(
+    node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let chain_id = node
+        .config()
+        .genesis
+        .as_ref()
+        .map(|g| g.chain_id)
+        .unwrap_or(1337);
+    let verifying = tenzro_types::primitives::Address::new({
+        let mut out = [0u8; 32];
+        out[12..].copy_from_slice(&TENZRO_PERMIT2_ADDRESS);
+        out
+    });
+    let ds = tenzro_vm::permit2::domain_separator(chain_id, &verifying);
+    Ok(json!({
+        "domain_separator": format!("0x{}", hex::encode(ds)),
+        "chain_id": chain_id,
+        "verifying_contract": format!("0x{}", hex::encode(TENZRO_PERMIT2_ADDRESS)),
+        "domain_name": tenzro_vm::permit2::PERMIT2_DOMAIN_NAME,
+    }))
+}
+
+fn parse_uint256_param(params: &Value, key: &str) -> std::result::Result<[u8; 32], JsonRpcError> {
+    let raw = params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing(&format!("Missing {key}")))?;
+    let stripped = raw.trim_start_matches("0x");
+    let decoded = hex::decode(stripped)
+        .map_err(|e| invalid_params(format!("{key}: invalid hex: {e}")))?;
+    if decoded.len() != 32 {
+        return Err(invalid_params(format!("{key} must be 32 bytes")));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&decoded);
+    Ok(out)
+}
+
+fn parse_eth_address_to_tenzro(
+    params: &Value,
+    key: &str,
+) -> std::result::Result<tenzro_types::primitives::Address, JsonRpcError> {
+    let raw = parse_eth_addr(
+        params
+            .get(key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| missing(&format!("Missing {key}")))?,
+    )?;
+    if raw.len() != 20 {
+        return Err(invalid_params(format!("{key} must be 20 bytes")));
+    }
+    let mut padded = [0u8; 32];
+    padded[12..].copy_from_slice(&raw);
+    Ok(tenzro_types::primitives::Address::new(padded))
+}
+
+fn parse_permit_transfer(
+    params: &Value,
+) -> std::result::Result<tenzro_vm::permit2::PermitTransferFrom, JsonRpcError> {
+    let token = parse_eth_address_to_tenzro(params, "token")?;
+    let amount = parse_uint256_param(params, "amount")?;
+    let spender = parse_eth_address_to_tenzro(params, "spender")?;
+    let nonce = parse_uint256_param(params, "nonce")?;
+    let deadline = params
+        .get("deadline")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| missing("Missing deadline"))?;
+    Ok(tenzro_vm::permit2::PermitTransferFrom {
+        permitted: tenzro_vm::permit2::TokenPermissions { token, amount },
+        spender,
+        nonce,
+        deadline,
+    })
+}
+
+/// `tenzro_permit2Digest` — compute the EIP-712 digest the owner signs.
+///
+/// Params: `{ token, amount, spender, nonce, deadline,
+/// witness?, witness_type_name?, witness_type_string? }`. When the
+/// witness triple is supplied the witness-bearing typehash is used.
+pub(crate) async fn handle_permit2_digest(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let chain_id = node
+        .config()
+        .genesis
+        .as_ref()
+        .map(|g| g.chain_id)
+        .unwrap_or(1337);
+    let verifying = tenzro_types::primitives::Address::new({
+        let mut out = [0u8; 32];
+        out[12..].copy_from_slice(&TENZRO_PERMIT2_ADDRESS);
+        out
+    });
+    let ds = tenzro_vm::permit2::domain_separator(chain_id, &verifying);
+
+    let base = parse_permit_transfer(&params)?;
+
+    let digest = if let (Some(witness_hex), Some(name), Some(typestr)) = (
+        params.get("witness").and_then(|v| v.as_str()),
+        params.get("witness_type_name").and_then(|v| v.as_str()),
+        params.get("witness_type_string").and_then(|v| v.as_str()),
+    ) {
+        let witness_bytes = hex::decode(witness_hex.trim_start_matches("0x"))
+            .map_err(|e| invalid_params(format!("witness hex: {e}")))?;
+        if witness_bytes.len() != 32 {
+            return Err(invalid_params("witness must be 32 bytes"));
+        }
+        let mut witness = [0u8; 32];
+        witness.copy_from_slice(&witness_bytes);
+        let permit = tenzro_vm::permit2::PermitTransferFromWitness {
+            permitted: base.permitted,
+            spender: base.spender,
+            nonce: base.nonce,
+            deadline: base.deadline,
+            witness,
+            witness_type_name: name.to_string(),
+            witness_type_string: typestr.to_string(),
+        };
+        permit.digest(&ds)
+    } else {
+        base.digest(&ds)
+    };
+
+    Ok(json!({
+        "digest": format!("0x{}", hex::encode(digest)),
+        "domain_separator": format!("0x{}", hex::encode(ds)),
+        "chain_id": chain_id,
+    }))
+}
+
+/// `tenzro_permit2VerifyAndConsume` — verify the signature, check
+/// expiry, mark the nonce used, and return the recovered signer. This
+/// is the trust-minimized read-side surface that relayers and ERC-7683
+/// settlers call before pulling tokens on the EVM side.
+///
+/// Params: same as `tenzro_permit2Digest` plus
+/// `{ signature, owner, requested_amount? }`. `requested_amount`
+/// defaults to the permitted amount.
+pub(crate) async fn handle_permit2_verify_and_consume(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let chain_id = node
+        .config()
+        .genesis
+        .as_ref()
+        .map(|g| g.chain_id)
+        .unwrap_or(1337);
+    let verifying = tenzro_types::primitives::Address::new({
+        let mut out = [0u8; 32];
+        out[12..].copy_from_slice(&TENZRO_PERMIT2_ADDRESS);
+        out
+    });
+    let ds = tenzro_vm::permit2::domain_separator(chain_id, &verifying);
+
+    let base = parse_permit_transfer(&params)?;
+    let owner_addr = parse_eth_addr(
+        params
+            .get("owner")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| missing("Missing owner"))?,
+    )?;
+    if owner_addr.len() != 20 {
+        return Err(invalid_params("owner must be 20 bytes"));
+    }
+    let mut owner = [0u8; 20];
+    owner.copy_from_slice(&owner_addr);
+
+    let signature_hex = params
+        .get("signature")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing signature"))?;
+    let signature = hex::decode(signature_hex.trim_start_matches("0x"))
+        .map_err(|e| invalid_params(format!("signature hex: {e}")))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if base.deadline < now {
+        return Err(invalid_params(format!(
+            "permit expired (deadline {}, now {})",
+            base.deadline, now
+        )));
+    }
+
+    let digest = if let (Some(witness_hex), Some(name), Some(typestr)) = (
+        params.get("witness").and_then(|v| v.as_str()),
+        params.get("witness_type_name").and_then(|v| v.as_str()),
+        params.get("witness_type_string").and_then(|v| v.as_str()),
+    ) {
+        let witness_bytes = hex::decode(witness_hex.trim_start_matches("0x"))
+            .map_err(|e| invalid_params(format!("witness hex: {e}")))?;
+        if witness_bytes.len() != 32 {
+            return Err(invalid_params("witness must be 32 bytes"));
+        }
+        let mut witness = [0u8; 32];
+        witness.copy_from_slice(&witness_bytes);
+        let permit = tenzro_vm::permit2::PermitTransferFromWitness {
+            permitted: base.permitted.clone(),
+            spender: base.spender,
+            nonce: base.nonce,
+            deadline: base.deadline,
+            witness,
+            witness_type_name: name.to_string(),
+            witness_type_string: typestr.to_string(),
+        };
+        permit.digest(&ds)
+    } else {
+        base.digest(&ds)
+    };
+
+    let recovered = tenzro_vm::permit2::recover_signer(&digest, &signature)
+        .map_err(|e| invalid_params(format!("recover: {e}")))?;
+    if recovered != owner {
+        return Err(invalid_params(format!(
+            "signer {} does not match owner {}",
+            hex::encode(recovered),
+            hex::encode(owner)
+        )));
+    }
+
+    let bitmap = node.permit2_nonce_bitmap();
+    bitmap
+        .check_and_use(&owner, &base.nonce)
+        .map_err(|e| invalid_params(format!("nonce: {e}")))?;
+
+    Ok(json!({
+        "verified": true,
+        "consumed": true,
+        "owner": format!("0x{}", hex::encode(owner)),
+        "spender": format!("0x{}", hex::encode(&base.spender.as_bytes()[12..])),
+        "token": format!("0x{}", hex::encode(&base.permitted.token.as_bytes()[12..])),
+        "amount": format!("0x{}", hex::encode(base.permitted.amount)),
+        "nonce": format!("0x{}", hex::encode(base.nonce)),
+        "deadline": base.deadline,
+        "digest": format!("0x{}", hex::encode(digest)),
+    }))
+}
+
+/// `tenzro_permit2NonceUsed` — query whether an `(owner, nonce)` pair
+/// has been spent. Params: `{ owner, nonce }`.
+pub(crate) async fn handle_permit2_nonce_used(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let owner_raw = parse_eth_addr(
+        params
+            .get("owner")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| missing("Missing owner"))?,
+    )?;
+    if owner_raw.len() != 20 {
+        return Err(invalid_params("owner must be 20 bytes"));
+    }
+    let mut owner = [0u8; 20];
+    owner.copy_from_slice(&owner_raw);
+    let nonce = parse_uint256_param(&params, "nonce")?;
+    let bitmap = node.permit2_nonce_bitmap();
+    Ok(json!({
+        "owner": format!("0x{}", hex::encode(owner)),
+        "nonce": format!("0x{}", hex::encode(nonce)),
+        "used": bitmap.is_used(&owner, &nonce),
     }))
 }
 
@@ -2709,6 +3162,248 @@ fn parse_agent_id_u64(value: &Value) -> std::result::Result<u64, JsonRpcError> {
     s.parse::<u64>().map_err(|e| {
         invalid_params(format!("agent_id decimal string did not parse as u64: {e}"))
     })
+}
+
+// ============================================================
+// Secure-Mint registry — 1:1 reserve-attestation binding for
+// tokenized assets (RWAs, tokenized equities, stablecoins).
+// ============================================================
+
+fn parse_u128_param(params: &Value, key: &str) -> std::result::Result<u128, JsonRpcError> {
+    let val = params
+        .get(key)
+        .ok_or_else(|| missing(&format!("Missing {key}")))?;
+    if let Some(n) = val.as_u64() {
+        return Ok(n as u128);
+    }
+    if let Some(s) = val.as_str() {
+        let stripped = s.trim_start_matches("0x");
+        if s.starts_with("0x") {
+            let bytes = hex::decode(stripped)
+                .map_err(|e| invalid_params(format!("{key} hex: {e}")))?;
+            if bytes.len() > 16 {
+                return Err(invalid_params(format!("{key} overflows u128")));
+            }
+            let mut buf = [0u8; 16];
+            buf[16 - bytes.len()..].copy_from_slice(&bytes);
+            return Ok(u128::from_be_bytes(buf));
+        }
+        return s.parse::<u128>().map_err(|e| {
+            invalid_params(format!("{key} decimal string: {e}"))
+        });
+    }
+    Err(invalid_params(format!("{key} must be u64, hex, or decimal string")))
+}
+
+fn parse_token_20(params: &Value, key: &str) -> std::result::Result<[u8; 20], JsonRpcError> {
+    let raw = parse_eth_addr(
+        params
+            .get(key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| missing(&format!("Missing {key}")))?,
+    )?;
+    if raw.len() != 20 {
+        return Err(invalid_params(format!("{key} must be 20 bytes")));
+    }
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&raw);
+    Ok(out)
+}
+
+fn secure_mint_policy_to_json(policy: &tenzro_vm::secure_mint::SecureMintPolicy) -> Value {
+    json!({
+        "asset_id": policy.asset_id,
+        "reserve": policy.reserve.to_string(),
+        "circulating": policy.circulating.to_string(),
+        "por_feed_id": policy.por_feed_id,
+        "attester_did": policy.attester_did,
+        "attestation_hash": format!("0x{}", hex::encode(policy.attestation_hash.as_bytes())),
+        "attested_at": policy.attested_at,
+        "ttl_secs": policy.ttl_secs,
+    })
+}
+
+/// `tenzro_setSecureMintPolicy` — install or refresh the per-token
+/// reserve attestation. Params: `{ token (20-byte hex), asset_id,
+/// reserve (u128/decimal/hex), circulating?, por_feed_id, attester_did,
+/// attestation_hash (32-byte hex), attested_at (unix-seconds),
+/// ttl_secs }`.
+pub(crate) async fn handle_set_secure_mint_policy(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let token = parse_token_20(&params, "token")?;
+    let asset_id = params
+        .get("asset_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing asset_id"))?
+        .to_string();
+    let reserve = parse_u128_param(&params, "reserve")?;
+    let circulating = if params.get("circulating").is_some() {
+        parse_u128_param(&params, "circulating")?
+    } else {
+        0u128
+    };
+    let por_feed_id = params
+        .get("por_feed_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing por_feed_id"))?
+        .to_string();
+    let attester_did = params
+        .get("attester_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing attester_did"))?
+        .to_string();
+    let attestation_hash_bytes = parse_uint256_param(&params, "attestation_hash")?;
+    let attestation_hash = tenzro_types::primitives::Hash::new(attestation_hash_bytes);
+    let attested_at = params
+        .get("attested_at")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| missing("Missing attested_at"))?;
+    let ttl_secs = params
+        .get("ttl_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(86_400);
+
+    let policy = tenzro_vm::secure_mint::SecureMintPolicy {
+        asset_id,
+        reserve,
+        circulating,
+        por_feed_id,
+        attester_did,
+        attestation_hash,
+        attested_at,
+        ttl_secs,
+    };
+    let prior = node.secure_mint_registry().set_policy(token, policy.clone());
+    Ok(json!({
+        "installed": true,
+        "token": format!("0x{}", hex::encode(token)),
+        "policy": secure_mint_policy_to_json(&policy),
+        "prior_policy": prior.as_ref().map(secure_mint_policy_to_json),
+    }))
+}
+
+/// `tenzro_getSecureMintPolicy` — read the active policy for a token.
+pub(crate) async fn handle_get_secure_mint_policy(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let token = parse_token_20(&params, "token")?;
+    let registry = node.secure_mint_registry();
+    match registry.policy(&token) {
+        Some(policy) => Ok(json!({
+            "found": true,
+            "token": format!("0x{}", hex::encode(token)),
+            "policy": secure_mint_policy_to_json(&policy),
+        })),
+        None => Ok(json!({
+            "found": false,
+            "token": format!("0x{}", hex::encode(token)),
+        })),
+    }
+}
+
+/// `tenzro_clearSecureMintPolicy` — drop the policy for a token.
+pub(crate) async fn handle_clear_secure_mint_policy(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let token = parse_token_20(&params, "token")?;
+    let cleared = node.secure_mint_registry().clear(&token);
+    Ok(json!({
+        "cleared": cleared,
+        "token": format!("0x{}", hex::encode(token)),
+    }))
+}
+
+/// `tenzro_secureMintCheck` — read-only invariant check: would minting
+/// `amount` of `token` succeed against the current attestation?
+pub(crate) async fn handle_secure_mint_check(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let token = parse_token_20(&params, "token")?;
+    let amount = parse_u128_param(&params, "amount")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match node.secure_mint_registry().would_mint_succeed(&token, amount, now) {
+        Ok(()) => Ok(json!({
+            "allowed": true,
+            "token": format!("0x{}", hex::encode(token)),
+            "amount": amount.to_string(),
+            "now": now,
+        })),
+        Err(err) => Ok(json!({
+            "allowed": false,
+            "token": format!("0x{}", hex::encode(token)),
+            "amount": amount.to_string(),
+            "now": now,
+            "reason": err.to_string(),
+        })),
+    }
+}
+
+/// `tenzro_secureMintApply` — apply the invariant and atomically
+/// increment the policy's circulating supply. Returns the updated
+/// policy. Mirrors what the EVM precompile at `0x1024` does inside the
+/// VM mint path; callable directly for off-chain mint authorizers.
+pub(crate) async fn handle_secure_mint_apply(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let token = parse_token_20(&params, "token")?;
+    let amount = parse_u128_param(&params, "amount")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match node.secure_mint_registry().check_and_mint(&token, amount, now) {
+        Ok(policy) => Ok(json!({
+            "applied": true,
+            "token": format!("0x{}", hex::encode(token)),
+            "amount": amount.to_string(),
+            "policy": secure_mint_policy_to_json(&policy),
+        })),
+        Err(err) => Err(invalid_params(format!("secure mint rejected: {err}"))),
+    }
+}
+
+/// `tenzro_secureMintRecordBurn` — decrement the policy's circulating
+/// supply by `amount` on a token burn / redemption.
+pub(crate) async fn handle_secure_mint_record_burn(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let token = parse_token_20(&params, "token")?;
+    let amount = parse_u128_param(&params, "amount")?;
+    match node.secure_mint_registry().record_burn(&token, amount) {
+        Some(policy) => Ok(json!({
+            "recorded": true,
+            "token": format!("0x{}", hex::encode(token)),
+            "amount": amount.to_string(),
+            "policy": secure_mint_policy_to_json(&policy),
+        })),
+        None => Err(invalid_params(format!(
+            "no Secure-Mint policy installed for token 0x{}",
+            hex::encode(token)
+        ))),
+    }
 }
 
 #[cfg(test)]

@@ -323,6 +323,12 @@ pub struct HotStuff2Engine {
     /// Running state
     is_running: Arc<RwLock<bool>>,
 
+    /// Operator drain flag. When `true`, this replica stops proposing new
+    /// blocks while elected leader but keeps voting on peers' proposals —
+    /// used by `tenzro node drain` (the `tenzro_setDraining` admin RPC) for
+    /// graceful validator rollout. Mirrors the `is_running` lock idiom.
+    drain: Arc<RwLock<bool>>,
+
     /// Shutdown signal
     shutdown_tx: Arc<RwLock<Option<broadcast::Sender<()>>>>,
 
@@ -483,6 +489,7 @@ impl HotStuff2Engine {
             blocks: Arc::new(DashMap::new()),
             fork_choice,
             is_running: Arc::new(RwLock::new(false)),
+            drain: Arc::new(RwLock::new(false)),
             shutdown_tx: Arc::new(RwLock::new(None)),
             slashing_callback: None,
             state_root_provider: None,
@@ -581,6 +588,18 @@ impl HotStuff2Engine {
     /// (the view advances asynchronously as messages arrive).
     pub fn current_view(&self) -> u64 {
         self.view_state.read().view
+    }
+
+    /// Sets the operator drain flag. While draining, this replica does not
+    /// propose blocks as leader (it keeps voting on peers' proposals).
+    /// Toggled by the `tenzro_setDraining` admin RPC / `tenzro node drain`.
+    pub fn set_draining(&self, draining: bool) {
+        *self.drain.write() = draining;
+    }
+
+    /// Returns `true` if this replica is currently draining (not proposing).
+    pub fn is_draining(&self) -> bool {
+        *self.drain.read()
     }
 
     /// Returns `true` if this replica is the elected leader for *any* of
@@ -1975,7 +1994,10 @@ impl HotStuff2Engine {
 
         match state.phase {
             Phase::Prepare => {
-                if is_leader {
+                // While draining (graceful rollout) a leader skips proposing a
+                // fresh block but still votes and re-broadcasts any block it
+                // already proposed, so finality of in-flight work is unaffected.
+                if is_leader && !self.is_draining() {
                     // Leader proposes a block
                     if state.proposed_block.is_none() {
                         drop(state);
@@ -2903,6 +2925,7 @@ impl Clone for HotStuff2Engine {
             blocks: self.blocks.clone(),
             fork_choice: self.fork_choice.clone(),
             is_running: self.is_running.clone(),
+            drain: self.drain.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
             slashing_callback: self.slashing_callback.clone(),
             state_root_provider: self.state_root_provider.clone(),

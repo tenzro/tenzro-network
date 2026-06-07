@@ -146,6 +146,7 @@ impl WebServer {
         // full mounted path (e.g. `/chat`). Config must list
         // `payments.paid_routes = ["/chat", "/execution/resolve", ...]`.
         let mut open = Router::new()
+            .route("/verify/did-envelope", post(handlers::verify_did_envelope))
             .route("/verify/zk-proof", post(handlers::verify_zk_proof))
             .route("/verify/tee-attestation", post(handlers::verify_tee_attestation))
             .route("/verify/transaction", post(handlers::verify_transaction))

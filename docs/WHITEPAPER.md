@@ -219,18 +219,19 @@ Standard Ethereum-compatible JSON-RPC for transaction submission, state queries,
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /api/verify/zk-proof` | Verify a zero-knowledge proof |
-| `POST /api/verify/tee-attestation` | Verify a TEE attestation report |
-| `POST /api/verify/transaction` | Verify a transaction signature |
-| `POST /api/verify/settlement` | Verify a settlement receipt |
-| `POST /api/verify/inference` | Verify an inference result against its proof |
-| `GET /api/verify/health` | Health check |
-| `GET /api/health` | Health check (alias) |
-| `GET /api/status` | Node status and metrics |
-| `POST /api/faucet` | Request testnet TNZO tokens |
+| `POST /verify/zk-proof` | Verify a zero-knowledge proof |
+| `POST /verify/tee-attestation` | Verify a TEE attestation report |
+| `POST /verify/transaction` | Verify a transaction signature |
+| `POST /verify/settlement` | Verify a settlement receipt |
+| `POST /verify/inference` | Verify an inference result against its proof |
+| `POST /verify/did-envelope` | Verify a DID-signed envelope |
+| `GET /verify/health` | Health check |
+| `GET /health` | Health check (alias) |
+| `GET /status` | Node status and metrics |
+| `POST /faucet` | Request testnet TNZO tokens |
 
 **MCP Server** (default `0.0.0.0:3001`):
-Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport (protocol version `2025-03-26`). Exposes 196 Tenzro node capabilities as MCP tools — wallet, identity, payments, inference, multi-modal AI, staking, tokens, NFTs, bridges, verification, agents, tasks, skills, compliance, TEE, ZK, VRF, events, AgentBond + insurance, and more — that any MCP-compatible AI agent can invoke. Six additional ecosystem MCP servers run alongside on ports 3003–3008 (Solana, Ethereum, Canton, LayerZero, Chainlink, Li.Fi). See §11.6.
+Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport (protocol version `2025-11-25`). Exposes 331 Tenzro node capabilities as MCP tools — wallet, identity, payments, inference, multi-modal AI, staking, tokens, NFTs, bridges, verification, agents, tasks, skills, compliance, TEE, ZK, VRF, events, AgentBond + insurance, and more — that any MCP-compatible AI agent can invoke. Six additional ecosystem MCP servers run alongside on ports 3003–3008 (Solana, Ethereum, Canton, LayerZero, Chainlink, Li.Fi). See §11.6.
 
 **A2A Protocol Server** (default `0.0.0.0:3002`):
 Agent-to-Agent protocol server implementing the Google A2A specification with JSON-RPC 2.0:
@@ -420,6 +421,36 @@ The Ledger implements ERC-4337 v0.8 account abstraction, enabling smart contract
   - `Batching` — Atomic multi-call execution
 - **AccountFactory.** Deterministic CREATE2 deployment of smart accounts from a salt and owner address.
 - **Paymaster.** Gas sponsorship — third parties can pay gas on behalf of users, enabling gasless transactions.
+
+### 4.8a EIP-7702 Type-4 Delegation
+
+EIP-7702 (Pectra, May 2025) lets an externally-owned account (EOA) borrow smart-contract code at its existing address by signing a `(chain_id, address, nonce)` authorization. Tenzro implements the protocol primitive in `tenzro-vm::eip7702`:
+
+- **Signed authorization.** `Eip7702Authorization { chain_id, delegate_address, nonce, signature }` with the canonical preimage `MAGIC(0x05) || rlp([chain_id, address, nonce])` and recoverable secp256k1 signature `(r, s, y_parity)`.
+- **Delegation registry.** `DelegationRegistry` records authority → target pointers atomically, accepts `chain_id == 0` as the cross-chain wildcard per the spec, refuses authority/declared mismatches, and treats `delegate_address == 0x0` as a revocation.
+- **Designator encoding.** Per the EIP, the authority's on-chain code field becomes the 23-byte `0xef0100 || target_address(20)` designator; `is_delegation_designator` / `extract_delegation_target` detect and decode it. The EVM executor consults `resolve_target` when it encounters this magic prefix and runs the target's code in the authority's storage context.
+- **RPC surface.** `tenzro_install7702Delegation`, `tenzro_get7702Delegation`, `tenzro_revoke7702Delegation` for relayers and wallets; the stateless `tenzro_eip7702SigningHash` / `tenzro_eip7702BuildDesignator` / `tenzro_eip7702ParseDesignator` / `tenzro_eip7702ProtocolInfo` helpers remain for offline signing flows.
+
+### 4.8b Permit2 SignatureTransfer
+
+Permit2 lets a token holder sign a one-shot authorization that any third party can use to pull a bounded amount of a token. Tenzro implements the protocol primitive in `tenzro-vm::permit2`:
+
+- **EIP-712 typed data.** `TokenPermissions { token, amount }`, `PermitTransferFrom { permitted, spender, nonce, deadline }`, and `PermitTransferFromWitness { …, witness, witness_type_name, witness_type_string }` with deterministic typehashes that bind any witness type-string inline so EIP-712 verifiers render the full struct shape.
+- **Domain separator.** Computed against the Tenzro canonical Permit2 verifying contract `0x0000…00001023` and the current chain id.
+- **Nonce bitmap.** Per-owner 256-bit-per-word bitmap (`Permit2NonceBitmap`) — owners can sign multiple permits in parallel without serializing through a single counter, mirroring the Uniswap layout.
+- **Witness path.** When the witness triple is supplied, the typehash is the witness-bearing form. This is what an ERC-7683 origin opener uses: the permit witness is the order id, so signing the permit also signs the cross-chain intent — one signature, end-to-end.
+- **RPC surface.** `tenzro_permit2DomainSeparator`, `tenzro_permit2Digest`, `tenzro_permit2VerifyAndConsume`, `tenzro_permit2NonceUsed`.
+
+### 4.8c Secure-Mint Registry
+
+Tokenized RWAs require that the on-chain circulating supply never exceeds the off-chain attested reserve. Tenzro implements the protocol primitive in `tenzro-vm::secure_mint`:
+
+- **Per-token policy.** `SecureMintPolicy { asset_id, reserve, circulating, por_feed_id, attester_did, attestation_hash, attested_at, ttl_secs }`. Tokens without a policy are pass-through; tokens with one are gated by `check_and_mint(token, amount, now)` which enforces both the `circulating + amount ≤ reserve` invariant and the attestation freshness window.
+- **Tokenized-equity profile sidecar.** `TokenizedEquityProfile { cct_pool_address, por_feed_id, underlying_caip19, isin, cusip, per_share_ratio, last_corporate_action }` lets the unified token registry carry equity-class metadata alongside the Secure-Mint policy.
+- **Burn accounting.** `record_burn` decrements circulating supply on redemption.
+- **RPC surface.** `tenzro_setSecureMintPolicy`, `tenzro_getSecureMintPolicy`, `tenzro_clearSecureMintPolicy`, `tenzro_secureMintCheck`, `tenzro_secureMintApply`, `tenzro_secureMintRecordBurn`. EVM precompile slot reserved at `0x0000…00001024`.
+
+This is the L1-level invariant the xStocks / BUIDL / tokenized-treasury class needs: a malicious issuer cannot mint above attested reserves, and stale attestations fail closed.
 
 ### 4.9 Cross-VM Token Architecture
 
@@ -835,6 +866,10 @@ MicropaymentChannel {
 ### 9.5 Batch Settlement
 
 The `BatchProcessor` enables atomic multi-settlement operations: either all settlements in a batch succeed, or all are rolled back. This is essential for multi-party transactions where partial settlement would be inconsistent.
+
+### 9.6 Capital Intent — agentic capital allocation
+
+Above mechanical settlement sits the **Capital Intent** standard: the regulated-capital-markets analog of an AP2 Intent Mandate, and a primitive no other 2026 stack provides. A principal signs a financial *objective* — acquire, exit, rebalance, hedge, or yield — bounded by risk constraints (slippage, deadline, allowed venues/chains), a regulatory regime (Reg S / Reg D / MiFID II), a minimum KYC tier, and hard capital ceilings (AP2 mandate + delegation scope). Solver agents, ranked by ERC-8004 reputation and Know-Your-Agent identity, compete to fulfil it; fulfilment runs as a saga (execute → verify → compensate) over ERC-7683 / CCIP settlement legs, each gated by `erc3643` compliance and proven for best execution. Backing is enforced by **attested-mint**: a tokenized asset can only be minted while `supply ≤ attested reserves`, making 1:1 backing a protocol invariant rather than an issuer promise. Capital Intent thus binds Tenzro's identity, wallet, compliance, custody, and cross-chain rails into one coordination layer between autonomous agents and regulated tokenized money and assets. Wire surface: `tenzro_capitalIntent*` and `tenzro_submitReserveAttestation` / `tenzro_attestedMint` / `tenzro_getReserve`, mirrored across MCP, the agent SDK, and the `tenzro capital` CLI.
 
 ---
 
@@ -1349,11 +1384,14 @@ Tenzro connects to external blockchain ecosystems through bridge adapters that e
 
 | Adapter | Protocol | Target Ecosystems |
 |---------|----------|------------------|
-| `WormholeAdapter` | Wormhole Guardian VAAs / NTT | Canonical TNZO transfers across 30+ chains incl. Solana, EVM L1/L2s |
+| `WormholeAdapter` | Wormhole Guardian VAAs / NTT (with on-Tenzro 13-of-19 Guardian-quorum verification, EOA receive_message signature path) | Canonical TNZO transfers across 30+ chains incl. Solana, EVM L1/L2s |
 | `LayerZeroAdapter` | LayerZero V2 (mandatory Tenzro DVN) | Ethereum, Arbitrum, Optimism, Polygon, BSC, Avalanche, Base |
 | `ChainlinkCcipAdapter` | Chainlink CCIP + CCT v1.6+ | Ethereum, Polygon, Avalanche, Arbitrum, Optimism (LockRelease + BurnMint pools) |
 | `DeBridgeAdapter` | deBridge DLN | Ethereum, Solana, BNB Chain, Polygon, Arbitrum (intent-based filling) |
 | `LiFiAdapter` | Li.Fi aggregator | 130+ chains via aggregated quote/route/status API |
+| `HyperlaneAdapter` | Hyperlane V3 (sovereign Tenzro-validator-set ISM) | 18+ chains incl. EVM L1/L2s, Mantle, Blast, Scroll, Linea, zkSync, Manta, Mode, Fraxtal |
+| `AxelarAdapter` | Axelar General Message Passing | 30+ chains incl. Cosmos (Osmosis, Cosmos Hub, Juno, Neutron, Injective), Move (Aptos, Sui), Stellar, XRP Ledger, Hyperliquid, Kava, Filecoin EVM |
+| `BabylonAdapter` | Babylon Bitcoin staking (finality-providers protocol, EOTS signatures) | Bitcoin economic security for Tenzro validators |
 | `CantonAdapter` | DAML 3.x + Global Synchronizer | Enterprise Canton synchronizers (CIP-56 holdings, two-phase commit) |
 
 ### 14.2a ERC-7683 Cross-Chain Intents
@@ -1445,6 +1483,36 @@ A snapshot of operational health (workflow / obligation / approval counts by sta
 Read access to workflows, obligations, approvals, receipts, fee routes, privacy domains, and operational metrics is mirrored across all three external surfaces: JSON-RPC (`tenzro_*` namespace), MCP (port 3001, as `#[tool]`-defined methods), and A2A (port 3002, as the `workflow` skill on the Tenzro Agent Card). Writes never occur through these surfaces — every state-changing operation is a signed privileged-VM selector.
 
 Five reference workflow templates ship under `crates/tenzro-workflow/reference_workflows/` (autonomous procurement, autonomous treasury, DvP settlement, environmental MRV, supply-chain digital product passport), each paired with a `*_daml_map.json` describing the Canton DAML projection and defining its `WorkflowSpec` (counterparty roles, obligations, approvals graph, fee route, privacy domain) for instantiation by the agent-kit spawner.
+
+---
+
+## 14a. Sandboxed Skills (WASI 0.2 Component Runtime)
+
+The `tenzro-wasm` crate is the sandboxed runtime that executes community-supplied agent skills, MCP tools, and A2A skill components on a Tenzro node. It is not a smart-contract VM — transactional execution stays on the EVM / SVM / DAML stack. The component runtime is the host for application-layer code that needs to run untrusted under capability-based isolation.
+
+### 14a.1 Design
+
+Components ship as WASI 0.2 `.wasm` files bundled with a `ComponentManifest` declaring identity, runtime ABI, capability requests, deadline, and fuel budget. The runtime validates the manifest's SHA-256 content hash against the bytes, admits the component to its registry, and instantiates it under Wasmtime fuel metering and epoch interruption. Components start with no filesystem access, no network access, no environment variables; capabilities are granted explicitly through the manifest's `capabilities` block.
+
+### 14a.2 Capability surface
+
+Components see two interface surfaces. The standard WASI 0.2 worlds (cli, http, sockets, filesystem, clocks, random) are gated by the manifest's `SkillCapabilities`. Tenzro-native interfaces exported under the `tenzro:*` namespace let a component call back into the node — read a configuration value, publish an event, request an inference, sign a payment under a delegated scope. The `HostInterface` trait the node implements is the single dispatch point for every `tenzro:*` call; per-method allow-lists and per-DID quotas are enforced before dispatch.
+
+### 14a.3 Determinism
+
+Wasmtime fuel metering counts WASM operations rather than wall-clock time, so two executions of the same component against the same input produce identical fuel reports regardless of the host's CPU speed. Epoch interruption enforces wall-clock deadlines on top of fuel budgets. Together they give the node a deterministic cost model the settlement engine can debit through `tenzro-payments`.
+
+### 14a.4 Execution receipts
+
+Every invocation returns an `ExecutionReceipt` carrying the component id, content hash, exported function name, SHA-256 of the input and output, outcome label (success, trapped, fuel-exhausted, deadline-exceeded, host-contract-violation), fuel report, and completion timestamp. Receipts chain into Tenzro `ReceiptEnvelope` records (see §9 Settlement) so a skill's execution history is durable and auditable end-to-end.
+
+### 14a.5 Integration points
+
+The `tenzro-agent-kit::executor` is the primary embedder. When a skill template's manifest declares `runtime: agent-skill`, the executor dispatches through `tenzro-wasm::SkillRuntime` instead of the native Rust or Python skill paths. The node's MCP server is the second embedder: community-submitted MCP tools ship as `.wasm` components and run in-process under capability checks instead of as separate HTTP processes. Both embedders are gated behind the `wasi-skills` feature flag.
+
+### 14a.6 Why not a fourth VM
+
+Tenzro's multi-VM strategy stays at EVM + SVM + DAML. Reach to CosmWasm-style chains, Move chains, and other WASM-VM-hosting ecosystems flows through the bridge layer, not through adding a fourth transactional VM. The `tenzro-wasm` runtime exclusively hosts application-layer code — skills and tools — not smart contracts.
 
 ---
 
@@ -1796,7 +1864,7 @@ These primitives compose through TDIP delegation scopes — every runtime check 
 - ~~Implement liquid staking (stTNZO)~~ — **DONE**: rebasing exchange rate, multi-validator delegation, 10% protocol fee
 
 ### Phase 4: Testnet Deployment
-- ~~Deploy testnet on GKE (Google Kubernetes Engine)~~ — **DONE**: 3 validators + 1 RPC node + Caddy reverse proxy
+- ~~Deploy public testnet~~ — **DONE**: Tenzro Labs operates the initial public RPC and ecosystem endpoints on tenzro.network with PQ-hybrid TLS at the edge while the validator set decentralizes
 - ~~Configure Caddy with auto-TLS for all subdomains~~ — **DONE**: Let's Encrypt certificates for 5 endpoints
 - ~~Verify all endpoints live~~ — **DONE**: RPC, API, Faucet, MCP, A2A all operational
 - Launch model provider onboarding
@@ -1864,7 +1932,7 @@ The network defines 120+ message types and 40+ RPC methods across 13 protobuf se
 
 ## Appendix D: Live Testnet Endpoints
 
-The Tenzro testnet is deployed on Google Kubernetes Engine (GKE) in `us-central1-a` with auto-TLS via Caddy and Let's Encrypt:
+Tenzro Labs operates the initial public endpoints on `tenzro.network` with PQ-hybrid TLS at the edge while the validator set decentralizes:
 
 | Service | URL | Port | Protocol |
 |---------|-----|------|----------|

@@ -32,6 +32,7 @@ tenzro-bridge = { workspace = true }
 tenzro-events = { workspace = true }
 tenzro-agent-kit = { workspace = true }
 tenzro-iroh = { workspace = true }
+tenzro-wasm = { workspace = true, optional = true }
 tenzro-auth = { workspace = true }
 tenzro-workflow = { workspace = true }
 async-trait = { workspace = true }
@@ -51,6 +52,7 @@ chrono = { workspace = true }
 toml = { workspace = true }
 libp2p = { workspace = true }
 hex = { workspace = true }
+bs58 = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
 bytes = { workspace = true }
@@ -90,6 +92,11 @@ vulkan = ["tenzro-model/vulkan"]
 metal = ["tenzro-model/metal"]
 visa-tap = ["tenzro-payments/visa-tap"]
 mastercard-agent-pay = ["tenzro-payments/mastercard-agent-pay"]
+# Enable the sandboxed WASI 0.2 component runtime for community MCP
+# tools and A2A skills. When enabled, the MCP server can register
+# tool components published as `.wasm` files alongside their manifests
+# and execute them in-process under capability checks.
+wasi-skills = ["dep:tenzro-wasm"]
 
 [dev-dependencies]
 tempfile = "3"

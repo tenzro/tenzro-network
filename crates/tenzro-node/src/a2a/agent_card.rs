@@ -197,6 +197,63 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                 output_modes: vec!["text/plain".to_string(), "application/json".to_string()],
             },
             AgentSkill {
+                id: "task-marketplace".to_string(),
+                name: "Task Marketplace Lifecycle".to_string(),
+                description: "Post → Quote → Escrow+Assign → Complete → Settle+Reputation. \
+                              Hand a unit of work to the network without picking a provider: \
+                              post a task with structured acceptance criteria, collect quotes \
+                              (optionally with TEE attestation + ERC-8004 reputation proof), \
+                              assign with on-chain escrow, and settle on proof-verified \
+                              completion with ERC-8004 reputation feedback. Disputes are \
+                              oracle/governance-arbitrated. Wire format is framework-portable \
+                              (JSON-RPC / MCP / A2A) per task-coordination-lifecycle.md."
+                    .to_string(),
+                tags: vec![
+                    "task".to_string(),
+                    "marketplace".to_string(),
+                    "escrow".to_string(),
+                    "reputation".to_string(),
+                    "erc8004".to_string(),
+                ],
+                examples: vec![
+                    "Post a task: 3-page market analysis, max 50 TNZO, 24h deadline".to_string(),
+                    "Quote task abc with price 30 TNZO and a reputation proof".to_string(),
+                    "Assign task abc to provider 0x… and fund escrow".to_string(),
+                    "Complete task abc with a TEE-attested result".to_string(),
+                ],
+                input_modes: vec!["application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
+                id: "workflow-coordination".to_string(),
+                name: "Multi-Agent Saga Workflow Coordination".to_string(),
+                description: "Durable, identity-bound, settlement-aware checkpoint substrate \
+                              for multi-agent workflows (the 'Temporal for trusted multi-agent \
+                              workflows' tier). Open a saga of steps, then per step: Execute \
+                              (optionally lock per-step escrow), Verify (release escrow + write \
+                              ERC-8004 reputation), or Compensate (refund escrow, optionally \
+                              cascading rollback in reverse order). Finalize records a receipt. \
+                              Frameworks (LangGraph / CrewAI / AutoGen Magentic-One / ADK) keep \
+                              their runtime; Tenzro is the wire + on-chain anchor per \
+                              multi-agent-workflow-coordination.md."
+                    .to_string(),
+                tags: vec![
+                    "workflow".to_string(),
+                    "saga".to_string(),
+                    "compensation".to_string(),
+                    "escrow".to_string(),
+                    "orchestration".to_string(),
+                ],
+                examples: vec![
+                    "Open workflow wf_abc with steps [research, quote, pay, receipt]".to_string(),
+                    "Execute step 2 (pay) locking 30 TNZO in escrow".to_string(),
+                    "Verify step 2 with the supplier's signed receipt".to_string(),
+                    "Compensate step 2 and refund the escrow".to_string(),
+                ],
+                input_modes: vec!["application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
                 id: "verification".to_string(),
                 name: "Proof Verification".to_string(),
                 description: "Verify Plonky3 STARK proofs over the KoalaBear field (one of the registered AIRs: \

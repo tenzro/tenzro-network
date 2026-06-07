@@ -42,7 +42,7 @@ For local development, use `http://localhost:3007/mcp`.
 - **Automation** — Decentralized keeper network for contract maintenance
 - **Functions** — DON-hosted serverless compute for off-chain data
 
-## Tools (20)
+## Tools (21)
 
 ### CCIP Cross-Chain (8 tools)
 

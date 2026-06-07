@@ -161,6 +161,60 @@ pub struct ReceiptSummary {
     pub principal_chain_summary: Option<PrincipalChainSummary>,
 }
 
+/// Reference to a signed off-chain mandate that authorized the receipt.
+///
+/// Settlements that flow from an AP2 cart mandate, an x402 challenge,
+/// an MPP session, or a Stripe SPT carry a `MandateRef` so the on-chain
+/// receipt is cryptographically tied back to the user's signed intent.
+/// The mandate body itself stays off-chain (or in DA); the chain stores
+/// only the hash, the protocol identifier, and the issuer DID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MandateRef {
+    /// Wire protocol identifier. Canonical values:
+    /// `"ap2-cart"`, `"ap2-intent"`, `"ap2-payment"`, `"x402"`,
+    /// `"mpp"`, `"stripe-spt"`, `"visa-tap"`, `"mastercard-agent-pay"`,
+    /// `"capital-intent"`, `"workflow-step"`.
+    pub protocol: String,
+    /// `keccak256(canonical_mandate_bytes)` or SHA-256, per the protocol
+    /// — the hash agreed between issuer and verifier.
+    pub mandate_hash: Hash,
+    /// DID of the principal (user / agent / institution) who signed the
+    /// mandate.
+    pub issuer_did: String,
+    /// Optional mandate body URI (e.g. `https://`, `tenzro://`,
+    /// `eigenda://`). When absent the verifier is expected to resolve
+    /// the body out of band.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mandate_uri: Option<String>,
+    /// Mandate expiry (unix seconds). `0` = no expiry.
+    #[serde(default)]
+    pub expires_at: u64,
+}
+
+impl MandateRef {
+    /// Construct an AP2 cart-mandate reference.
+    pub fn ap2_cart(mandate_hash: Hash, issuer_did: impl Into<String>) -> Self {
+        Self {
+            protocol: "ap2-cart".into(),
+            mandate_hash,
+            issuer_did: issuer_did.into(),
+            mandate_uri: None,
+            expires_at: 0,
+        }
+    }
+
+    /// Construct an x402-challenge reference.
+    pub fn x402(mandate_hash: Hash, issuer_did: impl Into<String>) -> Self {
+        Self {
+            protocol: "x402".into(),
+            mandate_hash,
+            issuer_did: issuer_did.into(),
+            mandate_uri: None,
+            expires_at: 0,
+        }
+    }
+}
+
 /// Receipt as recorded on-chain. Either embeds the full payload (Inline) or
 /// records a commitment + DA pointer (OffloadedDA). The chain's only guarantee
 /// is `commitment = SHA-256(canonical_payload)` — same model L2s use against
@@ -181,6 +235,11 @@ pub struct ReceiptEnvelope {
     /// SHA-256 over the canonical payload bytes — the chain-of-custody
     /// commitment, regardless of storage mode.
     pub commitment: Hash,
+    /// Optional reference to a signed off-chain mandate authorizing this
+    /// receipt. Present for settlements, inferences, and agent actions
+    /// that flow from a signed user intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mandate_ref: Option<MandateRef>,
 }
 
 impl ReceiptEnvelope {
@@ -195,6 +254,7 @@ impl ReceiptEnvelope {
             inline_payload: Some(payload),
             da_pointer: None,
             commitment,
+            mandate_ref: None,
         }
     }
 
@@ -213,7 +273,16 @@ impl ReceiptEnvelope {
             inline_payload: None,
             da_pointer: Some(pointer),
             commitment,
+            mandate_ref: None,
         }
+    }
+
+    /// Attach a signed off-chain mandate reference to this envelope. Used
+    /// for settlements that flow from an AP2 cart mandate, x402 challenge,
+    /// MPP session, Stripe SPT, or another signed user intent.
+    pub fn with_mandate(mut self, mandate_ref: MandateRef) -> Self {
+        self.mandate_ref = Some(mandate_ref);
+        self
     }
 
     /// Validate the envelope's internal shape — fields match the declared

@@ -183,7 +183,7 @@ Tenzro Train ships reference adapters for the modalities below. Sponsors can reg
 
 ### 4.1 Language
 
-- **Architectures**: decoder-only transformer (Llama-style), MoE (Mixtral-style), state-space (Mamba).
+- **Architectures**: decoder-only transformer (Qwen 3 / 3.5 / 3.6 / Gemma 3 / 4 / Mistral / Phi 3 / DeepSeek V3 / Granite), MoE (Qwen 3.5-MoE / 3.6-MoE / Mixtral-style), state-space (Mamba).
 - **Sample type**: token sequences (BPE/SentencePiece).
 - **Loss**: causal cross-entropy.
 - **Validation**: perplexity on held-out, downstream eval suites (MMLU, HumanEval, BBH).
@@ -431,7 +431,7 @@ For Phase 3 language scaling:
 
 | Parameter | Value |
 |---|---|
-| Model | Llama-style decoder, 7B params |
+| Model | Qwen 3.5-style decoder (any catalog-member LM family swappable — Qwen 3 / 3.5 / 3.6, Gemma 3 / 4, Mistral, Phi 3, DeepSeek V3, Granite), 7B params |
 | M (trainers) | 32 |
 | K (quorum) | 24 |
 | F (fragments) | 24 |

@@ -1205,6 +1205,18 @@ impl SettlementEngine {
         calculated_fee.max(MIN_FEE)
     }
 
+    /// Public proof-verification entry point.
+    ///
+    /// Routes a `ServiceProof` through the same proof-type dispatch
+    /// (ZeroKnowledge / TeeAttestation / Cryptographic / Oracle / MultiParty /
+    /// Merkle) used by [`SettlementEngine::settle`]. Exposed so callers outside
+    /// the full settlement flow — e.g. the task-marketplace
+    /// `tenzro_completeTask` path — can gate an action on proof validity
+    /// without constructing a `SettlementRequest`.
+    pub fn verify_service_proof(&self, proof: &ServiceProof) -> Result<()> {
+        self.verify_proof(proof)
+    }
+
     /// Verifies the service proof
     fn verify_proof(&self, proof: &ServiceProof) -> Result<()> {
         if proof.proof_data.is_empty() {
@@ -1304,15 +1316,21 @@ impl SettlementEngine {
                 );
             }
             ProofType::Merkle => {
-                // For Merkle proofs, verify merkle path
+                // The generic settlement verifier has no trusted root to check a
+                // Merkle inclusion against, so it only sanity-checks the shape
+                // here. Actual inclusion verification against a *pinned* root is
+                // performed at the task layer (`proof_requirement_satisfied` in
+                // the node RPC), where the poster-supplied `expected_root` is in
+                // scope.
                 if proof.proof_data.len() < 32 {
                     return Err(SettlementError::InvalidProof(
                         "Merkle proof requires at least one hash".to_string(),
                     ));
                 }
 
-                debug!("Merkle proof verified");
+                debug!("Merkle proof shape ok (inclusion checked at task layer)");
             }
+
         }
 
         Ok(())
