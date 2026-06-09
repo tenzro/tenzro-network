@@ -105,6 +105,15 @@ fn load_bundled_manifests() -> Result<Vec<AgentTemplate>, AgentKitError> {
         include_str!("../reference_templates/vision_indexer.json"),
         include_str!("../reference_templates/audio_transcriber.json"),
         include_str!("../reference_templates/video_analyst.json"),
+        // Wave 3 + 4 — institutional + DvP saga (brand-clean,
+        // generic-descriptor templates).
+        include_str!("../reference_templates/agentic_nav_calculator.json"),
+        include_str!("../reference_templates/agentic_lc_examiner.json"),
+        include_str!("../reference_templates/agentic_treasury_rebalancer.json"),
+        include_str!("../reference_templates/agentic_margin_call.json"),
+        include_str!("../reference_templates/agentic_bond_pricer_rfq.json"),
+        include_str!("../reference_templates/agentic_best_ex_router.json"),
+        include_str!("../reference_templates/dvp_atomic_swap_saga.json"),
     ];
 
     let mut templates = Vec::with_capacity(raw_manifests.len());

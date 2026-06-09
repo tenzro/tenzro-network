@@ -169,6 +169,52 @@ pub struct CantonReconnectSynchronizerParams {
     pub retry_on_failure: bool,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CantonGrantUserRightsParams {
+    #[schemars(
+        description = "Canton User Management Service user id to grant rights to. Pass null to grant to the OAuth principal's own user (`<client_id>@clients`)."
+    )]
+    pub user_id: Option<String>,
+    #[schemars(
+        description = "Fully-qualified party id (`<hint>::<participant-hash>`) the user will be allowed to act/read as. Canton rejects bare hints."
+    )]
+    pub party: String,
+    #[schemars(description = "Grant CanActAs (default: true)")]
+    #[serde(default = "default_true")]
+    pub can_act_as: bool,
+    #[schemars(description = "Grant CanReadAs (default: false)")]
+    #[serde(default)]
+    pub can_read_as: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CantonListUserRightsParams {
+    #[schemars(
+        description = "User id to list rights for. Pass null to list rights for the OAuth principal's own user."
+    )]
+    pub user_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CantonGetMyAnalyticsParams {
+    #[schemars(
+        description = "Your API key handle (`key_id`, 16-hex prefix of the SHA-256 of the plaintext key). Returned alongside the plaintext when the operator mints the key; cache it for analytics self-reads."
+    )]
+    pub key_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CantonListApiKeyAnalyticsParams {
+    #[schemars(
+        description = "Optional API key handle (`key_id`, 16-hex prefix of the SHA-256 of the key) to filter to a single tenant. Omit to return every tenant."
+    )]
+    pub key_id: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 // ─── Helper functions ───
 
 fn err_internal(msg: impl Into<String>) -> ErrorData {
@@ -221,6 +267,16 @@ pub struct CantonMcpServer {
     jwt_token: Option<String>,
     /// Optional OAuth2 client-credentials token provider.
     token_provider: Option<Arc<CantonTokenProvider>>,
+    /// Optional handle to the host node's per-tenant Canton analytics
+    /// store. Wired by [`crate::mcp::server`] at boot when the node
+    /// hosts this MCP server in-process; absent when the MCP runs
+    /// stand-alone against an external Canton participant. Surfaces
+    /// `canton_get_my_analytics` / `canton_list_api_key_analytics`.
+    analytics: Option<Arc<crate::canton_analytics::CantonAnalyticsManager>>,
+    /// Optional handle to the host node's API-key manager. Required by
+    /// `canton_get_my_analytics` so the MCP can resolve the presented
+    /// API key to its `key_id`.
+    api_keys: Option<Arc<crate::api_key::ApiKeyManager>>,
     /// HTTP client for API calls
     http: reqwest::Client,
     /// Tool router
@@ -253,12 +309,27 @@ impl CantonMcpServer {
             admin_api_url: "https://admin.devnet.tenzro.network".to_string(),
             jwt_token: None,
             token_provider: None,
+            analytics: None,
+            api_keys: None,
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("Failed to create HTTP client"),
             _tool_router: Self::tool_router(),
         }
+    }
+
+    /// Wires the in-process analytics + api-key managers so analytics
+    /// tools can serve answers without an extra hop through the
+    /// node's JSON-RPC. Idempotent — pass `None` to clear.
+    pub fn with_node_state(
+        mut self,
+        analytics: Option<Arc<crate::canton_analytics::CantonAnalyticsManager>>,
+        api_keys: Option<Arc<crate::api_key::ApiKeyManager>>,
+    ) -> Self {
+        self.analytics = analytics;
+        self.api_keys = api_keys;
+        self
     }
 
     /// Create with custom JSON Ledger API URL.
@@ -694,6 +765,126 @@ impl CantonMcpServer {
         json_result(serde_json::json!({
             "parties": parties,
         }))
+    }
+
+    #[tool(
+        description = "Grant CanActAs / CanReadAs rights on a Canton party to a user (Canton 3.5+ User Management Service, CIP-26). Required before a user can submit DAML commands on behalf of a newly-allocated party. Pass user_id=null to grant to the operator's own OAuth user. The `party` argument must be the fully-qualified party id."
+    )]
+    async fn canton_grant_user_rights(
+        &self,
+        Parameters(params): Parameters<CantonGrantUserRightsParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        if !params.can_act_as && !params.can_read_as {
+            return Err(err_invalid_params(
+                "at least one of can_act_as / can_read_as must be true",
+            ));
+        }
+        // Resolve user_id — null means the operator's own
+        // `<client_id>@clients` user.
+        let user_id = match params.user_id {
+            Some(u) => u,
+            None => match self.token_provider.as_ref() {
+                Some(p) => format!("{}@clients", p.client_id()),
+                None => {
+                    return Err(err_invalid_params(
+                        "user_id=null requires an OAuth token provider so the operator's own user can be derived",
+                    ));
+                }
+            },
+        };
+        let mut rights = Vec::new();
+        if params.can_act_as {
+            rights.push(serde_json::json!({
+                "kind": { "CanActAs": { "value": { "party": params.party.clone() } } }
+            }));
+        }
+        if params.can_read_as {
+            rights.push(serde_json::json!({
+                "kind": { "CanReadAs": { "value": { "party": params.party.clone() } } }
+            }));
+        }
+        // Canton 3.5: userId MUST also be in the body, not just URL.
+        let body = serde_json::json!({
+            "userId": user_id,
+            "rights": rights,
+        });
+        let path = format!("/users/{}/rights", urlencoding::encode(&user_id));
+        let response = self.ledger_post(&path, &body).await?;
+        json_result(response)
+    }
+
+    #[tool(
+        description = "List the rights granted to a Canton user via the User Management Service (CIP-26). Returns `{rights:[{kind:{CanActAs|CanReadAs:{value:{party}}}}, ...]}`. Pass user_id=null for the operator's own user."
+    )]
+    async fn canton_list_user_rights(
+        &self,
+        Parameters(params): Parameters<CantonListUserRightsParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let user_id = match params.user_id {
+            Some(u) => u,
+            None => match self.token_provider.as_ref() {
+                Some(p) => format!("{}@clients", p.client_id()),
+                None => {
+                    return Err(err_invalid_params(
+                        "user_id=null requires an OAuth token provider so the operator's own user can be derived",
+                    ));
+                }
+            },
+        };
+        let path = format!("/users/{}/rights", urlencoding::encode(&user_id));
+        let response = self.ledger_get(&path).await?;
+        json_result(response)
+    }
+
+    #[tool(
+        description = "Subject self-read: returns this tenant's Canton call aggregates (calls_total, errors_total, per-method counts, first_seen_at, last_called_at). Pass your `key_id` (16-hex prefix of the SHA-256 of your API key) — given to you alongside the plaintext key at issuance. Requires the host node to have wired analytics + api-key state into this MCP."
+    )]
+    async fn canton_get_my_analytics(
+        &self,
+        Parameters(params): Parameters<CantonGetMyAnalyticsParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let analytics = self.analytics.as_ref().ok_or_else(|| {
+            err_internal(
+                "Canton analytics is not wired into this MCP server (only available when run in-process with TenzroNode)",
+            )
+        })?;
+        let row = analytics.get(&params.key_id).ok_or_else(|| {
+            ErrorData {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "No analytics record for key_id {} (key is unknown, or has not made a canton call yet)",
+                    params.key_id
+                )),
+                data: None,
+            }
+        })?;
+        let value = serde_json::to_value(&row).map_err(|e| {
+            err_internal(format!("Canton analytics serialize failed: {}", e))
+        })?;
+        json_result(value)
+    }
+
+    #[tool(
+        description = "Operator admin-read: list per-tenant Canton call aggregates for every API key (or one tenant when key_id is set). Requires the host node to have wired analytics state into this MCP. Rows are sorted by last_called_at descending."
+    )]
+    async fn canton_list_api_key_analytics(
+        &self,
+        Parameters(params): Parameters<CantonListApiKeyAnalyticsParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let analytics = self.analytics.as_ref().ok_or_else(|| {
+            err_internal(
+                "Canton analytics is not wired into this MCP server (only available when run in-process with TenzroNode)",
+            )
+        })?;
+        let mut rows = analytics.list_all();
+        if let Some(filter) = params.key_id.as_deref() {
+            rows.retain(|r| r.key_id == filter);
+        }
+        rows.sort_by_key(|r| std::cmp::Reverse(r.last_called_at.unwrap_or(0)));
+        let value = serde_json::to_value(&rows).map_err(|e| {
+            err_internal(format!("Canton analytics serialize failed: {}", e))
+        })?;
+        json_result(serde_json::json!({ "analytics": value }))
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1181,7 +1372,12 @@ impl ServerHandler for CantonMcpServer {
              - canton_get_transaction — Get update by ID via /v2/updates/update-by-id\n\n\
              Party Management:\n\
              - canton_allocate_party — Allocate a new party on the participant\n\
-             - canton_list_parties — List known parties on the participant\n\n\
+             - canton_list_parties — List known parties on the participant\n\
+             - canton_grant_user_rights — Grant CanActAs / CanReadAs on a party to a user (CIP-26)\n\
+             - canton_list_user_rights — List rights granted to a Canton user\n\n\
+             Per-Tenant Analytics:\n\
+             - canton_get_my_analytics — Subject self-read of per-tenant call counters\n\
+             - canton_list_api_key_analytics — Operator admin-read of every tenant's counters\n\n\
              Canton Network:\n\
              - canton_list_domains — List connected synchronization domains\n\
              - canton_get_health — Check participant health and connectivity\n\n\
@@ -1279,6 +1475,7 @@ pub async fn start_canton_mcp_server(
     jwt_token: Option<String>,
     token_provider: Option<Arc<CantonTokenProvider>>,
     api_key_manager: Option<Arc<ApiKeyManager>>,
+    canton_analytics: Option<Arc<crate::canton_analytics::CantonAnalyticsManager>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
@@ -1302,6 +1499,7 @@ pub async fn start_canton_mcp_server(
     // `CantonMcpServer`, so we clone the configured URLs/JWT into each
     // instance via the `with_*` builders rather than relying on the
     // hard-coded `new()` defaults.
+    let factory_api_key_manager = api_key_manager.clone();
     let service = StreamableHttpService::new(
         move || {
             let mut server = CantonMcpServer::new()
@@ -1313,6 +1511,10 @@ pub async fn start_canton_mcp_server(
             if let Some(provider) = token_provider.clone() {
                 server = server.with_token_provider(provider);
             }
+            server = server.with_node_state(
+                canton_analytics.clone(),
+                factory_api_key_manager.clone(),
+            );
             Ok(server)
         },
         Arc::new(LocalSessionManager::default()),
@@ -1339,7 +1541,7 @@ pub async fn start_canton_mcp_server(
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     tracing::info!(
         addr = %listen_addr,
-        tools = 14,
+        tools = 18,
         mode = "stateless-json",
         auth_gated = api_key_manager.is_some(),
         "Canton MCP Server listening (endpoint: /mcp, X-Tenzro-Api-Key scope=canton required)"

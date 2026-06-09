@@ -99,15 +99,33 @@ pub mod axelar;
 pub mod babylon;
 pub mod hyperlane;
 pub mod router;
+pub mod tenant_idp;
 pub mod tnzo_cct;
 pub mod traits;
 pub mod wormhole;
+pub mod wormhole_ntt;
+pub mod chainlink_feed;
+pub mod fee_oracle;
+pub mod fee_sponsor;
 
 // Re-export commonly used types
 pub use circuit_breaker::CircuitBreaker;
 pub use error::{BridgeError, Result};
 pub use evm_signer::{EvmTransactionSigner, EvmSignerConfig};
 pub use monitor::{TransferMonitor, TransferStatusEvent, MonitorConfig};
+pub use chainlink_feed::{
+    ChainlinkFeedClient, FeedReading, FeedRegistration, FEED_BTC_USD_MAINNET,
+    FEED_ETH_USD_MAINNET, FEED_LINK_USD_MAINNET, QUOTE_CACHE_TTL_SECS,
+    SELECTOR_DECIMALS, SELECTOR_LATEST_ROUND_DATA, STALENESS_THRESHOLD_LONGTAIL_SECS,
+    STALENESS_THRESHOLD_MAJOR_SECS,
+};
+pub use fee_oracle::{
+    BridgeAdapterId, BridgeFeeOracle, BridgeFeeQuote, ChainlinkFeedFeeOracle,
+    GovernanceFeeRow, GovernanceSetFeeOracle, OracleBacking,
+};
+pub use fee_sponsor::{
+    BridgeFeeSponsor, BridgeSponsorshipReceipt, SponsorshipPool, WiredBridgeFeeSurface,
+};
 pub use router::{BridgeRouter, ChainCoverage};
 pub use tnzo_cct::{CctPoolType, TnzoCctBridge, TnzoCctPool, TnzoCctRegistry};
 pub use traits::{BridgeAdapter, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo, TransferStatus};

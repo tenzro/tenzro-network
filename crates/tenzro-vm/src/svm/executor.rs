@@ -535,6 +535,253 @@ impl SvmExecutor {
         ))
     }
 
+    /// Native SPL Token Program dispatch for wTNZO.
+    ///
+    /// The Tenzro SVM dispatches a single instruction per transaction (vs.
+    /// Solana's multi-instruction Message). To carry the per-instruction
+    /// account list across the dispatch boundary, callers prepend a serialized
+    /// account vector to `tx.data` for `SPL_TOKEN_PROGRAM_ID` calls:
+    ///
+    /// ```text
+    ///   [n_accounts: u8] [account_0: 32] ... [account_{n-1}: 32] [spl_data: variable]
+    /// ```
+    ///
+    /// Per-instruction SPL accounts (per Solana SPL Token v0.3+):
+    /// - Transfer:    accounts[0]=source, [1]=destination, [2]=authority
+    /// - MintTo:      accounts[0]=mint,   [1]=destination, [2]=mint_authority
+    /// - Burn:        accounts[0]=source, [1]=mint,        [2]=authority
+    /// - GetBalance:  accounts[0]=token_account
+    ///
+    /// Balance accounting is performed directly against `VmState` (the unified
+    /// TNZO balance layer) using `tenzro_token::spl_to_native` for the
+    /// 9-decimal SPL → 18-decimal native conversion. There is no separate
+    /// TnzoToken `Arc` because the SVM executor and the unified token registry
+    /// share the same RocksDB-backed balance column family via `VmState`.
+    fn execute_spl_native(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        sender_balance: u128,
+        compute_units: u64,
+    ) -> Result<ExecutionResult> {
+        use super::spl_adapter::{SplInstruction, SPL_TOKEN_PROGRAM_ID, WTNZO_SPL_MINT};
+        use tenzro_token::spl_to_native;
+
+        // Conservative fixed CU cost for pure-Rust SPL dispatch. Matches
+        // Solana SPL Token program's documented Transfer cost (~5_000 CU).
+        let actual_cu = compute_units.max(5_000);
+        let nonce = state.get_nonce(&tx.from);
+        let gas_cost = actual_cu as u128 * tx.gas_price;
+        let new_sender_balance = sender_balance.saturating_sub(gas_cost);
+
+        // Helper that bumps nonce + debits gas before returning a failure.
+        // Solana semantics: failed tx still bumps nonce and charges fees.
+        let charge_and_fail = |state: &mut dyn VmState, msg: String| -> ExecutionResult {
+            state.set_nonce(&tx.from, nonce + 1);
+            state.set_balance(&tx.from, new_sender_balance);
+            ExecutionResult::failed(actual_cu, msg)
+        };
+
+        // Decode the account prefix.
+        if tx.data.is_empty() {
+            return Ok(charge_and_fail(
+                state,
+                "SPL: empty calldata (expected [n_accounts: u8] [accounts: 32*n] [spl_data])"
+                    .into(),
+            ));
+        }
+        let n_accounts = tx.data[0] as usize;
+        let prefix_len = 1 + n_accounts * 32;
+        if tx.data.len() < prefix_len + 1 {
+            return Ok(charge_and_fail(
+                state,
+                format!(
+                    "SPL: calldata too short — expected {} bytes for {} accounts + instruction",
+                    prefix_len + 1,
+                    n_accounts
+                ),
+            ));
+        }
+        let mut accounts: Vec<[u8; 32]> = Vec::with_capacity(n_accounts);
+        for i in 0..n_accounts {
+            let off = 1 + i * 32;
+            let mut acc = [0u8; 32];
+            acc.copy_from_slice(&tx.data[off..off + 32]);
+            accounts.push(acc);
+        }
+        let spl_data = &tx.data[prefix_len..];
+
+        let opcode = spl_data[0];
+        let instruction = match SplInstruction::from_byte(opcode) {
+            Some(i) => i,
+            None => {
+                return Ok(charge_and_fail(
+                    state,
+                    format!("SPL: unknown instruction opcode {}", opcode),
+                ));
+            }
+        };
+
+        // Track whether the handler has already committed gas + nonce. The
+        // Transfer path commits early to avoid clobbering the source balance
+        // when authority == source == tx.from; other paths defer to the
+        // common commit at the end of this function.
+        let mut gas_already_committed = false;
+
+        // Dispatch. Returns logs + state_changes to merge into the receipt.
+        let (instruction_name, output_data, extra_state_changes) = match instruction {
+            SplInstruction::Transfer => {
+                if accounts.len() < 3 {
+                    return Ok(charge_and_fail(
+                        state,
+                        "SPL Transfer: need 3 accounts (source, destination, authority)".into(),
+                    ));
+                }
+                if spl_data.len() < 9 {
+                    return Ok(charge_and_fail(
+                        state,
+                        "SPL Transfer: need 8-byte LE u64 amount after opcode".into(),
+                    ));
+                }
+                let amount_spl = u64::from_le_bytes(spl_data[1..9].try_into().unwrap());
+                let amount_native = spl_to_native(amount_spl);
+
+                // Authority must equal the tx signer — SPL semantics require
+                // the authority to sign the instruction.
+                if accounts[2].as_slice() != tx.from.as_slice() {
+                    return Ok(charge_and_fail(
+                        state,
+                        "SPL Transfer: authority does not match tx signer".into(),
+                    ));
+                }
+                // Commit gas + nonce BEFORE the transfer write. In the
+                // single-owner ATA pointer-model authority == source == tx.from,
+                // so the gas-deduction write to tx.from must not overwrite the
+                // post-transfer source balance. Pre-debit here, then read the
+                // post-gas source balance for the transfer math.
+                state.set_nonce(&tx.from, nonce + 1);
+                state.set_balance(&tx.from, new_sender_balance);
+                gas_already_committed = true;
+
+                let source_balance = state.get_balance(&accounts[0]);
+                if source_balance < amount_native {
+                    // Rollback the gas deduction is impossible without a
+                    // checkpoint; per Solana semantics nonce+gas are sticky
+                    // even on failure, so leave them and return.
+                    return Ok(ExecutionResult::failed(
+                        actual_cu,
+                        format!(
+                            "SPL Transfer: insufficient balance {} < {}",
+                            source_balance, amount_native
+                        ),
+                    ));
+                }
+                let dest_balance_before = state.get_balance(&accounts[1]);
+                state.set_balance(&accounts[0], source_balance - amount_native);
+                state.set_balance(&accounts[1], dest_balance_before + amount_native);
+                let changes = vec![
+                    StateChange::new(
+                        accounts[0].to_vec(),
+                        b"balance".to_vec(),
+                        Some(source_balance.to_le_bytes().to_vec()),
+                        Some((source_balance - amount_native).to_le_bytes().to_vec()),
+                    ),
+                    StateChange::new(
+                        accounts[1].to_vec(),
+                        b"balance".to_vec(),
+                        Some(dest_balance_before.to_le_bytes().to_vec()),
+                        Some((dest_balance_before + amount_native).to_le_bytes().to_vec()),
+                    ),
+                ];
+                ("spl_transfer", amount_spl.to_le_bytes().to_vec(), changes)
+            }
+            SplInstruction::GetBalance => {
+                if accounts.is_empty() {
+                    return Ok(charge_and_fail(
+                        state,
+                        "SPL GetBalance: need account address".into(),
+                    ));
+                }
+                let native_balance = state.get_balance(&accounts[0]);
+                let spl_balance = tenzro_token::native_to_spl(native_balance).unwrap_or(0);
+                ("spl_get_balance", spl_balance.to_le_bytes().to_vec(), vec![])
+            }
+            SplInstruction::MintTo | SplInstruction::Burn => {
+                // In the pointer model the bridge layer is the authority for
+                // mint/burn — the SPL adapter only acknowledges. Surface this
+                // as a successful no-op so callers can build SPL workflows but
+                // the actual issuance happens via the bridge crate.
+                tracing::debug!(
+                    "SPL {:?}: no-op in pointer model — handled by bridge layer",
+                    instruction
+                );
+                (
+                    match instruction {
+                        SplInstruction::MintTo => "spl_mint_to",
+                        SplInstruction::Burn => "spl_burn",
+                        _ => unreachable!(),
+                    },
+                    Vec::new(),
+                    vec![],
+                )
+            }
+            _ => {
+                // InitializeMint / InitializeAccount / Approve / Revoke /
+                // CloseAccount are administrative; treated as successful
+                // no-ops at the pointer-model adapter layer.
+                tracing::debug!("SPL {:?}: administrative no-op", instruction);
+                ("spl_admin_noop", Vec::new(), vec![])
+            }
+        };
+
+        // Commit gas + nonce (unless the handler already did it).
+        if !gas_already_committed {
+            state.set_nonce(&tx.from, nonce + 1);
+            state.set_balance(&tx.from, new_sender_balance);
+        }
+
+        let logs = vec![Log::new(
+            SPL_TOKEN_PROGRAM_ID.to_vec(),
+            vec![
+                b"spl_token".to_vec(),
+                instruction_name.as_bytes().to_vec(),
+                WTNZO_SPL_MINT.to_vec(),
+                tx.from.clone(),
+            ],
+            output_data.clone(),
+        )];
+
+        let mut state_changes = vec![
+            StateChange::new(
+                tx.from.clone(),
+                b"nonce".to_vec(),
+                Some(nonce.to_le_bytes().to_vec()),
+                Some((nonce + 1).to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                tx.from.clone(),
+                b"balance".to_vec(),
+                Some(sender_balance.to_le_bytes().to_vec()),
+                Some(new_sender_balance.to_le_bytes().to_vec()),
+            ),
+        ];
+        state_changes.extend(extra_state_changes);
+
+        tracing::debug!(
+            "SVM: spl_token {} (cu={}) from {}",
+            instruction_name,
+            actual_cu,
+            hex::encode(&tx.from),
+        );
+
+        Ok(ExecutionResult::success(
+            actual_cu,
+            output_data,
+            logs,
+            state_changes,
+        ))
+    }
+
     /// Execute a loaded SBF/BPF program via the solana-sbpf virtual machine.
     ///
     /// This performs real eBPF execution:
@@ -802,6 +1049,15 @@ impl VmExecutor for SvmExecutor {
             // Anchor-style 8-byte discriminators, and the instruction layout.
             if program_id.as_slice() == super::cross_vm::TENZRO_CROSS_VM_PROGRAM_ID.as_slice() {
                 return self.execute_cross_vm_native(tx, state, sender_balance, compute_units);
+            }
+
+            // SPL Token Program short-circuit: the wTNZO SPL adapter is
+            // implemented in Rust over the native VmState balance layer
+            // (no ELF). All canonical SPL instructions for wTNZO
+            // (Transfer / MintTo / Burn / GetBalance) are dispatched
+            // here. Wire format per [`Self::execute_spl_native`].
+            if program_id.as_slice() == super::spl_adapter::SPL_TOKEN_PROGRAM_ID.as_slice() {
+                return self.execute_spl_native(tx, state, sender_balance, compute_units);
             }
 
             // Get program code
@@ -1292,5 +1548,115 @@ mod tests {
 
         let result = executor.call(&call, &state).await;
         assert!(result.is_err());
+    }
+
+    /// End-to-end SPL Transfer dispatch via the native short-circuit:
+    /// `tx.to = SPL_TOKEN_PROGRAM_ID`, data prefixed with [n=3][source][dest]
+    /// [authority] then SPL Transfer opcode 3 + LE u64 amount. Verifies that
+    /// source → dest balance moves and authority signing parity is enforced.
+    #[tokio::test]
+    async fn test_spl_native_transfer() {
+        use crate::traits::VmState;
+        use crate::svm::spl_adapter::SPL_TOKEN_PROGRAM_ID;
+        use tenzro_token::spl_to_native;
+
+        let executor = create_executor();
+        let mut state = StateAdapter::new();
+
+        let source = [0x11u8; 32];
+        let dest = [0x22u8; 32];
+        let authority = source; // single-owner ATA model
+
+        // Fund source with 100 native TNZO (18 dec) — enough to cover gas + transfer.
+        let one_tnzo: u128 = 1_000_000_000_000_000_000;
+        state.set_balance(&source.to_vec(), 100 * one_tnzo);
+
+        // Build calldata: [n_accounts=3][source][dest][authority][opcode=3][amount_le_u64].
+        let amount_spl: u64 = 5_000_000_000; // 5.0 wTNZO at 9 decimals
+        let mut data = Vec::new();
+        data.push(3u8);
+        data.extend_from_slice(&source);
+        data.extend_from_slice(&dest);
+        data.extend_from_slice(&authority);
+        data.push(3u8); // SPL Transfer opcode
+        data.extend_from_slice(&amount_spl.to_le_bytes());
+
+        let vm_tx = VmTransaction::new(
+            source.to_vec(),
+            Some(SPL_TOKEN_PROGRAM_ID.to_vec()),
+            0,
+            data,
+            200_000,
+            1_000_000_000,
+            0,
+            VmType::Svm,
+            1337,
+        );
+
+        let result = executor
+            .execute_transaction(&vm_tx, &mut state)
+            .await
+            .unwrap();
+
+        assert!(result.success, "SPL transfer should succeed: {:?}", result.revert_reason);
+
+        let amount_native = spl_to_native(amount_spl);
+        let dest_after = state.get_balance(&dest.to_vec());
+        assert_eq!(dest_after, amount_native, "destination should receive native amount");
+
+        // Source balance: started at 100 TNZO, lost gas + 5 TNZO transfer.
+        let src_after = state.get_balance(&source.to_vec());
+        assert!(src_after < (100 * one_tnzo) - amount_native, "source must pay gas");
+        assert!(src_after >= (100 * one_tnzo) - amount_native - (1 * one_tnzo), "gas should be modest");
+
+        // Nonce bumped.
+        assert_eq!(state.get_nonce(&source.to_vec()), 1);
+    }
+
+    /// SPL Transfer must fail when authority != tx signer.
+    #[tokio::test]
+    async fn test_spl_native_transfer_authority_mismatch() {
+        use crate::traits::VmState;
+        use crate::svm::spl_adapter::SPL_TOKEN_PROGRAM_ID;
+
+        let executor = create_executor();
+        let mut state = StateAdapter::new();
+
+        let source = [0x11u8; 32];
+        let dest = [0x22u8; 32];
+        let wrong_authority = [0x33u8; 32]; // not the signer
+
+        let one_tnzo: u128 = 1_000_000_000_000_000_000;
+        state.set_balance(&source.to_vec(), 100 * one_tnzo);
+
+        let amount_spl: u64 = 1_000_000_000;
+        let mut data = Vec::new();
+        data.push(3u8);
+        data.extend_from_slice(&source);
+        data.extend_from_slice(&dest);
+        data.extend_from_slice(&wrong_authority);
+        data.push(3u8);
+        data.extend_from_slice(&amount_spl.to_le_bytes());
+
+        let vm_tx = VmTransaction::new(
+            source.to_vec(),
+            Some(SPL_TOKEN_PROGRAM_ID.to_vec()),
+            0,
+            data,
+            200_000,
+            1_000_000_000,
+            0,
+            VmType::Svm,
+            1337,
+        );
+
+        let result = executor
+            .execute_transaction(&vm_tx, &mut state)
+            .await
+            .unwrap();
+
+        assert!(!result.success, "authority mismatch should fail");
+        // But nonce is still bumped (Solana semantics).
+        assert_eq!(state.get_nonce(&source.to_vec()), 1);
     }
 }

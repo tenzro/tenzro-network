@@ -6,6 +6,8 @@
 
 use crate::{
     error::{BridgeError, Result},
+    fee_oracle::{BridgeAdapterId, BridgeFeeQuote},
+    fee_sponsor::{BridgeSponsorshipReceipt, SponsorshipPool, WiredBridgeFeeSurface},
     traits::{BridgeAdapter, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo, TransferStatus},
 };
 use serde::{Deserialize, Serialize};
@@ -31,6 +33,10 @@ pub struct BridgeRouter {
     nonce_counter: AtomicU64,
     /// Monotonic nonce counter for message deduplication
     message_nonce_counter: AtomicU64,
+    /// Optional wired fee-in-TNZO surface. When set, every adapter routed
+    /// through this router can surface destination-native fees as TNZO
+    /// quotes via [`Self::quote_fee_in_tnzo`] without per-adapter forking.
+    fee_surface: Option<Arc<WiredBridgeFeeSurface>>,
 }
 
 impl BridgeRouter {
@@ -44,7 +50,101 @@ impl BridgeRouter {
             replay_window: Duration::from_secs(86400), // 24 hour replay window
             nonce_counter: AtomicU64::new(0),
             message_nonce_counter: AtomicU64::new(0),
+            fee_surface: None,
         }
+    }
+
+    /// Attach a wired fee-in-TNZO surface to the router. Once attached,
+    /// every registered adapter can surface destination-native fee quotes
+    /// in TNZO via [`Self::quote_fee_in_tnzo`] and route sponsorship to
+    /// the per-adapter pool — without per-adapter constructor injection.
+    ///
+    /// This is the SOTA cross-chain fee-abstraction pattern (Cosmos ICS-29,
+    /// Hyperlane IGP, Polkadot AssetHub asset-conversion): the router is
+    /// the single fee-quoting choke-point; adapters quote destination-
+    /// native, the oracle converts, the sponsor escrows.
+    pub fn with_fee_surface(mut self, surface: Arc<WiredBridgeFeeSurface>) -> Self {
+        self.fee_surface = Some(surface);
+        self
+    }
+
+    /// Returns the attached fee surface, if any.
+    pub fn fee_surface(&self) -> Option<Arc<WiredBridgeFeeSurface>> {
+        self.fee_surface.clone()
+    }
+
+    /// Quote a destination-native bridge fee in TNZO for an arbitrary
+    /// adapter + destination chain. Calls the underlying adapter's
+    /// `estimate_fee()` to determine the destination-native amount, then
+    /// passes it through the fee oracle for TNZO conversion.
+    ///
+    /// Returns `AdapterError` if no fee surface is wired, or if the named
+    /// adapter is not registered with the router.
+    pub async fn quote_fee_in_tnzo(
+        &self,
+        adapter_name: &str,
+        dest_chain: &str,
+        payload_size: usize,
+    ) -> Result<BridgeFeeQuote> {
+        let surface = self.fee_surface.as_ref().ok_or_else(|| {
+            BridgeError::AdapterError("no fee surface wired into BridgeRouter".to_string())
+        })?;
+        let adapter_id = BridgeAdapterId::from_str(adapter_name).ok_or_else(|| {
+            BridgeError::AdapterError(format!("unknown bridge adapter: {}", adapter_name))
+        })?;
+        let adapters = self.adapters.read().await;
+        let adapter = adapters.get(adapter_name).ok_or_else(|| {
+            BridgeError::AdapterError(format!(
+                "adapter '{}' not registered with router",
+                adapter_name
+            ))
+        })?;
+        let native_fee = adapter.estimate_fee(dest_chain, payload_size).await?;
+        surface
+            .oracle
+            .quote(adapter_id, dest_chain, native_fee)
+            .await
+    }
+
+    /// Sponsor a previously-quoted destination-native fee on the caller's
+    /// behalf. Records the sponsorship against the per-adapter pool and
+    /// returns the receipt; the caller is responsible for the actual TNZO
+    /// debit + on-chain mirror.
+    pub async fn sponsor_quote(
+        &self,
+        quote: &BridgeFeeQuote,
+        payer_did: impl Into<String>,
+    ) -> Result<BridgeSponsorshipReceipt> {
+        let surface = self.fee_surface.as_ref().ok_or_else(|| {
+            BridgeError::AdapterError("no fee surface wired into BridgeRouter".to_string())
+        })?;
+        surface.sponsor.record_sponsorship(quote, payer_did)
+    }
+
+    /// Enumerate the per-adapter sponsorship pools currently held by the
+    /// wired sponsor (one entry per adapter that has seen at least one
+    /// sponsorship or been preregistered).
+    pub async fn list_sponsorship_pools(&self) -> Vec<SponsorshipPool> {
+        let Some(surface) = self.fee_surface.as_ref() else {
+            return Vec::new();
+        };
+        // Walk every adapter that's wire-supported and surface its pool
+        // (get-or-create is idempotent — preregistered pools are returned
+        // as-is, otherwise a zero-balance pool snapshot is returned).
+        let mut pools = Vec::new();
+        for adapter_id in [
+            BridgeAdapterId::LayerZero,
+            BridgeAdapterId::ChainlinkCcip,
+            BridgeAdapterId::Wormhole,
+            BridgeAdapterId::DeBridge,
+            BridgeAdapterId::Hyperlane,
+            BridgeAdapterId::Axelar,
+            BridgeAdapterId::LiFi,
+            BridgeAdapterId::Canton,
+        ] {
+            pools.push(surface.sponsor.get_or_create_pool(adapter_id));
+        }
+        pools
     }
 
     /// Registers a bridge adapter
@@ -851,5 +951,144 @@ mod tests {
                 assert!(messages.contains_key("msg:recent"), "Recent message should survive pruning");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn router_quotes_fee_in_tnzo_via_wired_surface() {
+        use crate::fee_oracle::{GovernanceFeeRow, GovernanceSetFeeOracle};
+        use crate::fee_sponsor::{BridgeFeeSponsor, WiredBridgeFeeSurface};
+
+        let oracle = Arc::new(GovernanceSetFeeOracle::new());
+        oracle.set_rate(GovernanceFeeRow {
+            adapter: BridgeAdapterId::LayerZero,
+            dest_chain: "arbitrum".into(),
+            rate_q18: 3 * 1_000_000_000_000_000_000u128, // 3.0
+            markup_bps: 100,                              // 1%
+            valid_window_ms: 60_000,
+            updated_at_ms: 0,
+        });
+        let sponsor = Arc::new(BridgeFeeSponsor::new());
+        let surface = Arc::new(WiredBridgeFeeSurface::new(oracle, sponsor.clone()));
+        let router = BridgeRouter::new().with_fee_surface(surface);
+
+        // Register a LayerZero adapter so the router has a destination chain
+        // entry — `estimate_fee` from LayerZero stub returns a deterministic
+        // value the oracle can convert.
+        let lz_config = LayerZeroConfig::new(
+            "0x1a44076050125825900e736c501f859c50fE728c",
+            30101,
+            "0x0000000000000000000000000000000000000001",
+            "0x0000000000000000000000000000000000000002",
+        );
+        router
+            .register_adapter("layerzero", Box::new(LayerZeroAdapter::new(lz_config)))
+            .await;
+
+        let quote = router
+            .quote_fee_in_tnzo("layerzero", "arbitrum", 100)
+            .await
+            .unwrap();
+        assert_eq!(quote.adapter, BridgeAdapterId::LayerZero);
+        assert!(quote.tnzo_amount_wei > 0);
+        assert!(quote.valid_until_ms > quote.issued_at_ms);
+
+        // Sponsoring the quote should produce a receipt and update the pool.
+        let receipt = router
+            .sponsor_quote(&quote, "did:tn:human:router-test")
+            .await
+            .unwrap();
+        assert_eq!(receipt.adapter, BridgeAdapterId::LayerZero);
+        assert_eq!(receipt.tnzo_paid_wei, quote.tnzo_amount_wei);
+
+        // list_sponsorship_pools returns one entry per known adapter id.
+        let pools = router.list_sponsorship_pools().await;
+        assert_eq!(pools.len(), 8);
+        let lz_pool = pools
+            .iter()
+            .find(|p| p.adapter == BridgeAdapterId::LayerZero)
+            .unwrap();
+        assert_eq!(lz_pool.tnzo_balance_wei, quote.tnzo_amount_wei);
+    }
+
+    #[tokio::test]
+    async fn router_sponsor_pattern_covers_wormhole_lz_axelar_uniformly() {
+        use crate::fee_oracle::{GovernanceFeeRow, GovernanceSetFeeOracle};
+        use crate::fee_sponsor::{BridgeFeeSponsor, WiredBridgeFeeSurface};
+
+        let oracle = Arc::new(GovernanceSetFeeOracle::new());
+        for adapter in [
+            BridgeAdapterId::Wormhole,
+            BridgeAdapterId::LayerZero,
+            BridgeAdapterId::Axelar,
+        ] {
+            oracle.set_rate(GovernanceFeeRow {
+                adapter,
+                dest_chain: "eip155:1".into(),
+                rate_q18: 2 * 1_000_000_000_000_000_000u128,
+                markup_bps: 50,
+                valid_window_ms: 60_000,
+                updated_at_ms: 0,
+            });
+        }
+        let sponsor = Arc::new(BridgeFeeSponsor::new());
+        let surface = Arc::new(WiredBridgeFeeSurface::new(oracle, sponsor.clone()));
+        let router = BridgeRouter::new().with_fee_surface(surface);
+
+        // Direct oracle path (no adapter registration required) — verifies
+        // the sponsor-pattern fan-out works uniformly across all three.
+        for adapter in [
+            BridgeAdapterId::Wormhole,
+            BridgeAdapterId::LayerZero,
+            BridgeAdapterId::Axelar,
+        ] {
+            let quote = router
+                .fee_surface()
+                .unwrap()
+                .oracle
+                .quote(adapter, "eip155:1", 1_000_000)
+                .await
+                .unwrap();
+            assert_eq!(quote.adapter, adapter);
+            // 1_000_000 * 2 = 2_000_000; +0.5% = 2_010_000.
+            assert_eq!(quote.tnzo_amount_wei, 2_010_000);
+            let receipt = router
+                .sponsor_quote(&quote, format!("did:tn:human:{}", adapter.as_str()))
+                .await
+                .unwrap();
+            assert_eq!(receipt.adapter, adapter);
+        }
+
+        // Each adapter has its own deterministic vault.
+        let pools = router.list_sponsorship_pools().await;
+        let wormhole = pools
+            .iter()
+            .find(|p| p.adapter == BridgeAdapterId::Wormhole)
+            .unwrap();
+        let lz = pools
+            .iter()
+            .find(|p| p.adapter == BridgeAdapterId::LayerZero)
+            .unwrap();
+        let axelar = pools
+            .iter()
+            .find(|p| p.adapter == BridgeAdapterId::Axelar)
+            .unwrap();
+        assert_ne!(wormhole.vault_address, lz.vault_address);
+        assert_ne!(lz.vault_address, axelar.vault_address);
+        assert_ne!(wormhole.vault_address, axelar.vault_address);
+    }
+
+    #[tokio::test]
+    async fn router_returns_error_when_fee_surface_unwired() {
+        let router = BridgeRouter::new();
+        let err = router
+            .quote_fee_in_tnzo("layerzero", "arbitrum", 100)
+            .await
+            .unwrap_err();
+        match err {
+            BridgeError::AdapterError(m) => assert!(m.contains("no fee surface")),
+            other => panic!("unexpected: {:?}", other),
+        }
+        let empty = router.list_sponsorship_pools().await;
+        assert!(empty.is_empty());
     }
 }

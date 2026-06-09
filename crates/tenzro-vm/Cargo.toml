@@ -67,3 +67,7 @@ tenzro-wallet = { workspace = true }
 [[bench]]
 name = "vm_benchmarks"
 harness = false
+
+[[bench]]
+name = "passkey_benchmarks"
+harness = false

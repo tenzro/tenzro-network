@@ -1,0 +1,79 @@
+{
+  "template_id": "ref-agentic-lc-examiner-v1",
+  "name": "Agentic Letter-of-Credit Examiner",
+  "description": "Trade-finance agent that examines documentary presentations under standard letter-of-credit terms. Retrieves bill of lading, commercial invoice, and insurance certificate from a Canton-DAML obligation contract, runs discrepancy checks, and emits a compliance or discrepancy notice via DAML choice exercise.",
+  "template_type": "specialist",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1749470400,
+  "updated_at": 1749470400,
+  "capabilities": [
+    {
+      "id": "lc_presentation_examine",
+      "name": "L/C Presentation Examination",
+      "description": "Loads the documentary presentation from Canton, applies article-by-article discrepancy checks (signature, date, port, amount, description) per the L/C terms, produces a structured discrepancy report",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"lc_contract_id\":{\"type\":\"string\"},\"presentation_doc_hashes\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"is_compliant\":{\"type\":\"boolean\"},\"discrepancies\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"article_ref\":{\"type\":\"string\"},\"field\":{\"type\":\"string\"},\"finding\":{\"type\":\"string\"}}}},\"examination_signed_hash\":{\"type\":\"string\"}}}"
+    },
+    {
+      "id": "bol_authenticity_verify",
+      "name": "Bill of Lading Authenticity Verify",
+      "description": "Cross-references the electronic bill of lading against the carrier's DAML party signature; validates the shipped-on-board notation and the ports of loading and discharge match the L/C requirements",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"ebol_contract_id\":{\"type\":\"string\"},\"required_port_loading\":{\"type\":\"string\"},\"required_port_discharge\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"is_authentic\":{\"type\":\"boolean\"},\"ports_match\":{\"type\":\"boolean\"},\"carrier_signature_valid\":{\"type\":\"boolean\"}}}"
+    },
+    {
+      "id": "advice_to_issuer",
+      "name": "Advice to Issuing Bank",
+      "description": "Exercises the AdviceOfDocuments DAML choice on the L/C contract, transmitting examination outcome to the issuing bank's correspondent agent",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"lc_contract_id\":{\"type\":\"string\"},\"examination_signed_hash\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"daml_event_id\":{\"type\":\"string\"},\"issuer_acknowledged\":{\"type\":\"boolean\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 1024,
+    "min_storage_mb": 512,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": true,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are an agentic L/C examiner operating on Canton DAML contracts. Your responsibilities under the L/C terms: (1) Examine the documentary presentation strictly against the L/C — date of issue, port of loading, port of discharge, commercial description of goods, amount, currency, latest shipment date, and signature on the bill of lading. (2) Apply the examination window stipulated in the credit. (3) Surface every discrepancy with the relevant article reference — do not let a single nonconforming document pass. (4) Verify the electronic bill of lading carrier signature against the carrier's DAML party identity. (5) Exercise the AdviceOfDocuments choice with a JSON-canonical examination report. (6) Never advice compliant if even one discrepancy stands — return a Notice of Refusal. You operate under Full KYC + TEE attestation, with a per-operation value cap matching the L/C credit amount.",
+  "examples": [
+    {
+      "description": "Compliant presentation",
+      "user_input": "Examine presentation under L/C identifier abc for goods shipped from port A to port B at amount X",
+      "expected_output": "Examined. All required documents present. Bill of lading signed by carrier party with on-board notation, ports match L/C terms, commercial invoice amount matches L/C. All article checks pass. AdviceOfDocuments exercised on Canton; issuing bank acknowledged."
+    },
+    {
+      "description": "Discrepant presentation",
+      "user_input": "Examine presentation under L/C identifier xyz for goods shipped from port C to port D at amount Y",
+      "expected_output": "Examined. Discrepancies found: (1) bill of lading lacks on-board notation; (2) commercial invoice description does not match L/C description; (3) presentation outside the examination window. Notice of Refusal issued via AdviceOfDocuments choice. Goods remain at risk of the beneficiary."
+    }
+  ],
+  "tags": ["trade-finance", "letter-of-credit", "canton", "daml", "institutional", "bill-of-lading"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/agentic-lc-examiner",
+  "policy": {
+    "tools_allowlist": [
+      { "tool_id": "tenzro_listDamlContracts", "tool_type": "rpc" },
+      { "tool_id": "tenzro_submitDamlCommand", "tool_type": "rpc" },
+      { "tool_id": "tenzro_canton_getTransaction", "tool_type": "rpc" }
+    ],
+    "delegation_scope": {
+      "max_per_op_wei": "10000000000000000000000000",
+      "max_per_day_wei": "100000000000000000000000000",
+      "max_tx_count_per_day": 20,
+      "allowed_chains": ["tenzro", "canton"],
+      "allowed_protocols": ["canton"]
+    },
+    "hard_caps": {
+      "per_operation_value": "10000000000000000000000000",
+      "per_day_value": "100000000000000000000000000"
+    }
+  }
+}

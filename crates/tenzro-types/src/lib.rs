@@ -87,7 +87,7 @@ pub use identity::{KycTier, PaymentProtocolId, IdentityType};
 pub use fees::{ServiceFeeSchedule, NetworkCommissionRates};
 pub use task::{TaskInfo, TaskStatus, TaskType, TaskPriority, TaskQuote, TaskFilter,
     AcceptanceCriteria, ProofRequirement, ReputationProof, TaskDispute, DisputeResolution};
-pub use saga::{SagaWorkflow, SagaStep, SagaStepStatus, SagaStatus};
+pub use saga::{SagaWorkflow, SagaStep, SagaStepStatus, SagaStatus, AttestedDeadline};
 pub use capital_intent::{
     CapitalIntent, CapitalIntentRecord, CapitalIntentStatus, CapitalQuote, CapitalLeg, LegStatus,
     Objective, Constraints, ComplianceReq, Authorization, SettlementReq, RegRegime, Side,
@@ -124,8 +124,8 @@ pub use kill_switch::{KillSwitchAction, KillSwitchReceipt};
 pub use hardware::HardwareCapabilities;
 pub use intent_7683::{
     compute_order_id, fill_storage_key, order_storage_key, u128_to_uint256_be,
-    uint256_be_to_u128, CrossChainOrder, FillInstruction, FillRecord, GaslessCrossChainOrder,
-    OrderState, Output, ProofRoute, ResolvedCrossChainOrder, TargetOutput, Tenzro7683Order,
-    TenzroOrderData, TokenAmount, FILL_KEY_PREFIX, ORDER_KEY_PREFIX,
-    TENZRO_MAINNET_CHAIN_ID, TENZRO_TESTNET_CHAIN_ID,
+    uint256_be_to_u128, BridgeFeeHint, CrossChainOrder, FillInstruction, FillRecord,
+    GaslessCrossChainOrder, OrderState, Output, ProofRoute, ResolvedCrossChainOrder,
+    TargetOutput, Tenzro7683Order, TenzroOrderData, TokenAmount, FILL_KEY_PREFIX,
+    ORDER_KEY_PREFIX, TENZRO_MAINNET_CHAIN_ID, TENZRO_TESTNET_CHAIN_ID,
 };

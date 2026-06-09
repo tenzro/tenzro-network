@@ -71,6 +71,7 @@ pub mod erc8004_daml;
 pub mod erc8004_svm;
 pub mod error;
 pub mod identity;
+pub mod ivms101;
 pub mod kya;
 pub mod registry;
 pub mod verification;

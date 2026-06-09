@@ -145,6 +145,8 @@ impl TokenInfoCmd {
         output::print_field("Type", result.get("token_type").and_then(|v| v.as_str()).unwrap_or(""));
         output::print_field("EVM Address", result.get("evm_address").and_then(|v| v.as_str()).unwrap_or("N/A"));
         output::print_field("SVM Mint", result.get("svm_mint").and_then(|v| v.as_str()).unwrap_or("N/A"));
+        output::print_field("DAML Template", result.get("daml_template_id").and_then(|v| v.as_str()).unwrap_or("N/A"));
+        output::print_field("Tempo Address", result.get("tempo_address").and_then(|v| v.as_str()).unwrap_or("N/A"));
         output::print_field("Creator", result.get("creator").and_then(|v| v.as_str()).unwrap_or(""));
 
         Ok(())

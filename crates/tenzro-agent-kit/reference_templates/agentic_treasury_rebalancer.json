@@ -1,0 +1,75 @@
+{
+  "template_id": "ref-agentic-treasury-rebalancer-v1",
+  "name": "Agentic Treasury Rebalancer",
+  "description": "Treasury manager that maintains a target allocation across native assets, stablecoins, tokenized treasuries, and tokenized equities. Pulls live prices from on-chain oracles plus DEX aggregators, executes rebalances via the Tenzro AP2 and Capital Intent surface with multi-signer ERC-7579 validators, and emits a TEE-attested daily report.",
+  "template_type": "specialist",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1749470400,
+  "updated_at": 1749470400,
+  "capabilities": [
+    {
+      "id": "compute_drift",
+      "name": "Compute Allocation Drift",
+      "description": "Loads current holdings from Tenzro and bridged chains, prices them via on-chain oracles and DEX TWAPs, computes per-asset drift against the target allocation",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"portfolio_id\":{\"type\":\"string\"},\"target_allocations\":{\"type\":\"object\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"current_allocations\":{\"type\":\"object\"},\"drift_bps\":{\"type\":\"object\"},\"total_aum_usd\":{\"type\":\"string\"}}}"
+    },
+    {
+      "id": "build_rebalance_intent",
+      "name": "Build Rebalance Intent",
+      "description": "Synthesizes a Capital Intent (open / quote / assign / execute) that, when executed atomically, brings the portfolio within tolerance of the target allocation",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"drift_bps\":{\"type\":\"object\"},\"tolerance_bps\":{\"type\":\"integer\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"intent_id\":{\"type\":\"string\"},\"steps\":{\"type\":\"array\"}}}"
+    },
+    {
+      "id": "co_sign_via_ses_key",
+      "name": "Co-Sign via Session Key",
+      "description": "Executes the rebalance through an ERC-7579 SessionKey validator scoped to the AP2 cart mandate, with target whitelisting and per-tx plus daily caps enforced on-chain",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"intent_id\":{\"type\":\"string\"},\"session_key_address\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"user_op_hashes\":{\"type\":\"array\"},\"status\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 2048,
+    "min_storage_mb": 1024,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": true,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are a treasury rebalancer. Your responsibilities: (1) Compute live drift against the configured target allocation every governance-tick (typically hourly). (2) When drift in any sleeve exceeds the tolerance band (default 50 bps), build a Capital Intent that rebalances to within 10 bps of target. (3) Route every leg through the Tenzro AP2 Cart Mandate validator AND the Tenzro DelegationScope AND the runtime SpendingPolicy — three independent ceilings. (4) Execute through an ERC-7579 SessionKey validator pre-installed on the treasury smart-account, with explicit target and selector allowlist. (5) Emit a TEE-attested daily report listing every rebalance with price and tx hash. NEVER exceed the per-operation or per-day spending limits encoded on-chain. NEVER skip the AP2 mandate validation step. If any constraint cannot be met within tolerance, surface a deferred-rebalance receipt and DO NOT partially execute.",
+  "examples": [
+    {
+      "description": "Routine drift rebalance",
+      "user_input": "Rebalance portfolio with target allocation provided",
+      "expected_output": "Drift detected per sleeve. Built Capital Intent with N legs; each leg respects SessionKey caps. UserOps queued; report attached."
+    }
+  ],
+  "tags": ["treasury", "rebalance", "ap2", "session-keys", "erc-7579", "capital-intent", "tee-attested"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/agentic-treasury-rebalancer",
+  "policy": {
+    "tools_allowlist": [
+      { "tool_id": "tenzro_capitalIntentOpen", "tool_type": "rpc" },
+      { "tool_id": "tenzro_capitalIntentExecute", "tool_type": "rpc" },
+      { "tool_id": "tenzro_validateMandatePair", "tool_type": "rpc" },
+      { "tool_id": "tenzro_signAndSendTransaction", "tool_type": "rpc" }
+    ],
+    "delegation_scope": {
+      "max_per_op_wei": "5000000000000000000000000",
+      "max_per_day_wei": "20000000000000000000000000",
+      "max_tx_count_per_day": 100,
+      "allowed_chains": ["tenzro", "ethereum", "solana", "base"],
+      "allowed_protocols": ["ap2", "x402"]
+    },
+    "hard_caps": {
+      "per_operation_value": "5000000000000000000000000",
+      "per_day_value": "20000000000000000000000000"
+    }
+  }
+}

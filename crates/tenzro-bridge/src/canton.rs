@@ -116,9 +116,31 @@ impl CantonAdapter {
         }
     }
 
-    /// Attaches an OAuth2 client-credentials token provider. Required for
-    /// the Tenzro-operated Canton devnet (`json.devnet.tenzro.network`),
-    /// which gates the JSON Ledger API behind Auth0-issued JWTs.
+    /// Returns a sibling adapter that uses the provided JWT instead
+    /// of the configured token provider / static JWT. Used by Stage 2
+    /// per-tenant dispatch: when a tenant presents their own Canton
+    /// JWT via `X-Canton-Auth`, the node creates this view for the
+    /// duration of one request lifecycle so Canton routes the call to
+    /// the tenant's IDP and the operator's credential never appears
+    /// on the wire.
+    ///
+    /// The new view shares the HTTP client + pending-transfers map +
+    /// resolved-party cache; only the credential resolution differs.
+    pub fn with_tenant_jwt(&self, jwt: impl Into<String>) -> Self {
+        let mut config = self.config.clone();
+        config.jwt_token = Some(jwt.into());
+        Self {
+            config,
+            http_client: self.http_client.clone(),
+            pending_transfers: Arc::clone(&self.pending_transfers),
+            token_provider: None,
+            resolved_act_as_party_fq: Arc::clone(&self.resolved_act_as_party_fq),
+        }
+    }
+
+    /// Attaches an OAuth2 client-credentials token provider for
+    /// Canton participants that gate the JSON Ledger API behind
+    /// upstream-issued JWTs.
     pub fn with_token_provider(mut self, provider: Arc<CantonTokenProvider>) -> Self {
         self.token_provider = Some(provider);
         self
@@ -147,7 +169,25 @@ impl CantonAdapter {
         if template_ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.query_contracts(template_ids, query).await
+        self.query_contracts(template_ids, query, None).await
+    }
+
+    /// Same as [`Self::query_active_contracts`] but lets the caller
+    /// override the requesting party. `party_fq` MUST be in
+    /// fully-qualified form (`<hint>::<participant-hash>`) — Canton
+    /// rejects bare hints in `filtersByParty`. Used by the node's
+    /// multi-tenant canton dispatch to scope `requestingParties` to
+    /// the API key's bound tenant party.
+    pub async fn query_active_contracts_as(
+        &self,
+        template_ids: Vec<String>,
+        query: serde_json::Value,
+        party_fq: Option<&str>,
+    ) -> Result<Vec<JsonApiContract>> {
+        if template_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.query_contracts(template_ids, query, party_fq).await
     }
 
     /// Public wrapper that submits a Daml `create` command and returns the
@@ -247,11 +287,27 @@ impl CantonAdapter {
         party_id_hint: &str,
         display_name: Option<&str>,
     ) -> Result<String> {
+        self.allocate_party_with_idp(party_id_hint, display_name, None)
+            .await
+    }
+
+    /// Same as [`Self::allocate_party`] but binds the party to a
+    /// specific Canton IdentityProviderConfig (Stage 2 per-tenant
+    /// flow). Pass `None` for the default IDP (Stage 1 fallback).
+    pub async fn allocate_party_with_idp(
+        &self,
+        party_id_hint: &str,
+        display_name: Option<&str>,
+        identity_provider_id: Option<&str>,
+    ) -> Result<String> {
         let mut body = serde_json::json!({
             "partyIdHint": party_id_hint,
         });
         if let Some(name) = display_name {
             body["displayName"] = serde_json::Value::String(name.to_string());
+        }
+        if let Some(idp) = identity_provider_id {
+            body["identityProviderId"] = serde_json::Value::String(idp.to_string());
         }
 
         debug!(
@@ -380,10 +436,11 @@ impl CantonAdapter {
     /// Lists every party known to the participant via
     /// `GET /v2/parties/known`. Returns `partyDetails` array verbatim.
     ///
-    /// Note: on the Tenzro-operated DevNet the `daml_ledger_api` scope
-    /// does NOT grant read access to the party registry; this call may
-    /// return `{"partyDetails":[]}` even when parties exist. Use
-    /// active-contracts queries to discover party FQ ids in that case.
+    /// Note: depending on the participant's token scopes, this call
+    /// may return `{"partyDetails":[]}` even when parties exist; the
+    /// `daml_ledger_api` scope does not by itself grant read access to
+    /// the party registry. Use active-contracts queries to discover
+    /// party FQ ids in that case.
     pub async fn list_parties(&self) -> Result<serde_json::Value> {
         let response = self
             .build_request(reqwest::Method::GET, "/parties/known")
@@ -711,6 +768,364 @@ impl CantonAdapter {
         )))
     }
 
+    /// Fetches an arbitrary Canton user record by id. Companion to
+    /// [`Self::get_my_user`] but for any user — primary use is
+    /// "given a tenant's bound `<client_id>@clients` user id, what's
+    /// their `primaryParty`?" so the node can forward DAML
+    /// submissions with the tenant's allocated party as `actAs`.
+    pub async fn get_user(&self, user_id: &str) -> Result<serde_json::Value> {
+        let path = format!("/users/{}", urlencoding::encode(user_id));
+        let response = self
+            .build_request(reqwest::Method::GET, &path)
+            .await?
+            .send()
+            .await
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton get-user failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(BridgeError::AdapterError(format!(
+                "Canton get-user HTTP {}: {}",
+                status,
+                Self::sanitize_canton_http_error(status, body.len())
+            )));
+        }
+        response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton get-user response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })
+    }
+
+    /// Registers a Canton IdentityProviderConfig
+    /// (`POST /v2/idps`). Once registered, JWTs whose `iss` claim
+    /// matches `issuer_url` get routed to this IDP; the `sub` claim
+    /// becomes the Canton user id. Used by Stage 2 per-tenant
+    /// onboarding to give each tenant their own auditable principal.
+    pub async fn create_identity_provider(
+        &self,
+        idp_id: &str,
+        issuer_url: &str,
+        jwks_url: &str,
+        audience: &str,
+    ) -> Result<serde_json::Value> {
+        let body = serde_json::json!({
+            "identityProviderConfig": {
+                "identityProviderId": idp_id,
+                "isDeactivated": false,
+                "issuer": issuer_url,
+                "jwksUrl": jwks_url,
+                "audience": audience,
+            }
+        });
+        let response = self
+            .build_request(reqwest::Method::POST, "/idps")
+            .await?
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton create-idp failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(BridgeError::AdapterError(format!(
+                "Canton create-idp HTTP {}: {}",
+                status,
+                Self::sanitize_canton_http_error(status, body_text.len())
+            )));
+        }
+        response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton create-idp response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })
+    }
+
+    /// Lists registered IdentityProviderConfigs via `GET /v2/idps`.
+    pub async fn list_identity_providers(&self) -> Result<serde_json::Value> {
+        let response = self
+            .build_request(reqwest::Method::GET, "/idps")
+            .await?
+            .send()
+            .await
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton list-idps failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(BridgeError::AdapterError(format!(
+                "Canton list-idps HTTP {}: {}",
+                status,
+                Self::sanitize_canton_http_error(status, body_text.len())
+            )));
+        }
+        response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton list-idps response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })
+    }
+
+    /// Deletes an IdentityProviderConfig via `DELETE /v2/idps/{idp_id}`.
+    /// Used by the Stage 2 revoke path when a tenant is fully torn down.
+    pub async fn delete_identity_provider(&self, idp_id: &str) -> Result<()> {
+        let path = format!("/idps/{}", urlencoding::encode(idp_id));
+        let response = self
+            .build_request(reqwest::Method::DELETE, &path)
+            .await?
+            .send()
+            .await
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton delete-idp failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(BridgeError::AdapterError(format!(
+                "Canton delete-idp HTTP {}: {}",
+                status,
+                Self::sanitize_canton_http_error(status, body_text.len())
+            )));
+        }
+        Ok(())
+    }
+
+    /// Creates a new Canton user via the User Management Service
+    /// (`POST /v2/users`). Sets the user's `id` and optional
+    /// `primaryParty` (the FQ party id used as the default `actAs`
+    /// for that user). The operator's bearer JWT is the creating
+    /// principal — Canton records `identityProviderId = ""` when the
+    /// default IDP is used (Stage 1; per-tenant IDPs come in Stage 2).
+    ///
+    /// Used by `tenzro_createApiKey` when a `canton_user_id` is bound:
+    /// the node allocates a party, then creates the Canton user with
+    /// that party as primaryParty, then grants CanActAs — fully
+    /// automated tenant provisioning in one operator call.
+    pub async fn create_user(
+        &self,
+        user_id: &str,
+        primary_party: Option<&str>,
+        identity_provider_id: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let mut user = serde_json::json!({ "id": user_id });
+        if let Some(p) = primary_party {
+            user["primaryParty"] = serde_json::Value::String(p.to_string());
+        }
+        if let Some(idp) = identity_provider_id {
+            user["identityProviderId"] = serde_json::Value::String(idp.to_string());
+        }
+        let body = serde_json::json!({ "user": user, "rights": [] });
+        let response = self
+            .build_request(reqwest::Method::POST, "/users")
+            .await?
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton create-user failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(BridgeError::AdapterError(format!(
+                "Canton create-user HTTP {}: {}",
+                status,
+                Self::sanitize_canton_http_error(status, body_text.len())
+            )));
+        }
+        response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton create-user response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })
+    }
+
+    /// Convenience: resolves `user_id` → `primaryParty` (FQ form). Used
+    /// by the node's canton dispatch path to forward `actAs =
+    /// primaryParty(<bound_canton_user_id>)` when the API key has a
+    /// bound user. Returns `Err` if the user has no primary party
+    /// allocated yet — operator needs to call
+    /// [`Self::allocate_party`] + [`Self::grant_user_rights`] +
+    /// [`Self::set_user_primary_party`] first.
+    pub async fn primary_party_for_user(&self, user_id: &str) -> Result<String> {
+        let resp = self.get_user(user_id).await?;
+        let primary = resp
+            .get("user")
+            .and_then(|u| u.get("primaryParty"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                BridgeError::AdapterError(format!(
+                    "Canton user {} has no primaryParty allocated yet (allocate + grant + set-primary first)",
+                    user_id
+                ))
+            })?;
+        if primary.is_empty() {
+            return Err(BridgeError::AdapterError(format!(
+                "Canton user {} primaryParty is empty",
+                user_id
+            )));
+        }
+        Ok(primary.to_string())
+    }
+
+    /// Grants `CanActAs` / `CanReadAs` rights on a Canton party to a
+    /// user (Canton 3.5+ User Management Service via
+    /// `POST /v2/users/{userId}/rights`).
+    ///
+    /// Without these grants, the operator's OAuth user cannot submit
+    /// DAML commands on behalf of a newly-allocated party — Canton
+    /// returns a "security-sensitive error" on active-contracts /
+    /// submit calls even though the party exists.
+    ///
+    /// Pass `user_id = None` to grant to the OAuth principal's own
+    /// user id (`<client_id>@clients`). At least one of `can_act_as`
+    /// or `can_read_as` must be `true`.
+    ///
+    /// Returns Canton's `{ newlyGrantedRights: [...] }` response.
+    pub async fn grant_user_rights(
+        &self,
+        user_id: Option<&str>,
+        party: &str,
+        can_act_as: bool,
+        can_read_as: bool,
+    ) -> Result<serde_json::Value> {
+        if !can_act_as && !can_read_as {
+            return Err(BridgeError::AdapterError(
+                "grant_user_rights requires at least one of can_act_as or can_read_as".to_string(),
+            ));
+        }
+
+        // Resolve user_id to the OAuth principal when omitted.
+        let resolved_user_id = match user_id {
+            Some(u) => u.to_string(),
+            None => match self.token_provider.as_ref() {
+                Some(p) => format!("{}@clients", p.client_id()),
+                None => return Err(BridgeError::AdapterError(
+                    "grant_user_rights with user_id=None requires an OAuth2 token provider to derive the user id; this adapter was constructed without one".to_string()
+                )),
+            },
+        };
+
+        let mut rights: Vec<serde_json::Value> = Vec::new();
+        if can_act_as {
+            rights.push(serde_json::json!({
+                "kind": { "CanActAs": { "value": { "party": party } } }
+            }));
+        }
+        if can_read_as {
+            rights.push(serde_json::json!({
+                "kind": { "CanReadAs": { "value": { "party": party } } }
+            }));
+        }
+
+        let body = serde_json::json!({
+            "userId": resolved_user_id,
+            "rights": rights,
+        });
+
+        let path = format!(
+            "/users/{}/rights",
+            urlencoding::encode(&resolved_user_id),
+        );
+        let response = self
+            .build_request(reqwest::Method::POST, &path)
+            .await?
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| BridgeError::AdapterError(format!(
+                "Canton grant-user-rights failed: {}",
+                Self::classify_reqwest_error(&e)
+            )))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            error!("Canton grant-user-rights HTTP {}: {}", status, text);
+            return Err(BridgeError::AdapterError(format!(
+                "Canton grant-user-rights HTTP {}: {}",
+                status, text
+            )));
+        }
+
+        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
+            "Invalid Canton grant-user-rights response: {}",
+            Self::classify_reqwest_error(&e)
+        )))
+    }
+
+    /// Lists the rights granted to a Canton user via
+    /// `GET /v2/users/{userId}/rights`. Returns
+    /// `{ rights: [{ kind: { CanActAs: { value: { party } } } }, ...] }`.
+    /// Pass `user_id = None` to list rights for the OAuth principal's
+    /// own user (`<client_id>@clients`).
+    pub async fn list_user_rights(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let resolved_user_id = match user_id {
+            Some(u) => u.to_string(),
+            None => match self.token_provider.as_ref() {
+                Some(p) => format!("{}@clients", p.client_id()),
+                None => return Err(BridgeError::AdapterError(
+                    "list_user_rights with user_id=None requires an OAuth2 token provider".to_string()
+                )),
+            },
+        };
+
+        let path = format!(
+            "/users/{}/rights",
+            urlencoding::encode(&resolved_user_id),
+        );
+        let response = self
+            .build_request(reqwest::Method::GET, &path)
+            .await?
+            .send()
+            .await
+            .map_err(|e| BridgeError::AdapterError(format!(
+                "Canton list-user-rights failed: {}",
+                Self::classify_reqwest_error(&e)
+            )))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(BridgeError::AdapterError(format!(
+                "Canton list-user-rights HTTP {}: {}",
+                status, text
+            )));
+        }
+
+        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
+            "Invalid Canton list-user-rights response: {}",
+            Self::classify_reqwest_error(&e)
+        )))
+    }
+
     /// Returns the JSON API root URL (without `/v2`). Used by helpers
     /// that need to hit non-versioned endpoints like `/livez`.
     fn json_api_url_root(&self) -> String {
@@ -788,10 +1203,28 @@ impl CantonAdapter {
         method: reqwest::Method,
         endpoint: &str,
     ) -> Result<reqwest::RequestBuilder> {
+        self.build_request_with_jwt(method, endpoint, None).await
+    }
+
+    /// Same as [`Self::build_request`] but accepts an optional
+    /// tenant-supplied JWT that overrides the configured token
+    /// provider / static JWT. Used by Stage 2 per-tenant dispatch:
+    /// the tenant presents their own Canton JWT (via
+    /// `X-Canton-Auth: Bearer ...`) and Tenzro forwards it as-is so
+    /// Canton routes the call to the tenant's IDP and the operator's
+    /// credential never appears on the wire.
+    async fn build_request_with_jwt(
+        &self,
+        method: reqwest::Method,
+        endpoint: &str,
+        override_jwt: Option<&str>,
+    ) -> Result<reqwest::RequestBuilder> {
         let url = format!("{}{}", self.json_api_url(), endpoint);
         let mut builder = self.http_client.request(method, url);
 
-        if let Some(ref provider) = self.token_provider {
+        if let Some(jwt) = override_jwt {
+            builder = builder.bearer_auth(jwt);
+        } else if let Some(ref provider) = self.token_provider {
             let bearer = provider.bearer().await?;
             builder = builder.bearer_auth(bearer);
         } else if let Some(ref token) = self.config.jwt_token {
@@ -868,15 +1301,17 @@ impl CantonAdapter {
             .unwrap_or_else(|| self.config.act_as_party.clone());
 
         let request_body = JsonApiSubmitAndWaitRequest {
-            commands: vec![JsonApiCommandV2::Create {
-                template_id: template_id.to_string(),
-                create_arguments: payload,
-            }],
-            command_id: command_id.clone(),
-            user_id: self.config.application_id.clone(),
-            act_as: vec![act_as_party],
-            read_as: Vec::new(),
-            workflow_id: None,
+            commands: JsCommands {
+                commands: vec![JsonApiCommandV2::Create {
+                    template_id: template_id.to_string(),
+                    create_arguments: payload,
+                }],
+                command_id: command_id.clone(),
+                user_id: self.config.application_id.clone(),
+                act_as: vec![act_as_party],
+                read_as: Vec::new(),
+                workflow_id: None,
+            },
         };
 
         debug!(
@@ -908,6 +1343,17 @@ impl CantonAdapter {
                 .text()
                 .await
                 .unwrap_or_default();
+            // The sanitized error is what leaves the node toward the
+            // caller. We additionally log the upstream body verbatim
+            // at DEBUG so operators can diagnose wire-shape problems
+            // in their own logs without exposing Canton internals to
+            // RPC callers.
+            debug!(
+                target: "canton.upstream",
+                "Canton submit upstream body (status {}): {}",
+                status,
+                error_text
+            );
             let sanitized = Self::sanitize_canton_http_error(status, error_text.len());
             error!("Canton JSON Ledger API v2 submit error: {}", sanitized);
             return Err(BridgeError::AdapterError(sanitized));
@@ -973,17 +1419,19 @@ impl CantonAdapter {
             .unwrap_or_else(|| self.config.act_as_party.clone());
 
         let request_body = JsonApiSubmitAndWaitRequest {
-            commands: vec![JsonApiCommandV2::Exercise {
-                template_id: template_id.to_string(),
-                contract_id: contract_id.to_string(),
-                choice: choice.to_string(),
-                choice_argument: argument,
-            }],
-            command_id: command_id.clone(),
-            user_id: self.config.application_id.clone(),
-            act_as: vec![act_as_party],
-            read_as: Vec::new(),
-            workflow_id: None,
+            commands: JsCommands {
+                commands: vec![JsonApiCommandV2::Exercise {
+                    template_id: template_id.to_string(),
+                    contract_id: contract_id.to_string(),
+                    choice: choice.to_string(),
+                    choice_argument: argument,
+                }],
+                command_id: command_id.clone(),
+                user_id: self.config.application_id.clone(),
+                act_as: vec![act_as_party],
+                read_as: Vec::new(),
+                workflow_id: None,
+            },
         };
 
         debug!(
@@ -1155,8 +1603,7 @@ impl CantonAdapter {
     ///    — the canonical 2026 lookup for OAuth2 client-credentials
     ///    callers. Canton 3.5+ User Management Service (CIP-26)
     ///    exposes `primaryParty` for the authenticated principal.
-    ///    Verified working against `json.devnet.tenzro.network`
-    ///    returning shape `{user: {id, primaryParty: "<hint>::<hash>", ...}}`.
+    ///    Returns shape `{user: {id, primaryParty: "<hint>::<hash>", ...}}`.
     ///    (There is no `/users/me` alias on Canton 3.5.1 — that
     ///    endpoint returns 404 `USER_NOT_FOUND`.)
     /// 2. Fallback: scan active contracts for any party string
@@ -1287,10 +1734,17 @@ impl CantonAdapter {
         &self,
         template_ids: Vec<String>,
         query: serde_json::Value,
+        party_fq_override: Option<&str>,
     ) -> Result<Vec<JsonApiContract>> {
         // Resolve the bare party hint to its fully-qualified form first
         // — Canton 3.4+ rejects unresolved hints in `filtersByParty`.
-        let party_fq = self.resolve_act_as_party_fq().await?;
+        // When `party_fq_override` is provided (per-tenant query path),
+        // use it directly; otherwise fall back to the participant
+        // default.
+        let party_fq = match party_fq_override {
+            Some(p) => p.to_string(),
+            None => self.resolve_act_as_party_fq().await?,
+        };
 
         // Then fetch the current ledger-end offset. Canton rejects null
         // / empty-string / stale offsets on this endpoint.
@@ -1706,7 +2160,7 @@ impl CantonAdapter {
         ];
 
         let contracts = self
-            .query_contracts(templates, serde_json::Value::Null)
+            .query_contracts(templates, serde_json::Value::Null, None)
             .await?;
 
         let events: Vec<CantonInboundEvent> = contracts
@@ -1855,7 +2309,7 @@ impl BridgeAdapter for CantonAdapter {
         });
 
         match self
-            .query_contracts(vec!["TenzroBridge:Message".to_string()], query_filter)
+            .query_contracts(vec!["TenzroBridge:Message".to_string()], query_filter, None)
             .await
         {
             Ok(contracts) => {
@@ -1972,6 +2426,7 @@ impl BridgeAdapter for CantonAdapter {
             .query_contracts(
                 vec![format!("TenzroBridge:{}", request.asset_id)],
                 token_query,
+                None,
             )
             .await
             .unwrap_or_else(|e| {
@@ -2069,6 +2524,7 @@ impl BridgeAdapter for CantonAdapter {
                     .query_contracts(
                         vec![format!("TenzroBridge:{}", asset_id)],
                         query_filter,
+                        None,
                     )
                     .await
                 {
@@ -2304,17 +2760,10 @@ impl CantonConfig {
         self
     }
 
-    /// Returns the verified Tenzro-operated Canton devnet profile.
-    ///
-    /// Resolves to `https://json.devnet.tenzro.network/v2`, the GCE-fronted
-    /// JSON Ledger API for the Tenzro Canton validator. The participant
-    /// gRPC API (port 5001) is **not** externally exposed — this profile
-    /// is JSON-only.
-    ///
-    /// The primary party `tenzro-validator-1` is the shared validator party
-    /// allocated by the Splice validator process. Tenzro mediates all
-    /// Canton access on this party; external clients authenticate to the
-    /// Tenzro node via the API key surface, not directly to Canton.
+    /// Returns the bundled devnet profile. Intended for the Tenzro
+    /// node's runtime configuration; external clients authenticate to
+    /// the Tenzro node via the API key surface, not directly to
+    /// Canton.
     pub fn devnet() -> Self {
         Self {
             participant_host: "json.devnet.tenzro.network".to_string(),
@@ -2479,17 +2928,22 @@ pub enum DamlEvent {
 
 /// One Daml command inside a `JsCommands` envelope. The v2 endpoint accepts
 /// a tagged enum (`CreateCommand` / `ExerciseCommand` / `CreateAndExerciseCommand`).
+/// `JsCommand` enum encoded with circe's default external-tagging:
+/// each variant serialises as `{"<VariantName>": {...fields...}}`.
+/// Canton 3.5 rejects the alternative `{"commandType": "..", ...}`
+/// shape with `JSON decoding to CNil should never happen at
+/// 'commands.commands[0]'` — circe's discriminator for the
+/// `JsCommand` sealed trait is the outer field name itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "commandType", rename_all = "camelCase")]
 enum JsonApiCommandV2 {
-    #[serde(rename_all = "camelCase")]
+    #[serde(rename = "CreateCommand")]
     Create {
         #[serde(rename = "templateId")]
         template_id: String,
         #[serde(rename = "createArguments")]
         create_arguments: serde_json::Value,
     },
-    #[serde(rename_all = "camelCase")]
+    #[serde(rename = "ExerciseCommand")]
     Exercise {
         #[serde(rename = "templateId")]
         template_id: String,
@@ -2501,10 +2955,21 @@ enum JsonApiCommandV2 {
     },
 }
 
-/// `JsCommands` envelope for `/v2/commands/submit-and-wait-for-transaction`.
-/// (Migrated from deprecated `/submit-and-wait-for-transaction-tree` removed in Canton 3.5)
+/// Canton 3.5 `POST /v2/commands/submit-and-wait-for-transaction`
+/// request envelope.
+///
+/// Canton 3.5 wraps the `JsCommands` payload under a top-level
+/// `commands` key. A flat body (sending the `JsCommands` fields
+/// directly at the root) is rejected with HTTP 400 /
+/// `INVALID_ARGUMENT`, surfacing as `-32000 "Canton command
+/// submission failed"` at the JSON-RPC layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JsonApiSubmitAndWaitRequest {
+    commands: JsCommands,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JsCommands {
     commands: Vec<JsonApiCommandV2>,
     #[serde(rename = "commandId")]
     command_id: String,
@@ -2809,6 +3274,50 @@ pub struct JsonApiContract {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the `submit-and-wait-for-transaction` request body to the
+    /// shape a live Canton 3.5 participant accepts: `JsCommands`
+    /// nested one level under a top-level `commands` key. A
+    /// regression to the flat form would be rejected by the
+    /// participant with `Missing required field at 'commands.commands'`
+    /// (which surfaces as `-32000 "Canton command submission failed"`
+    /// at the JSON-RPC layer). Verifiable offline — no node required.
+    #[test]
+    fn submit_request_nests_jscommands_under_commands_key() {
+        let request_body = JsonApiSubmitAndWaitRequest {
+            commands: JsCommands {
+                commands: vec![JsonApiCommandV2::Create {
+                    template_id: "#auction:Auction:Auction".to_string(),
+                    create_arguments: serde_json::json!({ "seller": "Seller::abc" }),
+                }],
+                command_id: "cmd-1".to_string(),
+                user_id: "tenzro-auction-app".to_string(),
+                act_as: vec!["Seller::abc".to_string()],
+                read_as: Vec::new(),
+                workflow_id: None,
+            },
+        };
+        let serialized = serde_json::to_value(&request_body).unwrap();
+        let expected = serde_json::json!({
+            "commands": {
+                "commands": [{
+                    "CreateCommand": {
+                        "templateId": "#auction:Auction:Auction",
+                        "createArguments": { "seller": "Seller::abc" }
+                    }
+                }],
+                "commandId": "cmd-1",
+                "userId": "tenzro-auction-app",
+                "actAs": ["Seller::abc"],
+                "readAs": []
+            }
+        });
+        assert_eq!(serialized, expected);
+        let obj = serialized.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert!(obj["commands"].is_object());
+        assert!(obj["commands"]["commands"].is_array());
+    }
 
     #[tokio::test]
     async fn test_canton_adapter_creation() {

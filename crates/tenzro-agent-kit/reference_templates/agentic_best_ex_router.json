@@ -1,0 +1,75 @@
+{
+  "template_id": "ref-agentic-best-ex-router-v1",
+  "name": "Agentic Best-Execution Router",
+  "description": "Smart-order-router agent that takes a buy/sell intent for a token across multiple venues (on-chain DEX aggregators, cross-chain bridge intents, Tenzro CLOB), splits the order to minimize slippage plus fees plus settlement latency, and emits a single Capital Intent settled atomically. Each route quote carries a TEE-attested timestamp.",
+  "template_type": "specialist",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1749470400,
+  "updated_at": 1749470400,
+  "capabilities": [
+    {
+      "id": "fan_out_quotes",
+      "name": "Fan-Out Quotes",
+      "description": "Issues parallel quote requests to every configured venue (on-chain DEX, bridge intent, CLOB), collects responses within a deadline, scores by all-in cost including slippage, fees, and expected settlement latency",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"token_in\":{\"type\":\"string\"},\"token_out\":{\"type\":\"string\"},\"size\":{\"type\":\"string\"},\"deadline_ms\":{\"type\":\"integer\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"venue_scores\":{\"type\":\"array\"},\"best_split\":{\"type\":\"object\"}}}"
+    },
+    {
+      "id": "execute_split",
+      "name": "Execute Split Order",
+      "description": "Builds a Capital Intent that executes the chosen split across selected venues atomically, with per-leg slippage cap and overall worst-execution cap. Settlement is one-shot via the on-chain escrow primitive",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"best_split\":{\"type\":\"object\"},\"max_total_slippage_bps\":{\"type\":\"integer\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"intent_id\":{\"type\":\"string\"},\"filled_amount\":{\"type\":\"string\"},\"average_price\":{\"type\":\"string\"},\"venue_fills\":{\"type\":\"array\"}}}"
+    },
+    {
+      "id": "post_trade_attest",
+      "name": "Post-Trade Attestation",
+      "description": "Emits a TEE-attested fill report binding the executed price and venue split to a wall-clock timestamp so the consumer can reconstruct best-ex compliance evidence",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"intent_id\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"attestation_hash\":{\"type\":\"string\"},\"attested_at_ms\":{\"type\":\"integer\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 2048,
+    "min_storage_mb": 1024,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": true,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are a smart-order-routing agent. Your responsibilities: (1) Fan out parallel quote requests to every configured venue: on-chain DEX aggregators, bridge intent solvers, and the Tenzro CLOB. (2) Collect responses within the configured deadline (default 500ms for tier-1 sizes, 2s for tier-3). (3) Score by all-in cost: slippage + fees + expected settlement latency penalty. (4) Choose the optimal split (single-venue if dominant; multi-venue if savings exceed routing-overhead). (5) Execute via a Capital Intent that settles atomically through the on-chain escrow primitive — never partial-fill across venues without rollback. (6) Emit a TEE-attested post-trade fill report so the consumer can reconstruct best-execution compliance evidence. NEVER exceed the configured worst-case slippage cap. NEVER execute a quote whose validity window has lapsed.",
+  "examples": [
+    {
+      "description": "Multi-venue split",
+      "user_input": "Route a large size order between two tokens with a worst-case slippage cap",
+      "expected_output": "Fanned out to configured venues; collected quotes within deadline. Best split chosen with savings vs single-venue. Capital Intent executed atomically; post-trade fill report attested with wall-clock and monotonic counter."
+    }
+  ],
+  "tags": ["best-execution", "smart-order-routing", "capital-intent", "tee-attested", "atomic-settlement"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/agentic-best-ex-router",
+  "policy": {
+    "tools_allowlist": [
+      { "tool_id": "tenzro_capitalIntentOpen", "tool_type": "rpc" },
+      { "tool_id": "tenzro_capitalIntentExecute", "tool_type": "rpc" },
+      { "tool_id": "tenzro_createEscrow", "tool_type": "rpc" },
+      { "tool_id": "tenzro_releaseEscrow", "tool_type": "rpc" }
+    ],
+    "delegation_scope": {
+      "max_per_op_wei": "10000000000000000000000000",
+      "max_per_day_wei": "100000000000000000000000000",
+      "max_tx_count_per_day": 1000,
+      "allowed_chains": ["tenzro", "ethereum", "solana", "base"],
+      "allowed_protocols": ["mpp", "ap2", "x402"]
+    },
+    "hard_caps": {
+      "per_operation_value": "10000000000000000000000000",
+      "per_day_value": "100000000000000000000000000"
+    }
+  }
+}

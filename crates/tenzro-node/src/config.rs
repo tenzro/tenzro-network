@@ -266,6 +266,68 @@ pub struct BridgeConfig {
     /// Wormhole adapter configuration (optional).
     #[serde(default = "BridgeConfig::default_adapter_enabled")]
     pub wormhole: Option<BridgeAdapterConfig>,
+
+    /// Chainlink Data Feeds configuration for the fee-in-TNZO oracle.
+    /// When set + `enabled = true`, the bridge router's fee surface uses
+    /// `ChainlinkFeedFeeOracle` (with live `eth_call` to AggregatorV3Interface)
+    /// instead of falling back to the governance-set rate table.
+    #[serde(default)]
+    pub chainlink_feeds: Option<ChainlinkFeedsConfig>,
+}
+
+/// Chainlink Data Feeds configuration for the bridge fee oracle.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChainlinkFeedsConfig {
+    /// Master switch. Off by default; operators opt in.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Ethereum mainnet RPC URL for `eth_call` queries against the
+    /// AggregatorV3 proxy contracts. Operators should point at a private
+    /// dRPC endpoint or self-hosted Ethereum node in production.
+    #[serde(default)]
+    pub rpc_url: Option<String>,
+
+    /// TNZO/USD feed address (hex). When `None`, the oracle cannot derive
+    /// cross-feed rates and falls back to the governance table.
+    #[serde(default)]
+    pub tnzo_usd_feed: Option<String>,
+
+    /// Per-(adapter, dest_chain) destination-native USD feed addresses
+    /// (hex). Format: `vec![("layerzero", "eip155:1", "0x5f4e...")]`.
+    #[serde(default)]
+    pub dest_native_feeds: Vec<DestNativeFeedConfig>,
+
+    /// Markup applied to live-feed-derived quotes, basis points. Default 100 (1%).
+    #[serde(default = "ChainlinkFeedsConfig::default_markup_bps")]
+    pub markup_bps: u32,
+
+    /// Quote validity window for live-feed-backed quotes, ms. Default 60_000.
+    #[serde(default = "ChainlinkFeedsConfig::default_valid_window_ms")]
+    pub valid_window_ms: u64,
+}
+
+impl ChainlinkFeedsConfig {
+    fn default_markup_bps() -> u32 {
+        100
+    }
+    fn default_valid_window_ms() -> u64 {
+        60_000
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DestNativeFeedConfig {
+    /// Bridge adapter id: `layerzero` | `ccip` | `wormhole` | `debridge` |
+    /// `hyperlane` | `axelar` | `lifi` | `canton`.
+    pub adapter: String,
+    /// Destination chain CAIP-2 identifier (e.g. `eip155:1`, `solana:mainnet-beta`).
+    pub dest_chain: String,
+    /// AggregatorV3 proxy address for `(dest_native / USD)`.
+    pub feed_address: String,
+    /// Optional staleness tier: `major` | `longtail`. Default `major`.
+    #[serde(default)]
+    pub tier: Option<String>,
 }
 
 impl BridgeConfig {
@@ -296,6 +358,7 @@ impl Default for BridgeConfig {
             debridge: Self::default_adapter_enabled(),
             lifi: Self::default_adapter_enabled(),
             wormhole: Self::default_adapter_enabled(),
+            chainlink_feeds: None,
         }
     }
 }
@@ -575,17 +638,16 @@ pub struct CantonConfig {
     /// Whether Canton/DAML VM is enabled
     pub enabled: bool,
 
-    /// When `true`, the node connects to the Tenzro-operated Canton devnet
-    /// (`json.devnet.tenzro.network`) over TLS:443, authenticates via the
-    /// Auth0 client-credentials flow, and acts as the shared validator
-    /// party `tenzro-validator-1`. Overrides `host`/`port`. Set via the
-    /// `CANTON_DEVNET=true` env var.
+    /// When `true`, the node uses the bundled devnet participant
+    /// profile (TLS:443, OAuth2 client-credentials). Overrides
+    /// `host`/`port`. Set via the `CANTON_DEVNET=true` env var.
     #[serde(default)]
     pub devnet: bool,
 
-    /// Auth0 client secret for the Canton devnet client-credentials grant.
-    /// Loaded from the `CANTON_DEVNET_CLIENT_SECRET` env var when `devnet`
-    /// is true. Never serialized to config files even if set programmatically.
+    /// Upstream client_secret for the Canton devnet client-credentials
+    /// grant. Loaded from the `CANTON_DEVNET_CLIENT_SECRET` env var
+    /// when `devnet` is true. Never serialized to config files even
+    /// if set programmatically.
     #[serde(skip_serializing, default)]
     pub devnet_client_secret: Option<String>,
 
@@ -600,7 +662,7 @@ pub struct CantonConfig {
 
     /// Custom OAuth2 client-credentials configuration for an operator-run
     /// Canton validator. When set, the node uses this in place of the
-    /// hard-coded Tenzro Auth0 issuer. Mutually exclusive with `static_jwt`.
+    /// bundled devnet credentials. Mutually exclusive with `static_jwt`.
     ///
     /// All four fields must be present: `token_url`, `client_id`,
     /// `client_secret`, `audience`. `scope` is optional and defaults to
@@ -616,6 +678,60 @@ pub struct CantonConfig {
     /// exclusive with `oauth`. Env var: `CANTON_JWT_TOKEN`.
     #[serde(skip_serializing, default)]
     pub static_jwt: Option<String>,
+
+    /// Per-tenant identity-provider configuration (Stage 2). When
+    /// enabled, `tenzro_createApiKey` provisions each tenant with
+    /// their own upstream OAuth2 client, registers a dedicated Canton
+    /// IdentityProviderConfig for that client, creates the user under
+    /// that IDP, allocates a party under that IDP, and grants
+    /// CanActAs. The tenant holds their own client_secret (returned
+    /// once at issuance) and presents their own Canton JWT via
+    /// `X-Canton-Auth: Bearer <jwt>` on subsequent canton-scoped
+    /// requests; the Tenzro node forwards it as-is.
+    ///
+    /// Off by default — devnet uses the Stage 1 shared-principal
+    /// model. Flip on for testnet/mainnet.
+    #[serde(default)]
+    pub identity_providers: CantonIdentityProvidersConfig,
+}
+
+/// Per-tenant IDP (Stage 2) configuration. Disabled by default —
+/// devnet keeps the Stage 1 shared-principal flow until the operator
+/// explicitly enables this block.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CantonIdentityProvidersConfig {
+    /// Master switch. Off in devnet, on for testnet/mainnet.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Upstream IdP Management API base URL (e.g. the operator's own
+    /// Auth0 domain or an equivalent OIDC management surface).
+    /// Required when `enabled` is true so the node can mint per-tenant
+    /// upstream clients. Loaded from `CANTON_IDP_MGMT_URL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mgmt_url: Option<String>,
+
+    /// Bearer token for the IdP Management API. Loaded from
+    /// `CANTON_IDP_MGMT_TOKEN` and never serialized.
+    #[serde(skip_serializing, default)]
+    pub mgmt_token: Option<String>,
+
+    /// Audience to use when registering Canton IdentityProviderConfig
+    /// entries for tenant clients. Typically the Canton participant's
+    /// API audience. Loaded from `CANTON_IDP_AUDIENCE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canton_audience: Option<String>,
+
+    /// Default issuer URL the upstream IdP mints tokens under. The
+    /// node registers each tenant's Canton IDP with this issuer.
+    /// Loaded from `CANTON_IDP_ISSUER_URL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer_url: Option<String>,
+
+    /// JWKS URL for the upstream IdP. Canton uses this to verify
+    /// tenant-presented JWTs. Loaded from `CANTON_IDP_JWKS_URL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_url: Option<String>,
 }
 
 /// Operator-supplied OAuth2 client-credentials configuration for talking
@@ -648,6 +764,7 @@ impl Default for CantonConfig {
             tls: false,
             oauth: None,
             static_jwt: None,
+            identity_providers: CantonIdentityProvidersConfig::default(),
         }
     }
 }
@@ -688,6 +805,7 @@ impl CantonConfig {
                 tls: true,
                 oauth: None,
                 static_jwt: None,
+                identity_providers: CantonIdentityProvidersConfig::from_env(),
             };
         }
 
@@ -749,6 +867,39 @@ impl CantonConfig {
             tls,
             oauth,
             static_jwt,
+            identity_providers: CantonIdentityProvidersConfig::from_env(),
+        }
+    }
+}
+
+impl CantonIdentityProvidersConfig {
+    /// Load Stage 2 IDP config from environment variables.
+    ///
+    /// All fields are optional; the master switch `enabled` defaults
+    /// to `false`, keeping the Stage 1 shared-principal flow active
+    /// in devnet. Flip `CANTON_IDP_ENABLED=true` in testnet/mainnet
+    /// configs after also supplying the management/audience/issuer/
+    /// jwks endpoints.
+    pub fn from_env() -> Self {
+        let enabled = std::env::var("CANTON_IDP_ENABLED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(false);
+        Self {
+            enabled,
+            mgmt_url: std::env::var("CANTON_IDP_MGMT_URL").ok().filter(|v| !v.is_empty()),
+            mgmt_token: std::env::var("CANTON_IDP_MGMT_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            canton_audience: std::env::var("CANTON_IDP_AUDIENCE")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            issuer_url: std::env::var("CANTON_IDP_ISSUER_URL")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            jwks_url: std::env::var("CANTON_IDP_JWKS_URL")
+                .ok()
+                .filter(|v| !v.is_empty()),
         }
     }
 }
@@ -1323,6 +1474,7 @@ mod tests {
             tls: true,
             oauth: None,
             static_jwt: None,
+            identity_providers: CantonIdentityProvidersConfig::default(),
         };
 
         // Save: the serializer must drop the secret. This is the half of the

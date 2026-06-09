@@ -726,6 +726,7 @@ async fn main() -> Result<()> {
         };
     let mut canton_shutdown_rx = shutdown_tx.subscribe();
     let canton_api_key_mgr = node_arc.api_key_manager().cloned();
+    let canton_analytics_mgr = node_arc.canton_analytics().cloned();
     tokio::spawn(async move {
         tokio::select! {
             result = mcp::canton::start_canton_mcp_server(
@@ -735,6 +736,7 @@ async fn main() -> Result<()> {
                 canton_jwt_token,
                 canton_token_provider,
                 canton_api_key_mgr,
+                canton_analytics_mgr,
             ) => {
                 if let Err(e) = result { error!("Canton MCP server error: {}", e); }
             }

@@ -1,0 +1,73 @@
+{
+  "template_id": "ref-agentic-bond-pricer-rfq-v1",
+  "name": "Agentic Bond Pricer + RFQ Responder",
+  "description": "Fixed-income agent that prices tokenized bonds on demand, responds to Request-for-Quote flows from institutional venues, and posts executable two-way prices on the Tenzro CLOB. Uses on-chain oracle yield curves and liquidity-weighted last-trade for spread, attested via TEE.",
+  "template_type": "specialist",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1749470400,
+  "updated_at": 1749470400,
+  "capabilities": [
+    {
+      "id": "bond_price",
+      "name": "Bond Price Compute",
+      "description": "Given a bond identifier, computes the clean and dirty price, accrued interest, and yield-to-maturity from the configured yield curve and last-trade data",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"bond_identifier\":{\"type\":\"string\"},\"face_value\":{\"type\":\"string\"},\"settlement_date\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"clean_price\":{\"type\":\"string\"},\"dirty_price\":{\"type\":\"string\"},\"accrued_interest\":{\"type\":\"string\"},\"ytm_bps\":{\"type\":\"integer\"},\"spread_bps\":{\"type\":\"integer\"}}}"
+    },
+    {
+      "id": "rfq_respond",
+      "name": "RFQ Response",
+      "description": "Builds a two-way quote (bid + ask) sized to the RFQ size and counterparty tier, includes a TEE-attested timestamp and validity window, and emits it as a Capital Intent Quote",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"rfq_id\":{\"type\":\"string\"},\"bond_identifier\":{\"type\":\"string\"},\"size\":{\"type\":\"string\"},\"counterparty_tier\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"bid\":{\"type\":\"string\"},\"ask\":{\"type\":\"string\"},\"size_at_bid\":{\"type\":\"string\"},\"size_at_ask\":{\"type\":\"string\"},\"valid_until_ms\":{\"type\":\"integer\"},\"attested_at_ms\":{\"type\":\"integer\"}}}"
+    },
+    {
+      "id": "clob_post_two_way",
+      "name": "Post Two-Way Quote on CLOB",
+      "description": "Posts the computed bid and ask to the Tenzro CLOB orderbook with a configured maximum exposure, refreshing every quote-tick (default 5 seconds)",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"bond_identifier\":{\"type\":\"string\"},\"bid\":{\"type\":\"string\"},\"ask\":{\"type\":\"string\"},\"max_exposure_usd\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"bid_order_id\":{\"type\":\"string\"},\"ask_order_id\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 4096,
+    "min_storage_mb": 2048,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": true,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are an agentic bond pricer and RFQ responder operating on Tenzro's fixed-income surface. Your responsibilities: (1) Maintain live yield-curve snapshots for the configured currencies via on-chain oracles. (2) On RFQ arrival, compute a fair clean and dirty price within 100ms and respond with a two-way quote sized for the counterparty tier. (3) Apply a counterparty-tier spread penalty for lower tiers. (4) Every quote MUST carry a TEE-attested timestamp and a validity window (default 10s for live RFQs, 60s for resting quotes). (5) When the quote is hit, fire a Capital Intent execute. (6) Refresh resting CLOB quotes every 5s with the latest curve. NEVER quote outside the configured max-exposure-USD per identifier. NEVER serve a stale quote (validity window already lapsed).",
+  "examples": [
+    {
+      "description": "RFQ on a tokenized bond",
+      "user_input": "RFQ for size X of bond identifier abc, counterparty tier Y, settlement T+0",
+      "expected_output": "Loaded curve at attested wall-time. Computed clean + dirty + accrued + YTM + spread vs curve. Two-way quote emitted with bid and ask, sized per tier, attested at wall-clock and monotonic counter with validity window."
+    }
+  ],
+  "tags": ["fixed-income", "bonds", "rfq", "clob", "tee-attested", "capital-intent"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/agentic-bond-pricer-rfq",
+  "policy": {
+    "tools_allowlist": [
+      { "tool_id": "tenzro_capitalIntentQuote", "tool_type": "rpc" },
+      { "tool_id": "tenzro_capitalIntentExecute", "tool_type": "rpc" }
+    ],
+    "delegation_scope": {
+      "max_per_op_wei": "100000000000000000000000000",
+      "max_per_day_wei": "1000000000000000000000000000",
+      "max_tx_count_per_day": 5000,
+      "allowed_chains": ["tenzro"],
+      "allowed_protocols": ["mpp"]
+    },
+    "hard_caps": {
+      "per_operation_value": "100000000000000000000000000",
+      "per_day_value": "1000000000000000000000000000"
+    }
+  }
+}

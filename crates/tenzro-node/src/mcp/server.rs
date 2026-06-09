@@ -3053,7 +3053,14 @@ async fn rpc_dispatch(node: &Arc<TenzroNode>, method: &str, params: serde_json::
         }
     }
 
-    let response = crate::rpc::handle_request(node, request, &auth_ctx, h.x_tenzro_api_key.as_deref()).await;
+    let response = crate::rpc::handle_request(
+        node,
+        request,
+        &auth_ctx,
+        h.x_tenzro_api_key.as_deref(),
+        None,
+    )
+    .await;
     if let Some(result) = response.result {
         Ok(result)
     } else if let Some(error) = response.error {
@@ -3281,6 +3288,152 @@ pub struct CapitalIntentSettleParams {
     pub intent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payee: Option<String>,
+}
+
+// ─── Passkey-first wallet MCP tool params ───
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeyEnrollParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub passkey_public_key_hex: String,
+    pub credential_id_hex: String,
+    pub ml_dsa_public_key_hex: String,
+    #[serde(default)]
+    pub salt: u64,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeySignParams {
+    pub account_address: String,
+    pub op_hash_hex: String,
+    pub assertion: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ml_dsa_signature_hex: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeyAddGuardianParams {
+    pub account_address: String,
+    pub guardian_ed25519_pubkey_hex: String,
+    pub guardian_ml_dsa_pubkey_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeyInitiateRecoveryParams {
+    pub account_address: String,
+    pub new_passkey_public_key_hex: String,
+    pub new_credential_id_hex: String,
+    pub new_ml_dsa_public_key_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeySubmitRecoverySignatureParams {
+    pub recovery_id: String,
+    pub guardian_index: u32,
+    pub composite_signature_hex: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeyFinalizeRecoveryParams {
+    pub recovery_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeyGrantSessionKeyParams {
+    pub account_address: String,
+    pub session_pubkey_hex: String,
+    pub allowed_selectors_hex: Vec<String>,
+    #[serde(default)]
+    pub allowed_targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_value_per_call_wei: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_value_wei: Option<String>,
+    pub valid_after_unix: u64,
+    pub valid_until_unix: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeyRevokeSessionKeyParams {
+    pub account_address: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeySetSpendingLimitParams {
+    pub account_address: String,
+    pub per_tx_cap_wei: String,
+    pub daily_cap_wei: String,
+    pub authenticator_pubkey_hex: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeyAddHardwareSignerParams {
+    pub account_address: String,
+    pub device_kind: String,
+    pub public_key_hex: String,
+    #[serde(default)]
+    pub required_always: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_above_wei: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeyGetSmartAccountParams {
+    pub account_address: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeyListPendingRecoveriesParams {
+    pub account_address: String,
+}
+
+// ─── Wave 7 / 9 Params structs ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UrwaTokenIdParams {
+    #[schemars(description = "32-byte hex-encoded token_id (with or without 0x prefix)")]
+    pub token_id_hex: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UrwaFrozenLookupParams {
+    #[schemars(description = "32-byte hex-encoded token_id (with or without 0x prefix)")]
+    pub token_id_hex: String,
+    #[schemars(description = "20-byte hex-encoded EVM account address (with or without 0x prefix)")]
+    pub account_hex: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Ivms101HashParams {
+    #[schemars(description = "IVMS101 Travel Rule envelope JSON payload")]
+    pub envelope: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SignedAgentCardHashParams {
+    #[schemars(description = "A2A AgentCard JSON payload to hash")]
+    pub agent_card: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct QuoteBridgeFeeParams {
+    #[schemars(description = "Bridge adapter identifier: layerzero | ccip | wormhole | debridge | hyperlane | axelar | lifi | canton")]
+    pub adapter: String,
+    #[schemars(description = "Destination chain identifier (prefer CAIP-2 form, e.g. eip155:1, solana:mainnet-beta)")]
+    pub dest_chain: String,
+    #[schemars(description = "Destination-native fee in the destination chain's smallest unit, as a u128 decimal string")]
+    pub native_fee_smallest_unit: String,
 }
 
 #[tool_router]
@@ -8600,7 +8753,8 @@ impl TenzroMcpServer {
                 "token_type": format!("{:?}", d.token_type),
                 "evm_address": d.vm_addresses.evm_hex(),
                 "svm_mint": d.vm_addresses.svm_hex(),
-                "daml_template": d.vm_addresses.daml_template_id,
+                "daml_template_id": d.vm_addresses.daml_template_id,
+                "tempo_address": d.vm_addresses.tempo_hex(),
                 "permissions": {
                     "mintable": d.permissions.mintable,
                     "burnable": d.permissions.burnable,
@@ -8642,6 +8796,9 @@ impl TenzroMcpServer {
                 "total_supply": d.total_supply.to_string(),
                 "token_type": format!("{:?}", d.token_type),
                 "evm_address": d.vm_addresses.evm_hex(),
+                "svm_mint": d.vm_addresses.svm_hex(),
+                "daml_template_id": d.vm_addresses.daml_template_id.clone(),
+                "tempo_address": d.vm_addresses.tempo_hex(),
             })
         }).collect();
 
@@ -10277,6 +10434,132 @@ impl TenzroMcpServer {
         )
         .await
         .map_err(|e| err_internal(format!("eip7702ProtocolInfo failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Wave-7 + Wave-9 Tools (Wave 1-5 primitives + BridgeFeeOracle) ───
+
+    #[tool(description = "Read the ERC-7943 (uRWA) kill-switch state for a given token_id (32-byte hex). Returns the kill-switch active flag, the canonical 4-byte selectors for the standard uRWA functions, and the precompile addresses backing the on-chain enforcement path.")]
+    async fn urwa_is_kill_switched(
+        &self,
+        Parameters(params): Parameters<UrwaTokenIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_urwaIsKillSwitched",
+            serde_json::json!({ "token_id_hex": params.token_id_hex }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("urwaIsKillSwitched failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read the ERC-7943 (uRWA) frozen-tokens amount for a (token_id, account) pair. Returns the frozen amount in token smallest unit.")]
+    async fn urwa_get_frozen_tokens(
+        &self,
+        Parameters(params): Parameters<UrwaFrozenLookupParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_urwaGetFrozenTokens",
+            serde_json::json!({
+                "token_id_hex": params.token_id_hex,
+                "account_hex": params.account_hex
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("urwaGetFrozenTokens failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Compute the canonical SHA-256 hash for an IVMS101 Travel Rule envelope. The caller passes the envelope JSON; the node returns the binding hash that anchors the envelope to a settlement receipt.")]
+    async fn ivms101_hash(
+        &self,
+        Parameters(params): Parameters<Ivms101HashParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_ivms101Hash",
+            params.envelope,
+        )
+        .await
+        .map_err(|e| err_internal(format!("ivms101Hash failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Return the current node wall-clock as a Tenzro AttestedTimestamp envelope. The returned shape carries wall_ms, monotonic_ns, and TEE vendor (null when the node is not running inside a TEE).")]
+    async fn attested_clock_now(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_attestedClockNow",
+            serde_json::Value::Null,
+        )
+        .await
+        .map_err(|e| err_internal(format!("attestedClockNow failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Enumerate the Wormhole NTT chain catalog supported by this Tenzro deployment. Returns Wormhole chain ids + names + supported Transceiver kinds (wormhole / axelar / layerzero / custom).")]
+    async fn wormhole_ntt_list_chains(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_wormholeNttListChains",
+            serde_json::Value::Null,
+        )
+        .await
+        .map_err(|e| err_internal(format!("wormholeNttListChains failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Compute the canonical hash for an A2A v1.0 SignedAgentCard payload. The caller passes the AgentCard JSON; the node returns the 32-byte hash the domain owner must sign via JWS to produce the SignedAgentCard envelope.")]
+    async fn signed_agent_card_canonical_hash(
+        &self,
+        Parameters(params): Parameters<SignedAgentCardHashParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_signedAgentCardCanonicalHash",
+            params.agent_card,
+        )
+        .await
+        .map_err(|e| err_internal(format!("signedAgentCardCanonicalHash failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Quote the destination-native bridge fee in TNZO for a given (adapter, dest_chain, native_fee_smallest_unit). Read-only quote envelope; the matching tenzro_sponsorBridgeFee RPC consumes the quote to debit the user's TNZO and post a sponsorship receipt.")]
+    async fn quote_bridge_fee_in_tnzo(
+        &self,
+        Parameters(params): Parameters<QuoteBridgeFeeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_quoteBridgeFeeInTnzo",
+            serde_json::json!({
+                "adapter": params.adapter,
+                "dest_chain": params.dest_chain,
+                "native_fee_smallest_unit": params.native_fee_smallest_unit,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("quoteBridgeFeeInTnzo failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Enumerate the canonical per-adapter bridge sponsorship-pool vault addresses. Vault addresses are deterministic SHA-256 over 'tenzro/bridge/sponsorship-vault' || adapter_str (first 20 bytes).")]
+    async fn list_bridge_sponsorship_pools(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listBridgeSponsorshipPools",
+            serde_json::Value::Null,
+        )
+        .await
+        .map_err(|e| err_internal(format!("listBridgeSponsorshipPools failed: {}", e)))?;
         json_result(result)
     }
 
@@ -12590,6 +12873,162 @@ impl TenzroMcpServer {
         let result = rpc_dispatch(&self.node, "tenzro_revokeMyApiKey", payload)
             .await
             .map_err(|e| err_internal(format!("revokeMyApiKey failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Passkey-first wallet custody (Coinbase / Daimo / Argent pattern) ───
+
+    #[tool(description = "Enroll a passkey-bound smart account. Consumes a WebAuthn registration credential (P-256 public key + opaque credential ID + ML-DSA-65 verifying key for hybrid PQ), creates a TDIP human identity, deploys a smart account via the shared AccountFactory, and installs WebAuthnValidator as the primary signer. The signing key never leaves the user's hardware secure element.")]
+    async fn enroll_passkey(
+        &self,
+        Parameters(params): Parameters<PasskeyEnrollParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_enrollPasskey", payload)
+            .await
+            .map_err(|e| err_internal(format!("enrollPasskey failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Verify a WebAuthn assertion against the registered passkey on a smart account. Returns verified=true iff the P-256 leg validates and the embedded challenge matches the supplied user-op hash.")]
+    async fn sign_with_passkey(
+        &self,
+        Parameters(params): Parameters<PasskeySignParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_signWithPasskey", payload)
+            .await
+            .map_err(|e| err_internal(format!("signWithPasskey failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Add a social-recovery guardian to a smart account. The guardian holds an Ed25519 + ML-DSA-65 composite key and will be asked to sign rotation proofs when the user loses access to their primary passkey.")]
+    async fn add_passkey_guardian(
+        &self,
+        Parameters(params): Parameters<PasskeyAddGuardianParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_addGuardian", payload)
+            .await
+            .map_err(|e| err_internal(format!("addGuardian failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Initiate a social-recovery ceremony to rotate a smart account to a freshly enrolled passkey. Returns a recovery_id and the 32-byte op hash that guardians must sign.")]
+    async fn initiate_passkey_recovery(
+        &self,
+        Parameters(params): Parameters<PasskeyInitiateRecoveryParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_initiateRecovery", payload)
+            .await
+            .map_err(|e| err_internal(format!("initiateRecovery failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Submit one guardian's composite (Ed25519 + ML-DSA-65) signature against an in-flight social-recovery ceremony. Returns the running tally and a quorum_reached flag.")]
+    async fn submit_recovery_signature(
+        &self,
+        Parameters(params): Parameters<PasskeySubmitRecoverySignatureParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_submitRecoverySignature", payload)
+            .await
+            .map_err(|e| err_internal(format!("submitRecoverySignature failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Finalize a social-recovery ceremony once guardian quorum is reached. The node installs the new passkey as the smart account's primary WebAuthnValidator.")]
+    async fn finalize_passkey_recovery(
+        &self,
+        Parameters(params): Parameters<PasskeyFinalizeRecoveryParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_finalizeRecovery", payload)
+            .await
+            .map_err(|e| err_internal(format!("finalizeRecovery failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Grant a scoped session key to a smart account so an agent can sign a bounded subset of operations without holding the human's passkey. Permissions: allowed function selectors, target contracts, per-call value cap, cumulative value cap, validity window.")]
+    async fn grant_session_key(
+        &self,
+        Parameters(params): Parameters<PasskeyGrantSessionKeyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_grantSessionKey", payload)
+            .await
+            .map_err(|e| err_internal(format!("grantSessionKey failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Revoke a smart account's session-key validator config.")]
+    async fn revoke_session_key(
+        &self,
+        Parameters(params): Parameters<PasskeyRevokeSessionKeyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_revokeSessionKey", payload)
+            .await
+            .map_err(|e| err_internal(format!("revokeSessionKey failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Install or update the per-account SpendingLimitValidator config (per-tx + daily rolling-window caps).")]
+    async fn set_spending_limit(
+        &self,
+        Parameters(params): Parameters<PasskeySetSpendingLimitParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_setSpendingLimit", payload)
+            .await
+            .map_err(|e| err_internal(format!("setSpendingLimit failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Install a hardware-signer ERC-7579 validator (Ledger / Trezor / GridPlus / YubiKey / generic) as an additional ANDed validator on a smart account.")]
+    async fn add_hardware_signer(
+        &self,
+        Parameters(params): Parameters<PasskeyAddHardwareSignerParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_addHardwareSigner", payload)
+            .await
+            .map_err(|e| err_internal(format!("addHardwareSigner failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch the smart-account summary: address, owner, nonce, deployment status, installed ERC-7579 validators.")]
+    async fn get_smart_account(
+        &self,
+        Parameters(params): Parameters<PasskeyGetSmartAccountParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_getSmartAccount", payload)
+            .await
+            .map_err(|e| err_internal(format!("getSmartAccount failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List every smart account known to the node, including each account's installed validators.")]
+    async fn list_smart_accounts(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_listSmartAccounts", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listSmartAccounts failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List in-flight social-recovery ceremonies for a smart account, with current signature counts and expiration timestamps.")]
+    async fn list_pending_recoveries(
+        &self,
+        Parameters(params): Parameters<PasskeyListPendingRecoveriesParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_listPendingRecoveries", payload)
+            .await
+            .map_err(|e| err_internal(format!("listPendingRecoveries failed: {}", e)))?;
         json_result(result)
     }
 }

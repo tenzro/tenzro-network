@@ -6,6 +6,7 @@
 use crate::error::{Result, TokenError};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tenzro_types::asset::AssetId;
@@ -180,6 +181,29 @@ pub struct NetworkTreasury {
     pending_approvals: RwLock<HashMap<String, Vec<Address>>>,
     /// Optional storage backend for persistence
     storage: Option<Arc<TreasuryStorageBackend>>,
+    /// Per-bridge-adapter sponsorship pool balances. Tracks TNZO held
+    /// on behalf of users who sponsored cross-chain bridge fees (per
+    /// the Cosmos ICS-29 / Hyperlane IGP pattern adapted for Tenzro).
+    /// Keyed by the bridge adapter's canonical string id
+    /// (`layerzero`, `ccip`, `wormhole`, `debridge`, `hyperlane`,
+    /// `axelar`, `lifi`, `canton`). Operators tune `refill_threshold_bps`
+    /// via GovernanceEngine; the off-chain rebalancer reads these
+    /// fields to decide when to top up the relayer.
+    bridge_sponsorship_pools: RwLock<HashMap<String, BridgeSponsorshipPoolRecord>>,
+}
+
+/// Per-bridge-adapter sponsorship pool record persisted in the
+/// NetworkTreasury. Mirrors the shape exposed by
+/// `tenzro_bridge::fee_sponsor::SponsorshipPool`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeSponsorshipPoolRecord {
+    pub adapter: String,
+    /// 20-byte deterministic vault address — `SHA-256(
+    /// "tenzro/bridge/sponsorship-vault" || adapter)[..20]`.
+    pub vault_address: [u8; 20],
+    pub tnzo_balance_wei: u128,
+    pub refill_threshold_bps: u32,
+    pub native_outstanding_smallest_unit: u128,
 }
 
 impl std::fmt::Debug for NetworkTreasury {
@@ -204,6 +228,7 @@ impl NetworkTreasury {
             withdrawal_threshold: RwLock::new(1), // Default: single sig until configured
             pending_approvals: RwLock::new(HashMap::new()),
             storage: None,
+            bridge_sponsorship_pools: RwLock::new(HashMap::new()),
         }
     }
 
@@ -219,6 +244,85 @@ impl NetworkTreasury {
             withdrawal_threshold: RwLock::new(1),
             pending_approvals: RwLock::new(HashMap::new()),
             storage: Some(storage),
+            bridge_sponsorship_pools: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Get a snapshot of all per-bridge sponsorship pools. Read-only.
+    pub fn bridge_sponsorship_pools_snapshot(&self) -> HashMap<String, BridgeSponsorshipPoolRecord> {
+        self.bridge_sponsorship_pools.read().clone()
+    }
+
+    /// Get the per-adapter sponsorship pool record, creating it lazily
+    /// from the canonical vault-address derivation.
+    pub fn get_or_create_bridge_sponsorship_pool(&self, adapter: &str) -> BridgeSponsorshipPoolRecord {
+        let mut pools = self.bridge_sponsorship_pools.write();
+        if let Some(rec) = pools.get(adapter) {
+            return rec.clone();
+        }
+        // SHA-256("tenzro/bridge/sponsorship-vault" || adapter)[..20]
+        let mut h = Sha256::new();
+        h.update(b"tenzro/bridge/sponsorship-vault");
+        h.update(adapter.as_bytes());
+        let d = h.finalize();
+        let mut vault = [0u8; 20];
+        vault.copy_from_slice(&d[..20]);
+        let rec = BridgeSponsorshipPoolRecord {
+            adapter: adapter.to_string(),
+            vault_address: vault,
+            tnzo_balance_wei: 0,
+            refill_threshold_bps: 0,
+            native_outstanding_smallest_unit: 0,
+        };
+        pools.insert(adapter.to_string(), rec.clone());
+        rec
+    }
+
+    /// Credit a user TNZO sponsorship + record the outstanding
+    /// destination-native commitment. Called by the bridge-fee
+    /// sponsor RPC on a successful debit.
+    pub fn sponsor_bridge_fee(
+        &self,
+        adapter: &str,
+        tnzo_paid_wei: u128,
+        native_committed_smallest_unit: u128,
+    ) {
+        let _ = self.get_or_create_bridge_sponsorship_pool(adapter);
+        let mut pools = self.bridge_sponsorship_pools.write();
+        if let Some(rec) = pools.get_mut(adapter) {
+            rec.tnzo_balance_wei = rec.tnzo_balance_wei.saturating_add(tnzo_paid_wei);
+            rec.native_outstanding_smallest_unit = rec
+                .native_outstanding_smallest_unit
+                .saturating_add(native_committed_smallest_unit);
+        }
+    }
+
+    /// Drain the outstanding-native commitment after the relayer
+    /// submits delivery proof. Does NOT touch the TNZO balance — that
+    /// is paid out to the relayer via a separate explicit drain step
+    /// to keep the audit trail clean.
+    pub fn drain_bridge_sponsorship_outstanding(
+        &self,
+        adapter: &str,
+        native_amount: u128,
+    ) {
+        let mut pools = self.bridge_sponsorship_pools.write();
+        if let Some(rec) = pools.get_mut(adapter) {
+            rec.native_outstanding_smallest_unit = rec
+                .native_outstanding_smallest_unit
+                .saturating_sub(native_amount);
+        }
+    }
+
+    /// Set the per-adapter refill threshold (bps). Governance-tunable
+    /// via the GovernanceEngine; off-chain rebalancer triggers a
+    /// treasury top-up when the relayer's destination-native balance
+    /// drops below `outstanding * refill_threshold_bps / 10000`.
+    pub fn set_bridge_sponsorship_refill_threshold(&self, adapter: &str, bps: u32) {
+        let _ = self.get_or_create_bridge_sponsorship_pool(adapter);
+        let mut pools = self.bridge_sponsorship_pools.write();
+        if let Some(rec) = pools.get_mut(adapter) {
+            rec.refill_threshold_bps = bps;
         }
     }
 

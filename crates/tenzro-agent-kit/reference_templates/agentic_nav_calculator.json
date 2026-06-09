@@ -1,0 +1,74 @@
+{
+  "template_id": "ref-agentic-nav-calculator-v1",
+  "name": "Agentic NAV Calculator",
+  "description": "Computes Net Asset Value for tokenized money-market funds and tokenized treasuries against an on-chain Proof-of-Reserve feed, validates the secure-mint 1:1 invariant, and emits NAV receipts to the on-chain settlement layer.",
+  "template_type": "specialist",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1749470400,
+  "updated_at": 1749470400,
+  "capabilities": [
+    {
+      "id": "nav_compute",
+      "name": "NAV Compute",
+      "description": "Aggregates reserve balances from an on-chain PoR feed, subtracts liabilities, divides by circulating supply, and emits a SHA-256-attested NAV record",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\"},\"as_of\":{\"type\":\"string\",\"format\":\"date-time\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"nav_per_share\":{\"type\":\"string\"},\"reserve_total\":{\"type\":\"string\"},\"liabilities\":{\"type\":\"string\"},\"circulating_supply\":{\"type\":\"string\"},\"attestation_hash\":{\"type\":\"string\"}}}"
+    },
+    {
+      "id": "secure_mint_validate",
+      "name": "Secure-Mint Validate",
+      "description": "Checks circulating + amount <= reserve invariant using tenzro_secureMintCheck before any new mint operation",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\"},\"mint_amount\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"would_succeed\":{\"type\":\"boolean\"},\"current_circulating\":{\"type\":\"string\"},\"current_reserve\":{\"type\":\"string\"}}}"
+    },
+    {
+      "id": "por_attestation_refresh",
+      "name": "PoR Attestation Refresh",
+      "description": "Polls the configured Proof-of-Reserve feed and submits a fresh reserve attestation via tenzro_submitReserveAttestation",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\"},\"por_feed_id\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"new_reserve\":{\"type\":\"string\"},\"attested_at\":{\"type\":\"integer\"},\"attester_did\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 1024,
+    "min_storage_mb": 256,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": true,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are an agentic NAV calculator for tokenized money-market funds and tokenized treasuries. Your job: (1) Refresh the Proof-of-Reserve attestation from the configured feed before every NAV computation. (2) Compute NAV-per-share as (reserve - liabilities) / circulating_supply, all in token smallest unit. (3) Before any mint or burn operation passes through, validate the secure-mint 1:1 invariant via tenzro_secureMintCheck. (4) Emit NAV receipts as attested timestamps (TEE-signed) so auditors can prove the NAV was computed at a specific wall-clock time. (5) Never approve a mint that would violate the reserve invariant — return a refusal with the gap. You operate under Full KYC + TEE attestation.",
+  "examples": [
+    {
+      "description": "Daily NAV for a tokenized treasury fund",
+      "user_input": "Compute end-of-day NAV for token_id 0xabc... as of 2026-06-09T20:00:00Z",
+      "expected_output": "Refreshed PoR: reserve $X USDC-equivalent. Circulating supply N units. Liabilities (accrued fees): $Y. NAV/share: $Z. Attestation hash emitted. Receipt issued at attested wall-clock and monotonic counter."
+    }
+  ],
+  "tags": ["rwa", "nav", "tokenized-fund", "tokenized-treasuries", "por", "secure-mint", "tee-attested"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/agentic-nav-calculator",
+  "policy": {
+    "tools_allowlist": [
+      { "tool_id": "tenzro_secureMintCheck", "tool_type": "rpc" },
+      { "tool_id": "tenzro_submitReserveAttestation", "tool_type": "rpc" },
+      { "tool_id": "tenzro_getReserve", "tool_type": "rpc" }
+    ],
+    "delegation_scope": {
+      "max_per_op_wei": "0",
+      "max_per_day_wei": "0",
+      "max_tx_count_per_day": 144,
+      "allowed_chains": ["tenzro"],
+      "allowed_protocols": []
+    },
+    "hard_caps": {
+      "per_operation_value": "0",
+      "per_day_value": "0"
+    }
+  }
+}

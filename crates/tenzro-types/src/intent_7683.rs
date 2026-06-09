@@ -101,6 +101,16 @@ pub struct FillInstruction {
 /// Tenzro-specific payload carried in `CrossChainOrder.orderData` when Tenzro
 /// is the origin chain. Solvers decode this to know what to fill and which
 /// bridge route to use for the proof return.
+///
+/// Optional [`BridgeFeeHint`] lets the swapper bake a destination-native-fee-
+/// in-TNZO quote into the open order. When set, any bridge in the registered
+/// adapter set can pick up the order: the solver references `bridge_fee_hint.
+/// tnzo_amount_wei` to know what TNZO it's reimbursed in TNZO terms, the
+/// origin settler enforces the quote's `valid_until_ms`, and the destination
+/// settler routes the proof through whichever adapter the solver chose. This
+/// is the SOTA across-protocol pattern (Across V3 hub-and-spoke + Cosmos
+/// ICS-29 escrow fee abstraction): user signs once with one TNZO-denominated
+/// price, the solver picks the bridge based on liquidity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenzroOrderData {
     pub inputs: Vec<TokenAmount>,
@@ -109,6 +119,36 @@ pub struct TenzroOrderData {
     pub dest_recipient: [u8; 32],
     pub fill_deadline: u32,
     pub proof_route: ProofRoute,
+    /// Optional destination-bridge-fee hint denominated in TNZO. When `Some`,
+    /// the order is fungible across the 6 supported bridges — any solver can
+    /// pick up the order and quote whichever adapter has cheapest destination
+    /// liquidity, as long as their destination-native-fee is <= the hinted
+    /// TNZO amount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge_fee_hint: Option<BridgeFeeHint>,
+}
+
+/// Hint embedded in [`TenzroOrderData`] to make a 7683 order fungible across
+/// every registered bridge adapter. The swapper obtains this by calling
+/// `tenzro_quoteBridgeFeeInTnzo` against any of the 6 adapters before
+/// opening the order; the value bounds the solver's destination-native fee
+/// commitment in TNZO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeFeeHint {
+    /// Reference quote id from the BridgeFeeOracle. Solvers can re-fetch
+    /// the canonical quote via `tenzro_getBridgeFeeQuote` for audit.
+    pub quote_id_hex: String,
+    /// TNZO ceiling the swapper authorized for the destination-native fee.
+    /// Encoded as decimal string to round-trip through JSON without
+    /// precision loss for u128 values.
+    pub tnzo_amount_wei: String,
+    /// Wall-clock expiry — solvers MUST NOT execute fills referencing this
+    /// hint after expiry. Mirrors the underlying quote's `valid_until_ms`.
+    pub valid_until_ms: u64,
+    /// Suggested adapter the swapper had in mind at quote time. Advisory
+    /// only; the solver may choose a different adapter as long as the
+    /// destination-native fee in TNZO terms stays <= `tnzo_amount_wei`.
+    pub preferred_adapter: String,
 }
 
 /// 7683 `CrossChainOrder` — what the user signs to open an order. Written
@@ -437,5 +477,42 @@ mod tests {
         let bytes = serde_json::to_vec(&envelope).unwrap();
         let decoded: Tenzro7683Order = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn order_data_bridge_fee_hint_round_trips() {
+        let order = TenzroOrderData {
+            inputs: vec![],
+            outputs: vec![],
+            dest_chain_id: 8453,
+            dest_recipient: [0u8; 32],
+            fill_deadline: 1_700_002_000,
+            proof_route: ProofRoute::LayerZero,
+            bridge_fee_hint: Some(BridgeFeeHint {
+                quote_id_hex: "0xabcd".to_string(),
+                tnzo_amount_wei: "5100000".to_string(),
+                valid_until_ms: 1_700_001_000,
+                preferred_adapter: "layerzero".to_string(),
+            }),
+        };
+        let bytes = serde_json::to_vec(&order).unwrap();
+        let decoded: TenzroOrderData = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, order);
+        assert!(decoded.bridge_fee_hint.is_some());
+    }
+
+    #[test]
+    fn order_data_without_fee_hint_is_backward_compat() {
+        // Simulate an "old" payload that doesn't include `bridge_fee_hint`.
+        let bytes = br#"{
+            "inputs": [],
+            "outputs": [],
+            "dest_chain_id": 8453,
+            "dest_recipient": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "fill_deadline": 1700002000,
+            "proof_route": "LayerZero"
+        }"#;
+        let decoded: TenzroOrderData = serde_json::from_slice(bytes).unwrap();
+        assert!(decoded.bridge_fee_hint.is_none());
     }
 }

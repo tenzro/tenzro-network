@@ -62,6 +62,7 @@ schemars = { workspace = true }
 dashmap = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
+urlencoding = "2"
 tokio-stream = "0.1"
 async-stream = "0.3"
 futures = { workspace = true }

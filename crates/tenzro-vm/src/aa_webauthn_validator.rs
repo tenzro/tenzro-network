@@ -168,6 +168,13 @@ pub struct WebAuthnValidator {
     expected_origin: String,
     /// Per-account enrollment.
     enrollments: DashMap<Vec<u8>, WebAuthnAccountKey>,
+    /// Optional persistent storage. When present, every `enroll` /
+    /// `revoke` writes through to `CF_VALIDATOR_MODULES` under the
+    /// `erc7579/webauthn/<account_hex>` prefix and the constructor
+    /// hydrates `enrollments` from the same prefix. Production
+    /// constructor `with_storage()` always wires this; tests use
+    /// `new()` for the in-memory-only path.
+    storage: Option<Arc<dyn tenzro_storage::KvStore>>,
 }
 
 impl WebAuthnValidator {
@@ -179,6 +186,72 @@ impl WebAuthnValidator {
             address,
             expected_origin,
             enrollments: DashMap::new(),
+            storage: None,
+        }
+    }
+
+    /// Construct a persistent validator backed by `storage`. Hydrates
+    /// `enrollments` from `CF_VALIDATOR_MODULES / erc7579/webauthn/*`
+    /// on construction. Every subsequent `enroll` / `revoke` writes
+    /// through to the same column family. **Production constructor** —
+    /// call instead of `new` whenever the node owns a `KvStore`.
+    pub fn with_storage(
+        address: [u8; 20],
+        expected_origin: String,
+        storage: Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        let v = Self {
+            address,
+            expected_origin,
+            enrollments: DashMap::new(),
+            storage: Some(storage),
+        };
+        v.hydrate();
+        v
+    }
+
+    fn enrollment_key(account: &[u8]) -> Vec<u8> {
+        let mut k = b"erc7579/webauthn/".to_vec();
+        k.extend_from_slice(account);
+        k
+    }
+
+    fn hydrate(&self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let prefix = b"erc7579/webauthn/";
+        let entries = match storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, prefix) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for (key, value) in entries {
+            if key.len() <= prefix.len() {
+                continue;
+            }
+            let account = key[prefix.len()..].to_vec();
+            if let Ok(record) = bincode::deserialize::<WebAuthnAccountKey>(&value) {
+                self.enrollments.insert(account, record);
+            }
+        }
+    }
+
+    fn persist(&self, account: &[u8], key: &WebAuthnAccountKey) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = bincode::serialize(key) {
+                let _ = storage.put(
+                    tenzro_storage::CF_VALIDATOR_MODULES,
+                    &Self::enrollment_key(account),
+                    &bytes,
+                );
+            }
+        }
+    }
+
+    fn forget(&self, account: &[u8]) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage
+                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::enrollment_key(account));
         }
     }
 
@@ -195,13 +268,18 @@ impl WebAuthnValidator {
         account: Vec<u8>,
         key: WebAuthnAccountKey,
     ) -> Result<(), ValidatorError> {
+        self.persist(&account, &key);
         self.enrollments.insert(account, key);
         Ok(())
     }
 
     /// Remove an enrollment. Returns `true` if a record was removed.
     pub fn revoke(&self, account: &[u8]) -> bool {
-        self.enrollments.remove(account).is_some()
+        let removed = self.enrollments.remove(account).is_some();
+        if removed {
+            self.forget(account);
+        }
+        removed
     }
 
     /// Look up the enrollment for `account`.
@@ -604,5 +682,52 @@ mod tests {
     #[test]
     fn no_op_validator_does_not_collide() {
         let _ = NoOpValidator::new([0; 20]);
+    }
+
+    /// Verifies WebAuthnValidator enrollments survive node restart by
+    /// rebuilding the validator against the same backing store.
+    #[test]
+    fn webauthn_enrollment_persists_across_restart() {
+        use std::sync::Arc;
+        let store: Arc<dyn tenzro_storage::KvStore> =
+            Arc::new(tenzro_storage::MemoryStore::new());
+        let module_addr = [0x10u8; 20];
+        let origin = "https://wallet.tenzro.network".to_string();
+        let account_a = vec![0xA1u8; 20];
+        let account_b = vec![0xB2u8; 20];
+        let key_a = WebAuthnAccountKey::new(
+            [0x11u8; 32],
+            [0x22u8; 32],
+            vec![0x33u8; ML_DSA_65_VK_LEN],
+        )
+        .unwrap();
+        let key_b = WebAuthnAccountKey::new(
+            [0xAAu8; 32],
+            [0xBBu8; 32],
+            vec![0xCCu8; ML_DSA_65_VK_LEN],
+        )
+        .unwrap();
+
+        {
+            let v = WebAuthnValidator::with_storage(module_addr, origin.clone(), store.clone());
+            v.enroll(account_a.clone(), key_a.clone()).unwrap();
+            v.enroll(account_b.clone(), key_b.clone()).unwrap();
+            assert_eq!(v.enrollment_count(), 2);
+        }
+
+        let v2 = WebAuthnValidator::with_storage(module_addr, origin.clone(), store.clone());
+        assert_eq!(v2.enrollment_count(), 2, "enrollments must hydrate");
+        let restored_a = v2.get_enrollment(&account_a).expect("acc-A hydrated");
+        assert_eq!(restored_a.pubkey_x, key_a.pubkey_x);
+        assert_eq!(restored_a.pubkey_y, key_a.pubkey_y);
+        assert_eq!(restored_a.pq_pubkey, key_a.pq_pubkey);
+
+        // Revoke A; rebuild; A must be gone, B must persist.
+        assert!(v2.revoke(&account_a));
+        drop(v2);
+        let v3 = WebAuthnValidator::with_storage(module_addr, origin, store);
+        assert_eq!(v3.enrollment_count(), 1);
+        assert!(v3.get_enrollment(&account_a).is_none());
+        assert!(v3.get_enrollment(&account_b).is_some());
     }
 }

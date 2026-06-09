@@ -295,7 +295,7 @@ Per-modality `list_*_catalog`, `list_*_models`, `load_*_model`, `unload_*_model`
 - `register_compliance` — Register compliance rules
 - `freeze_address` — Freeze address for compliance
 
-### Canton / DAML (15 tools — Canton 3.5+ JSON Ledger API)
+### Canton / DAML (Canton 3.5+ JSON Ledger API)
 
 Reads:
 - `canton_list_domains` — List Canton synchronization domains the node is configured against
@@ -304,7 +304,7 @@ Reads:
 - `canton_list_packages` — `GET /v2/packages` — installed DAR package ids
 - `canton_health` — combined `/livez` + `/readyz` + `/v2/version` probe
 - `canton_version` — `GET /v2/version` — participant version + CIP feature flags (verified Canton 3.5.1)
-- `canton_get_my_user` — `GET /v2/users/<client_id>@clients` — OAuth principal's primary party (CIP-26 User Management)
+- `canton_get_my_user` — Canton user record for the calling principal (CIP-26 User Management)
 - `canton_coin_balance` — CIP-56 Canton Coin balance (sums every `Splice.Amulet:Amulet` contract the party signs)
 - `canton_fee_schedule` — latest `Splice.AmuletRules:AmuletRules` active contract
 - `canton_connected_synchronizers` — `GET /v2/state/connected-synchronizers` — currently-subscribed synchronizers with permission classes
@@ -312,9 +312,15 @@ Reads:
 - `canton_get_events` — events for a specific contract id
 
 Writes:
-- `canton_submit_command` — DAML `create` / `exercise` via the JSON Ledger API submit-and-wait path
+- `canton_submit_command` — DAML `create` / `exercise` via the JSON Ledger API submit-and-wait path. When the presenting API key carries a bound `canton_user_id`, the node forwards `actAs` as that user's `primaryParty`, scoping the submission to the tenant. Canton's AuthService enforces per-user CanActAs rights server-side.
 - `canton_allocate_party` — `POST /v2/parties` — returns the fully-qualified party id `<hint>::<participant-hash>`
+- `canton_grant_user_rights` — `POST /v2/users/{userId}/rights` — grant CanActAs / CanReadAs on a party to a tenant's user (CIP-26). Required before a newly-allocated party can be acted on.
+- `canton_list_user_rights` — `GET /v2/users/{userId}/rights` — inspect what a tenant can act/read as.
 - `canton_upload_dar` — DAR upload via `POST /v2/packages` with a single `Content-Type: application/octet-stream` header (Canton 3.5+ rejects duplicates). Legacy `/admin/packages/upload-dar` is NOT used — that's gRPC-only and not exposed on the Tenzro-operated DevNet.
+
+Per-tenant analytics:
+- `canton_get_my_analytics` — Subject self-read: per-tenant call counters for the API key configured on this client. Returns `{key_id, canton_user_id, calls_total, errors_total, calls_by_method, errors_by_method, first_seen_at, last_called_at}`.
+- `canton_list_api_key_analytics` — Operator admin-read: every tenant's counters (admin-token-gated). Optional `key_id` filter.
 
 ### Verification (1 tool)
 

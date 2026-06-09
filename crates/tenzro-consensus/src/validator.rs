@@ -415,14 +415,152 @@ pub struct EquivocationDetector {
 
     /// Detected equivocation evidence
     evidence: Arc<DashMap<(Address, u64), EquivocationEvidence>>,
+
+    /// Optional persistence backend. When set, every recorded vote
+    /// and every detected EquivocationEvidence writes through to a
+    /// dedicated `equivocation:*` keyspace in `CF_AUDIT` and is
+    /// hydrated on construction. Without persistence, a validator
+    /// equivocator can simply restart their node to wipe the
+    /// detector's state and avoid slashing.
+    storage: Option<Arc<dyn tenzro_storage::KvStore>>,
 }
 
 impl EquivocationDetector {
-    /// Creates a new equivocation detector
+    /// Creates a new equivocation detector (in-memory only — test
+    /// path).
     pub fn new() -> Self {
         Self {
             votes: Arc::new(DashMap::new()),
             evidence: Arc::new(DashMap::new()),
+            storage: None,
+        }
+    }
+
+    /// Production constructor: write-through to `CF_AUDIT` under
+    /// `equivocation/votes/*` and `equivocation/evidence/*`. Hydrates
+    /// both maps on construction.
+    pub fn with_storage(storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
+        let d = Self {
+            votes: Arc::new(DashMap::new()),
+            evidence: Arc::new(DashMap::new()),
+            storage: Some(storage),
+        };
+        d.hydrate();
+        d
+    }
+
+    fn vote_key(validator: &Address, view: u64) -> Vec<u8> {
+        let mut k = b"equivocation/votes/".to_vec();
+        k.extend_from_slice(validator.as_bytes());
+        k.push(b'/');
+        k.extend_from_slice(&view.to_le_bytes());
+        k
+    }
+    fn evidence_key(validator: &Address, view: u64) -> Vec<u8> {
+        let mut k = b"equivocation/evidence/".to_vec();
+        k.extend_from_slice(validator.as_bytes());
+        k.push(b'/');
+        k.extend_from_slice(&view.to_le_bytes());
+        k
+    }
+
+    fn hydrate(&self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        if let Ok(entries) =
+            storage.scan_prefix(tenzro_storage::CF_AUDIT, b"equivocation/votes/")
+        {
+            for (key, value) in entries {
+                if let Some(vk) = Self::parse_vote_key(&key) {
+                    if let Ok(payload) =
+                        serde_json::from_slice::<(Hash, crate::voter::VoteType)>(&value)
+                    {
+                        self.votes.insert(vk, payload);
+                    }
+                }
+            }
+        }
+        if let Ok(entries) =
+            storage.scan_prefix(tenzro_storage::CF_AUDIT, b"equivocation/evidence/")
+        {
+            for (key, value) in entries {
+                if let Some((addr, view)) = Self::parse_evidence_key(&key) {
+                    if let Ok(ev) =
+                        serde_json::from_slice::<EquivocationEvidence>(&value)
+                    {
+                        self.evidence.insert((addr, view), ev);
+                    }
+                }
+            }
+        }
+    }
+
+    fn parse_vote_key(key: &[u8]) -> Option<ValidatorViewKey> {
+        let prefix = b"equivocation/votes/";
+        if !key.starts_with(prefix) {
+            return None;
+        }
+        let rest = &key[prefix.len()..];
+        if rest.len() < 9 {
+            return None;
+        }
+        let addr_end = rest.len() - 9;
+        if rest[addr_end] != b'/' {
+            return None;
+        }
+        let validator = Address::from_bytes(&rest[..addr_end])?;
+        let mut view_buf = [0u8; 8];
+        view_buf.copy_from_slice(&rest[addr_end + 1..]);
+        let view = u64::from_le_bytes(view_buf);
+        Some(ValidatorViewKey { validator, view })
+    }
+
+    fn parse_evidence_key(key: &[u8]) -> Option<(Address, u64)> {
+        let prefix = b"equivocation/evidence/";
+        if !key.starts_with(prefix) {
+            return None;
+        }
+        let rest = &key[prefix.len()..];
+        if rest.len() < 9 {
+            return None;
+        }
+        let addr_end = rest.len() - 9;
+        if rest[addr_end] != b'/' {
+            return None;
+        }
+        let validator = Address::from_bytes(&rest[..addr_end])?;
+        let mut view_buf = [0u8; 8];
+        view_buf.copy_from_slice(&rest[addr_end + 1..]);
+        let view = u64::from_le_bytes(view_buf);
+        Some((validator, view))
+    }
+
+    fn persist_vote(
+        &self,
+        vk: &ValidatorViewKey,
+        payload: &(Hash, crate::voter::VoteType),
+    ) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = serde_json::to_vec(payload) {
+                let _ = storage.put(
+                    tenzro_storage::CF_AUDIT,
+                    &Self::vote_key(&vk.validator, vk.view),
+                    &bytes,
+                );
+            }
+        }
+    }
+
+    fn persist_evidence(&self, ev: &EquivocationEvidence) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = serde_json::to_vec(ev) {
+                let _ = storage.put(
+                    tenzro_storage::CF_AUDIT,
+                    &Self::evidence_key(&ev.validator, ev.view),
+                    &bytes,
+                );
+            }
         }
     }
 
@@ -485,6 +623,7 @@ impl EquivocationDetector {
 
                 // Store the evidence
                 self.evidence.insert((vote.voter, vote.view), evidence.clone());
+                self.persist_evidence(&evidence);
 
                 tracing::warn!(
                     validator = %vote.voter,
@@ -499,7 +638,9 @@ impl EquivocationDetector {
         }
 
         // Record this vote
-        self.votes.insert(key, (vote.block_hash, vote.vote_type));
+        let payload = (vote.block_hash, vote.vote_type);
+        self.votes.insert(key.clone(), payload);
+        self.persist_vote(&key, &payload);
 
         Ok(None)
     }

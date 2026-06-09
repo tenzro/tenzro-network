@@ -547,6 +547,52 @@ pub fn serialize_snapshot_entries(entries: &[SnapshotEntry]) -> Result<Vec<u8>> 
     })
 }
 
+/// Compute a deterministic state-root hash over a set of snapshot entries.
+///
+/// Replaces the long-standing `Hash::zero()` stub. The root is
+/// `SHA-256(domain || sorted_triples)` where each triple is
+/// `len_le(cf) || cf || len_le(key) || key || len_le(value) || value`
+/// and `domain = b"tenzro/snapshot/state-root/v1"`.
+///
+/// Determinism: entries are sorted by `(cf, key)` before hashing so any
+/// snapshot of the same logical state produces the same root regardless of
+/// the order entries were collected in. The length prefixes guarantee no
+/// preimage ambiguity across cf/key/value boundaries.
+///
+/// This is *not* a Merkle-Patricia-Trie root — that's a heavier construct
+/// that the consensus state layer maintains separately and threads in via
+/// `create_snapshot(state_root, ...)`. This helper exists so callers that
+/// don't have an MPT (offline tooling, lightweight snapshots, tests) can
+/// still produce and verify a load-bearing root without falling back to
+/// `Hash::zero()`.
+pub fn compute_state_root(entries: &[SnapshotEntry]) -> Hash {
+    use sha2::{Digest, Sha256};
+    const DOMAIN: &[u8] = b"tenzro/snapshot/state-root/v1";
+
+    let mut sorted: Vec<&SnapshotEntry> = entries.iter().collect();
+    sorted.sort_by(|a, b| {
+        a.cf.as_bytes()
+            .cmp(b.cf.as_bytes())
+            .then_with(|| a.key.cmp(&b.key))
+    });
+
+    let mut hasher = Sha256::new();
+    hasher.update(DOMAIN);
+    for e in sorted {
+        let cf = e.cf.as_bytes();
+        hasher.update((cf.len() as u32).to_le_bytes());
+        hasher.update(cf);
+        hasher.update((e.key.len() as u32).to_le_bytes());
+        hasher.update(&e.key);
+        hasher.update((e.value.len() as u32).to_le_bytes());
+        hasher.update(&e.value);
+    }
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    Hash::new(out)
+}
+
 /// Snapshot restoration helper
 pub struct SnapshotRestorer;
 
@@ -634,17 +680,48 @@ impl SnapshotRestorer {
         })
     }
 
-    /// Validates a snapshot
+    /// Validates a snapshot.
+    ///
+    /// Checks the trivial invariants (state_data non-empty, compressed_size
+    /// matches), then — when the payload decodes as a `Vec<SnapshotEntry>` —
+    /// recomputes the deterministic state root via [`compute_state_root`] and
+    /// requires it to match the snapshot's recorded `state_root`. When the
+    /// recorded root is `Hash::zero()`, the recompute check is skipped (legacy
+    /// callers that didn't set a real root still validate as long as their
+    /// payload is well-formed). Returns `false` on root mismatch so the
+    /// snapshot can be rejected before any restore attempt.
     pub fn validate_snapshot(snapshot: &Snapshot) -> Result<bool> {
-        // Basic validation
         if snapshot.state_data.is_empty() {
             return Ok(false);
         }
-
         if snapshot.metadata.compressed_size != snapshot.state_data.len() as u64 {
             return Ok(false);
         }
 
+        // If the recorded root is non-zero AND the payload decodes as
+        // SnapshotEntry list, recompute and compare.
+        if snapshot.state_root != Hash::zero() {
+            let raw = match snapshot.metadata.compression {
+                CompressionType::Gzip => match decompress_gzip(&snapshot.state_data) {
+                    Ok(d) => d,
+                    Err(_) => return Ok(true), // can't decompress => accept basic checks only
+                },
+                CompressionType::None => snapshot.state_data.clone(),
+                _ => return Ok(true),
+            };
+            if let Ok(entries) = bincode::deserialize::<Vec<SnapshotEntry>>(&raw) {
+                let recomputed = compute_state_root(&entries);
+                if recomputed != snapshot.state_root {
+                    tracing::warn!(
+                        height = snapshot.height.0,
+                        recorded = %hex::encode(snapshot.state_root.as_bytes()),
+                        recomputed = %hex::encode(recomputed.as_bytes()),
+                        "snapshot state_root mismatch"
+                    );
+                    return Ok(false);
+                }
+            }
+        }
         Ok(true)
     }
 }
@@ -908,5 +985,108 @@ mod tests {
             let val = target.get(CF_STATE, &key).unwrap().expect("entry missing");
             assert_eq!(val, vec![i * 10]);
         }
+    }
+
+    #[test]
+    fn compute_state_root_is_deterministic() {
+        use crate::kv::CF_STATE;
+        let entries_a = vec![
+            SnapshotEntry {
+                cf: CF_STATE.to_string(),
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+            },
+            SnapshotEntry {
+                cf: CF_STATE.to_string(),
+                key: b"k2".to_vec(),
+                value: b"v2".to_vec(),
+            },
+        ];
+        let entries_b = vec![
+            SnapshotEntry {
+                cf: CF_STATE.to_string(),
+                key: b"k2".to_vec(),
+                value: b"v2".to_vec(),
+            },
+            SnapshotEntry {
+                cf: CF_STATE.to_string(),
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+            },
+        ];
+        let root_a = compute_state_root(&entries_a);
+        let root_b = compute_state_root(&entries_b);
+        assert_eq!(root_a, root_b, "root must be order-independent");
+        assert_ne!(root_a, Hash::zero(), "root must be non-zero for non-empty payload");
+    }
+
+    #[test]
+    fn compute_state_root_changes_with_value() {
+        use crate::kv::CF_STATE;
+        let entries_a = vec![SnapshotEntry {
+            cf: CF_STATE.to_string(),
+            key: b"k".to_vec(),
+            value: b"v1".to_vec(),
+        }];
+        let entries_b = vec![SnapshotEntry {
+            cf: CF_STATE.to_string(),
+            key: b"k".to_vec(),
+            value: b"v2".to_vec(),
+        }];
+        assert_ne!(
+            compute_state_root(&entries_a),
+            compute_state_root(&entries_b)
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_snapshot_accepts_correct_root() {
+        use crate::kv::CF_STATE;
+        let kv_store = Arc::new(MemoryStore::new());
+        let manager = SnapshotManager::new(kv_store, 5);
+        let entries = vec![
+            SnapshotEntry {
+                cf: CF_STATE.to_string(),
+                key: b"alpha".to_vec(),
+                value: b"1".to_vec(),
+            },
+            SnapshotEntry {
+                cf: CF_STATE.to_string(),
+                key: b"beta".to_vec(),
+                value: b"2".to_vec(),
+            },
+        ];
+        let real_root = compute_state_root(&entries);
+        let payload = serialize_snapshot_entries(&entries).unwrap();
+        let snapshot = manager
+            .create_snapshot(BlockHeight::new(42), real_root, Hash::zero(), payload)
+            .await
+            .unwrap();
+        assert!(SnapshotRestorer::validate_snapshot(&snapshot).unwrap());
+    }
+
+    #[tokio::test]
+    async fn validate_snapshot_rejects_wrong_root() {
+        use crate::kv::CF_STATE;
+        let kv_store = Arc::new(MemoryStore::new());
+        let manager = SnapshotManager::new(kv_store, 5);
+        let entries = vec![SnapshotEntry {
+            cf: CF_STATE.to_string(),
+            key: b"alpha".to_vec(),
+            value: b"1".to_vec(),
+        }];
+        let mut wrong_root = [0u8; 32];
+        wrong_root[0] = 0x42; // arbitrary non-zero hash
+        let payload = serialize_snapshot_entries(&entries).unwrap();
+        let snapshot = manager
+            .create_snapshot(
+                BlockHeight::new(43),
+                Hash::new(wrong_root),
+                Hash::zero(),
+                payload,
+            )
+            .await
+            .unwrap();
+        assert!(!SnapshotRestorer::validate_snapshot(&snapshot).unwrap());
     }
 }

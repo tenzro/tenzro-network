@@ -23,6 +23,13 @@ chrono = { workspace = true }
 zeroize = { workspace = true }
 argon2 = { workspace = true }
 reqwest = { workspace = true }
+# Optional transport deps for the PluggableSigner hardware adapters.
+# Each adapter is feature-gated; consumers pull the transport only when
+# the corresponding feature is enabled.
+ledger-transport-hid = { version = "0.11", optional = true }
+ledger-apdu = { version = "0.11", optional = true }
+hidapi = { version = "2.6", optional = true }
+trezor-client = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -45,3 +52,9 @@ default = []
 # (via `cargo build -p tenzro-node`); enabled with
 # `cargo test -p tenzro-wallet --features e2e`.
 e2e = []
+# Hardware signer adapters. Each pulls in its own transport dependency.
+# Off by default so consumers only link what they use.
+ledger-signer = ["dep:ledger-transport-hid", "dep:ledger-apdu", "dep:hidapi"]
+trezor-signer = ["dep:trezor-client"]
+gridplus-signer = []  # reqwest is in main deps already
+all-hardware-signers = ["ledger-signer", "trezor-signer", "gridplus-signer"]

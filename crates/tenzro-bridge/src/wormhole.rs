@@ -125,6 +125,103 @@ impl GuardianSet {
 }
 
 impl Vaa {
+    /// Parses a Wormhole VAA from its canonical wire encoding.
+    ///
+    /// Wire layout (per Wormhole core spec):
+    /// `version(1) || guardian_set_index(4) || len_sigs(1) ||
+    ///  sigs(len*66) || timestamp(4) || nonce(4) || emitter_chain(2) ||
+    ///  emitter_address(32) || sequence(8) || consistency_level(1) ||
+    ///  payload`.
+    ///
+    /// Each signature record is `guardian_index(1) || r(32) || s(32) || v(1)`.
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        let mut o = 0usize;
+        fn need(bytes: &[u8], o: usize, n: usize, label: &str) -> Result<()> {
+            if bytes.len() < o + n {
+                Err(BridgeError::AdapterError(format!(
+                    "VAA truncated at {} (need {} bytes from offset {}, have {})",
+                    label,
+                    n,
+                    o,
+                    bytes.len()
+                )))
+            } else {
+                Ok(())
+            }
+        }
+        need(bytes, o, 1, "version")?;
+        let version = bytes[o];
+        o += 1;
+        if version != 1 {
+            return Err(BridgeError::AdapterError(format!(
+                "unsupported VAA version: {}",
+                version
+            )));
+        }
+        need(bytes, o, 4, "guardian_set_index")?;
+        let mut gsi = [0u8; 4];
+        gsi.copy_from_slice(&bytes[o..o + 4]);
+        let guardian_set_index = u32::from_be_bytes(gsi);
+        o += 4;
+        need(bytes, o, 1, "len_sigs")?;
+        let len_sigs = bytes[o] as usize;
+        o += 1;
+        let mut signatures = Vec::with_capacity(len_sigs);
+        for i in 0..len_sigs {
+            need(bytes, o, 66, &format!("signature[{}]", i))?;
+            let guardian_index = bytes[o];
+            let signature = bytes[o + 1..o + 65].to_vec();
+            let recovery_id = bytes[o + 65];
+            o += 66;
+            signatures.push(GuardianSignature {
+                guardian_index,
+                signature,
+                recovery_id,
+            });
+        }
+        need(bytes, o, 4, "timestamp")?;
+        let mut t = [0u8; 4];
+        t.copy_from_slice(&bytes[o..o + 4]);
+        let timestamp = u32::from_be_bytes(t);
+        o += 4;
+        need(bytes, o, 4, "nonce")?;
+        let mut n = [0u8; 4];
+        n.copy_from_slice(&bytes[o..o + 4]);
+        let nonce = u32::from_be_bytes(n);
+        o += 4;
+        need(bytes, o, 2, "emitter_chain")?;
+        let mut ec = [0u8; 2];
+        ec.copy_from_slice(&bytes[o..o + 2]);
+        let emitter_chain = u16::from_be_bytes(ec);
+        o += 2;
+        need(bytes, o, 32, "emitter_address")?;
+        let mut emitter_address = [0u8; 32];
+        emitter_address.copy_from_slice(&bytes[o..o + 32]);
+        o += 32;
+        need(bytes, o, 8, "sequence")?;
+        let mut seq = [0u8; 8];
+        seq.copy_from_slice(&bytes[o..o + 8]);
+        let sequence = u64::from_be_bytes(seq);
+        o += 8;
+        need(bytes, o, 1, "consistency_level")?;
+        let consistency_level = bytes[o];
+        o += 1;
+        let payload = bytes[o..].to_vec();
+        Ok(Self {
+            version,
+            guardian_set_index,
+            emitter_chain,
+            emitter_address,
+            sequence,
+            timestamp,
+            nonce,
+            consistency_level,
+            payload,
+            guardian_signatures: len_sigs as u8,
+            signatures,
+        })
+    }
+
     /// Deterministic VAA ID used by Wormholescan: `chain/emitter_hex/sequence`.
     pub fn id(&self) -> String {
         format!(
@@ -473,6 +570,13 @@ pub struct WormholeAdapter {
     /// Per-sender monotonic nonce tracker for inbound `TenzroMessage`
     /// envelopes (the `TokenBridgePayload`-only path bypasses this).
     inbound_nonce_tracker: Arc<crate::message_format::NonceTracker>,
+    /// Optional persistence backend for the `seen_messages` dedup
+    /// map. When set, every inserted dedup key is written through to
+    /// `CF_SETTLEMENTS / bridge_seen:wormhole:<key>` so replay
+    /// protection survives node restart. Without this, an attacker
+    /// who can re-deliver a previously-processed VAA across a node
+    /// restart triggers double-mint on the destination side.
+    seen_storage: Option<Arc<dyn tenzro_storage::KvStore>>,
     /// Optionally-supplied active Wormhole Guardian set. When present
     /// `verify_vaa` runs the full ECDSA-secp256k1 quorum check; when
     /// absent the adapter defers verification to the destination Core
@@ -498,8 +602,36 @@ impl WormholeAdapter {
             signer: None,
             seen_messages: Arc::new(DashMap::new()),
             inbound_nonce_tracker: Arc::new(crate::message_format::NonceTracker::new()),
+            seen_storage: None,
             guardian_set: Arc::new(parking_lot::RwLock::new(None)),
         }
+    }
+
+    /// Production constructor: wire `KvStore` into the dedup map +
+    /// the inbound nonce tracker. Replays of previously-seen VAAs
+    /// across node restart are rejected as if the original delivery
+    /// had just happened.
+    pub fn with_storage(mut self, storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
+        // Hydrate seen_messages.
+        if let Ok(entries) = storage.scan_prefix(
+            tenzro_storage::CF_SETTLEMENTS,
+            b"bridge_seen:wormhole:",
+        ) {
+            let prefix_len = "bridge_seen:wormhole:".len();
+            for (key, _) in entries {
+                if key.len() <= prefix_len {
+                    continue;
+                }
+                if let Ok(k) = std::str::from_utf8(&key[prefix_len..]) {
+                    self.seen_messages.insert(k.to_string(), ());
+                }
+            }
+        }
+        self.seen_storage = Some(storage.clone());
+        self.inbound_nonce_tracker = Arc::new(
+            crate::message_format::NonceTracker::with_storage("wormhole", storage),
+        );
+        self
     }
 
     /// Pin an active Wormhole Guardian set at construction time.
@@ -758,7 +890,42 @@ impl BridgeAdapter for WormholeAdapter {
             return Err(BridgeError::ReplayAttack(dedup_key));
         }
 
-        // Layer 2: when the payload is a TenzroMessage, run the same
+        // Layer 2 (outer envelope): if a Guardian set is configured AND
+        // the payload parses as a VAA, run the full Guardian quorum
+        // check via secp256k1 ECDSA signature recovery against the
+        // pinned `GuardianSet`. The cross-chain authority comes from
+        // here, NOT from the inner TenzroMessage's self-contained
+        // public key — anyone can mint a fresh keypair and sign a
+        // forged TenzroMessage. Without this check, inbound spoofing
+        // is trivial.
+        //
+        // Fail-closed: when a Guardian set is configured, an
+        // unparseable / quorum-failing VAA is rejected outright. When
+        // no Guardian set is configured (test/dev nodes), the outer
+        // check is skipped and the inner TenzroMessage check below is
+        // the only authority — production deployments MUST call
+        // `with_guardian_set` at startup.
+        if self.guardian_set.read().is_some() {
+            match Vaa::parse(&payload) {
+                Ok(vaa) => {
+                    self.verify_vaa(&vaa).map_err(|e| {
+                        BridgeError::AdapterError(format!(
+                            "Wormhole VAA quorum check failed: {}",
+                            e
+                        ))
+                    })?;
+                }
+                Err(_) => {
+                    // Not a VAA — fall through to the TenzroMessage
+                    // path. This branch is taken for native Tenzro
+                    // messages that haven't been wrapped in a Wormhole
+                    // VAA (e.g. cross-Tenzro inter-node traffic). The
+                    // inner signature check still runs.
+                }
+            }
+        }
+
+        // Layer 3: when the payload is a TenzroMessage, run the same
         // 6-step verification path the other adapters use — decode,
         // validate, hash-check, signature-check, per-sender nonce
         // monotonicity — so a Tenzro-side relying party can trust the
@@ -785,7 +952,12 @@ impl BridgeAdapter for WormholeAdapter {
                 .map_err(|e| BridgeError::ReplayAttack(format!("nonce: {e}")))?;
         }
 
-        self.seen_messages.insert(dedup_key, ());
+        self.seen_messages.insert(dedup_key.clone(), ());
+        if let Some(ref storage) = self.seen_storage {
+            let mut k = b"bridge_seen:wormhole:".to_vec();
+            k.extend_from_slice(dedup_key.as_bytes());
+            let _ = storage.put(tenzro_storage::CF_SETTLEMENTS, &k, b"");
+        }
         Ok(())
     }
 
