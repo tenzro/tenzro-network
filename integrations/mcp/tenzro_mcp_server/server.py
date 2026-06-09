@@ -3037,6 +3037,411 @@ async def canton_get_my_user() -> dict:
     return await rpc_call("tenzro_canton_getMyUser", {})
 
 
+@mcp.tool
+async def canton_allocate_party(
+    party_id_hint: str, display_name: str | None = None
+) -> dict:
+    """Allocate a new party on the participant via POST /v2/parties.
+    Returns `{party_id, party_id_hint}` where `party_id` is the
+    fully-qualified `<hint>::<participant-hash>` form. The newly
+    allocated party has no `CanActAs` / `CanReadAs` grants on any
+    user by default — follow up with `canton_grant_user_rights` so
+    the operator's OAuth user can submit DAML commands on its
+    behalf."""
+    params: dict = {"party_id_hint": party_id_hint}
+    if display_name is not None:
+        params["display_name"] = display_name
+    return await rpc_call("tenzro_allocateParty", params)
+
+
+@mcp.tool
+async def canton_grant_user_rights(
+    party: str,
+    user_id: str | None = None,
+    can_act_as: bool = True,
+    can_read_as: bool = False,
+) -> dict:
+    """Grant `CanActAs` / `CanReadAs` rights on a Canton party to
+    a user (Canton 3.5+ User Management Service via
+    POST /v2/users/{userId}/rights). Without these grants the
+    operator's OAuth user cannot submit DAML commands as the party
+    even if the party exists.
+
+    `party` must be the fully-qualified party id
+    `<hint>::<participant-hash>`. Pass `user_id=None` to grant to
+    the OAuth principal's own user id (`<client_id>@clients`).
+    Returns `{newlyGrantedRights: [...]}`."""
+    return await rpc_call(
+        "tenzro_canton_grantUserRights",
+        {
+            "user_id": user_id,
+            "party": party,
+            "can_act_as": can_act_as,
+            "can_read_as": can_read_as,
+        },
+    )
+
+
+@mcp.tool
+async def canton_list_user_rights(user_id: str | None = None) -> dict:
+    """List the rights granted to a Canton user via
+    GET /v2/users/{userId}/rights. Returns
+    `{rights: [{kind: {CanActAs: {value: {party}}}}, ...]}`.
+    Pass `user_id=None` to list rights for the OAuth principal's
+    own user."""
+    params: dict = {}
+    if user_id is not None:
+        params["user_id"] = user_id
+    return await rpc_call("tenzro_canton_listUserRights", params)
+
+
+@mcp.tool
+async def canton_get_my_analytics() -> dict:
+    """Subject self-read: returns this tenant's Canton call
+    aggregates for the API key configured on this MCP client.
+
+    Counters are maintained server-side in RocksDB
+    (`CF_CANTON_ANALYTICS`) — every canton-scoped JSON-RPC call
+    increments `calls_total` (or `errors_total`) plus the
+    corresponding per-method bucket. Lets a tenant answer
+    "how many DAML transactions have I submitted, and which
+    methods am I hitting?" without operator help.
+
+    Returns
+    `{key_id, canton_user_id, calls_total, errors_total,
+    calls_by_method, errors_by_method, first_seen_at,
+    last_called_at}`.
+    """
+    return await rpc_call("tenzro_canton_getMyAnalytics", {})
+
+
+@mcp.tool
+async def canton_list_api_key_analytics(key_id: str | None = None) -> dict:
+    """Operator admin-read: returns per-tenant Canton call
+    aggregates for every API key (or just one when `key_id` is
+    set). Requires the operator admin token at the node level.
+
+    Rows are sorted by `last_called_at` descending. Returns
+    `{analytics: [...]}` where each row matches the shape
+    documented on `canton_get_my_analytics`.
+    """
+    params: dict = {}
+    if key_id is not None:
+        params["key_id"] = key_id
+    return await rpc_call("tenzro_canton_listApiKeyAnalytics", params)
+
+
+# ---------------------------------------------------------------------------
+# Wave 7/9/12 — institutional primitives: uRWA / IVMS101 / attested
+# clock / SignedAgentCard / Wormhole NTT / bridge-fee-in-TNZO
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def urwa_is_kill_switched(token_id_hex: str) -> dict:
+    """Read the ERC-7943 (uRWA) kill-switch state for a 32-byte token id.
+
+    Returns ``{token_id_hex, active, selectors, precompile_addresses}``.
+    When ``active`` is ``True`` every transfer of the token reverts at
+    the EVM transfer hook until the operator clears the switch via the
+    admin-gated ``tenzro_urwaClearKillSwitch`` RPC.
+    """
+    return await rpc_call("tenzro_urwaIsKillSwitched", {"token_id_hex": token_id_hex})
+
+
+@mcp.tool
+async def urwa_get_frozen_tokens(token_id_hex: str, account_hex: str) -> dict:
+    """Read the ERC-7943 frozen-amount for a (token, account) pair.
+
+    Returns the frozen amount in the token smallest unit. The
+    transferable balance equals ``balance - frozen_amount``; transfers
+    that would push the post-debit balance below zero revert.
+    """
+    return await rpc_call(
+        "tenzro_urwaGetFrozenTokens",
+        {"token_id_hex": token_id_hex, "account_hex": account_hex},
+    )
+
+
+@mcp.tool
+async def urwa_set_frozen_tokens(
+    token_id_hex: str,
+    account_hex: str,
+    amount: str,
+    reason: str | None = None,
+) -> dict:
+    """(Admin) Freeze a specific amount on an ERC-7943 token account.
+
+    The transferable balance becomes ``balance - amount``. Optional
+    ``reason`` is recorded for audit. Requires the
+    ``X-Tenzro-Admin-Token`` header on the underlying RPC client.
+    """
+    return await rpc_call(
+        "tenzro_urwaSetFrozenTokens",
+        {
+            "token_id_hex": token_id_hex,
+            "account_hex": account_hex,
+            "amount": amount,
+            "reason": reason,
+        },
+    )
+
+
+@mcp.tool
+async def urwa_trigger_kill_switch(
+    token_id_hex: str,
+    triggered_by_did: str | None = None,
+    reason: str | None = None,
+) -> dict:
+    """(Admin) Activate the ERC-7943 kill-switch on a token.
+
+    All transfers of the token revert until ``urwa_clear_kill_switch``
+    is called. The ``triggered_by_did`` and ``reason`` fields are
+    persisted to the audit log.
+    """
+    return await rpc_call(
+        "tenzro_urwaTriggerKillSwitch",
+        {
+            "token_id_hex": token_id_hex,
+            "triggered_by_did": triggered_by_did,
+            "reason": reason,
+        },
+    )
+
+
+@mcp.tool
+async def urwa_clear_kill_switch(token_id_hex: str) -> dict:
+    """(Admin) Clear the ERC-7943 kill-switch on a token. Transfers resume."""
+    return await rpc_call(
+        "tenzro_urwaClearKillSwitch", {"token_id_hex": token_id_hex}
+    )
+
+
+@mcp.tool
+async def ivms101_canonical_hash(envelope: dict) -> dict:
+    """Compute the canonical SHA-256 binding hash for an IVMS101 Travel Rule envelope.
+
+    The envelope carries ``originator + beneficiary + originating_vasp +
+    beneficiary_vasp + transfer`` records per the FATF JSON schema. The
+    returned hash anchors a settlement receipt to a specific
+    originator/beneficiary/VASP/transfer-data record — auditors trace
+    receipt → IVMS101 envelope → VASP DIDs end-to-end without PII
+    landing on-chain (the envelope itself stays off-chain, typically
+    carried via TRP).
+    """
+    return await rpc_call("tenzro_ivms101Hash", envelope)
+
+
+@mcp.tool
+async def attested_clock_now() -> dict:
+    """Return the current node wall-clock as a Tenzro AttestedTimestamp envelope.
+
+    Carries ``wall_ms``, ``monotonic_ns``, and ``tee_vendor`` metadata.
+    Used by long-running multi-party workflows that cannot trust any
+    single replica's wall-clock — DvP settlement deadlines, AP2 mandate
+    expiry, margin-call grace periods, parametric-insurance trigger
+    windows. When the node is not running inside a TEE the envelope is
+    unsigned (``tee_vendor`` is ``null``) and relying parties MUST
+    reject it for production mandate / deadline use.
+    """
+    return await rpc_call("tenzro_attestedClockNow", [])
+
+
+@mcp.tool
+async def signed_agent_card_canonical_hash(agent_card: dict) -> dict:
+    """Compute the canonical hash for an A2A v1.0 SignedAgentCard payload.
+
+    Domain owners hash + JWS-sign the agent card; relying parties
+    re-verify the canonical hash to detect a hostile reverse-proxy or
+    intermediate-cache rewrite of ``url`` / ``skills`` /
+    ``securitySchemes``. Production-grade A2A 2026 conformance bar.
+    """
+    return await rpc_call("tenzro_signedAgentCardCanonicalHash", agent_card)
+
+
+@mcp.tool
+async def wormhole_ntt_list_chains() -> dict:
+    """Enumerate the registered Wormhole NTT chain catalog.
+
+    Returns ``{chains, transceiver_kinds, scaffolding}``. NTT is
+    Wormhole's 2026 multi-chain native-token primitive — instead of
+    wrapped tokens locked at a vault, an ``NttManager`` mints / burns
+    the native token directly on each chain with quorum-aggregated
+    Transceiver attestation (Wormhole / Axelar / LayerZero / custom).
+    """
+    return await rpc_call("tenzro_wormholeNttListChains", [])
+
+
+@mcp.tool
+async def quote_bridge_fee_in_tnzo(
+    adapter: str,
+    dest_chain: str,
+    native_fee_smallest_unit: str,
+) -> dict:
+    """Quote a destination-native bridge fee in TNZO.
+
+    ``adapter`` is one of ``layerzero | ccip | wormhole | debridge |
+    hyperlane | axelar | lifi | canton``; ``dest_chain`` is a CAIP-2
+    identifier (e.g. ``eip155:1``). Returns the canonical
+    ``BridgeFeeQuote`` envelope including the TNZO debit due, spot rate
+    at quote time, TTL window, and backing oracle
+    (``chainlink_feed | governance | fallback``).
+    """
+    return await rpc_call(
+        "tenzro_quoteBridgeFeeInTnzo",
+        {
+            "adapter": adapter,
+            "dest_chain": dest_chain,
+            "native_fee_smallest_unit": native_fee_smallest_unit,
+        },
+    )
+
+
+@mcp.tool
+async def list_bridge_sponsorship_pools() -> dict:
+    """Enumerate per-adapter bridge sponsorship-pool vault addresses.
+
+    Vault addresses are deterministic ``SHA-256("tenzro/bridge/
+    sponsorship-vault" || adapter)[..20]`` — same on every Tenzro node,
+    survives restarts. Returns ``{pools, total}`` for all 8 registered
+    adapters (layerzero / ccip / wormhole / debridge / hyperlane /
+    axelar / lifi / canton).
+    """
+    return await rpc_call("tenzro_listBridgeSponsorshipPools", [])
+
+
+@mcp.tool
+async def set_bridge_fee_rate(
+    adapter: str,
+    dest_chain: str,
+    rate_q18: str,
+    markup_bps: int = 100,
+    valid_window_ms: int = 60_000,
+) -> dict:
+    """(Operator admin-token-gated) Register a governance-set rate row.
+
+    ``rate_q18`` is the Q18 fixed-point destination-native-to-TNZO rate
+    (e.g. ``"2000000000000000000"`` for 2.0). ``markup_bps`` applies
+    on top of the spot rate. ``valid_window_ms`` is the live-quote TTL.
+    Requires ``X-Tenzro-Admin-Token``.
+    """
+    return await rpc_call(
+        "tenzro_setBridgeFeeRate",
+        [{
+            "adapter": adapter,
+            "dest_chain": dest_chain,
+            "rate_q18": rate_q18,
+            "markup_bps": markup_bps,
+            "valid_window_ms": valid_window_ms,
+        }],
+    )
+
+
+@mcp.tool
+async def sponsor_bridge_fee(
+    quote_id_hex: str,
+    adapter: str,
+    dest_chain: str,
+    native_fee_smallest_unit: str,
+    tnzo_amount_wei: str,
+    rate_q18_hex: str,
+    issued_at_ms: int,
+    valid_until_ms: int,
+    payer_did: str,
+    oracle_backing: str = "governance",
+) -> dict:
+    """Sponsor a previously-quoted destination-native bridge fee in TNZO.
+
+    Debits the ``payer_did`` for ``tnzo_amount_wei`` and credits the
+    per-adapter sponsorship pool with ``native_fee_smallest_unit`` of
+    outstanding native-fee commitment. Returns the
+    ``BridgeSponsorshipReceipt`` envelope. Requires an API key with
+    ``chainlink`` scope.
+    """
+    return await rpc_call(
+        "tenzro_sponsorBridgeFee",
+        [{
+            "quote_id_hex": quote_id_hex,
+            "adapter": adapter,
+            "dest_chain": dest_chain,
+            "native_fee_smallest_unit": native_fee_smallest_unit,
+            "tnzo_amount_wei": tnzo_amount_wei,
+            "rate_q18_hex": rate_q18_hex,
+            "issued_at_ms": issued_at_ms,
+            "valid_until_ms": valid_until_ms,
+            "oracle_backing": oracle_backing,
+            "payer_did": payer_did,
+        }],
+    )
+
+
+@mcp.tool
+async def set_sponsorship_refill_threshold(
+    adapter: str,
+    refill_threshold_bps: int,
+) -> dict:
+    """(Operator admin-token-gated) Set per-adapter pool refill threshold.
+
+    When the pool's TNZO balance drops below ``refill_threshold_bps`` of
+    expected daily outflow, the network treasury auto-rebalances.
+    ``0`` disables auto-refill. Requires ``X-Tenzro-Admin-Token``.
+    """
+    return await rpc_call(
+        "tenzro_setSponsorshipRefillThreshold",
+        [{"adapter": adapter, "refill_threshold_bps": refill_threshold_bps}],
+    )
+
+
+@mcp.tool
+async def get_bridge_analytics() -> dict:
+    """Subject self-read of the caller's own Chainlink/bridge analytics.
+
+    Returns CU consumption (Alchemy-style Compute Units), per-method
+    counters, error counts, and rate-limit rejections for the API key
+    presented as ``X-Tenzro-Api-Key`` with ``chainlink`` scope.
+    """
+    return await rpc_call("tenzro_getBridgeAnalytics", [])
+
+
+@mcp.tool
+async def list_bridge_analytics(key_id: str | None = None) -> dict:
+    """(Operator admin-token-gated) Cross-tenant Chainlink/bridge analytics.
+
+    Returns every per-tenant Chainlink/bridge aggregate (CU consumption,
+    call counts, error counts, rate-limit rejections). Optional
+    ``key_id`` filter narrows the result to a single tenant. Requires
+    ``X-Tenzro-Admin-Token``.
+    """
+    params = {"key_id": key_id} if key_id else None
+    return await rpc_call("tenzro_listBridgeAnalytics", params)
+
+
+@mcp.tool
+async def workflow_set_step_deadline(
+    workflow_id: str,
+    step_idx: int,
+    attested_deadline: dict,
+) -> dict:
+    """Bind a TEE-attested deadline to a saga step.
+
+    After the deadline passes (with 30s tolerance per Canton 3.5
+    timestamp-drift guidance) ``tenzro_workflowStepExecute`` refuses
+    the transition and the caller MUST
+    ``tenzro_workflowStepCompensate``. The monotonic counter on the
+    deadline binds it to a specific enclave instance so a relayer
+    cannot backdate via wall-clock manipulation. Only applies to
+    steps in ``Pending`` status.
+    """
+    return await rpc_call(
+        "tenzro_workflowSetStepDeadline",
+        {
+            "workflow_id": workflow_id,
+            "step_idx": step_idx,
+            "attested_deadline": attested_deadline,
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

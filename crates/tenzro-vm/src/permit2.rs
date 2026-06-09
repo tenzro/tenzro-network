@@ -260,18 +260,90 @@ pub fn recover_signer(digest: &[u8; 32], signature: &[u8]) -> Result<[u8; 20], P
 /// owner has a `HashMap<word_pos: u248, word: U256>` and a nonce of the
 /// form `(word_pos << 8) | bit_pos` is considered used when the matching
 /// bit in `word` is set.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Permit2NonceBitmap {
     /// Per-owner word storage. The outer key is the owner address; the
     /// inner key is the high-248-bit word position; the inner value is
     /// the 32-byte word.
     words: RwLock<HashMap<[u8; 20], HashMap<[u8; 31], [u8; 32]>>>,
+    storage: Option<std::sync::Arc<dyn tenzro_storage::KvStore>>,
+}
+
+impl std::fmt::Debug for Permit2NonceBitmap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Permit2NonceBitmap")
+            .field("owners", &self.words.read().len())
+            .field("persistent", &self.storage.is_some())
+            .finish()
+    }
 }
 
 impl Permit2NonceBitmap {
-    /// Build an empty bitmap.
+    /// Build an empty bitmap (test-only; production should use
+    /// `with_storage`).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Production constructor: write-through to `CF_SETTLEMENTS` under
+    /// `permit2:<owner20>:<word_pos31>`. Hydrates on construction.
+    /// Without this, replay protection resets on every restart and
+    /// previously-consumed Permit2 signatures become replayable.
+    pub fn with_storage(storage: std::sync::Arc<dyn tenzro_storage::KvStore>) -> Self {
+        let b = Self {
+            words: RwLock::new(HashMap::new()),
+            storage: Some(storage),
+        };
+        b.hydrate();
+        b
+    }
+
+    fn key(owner: &[u8; 20], word_pos: &[u8; 31]) -> Vec<u8> {
+        let mut k = b"permit2:".to_vec();
+        k.extend_from_slice(owner);
+        k.push(b':');
+        k.extend_from_slice(word_pos);
+        k
+    }
+
+    fn hydrate(&self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let entries = match storage.scan_prefix(tenzro_storage::CF_SETTLEMENTS, b"permit2:") {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let prefix_len = "permit2:".len();
+        let owner_len = 20;
+        let sep_len = 1;
+        let word_pos_len = 31;
+        let expected = prefix_len + owner_len + sep_len + word_pos_len;
+        let mut map = self.words.write();
+        for (key, value) in entries {
+            if key.len() != expected || value.len() != 32 {
+                continue;
+            }
+            let mut owner = [0u8; 20];
+            owner.copy_from_slice(&key[prefix_len..prefix_len + owner_len]);
+            let mut word_pos = [0u8; 31];
+            word_pos.copy_from_slice(
+                &key[prefix_len + owner_len + sep_len..prefix_len + owner_len + sep_len + word_pos_len],
+            );
+            let mut word = [0u8; 32];
+            word.copy_from_slice(&value);
+            map.entry(owner).or_default().insert(word_pos, word);
+        }
+    }
+
+    fn persist(&self, owner: &[u8; 20], word_pos: &[u8; 31], word: &[u8; 32]) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(
+                tenzro_storage::CF_SETTLEMENTS,
+                &Self::key(owner, word_pos),
+                word,
+            );
+        }
     }
 
     /// Check whether `nonce` has been used by `owner` and, if not, mark
@@ -294,6 +366,9 @@ impl Permit2NonceBitmap {
             return Err(Permit2Error::NonceAlreadyUsed);
         }
         word[byte_idx] |= mask;
+        let snapshot = *word;
+        drop(words);
+        self.persist(owner, &word_pos, &snapshot);
         Ok(())
     }
 

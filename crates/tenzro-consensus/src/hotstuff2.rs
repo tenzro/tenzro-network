@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::time::sleep;
@@ -396,6 +397,35 @@ pub struct HotStuff2Engine {
     /// `timeout_collector`.
     nec_collector: Arc<RwLock<Option<Arc<crate::timeout::NoEndorsementCollector>>>>,
 
+    /// Highest view at which this replica has emitted a proposal. Acts as a
+    /// monotonic guard so a leader CANNOT broadcast two different proposals
+    /// for the same view — even if `propose_block_internal()` awaited long
+    /// enough for the pacemaker to advance the view (e.g. Bracha boost from
+    /// remote TimeoutMsgs) and the next tick re-enters the propose path on
+    /// the new view. Both AptosBFT (`RoundManager::process_certificates`) and
+    /// DiemBFT (`EventProcessor::process_new_round_event`) gate proposal
+    /// generation on this same monotonic-round invariant; without it, the
+    /// honest leader can self-equivocate by racing a mempool-snapshot-drift
+    /// rebuild against its own view-change handler. Sentinel value `u64::MAX`
+    /// means "never proposed" (no view will compare-and-swap past it because
+    /// `view < u64::MAX` always); we initialise to `0` and use a CAS-style
+    /// fetch_max to enforce strict monotonicity.
+    last_proposed_view: Arc<AtomicU64>,
+
+    /// Receiver-side proposal dedup keyed by `(proposer, view, block_hash)`.
+    /// Set of `(view, proposer_addr_first_4_bytes_u32, block_hash)` so a
+    /// duplicate of a proposal we've already seen at this view from this
+    /// proposer is dropped at the door — BEFORE running the catchup, vote,
+    /// and vote-state-store paths. Mirrors AptosBFT's
+    /// `EpochManager::process_message` seen-set dedup. Without this, gossipsub
+    /// IHAVE/IWANT replay (and any pre-fix in-flight proposals from the buggy
+    /// run before the equivocation patch) keep firing the vote-state-store's
+    /// double-sign refuse path and noise up the equivocation telemetry —
+    /// even though the local replica correctly refuses to vote twice. The
+    /// dedup set is bounded by `PROPOSAL_DEDUP_VIEW_WINDOW` and pruned in
+    /// `advance_view` alongside the other per-view caches.
+    proposal_dedup: Arc<DashMap<(u64, Hash), ()>>,
+
     /// Strategy for selecting the leader of a given round/view. Resolved
     /// from [`ConsensusConfig::proposer_election`] at construction time.
     /// `RoundRobinProposer` (`view % N`) for tests, `ReputationProposer`
@@ -501,6 +531,8 @@ impl HotStuff2Engine {
             timeout_collector: Arc::new(RwLock::new(None)),
             last_round_nec: Arc::new(RwLock::new(None)),
             nec_collector: Arc::new(RwLock::new(None)),
+            last_proposed_view: Arc::new(AtomicU64::new(0)),
+            proposal_dedup: Arc::new(DashMap::new()),
             proposer_election,
             reputation,
         }
@@ -1118,6 +1150,16 @@ impl HotStuff2Engine {
         if let Some(collector) = self.vote_collector.read().as_ref() {
             let min_view = new_view.saturating_sub(VOTE_CACHE_VIEW_WINDOW);
             collector.cleanup_old_votes(min_view);
+        }
+
+        // Prune the receiver-side proposal-dedup set the same way as
+        // vote/timeout caches. Keep the last `VOTE_CACHE_VIEW_WINDOW`
+        // views' worth of proposal-id sentinels so late-arriving gossip
+        // replays can still be deduplicated. Anything older is dead
+        // weight and gets evicted.
+        {
+            let min_view = new_view.saturating_sub(VOTE_CACHE_VIEW_WINDOW);
+            self.proposal_dedup.retain(|(view, _hash), _| *view >= min_view);
         }
 
         // Drop the TimeoutCollector's per-view caches for views that can no
@@ -2000,8 +2042,58 @@ impl HotStuff2Engine {
                 if is_leader && !self.is_draining() {
                     // Leader proposes a block
                     if state.proposed_block.is_none() {
+                        // PROPOSAL-GUARD (Aptos/Diem invariant): atomically
+                        // claim the current view as the "I am proposing for
+                        // view V" slot before we await the block builder. If
+                        // we already proposed for V (or any view ≥ V), bail.
+                        // Without this, the await on `propose_block_internal`
+                        // is a re-entrancy window: a Bracha-boost amplifying
+                        // to `on_view_timeout` can advance the view and the
+                        // next tick re-enters this branch, both ending up
+                        // calling `propose_block_internal` for the same
+                        // height with different mempool snapshots → two
+                        // different block hashes → self-equivocation. We use
+                        // `fetch_max` for the lock: it returns the previous
+                        // max; if `prev >= view` we already proposed for
+                        // this view (or a later one) and must NOT re-emit.
+                        let view_at_entry = state.view;
+                        let prev_proposed = self
+                            .last_proposed_view
+                            .fetch_max(view_at_entry, Ordering::SeqCst);
+                        if prev_proposed >= view_at_entry && view_at_entry != 0 {
+                            tracing::debug!(
+                                view = view_at_entry,
+                                last_proposed_view = prev_proposed,
+                                "proposal-guard: already proposed for this view; skipping re-entrant propose"
+                            );
+                            return Ok(());
+                        }
                         drop(state);
                         let block = self.propose_block_internal().await?;
+                        // Late-check: by the time the block is built, the
+                        // pacemaker may have advanced past the view we
+                        // committed to. Don't broadcast a stale-view
+                        // proposal — it can't be safely voted on by peers
+                        // (the inner `block.header.view` is now < current
+                        // view) and broadcasting it conflicts with the
+                        // proposal we'll emit for the new view.
+                        {
+                            let current_view = self.view_state.read().view;
+                            if current_view != view_at_entry {
+                                tracing::warn!(
+                                    view_at_entry = view_at_entry,
+                                    current_view = current_view,
+                                    "proposal-guard: view advanced during block build; discarding stale proposal"
+                                );
+                                return Ok(());
+                            }
+                        }
+                        // Atomic check-and-set: only the FIRST winner of
+                        // the (view, propose) slot mutates `proposed_block`.
+                        // A concurrent re-entry (which we've already
+                        // returned from above) cannot reach this line, so
+                        // this write is the unique propose-record for the
+                        // view.
                         self.view_state.write().proposed_block = Some(block.clone());
 
                         // Broadcast proposal to all peers so they can vote on it.
@@ -2420,6 +2512,44 @@ impl ConsensusEngine for HotStuff2Engine {
         no_endorsement_certificate: Option<crate::timeout::NoEndorsementCertificate>,
         proposer_high_qc_view: u64,
     ) -> Result<Vote> {
+        // RECEIVER-SIDE DEDUP (AptosBFT EpochManager::process_message
+        // pattern): drop duplicate proposals at the door, keyed by
+        // `(view, block_hash)`. A gossipsub IHAVE/IWANT replay, a peer-
+        // forwarded copy of a proposal we already saw via the consensus-
+        // direct overlay, or in-flight proposals from a previous buggy
+        // run that were still circulating when we restarted on the fix
+        // image — all land at `on_proposal` and would otherwise burn
+        // CPU through the catchup / vote-state-store / equivocation
+        // detector paths before the local replica's
+        // `LastSignState::check_safe_to_sign` finally said "already
+        // signed for this view; refusing". The vote-state-store is
+        // correct end-of-line defence, but it noise up the equivocation
+        // telemetry (each rejected vote logs a `DOUBLE-SIGN PREVENTED`
+        // ERROR) and wastes a few hundred microseconds per re-deliver
+        // on signature verification. Dropping at the door is cheaper
+        // and keeps the equivocation log clean for real Byzantine
+        // events. Pruned by `advance_view` alongside other per-view
+        // caches.
+        let dedup_key = (block.header.view, block.hash());
+        // `entry().or_insert` is the canonical SeqCst-equivalent atomic
+        // insertion-if-absent for `DashMap`. We don't care about the
+        // returned ref — only the side effect of "was the slot empty?".
+        // Re-check by trying to insert; if the slot was already populated
+        // we drop the proposal silently.
+        if !self.proposal_dedup.insert(dedup_key, ()).is_none() {
+            tracing::debug!(
+                view = block.header.view,
+                hash = %block.hash(),
+                "receiver-dedup: dropping duplicate proposal already seen at this view"
+            );
+            // Return a Vote-shaped error: the caller (event_loop)
+            // doesn't broadcast on error, so a duplicate is silently
+            // absorbed without re-broadcasting or re-voting.
+            return Err(ConsensusError::Internal(
+                "duplicate proposal (already processed at this view)".to_string(),
+            ));
+        }
+
         // SyncInfo (#171, Aptos pattern): the proposer piggybacks its current
         // `high_qc_view` on every proposal. We adopt it if higher than our
         // own (subject to `< proposal_view`). This is the steady-state
@@ -2462,6 +2592,83 @@ impl ConsensusEngine for HotStuff2Engine {
             let state = self.view_state.read();
             (state.view, state.height)
         };
+
+        // Catchup-on-proposal (Aptos `ensure_blocks_in_storage` / Diem
+        // `process_certificates` pattern): if the proposer is ahead by one
+        // height, the proposal carries the parent's Commit QC in
+        // `block.header.consensus_proof.proof_data`. We can apply that QC
+        // locally to finalize the parent and advance our `view_state.height`
+        // by one before height-checking the proposal. This unsticks the
+        // 1-block tip fork that occurs when a validator misses a Commit
+        // vote window (its view advances past `qc.view` before it can vote
+        // Commit, so `on_vote` records the Prepare QC in `high_qc_view` but
+        // never finalizes via `finalize_with_commit_qc`).
+        //
+        // Safe because: (1) the embedded QC is signed by 2f+1 of the current
+        // epoch's validators (verified via `finalize_with_commit_qc` →
+        // `finality_tracker.finalize_block` → QC signature verification);
+        // (2) we only accept catchup-finalize for the parent of the
+        // incoming proposal, never arbitrary jumps; (3) the parent block
+        // must already be in `self.blocks` (every proposal forward-syncs
+        // its block into the cache on `on_proposal`'s prelude).
+        if proposal_height == local_height + 1u64 {
+            let parent_hash = block.header.prev_hash;
+            let parent_known = self.blocks.contains_key(&parent_hash);
+            let qc_bytes = block.header.consensus_proof.proof_data.as_slice();
+            if parent_known && !qc_bytes.is_empty() {
+                match bincode::deserialize::<QuorumCertificate>(qc_bytes) {
+                    Ok(parent_commit_qc) if parent_commit_qc.vote_type == VoteType::Commit
+                        && parent_commit_qc.block_hash == parent_hash
+                        && parent_commit_qc.height == local_height =>
+                    {
+                        // Look up the parent block from our local cache and
+                        // run the same finalize path that the leader-driven
+                        // commit takes. Idempotent if we somehow already
+                        // finalized.
+                        if let Some(parent_block) =
+                            self.blocks.get(&parent_hash).map(|r| r.clone())
+                        {
+                            tracing::info!(
+                                proposal_height = %proposal_height,
+                                parent_height = %local_height,
+                                qc_view = parent_commit_qc.view,
+                                "Catchup-on-proposal: finalizing missed parent \
+                                 via QC embedded in incoming proposal"
+                            );
+                            if let Err(e) = self
+                                .finalize_with_commit_qc(&parent_block, parent_commit_qc)
+                                .await
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    parent_height = %local_height,
+                                    "Catchup-on-proposal: parent finalize failed; \
+                                     falling through to regular height-mismatch reject"
+                                );
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::debug!(
+                            proposal_height = %proposal_height,
+                            "Catchup-on-proposal: embedded QC did not match parent (wrong height, \
+                             wrong block hash, or wrong vote_type) — skipping catchup"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            "Catchup-on-proposal: failed to deserialize parent commit QC; \
+                             skipping catchup"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Re-read local_height after the catchup attempt — finalize_with_commit_qc
+        // bumps view_state.height on success.
+        let local_height = self.view_state.read().height;
 
         // Reject proposals for the wrong height outright — `validate_proposal`
         // will catch this too, but failing fast avoids an unnecessary view jump.
@@ -2828,10 +3035,38 @@ impl ConsensusEngine for HotStuff2Engine {
 
         match qc.vote_type {
             VoteType::Prepare => {
-                // Promote local view to Commit and emit our Commit vote.
-                // Idempotent: if we're already past Prepare for this view+block,
-                // skip to avoid double-broadcasting Commit.
-                let should_emit = {
+                // Emit our Commit vote on observation of the Prepare QC.
+                //
+                // Previously this was gated by `state.phase == Phase::Prepare
+                // && state.view == qc.view`. That gate caused the 2026-06-08
+                // testnet stall: when the local pacemaker advanced past `qc.view`
+                // (Bracha boost, vote-piggybacked SyncInfo, etc.) before the
+                // Prepare QC arrived locally, we'd suppress our Commit vote.
+                // Multiple validators in the cluster hit this race per view, so
+                // Commit-QC quorum never formed → block never finalized →
+                // next-height proposals had no parent QC to carry → 1-block
+                // tip fork → live-lock.
+                //
+                // The fix (Aptos/Diem/Jolteon Safety Rules pattern): drop the
+                // local view gate and rely on `create_vote` + `vote_state_store`
+                // for the safety guard. `create_vote` calls
+                // `vote_state_store.record_or_reject` which enforces strict
+                // monotonicity: any attempt to cast a vote at `(v, h, step)`
+                // that is not strictly after the last persisted signing tuple
+                // returns `Equivocation` and the vote is dropped. So even if
+                // we re-enter this path for a Prepare QC after our view has
+                // moved on, we cannot double-sign at a conflicting (view,
+                // height, step) — the vote-state-store is the cryptographic
+                // safety net, the local view was just a stale liveness gate
+                // we don't actually need.
+                //
+                // Idempotency for the recovery case: if `create_vote` returns
+                // an Equivocation error we treat it as "already voted, no
+                // action" and continue. Phase/state are bumped only when our
+                // view actually matched the QC — this preserves the proposer
+                // path's invariants while letting recovery emit votes
+                // unconditionally.
+                let phase_matches = {
                     let mut state = self.view_state.write();
                     if state.phase == Phase::Prepare && state.view == qc.view {
                         state.phase = Phase::Commit;
@@ -2860,32 +3095,53 @@ impl ConsensusEngine for HotStuff2Engine {
                     }
                 }
 
-                if should_emit {
-                    // Emit Commit vote for the same block. create_vote will
-                    // also persist the (view, height, Commit, block_hash) tuple
-                    // to the vote_state_store for double-sign protection.
-                    let commit_vote = self.create_vote(&block, VoteType::Commit)?;
-                    self.send_out(ConsensusOutMessage::Vote(commit_vote.clone()));
-
-                    // Add our own Commit vote to the collector so we count
-                    // toward the Commit quorum without waiting for the gossip
-                    // round-trip.
-                    let collector_qc = {
-                        let vote_collector = self.vote_collector.read();
-                        match vote_collector.as_ref() {
-                            Some(collector) => collector.add_vote(commit_vote)?,
-                            None => return Err(ConsensusError::NotStarted),
+                // Emit Commit vote unconditionally (subject to vote-state-store
+                // double-sign protection inside `create_vote`).
+                match self.create_vote(&block, VoteType::Commit) {
+                    Ok(commit_vote) => {
+                        if !phase_matches {
+                            tracing::info!(
+                                view = qc.view,
+                                local_view = self.view_state.read().view,
+                                height = %qc.height,
+                                "Recovery: emitting Commit vote for Prepare QC at past view \
+                                 — local pacemaker moved on but vote_state_store permits the vote"
+                            );
                         }
-                    };
+                        self.send_out(ConsensusOutMessage::Vote(commit_vote.clone()));
 
-                    // If our self-Commit vote completed the Commit quorum
-                    // (e.g. we were the last vote needed), recurse into
-                    // finalization immediately.
-                    if let Some(commit_qc) = collector_qc
-                        && commit_qc.vote_type == VoteType::Commit
-                    {
-                        self.finalize_with_commit_qc(&block, commit_qc).await?;
+                        // Add our own Commit vote to the collector so we count
+                        // toward the Commit quorum without waiting for the gossip
+                        // round-trip.
+                        let collector_qc = {
+                            let vote_collector = self.vote_collector.read();
+                            match vote_collector.as_ref() {
+                                Some(collector) => collector.add_vote(commit_vote)?,
+                                None => return Err(ConsensusError::NotStarted),
+                            }
+                        };
+
+                        // If our self-Commit vote completed the Commit quorum
+                        // (e.g. we were the last vote needed), recurse into
+                        // finalization immediately.
+                        if let Some(commit_qc) = collector_qc
+                            && commit_qc.vote_type == VoteType::Commit
+                        {
+                            self.finalize_with_commit_qc(&block, commit_qc).await?;
+                        }
                     }
+                    Err(ConsensusError::Equivocation { .. }) => {
+                        // Vote-state-store says we've already signed at or
+                        // past this (view, height, step). Treat as idempotent
+                        // recovery no-op — DO NOT propagate the error: this
+                        // path is a recovery channel, not a misbehavior signal.
+                        tracing::debug!(
+                            view = qc.view,
+                            height = %qc.height,
+                            "Recovery Commit-vote suppressed by vote_state_store (already signed)"
+                        );
+                    }
+                    Err(e) => return Err(e),
                 }
             }
             VoteType::Commit => {
@@ -2937,6 +3193,8 @@ impl Clone for HotStuff2Engine {
             timeout_collector: self.timeout_collector.clone(),
             last_round_nec: self.last_round_nec.clone(),
             nec_collector: self.nec_collector.clone(),
+            last_proposed_view: self.last_proposed_view.clone(),
+            proposal_dedup: self.proposal_dedup.clone(),
             proposer_election: self.proposer_election.clone(),
             reputation: self.reputation.clone(),
         }

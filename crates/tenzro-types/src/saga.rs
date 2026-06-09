@@ -63,6 +63,38 @@ pub struct SagaStep {
     pub verify_witnesses: Vec<String>,
     /// Last-updated unix-seconds timestamp.
     pub updated_at: i64,
+    /// Optional TEE-attested deadline. When set, the saga
+    /// orchestrator MUST refuse to advance the step past `Executing`
+    /// after `attested_deadline.wall_ms` and SHOULD compensate
+    /// instead. The monotonic counter binds the deadline to a
+    /// specific enclave instance so a relayer cannot backdate it
+    /// through wall-clock manipulation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attested_deadline: Option<AttestedDeadline>,
+}
+
+/// Tenzro-types projection of the workflow-crate `AttestedTimestamp`.
+/// Mirrors the wire shape exactly. Defined here so any caller using
+/// `SagaStep` (RPC, SDK, agent runtime) doesn't pull tenzro-workflow
+/// just to set a deadline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttestedDeadline {
+    pub wall_ms: u64,
+    pub monotonic_ns: u64,
+    pub tee_vendor: Option<String>,
+    pub enclave_id_hex: Option<String>,
+    pub attestation_hash_hex: Option<String>,
+    pub signature_hex: Option<String>,
+}
+
+impl AttestedDeadline {
+    /// `true` if `wall_ms` lies before the relying party's wall-clock
+    /// less the tolerance window. Default tolerance is 30s
+    /// (Canton 3.5 timestamp drift guidance).
+    pub fn is_expired(&self, now_wall_ms: u64, tolerance_ms: u64) -> bool {
+        // Expired when deadline + tolerance ≤ now.
+        self.wall_ms.saturating_add(tolerance_ms) <= now_wall_ms
+    }
 }
 
 impl SagaStep {
@@ -77,6 +109,7 @@ impl SagaStep {
             execute_proof: None,
             verify_witnesses: Vec::new(),
             updated_at: at,
+            attested_deadline: None,
         }
     }
 }

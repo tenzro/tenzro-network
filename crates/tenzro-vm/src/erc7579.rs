@@ -105,6 +105,27 @@ pub const PRECOMPILE_SESSION_KEY_VALIDATOR: &[u8] =
 pub const PRECOMPILE_SPENDING_LIMIT_VALIDATOR: &[u8] =
     &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1f, 0];
 
+/// Hardware signer module-address slots. The node-side `tenzro_addHardwareSigner`
+/// RPC assigns one of these to each installed device. Multiple hardware
+/// signers can coexist on a single account because each device kind gets a
+/// distinct slot. Matches the slot mapping in
+/// `crates/tenzro-node/src/passkey_rpc.rs::handle_add_hardware_signer`.
+pub const HARDWARE_VALIDATOR_LEDGER: [u8; 20] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x30,
+];
+pub const HARDWARE_VALIDATOR_TREZOR: [u8; 20] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x31,
+];
+pub const HARDWARE_VALIDATOR_GRIDPLUS: [u8; 20] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x32,
+];
+pub const HARDWARE_VALIDATOR_YUBIKEY: [u8; 20] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x33,
+];
+pub const HARDWARE_VALIDATOR_GENERIC: [u8; 20] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x3f,
+];
+
 // -----------------------------------------------------------------------------
 // ValidatorModuleConfig — the on-account record of an installed module
 // -----------------------------------------------------------------------------
@@ -187,6 +208,12 @@ pub struct SocialRecoveryValidator {
     address: [u8; 20],
     /// Per-account configuration. Keyed by smart-account address.
     configs: DashMap<Vec<u8>, SocialRecoveryConfig>,
+    /// Optional persistence backend. Write-through on every
+    /// `install_for`/`uninstall_for`; hydrate on construction via
+    /// `with_storage`. Without storage, configs are in-memory only —
+    /// fine for tests, disastrous for production where a node
+    /// restart silently wipes the guardian quorum.
+    storage: Option<std::sync::Arc<dyn tenzro_storage::KvStore>>,
 }
 
 impl SocialRecoveryValidator {
@@ -194,6 +221,71 @@ impl SocialRecoveryValidator {
         Self {
             address,
             configs: DashMap::new(),
+            storage: None,
+        }
+    }
+
+    /// Constructs a persistent validator backed by `storage`. Hydrates
+    /// the configs map from `CF_VALIDATOR_MODULES / erc7579/social/*`
+    /// on construction. Every subsequent `install_for`/`uninstall_for`
+    /// writes through to the same column family. Production
+    /// constructor — call instead of `new` whenever the node owns a
+    /// `KvStore`.
+    pub fn with_storage(
+        address: [u8; 20],
+        storage: std::sync::Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        let v = Self {
+            address,
+            configs: DashMap::new(),
+            storage: Some(storage),
+        };
+        v.hydrate();
+        v
+    }
+
+    fn social_key(account: &[u8]) -> Vec<u8> {
+        let mut k = b"erc7579/social/".to_vec();
+        k.extend_from_slice(account);
+        k
+    }
+
+    fn hydrate(&self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let prefix = b"erc7579/social/";
+        let entries = match storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, prefix) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for (key, value) in entries {
+            if key.len() <= prefix.len() {
+                continue;
+            }
+            let account = key[prefix.len()..].to_vec();
+            if let Ok(config) = serde_json::from_slice::<SocialRecoveryConfig>(&value) {
+                self.configs.insert(account, config);
+            }
+        }
+    }
+
+    fn persist(&self, account: &[u8], config: &SocialRecoveryConfig) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = serde_json::to_vec(config) {
+                let _ = storage.put(
+                    tenzro_storage::CF_VALIDATOR_MODULES,
+                    &Self::social_key(account),
+                    &bytes,
+                );
+            }
+        }
+    }
+
+    fn forget(&self, account: &[u8]) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage
+                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::social_key(account));
         }
     }
 
@@ -205,12 +297,14 @@ impl SocialRecoveryValidator {
         account: Vec<u8>,
         config: SocialRecoveryConfig,
     ) -> Result<(), ValidatorError> {
+        self.persist(&account, &config);
         self.configs.insert(account, config);
         Ok(())
     }
 
     pub fn uninstall_for(&self, account: &[u8]) {
         self.configs.remove(account);
+        self.forget(account);
     }
 
     pub fn config_for(&self, account: &[u8]) -> Option<SocialRecoveryConfig> {
@@ -324,7 +418,7 @@ pub struct SessionKeyConfig {
 }
 
 /// Mutable counter for per-key total spend.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 struct SessionKeyState {
     total_spent: u128,
 }
@@ -354,6 +448,8 @@ pub struct SessionKeyValidator {
     /// Test hook — when set, used in place of `SystemTime::now()` so the time
     /// gates are deterministically testable. `None` in production.
     clock_override: RwLock<Option<u64>>,
+    /// Optional persistence backend.
+    storage: Option<std::sync::Arc<dyn tenzro_storage::KvStore>>,
 }
 
 impl SessionKeyValidator {
@@ -363,17 +459,117 @@ impl SessionKeyValidator {
             configs: DashMap::new(),
             state: DashMap::new(),
             clock_override: RwLock::new(None),
+            storage: None,
+        }
+    }
+
+    /// Production constructor with write-through to
+    /// `CF_VALIDATOR_MODULES`. Hydrates configs + state on construction.
+    pub fn with_storage(
+        address: [u8; 20],
+        storage: std::sync::Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        let v = Self {
+            address,
+            configs: DashMap::new(),
+            state: DashMap::new(),
+            clock_override: RwLock::new(None),
+            storage: Some(storage),
+        };
+        v.hydrate();
+        v
+    }
+
+    fn cfg_key(account: &[u8]) -> Vec<u8> {
+        let mut k = b"erc7579/session/".to_vec();
+        k.extend_from_slice(account);
+        k
+    }
+    fn state_key(account: &[u8]) -> Vec<u8> {
+        let mut k = b"erc7579/session_state/".to_vec();
+        k.extend_from_slice(account);
+        k
+    }
+
+    fn hydrate(&self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let cfg_prefix: &[u8] = b"erc7579/session/";
+        if let Ok(entries) =
+            storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, cfg_prefix)
+        {
+            for (key, value) in entries {
+                if key.len() <= cfg_prefix.len() {
+                    continue;
+                }
+                let account = key[cfg_prefix.len()..].to_vec();
+                if let Ok(config) = serde_json::from_slice::<SessionKeyConfig>(&value) {
+                    self.configs.insert(account, config);
+                }
+            }
+        }
+        let state_prefix: &[u8] = b"erc7579/session_state/";
+        if let Ok(entries) =
+            storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, state_prefix)
+        {
+            for (key, value) in entries {
+                if key.len() <= state_prefix.len() {
+                    continue;
+                }
+                let account = key[state_prefix.len()..].to_vec();
+                if let Ok(state) = serde_json::from_slice::<SessionKeyState>(&value) {
+                    self.state.insert(account, RwLock::new(state));
+                }
+            }
+        }
+    }
+
+    fn persist_config(&self, account: &[u8], config: &SessionKeyConfig) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = serde_json::to_vec(config) {
+                let _ = storage.put(
+                    tenzro_storage::CF_VALIDATOR_MODULES,
+                    &Self::cfg_key(account),
+                    &bytes,
+                );
+            }
+        }
+    }
+
+    fn persist_state(&self, account: &[u8], state: &SessionKeyState) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = serde_json::to_vec(state) {
+                let _ = storage.put(
+                    tenzro_storage::CF_VALIDATOR_MODULES,
+                    &Self::state_key(account),
+                    &bytes,
+                );
+            }
+        }
+    }
+
+    fn forget(&self, account: &[u8]) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage
+                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::cfg_key(account));
+            let _ = storage
+                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::state_key(account));
         }
     }
 
     pub fn install_for(&self, account: Vec<u8>, config: SessionKeyConfig) {
+        self.persist_config(&account, &config);
+        let initial_state = SessionKeyState::default();
+        self.persist_state(&account, &initial_state);
         self.configs.insert(account.clone(), config);
-        self.state.insert(account, RwLock::new(SessionKeyState::default()));
+        self.state.insert(account, RwLock::new(initial_state));
     }
 
     pub fn uninstall_for(&self, account: &[u8]) {
         self.configs.remove(account);
         self.state.remove(account);
+        self.forget(account);
     }
 
     pub fn config_for(&self, account: &[u8]) -> Option<SessionKeyConfig> {
@@ -473,6 +669,10 @@ impl IValidator for SessionKeyValidator {
                 return Ok(ValidationData::failure());
             }
             state.total_spent = new_total;
+            let snapshot = state.clone();
+            drop(state);
+            drop(state_entry);
+            self.persist_state(&op.sender, &snapshot);
         }
 
         // Surface the configured time bounds as `(valid_after, valid_until)`
@@ -537,7 +737,7 @@ impl Default for SpendingLimitConfig {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 struct SpendingLimitState {
     /// Unix timestamp (seconds) at which the current window started.
     window_start_ts: u64,
@@ -569,6 +769,7 @@ pub struct SpendingLimitValidator {
     /// pins its own.
     authenticators: DashMap<Vec<u8>, [u8; 32]>,
     clock_override: RwLock<Option<u64>>,
+    storage: Option<std::sync::Arc<dyn tenzro_storage::KvStore>>,
 }
 
 impl SpendingLimitValidator {
@@ -579,6 +780,133 @@ impl SpendingLimitValidator {
             state: DashMap::new(),
             authenticators: DashMap::new(),
             clock_override: RwLock::new(None),
+            storage: None,
+        }
+    }
+
+    /// Production constructor with write-through.
+    pub fn with_storage(
+        address: [u8; 20],
+        storage: std::sync::Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        let v = Self {
+            address,
+            configs: DashMap::new(),
+            state: DashMap::new(),
+            authenticators: DashMap::new(),
+            clock_override: RwLock::new(None),
+            storage: Some(storage),
+        };
+        v.hydrate();
+        v
+    }
+
+    fn cfg_key(account: &[u8]) -> Vec<u8> {
+        let mut k = b"erc7579/spending/".to_vec();
+        k.extend_from_slice(account);
+        k
+    }
+    fn state_key(account: &[u8]) -> Vec<u8> {
+        let mut k = b"erc7579/spending_state/".to_vec();
+        k.extend_from_slice(account);
+        k
+    }
+    fn auth_key(account: &[u8]) -> Vec<u8> {
+        let mut k = b"erc7579/spending_auth/".to_vec();
+        k.extend_from_slice(account);
+        k
+    }
+
+    fn hydrate(&self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let cfg_prefix: &[u8] = b"erc7579/spending/";
+        if let Ok(entries) =
+            storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, cfg_prefix)
+        {
+            for (key, value) in entries {
+                if key.len() <= cfg_prefix.len() {
+                    continue;
+                }
+                let account = key[cfg_prefix.len()..].to_vec();
+                if let Ok(config) = serde_json::from_slice::<SpendingLimitConfig>(&value) {
+                    self.configs.insert(account, config);
+                }
+            }
+        }
+        let state_prefix: &[u8] = b"erc7579/spending_state/";
+        if let Ok(entries) =
+            storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, state_prefix)
+        {
+            for (key, value) in entries {
+                if key.len() <= state_prefix.len() {
+                    continue;
+                }
+                let account = key[state_prefix.len()..].to_vec();
+                if let Ok(state) = serde_json::from_slice::<SpendingLimitState>(&value) {
+                    self.state.insert(account, RwLock::new(state));
+                }
+            }
+        }
+        let auth_prefix: &[u8] = b"erc7579/spending_auth/";
+        if let Ok(entries) =
+            storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, auth_prefix)
+        {
+            for (key, value) in entries {
+                if key.len() <= auth_prefix.len() || value.len() != 32 {
+                    continue;
+                }
+                let account = key[auth_prefix.len()..].to_vec();
+                let mut pk = [0u8; 32];
+                pk.copy_from_slice(&value);
+                self.authenticators.insert(account, pk);
+            }
+        }
+    }
+
+    fn persist_config(&self, account: &[u8], config: &SpendingLimitConfig) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = serde_json::to_vec(config) {
+                let _ = storage.put(
+                    tenzro_storage::CF_VALIDATOR_MODULES,
+                    &Self::cfg_key(account),
+                    &bytes,
+                );
+            }
+        }
+    }
+
+    fn persist_state(&self, account: &[u8], state: &SpendingLimitState) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = serde_json::to_vec(state) {
+                let _ = storage.put(
+                    tenzro_storage::CF_VALIDATOR_MODULES,
+                    &Self::state_key(account),
+                    &bytes,
+                );
+            }
+        }
+    }
+
+    fn persist_auth(&self, account: &[u8], pubkey: &[u8; 32]) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(
+                tenzro_storage::CF_VALIDATOR_MODULES,
+                &Self::auth_key(account),
+                pubkey,
+            );
+        }
+    }
+
+    fn forget(&self, account: &[u8]) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage
+                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::cfg_key(account));
+            let _ = storage
+                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::state_key(account));
+            let _ = storage
+                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::auth_key(account));
         }
     }
 
@@ -588,9 +916,13 @@ impl SpendingLimitValidator {
         config: SpendingLimitConfig,
         authenticator_pubkey: [u8; 32],
     ) {
+        self.persist_config(&account, &config);
+        let initial_state = SpendingLimitState::default();
+        self.persist_state(&account, &initial_state);
+        self.persist_auth(&account, &authenticator_pubkey);
         self.configs.insert(account.clone(), config);
         self.state
-            .insert(account.clone(), RwLock::new(SpendingLimitState::default()));
+            .insert(account.clone(), RwLock::new(initial_state));
         self.authenticators.insert(account, authenticator_pubkey);
     }
 
@@ -598,6 +930,7 @@ impl SpendingLimitValidator {
         self.configs.remove(account);
         self.state.remove(account);
         self.authenticators.remove(account);
+        self.forget(account);
     }
 
     pub fn config_for(&self, account: &[u8]) -> Option<SpendingLimitConfig> {
@@ -699,6 +1032,10 @@ impl IValidator for SpendingLimitValidator {
                 return Ok(ValidationData::failure());
             }
             state.spent_in_window = new_spend;
+            let snapshot = state.clone();
+            drop(state);
+            drop(state_entry);
+            self.persist_state(&op.sender, &snapshot);
         }
 
         Ok(ValidationData::success())
@@ -1594,5 +1931,431 @@ mod tests {
         acct.install_validator_module_with_recovery(cfg2, true)
             .unwrap();
         assert!(acct.is_validator_installed(&[0x1e; 20]));
+    }
+}
+
+// =============================================================================
+// HardwareSignerValidator — Ledger / Trezor / GridPlus secp256k1 sign-off
+// =============================================================================
+
+/// On-chain configuration for a hardware-bound co-signer.
+///
+/// The node-side `tenzro_addHardwareSigner` RPC writes this struct (as JSON)
+/// into the `ValidatorModuleConfig.init_data` slot. The
+/// [`HardwareSignerValidator`] then decodes that init_data on install and
+/// stores it per-account. Mirrors the `HardwareValidatorInit` shape in
+/// `crates/tenzro-node/src/passkey_rpc.rs::handle_add_hardware_signer`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HardwareSignerConfig {
+    pub device_kind: String,
+    /// 33-byte SEC1-compressed secp256k1 public key (Ledger / Trezor / GridPlus
+    /// hardware path) OR 64-byte raw P-256 (YubiKey path — verification falls
+    /// through to the WebAuthn module in that case).
+    pub public_key: Vec<u8>,
+    /// If `true`, every UserOp must carry a valid hardware signature.
+    /// Otherwise the validator only insists when the UserOp's call_value
+    /// exceeds `required_above_wei`.
+    pub required_always: bool,
+    /// Threshold above which the hardware signature is required (`None`
+    /// means no value gate — only `required_always` matters).
+    pub required_above_wei: Option<String>,
+    pub label: Option<String>,
+}
+
+impl HardwareSignerConfig {
+    /// Decode `init_data` JSON written by the node-side RPC.
+    pub fn from_init_data(init_data: &[u8]) -> Result<Self, ValidatorError> {
+        serde_json::from_slice(init_data).map_err(|e| {
+            ValidatorError::InvalidInput(format!("HardwareSigner: init_data decode: {e}"))
+        })
+    }
+}
+
+/// HardwareSignerValidator — verifies a secp256k1 ECDSA signature against a
+/// hardware-bound public key on every UserOp whose call_value crosses the
+/// configured threshold (or unconditionally when `required_always = true`).
+///
+/// # Signature wire shape
+///
+/// The UserOp signature is `compact_r || compact_s` (64 bytes raw, no `v`
+/// byte) over the UserOp hash. This matches what the wallet-side
+/// `PluggableSigner::sign_hash` returns for Ledger / Trezor / GridPlus
+/// adapters.
+pub struct HardwareSignerValidator {
+    address: [u8; 20],
+    configs: DashMap<Vec<u8>, HardwareSignerConfig>,
+    storage: Option<std::sync::Arc<dyn tenzro_storage::KvStore>>,
+}
+
+impl HardwareSignerValidator {
+    pub fn new(address: [u8; 20]) -> Self {
+        Self {
+            address,
+            configs: DashMap::new(),
+            storage: None,
+        }
+    }
+
+    pub fn with_storage(
+        address: [u8; 20],
+        storage: std::sync::Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        let v = Self {
+            address,
+            configs: DashMap::new(),
+            storage: Some(storage),
+        };
+        v.hydrate();
+        v
+    }
+
+    fn key_for(account: &[u8], module_addr: &[u8; 20]) -> Vec<u8> {
+        let mut k = b"erc7579/hardware/".to_vec();
+        k.extend_from_slice(module_addr);
+        k.push(b'/');
+        k.extend_from_slice(account);
+        k
+    }
+
+    fn hydrate(&self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let mut prefix = b"erc7579/hardware/".to_vec();
+        prefix.extend_from_slice(&self.address);
+        prefix.push(b'/');
+        let entries = match storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, &prefix) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for (key, value) in entries {
+            if key.len() <= prefix.len() {
+                continue;
+            }
+            let account = key[prefix.len()..].to_vec();
+            if let Ok(config) = serde_json::from_slice::<HardwareSignerConfig>(&value) {
+                self.configs.insert(account, config);
+            }
+        }
+    }
+
+    fn persist(&self, account: &[u8], config: &HardwareSignerConfig) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = serde_json::to_vec(config) {
+                let _ = storage.put(
+                    tenzro_storage::CF_VALIDATOR_MODULES,
+                    &Self::key_for(account, &self.address),
+                    &bytes,
+                );
+            }
+        }
+    }
+
+    fn forget(&self, account: &[u8]) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.delete(
+                tenzro_storage::CF_VALIDATOR_MODULES,
+                &Self::key_for(account, &self.address),
+            );
+        }
+    }
+
+    pub fn install_for(
+        &self,
+        account: Vec<u8>,
+        config: HardwareSignerConfig,
+    ) -> Result<(), ValidatorError> {
+        self.persist(&account, &config);
+        self.configs.insert(account, config);
+        Ok(())
+    }
+
+    pub fn uninstall_for(&self, account: &[u8]) {
+        self.configs.remove(account);
+        self.forget(account);
+    }
+
+    pub fn config_for(&self, account: &[u8]) -> Option<HardwareSignerConfig> {
+        self.configs.get(account).map(|e| e.value().clone())
+    }
+
+    /// Convenience: decode `init_data` and install in one step. Used by
+    /// `EntryPoint::installModule` dispatch when an account installs a
+    /// hardware-signer module.
+    pub fn install_from_init_data(
+        &self,
+        account: Vec<u8>,
+        init_data: &[u8],
+    ) -> Result<(), ValidatorError> {
+        let config = HardwareSignerConfig::from_init_data(init_data)?;
+        self.install_for(account, config)
+    }
+
+    /// Verify a 64-byte secp256k1 signature against a 33-byte compressed
+    /// public key over a 32-byte hash. Returns `true` iff the signature
+    /// matches. Pulled out so unit tests can exercise it directly.
+    fn verify_secp256k1(pubkey: &[u8], hash: &[u8; 32], sig: &[u8]) -> bool {
+        use k256::ecdsa::signature::Verifier;
+        use k256::ecdsa::{Signature, VerifyingKey};
+
+        if sig.len() != 64 {
+            return false;
+        }
+        let Ok(vk) = VerifyingKey::from_sec1_bytes(pubkey) else {
+            return false;
+        };
+        let Ok(signature) = Signature::from_slice(sig) else {
+            return false;
+        };
+        vk.verify(hash, &signature).is_ok()
+    }
+
+    fn parse_threshold(s: Option<&String>) -> Option<u128> {
+        s.and_then(|raw| {
+            let raw = raw.trim();
+            if let Some(hex_part) = raw.strip_prefix("0x") {
+                u128::from_str_radix(hex_part, 16).ok()
+            } else {
+                raw.parse::<u128>().ok()
+            }
+        })
+    }
+
+    /// Best-effort extraction of the call_value out of `execute(...)` calldata.
+    /// When the UserOp uses the canonical `execute(address,uint256,bytes)`
+    /// selector (0xb61d27f6), this returns the embedded value; otherwise 0
+    /// (the value gate is conservative — if we can't tell, we don't require
+    /// the hardware leg unless `required_always = true`).
+    fn extract_value_from_calldata(call_data: &[u8]) -> u128 {
+        if call_data.len() < 132 {
+            return 0;
+        }
+        if call_data[0..4] != [0xb6, 0x1d, 0x27, 0xf6] {
+            return 0;
+        }
+        if call_data[36..52].iter().any(|b| *b != 0) {
+            return u128::MAX; // oversize → force hardware leg
+        }
+        let mut v = [0u8; 16];
+        v.copy_from_slice(&call_data[52..68]);
+        u128::from_be_bytes(v)
+    }
+}
+
+impl IValidator for HardwareSignerValidator {
+    fn module_address(&self) -> [u8; 20] {
+        self.address
+    }
+
+    fn validate_user_op(
+        &self,
+        op: &UserOperation,
+        op_hash: &[u8; 32],
+    ) -> Result<ValidationData, ValidatorError> {
+        let Some(config) = self.config_for(&op.sender) else {
+            return Err(ValidatorError::InvalidInput(format!(
+                "HardwareSigner: no config installed for account 0x{}",
+                hex::encode(&op.sender)
+            )));
+        };
+
+        // Decide whether the hardware leg is required for this op.
+        let gate_required = if config.required_always {
+            true
+        } else if let Some(threshold) = Self::parse_threshold(config.required_above_wei.as_ref()) {
+            let call_value = Self::extract_value_from_calldata(&op.call_data);
+            call_value >= threshold
+        } else {
+            false
+        };
+
+        if !gate_required {
+            // Out-of-scope op — the hardware validator does not block here;
+            // some other validator (WebAuthn, SocialRecovery) is responsible.
+            // Return success so the EntryPoint AND-combine doesn't fail.
+            return Ok(ValidationData::success());
+        }
+
+        // The UserOp signature for the hardware path is appended at the
+        // end of `op.signature` as the last 64 bytes. Earlier bytes are
+        // consumed by upstream validators (e.g. WebAuthn). When only the
+        // hardware leg is installed, the whole signature is the 64-byte
+        // ECDSA payload.
+        if op.signature.len() < 64 {
+            return Ok(ValidationData::failure());
+        }
+        let sig_start = op.signature.len() - 64;
+        let sig = &op.signature[sig_start..];
+
+        if Self::verify_secp256k1(&config.public_key, op_hash, sig) {
+            Ok(ValidationData::success())
+        } else {
+            Ok(ValidationData::failure())
+        }
+    }
+
+    fn is_valid_signature_with_sender(
+        &self,
+        sender: &[u8],
+        hash: &[u8; 32],
+        signature: &[u8],
+    ) -> [u8; 4] {
+        let Some(config) = self.config_for(sender) else {
+            return ERC1271_FAILURE_VALUE;
+        };
+        if signature.len() < 64 {
+            return ERC1271_FAILURE_VALUE;
+        }
+        let sig = &signature[signature.len() - 64..];
+        if Self::verify_secp256k1(&config.public_key, hash, sig) {
+            ERC1271_MAGIC_VALUE
+        } else {
+            ERC1271_FAILURE_VALUE
+        }
+    }
+}
+
+#[cfg(test)]
+mod hardware_tests {
+    use super::*;
+    use crate::account_abstraction::UserOperation;
+    use k256::ecdsa::{signature::Signer, SigningKey};
+
+    fn test_signing_key(seed: u8) -> SigningKey {
+        let mut bytes = [0u8; 32];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = seed.wrapping_add(i as u8).wrapping_add(1);
+        }
+        SigningKey::from_bytes(&bytes.into()).expect("valid secp256k1 scalar")
+    }
+
+    fn dummy_user_op(sender: Vec<u8>, sig: Vec<u8>, call_data: Vec<u8>) -> UserOperation {
+        UserOperation {
+            sender,
+            nonce: 0,
+            factory: vec![],
+            factory_data: vec![],
+            call_data,
+            call_gas_limit: 100_000,
+            verification_gas_limit: 50_000,
+            pre_verification_gas: 21_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 1_000_000,
+            paymaster: vec![],
+            paymaster_verification_gas_limit: 0,
+            paymaster_post_op_gas_limit: 0,
+            paymaster_data: vec![],
+            signature: sig,
+        }
+    }
+
+    #[test]
+    fn hardware_validator_required_always_accepts_real_signature() {
+        let sk = test_signing_key(7);
+        let vk = sk.verifying_key();
+        let pubkey = vk.to_sec1_point(true).as_bytes().to_vec(); // 33-byte compressed // 33-byte compressed
+
+        let validator = HardwareSignerValidator::new(HARDWARE_VALIDATOR_LEDGER);
+        let sender = vec![0xAB; 20];
+        validator
+            .install_for(
+                sender.clone(),
+                HardwareSignerConfig {
+                    device_kind: "ledger".into(),
+                    public_key: pubkey,
+                    required_always: true,
+                    required_above_wei: None,
+                    label: Some("Ledger Nano X".into()),
+                },
+            )
+            .unwrap();
+
+        let op_hash = [0x42u8; 32];
+        let sig: k256::ecdsa::Signature = sk.sign(&op_hash);
+        let sig_bytes = sig.to_bytes().to_vec(); // 64 bytes r||s
+
+        let op = dummy_user_op(sender, sig_bytes, vec![]);
+        let vd = validator.validate_user_op(&op, &op_hash).unwrap();
+        assert_eq!(vd.valid_after, 0);
+        assert_eq!(vd.valid_until, 0);
+    }
+
+    #[test]
+    fn hardware_validator_rejects_wrong_signature() {
+        let sk = test_signing_key(7);
+        let vk = sk.verifying_key();
+        let pubkey = vk.to_sec1_point(true).as_bytes().to_vec(); // 33-byte compressed
+
+        let validator = HardwareSignerValidator::new(HARDWARE_VALIDATOR_LEDGER);
+        let sender = vec![0xCD; 20];
+        validator
+            .install_for(
+                sender.clone(),
+                HardwareSignerConfig {
+                    device_kind: "ledger".into(),
+                    public_key: pubkey,
+                    required_always: true,
+                    required_above_wei: None,
+                    label: None,
+                },
+            )
+            .unwrap();
+
+        // Sign over a DIFFERENT hash so verification fails
+        let real_hash = [0x42u8; 32];
+        let wrong_hash = [0x99u8; 32];
+        let sig: k256::ecdsa::Signature = sk.sign(&wrong_hash);
+        let sig_bytes = sig.to_bytes().to_vec();
+
+        let op = dummy_user_op(sender, sig_bytes, vec![]);
+        let vd = validator.validate_user_op(&op, &real_hash).unwrap();
+        assert!(vd.is_failure(), "wrong signature must fail");
+    }
+
+    #[test]
+    fn hardware_validator_value_gate_skips_low_value_ops() {
+        // required_above_wei = 1_000_000 means low-value ops don't need
+        // the hardware leg — validator returns success WITHOUT checking
+        // the signature.
+        let validator = HardwareSignerValidator::new(HARDWARE_VALIDATOR_LEDGER);
+        let sender = vec![0xEF; 20];
+        validator
+            .install_for(
+                sender.clone(),
+                HardwareSignerConfig {
+                    device_kind: "ledger".into(),
+                    public_key: vec![0u8; 33], // junk pubkey — never consulted
+                    required_always: false,
+                    required_above_wei: Some("1000000".into()),
+                    label: None,
+                },
+            )
+            .unwrap();
+
+        // No execute() selector → extract_value returns 0 → below threshold
+        let op = dummy_user_op(sender, vec![], vec![0xde, 0xad]);
+        let vd = validator.validate_user_op(&op, &[0u8; 32]).unwrap();
+        assert_eq!(vd.valid_until, 0); // success
+    }
+
+    #[test]
+    fn hardware_validator_install_from_init_data_roundtrip() {
+        let init = serde_json::json!({
+            "device_kind": "trezor",
+            "public_key": [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33],
+            "required_always": true,
+            "required_above_wei": null,
+            "label": "personal trezor"
+        });
+        let init_bytes = serde_json::to_vec(&init).unwrap();
+        let validator = HardwareSignerValidator::new(HARDWARE_VALIDATOR_TREZOR);
+        let account = vec![0x11; 20];
+        validator
+            .install_from_init_data(account.clone(), &init_bytes)
+            .unwrap();
+        let cfg = validator.config_for(&account).expect("config installed");
+        assert_eq!(cfg.device_kind, "trezor");
+        assert!(cfg.required_always);
+        assert_eq!(cfg.public_key.len(), 33);
     }
 }

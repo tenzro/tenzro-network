@@ -1123,6 +1123,49 @@ pub struct TenzroNode {
     /// only; later wave will rebuild the per-account install set from
     /// on-chain `InstalledModule` logs on restart.
     aa_validator_registry: Option<Arc<tenzro_vm::aa_validators::ValidatorRegistry>>,
+    /// ERC-4337 smart-account factory shared across passkey-first enrollment,
+    /// guardian recovery, and session-key grants. The factory holds a
+    /// `DashMap<Vec<u8>, SmartAccount>` of every account deployed via
+    /// `tenzro_enrollPasskey`; the per-account `validator_modules` field is
+    /// the source of truth for which ERC-7579 validators (`WebAuthnValidator`,
+    /// `SocialRecoveryValidator`, `SessionKeyValidator`, `SpendingLimitValidator`,
+    /// `HardwareSignerValidator`) are installed. Persisted to `CF_AGENTS`
+    /// under the `smart_account:` prefix via the wrapper layer (see
+    /// `passkey_rpc.rs`). The factory address is the canonical Tenzro
+    /// AccountFactory precompile address `0x0000…0000400`.
+    account_factory: Option<Arc<tenzro_vm::AccountFactory>>,
+    /// SocialRecoveryValidator shared by every account that has installed it.
+    /// Owned at node level (not per-account) because the validator is
+    /// `Arc<dyn IValidator>`-stored in the AccountFactory but the *config* is
+    /// per-account inside the validator's own `configs: DashMap` (see
+    /// `tenzro_vm::erc7579::SocialRecoveryValidator`). Persists to
+    /// `CF_VALIDATOR_MODULES` under `erc7579/social/<account_addr>`.
+    social_recovery_validator: Option<Arc<tenzro_vm::SocialRecoveryValidator>>,
+    /// SessionKeyValidator — same per-account-config model as
+    /// `social_recovery_validator`. Configs persist under
+    /// `erc7579/session/<account_addr>`.
+    session_key_validator: Option<Arc<tenzro_vm::SessionKeyValidator>>,
+    /// SpendingLimitValidator — per-account ceilings (per-tx + rolling-window
+    /// daily). Configs persist under `erc7579/spending/<account_addr>`.
+    spending_limit_validator: Option<Arc<tenzro_vm::SpendingLimitValidator>>,
+    /// WebAuthnValidator — the primary user-facing validator for passkey-first
+    /// onboarding. Per-account configs hold the registered WebAuthn public
+    /// key (P-256 SEC1) plus the rolling sign-count. Persists to
+    /// `CF_VALIDATOR_MODULES / erc7579/webauthn/<account_addr>`.
+    webauthn_validator: Option<Arc<tenzro_vm::WebAuthnValidator>>,
+    /// Hardware-signer validators (Ledger / Trezor / GridPlus / YubiKey /
+    /// Generic). One validator per device-kind module address. Per-account
+    /// configs are written through to `CF_VALIDATOR_MODULES /
+    /// erc7579/hardware/<module_addr>/<account_addr>` by
+    /// `tenzro_addHardwareSigner` and hydrated on startup.
+    hardware_signer_validators:
+        Option<Vec<Arc<tenzro_vm::erc7579::HardwareSignerValidator>>>,
+    /// Pending social-recovery operations indexed by recovery_id. Each entry
+    /// holds the target account, the new validator install request, the set
+    /// of guardian signatures collected so far, and the `expires_at`
+    /// deadline. Persists to `CF_VALIDATOR_MODULES / erc7579/recovery_pending/`
+    /// so an interrupted recovery survives node restart.
+    recovery_pending: Option<Arc<crate::passkey_rpc::PendingRecoveryStore>>,
     /// Shared `IdentityScopeOracle` consulted by every installed
     /// `DelegationScopeValidator` (Phase B Thread 3 / B.3.5). Held on Node
     /// so #164 (per-machine validator install) can clone the same Arc into
@@ -1214,6 +1257,32 @@ pub struct TenzroNode {
     /// Persists `ApiKeyRecord` rows (SHA-256-hashed plaintext) to
     /// `CF_API_KEYS` via [`crate::api_key::ApiKeyManager::new`].
     api_key_manager: Option<Arc<crate::api_key::ApiKeyManager>>,
+
+    /// Per-tenant Canton usage counter. Incremented from the canton
+    /// RPC dispatch path so the operator can answer "how many DAML
+    /// transactions has the tenzro-labs team submitted this month, and
+    /// which methods are they hitting?" Persists `CantonKeyAnalytics`
+    /// to `CF_CANTON_ANALYTICS`. `None` when storage isn't wired,
+    /// matching the api_key_manager pattern.
+    canton_analytics: Option<Arc<crate::canton_analytics::CantonAnalyticsManager>>,
+
+    /// Per-tenant Chainlink/bridge analytics — counters + CU attribution
+    /// for `chainlink`-scoped API keys. Same pattern as `canton_analytics`
+    /// but for the bridge fee oracle path.
+    bridge_analytics: Option<Arc<crate::bridge_analytics::BridgeAnalyticsManager>>,
+
+    /// GCRA rate limiter for `chainlink`-scoped API keys. In-memory only;
+    /// counters don't survive restart (rate-limit windows are short-lived).
+    /// Defaults: 10 req/sec, burst 100.
+    chainlink_rate_limiter: Arc<crate::bridge_analytics::GcraLimiter>,
+
+    /// Stage 2.b: per-tenant upstream OAuth client provisioner. When
+    /// `canton.identity_providers.enabled` is true and
+    /// `mgmt_url`/`mgmt_token` are configured, this is an
+    /// `Auth0ManagementClient`; `handle_create_api_key` uses it to
+    /// mint a per-tenant client and return the secret to the tenant
+    /// once. `None` when Stage 2.b is disabled — devnet flow.
+    tenant_idp_provisioner: Option<Arc<dyn tenzro_bridge::tenant_idp::TenantIdpProvisioner>>,
 
     /// Operator admin token gating per-node mutation RPCs (API-key
     /// issuance/revocation, staking, provider registration). Loaded once
@@ -1372,6 +1441,17 @@ pub struct TenzroNode {
     /// Tokens without a registered policy are unaffected. See
     /// [`tenzro_vm::secure_mint::SecureMintRegistry`].
     secure_mint_registry: Arc<tenzro_vm::secure_mint::SecureMintRegistry>,
+
+    /// ERC-7943 (uRWA) per-token kill-switch + per-account freeze
+    /// registry. The EVM transfer hook consults `check_transfer`
+    /// pre-debit so a kill-switched token cannot move and a frozen
+    /// balance cannot be transferred. Mutations flow through
+    /// `tenzro_urwaSetFrozenTokens` / `tenzro_urwaTriggerKillSwitch` /
+    /// `tenzro_urwaClearKillSwitch` / `tenzro_urwaForcedTransfer` —
+    /// each admin-gated. Persisted to `CF_TOKENS` under
+    /// `urwa_freeze:` and `urwa_kill:` prefixes via
+    /// `UrwaRegistry::with_storage`.
+    urwa_registry: Arc<tenzro_vm::erc7943::UrwaRegistry>,
 
     /// ERC-8004 on-chain agent-registry mirror (DID → sequential `agentId`).
     /// Populated during identity init with `NativeErc8004Mirror`, which
@@ -1570,6 +1650,13 @@ impl TenzroNode {
             workflow_runtime: None,
             validator_registry: None,
             aa_validator_registry: None,
+            account_factory: None,
+            social_recovery_validator: None,
+            session_key_validator: None,
+            spending_limit_validator: None,
+            webauthn_validator: None,
+            hardware_signer_validators: None,
+            recovery_pending: None,
             identity_scope_oracle: None,
             aa_entry_point: None,
             burn_quota_manager: None,
@@ -1589,6 +1676,12 @@ impl TenzroNode {
             fee_collector: None,
             auth_engine: None,
             api_key_manager: None,
+            canton_analytics: None,
+            bridge_analytics: None,
+            chainlink_rate_limiter: Arc::new(
+                crate::bridge_analytics::GcraLimiter::default(),
+            ),
+            tenant_idp_provisioner: None,
             admin_token: None,
             model_registry: None,
             provider_manager: None,
@@ -1627,6 +1720,7 @@ impl TenzroNode {
             eip7702_delegation_registry: Arc::new(tenzro_vm::eip7702::DelegationRegistry::new()),
             permit2_nonce_bitmap: Arc::new(tenzro_vm::permit2::Permit2NonceBitmap::new()),
             secure_mint_registry: Arc::new(tenzro_vm::secure_mint::SecureMintRegistry::new()),
+            urwa_registry: Arc::new(tenzro_vm::erc7943::UrwaRegistry::new()),
             erc8004_agent_registry: None,
             erc8004_system_signer: None,
             health_monitor,
@@ -2214,6 +2308,88 @@ impl TenzroNode {
         )?;
         self.api_key_manager = Some(api_keys);
 
+        // Per-tenant Canton usage counters. Hydrates `CantonKeyAnalytics`
+        // cache from `CF_CANTON_ANALYTICS` so historical counters survive
+        // restart. Incremented from the canton RPC dispatch path; surfaced
+        // via `tenzro_canton_getMyAnalytics` (subject self-read) and
+        // `tenzro_canton_listApiKeyAnalytics` (operator admin-read).
+        let canton_analytics = crate::canton_analytics::CantonAnalyticsManager::new(
+            store.clone() as Arc<dyn tenzro_storage::KvStore>,
+        )?;
+        self.canton_analytics = Some(canton_analytics);
+
+        // Per-tenant Chainlink/bridge usage counters. Same pattern as
+        // canton_analytics — hydrates from `CF_BRIDGE_ANALYTICS` so
+        // historical CU attribution survives restart. Incremented on
+        // every chainlink-scoped RPC call; surfaced via
+        // `tenzro_getBridgeAnalytics` (subject self-read) and
+        // `tenzro_listBridgeAnalytics` (operator admin-read).
+        let bridge_analytics = crate::bridge_analytics::BridgeAnalyticsManager::new(
+            store.clone() as Arc<dyn tenzro_storage::KvStore>,
+        )?;
+        self.bridge_analytics = Some(bridge_analytics);
+
+        // Stage 2.b: per-tenant upstream IdP provisioner. Built only
+        // when `canton.identity_providers.enabled` + `mgmt_url` +
+        // `mgmt_token` are all set. Devnet leaves all three unset so
+        // `handle_create_api_key` falls through to the Stage 1
+        // shared-principal flow. Production testnet/mainnet flips
+        // `CANTON_IDP_ENABLED=true` + sets `CANTON_IDP_MGMT_URL` +
+        // `CANTON_IDP_MGMT_TOKEN` so each tenant gets a dedicated
+        // OAuth client.
+        {
+            let idp_cfg = &self.config.canton.identity_providers;
+            if idp_cfg.enabled
+                && let (Some(mgmt_url), Some(mgmt_token)) =
+                    (idp_cfg.mgmt_url.as_deref(), idp_cfg.mgmt_token.as_deref())
+            {
+                match tenzro_bridge::tenant_idp::Auth0ManagementClient::new(
+                    mgmt_url,
+                    mgmt_token,
+                ) {
+                    Ok(client) => {
+                        self.tenant_idp_provisioner =
+                            Some(Arc::new(client) as Arc<dyn tenzro_bridge::tenant_idp::TenantIdpProvisioner>);
+                        tracing::info!(
+                            "Stage 2.b: tenant-IdP provisioner wired (Auth0 management)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Stage 2.b: tenant-IdP provisioner construction failed; falling back to Stage 1"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Swap in the persistent variants of EIP-7702 / Permit2 /
+        // Secure-Mint registries now that storage is available. The
+        // default `::new()` variants installed at struct-creation time
+        // are in-memory-only and would silently drop authorizations /
+        // nonce bitmaps / reserve policies across restart.
+        self.eip7702_delegation_registry = Arc::new(
+            tenzro_vm::eip7702::DelegationRegistry::with_storage(
+                store.clone() as Arc<dyn tenzro_storage::KvStore>,
+            ),
+        );
+        self.permit2_nonce_bitmap = Arc::new(
+            tenzro_vm::permit2::Permit2NonceBitmap::with_storage(
+                store.clone() as Arc<dyn tenzro_storage::KvStore>,
+            ),
+        );
+        self.secure_mint_registry = Arc::new(
+            tenzro_vm::secure_mint::SecureMintRegistry::with_storage(
+                store.clone() as Arc<dyn tenzro_storage::KvStore>,
+            ),
+        );
+        self.urwa_registry = Arc::new(
+            tenzro_vm::erc7943::UrwaRegistry::with_storage(
+                store.clone() as Arc<dyn tenzro_storage::KvStore>,
+            ),
+        );
+
         // Load the operator admin token from the environment. Gates
         // operator-only mutation RPCs (createApiKey/revokeApiKey/
         // listApiKeys/stake/unstake/registerProvider). Fail-closed:
@@ -2787,15 +2963,52 @@ impl TenzroNode {
         } else {
             Arc::new(TokenRegistry::new())
         };
-        // Register native TNZO token at startup (wTNZO ERC-20 pointer address).
-        // Skip if already in the persisted catalog from a previous boot.
-        if token_registry.get_by_symbol("TNZO").is_none() {
-            if let Err(e) = token_registry.register_tnzo(
-                Some([0x10, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01]),
-                None,
-                None,
-            ) {
-                warn!("TNZO token registration: {}", e);
+        // Register native TNZO token at startup with the full cross-VM pointer
+        // triple — wTNZO ERC-20 (EVM), wTNZO SPL mint (SVM), CIP-56 holding
+        // template (Canton/DAML). All three share the same underlying TNZO
+        // balance under the Sei V2 pointer model; the registry just records
+        // the per-VM addresses so callers can resolve the token by any of them.
+        let evm_addr = Some([0x10, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01]);
+        let svm_mint = Some(tenzro_vm::svm::spl_adapter::WTNZO_SPL_MINT);
+        let daml_template = Some(tenzro_vm::daml::cip56::TNZO_HOLDING_TEMPLATE.to_string());
+        match token_registry.get_by_symbol("TNZO") {
+            None => {
+                // Fresh deploy — register with the full triple.
+                if let Err(e) = token_registry.register_tnzo(
+                    evm_addr,
+                    svm_mint,
+                    daml_template,
+                ) {
+                    warn!("TNZO token registration: {}", e);
+                }
+            }
+            Some(existing) => {
+                // Upgrade path — a previously persisted TNZO entry may be missing
+                // the SVM mint or DAML template (pre-2026-06-08 nodes registered
+                // EVM-only). Backfill them in place so cross-VM lookups by SPL
+                // mint / CIP-56 template resolve to the same TokenId.
+                let needs_update = existing.vm_addresses.svm.is_none()
+                    || existing.vm_addresses.daml_template_id.is_none();
+                if needs_update {
+                    let updated = tenzro_token::VmAddresses {
+                        evm: existing.vm_addresses.evm.or(evm_addr),
+                        svm: existing.vm_addresses.svm.or(svm_mint),
+                        daml_template_id: existing
+                            .vm_addresses
+                            .daml_template_id
+                            .clone()
+                            .or(daml_template),
+                        native: existing.vm_addresses.native,
+                        tempo: existing.vm_addresses.tempo,
+                    };
+                    if let Err(e) =
+                        token_registry.update_vm_addresses(&existing.token_id, updated)
+                    {
+                        warn!("TNZO triple-pointer backfill: {}", e);
+                    } else {
+                        info!("TNZO triple-pointer backfilled (SVM mint + CIP-56 template)");
+                    }
+                }
             }
         }
 
@@ -5024,8 +5237,82 @@ impl TenzroNode {
     async fn init_bridge(&mut self) -> Result<()> {
         info!("Initializing bridge router...");
 
-        let bridge_router = Arc::new(BridgeRouter::new());
+        // Wire the fee-in-TNZO surface onto every router from the start so
+        // adapters can quote / sponsor uniformly via `tenzro_quoteBridgeFeeInTnzo`
+        // and `tenzro_listBridgeSponsorshipPools`. When `bridge.chainlink_feeds`
+        // is set + enabled, the oracle is a `ChainlinkFeedFeeOracle` backed by
+        // live `eth_call` against AggregatorV3Interface — falls through to the
+        // inner `GovernanceSetFeeOracle` on stale / invalid / RPC failures.
+        let governance_oracle = std::sync::Arc::new(
+            tenzro_bridge::fee_oracle::GovernanceSetFeeOracle::new(),
+        );
         let bridge_cfg = &self.config.bridge;
+        let oracle: std::sync::Arc<dyn tenzro_bridge::fee_oracle::BridgeFeeOracle> =
+            if let Some(cf) = bridge_cfg.chainlink_feeds.as_ref().filter(|c| c.enabled) {
+                let rpc = cf
+                    .rpc_url
+                    .clone()
+                    .unwrap_or_else(|| "https://eth.llamarpc.com".to_string());
+                let client = std::sync::Arc::new(
+                    tenzro_bridge::ChainlinkFeedClient::new(rpc.clone()),
+                );
+                let chainlink_oracle =
+                    tenzro_bridge::fee_oracle::ChainlinkFeedFeeOracle::new(governance_oracle.clone())
+                        .with_feed_client(client.clone())
+                        .with_markup_bps(cf.markup_bps)
+                        .with_valid_window_ms(cf.valid_window_ms);
+                if let Some(tnzo_feed) = cf.tnzo_usd_feed.as_ref() {
+                    // Eagerly register the TNZO/USD feed so `decimals()` is
+                    // cached at startup. Failure is non-fatal — the oracle
+                    // simply falls back to governance for that pair.
+                    if let Err(e) = client.register_feed(tnzo_feed.as_str(), "major").await {
+                        tracing::warn!("failed to register TNZO/USD feed: {}", e);
+                    }
+                    chainlink_oracle.set_tnzo_usd_feed(tnzo_feed.as_str());
+                }
+                for entry in &cf.dest_native_feeds {
+                    if let Some(adapter_id) =
+                        tenzro_bridge::fee_oracle::BridgeAdapterId::from_str(&entry.adapter)
+                    {
+                        let tier = entry.tier.as_deref().unwrap_or("major");
+                        if let Err(e) = client
+                            .register_feed(entry.feed_address.as_str(), tier)
+                            .await
+                        {
+                            tracing::warn!(
+                                "failed to register dest-native feed {} for {}: {}",
+                                entry.feed_address,
+                                entry.adapter,
+                                e
+                            );
+                        }
+                        chainlink_oracle.set_dest_native_feed(
+                            adapter_id,
+                            entry.dest_chain.as_str(),
+                            entry.feed_address.as_str(),
+                        );
+                    } else {
+                        tracing::warn!(
+                            "unknown bridge adapter id in chainlink_feeds config: {}",
+                            entry.adapter
+                        );
+                    }
+                }
+                info!(
+                    "Bridge fee oracle: ChainlinkFeedFeeOracle (rpc={}, feeds={})",
+                    rpc,
+                    cf.dest_native_feeds.len()
+                );
+                std::sync::Arc::new(chainlink_oracle)
+            } else {
+                info!("Bridge fee oracle: GovernanceSetFeeOracle (governance table only)");
+                governance_oracle.clone()
+            };
+        let fee_sponsor = std::sync::Arc::new(tenzro_bridge::fee_sponsor::BridgeFeeSponsor::new());
+        let fee_surface = std::sync::Arc::new(
+            tenzro_bridge::fee_sponsor::WiredBridgeFeeSurface::new(oracle, fee_sponsor.clone()),
+        );
+        let bridge_router = Arc::new(BridgeRouter::new().with_fee_surface(fee_surface));
 
         if !bridge_cfg.enabled {
             info!("Bridge subsystem disabled — router initialized with no adapters");
@@ -5645,6 +5932,161 @@ impl TenzroNode {
             info!(
                 dsv_address = %hex::encode(dsv_address),
                 "AA ValidatorRegistry + IdentityScopeOracle initialized; DelegationScopeValidator attested (Phase B B.3.5)"
+            );
+
+            // Passkey-first custody substrate: AccountFactory + the four
+            // ERC-7579 validators (WebAuthn + SocialRecovery + SessionKey +
+            // SpendingLimit) all wired with persistence to CF_VALIDATOR_MODULES.
+            // The factory's deterministic address (`0x0000...0400`) is the
+            // canonical Tenzro AccountFactory precompile — every smart account
+            // deployed via `tenzro_enrollPasskey` is created here and inherits
+            // the per-account validator install set from these validators.
+            let factory_address = {
+                let mut a = [0u8; 20];
+                a[18] = 0x04; // 0x0000...0400
+                a.to_vec()
+            };
+            let account_factory = if let Some(ref storage) = self.storage {
+                Arc::new(tenzro_vm::AccountFactory::with_storage(
+                    factory_address,
+                    storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                ))
+            } else {
+                Arc::new(tenzro_vm::AccountFactory::new(factory_address))
+            };
+            self.account_factory = Some(account_factory.clone());
+
+            let webauthn_origin = std::env::var("TENZRO_WEBAUTHN_ORIGIN")
+                .unwrap_or_else(|_| "https://wallet.tenzro.network".to_string());
+            let webauthn_module_addr = {
+                let mut a = [0u8; 20];
+                a[18] = 0x10; a[19] = 0x20;
+                a
+            };
+            let webauthn_validator = if let Some(ref storage) = self.storage {
+                Arc::new(tenzro_vm::WebAuthnValidator::with_storage(
+                    webauthn_module_addr,
+                    webauthn_origin.clone(),
+                    storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                ))
+            } else {
+                Arc::new(tenzro_vm::WebAuthnValidator::new(
+                    webauthn_module_addr,
+                    webauthn_origin.clone(),
+                ))
+            };
+            self.webauthn_validator = Some(webauthn_validator.clone());
+
+            let social_module_addr = {
+                let mut a = [0u8; 20];
+                a[18] = 0x10; a[19] = 0x1d;
+                a
+            };
+            let social_validator = if let Some(ref storage) = self.storage {
+                Arc::new(tenzro_vm::SocialRecoveryValidator::with_storage(
+                    social_module_addr,
+                    storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                ))
+            } else {
+                Arc::new(tenzro_vm::SocialRecoveryValidator::new(social_module_addr))
+            };
+            self.social_recovery_validator = Some(social_validator.clone());
+
+            let session_module_addr = {
+                let mut a = [0u8; 20];
+                a[18] = 0x10; a[19] = 0x1e;
+                a
+            };
+            let session_validator = if let Some(ref storage) = self.storage {
+                Arc::new(tenzro_vm::SessionKeyValidator::with_storage(
+                    session_module_addr,
+                    storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                ))
+            } else {
+                Arc::new(tenzro_vm::SessionKeyValidator::new(session_module_addr))
+            };
+            self.session_key_validator = Some(session_validator.clone());
+
+            let spending_module_addr = {
+                let mut a = [0u8; 20];
+                a[18] = 0x10; a[19] = 0x1f;
+                a
+            };
+            let spending_validator = if let Some(ref storage) = self.storage {
+                Arc::new(tenzro_vm::SpendingLimitValidator::with_storage(
+                    spending_module_addr,
+                    storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                ))
+            } else {
+                Arc::new(tenzro_vm::SpendingLimitValidator::new(spending_module_addr))
+            };
+            self.spending_limit_validator = Some(spending_validator.clone());
+
+            // Hardware-signer validators (Ledger / Trezor / GridPlus / YubiKey
+            // / Generic). Each device kind gets its own module address +
+            // its own `HardwareSignerValidator` instance so multiple hardware
+            // signers can coexist on the same smart account. Per-account
+            // configs persist to `CF_VALIDATOR_MODULES / erc7579/hardware/<module>/<account>`
+            // via `with_storage`.
+            let hardware_module_addrs = [
+                tenzro_vm::erc7579::HARDWARE_VALIDATOR_LEDGER,
+                tenzro_vm::erc7579::HARDWARE_VALIDATOR_TREZOR,
+                tenzro_vm::erc7579::HARDWARE_VALIDATOR_GRIDPLUS,
+                tenzro_vm::erc7579::HARDWARE_VALIDATOR_YUBIKEY,
+                tenzro_vm::erc7579::HARDWARE_VALIDATOR_GENERIC,
+            ];
+            let mut hardware_validators = Vec::with_capacity(hardware_module_addrs.len());
+            for hw_addr in &hardware_module_addrs {
+                let v = if let Some(ref storage) = self.storage {
+                    Arc::new(tenzro_vm::erc7579::HardwareSignerValidator::with_storage(
+                        *hw_addr,
+                        storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                    ))
+                } else {
+                    Arc::new(tenzro_vm::erc7579::HardwareSignerValidator::new(*hw_addr))
+                };
+                hardware_validators.push(v);
+            }
+            self.hardware_signer_validators = Some(hardware_validators);
+
+            // Attest the four ERC-7579 modules + the five hardware-validator
+            // slots so the registry accepts installs against them.
+            let mut to_attest = vec![
+                webauthn_module_addr,
+                social_module_addr,
+                session_module_addr,
+                spending_module_addr,
+            ];
+            to_attest.extend_from_slice(&hardware_module_addrs);
+            for module_addr in to_attest {
+                aa_registry.attestations().attest(
+                    tenzro_vm::aa_validators::ModuleAttestation {
+                        module_address: module_addr,
+                        module_type: tenzro_vm::aa_validators::ModuleType::Validator,
+                        registry: *aa_registry.trusted_registry(),
+                        attester: [0u8; 20],
+                        attestation_data: b"tenzro-protocol-attestation".to_vec(),
+                        revoked: false,
+                    },
+                );
+            }
+
+            // Pending-recovery store for the social-recovery guardian-quorum
+            // flow. Persists in-progress recoveries to CF_VALIDATOR_MODULES so
+            // they survive node restart.
+            if let Some(ref storage) = self.storage {
+                let store = Arc::new(crate::passkey_rpc::PendingRecoveryStore::with_storage(
+                    storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                ));
+                self.recovery_pending = Some(store);
+            }
+
+            info!(
+                webauthn_origin = %webauthn_origin,
+                factory_addr = "0x0000...0400",
+                "Passkey-first custody substrate initialized — WebAuthnValidator, \
+                 SocialRecoveryValidator, SessionKeyValidator, SpendingLimitValidator, \
+                 AccountFactory, PendingRecoveryStore all wired with persistence"
             );
 
             // Phase B Thread 3c / #165 — wire the ERC-4337 v0.8 EntryPoint
@@ -7163,6 +7605,15 @@ impl TenzroNode {
         self.secure_mint_registry.clone()
     }
 
+    /// Returns the ERC-7943 (uRWA) registry handle. EVM transfer hook
+    /// consults this for kill-switch + freeze enforcement; mutation
+    /// RPCs write through.
+    pub fn urwa_registry(
+        &self,
+    ) -> Arc<tenzro_vm::erc7943::UrwaRegistry> {
+        self.urwa_registry.clone()
+    }
+
     /// Returns the Cosmos-style snapshot ABCI store if initialized.
     ///
     /// Used by the four snapshot RPCs and by the EventLoop's periodic
@@ -7331,6 +7782,64 @@ impl TenzroNode {
         self.identity_scope_oracle.as_ref()
     }
 
+    /// Returns the shared ERC-4337 AccountFactory if initialized.
+    /// All smart accounts deployed via `tenzro_enrollPasskey` live here.
+    pub fn account_factory(&self) -> Option<&Arc<tenzro_vm::AccountFactory>> {
+        self.account_factory.as_ref()
+    }
+
+    /// Returns the shared SocialRecoveryValidator (ERC-7579 module).
+    pub fn social_recovery_validator(
+        &self,
+    ) -> Option<&Arc<tenzro_vm::SocialRecoveryValidator>> {
+        self.social_recovery_validator.as_ref()
+    }
+
+    /// Returns the shared SessionKeyValidator (ERC-7579 module).
+    pub fn session_key_validator(
+        &self,
+    ) -> Option<&Arc<tenzro_vm::SessionKeyValidator>> {
+        self.session_key_validator.as_ref()
+    }
+
+    /// Returns the shared SpendingLimitValidator (ERC-7579 module).
+    pub fn spending_limit_validator(
+        &self,
+    ) -> Option<&Arc<tenzro_vm::SpendingLimitValidator>> {
+        self.spending_limit_validator.as_ref()
+    }
+
+    /// Returns the shared WebAuthnValidator (passkey-bound primary validator).
+    pub fn webauthn_validator(
+        &self,
+    ) -> Option<&Arc<tenzro_vm::WebAuthnValidator>> {
+        self.webauthn_validator.as_ref()
+    }
+
+    /// Returns the HardwareSignerValidator at the given module address (the
+    /// 20-byte ERC-7579 module address — `HARDWARE_VALIDATOR_LEDGER` etc.).
+    /// `tenzro_addHardwareSigner` looks up the validator for the chosen
+    /// device slot and calls `install_for` so the per-account config is
+    /// available to the validator chain.
+    pub fn hardware_signer_validator(
+        &self,
+        module_addr: &[u8; 20],
+    ) -> Option<Arc<tenzro_vm::erc7579::HardwareSignerValidator>> {
+        use tenzro_vm::aa_validators::IValidator;
+        self.hardware_signer_validators.as_ref().and_then(|vs| {
+            vs.iter()
+                .find(|v| &v.module_address() == module_addr)
+                .cloned()
+        })
+    }
+
+    /// Returns the pending-recovery store used by the social-recovery flow.
+    pub fn recovery_pending(
+        &self,
+    ) -> Option<&Arc<crate::passkey_rpc::PendingRecoveryStore>> {
+        self.recovery_pending.as_ref()
+    }
+
     /// Returns the BurnQuota manager if initialized (Agent-Swarm Spec 3 wave 1).
     pub fn burn_quota_manager(
         &self,
@@ -7371,6 +7880,42 @@ impl TenzroNode {
     /// header.
     pub fn api_key_manager(&self) -> Option<&Arc<crate::api_key::ApiKeyManager>> {
         self.api_key_manager.as_ref()
+    }
+
+    /// Returns the per-tenant Canton analytics manager, populated once
+    /// storage is initialized. Used by the canton RPC dispatch path to
+    /// increment per-key call counters and surfaced via
+    /// `tenzro_canton_getMyAnalytics` (subject self-read) and
+    /// `tenzro_canton_listApiKeyAnalytics` (operator admin-read).
+    pub fn canton_analytics(
+        &self,
+    ) -> Option<&Arc<crate::canton_analytics::CantonAnalyticsManager>> {
+        self.canton_analytics.as_ref()
+    }
+
+    /// Returns the per-tenant Chainlink/bridge analytics manager. Same
+    /// pattern as `canton_analytics`. Used by the bridge RPC dispatch
+    /// path to attribute CU consumption to each tenant.
+    pub fn bridge_analytics(
+        &self,
+    ) -> Option<&Arc<crate::bridge_analytics::BridgeAnalyticsManager>> {
+        self.bridge_analytics.as_ref()
+    }
+
+    /// Returns the GCRA rate limiter for chainlink-scoped API keys.
+    pub fn chainlink_rate_limiter(&self) -> &Arc<crate::bridge_analytics::GcraLimiter> {
+        &self.chainlink_rate_limiter
+    }
+
+    /// Returns the Stage 2.b tenant-IdP provisioner, if configured.
+    /// `Some(_)` means the node will auto-mint a per-tenant Auth0
+    /// client (and Canton IDP) on every `tenzro_createApiKey` call
+    /// with a bound `canton_user_id`. `None` means Stage 1 shared-
+    /// principal flow.
+    pub fn tenant_idp_provisioner(
+        &self,
+    ) -> Option<&Arc<dyn tenzro_bridge::tenant_idp::TenantIdpProvisioner>> {
+        self.tenant_idp_provisioner.as_ref()
     }
 
     /// Returns the operator admin token, if one is configured for this

@@ -33,6 +33,8 @@ use commands::{
     KeyCommand,
     WorkflowCommand, Eip7702Command, Permit2Command, SecureMintCommand,
     HyperlaneCommand, AxelarCommand, BabylonCommand, CaipCommand,
+    urwa::UrwaCommand, ivms101::Ivms101Command, attested_clock::AttestedClockCommand,
+    bridge_fee::BridgeFeeCommand, wormhole_ntt::WormholeNttCommand,
 };
 
 /// Tenzro Network CLI — node operation, wallet management, provider tools
@@ -185,6 +187,10 @@ enum Command {
     /// Custody & MPC wallet operations (create, export, import, rotate, limits, session)
     #[command(subcommand)]
     Custody(CustodyCommand),
+
+    /// Passkey-first wallet onboarding + custody (enrollment, recovery, session keys, hardware signers)
+    #[command(subcommand)]
+    Passkey(commands::passkey::PasskeyCommand),
 
     /// Application management (register, users, funding, sponsoring, stats)
     #[command(subcommand)]
@@ -345,6 +351,26 @@ enum Command {
     #[command(subcommand)]
     SecureMint(SecureMintCommand),
 
+    /// ERC-7943 (uRWA) tokenized RWA compliance: kill-switch / freeze / forced-transfer
+    #[command(subcommand)]
+    Urwa(UrwaCommand),
+
+    /// IVMS101 Travel Rule envelope: compute canonical SHA-256 binding hash
+    #[command(subcommand)]
+    Ivms101(Ivms101Command),
+
+    /// TEE-attested clock: AttestedTimestamp envelope for long-running workflows
+    #[command(name = "attested-clock", subcommand)]
+    AttestedClock(AttestedClockCommand),
+
+    /// Bridge fee in TNZO: quote destination-native bridge fees in TNZO + list sponsorship pools
+    #[command(name = "bridge-fee", subcommand)]
+    BridgeFee(BridgeFeeCommand),
+
+    /// Wormhole NTT (Native Token Transfers): list chain catalog
+    #[command(name = "wormhole-ntt", subcommand)]
+    WormholeNtt(WormholeNttCommand),
+
     /// Hyperlane V3 messaging with sovereign Tenzro-ISM: list-chains / dispatch / quote-dispatch / get-message
     #[command(subcommand)]
     Hyperlane(HyperlaneCommand),
@@ -490,6 +516,7 @@ async fn main() -> Result<()> {
         Command::Vrf(cmd) => cmd.execute().await?,
         Command::Cortex(cmd) => cmd.execute().await?,
         Command::Custody(cmd) => cmd.execute().await?,
+        Command::Passkey(cmd) => cmd.execute(None).await?,
         Command::App(cmd) => cmd.execute().await?,
         Command::Ap2(cmd) => cmd.execute().await?,
         Command::Erc8004(cmd) => cmd.execute().await?,
@@ -529,6 +556,11 @@ async fn main() -> Result<()> {
         Command::Eip7702(cmd) => cmd.execute().await?,
         Command::Permit2(cmd) => cmd.execute().await?,
         Command::SecureMint(cmd) => cmd.execute().await?,
+        Command::Urwa(cmd) => cmd.execute().await?,
+        Command::Ivms101(cmd) => cmd.execute().await?,
+        Command::AttestedClock(cmd) => cmd.execute().await?,
+        Command::BridgeFee(cmd) => cmd.execute().await?,
+        Command::WormholeNtt(cmd) => cmd.execute().await?,
         Command::Hyperlane(cmd) => cmd.execute().await?,
         Command::Axelar(cmd) => cmd.execute().await?,
         Command::Babylon(cmd) => cmd.execute().await?,

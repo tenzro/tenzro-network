@@ -599,18 +599,82 @@ tenzro agent terminate \
   --cascade
 ```
 
-### Canton Integration
+### Canton Integration (Canton 3.5+ JSON Ledger API)
+
+All `tenzro canton ...` subcommands route through the local Tenzro node,
+which proxies to its configured Canton participant. Callers never see
+the Auth0 secret. Every method requires an API key with scope `canton`
+(passed via `--api-key` or `TENZRO_API_KEY` env var).
 
 ```bash
-# List Canton domains (tenzro_listCantonDomains)
-tenzro canton domains
+# Existing core commands
+tenzro canton domains                              # tenzro_listCantonDomains
+tenzro canton contracts --template '<tid>'         # tenzro_listDamlContracts
+tenzro canton submit <command>                     # tenzro_submitDamlCommand
 
-# List DAML contracts (tenzro_listDamlContracts)
-tenzro canton contracts
-
-# Submit DAML command (tenzro_submitDamlCommand)
-tenzro canton submit <command>
+# Canton 3.5+ extension surface
+tenzro canton health                               # /livez + /readyz + /v2/version
+tenzro canton version                              # /v2/version + CIP feature flags
+tenzro canton my-user                              # GET /v2/users/<client_id>@clients (CIP-26)
+tenzro canton parties                              # GET /v2/parties/known
+tenzro canton packages                             # GET /v2/packages — installed DAR ids
+tenzro canton coin-balance                         # CIP-56 Canton Coin balance
+tenzro canton fee-schedule                         # latest Splice.AmuletRules:AmuletRules
+tenzro canton connected-synchronizers              # GET /v2/state/connected-synchronizers
+tenzro canton get-transaction --update-id <hex>    # GET /v2/updates/transaction-tree-by-id
+tenzro canton upload-dar --file path/to/my.dar     # POST /v2/packages (single Content-Type)
 ```
+
+### Bridge Fee in TNZO + Chainlink Integration
+
+Cross-chain bridge fees payable in TNZO instead of destination-native
+gas. The protocol-side fee oracle quotes the destination-native fee in
+TNZO; the `BridgeFeeSponsor` debits the user and credits a
+deterministic per-adapter sponsorship-pool vault.
+
+Two oracle backings:
+
+- **`GovernanceSetFeeOracle`** — manual rate table written by the
+  operator via `tenzro_setBridgeFeeRate` (admin-token-gated). Testnet
+  default.
+- **`ChainlinkFeedFeeOracle`** — live `eth_call` against
+  `AggregatorV3Interface.latestRoundData()` on the operator's
+  configured Ethereum mainnet RPC. Requires the operator's bridge
+  config to set `chainlink_feeds.enabled = true` + `rpc_url` + per-
+  adapter feed addresses. Falls back to governance when a feed isn't
+  configured or is stale.
+
+The upstream Ethereum mainnet RPC quota is operator-paid, so methods
+that consult it are gated by the `chainlink` API key scope (same
+pattern as `canton`). The operator mints `tnz_...` keys with the
+`chainlink` scope and tracks per-tenant Compute Unit consumption in
+`CF_BRIDGE_ANALYTICS`. Per-tenant rate-limiting uses GCRA (10 req/sec
+sustained, burst 100 by default).
+
+```bash
+# Read paths — require X-Tenzro-Api-Key with `chainlink` scope
+tenzro bridge-fee quote --adapter layerzero --dest-chain eip155:1 \
+    --native-fee 1000000
+tenzro bridge-fee list-pools
+tenzro bridge-fee sponsor \
+    --quote-id-hex 0x... --adapter layerzero --dest-chain eip155:1 \
+    --native-fee-smallest-unit 1000000 --tnzo-amount-wei 5100000 \
+    --rate-q18-hex 0x... --issued-at-ms 1781030000000 \
+    --valid-until-ms 1781030060000 --payer-did did:tn:human:alice
+
+# Subject self-read of own CU consumption + call counters
+tenzro bridge-fee analytics  # uses TENZRO_API_KEY env var
+
+# Admin paths — require X-Tenzro-Admin-Token
+tenzro bridge-fee set-rate --adapter layerzero --dest-chain eip155:1 \
+    --rate-q18 2000000000000000000 --markup-bps 100
+tenzro bridge-fee set-refill --adapter layerzero --refill-threshold-bps 500
+tenzro bridge-fee list-analytics  # operator cross-tenant read
+```
+
+Rate-limit rejections surface as JSON-RPC error code `-32005` with a
+`data: { retry_after_ms, rate_per_second, burst }` envelope so SDKs
+can implement client-side backoff.
 
 ### Escrow Operations
 

@@ -2235,6 +2235,30 @@ impl IdentityRegistry {
         self.identities.insert(key, identity);
     }
 
+    /// Append a free-form metadata key/value to an existing identity.
+    /// Used by the passkey-first onboarding path to record
+    /// `smart_account_address` / `passkey_credential_id` against the
+    /// freshly-registered human identity. Updates both the in-memory
+    /// cache AND writes through to `CF_IDENTITIES` so subsequent
+    /// `resolve()` calls and restarts both see the binding.
+    ///
+    /// Returns `Err` if the identity is unknown.
+    pub fn set_identity_metadata(
+        &self,
+        did: &str,
+        kv: impl IntoIterator<Item = (String, String)>,
+    ) -> crate::error::Result<()> {
+        let mut entry = self
+            .identities
+            .get_mut(did)
+            .ok_or_else(|| crate::error::IdentityError::NotFound(did.to_string()))?;
+        for (k, v) in kv {
+            entry.metadata.insert(k, v);
+        }
+        self.persist_identity(did, entry.value());
+        Ok(())
+    }
+
     /// Insert an identity into the registry from an externally produced
     /// record — used by the CARv1 import flow (C.6) to land an identity on
     /// a new node from an export bundle. Persists to RocksDB if storage is

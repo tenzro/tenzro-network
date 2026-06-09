@@ -36,6 +36,40 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "outputModes": ["text/plain", "application/json"],
             },
             {
+                "id": "passkey-wallet",
+                "name": "Passkey-First Custody",
+                "description": (
+                    "Passkey-first wallet onboarding and custody (Coinbase / "
+                    "Daimo / Argent pattern). Enroll a passkey-bound ERC-4337 "
+                    "smart account, add social-recovery guardians, initiate / "
+                    "finalize guardian-quorum recovery to rotate to a new "
+                    "passkey, grant scoped session keys to agents, install "
+                    "hardware signers (Ledger / Trezor / GridPlus / YubiKey), "
+                    "and query installed validators. Signing keys never leave "
+                    "the user's hardware secure element."
+                ),
+                "tags": [
+                    "wallet",
+                    "custody",
+                    "passkey",
+                    "webauthn",
+                    "erc-4337",
+                    "erc-7579",
+                    "social-recovery",
+                    "session-key",
+                ],
+                "examples": [
+                    "Enroll a passkey-bound smart account",
+                    "Add a guardian to my account",
+                    "Initiate a recovery ceremony to rotate my passkey",
+                    "Grant a session key to my trading agent for 30 days",
+                    "Install my Ledger as a hardware signer",
+                    "Show my smart account's installed validators",
+                ],
+                "inputModes": ["text/plain"],
+                "outputModes": ["text/plain", "application/json"],
+            },
+            {
                 "id": "identity",
                 "name": "Identity Management",
                 "description": (
@@ -796,19 +830,25 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "(/livez + /readyz + /v2/version), CIP-56 Canton Coin "
                     "balance, AmuletRules fee schedule, connected "
                     "synchronizers, transaction-tree lookup, OAuth principal's "
-                    "user record. Writes: submit-and-wait DAML create / "
-                    "exercise commands, allocate party, upload DAR via "
-                    "POST /v2/packages with a single Content-Type header "
-                    "(Canton 3.5+ rejects duplicates; the legacy "
-                    "/admin/packages/upload-dar path is gRPC-only and NOT "
-                    "exposed on the Tenzro-operated DevNet). Requires an "
-                    "API key with the `canton` scope at the Tenzro node."
+                    "user record, list user rights. Writes: submit-and-wait "
+                    "DAML create / exercise commands (auto-scoped to the "
+                    "presenting API key's bound canton_user_id when set), "
+                    "allocate party, grant CanActAs / CanReadAs rights on a "
+                    "party to a user (CIP-26), upload DAR via POST /v2/packages "
+                    "with a single Content-Type header (Canton 3.5+ rejects "
+                    "duplicates; the legacy /admin/packages/upload-dar path "
+                    "is gRPC-only and NOT exposed on the Tenzro-operated "
+                    "DevNet). Per-tenant analytics: self-read of API-key call "
+                    "counters (calls_total, errors_total, per-method buckets) "
+                    "and operator admin-read across every tenant. Requires "
+                    "an API key with the `canton` scope at the Tenzro node."
                 ),
                 "tags": [
                     "canton", "daml", "3.5", "json-ledger-api",
                     "cip-26", "cip-56", "amulet", "splice",
                     "dar-upload", "fee-schedule", "synchronizer",
                     "active-contracts", "submit-and-wait", "participant",
+                    "multi-tenant", "act-as", "user-rights", "analytics",
                 ],
                 "examples": [
                     "Canton health",
@@ -821,7 +861,10 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "Canton connected synchronizers",
                     "List DAML contracts for template #splice-amulet:Splice.Amulet:Amulet",
                     "Get Canton transaction <hex-update-id>",
-                    "Allocate Canton party party_id_hint=manexus-test",
+                    "Allocate Canton party party_id_hint=tenzro-labs",
+                    "Grant Canton user rights party=tenzro-labs::<hash> user_id=tenzro-labs@clients can_act_as=true",
+                    "List Canton user rights for tenzro-labs@clients",
+                    "Canton my analytics",
                     "Upload DAR <base64-bytes>",
                     "Submit DAML create on template …",
                 ],
@@ -1199,6 +1242,99 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "Fetch chunk 0 of the snapshot at height 5000",
                 ],
                 "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "urwa",
+                "name": "ERC-7943 (uRWA) Compliance",
+                "description": (
+                    "Universal Real-World Asset compliance: kill-switch, "
+                    "per-account freeze, forced-transfer for tokenized RWAs."
+                ),
+                "tags": ["urwa", "erc7943", "rwa", "kill-switch", "freeze"],
+                "examples": [
+                    "Check if token 0xabc is kill-switched",
+                    "Get frozen amount for account 0xdef on token 0xabc",
+                    "Freeze 1000 tokens on account 0xdef pending KYC refresh",
+                    "Activate the kill-switch on token 0xabc citing sanctions update",
+                ],
+                "inputModes": ["application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "ivms101",
+                "name": "IVMS101 Travel Rule",
+                "description": (
+                    "FATF Travel Rule envelope: canonical SHA-256 binding hash for "
+                    "an originator + beneficiary + VASP + transfer-data record."
+                ),
+                "tags": ["ivms101", "travel-rule", "fatf", "compliance", "trp"],
+                "examples": [
+                    "Hash an IVMS101 envelope binding originator + beneficiary VASPs",
+                    "Anchor a settlement receipt to an off-chain Travel Rule envelope",
+                ],
+                "inputModes": ["application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "attested-clock",
+                "name": "TEE-Attested Clock",
+                "description": (
+                    "Hardware-attested wall-clock + monotonic counter for long-running "
+                    "workflows that cannot trust any single replica's wall-clock."
+                ),
+                "tags": ["attested-clock", "tee", "workflow", "deadline"],
+                "examples": [
+                    "Return the current AttestedTimestamp envelope",
+                    "Anchor an AP2 mandate expiry to a hardware-signed timestamp",
+                    "Bind a margin-call grace deadline to an attested wall_ms",
+                ],
+                "inputModes": ["application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "signed-agent-card",
+                "name": "A2A v1.0 Signed Agent Cards",
+                "description": (
+                    "Compute the canonical hash for an A2A v1.0 SignedAgentCard "
+                    "envelope so domain owners JWS-sign and relying parties verify."
+                ),
+                "tags": ["a2a", "signed-agent-card", "jws", "did-web"],
+                "examples": [
+                    "Compute the canonical hash for an AgentCard JSON payload",
+                ],
+                "inputModes": ["application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "wormhole-ntt",
+                "name": "Wormhole NTT",
+                "description": (
+                    "Native Token Transfers — Wormhole's 2026 multi-chain native-token "
+                    "primitive with per-chain NttManager + quorum-aggregated Transceivers."
+                ),
+                "tags": ["wormhole", "ntt", "cross-chain", "native-token"],
+                "examples": [
+                    "List the Wormhole NTT chain catalog + transceiver kinds",
+                ],
+                "inputModes": ["application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "bridge-fee-in-tnzo",
+                "name": "Bridge Fee in TNZO",
+                "description": (
+                    "Pay cross-chain bridge fees in TNZO instead of destination-chain "
+                    "gas. Cosmos ICS-29 / Hyperlane IGP / Polkadot AssetHub pattern."
+                ),
+                "tags": [
+                    "bridge-fee", "tnzo", "cross-chain", "sponsorship", "ics-29",
+                ],
+                "examples": [
+                    "Quote the CCIP fee to eip155:1 in TNZO for a 1M-wei native fee",
+                    "Enumerate per-adapter sponsorship-pool vault addresses",
+                ],
+                "inputModes": ["application/json"],
                 "outputModes": ["application/json"],
             },
         ],

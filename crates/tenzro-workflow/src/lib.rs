@@ -27,7 +27,9 @@
 //! - [`error`] — `WorkflowError`, `Result`
 
 pub mod approval;
+pub mod attested_clock;
 pub mod codegen;
+pub mod idempotency;
 pub mod error;
 pub mod fee_route;
 pub mod lifecycle;

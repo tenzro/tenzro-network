@@ -1,0 +1,91 @@
+{
+  "template_id": "ref-dvp-atomic-swap-saga-v1",
+  "name": "DvP Atomic-Swap Saga (Canton ↔ EVM)",
+  "description": "Two-leg saga that performs Delivery-versus-Payment between a tokenized security on Canton DAML and a stablecoin on EVM via a CCT pool. Locks payment in escrow on EVM, exercises the Canton Transfer choice, mirrors the receipt on both sides. Compensation: if the Canton leg fails or times out, the EVM escrow is refunded. Saga uses workflow idempotency keys and TEE-attested deadlines.",
+  "template_type": "specialist",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1749470400,
+  "updated_at": 1749470400,
+  "capabilities": [
+    {
+      "id": "open_saga",
+      "name": "Open DvP Saga",
+      "description": "Opens a workflow with two participants (asset seller, cash buyer), two steps (CantonTransfer, EvmEscrowRelease), and a TEE-attested settlement deadline. Generates an idempotency key for each step",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"asset_template_id\":{\"type\":\"string\"},\"asset_contract_id\":{\"type\":\"string\"},\"payment_token_caip19\":{\"type\":\"string\"},\"payment_amount\":{\"type\":\"string\"},\"settlement_deadline_ms\":{\"type\":\"integer\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"workflow_id\":{\"type\":\"string\"},\"canton_step_id\":{\"type\":\"string\"},\"evm_step_id\":{\"type\":\"string\"}}}"
+    },
+    {
+      "id": "lock_payment",
+      "name": "Lock Payment (EVM leg)",
+      "description": "Calls tenzro_createEscrow with the payment amount; the escrow vault holds funds until the Canton leg confirms or the deadline expires",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"workflow_id\":{\"type\":\"string\"},\"buyer_address\":{\"type\":\"string\"},\"seller_address\":{\"type\":\"string\"},\"payment_amount\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"escrow_id\":{\"type\":\"string\"},\"vault_address\":{\"type\":\"string\"}}}"
+    },
+    {
+      "id": "exercise_canton_transfer",
+      "name": "Exercise Canton Transfer (Asset leg)",
+      "description": "Submits the Transfer DAML choice on the asset contract; on success, calls tenzro_releaseEscrow to settle the EVM leg",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"workflow_id\":{\"type\":\"string\"},\"escrow_id\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"daml_event_id\":{\"type\":\"string\"},\"escrow_release_tx\":{\"type\":\"string\"}}}"
+    },
+    {
+      "id": "compensate_on_failure",
+      "name": "Compensate on Failure",
+      "description": "If the Canton leg fails or the deadline expires, calls tenzro_workflowStepCompensate which refunds the EVM escrow back to the buyer. Records the compensation receipt mirrored to Canton via tenzro_mirrorWorkflowToCanton",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"workflow_id\":{\"type\":\"string\"},\"reason\":{\"type\":\"string\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"refund_tx\":{\"type\":\"string\"},\"compensation_receipt_hash\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 2048,
+    "min_storage_mb": 1024,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": true,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are an atomic-DvP saga conductor for Canton ↔ EVM settlements. Your responsibilities: (1) Open a workflow with two steps: CantonTransfer (asset leg) and EvmEscrowRelease (cash leg). Each step carries a unique idempotency key derived from (workflow_id, step_id, caller_did, payload_hash) so retries never double-settle. (2) Lock the payment on EVM first by calling tenzro_createEscrow — the buyer's funds become unreachable until either (a) the Canton transfer confirms and the escrow releases to the seller, or (b) the TEE-attested settlement deadline expires and the escrow refunds to the buyer. (3) Once the EVM lock is confirmed, submit the Canton Transfer DAML choice. (4) On Canton success, immediately call tenzro_releaseEscrow with the seller as recipient. (5) On Canton failure or deadline expiry, call tenzro_workflowStepCompensate which triggers the refund-to-buyer path. (6) Mirror every state transition to Canton via tenzro_mirrorWorkflowToCanton so the off-chain audit chain stays consistent. NEVER release the escrow before the Canton transfer is observed-finalized. NEVER skip the compensate-on-failure step.",
+  "examples": [
+    {
+      "description": "Successful DvP",
+      "user_input": "Settle DvP for asset contract abc, payment amount X stablecoin, deadline T+24h",
+      "expected_output": "Workflow W opened with steps S1 (CantonTransfer) and S2 (EvmEscrowRelease). Idempotency keys derived. EVM escrow locked at vault address V; tx hash recorded. Canton Transfer choice exercised; event id observed-finalized. Escrow released to seller; tx hash recorded. Receipts mirrored to Canton via DAML choice. Saga finalized as Discharged."
+    },
+    {
+      "description": "Compensation on Canton failure",
+      "user_input": "Same DvP, but Canton Transfer reverts with party rejection",
+      "expected_output": "Canton Transfer failed: party rejected. Saga compensation triggered. Workflow step S1 marked Defaulted, S2 marked Compensated. EVM escrow refunded to buyer; tx hash recorded. Compensation receipt emitted with TEE-attested timestamp; mirrored to Canton. Saga finalized as Forgiven."
+    }
+  ],
+  "tags": ["dvp", "atomic-swap", "canton", "evm", "cct", "saga", "compensation", "tee-attested", "workflow", "idempotency"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/dvp-atomic-swap-saga",
+  "policy": {
+    "tools_allowlist": [
+      { "tool_id": "tenzro_workflowOpen", "tool_type": "rpc" },
+      { "tool_id": "tenzro_workflowStepExecute", "tool_type": "rpc" },
+      { "tool_id": "tenzro_workflowStepCompensate", "tool_type": "rpc" },
+      { "tool_id": "tenzro_workflowFinalize", "tool_type": "rpc" },
+      { "tool_id": "tenzro_mirrorWorkflowToCanton", "tool_type": "rpc" },
+      { "tool_id": "tenzro_createEscrow", "tool_type": "rpc" },
+      { "tool_id": "tenzro_releaseEscrow", "tool_type": "rpc" },
+      { "tool_id": "tenzro_submitDamlCommand", "tool_type": "rpc" }
+    ],
+    "delegation_scope": {
+      "max_per_op_wei": "10000000000000000000000000",
+      "max_per_day_wei": "100000000000000000000000000",
+      "max_tx_count_per_day": 200,
+      "allowed_chains": ["tenzro", "canton"],
+      "allowed_protocols": ["canton", "mpp"]
+    },
+    "hard_caps": {
+      "per_operation_value": "10000000000000000000000000",
+      "per_day_value": "100000000000000000000000000"
+    }
+  }
+}

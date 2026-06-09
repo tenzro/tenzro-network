@@ -1,8 +1,6 @@
 # Tenzro Network
 
-**The reference implementation of the Open Agent Network (OAN).** The first protocol where the full agent loop — discover model, discover skill, discover task, access resource, pay for it — is wire-level, not application-level. Fully usable today with the latest protocol support.
-
-A purpose-built L1 blockchain enabling humans and autonomous agents to access intelligence (AI models) and security (TEE enclaves) with native settlement in TNZO.
+**The coordination layer for the AI and agentic economy.** One universal identity and wallet for every agent and human to discover, transact, settle, and **access and orchestrate decentralized AI and compute resources** across every chain, every VM, and every protocol — EVM, SVM, Canton/DAML, cross-chain bridges, AP2 and x402 payments, decentralized AI inference, decentralized GPU training, TEE-backed confidential compute — under one identity (TDIP) and one settlement asset (TNZO).
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-51%20suites%2C%200%20failures-brightgreen)]()
@@ -11,14 +9,18 @@ A purpose-built L1 blockchain enabling humans and autonomous agents to access in
 
 ## What is Tenzro?
 
-Tenzro Network is a fully decentralized protocol for the AI economy, and the reference implementation of the [Open Agent Network (OAN)](https://github.com/tenzro/open-agent-network) — the standards family (TNIP-001..022) for a hybrid human + agent coexisting network. OAN provides the full governance framework; Tenzro Network ships the working implementation. The wire stays open for other implementations.
+Tenzro Network is a fully decentralized L1 designed as the **interoperability and coordination substrate** for the AI economy. The thesis is straightforward: agents and humans need a single self-sovereign identity, a single threshold-secured wallet, a single settlement asset, and **a single discovery and orchestration surface for decentralized AI and compute** that work uniformly across every VM and every external chain they touch. Today they don't — agents hold one wallet per chain, identity is rebound at every protocol boundary, AI inference and GPU compute live behind opaque centralized APIs, and value can't cross from EVM to Canton without giving up custody. Tenzro fixes this at the protocol layer.
 
-- **Providers** earn TNZO by securing the network (validators), serving AI models (inference), running TEE enclaves (confidential computing), and contributing GPU compute to verifiable training runs
-- **Users** discover and consume AI models, verify proofs, and interact through CLI, SDKs, or MCP
-- **Agents** operate autonomously with self-sovereign identities, FROST-Ed25519 threshold wallets, and delegation scopes — discovering compute, negotiating prices, and settling autonomously on the same TNZO rails
-- **Humans** are a peer identity class, not a UI concern: HITL escalation, guardian-quorum recovery, and delegation are wire primitives, not adapter-layer features
-- **Settlement** happens on-chain with micropayment channels for per-token billing and escrow + on-chain run-root commitments for training jobs
-- **Cross-chain** interoperability via LayerZero V2, Chainlink CCIP, deBridge DLN, LI.FI, Wormhole, and Canton
+- **Decentralized AI + compute orchestration**: agents and humans discover and access AI inference (chat, vision, audio, forecasting, embeddings, segmentation, detection — 7 ONNX runtimes), GPU training capacity (Tenzro Train), and TEE-backed confidential compute (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC) through a single protocol-level marketplace with per-token billing, reputation scoring, and on-chain verifiability. Providers are sovereign — anyone can run a model, expose an endpoint, or contribute compute, and earn TNZO directly. The inference router (price / latency / reputation / weighted strategies) and the agent-spawning + swarm-orchestration primitives let agents compose multi-model, multi-provider workflows without trusting any one party.
+- **Universal identity (TDIP)**: one DID for humans, delegated agents, and autonomous agents that works on EVM (via ERC-8004 mirror), SVM, Canton (CIP-26 user binding), AP2 mandates, x402 micropayments, and OAuth/DPoP — same identity, same delegation scope, same revocation surface.
+- **Universal wallet (FROST-Ed25519 + ML-DSA-65 hybrid PQ)**: threshold-secured, hardware-attestable, and one balance shared across three VM views — wTNZO ERC-20 on EVM, SPL adapter on SVM, CIP-56 holding on Canton. No bridge risk, no liquidity fragmentation. Pointer-model native asset.
+- **Universal settlement (TNZO)**: bridge fees, inference fees, escrow, micropayment channels, training-run grants, and cross-chain destination-native fees (via the Chainlink-backed bridge fee oracle) all denominated and accounted in TNZO.
+- **Cross-chain reach as a wire primitive**: LayerZero V2, Chainlink CCIP, Chainlink CCT, Wormhole + NTT, deBridge DLN, LI.FI, Hyperlane V3, Axelar GMP, Babylon Bitcoin staking, and Canton — all behind one ERC-7683 envelope with `BridgeFeeHint`. Users sign once, solvers pick the bridge.
+- **Multi-VM execution**: EVM (revm + 9 standard precompiles + 7 BLS12-381 EIP-2537 + 13 Tenzro precompiles) + SVM (solana_rbpf with SPL Token Program dispatch) + Canton 3.5+ DAML — every contract, every instruction, every command runs against the same identity, same wallet, same TNZO balance.
+- **AI inference + training as first-class economic activity**: providers earn TNZO for serving models (chat, vision, audio, forecasting, embeddings, segmentation, detection), running TEE enclaves, and contributing GPU compute to verifiable training runs (Tenzro Train). Inference results, settlements, and identity claims are verifiable on-chain via Plonky3 STARKs over the KoalaBear field (transparent setup, post-quantum-conjectured soundness) or attested by hardware enclaves (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC) — both anchored via `ZK_VERIFY` and `TEE_VERIFY` precompiles.
+- **Humans as peer identity class**: HITL escalation, guardian-quorum recovery, AP2 cart/intent/payment mandates, and delegation scopes are wire primitives, not adapter-layer features.
+
+Tenzro Network is also the reference implementation of the [Open Agent Network (OAN)](https://github.com/tenzro/open-agent-network) — the standards family (TNIP-001..022) for a hybrid human + agent coexisting network. OAN provides the governance framework; Tenzro Network ships the working implementation. The wire stays open for other implementations.
 
 ## Compute as Currency
 
@@ -200,6 +202,7 @@ The node exposes 4 protocol servers, plus 6 ecosystem MCP servers:
 - **Public tools** (no auth): `get_node_status`, `list_models`, `get_balance`, `resolve_did`, `debridge_search_tokens`, etc.
 - **Write tools** (auth required): `send_transaction`, `create_wallet`, `stake_tokens`, `register_identity`, etc.
 - **Auth method**: OAuth 2.1 + DPoP (RFC 9449) — bearer JWT minted via `tenzro_onboardHuman` / `tenzro_onboardDelegatedAgent` / `tenzro_onboardAutonomousAgent`. Each request carries `Authorization: DPoP <jwt>` plus a fresh `DPoP: <proof>` header (per-request JWS-compact, bound to the JWT's `cnf.jkt` thumbprint per RFC 7638). RAR scopes (RFC 9396) constrain the JWT to specific tools and amounts.
+- **API keys (operator-issued)**: `tnz_...` keys minted by the RPC operator via `tenzro_createApiKey` (admin-token-gated) and presented as `X-Tenzro-Api-Key`. Scopes gate methods that consult third-party paid resources: `canton` (Canton JSON Ledger API), `chainlink` (Ethereum mainnet RPC quota for Chainlink Data Feeds + bridge fee oracle + per-adapter sponsorship), `evm` / `svm` / `inference` / `tee` / `bridge` for operators who monetise those surfaces. Per-tenant counters in `CF_CANTON_ANALYTICS` + `CF_BRIDGE_ANALYTICS`. GCRA rate-limit on `chainlink`-scoped methods.
 - **Revocation**: `tenzro_revokeJwt` (single token by `jti`) or `tenzro_revokeDid` (cascading through the act-chain).
 - **Config**: `TENZRO_MCP_AUTH=tiered` (default) | `false` (dev) | `full` (all tools require auth)
 
@@ -257,9 +260,26 @@ This means a single agent identity can compose a card-rail TAP payment, an x402 
 - **Chainlink CCIP**: Router-based cross-chain messaging with token pools
 - **Chainlink CCT**: Cross-Chain Token v1.6+ self-serve pool registry (LockRelease + BurnMint)
 - **Wormhole**: 19-guardian VAA attestation, 30+ chains incl. Solana/Aptos/Sui
+- **Wormhole NTT**: Native Token Transfers with NttManager registry + multi-transceiver chain catalog (Wormhole / Axelar / LayerZero / custom)
 - **deBridge DLN**: Intent-based cross-chain swaps (official MCP proxy)
 - **LI.FI**: 66-chain aggregation with route optimization
+- **Hyperlane V3**: messaging with sovereign Tenzro-validator-set ISM (`list_chains`, `quote_dispatch`, `dispatch`)
+- **Axelar GMP**: Cosmos / Move / Stellar / XRPL reach
+- **Babylon**: Bitcoin staking finality-providers + EOTS delegations
 - **Canton**: Enterprise DAML interoperability
+
+### Bridge Fee in TNZO + Chainlink-backed Fee Oracle
+- **Single-token UX**: users pay one TNZO-denominated fee on the source chain; the destination-native fee is fronted by a per-adapter sponsorship pool.
+- **Two oracle backings**: `GovernanceSetFeeOracle` (manual rate table, admin-token-gated via `tenzro_setBridgeFeeRate`) and `ChainlinkFeedFeeOracle` (live `eth_call` against `AggregatorV3Interface.latestRoundData()` with 30s in-memory cache + staleness + invalid-answer rejection).
+- **Per-adapter sponsorship pools**: 8 deterministic vault addresses (SHA-256 over `"tenzro/bridge/sponsorship-vault" || adapter`, first 20 bytes), enumerable via `tenzro_listBridgeSponsorshipPools`.
+- **ERC-7683 envelope unification**: `TenzroOrderData.bridge_fee_hint` lets a single user-signed order be filled by any of the 6 bridges — solver picks the adapter, the TNZO ceiling bounds the destination-native commitment.
+- **Operator-gated upstream cost**: the Ethereum mainnet RPC quota for Chainlink reads is operator-paid; methods are gated by API key with `chainlink` scope (same model as Canton). Per-tenant Compute Unit attribution in `CF_BRIDGE_ANALYTICS`. GCRA rate limiter (10 req/sec sustained, burst 100) with `-32005` retry envelope.
+
+### Tokenization & Compliance
+- **ERC-7943 (uRWA)**: real-world-asset compliance surface — token kill-switch (`tenzro_urwaTriggerKillSwitch`), freeze-tokens (`tenzro_urwaSetFrozenTokens`), forced-transfer (admin-token-gated).
+- **IVMS101 v1.1.0**: FATF Travel Rule canonical envelope binding for KYC payloads on cross-border transfers.
+- **Secure-Mint**: per-token 1:1 reserve-attestation invariant for tokenized RWAs.
+- **TEE-attested timestamps**: saga step deadlines and obligation expiries carry a TEE-attested `wall_ms + monotonic_ns + tee_vendor` envelope with 30s drift tolerance.
 
 ### Agent Interoperability
 - **ERC-8004**: Trustless Agents Registry on Ethereum — mirror Tenzro machine DIDs to the `registerAgent`/`getAgent`/`submitFeedback`/`validationRequest`/`validationResponse` interface for cross-ecosystem agent reputation. CLI exposes both `tenzro erc8004` and the canonical EIP-8004 short-name alias `tenzro 8004`.

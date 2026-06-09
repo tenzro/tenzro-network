@@ -302,6 +302,24 @@ async fn handle_rpc_post(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    // Stage 2: optional tenant-supplied Canton JWT. When present, the
+    // canton dispatch path uses this JWT instead of the operator's
+    // configured credential, so Canton routes the call to the
+    // tenant's IDP and the operator credential never appears on the
+    // wire. Accepts either raw JWT or `Bearer <jwt>` for ergonomic
+    // parity with `Authorization` headers.
+    let canton_auth = headers
+        .get("x-canton-auth")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.trim()
+                .strip_prefix("Bearer ")
+                .or_else(|| s.trim().strip_prefix("bearer "))
+                .unwrap_or(s.trim())
+                .to_string()
+        });
+    let _ = canton_auth.as_deref(); // wired below into handler invocations
+
     // Support batch requests (JSON array)
     if let Some(batch) = payload.as_array() {
         let mut responses = Vec::new();
@@ -317,7 +335,23 @@ async fn handle_rpc_post(
                         responses.push(serde_json::to_value(err).unwrap());
                         continue;
                     }
-                    let response = handle_request(&node, request, &auth_ctx, api_key.as_deref()).await;
+                    if let Some(err) =
+                        gate_chainlink_rate_limit(&node, &request, api_key.as_deref())
+                    {
+                        responses.push(serde_json::to_value(err).unwrap());
+                        continue;
+                    }
+                    let method = request.method.clone();
+                    let response = handle_request(
+                        &node,
+                        request,
+                        &auth_ctx,
+                        api_key.as_deref(),
+                        canton_auth.as_deref(),
+                    )
+                    .await;
+                    record_canton_call(&node, &method, api_key.as_deref(), &response);
+                    record_chainlink_call(&node, &method, api_key.as_deref(), &response);
                     responses.push(serde_json::to_value(response).unwrap());
                 }
                 Err(e) => {
@@ -347,7 +381,22 @@ async fn handle_rpc_post(
             if let Some(err) = gate_api_key(&node, &request, api_key.as_deref()) {
                 return (StatusCode::OK, Json(serde_json::to_value(err).unwrap()));
             }
-            let response = handle_request(&node, request, &auth_ctx, api_key.as_deref()).await;
+            if let Some(err) =
+                gate_chainlink_rate_limit(&node, &request, api_key.as_deref())
+            {
+                return (StatusCode::OK, Json(serde_json::to_value(err).unwrap()));
+            }
+            let method = request.method.clone();
+            let response = handle_request(
+                &node,
+                request,
+                &auth_ctx,
+                api_key.as_deref(),
+                canton_auth.as_deref(),
+            )
+            .await;
+            record_canton_call(&node, &method, api_key.as_deref(), &response);
+            record_chainlink_call(&node, &method, api_key.as_deref(), &response);
             (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
         }
         Err(e) => {
@@ -376,6 +425,14 @@ pub(crate) fn gate_api_key(
     request: &JsonRpcRequest,
     api_key: Option<&str>,
 ) -> Option<JsonRpcResponse> {
+    // Admin-token-gated methods skip the API-key scope gate even when
+    // their name matches the canton scope predicate. `gate_admin_token`
+    // already enforced authorization for these methods upstream, and
+    // the operator admin token is strictly stronger than any tenant
+    // API key (cross-tenant read).
+    if requires_admin_token(&request.method) {
+        return None;
+    }
     let mgr = node.api_key_manager()?;
     use crate::api_key::AuthorizeOutcome;
     match mgr.authorize(api_key, &request.method) {
@@ -419,6 +476,141 @@ pub(crate) fn gate_api_key(
     }
 }
 
+/// Records a per-tenant Canton call against `CF_CANTON_ANALYTICS`.
+/// Skips silently when the request is not canton-scoped, when no API
+/// key was presented (e.g. operator admin token-only access), or when
+/// the key is unknown. Errors during persistence are logged but do
+/// not interfere with the response — analytics is a side effect, not
+/// a gate.
+pub(crate) fn record_canton_call(
+    node: &Arc<TenzroNode>,
+    method: &str,
+    api_key: Option<&str>,
+    response: &JsonRpcResponse,
+) {
+    if crate::api_key::required_scope_for_method(method)
+        != Some(crate::api_key::ApiKeyScope::Canton)
+    {
+        return;
+    }
+    let plaintext = match api_key {
+        Some(k) => k,
+        None => return,
+    };
+    let mgr = match node.api_key_manager() {
+        Some(m) => m,
+        None => return,
+    };
+    let record = match mgr.lookup(plaintext) {
+        Some(r) => r,
+        None => return,
+    };
+    let analytics = match node.canton_analytics() {
+        Some(a) => a,
+        None => return,
+    };
+    let success = response.error.is_none();
+    if let Err(e) = analytics.record_call(
+        &record.key_id,
+        record.canton_user_id.as_deref(),
+        method,
+        success,
+    ) {
+        warn!("canton_analytics record_call failed: {}", e);
+    }
+}
+
+/// Per-tenant GCRA rate-limit gate for `chainlink`-scoped methods.
+/// Returns 429-equivalent JSON-RPC error when the key exceeds its
+/// burst budget; passes through otherwise.
+///
+/// The JSON-RPC envelope doesn't carry HTTP status codes, but we encode
+/// the 429 semantics in code `-32005` + a `retry_after_ms` field so SDKs
+/// can implement client-side backoff per Stripe's recommendation.
+pub(crate) fn gate_chainlink_rate_limit(
+    node: &Arc<TenzroNode>,
+    request: &JsonRpcRequest,
+    api_key: Option<&str>,
+) -> Option<JsonRpcResponse> {
+    // Only gate methods that map to the chainlink scope; everything else
+    // sails through.
+    if crate::api_key::required_scope_for_method(&request.method)
+        != Some(crate::api_key::ApiKeyScope::Chainlink)
+    {
+        return None;
+    }
+    // Admin-token paths skip rate-limiting (operator owns the upstream).
+    if requires_admin_token(&request.method) {
+        return None;
+    }
+    let plaintext = api_key?;
+    let mgr = node.api_key_manager()?;
+    let record = mgr.lookup(plaintext)?;
+    let limiter = node.chainlink_rate_limiter();
+    match limiter.check(&record.key_id) {
+        crate::bridge_analytics::GcraDecision::Admit { .. } => None,
+        crate::bridge_analytics::GcraDecision::Deny { retry_after } => {
+            if let Some(analytics) = node.bridge_analytics() {
+                analytics.record_rate_limit_rejection(&record.key_id);
+            }
+            Some(JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request.id.clone(),
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32005,
+                    message: format!(
+                        "Rate limit exceeded for chainlink-scoped methods; \
+                         retry after {} ms",
+                        retry_after.as_millis()
+                    ),
+                    data: Some(serde_json::json!({
+                        "retry_after_ms": retry_after.as_millis() as u64,
+                        "rate_per_second": limiter.rate_per_second(),
+                        "burst": limiter.burst(),
+                    })),
+                }),
+            })
+        }
+    }
+}
+
+/// Per-tenant Chainlink/bridge call recorder. Mirror of
+/// [`record_canton_call`] for the `chainlink` scope; persists the call
+/// + CU cost to `CF_BRIDGE_ANALYTICS`.
+pub(crate) fn record_chainlink_call(
+    node: &Arc<TenzroNode>,
+    method: &str,
+    api_key: Option<&str>,
+    response: &JsonRpcResponse,
+) {
+    if crate::api_key::required_scope_for_method(method)
+        != Some(crate::api_key::ApiKeyScope::Chainlink)
+    {
+        return;
+    }
+    let plaintext = match api_key {
+        Some(k) => k,
+        None => return,
+    };
+    let mgr = match node.api_key_manager() {
+        Some(m) => m,
+        None => return,
+    };
+    let record = match mgr.lookup(plaintext) {
+        Some(r) => r,
+        None => return,
+    };
+    let analytics = match node.bridge_analytics() {
+        Some(a) => a,
+        None => return,
+    };
+    let success = response.error.is_none();
+    if let Err(e) = analytics.record_call(&record.key_id, method, success) {
+        warn!("bridge_analytics record_call failed: {}", e);
+    }
+}
+
 /// Returns `true` if the given JSON-RPC method is gated behind the
 /// operator admin token. Mutation RPCs that bind operator-controlled
 /// state (API-key issuance/revocation, staking against the operator's
@@ -429,17 +621,63 @@ pub(crate) fn gate_api_key(
 fn requires_admin_token(method: &str) -> bool {
     matches!(
         method,
+        // API key management
         "tenzro_createApiKey"
             | "tenzro_revokeApiKey"
             | "tenzro_listApiKeys"
+            // Operator staking + provider lifecycle
             | "tenzro_stake"
             | "tenzro_stakeTokens"
             | "tenzro_unstake"
             | "tenzro_unstakeTokens"
             | "tenzro_registerProvider"
+            // Node ops
             | "tenzro_produceSnapshot"
             | "tenzro_setDraining"
             | "tenzro_gossipStats"
+            // Canton operator surfaces
+            | "tenzro_canton_listApiKeyAnalytics"
+            | "tenzro_canton_createIdp"
+            | "tenzro_canton_listIdps"
+            | "tenzro_canton_deleteIdp"
+            // Cross-chain mint/burn: bridge ack writes that move
+            // settlement supply. Production drive should be signed
+            // gossip from validators; the RPC path is operator-only.
+            | "tenzro_crosschainMint"
+            | "tenzro_crosschainBurn"
+            | "tenzro_authorizeCrosschainBridge"
+            | "tenzro_revokeBridge"
+            | "tenzro_updateBridgeLimits"
+            // Compliance controls
+            | "tenzro_freezeAddress"
+            | "tenzro_unfreezeAddress"
+            | "tenzro_whitelistAddress"
+            | "tenzro_setCountryRestriction"
+            // ERC-7943 (uRWA) compliance mutations — token kill-switch,
+            // freeze, and forced-transfer are operator-only writes.
+            | "tenzro_urwaSetFrozenTokens"
+            | "tenzro_urwaTriggerKillSwitch"
+            | "tenzro_urwaClearKillSwitch"
+            | "tenzro_urwaForcedTransfer"
+            | "tenzro_recoverTokens"
+            // Secure-mint policy: reserve invariants for tokenized
+            // assets. Anyone setting/clearing this is a direct
+            // backing bypass.
+            | "tenzro_setSecureMintPolicy"
+            | "tenzro_clearSecureMintPolicy"
+            // Delegation scope tweaks alter spend ceilings for
+            // identities — must be operator-controlled or signed.
+            | "tenzro_setDelegationScope"
+            // Bridge fee-in-TNZO oracle + sponsorship-pool mutations.
+            // Rate-table writes feed the cross-chain fee abstraction
+            // path; refill-threshold tweaks govern when the network
+            // treasury auto-rebalances the per-adapter pool.
+            | "tenzro_setBridgeFeeRate"
+            | "tenzro_setSponsorshipRefillThreshold"
+            // Operator admin-read of per-tenant CU consumption + call
+            // counters for the chainlink-scoped bridge fee path. Strict
+            // cross-tenant read — operator-only.
+            | "tenzro_listBridgeAnalytics"
     )
 }
 
@@ -571,7 +809,14 @@ pub(crate) async fn handle_request(
     mut request: JsonRpcRequest,
     auth_ctx: &AuthContext,
     api_key: Option<&str>,
+    canton_auth: Option<&str>,
 ) -> JsonRpcResponse {
+    // Install the tenant Canton JWT into a task-local slot so canton
+    // handlers further down the call tree can pick it up without
+    // every handler taking the parameter explicitly.
+    let _canton_auth_guard = canton_auth.map(|jwt| {
+        crate::canton_jwt::set_for_current_task(jwt.to_string())
+    });
     // Per JSON-RPC 2.0 §4: the `jsonrpc` member MUST be exactly the string "2.0".
     // Reject anything else with -32600 Invalid Request before dispatching the
     // method — this protects downstream handlers from speaking against a 1.0
@@ -957,6 +1202,25 @@ pub(crate) async fn handle_request(
         "tenzro_permit2Digest" => crate::rpc_integrations::handle_permit2_digest(node, request.params).await,
         "tenzro_permit2VerifyAndConsume" => crate::rpc_integrations::handle_permit2_verify_and_consume(node, request.params).await,
         "tenzro_permit2NonceUsed" => crate::rpc_integrations::handle_permit2_nonce_used(node, request.params).await,
+
+        // Wave 7 — Wave 1-5 primitive RPC surface
+        "tenzro_urwaIsKillSwitched" => crate::rpc_integrations::handle_urwa_is_kill_switched(node, request.params).await,
+        "tenzro_urwaGetFrozenTokens" => crate::rpc_integrations::handle_urwa_get_frozen_tokens(node, request.params).await,
+        "tenzro_urwaSetFrozenTokens" => crate::rpc_integrations::handle_urwa_set_frozen_tokens(node, request.params).await,
+        "tenzro_urwaTriggerKillSwitch" => crate::rpc_integrations::handle_urwa_trigger_kill_switch(node, request.params).await,
+        "tenzro_urwaClearKillSwitch" => crate::rpc_integrations::handle_urwa_clear_kill_switch(node, request.params).await,
+        "tenzro_ivms101Hash" => crate::rpc_integrations::handle_ivms101_hash(node, request.params).await,
+        "tenzro_attestedClockNow" => crate::rpc_integrations::handle_attested_clock_now(node, request.params).await,
+        "tenzro_wormholeNttListChains" => crate::rpc_integrations::handle_wormhole_ntt_list_chains(node, request.params).await,
+        "tenzro_signedAgentCardCanonicalHash" => crate::rpc_integrations::handle_signed_agent_card_canonical_hash(node, request.params).await,
+        "tenzro_quoteBridgeFeeInTnzo" => crate::rpc_integrations::handle_quote_bridge_fee_in_tnzo(node, request.params).await,
+        "tenzro_listBridgeSponsorshipPools" => crate::rpc_integrations::handle_list_bridge_sponsorship_pools(node, request.params).await,
+        "tenzro_setBridgeFeeRate" => crate::rpc_integrations::handle_set_bridge_fee_rate(node, request.params).await,
+        "tenzro_sponsorBridgeFee" => crate::rpc_integrations::handle_sponsor_bridge_fee(node, request.params).await,
+        "tenzro_setSponsorshipRefillThreshold" => crate::rpc_integrations::handle_set_sponsorship_refill_threshold(node, request.params).await,
+        "tenzro_getBridgeAnalytics" => handle_get_bridge_analytics(node, api_key).await,
+        "tenzro_listBridgeAnalytics" => handle_list_bridge_analytics(node, request.params).await,
+
         // Secure-Mint registry — per-token 1:1 reserve-attestation
         // policies plus the `circulating + amount ≤ reserve` invariant
         // gate enforced by the EVM precompile at `0x0000…00001024`.
@@ -991,6 +1255,49 @@ pub(crate) async fn handle_request(
         // Provider methods
         "tenzro_participate" => handle_participate(node, request.params).await,
         "tenzro_joinAsMicroNode" => handle_join_as_micro_node(node, request.params).await,
+
+        // Passkey-first custody RPCs (Coinbase / Daimo / Argent pattern).
+        // Substrate: P-256 + WebAuthn + ERC-7579 modular validators
+        // + ERC-4337 smart accounts + RIP-7212 P256VERIFY precompile.
+        "tenzro_enrollPasskey" => {
+            crate::passkey_rpc::handle_enroll_passkey(node, request.params).await
+        }
+        "tenzro_signWithPasskey" => {
+            crate::passkey_rpc::handle_sign_with_passkey(node, request.params).await
+        }
+        "tenzro_addGuardian" => {
+            crate::passkey_rpc::handle_add_guardian(node, request.params).await
+        }
+        "tenzro_initiateRecovery" => {
+            crate::passkey_rpc::handle_initiate_recovery(node, request.params).await
+        }
+        "tenzro_submitRecoverySignature" => {
+            crate::passkey_rpc::handle_submit_recovery_signature(node, request.params).await
+        }
+        "tenzro_finalizeRecovery" => {
+            crate::passkey_rpc::handle_finalize_recovery(node, request.params).await
+        }
+        "tenzro_grantSessionKey" => {
+            crate::passkey_rpc::handle_grant_session_key(node, request.params).await
+        }
+        "tenzro_revokeSessionKey" => {
+            crate::passkey_rpc::handle_revoke_session_key(node, request.params).await
+        }
+        "tenzro_setSpendingLimit" => {
+            crate::passkey_rpc::handle_set_spending_limit(node, request.params).await
+        }
+        "tenzro_addHardwareSigner" => {
+            crate::passkey_rpc::handle_add_hardware_signer(node, request.params).await
+        }
+        "tenzro_getSmartAccount" => {
+            crate::passkey_rpc::handle_get_smart_account(node, request.params).await
+        }
+        "tenzro_listSmartAccounts" => {
+            crate::passkey_rpc::handle_list_smart_accounts(node, request.params).await
+        }
+        "tenzro_listPendingRecoveries" => {
+            crate::passkey_rpc::handle_list_pending_recoveries(node, request.params).await
+        }
 
         // Onboarding RPCs — provision identity + wallet, then mint a
         // `tenzro_auth::AuthEngine` JWT with a per-identity RAR envelope.
@@ -1154,8 +1461,8 @@ pub(crate) async fn handle_request(
         // Canton/DAML methods
         "tenzro_listCantonDomains" => handle_list_canton_domains(node).await,
         // `tenzro_canton_listMirroredContracts` is the canton-workflow doc name.
-        "tenzro_listDamlContracts" | "tenzro_canton_listMirroredContracts" => handle_list_daml_contracts(node, request.params).await,
-        "tenzro_submitDamlCommand" => handle_submit_daml_command(node, request.params).await,
+        "tenzro_listDamlContracts" | "tenzro_canton_listMirroredContracts" => handle_list_daml_contracts(node, request.params, api_key).await,
+        "tenzro_submitDamlCommand" => handle_submit_daml_command(node, request.params, api_key).await,
         "tenzro_allocateParty" => handle_allocate_party(node, request.params).await,
         // Canton 3.5+ JSON Ledger API extension methods (M11 — Canton-fix wave).
         "tenzro_canton_uploadDar" => handle_canton_upload_dar(node, request.params).await,
@@ -1168,6 +1475,13 @@ pub(crate) async fn handle_request(
         "tenzro_canton_feeSchedule" => handle_canton_fee_schedule(node).await,
         "tenzro_canton_connectedSynchronizers" => handle_canton_connected_synchronizers(node).await,
         "tenzro_canton_getMyUser" => handle_canton_get_my_user(node).await,
+        "tenzro_canton_grantUserRights" => handle_canton_grant_user_rights(node, request.params).await,
+        "tenzro_canton_listUserRights" => handle_canton_list_user_rights(node, request.params).await,
+        "tenzro_canton_getMyAnalytics" => handle_canton_get_my_analytics(node, api_key).await,
+        "tenzro_canton_listApiKeyAnalytics" => handle_canton_list_api_key_analytics(node, request.params).await,
+        "tenzro_canton_createIdp" => handle_canton_create_idp(node, request.params).await,
+        "tenzro_canton_listIdps" => handle_canton_list_idps(node).await,
+        "tenzro_canton_deleteIdp" => handle_canton_delete_idp(node, request.params).await,
 
         // API key management — operator (admin-token-gated)
         "tenzro_createApiKey" => handle_create_api_key(node, request.params).await,
@@ -1249,6 +1563,7 @@ pub(crate) async fn handle_request(
         "tenzro_workflowStepExecute" => handle_workflow_step_execute(node, request.params).await,
         "tenzro_workflowStepVerify" => handle_workflow_step_verify(node, request.params).await,
         "tenzro_workflowStepCompensate" => handle_workflow_step_compensate(node, request.params).await,
+        "tenzro_workflowSetStepDeadline" => handle_workflow_set_step_deadline(node, request.params).await,
         "tenzro_workflowFinalize" => handle_workflow_finalize(node, request.params).await,
         "tenzro_getWorkflowSaga" => handle_get_workflow_saga(node, request.params).await,
 
@@ -5994,11 +6309,20 @@ async fn handle_get_workflow_operational_metrics(
 fn canton_adapter_or_err(
     node: &Arc<TenzroNode>,
 ) -> std::result::Result<Arc<tenzro_bridge::canton::CantonAdapter>, JsonRpcError> {
-    node.canton_adapter().cloned().ok_or_else(|| JsonRpcError {
+    let base = node.canton_adapter().cloned().ok_or_else(|| JsonRpcError {
         code: -32000,
         message: "Canton adapter not initialized (set [canton].enabled = true)".to_string(),
         data: None,
-    })
+    })?;
+    // Stage 2: when the tenant presented their own Canton JWT via
+    // `X-Canton-Auth`, swap to a per-request adapter view that uses
+    // the tenant's JWT. The operator credential is never sent on
+    // these requests — Canton routes via the tenant's IDP.
+    if let Some(jwt) = crate::canton_jwt::current() {
+        Ok(Arc::new(base.with_tenant_jwt(jwt)))
+    } else {
+        Ok(base)
+    }
 }
 
 /// `tenzro_mirrorWorkflowToCanton` — replicate a workflow into a Canton
@@ -12354,6 +12678,37 @@ async fn handle_send_raw_transaction(
         });
     }
 
+    // === ERC-7579 on-chain validator pre-check ===
+    // Closes the parallel custody control surface on the raw-send path.
+    // `tenzro_signTransaction` runs the validator chain inside the auth
+    // flow; without the same check here, a delegated agent whose
+    // session key was revoked or whose SpendingLimit window is exceeded
+    // could bypass enforcement by signing the tx in their own wallet
+    // and routing it through `eth_sendRawTransaction`. Per the
+    // `feedback_custody_enforce_at_signing_time` memory + the May 2026
+    // Grok/Bankr incident this is the dominant residual custody gap.
+    //
+    // ERC-7579 validators are keyed by smart-account address. Accounts
+    // with no installed modules pass through transparently (handled
+    // inside `aa_pre_sign_check`), so human EOAs / unregistered senders
+    // are unaffected. Now that `CF_VALIDATOR_MODULES` makes the
+    // installed-modules map persistent across restarts, the check is
+    // genuinely enforceable in production.
+    let value_for_aa = match &signed_tx.transaction.tx_type {
+        TransactionType::Transfer { amount } => *amount,
+        _ => 0u128,
+    };
+    aa_pre_sign_check(
+        node,
+        &signed_tx.transaction.from,
+        &signed_tx.transaction.to,
+        value_for_aa,
+        signed_tx.transaction.nonce.0,
+        signed_tx.transaction.gas_limit,
+        signed_tx.transaction.gas_price,
+        &signed_tx.transaction.tx_type,
+    )?;
+
     // Synchronous Spec-2 admission: try the local consensus mempool first so
     // rate-limited senders see JSON-RPC error -32011 immediately instead of a
     // silent async drop. On success the tx is already in the mempool — we then
@@ -12487,12 +12842,209 @@ async fn handle_send_raw_transaction(
     Ok(serde_json::json!(format!("{}", tx_hash)))
 }
 
+/// `eth_getBlockByNumber(blockTag, fullTransactions)` — Ethereum JSON-RPC
+/// spec block shape.
+///
+/// Block tag is `"latest"`, `"pending"`, `"earliest"`, or a `0x`-prefixed
+/// hex height. `fullTransactions` is a boolean: when true, the
+/// `transactions` field carries full tx objects; when false, just tx
+/// hashes. The response MUST be in the Ethereum execution-payload shape
+/// (number/hash/parentHash/stateRoot/etc. as `0x`-prefixed hex strings,
+/// timestamp in seconds-since-epoch as hex) — anything else breaks
+/// MetaMask / ethers.js / web3.js / viem clients.
 async fn handle_get_block_by_number(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    // Alias to handle_get_block
-    handle_get_block(node, params).await
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let arr = params.as_array().cloned().unwrap_or_default();
+    let block_tag = arr
+        .first()
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing block tag (expected hex height or \"latest\")".to_string(),
+            data: None,
+        })?;
+    let full_tx = arr
+        .get(1)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+    let block_store = BlockStoreImpl::new(storage.clone()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Block store error: {}", e),
+        data: None,
+    })?;
+
+    let block = match block_tag {
+        "latest" | "pending" | "finalized" | "safe" => {
+            block_store.latest_block().await.map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Failed to get latest block: {}", e),
+                data: None,
+            })?
+        }
+        "earliest" => block_store
+            .get_block_by_height(BlockHeight::new(0))
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Failed to get earliest block: {}", e),
+                data: None,
+            })?,
+        hex => {
+            let height = u64::from_str_radix(hex.trim_start_matches("0x"), 16).map_err(
+                |e| JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid block height hex: {}", e),
+                    data: None,
+                },
+            )?;
+            block_store
+                .get_block_by_height(BlockHeight::new(height))
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Failed to get block: {}", e),
+                    data: None,
+                })?
+        }
+    };
+
+    Ok(match block {
+        Some(b) => evm_block_to_json(&b, full_tx),
+        None => Value::Null,
+    })
+}
+
+/// Format a Tenzro `Block` in the Ethereum JSON-RPC block shape.
+///
+/// All numeric fields are `0x`-prefixed lowercase hex. `timestamp` is
+/// in seconds-since-epoch (NOT milliseconds — go-ethereum and reth use
+/// seconds, and JavaScript clients explicitly assume seconds when
+/// dividing by 1000 for `new Date()` construction). Hashes are
+/// `0x`-prefixed 32-byte hex (64 hex chars). Addresses are `0x`-prefixed
+/// 20-byte hex. Missing-from-our-model fields (uncles, mixHash, nonce,
+/// extraData, logsBloom, receiptsRoot, sha3Uncles) are filled with the
+/// canonical zero-bytes shape — required by every conformance test.
+fn evm_block_to_json(b: &tenzro_types::Block, full_tx: bool) -> Value {
+    let height = b.height().0;
+    let block_hash_hex = format!("0x{}", hex::encode(b.hash().as_bytes()));
+    let parent_hash_hex = format!("0x{}", hex::encode(b.header.prev_hash.as_bytes()));
+    let state_root_hex = format!("0x{}", hex::encode(b.header.state_root.as_bytes()));
+    let tx_root_hex = format!("0x{}", hex::encode(b.header.tx_root.as_bytes()));
+    // Convert ms → s for the timestamp; cap at 32 bits is fine through 2106.
+    let timestamp_secs = (b.header.timestamp.as_millis() / 1000) as u64;
+    let gas_used = b.header.metadata.gas_used;
+    let gas_limit = b.header.metadata.gas_limit;
+    let base_fee = b
+        .header
+        .metadata
+        .base_fee_per_gas
+        .unwrap_or(0u128);
+    let zero32 = "0x".to_string() + &"0".repeat(64);
+    let zero8 = "0x0000000000000000".to_string();
+    let empty_bloom = "0x".to_string() + &"0".repeat(512);
+    // Proposer is a Tenzro `Address` (32 bytes); EVM `miner` is 20 bytes.
+    // Take the trailing 20 bytes for compatibility with tools that
+    // assume EVM addresses.
+    let proposer_bytes = b.header.proposer.as_bytes();
+    let proposer_20 = if proposer_bytes.len() >= 20 {
+        &proposer_bytes[proposer_bytes.len() - 20..]
+    } else {
+        proposer_bytes
+    };
+    let miner_hex = format!("0x{}", hex::encode(proposer_20));
+
+    let txs_json: Vec<Value> = b
+        .transactions
+        .iter()
+        .map(|signed_tx| {
+            let tx = &signed_tx.transaction;
+            let tx_hash = format!("0x{}", hex::encode(tx.hash().as_bytes()));
+            if full_tx {
+                evm_tx_to_json(tx, Some(&block_hash_hex), Some(height))
+            } else {
+                Value::String(tx_hash)
+            }
+        })
+        .collect();
+
+    let block_size_bytes = serde_json::to_vec(&b).map(|v| v.len()).unwrap_or(0);
+
+    serde_json::json!({
+        "number": format!("0x{:x}", height),
+        "hash": block_hash_hex,
+        "parentHash": parent_hash_hex,
+        "nonce": zero8,
+        "sha3Uncles": zero32,
+        "logsBloom": empty_bloom,
+        "transactionsRoot": tx_root_hex,
+        "stateRoot": state_root_hex,
+        "receiptsRoot": zero32,
+        "miner": miner_hex,
+        "difficulty": "0x0",
+        "totalDifficulty": "0x0",
+        "extraData": "0x",
+        "size": format!("0x{:x}", block_size_bytes),
+        "gasLimit": format!("0x{:x}", gas_limit),
+        "gasUsed": format!("0x{:x}", gas_used),
+        "timestamp": format!("0x{:x}", timestamp_secs),
+        "transactions": txs_json,
+        "uncles": [],
+        "baseFeePerGas": format!("0x{:x}", base_fee),
+        "mixHash": zero32,
+    })
+}
+
+/// Format a Tenzro `Transaction` in the Ethereum JSON-RPC tx shape.
+fn evm_tx_to_json(
+    tx: &tenzro_types::Transaction,
+    block_hash: Option<&str>,
+    block_number: Option<u64>,
+) -> Value {
+    let tx_hash = format!("0x{}", hex::encode(tx.hash().as_bytes()));
+    let from_bytes = tx.from.as_bytes();
+    let from_20 = if from_bytes.len() >= 20 {
+        &from_bytes[from_bytes.len() - 20..]
+    } else {
+        from_bytes
+    };
+    let to_bytes = tx.to.as_bytes();
+    let to_20 = if to_bytes.len() >= 20 {
+        &to_bytes[to_bytes.len() - 20..]
+    } else {
+        to_bytes
+    };
+    let value: u128 = match &tx.tx_type {
+        tenzro_types::TransactionType::Transfer { amount } => *amount,
+        _ => 0u128,
+    };
+    serde_json::json!({
+        "hash": tx_hash,
+        "nonce": format!("0x{:x}", tx.nonce.0),
+        "blockHash": block_hash.unwrap_or(""),
+        "blockNumber": block_number.map(|n| format!("0x{:x}", n)).unwrap_or_default(),
+        "transactionIndex": "0x0",
+        "from": format!("0x{}", hex::encode(from_20)),
+        "to": format!("0x{}", hex::encode(to_20)),
+        "value": format!("0x{:x}", value),
+        "gas": format!("0x{:x}", tx.gas_limit),
+        "gasPrice": format!("0x{:x}", tx.gas_price),
+        "input": "0x",
+        "chainId": format!("0x{:x}", tx.chain_id.0),
+        "type": "0x0",
+    })
 }
 
 async fn handle_get_block_by_hash(
@@ -12533,19 +13085,16 @@ async fn handle_get_block_by_hash(
         code: -32000, message: format!("Failed to get block: {}", e), data: None,
     })?;
 
+    // EVM-compat response: emit `eth_getBlockByHash` shape with all
+    // numeric fields as `0x`-prefixed hex, timestamp in seconds, hashes
+    // `0x`-prefixed. Same formatter as `eth_getBlockByNumber`.
+    let full_tx = if let Some(arr) = params.as_array() {
+        arr.get(1).and_then(|v| v.as_bool()).unwrap_or(false)
+    } else {
+        false
+    };
     match block {
-        Some(b) => Ok(serde_json::json!({
-            "height": b.height().0,
-            "hash": format!("{}", b.hash()),
-            "prev_hash": format!("{}", b.header.prev_hash),
-            "state_root": format!("{}", b.header.state_root),
-            "tx_root": format!("{}", b.header.tx_root),
-            "timestamp": b.header.timestamp.as_millis(),
-            "proposer": format!("{}", b.header.proposer),
-            "tx_count": b.transactions.len(),
-            "gas_used": b.header.metadata.gas_used,
-            "gas_limit": b.header.metadata.gas_limit,
-        })),
+        Some(b) => Ok(evm_block_to_json(&b, full_tx)),
         None => Ok(Value::Null),
     }
 }
@@ -19223,6 +19772,7 @@ async fn handle_list_canton_domains(
 async fn handle_list_daml_contracts(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let config = node.config();
     if !config.canton.enabled {
@@ -19264,8 +19814,41 @@ async fn handle_list_daml_contracts(
     }
 
     let adapter = canton_adapter_or_err(node)?;
+
+    // Per-tenant `requestingParties` scope. Same resolution as the
+    // submit path: the bound `canton_user_id` on the API key maps to
+    // that tenant's `primaryParty`; the tenzro-labs team only sees rows
+    // their party is a stakeholder on. `None` here falls through to
+    // the adapter's participant default (legacy shared path).
+    let requesting_party_fq = match (api_key, node.api_key_manager()) {
+        (Some(plaintext), Some(mgr)) => match mgr.lookup(plaintext) {
+            Some(record) => match record.canton_user_id.as_deref() {
+                Some(uid) => Some(
+                    adapter
+                        .primary_party_for_user(uid)
+                        .await
+                        .map_err(|e| JsonRpcError {
+                            code: -32000,
+                            message: format!(
+                                "Canton requestingParties resolve failed for user {}: {}",
+                                uid, e
+                            ),
+                            data: None,
+                        })?,
+                ),
+                None => None,
+            },
+            None => None,
+        },
+        _ => None,
+    };
+
     let contracts = adapter
-        .query_active_contracts(template_ids.clone(), query.clone())
+        .query_active_contracts_as(
+            template_ids.clone(),
+            query.clone(),
+            requesting_party_fq.as_deref(),
+        )
         .await
         .map_err(|e| {
             tracing::error!("Canton query_active_contracts failed: {}", e);
@@ -19297,6 +19880,7 @@ async fn handle_list_daml_contracts(
 async fn handle_submit_daml_command(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let config = node.config();
     if !config.canton.enabled {
@@ -19334,10 +19918,53 @@ async fn handle_submit_daml_command(
 
     let adapter = canton_adapter_or_err(node)?;
 
-    // Optional per-submission `actAs` override. Set by per-agent spawning so
-    // contracts created by the agent name the agent's allocated party (not
-    // the operator's participant-default party).
-    let act_as_party = params.get("act_as").and_then(|v| v.as_str());
+    // Resolve the `actAs` party for this submission. Precedence:
+    //   1. Explicit `act_as` param (per-call override; used by
+    //      per-agent spawning so contracts name the agent's allocated
+    //      party, not the operator's).
+    //   2. The API key's bound `canton_user_id` resolved to its
+    //      `primaryParty` — the multi-tenant path. Canton's
+    //      AuthService enforces per-user CanActAs rights, so the
+    //      tenzro-labs team can only submit on behalf of parties their
+    //      user is granted on.
+    //   3. None — falls through to the adapter's participant-default
+    //      `act_as_party` (legacy shared-operator path).
+    let explicit_act_as = params
+        .get("act_as")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let resolved_act_as = if explicit_act_as.is_some() {
+        explicit_act_as
+    } else {
+        match (api_key, node.api_key_manager()) {
+            (Some(plaintext), Some(mgr)) => {
+                if let Some(record) = mgr.lookup(plaintext) {
+                    if let Some(uid) = record.canton_user_id.as_deref() {
+                        Some(
+                            adapter
+                                .primary_party_for_user(uid)
+                                .await
+                                .map_err(|e| JsonRpcError {
+                                    code: -32000,
+                                    message: format!(
+                                        "Canton actAs resolve failed for user {}: {}",
+                                        uid, e
+                                    ),
+                                    data: None,
+                                })?,
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    };
+    let act_as_party = resolved_act_as.as_deref();
 
     let result = match command_type {
         "create" => {
@@ -19705,6 +20332,367 @@ async fn handle_canton_get_my_user(
     })
 }
 
+async fn handle_canton_grant_user_rights(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let user_id = params.get("user_id").and_then(|v| v.as_str());
+    let party = params
+        .get("party")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing party (fully-qualified party id)".to_string(),
+            data: None,
+        })?;
+    let can_act_as = params
+        .get("can_act_as")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let can_read_as = params
+        .get("can_read_as")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let adapter = canton_adapter_or_err(node)?;
+    adapter
+        .grant_user_rights(user_id, party, can_act_as, can_read_as)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Canton grant_user_rights failed: {}", e),
+            data: None,
+        })
+}
+
+async fn handle_canton_list_user_rights(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let user_id = params
+        .as_ref()
+        .and_then(|p| p.get("user_id"))
+        .and_then(|v| v.as_str());
+    let adapter = canton_adapter_or_err(node)?;
+    adapter
+        .list_user_rights(user_id)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Canton list_user_rights failed: {}", e),
+            data: None,
+        })
+}
+
+/// Subject self-read: returns the canton call aggregates for the API
+/// key presented in `X-Tenzro-Api-Key`. Lets a tenant ("tenzro-labs")
+/// answer "how many DAML transactions have I submitted, and which
+/// methods am I hitting?" without operator help.
+///
+/// Surfaced shape:
+/// ```json
+/// {
+///   "key_id": "...",
+///   "canton_user_id": "tenzro-labs@clients",
+///   "calls_total": 42,
+///   "errors_total": 1,
+///   "calls_by_method": { "tenzro_canton_listContracts": 30, ... },
+///   "errors_by_method": { "tenzro_canton_submitCommand": 1 },
+///   "first_seen_at": 1717690000,
+///   "last_called_at": 1717693200
+/// }
+/// ```
+async fn handle_canton_get_my_analytics(
+    node: &Arc<TenzroNode>,
+    api_key: Option<&str>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let plaintext = api_key.ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Missing X-Tenzro-Api-Key header".to_string(),
+        data: None,
+    })?;
+    let mgr = node.api_key_manager().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "API key manager not initialized".to_string(),
+        data: None,
+    })?;
+    let record = mgr.lookup(plaintext).ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Unauthorized: API key is unknown or revoked".to_string(),
+        data: None,
+    })?;
+    let analytics = node.canton_analytics().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Canton analytics not initialized".to_string(),
+        data: None,
+    })?;
+    let agg = analytics
+        .get(&record.key_id)
+        .unwrap_or_else(|| crate::canton_analytics::CantonKeyAnalytics {
+            key_id: record.key_id.clone(),
+            canton_user_id: record.canton_user_id.clone(),
+            calls_total: 0,
+            errors_total: 0,
+            calls_by_method: std::collections::HashMap::new(),
+            errors_by_method: std::collections::HashMap::new(),
+            first_seen_at: None,
+            last_called_at: None,
+        });
+    serde_json::to_value(agg).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("canton_analytics serialize: {}", e),
+        data: None,
+    })
+}
+
+/// Subject self-read for `chainlink`-scoped per-tenant Chainlink/bridge
+/// analytics. Returns the caller's own aggregate (CU consumption,
+/// per-method counters, error counts, rate-limit rejections).
+async fn handle_get_bridge_analytics(
+    node: &Arc<TenzroNode>,
+    api_key: Option<&str>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let plaintext = api_key.ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Missing X-Tenzro-Api-Key header".to_string(),
+        data: None,
+    })?;
+    let mgr = node.api_key_manager().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "API key manager not initialized".to_string(),
+        data: None,
+    })?;
+    let record = mgr.lookup(plaintext).ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Unauthorized: API key is unknown or revoked".to_string(),
+        data: None,
+    })?;
+    let analytics = node.bridge_analytics().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Bridge analytics not initialized".to_string(),
+        data: None,
+    })?;
+    let agg = analytics.get(&record.key_id).unwrap_or_else(|| {
+        crate::bridge_analytics::BridgeKeyAnalytics {
+            key_id: record.key_id.clone(),
+            calls_total: 0,
+            errors_total: 0,
+            calls_by_method: std::collections::HashMap::new(),
+            errors_by_method: std::collections::HashMap::new(),
+            cu_consumed_total: 0,
+            first_seen_at: None,
+            last_called_at: None,
+            rate_limit_rejections: 0,
+        }
+    });
+    serde_json::to_value(agg).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("bridge_analytics serialize: {}", e),
+        data: None,
+    })
+}
+
+/// Operator admin-read: returns every per-tenant Chainlink/bridge
+/// aggregate. Admin-token-gated.
+async fn handle_list_bridge_analytics(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let analytics = node.bridge_analytics().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Bridge analytics not initialized".to_string(),
+        data: None,
+    })?;
+    let key_id_filter = params
+        .as_ref()
+        .and_then(|p| p.get("key_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut rows = analytics.list_all();
+    if let Some(filter) = key_id_filter {
+        rows.retain(|r| r.key_id == filter);
+    }
+    rows.sort_by_key(|r| std::cmp::Reverse(r.last_called_at.unwrap_or(0)));
+    Ok(serde_json::json!({ "analytics": rows }))
+}
+
+/// Operator admin-read: returns every per-tenant aggregate.
+/// Admin-token-gated (see [`requires_admin_token`]). Pages naturally
+/// by API-key count — there is at most one entry per issued
+/// canton-scoped key. Optional `key_id` filter narrows to a single
+/// tenant when the operator already knows the handle.
+///
+/// Surfaced shape: `{ "analytics": [ ...CantonKeyAnalytics... ] }`.
+async fn handle_canton_list_api_key_analytics(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let analytics = node.canton_analytics().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Canton analytics not initialized".to_string(),
+        data: None,
+    })?;
+    let key_id_filter = params
+        .as_ref()
+        .and_then(|p| p.get("key_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut rows = analytics.list_all();
+    if let Some(filter) = key_id_filter {
+        rows.retain(|r| r.key_id == filter);
+    }
+    rows.sort_by_key(|r| std::cmp::Reverse(r.last_called_at.unwrap_or(0)));
+    Ok(serde_json::json!({ "analytics": rows }))
+}
+
+/// Operator admin-write: register a Canton IdentityProviderConfig
+/// (`POST /v2/idps`). Stage 2 operator surface — used for explicit
+/// tenant IDP management outside the `tenzro_createApiKey`
+/// auto-provision flow. Admin-token-gated.
+async fn handle_canton_create_idp(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let idp_id = params
+        .get("idp_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing idp_id".to_string(),
+            data: None,
+        })?;
+    let issuer_url = params
+        .get("issuer_url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing issuer_url".to_string(),
+            data: None,
+        })?;
+    let jwks_url = params
+        .get("jwks_url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing jwks_url".to_string(),
+            data: None,
+        })?;
+    let audience = params
+        .get("audience")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing audience".to_string(),
+            data: None,
+        })?;
+    let adapter = canton_adapter_or_err(node)?;
+    adapter
+        .create_identity_provider(idp_id, issuer_url, jwks_url, audience)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Canton create_idp failed: {}", e),
+            data: None,
+        })
+}
+
+/// Operator admin-read: list every Canton IdentityProviderConfig
+/// (`GET /v2/idps`). Admin-token-gated.
+async fn handle_canton_list_idps(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let adapter = canton_adapter_or_err(node)?;
+    adapter
+        .list_identity_providers()
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Canton list_idps failed: {}", e),
+            data: None,
+        })
+}
+
+/// Operator admin-write: delete a Canton IdentityProviderConfig
+/// (`DELETE /v2/idps/{idp_id}`). Used by the Stage 2 revoke flow to
+/// fully tear down a tenant. Admin-token-gated.
+async fn handle_canton_delete_idp(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let idp_id = params
+        .get("idp_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing idp_id".to_string(),
+            data: None,
+        })?;
+    let adapter = canton_adapter_or_err(node)?;
+    adapter
+        .delete_identity_provider(idp_id)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Canton delete_idp failed: {}", e),
+            data: None,
+        })?;
+    Ok(serde_json::json!({ "deleted": idp_id }))
+}
+
 // ── API key management handlers ─────────────────────────────────────
 //
 // API keys gate access to scoped RPC surfaces (currently `tenzro_*Canton*`).
@@ -19759,10 +20747,15 @@ async fn handle_create_api_key(
         })?;
         let scope = match s {
             "canton" => ApiKeyScope::Canton,
+            "evm" => ApiKeyScope::Evm,
+            "svm" => ApiKeyScope::Svm,
+            "inference" => ApiKeyScope::Inference,
+            "tee" => ApiKeyScope::Tee,
+            "bridge" => ApiKeyScope::Bridge,
             other => {
                 return Err(JsonRpcError {
                     code: -32602,
-                    message: format!("Unknown scope: {}", other),
+                    message: format!("Unknown scope: {} (expected canton | evm | svm | inference | tee | bridge)", other),
                     data: None,
                 });
             }
@@ -19800,14 +20793,300 @@ async fn handle_create_api_key(
         }
     }
 
+    // Optional Canton User Management Service user id binding —
+    // forwards canton-scoped requests `actAs` this user's primary
+    // party so Canton's AuthService enforces per-user CanActAs.
+    // See docs/operators/CANTON_MULTITENANT.md.
+    let canton_user_id = params
+        .get("canton_user_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Auto-provision the Canton user + party + rights when a
+    // canton_user_id is bound and the canton scope is granted. Tenzro
+    // operates the participant so we have the operator JWT and can
+    // do this atomically in one operator call, instead of asking the
+    // operator to run three separate RPCs after key issuance.
+    //
+    // Idempotency: skip if the user already exists on Canton.
+    // Skip if canton isn't enabled or the key doesn't carry the
+    // canton scope (so an `inference`-scope key wouldn't trigger a
+    // canton provision).
+    //
+    // Opt-out: `auto_provision_canton: false` in params disables this
+    // (useful when the operator has pre-provisioned the user out of
+    // band, or for keys that intentionally share an existing user).
+    let auto_provision = params
+        .get("auto_provision_canton")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    // Stage 2: optional per-tenant IDP registration. When the node is
+    // configured with `canton.identity_providers.enabled=true`, the
+    // caller may pass `canton_identity_provider_id` together with the
+    // tenant's `canton_issuer_url`, `canton_jwks_url`, and
+    // `canton_audience` to register a dedicated IDP for the tenant.
+    // The Canton user + party are then bound to that IDP, so tokens
+    // minted by the tenant (signed by their own IdP-issued client)
+    // are routed to their IDP server-side and can only act on parties
+    // their user is granted on.
+    let stage2_enabled = node.config().canton.identity_providers.enabled;
+    let canton_idp_id = params
+        .get("canton_identity_provider_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let canton_issuer_url = params
+        .get("canton_issuer_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let canton_jwks_url = params
+        .get("canton_jwks_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let canton_audience = params
+        .get("canton_audience")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut provision_summary: Option<Value> = None;
+    let mut provisioned_party: Option<String> = None;
+    let mut provisioned_idp: Option<String> = None;
+    let mut stage2b_idp_client: Option<tenzro_bridge::tenant_idp::TenantIdpClient> = None;
+    if auto_provision
+        && canton_user_id.is_some()
+        && scopes.contains(&ApiKeyScope::Canton)
+        && node.config().canton.enabled
+    {
+        let user_id = canton_user_id.as_deref().unwrap();
+        // Derive party hint from user_id: `tenzro-labs@clients` → `tenzro-labs`.
+        // Strip everything from the first `@`; if no `@`, use as-is.
+        let party_hint = user_id.split('@').next().unwrap_or(user_id).to_string();
+        if party_hint.is_empty() {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "canton_user_id {} produces empty party hint (expected <hint>@<realm>)",
+                    user_id
+                ),
+                data: None,
+            });
+        }
+
+        let adapter = canton_adapter_or_err(node)?;
+
+        // 1. Check if user already exists (idempotency).
+        let existing = adapter.get_user(user_id).await.ok();
+        if let Some(record) = existing {
+            // User exists — extract its primary party for analytics summary,
+            // but don't attempt to re-create / re-grant. Operator can manage
+            // existing users out of band.
+            let pp = record
+                .get("user")
+                .and_then(|u| u.get("primaryParty"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            provisioned_party = pp.clone();
+            provision_summary = Some(serde_json::json!({
+                "status": "already_exists",
+                "user_id": user_id,
+                "primary_party": pp,
+            }));
+        } else {
+            // Stage 2: when per-tenant IDPs are enabled and the caller
+            // supplied IDP metadata, register the IDP before allocating
+            // the party so the party is bound to the tenant's IDP.
+
+            // Stage 2.b: if a tenant-IdP provisioner is wired, mint a
+            // fresh per-tenant OAuth client upstream and derive the
+            // IDP metadata from it. This supersedes any
+            // operator-supplied issuer/jwks/audience: the operator
+            // doesn't need to know the upstream config when the
+            // provisioner can mint it.
+            let (canton_idp_id_resolved, canton_issuer_resolved, canton_jwks_resolved, canton_audience_resolved) = {
+                let provisioner = if stage2_enabled {
+                    node.tenant_idp_provisioner()
+                } else {
+                    None
+                };
+                if let Some(prov) = provisioner {
+                    // Audience comes from the operator's
+                    // configuration (Canton participant's expected
+                    // audience). Required for Stage 2.b.
+                    let configured_audience = node
+                        .config()
+                        .canton
+                        .identity_providers
+                        .canton_audience
+                        .clone()
+                        .ok_or_else(|| JsonRpcError {
+                            code: -32602,
+                            message: "Stage 2.b: canton.identity_providers.canton_audience is required when a tenant-IdP provisioner is wired".to_string(),
+                            data: None,
+                        })?;
+                    let req = tenzro_bridge::tenant_idp::TenantIdpRequest {
+                        tenant_label: label.clone(),
+                        tenant_user_id: user_id.to_string(),
+                        audience: configured_audience,
+                    };
+                    let client = prov.mint_tenant_client(&req).await.map_err(|e| JsonRpcError {
+                        code: -32000,
+                        message: format!(
+                            "Stage 2.b: tenant-IdP provisioner mint_tenant_client failed: {}",
+                            e
+                        ),
+                        data: None,
+                    })?;
+                    // The tenant's Canton IDP id matches their OAuth
+                    // client_id so Canton routes their JWTs to their
+                    // own IDP and downstream audit identifies them.
+                    let idp_id = format!("tenant-{}", client.client_id);
+                    stage2b_idp_client = Some(client.clone());
+                    (
+                        Some(idp_id),
+                        Some(client.issuer_url.clone()),
+                        Some(client.jwks_url.clone()),
+                        Some(client.audience.clone()),
+                    )
+                } else {
+                    (
+                        canton_idp_id.clone(),
+                        canton_issuer_url.clone(),
+                        canton_jwks_url.clone(),
+                        canton_audience.clone(),
+                    )
+                }
+            };
+
+            let idp_for_provision = if stage2_enabled {
+                match (
+                    canton_idp_id_resolved.as_deref(),
+                    canton_issuer_resolved.as_deref(),
+                    canton_jwks_resolved.as_deref(),
+                    canton_audience_resolved.as_deref(),
+                ) {
+                    (Some(idp_id), Some(issuer), Some(jwks), Some(aud)) => {
+                        // Try to register. If the IDP already exists,
+                        // Canton returns an error we treat as
+                        // idempotent (Stage 2 may pre-provision IDPs
+                        // out of band).
+                        match adapter
+                            .create_identity_provider(idp_id, issuer, jwks, aud)
+                            .await
+                        {
+                            Ok(_) => {
+                                provisioned_idp = Some(idp_id.to_string());
+                            }
+                            Err(e) => {
+                                let msg = format!("{}", e);
+                                if msg.contains("ALREADY_EXISTS") || msg.contains("409") {
+                                    provisioned_idp = Some(idp_id.to_string());
+                                } else {
+                                    return Err(JsonRpcError {
+                                        code: -32000,
+                                        message: format!(
+                                            "Canton Stage 2: create_identity_provider({}) failed: {}",
+                                            idp_id, e
+                                        ),
+                                        data: None,
+                                    });
+                                }
+                            }
+                        }
+                        Some(idp_id.to_string())
+                    }
+                    (Some(_), _, _, _) => {
+                        return Err(JsonRpcError {
+                            code: -32602,
+                            message: "Stage 2: canton_identity_provider_id requires canton_issuer_url + canton_jwks_url + canton_audience".to_string(),
+                            data: None,
+                        });
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // 2. Allocate the party (under the tenant's IDP when set).
+            let fq_party = adapter
+                .allocate_party_with_idp(&party_hint, None, idp_for_provision.as_deref())
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!(
+                        "Canton auto-provision: allocate_party({}) failed: {}",
+                        party_hint, e
+                    ),
+                    data: None,
+                })?;
+            // 3. Create the Canton user with primaryParty = FQ party
+            //    (under the tenant's IDP when set).
+            adapter
+                .create_user(user_id, Some(&fq_party), idp_for_provision.as_deref())
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!(
+                        "Canton auto-provision: create_user({}, primary={}) failed: {}",
+                        user_id, fq_party, e
+                    ),
+                    data: None,
+                })?;
+            // 4. Grant CanActAs to the user on its primary party.
+            adapter
+                .grant_user_rights(Some(user_id), &fq_party, true, false)
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!(
+                        "Canton auto-provision: grant_user_rights({}, {}) failed: {}",
+                        user_id, fq_party, e
+                    ),
+                    data: None,
+                })?;
+
+            provisioned_party = Some(fq_party.clone());
+            let stage = if idp_for_provision.is_some() {
+                "stage2"
+            } else {
+                "stage1"
+            };
+            provision_summary = Some(serde_json::json!({
+                "status": "provisioned",
+                "stage": stage,
+                "user_id": user_id,
+                "primary_party": fq_party,
+                "party_hint": party_hint,
+                "identity_provider_id": idp_for_provision,
+                "rights_granted": ["CanActAs"],
+            }));
+        }
+    }
+
     let issued = mgr
-        .issue(subject, label, scopes, class)
+        .issue(
+            subject,
+            label.clone(),
+            scopes,
+            class,
+            canton_user_id,
+            provisioned_idp.clone(),
+            stage2b_idp_client.as_ref().map(|c| c.client_id.clone()),
+        )
         .map_err(|e| JsonRpcError {
             code: -32603,
             message: format!("issue API key: {}", e),
             data: None,
         })?;
 
+    let tenant_oauth = stage2b_idp_client.as_ref().map(|c| {
+        serde_json::json!({
+            "client_id": c.client_id,
+            "client_secret": c.client_secret,
+            "token_url": c.token_url,
+            "issuer_url": c.issuer_url,
+            "jwks_url": c.jwks_url,
+            "audience": c.audience,
+        })
+    });
     Ok(serde_json::json!({
         "key": issued.key,
         "key_id": issued.record.key_id,
@@ -19816,6 +21095,18 @@ async fn handle_create_api_key(
         "scopes": issued.record.scopes.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
         "class": issued.record.class.as_str(),
         "created_at": issued.record.created_at,
+        "canton_user_id": issued.record.canton_user_id,
+        "canton_primary_party": provisioned_party,
+        "canton_identity_provider_id": provisioned_idp,
+        "canton_provisioning": provision_summary,
+        // Stage 2.b: per-tenant OAuth client minted upstream. The
+        // `client_secret` is returned exactly once — the tenant must
+        // persist it. Their token-acquisition loop is:
+        //   POST {token_url} { grant_type: client_credentials,
+        //     client_id, client_secret, audience }
+        // and they present the resulting JWT on canton-scoped Tenzro
+        // calls via `X-Canton-Auth: Bearer <jwt>`.
+        "tenant_oauth_client": tenant_oauth,
         "note": "Save the `key` field now — it is shown only once.",
     }))
 }
@@ -19847,16 +21138,72 @@ async fn handle_revoke_api_key(
             data: None,
         })?;
 
+    // Capture Stage 2.b cleanup metadata BEFORE revoking so we can
+    // tear down the tenant's upstream OAuth client + Canton IDP in
+    // lockstep with revoking the Tenzro key. We snapshot the record
+    // first so a concurrent revoke doesn't race us.
+    let record_before = mgr.find_by_key_id(key_id);
+
     let outcome = mgr.revoke_by_id_admin(key_id).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("revoke API key: {}", e),
         data: None,
     })?;
 
+    let mut tenant_cleanup = serde_json::Map::new();
+    if matches!(outcome, AdminRevokeOutcome::Revoked)
+        && let Some(record) = record_before
+    {
+        // Delete upstream OAuth client (Stage 2.b).
+        if let Some(client_id) = record.tenant_oauth_client_id.as_deref()
+            && let Some(prov) = node.tenant_idp_provisioner()
+        {
+            match prov.delete_tenant_client(client_id).await {
+                Ok(()) => {
+                    tenant_cleanup
+                        .insert("oauth_client_deleted".to_string(), Value::Bool(true));
+                    tenant_cleanup.insert(
+                        "tenant_oauth_client_id".to_string(),
+                        Value::String(client_id.to_string()),
+                    );
+                }
+                Err(e) => {
+                    tenant_cleanup.insert(
+                        "oauth_client_delete_error".to_string(),
+                        Value::String(format!("{}", e)),
+                    );
+                }
+            }
+        }
+
+        // Delete Canton IDP (Stage 2.b).
+        if let Some(idp_id) = record.canton_identity_provider_id.as_deref()
+            && let Some(adapter) = node.canton_adapter()
+        {
+            match adapter.delete_identity_provider(idp_id).await {
+                Ok(()) => {
+                    tenant_cleanup
+                        .insert("canton_idp_deleted".to_string(), Value::Bool(true));
+                    tenant_cleanup.insert(
+                        "canton_identity_provider_id".to_string(),
+                        Value::String(idp_id.to_string()),
+                    );
+                }
+                Err(e) => {
+                    tenant_cleanup.insert(
+                        "canton_idp_delete_error".to_string(),
+                        Value::String(format!("{}", e)),
+                    );
+                }
+            }
+        }
+    }
+
     match outcome {
         AdminRevokeOutcome::Revoked => Ok(serde_json::json!({
             "key_id": key_id,
             "revoked": true,
+            "tenant_cleanup": tenant_cleanup,
         })),
         AdminRevokeOutcome::NotFound => Ok(serde_json::json!({
             "key_id": key_id,
@@ -23375,21 +24722,50 @@ async fn handle_submit_reserve_attestation(
     let att: tenzro_types::ReserveAttestation = serde_json::from_value(att_val).map_err(|e| JsonRpcError {
         code: -32602, message: format!("invalid reserve attestation: {e}"), data: None,
     })?;
-    if !att.signature.is_empty() {
-        if let Some(registry) = node.identity_registry() {
-            if let Ok(identity) = registry.resolve(&att.attestor_did) {
-                if let Some(ed) = identity.public_keys.iter().find(|pk| pk.key_type == "Ed25519" && pk.public_key.len() == 32) {
-                    use tenzro_crypto::keys::{KeyType, PublicKey};
-                    use tenzro_crypto::signatures::{verify, Signature};
-                    let pk = PublicKey::new(KeyType::Ed25519, ed.public_key.clone());
-                    let sig = Signature::new(KeyType::Ed25519, att.signature.clone());
-                    verify(&pk, &att.signing_payload(), &sig).map_err(|_| JsonRpcError {
-                        code: -32001, message: "reserve attestation signature did not verify".to_string(), data: None,
-                    })?;
-                }
-            }
-        }
+    // Fail-closed: the attestation MUST carry a non-empty Ed25519
+    // signature over `att.signing_payload()` by the registered
+    // attestor's identity key. Reserve attestations gate
+    // `tenzro_attestedMint`; accepting an unsigned attestation lets
+    // any caller fabricate reserves for a 1:1-backed asset and mint
+    // unlimited supply.
+    if att.signature.is_empty() {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: "reserve attestation requires a non-empty signature".to_string(),
+            data: None,
+        });
     }
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "identity registry unavailable; cannot verify reserve attestation".to_string(),
+        data: None,
+    })?;
+    let identity = registry.resolve(&att.attestor_did).map_err(|e| JsonRpcError {
+        code: -32001,
+        message: format!("reserve attestor {} not registered: {}", att.attestor_did, e),
+        data: None,
+    })?;
+    let ed = identity
+        .public_keys
+        .iter()
+        .find(|pk| pk.key_type == "Ed25519" && pk.public_key.len() == 32)
+        .ok_or_else(|| JsonRpcError {
+            code: -32001,
+            message: format!(
+                "reserve attestor {} has no Ed25519 verification key on file",
+                att.attestor_did
+            ),
+            data: None,
+        })?;
+    use tenzro_crypto::keys::{KeyType, PublicKey};
+    use tenzro_crypto::signatures::{verify, Signature};
+    let pk = PublicKey::new(KeyType::Ed25519, ed.public_key.clone());
+    let sig = Signature::new(KeyType::Ed25519, att.signature.clone());
+    verify(&pk, &att.signing_payload(), &sig).map_err(|_| JsonRpcError {
+        code: -32001,
+        message: "reserve attestation signature did not verify".to_string(),
+        data: None,
+    })?;
     let storage = node.storage().ok_or_else(|| JsonRpcError { code: -32000, message: "Storage not available".to_string(), data: None })?;
     let bytes = serde_json::to_vec(&att).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })?;
     storage.put(CF_SETTLEMENTS, &reserve_key(&att.asset_id), &bytes).map_err(|e| JsonRpcError { code: -32000, message: format!("Storage error: {e}"), data: None })?;
@@ -23615,6 +24991,38 @@ async fn handle_workflow_step_execute(
     let workflow_id = params.get("workflow_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
         code: -32602, message: "Missing workflow_id".to_string(), data: None,
     })?;
+
+    // Idempotency check (Wave 12.2 / AWS Step Functions / Stripe
+    // pattern). If the caller passes `idempotency_key`, this handler
+    // is replay-safe: repeated calls with the same key return the
+    // first execution's result hash instead of re-running the step.
+    // Key derivation guidance — caller computes:
+    //   SHA-256("tenzro/idempotency/v1" || workflow_id || step_idx
+    //           || caller_did || canonical_payload_hash)
+    // and submits the 32-byte hex form. The runtime stores
+    // (key → result_hash) under CF_AGENTS / workflow_idempotency:.
+    let idempotency_key_hex = params.get("idempotency_key")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim_start_matches("0x").to_string());
+
+    if let Some(key_hex) = &idempotency_key_hex {
+        let kv = node.storage().map(|s| s.clone() as Arc<dyn tenzro_storage::KvStore>);
+        if let Some(store) = kv {
+            let mut full_key = b"workflow_idempotency:".to_vec();
+            full_key.extend_from_slice(key_hex.as_bytes());
+            if let Ok(Some(prev)) = store.get(tenzro_storage::CF_AGENTS, &full_key) {
+                if let Ok(prev_value) = serde_json::from_slice::<Value>(&prev) {
+                    return Ok(serde_json::json!({
+                        "workflow_id": workflow_id,
+                        "idempotency_key_hex": key_hex,
+                        "idempotent_replay": true,
+                        "first_result": prev_value,
+                    }));
+                }
+            }
+        }
+    }
+
     let mut saga = load_saga(node, workflow_id)?;
     let idx = saga_step_idx(&saga, &params)?;
 
@@ -23624,6 +25032,30 @@ async fn handle_workflow_step_execute(
             message: format!("step {} is not Pending (status {:?})", idx, saga.steps[idx].status),
             data: None,
         });
+    }
+
+    // TEE-attested deadline check (Wave 12.3). When the step carries
+    // an `attested_deadline`, the orchestrator refuses to advance it
+    // past `wall_ms + 30s` tolerance. The monotonic counter on the
+    // deadline binds it to a specific enclave instance, so a relayer
+    // cannot backdate by wall-clock manipulation. Callers seeing a
+    // deadline rejection should switch to `tenzro_workflowStepCompensate`.
+    if let Some(dl) = saga.steps[idx].attested_deadline.as_ref() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        // 30 s tolerance — Canton 3.5 timestamp-drift guidance.
+        if dl.is_expired(now_ms, 30_000) {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!(
+                    "step {} attested_deadline expired (wall_ms={} now={}); call tenzro_workflowStepCompensate",
+                    idx, dl.wall_ms, now_ms
+                ),
+                data: None,
+            });
+        }
     }
 
     // Optional per-step escrow funding (payer → vault).
@@ -23671,7 +25103,27 @@ async fn handle_workflow_step_execute(
     saga.updated_at = chrono::Utc::now().timestamp();
     save_saga(node, &saga)?;
     info!(workflow_id = %workflow_id, step = idx, escrow = escrow_amount, "Saga step executing");
-    Ok(serde_json::json!({"workflow_id": workflow_id, "step_idx": idx, "status": "executing", "escrow_id": saga.steps[idx].escrow_id}))
+    let result = serde_json::json!({"workflow_id": workflow_id, "step_idx": idx, "status": "executing", "escrow_id": saga.steps[idx].escrow_id});
+
+    // Persist the idempotency record (first-write-wins). A retry
+    // submitting the same idempotency_key returns this exact result
+    // shape instead of re-executing the saga step.
+    if let Some(key_hex) = &idempotency_key_hex {
+        if let Some(store) = node.storage().map(|s| s.clone() as Arc<dyn tenzro_storage::KvStore>) {
+            let mut full_key = b"workflow_idempotency:".to_vec();
+            full_key.extend_from_slice(key_hex.as_bytes());
+            if let Ok(bytes) = serde_json::to_vec(&result) {
+                // get-then-put first-write-wins (the runtime caller does
+                // not race here because step_execute is single-threaded
+                // per workflow). If a prior record exists we leave it.
+                if matches!(store.get(tenzro_storage::CF_AGENTS, &full_key), Ok(None)) {
+                    let _ = store.put(tenzro_storage::CF_AGENTS, &full_key, &bytes);
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 /// `tenzro_workflowStepVerify(workflow_id, step_idx, witness_signatures[], outcome_score?)`
@@ -23797,6 +25249,59 @@ async fn handle_workflow_step_compensate(
     save_saga(node, &saga)?;
     info!(workflow_id = %workflow_id, step = idx, cascade = cascade, refunds = refunded.len(), "Saga step compensated");
     Ok(serde_json::json!({"workflow_id": workflow_id, "step_idx": idx, "status": "compensated", "refunded_escrows": refunded}))
+}
+
+/// `tenzro_workflowSetStepDeadline(workflow_id, step_idx, attested_deadline)`
+/// — bind a TEE-attested deadline to a saga step. After the deadline
+/// passes (with 30s tolerance), `tenzro_workflowStepExecute` refuses
+/// the transition and the caller MUST `tenzro_workflowStepCompensate`.
+/// Only applicable to steps in `Pending` status (otherwise the
+/// orchestrator has already committed and a deadline cannot bind).
+async fn handle_workflow_set_step_deadline(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{SagaStepStatus, AttestedDeadline};
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let workflow_id = params.get("workflow_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing workflow_id".to_string(), data: None,
+    })?;
+    let mut saga = load_saga(node, workflow_id)?;
+    let idx = saga_step_idx(&saga, &params)?;
+
+    if saga.steps[idx].status != SagaStepStatus::Pending {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!(
+                "step {} is not Pending (status {:?}); deadline cannot bind",
+                idx, saga.steps[idx].status
+            ),
+            data: None,
+        });
+    }
+
+    let dl_json = params.get("attested_deadline").ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing attested_deadline".to_string(), data: None,
+    })?.clone();
+    let dl: AttestedDeadline = serde_json::from_value(dl_json).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("attested_deadline parse failed: {}", e),
+        data: None,
+    })?;
+
+    saga.steps[idx].attested_deadline = Some(dl.clone());
+    saga.steps[idx].updated_at = chrono::Utc::now().timestamp();
+    saga.updated_at = chrono::Utc::now().timestamp();
+    save_saga(node, &saga)?;
+    info!(workflow_id = %workflow_id, step = idx, wall_ms = dl.wall_ms, "Saga step attested-deadline set");
+    Ok(serde_json::json!({
+        "workflow_id": workflow_id,
+        "step_idx": idx,
+        "attested_deadline": dl,
+    }))
 }
 
 /// `tenzro_workflowFinalize(workflow_id)` — all steps Verified → Completed.
@@ -27156,6 +28661,7 @@ async fn handle_get_token(
             "token_type": format!("{:?}", d.token_type),
             "evm_address": d.vm_addresses.evm_hex(),
             "svm_mint": d.vm_addresses.svm_hex(),
+            "daml_template_id": d.vm_addresses.daml_template_id.clone(),
             "tempo_address": d.vm_addresses.tempo_hex(),
             "creator": format!("0x{}", hex::encode(d.creator)),
         })),
@@ -27199,6 +28705,7 @@ async fn handle_list_tokens(
             "total_supply": d.total_supply.to_string(),
             "evm_address": d.vm_addresses.evm_hex(),
             "svm_mint": d.vm_addresses.svm_hex(),
+            "daml_template_id": d.vm_addresses.daml_template_id.clone(),
             "tempo_address": d.vm_addresses.tempo_hex(),
         })
     }).collect();

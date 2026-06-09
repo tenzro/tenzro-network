@@ -32,7 +32,7 @@ use crate::manifest::ComponentManifest;
 use crate::metrics::{ExecutionReceipt, FuelReport, InvocationOutcome};
 
 /// A component that has been validated and admitted to the runtime.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LoadedComponent {
     /// Stable identifier from the manifest.
     pub id: String,

@@ -142,6 +142,94 @@ pub struct AxelarCall {
 }
 
 /// Axelar GMP bridge adapter.
+/// Axelar GMP validator set verifier.
+///
+/// Axelar's GMP carries threshold multisig over the canonical command
+/// hash. Each validator's signature is an ECDSA-secp256k1 signature
+/// over `keccak256(commandId || sourceChain || sourceAddress ||
+/// destAddress || payloadHash)`. The set + threshold are pinned by
+/// the operator at bridge startup.
+#[derive(Debug, Clone)]
+pub struct AxelarValidatorSet {
+    /// Authorized validator addresses (20-byte secp256k1).
+    pub validators: Vec<[u8; 20]>,
+    /// Quorum threshold (count of signatures required for delivery).
+    pub threshold: u8,
+}
+
+impl AxelarValidatorSet {
+    /// Returns `Ok(())` if at least `threshold` distinct validators
+    /// from the set produced valid signatures over `message_digest`.
+    pub fn verify_quorum(
+        &self,
+        message_digest: &[u8; 32],
+        signatures: &[([u8; 20], [u8; 65])],
+    ) -> Result<()> {
+        use k256::ecdsa::{RecoveryId, Signature as K256Sig, VerifyingKey};
+        use sha3::{Digest as Sha3Digest, Keccak256};
+        if signatures.len() < self.threshold as usize {
+            return Err(BridgeError::AdapterError(format!(
+                "Axelar quorum: {} signatures < threshold {}",
+                signatures.len(),
+                self.threshold
+            )));
+        }
+        let mut seen: std::collections::HashSet<[u8; 20]> =
+            std::collections::HashSet::new();
+        let mut valid = 0;
+        for (claimed_addr, sig) in signatures {
+            if !self.validators.contains(claimed_addr) {
+                continue;
+            }
+            if seen.contains(claimed_addr) {
+                continue;
+            }
+            if sig.len() != 65 {
+                continue;
+            }
+            let v_byte = sig[64];
+            let v = if v_byte >= 27 { v_byte - 27 } else { v_byte };
+            let rid = match RecoveryId::from_byte(v) {
+                Some(r) => r,
+                None => continue,
+            };
+            let k = match K256Sig::from_slice(&sig[..64]) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let recovered = match VerifyingKey::recover_from_prehash(
+                message_digest,
+                &k,
+                rid,
+            ) {
+                Ok(vk) => vk,
+                Err(_) => continue,
+            };
+            let pk_point = k256::PublicKey::from(&recovered);
+            let pk_uncompressed = pk_point.to_sec1_bytes();
+            if pk_uncompressed.len() < 65 {
+                continue;
+            }
+            let mut kc = Keccak256::new();
+            Sha3Digest::update(&mut kc, &pk_uncompressed[1..65]);
+            let hash: [u8; 32] = kc.finalize().into();
+            let recovered_addr: [u8; 20] = hash[12..32].try_into().unwrap();
+            if recovered_addr != *claimed_addr {
+                continue;
+            }
+            seen.insert(*claimed_addr);
+            valid += 1;
+            if valid >= self.threshold {
+                return Ok(());
+            }
+        }
+        Err(BridgeError::AdapterError(format!(
+            "Axelar quorum: only {} valid signatures < threshold {}",
+            valid, self.threshold
+        )))
+    }
+}
+
 pub struct AxelarAdapter {
     config: AxelarConfig,
     http_client: reqwest::Client,
@@ -155,6 +243,8 @@ pub struct AxelarAdapter {
     transfers: Arc<DashMap<String, TransferStatus>>,
     /// Optional EVM signer for on-chain dispatch.
     signer: Arc<RwLock<Option<Arc<EvmTransactionSigner>>>>,
+    /// Pinned Axelar validator set for inbound GMP verification.
+    validator_set: Arc<RwLock<Option<AxelarValidatorSet>>>,
 }
 
 impl AxelarAdapter {
@@ -172,6 +262,7 @@ impl AxelarAdapter {
             inbound_nonce_tracker: Arc::new(NonceTracker::new()),
             transfers: Arc::new(DashMap::new()),
             signer: Arc::new(RwLock::new(None)),
+            validator_set: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -179,6 +270,18 @@ impl AxelarAdapter {
     pub fn with_signer(self, signer: EvmTransactionSigner) -> Self {
         *self.signer.write() = Some(Arc::new(signer));
         self
+    }
+
+    /// Install the Axelar validator set used to verify inbound GMP
+    /// signatures. Production deployments MUST install a set before
+    /// bridging real value.
+    pub fn install_validator_set(&self, set: AxelarValidatorSet) {
+        *self.validator_set.write() = Some(set);
+    }
+
+    /// Returns `true` iff an Axelar validator set has been installed.
+    pub fn has_validator_set(&self) -> bool {
+        self.validator_set.read().is_some()
     }
 
     /// Borrow the adapter configuration.
@@ -250,6 +353,46 @@ impl BridgeAdapter for AxelarAdapter {
         if self.seen_commands.contains_key(&command_key) {
             return Err(BridgeError::ReplayAttack(command_key));
         }
+
+        // Axelar multisig validator-quorum check. Same trailing
+        // signature trailer format as Hyperlane: `body || u8
+        // sig_count || sig_count * (addr20 || sig65)`. When a
+        // validator set is installed, we verify threshold-many
+        // distinct signatures over the body digest. Without a set
+        // we fall through to the inner TenzroMessage check
+        // (consistent with pre-quorum-verification behaviour);
+        // production deployments MUST install a set.
+        let set_opt = self.validator_set.read().clone();
+        if let Some(set) = set_opt {
+            let n = payload.len();
+            if n < 1 {
+                return Err(BridgeError::InvalidParameter(
+                    "Axelar quorum: payload too short".into(),
+                ));
+            }
+            let sig_count = payload[n - 1] as usize;
+            let sig_record_len = 20 + 65;
+            let trailer_len = 1 + sig_count * sig_record_len;
+            if n < trailer_len + 1 {
+                return Err(BridgeError::InvalidParameter(
+                    "Axelar quorum: payload truncated for declared signature count".into(),
+                ));
+            }
+            let body = &payload[..n - trailer_len];
+            let mut signatures: Vec<([u8; 20], [u8; 65])> =
+                Vec::with_capacity(sig_count);
+            for i in 0..sig_count {
+                let off = n - trailer_len + i * sig_record_len;
+                let mut a = [0u8; 20];
+                a.copy_from_slice(&payload[off..off + 20]);
+                let mut s = [0u8; 65];
+                s.copy_from_slice(&payload[off + 20..off + 20 + 65]);
+                signatures.push((a, s));
+            }
+            let body_digest: [u8; 32] = Sha256::digest(body).into();
+            set.verify_quorum(&body_digest, &signatures)?;
+        }
+
         if let Ok(message) = TenzroMessage::decode(&payload) {
             message.validate()?;
             if !message.verify_hash() {

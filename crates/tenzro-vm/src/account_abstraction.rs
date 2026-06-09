@@ -963,11 +963,21 @@ impl EntryPoint {
         // runtime.rs).
         let (exec_success, exec_gas_used, exec_logs) = match self.runtime.as_ref() {
             Some(runtime) => {
+                // Decode the canonical Safe / Biconomy Nexus / ZeroDev Kernel
+                // `execute(address to, uint256 value, bytes data)` selector
+                // (0xb61d27f6). When present, dispatch the sub-call directly
+                // (smart-account-as-router pattern). When absent, fall back
+                // to the legacy self-call shape (smart-account-as-target)
+                // so callers wiring raw bytecode keep working.
+                let (sub_to, sub_value, sub_data) =
+                    decode_execute_calldata(&op.call_data)
+                        .unwrap_or_else(|| (op.sender.clone(), 0u128, op.call_data.clone()));
+
                 let tx = VmTransaction {
                     from: op.sender.clone(),
-                    to: Some(op.sender.clone()),
-                    value: 0,
-                    data: op.call_data.clone(),
+                    to: Some(sub_to),
+                    value: sub_value,
+                    data: sub_data,
                     gas_limit: op.call_gas_limit,
                     gas_price: op.max_fee_per_gas,
                     nonce: op.nonce,
@@ -1106,21 +1116,101 @@ pub struct EntryPointStats {
 ///
 /// The factory creates deterministic addresses for accounts based on
 /// the owner and salt, allowing counterfactual deployment.
-#[derive(Debug)]
 pub struct AccountFactory {
     /// Factory contract address
     pub factory_address: Vec<u8>,
 
     /// Deployed accounts
     pub deployed_accounts: DashMap<Vec<u8>, SmartAccount>,
+
+    /// Optional persistent storage. When present every `create_account` /
+    /// `update_account` writes through to `CF_AGENTS` under the
+    /// `smart_account/<addr>` prefix, and the constructor hydrates
+    /// `deployed_accounts` from the same prefix. Production constructor
+    /// `with_storage()` always wires this; tests use `new()` for the
+    /// in-memory-only path.
+    storage: Option<std::sync::Arc<dyn tenzro_storage::KvStore>>,
+}
+
+impl std::fmt::Debug for AccountFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountFactory")
+            .field("factory_address", &self.factory_address)
+            .field("deployed_accounts", &self.deployed_accounts)
+            .field("storage", &self.storage.as_ref().map(|_| "<KvStore>"))
+            .finish()
+    }
 }
 
 impl AccountFactory {
-    /// Create a new AccountFactory
+    /// Storage-key prefix for smart-account records in CF_AGENTS.
+    /// `smart_account/<20-byte-address>`.
+    const PERSIST_PREFIX: &'static [u8] = b"smart_account/";
+
+    /// Compute the on-disk key for an account.
+    pub fn persist_key(address: &[u8]) -> Vec<u8> {
+        let mut k = Self::PERSIST_PREFIX.to_vec();
+        k.extend_from_slice(address);
+        k
+    }
+
+    /// Create a new AccountFactory (in-memory only).
     pub fn new(factory_address: Vec<u8>) -> Self {
         Self {
             factory_address,
             deployed_accounts: DashMap::new(),
+            storage: None,
+        }
+    }
+
+    /// Construct a persistent factory backed by `storage`. Hydrates
+    /// `deployed_accounts` from `CF_AGENTS / smart_account/*` on
+    /// construction. Every subsequent `create_account` /
+    /// `update_account` writes through to the same column family.
+    /// **Production constructor** — call instead of `new` whenever the
+    /// node owns a `KvStore`.
+    pub fn with_storage(
+        factory_address: Vec<u8>,
+        storage: std::sync::Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        let factory = Self {
+            factory_address,
+            deployed_accounts: DashMap::new(),
+            storage: Some(storage),
+        };
+        factory.hydrate();
+        factory
+    }
+
+    fn hydrate(&self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let prefix = Self::PERSIST_PREFIX;
+        let entries = match storage.scan_prefix(tenzro_storage::CF_AGENTS, prefix) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for (key, value) in entries {
+            if key.len() <= prefix.len() {
+                continue;
+            }
+            let addr = key[prefix.len()..].to_vec();
+            if let Ok(account) = bincode::deserialize::<SmartAccount>(&value) {
+                self.deployed_accounts.insert(addr, account);
+            }
+        }
+    }
+
+    fn persist(&self, account: &SmartAccount) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = bincode::serialize(account) {
+                let _ = storage.put(
+                    tenzro_storage::CF_AGENTS,
+                    &Self::persist_key(&account.address),
+                    &bytes,
+                );
+            }
         }
     }
 
@@ -1140,8 +1230,17 @@ impl AccountFactory {
             validator_modules: std::collections::BTreeMap::new(),
         };
 
+        self.persist(&account);
         self.deployed_accounts.insert(address, account.clone());
         account
+    }
+
+    /// Persist an updated smart account (validator install, nonce bump,
+    /// social-recovery rotation, etc.). Use this instead of writing to
+    /// `deployed_accounts` directly so the on-disk state stays in sync.
+    pub fn update_account(&self, account: SmartAccount) {
+        self.persist(&account);
+        self.deployed_accounts.insert(account.address.clone(), account);
     }
 
     /// Get the counterfactual address for an account
@@ -1690,6 +1789,67 @@ pub fn process_7702_authorizations(
     }
 
     Ok(upgraded_eoas)
+}
+
+/// Canonical Safe / Biconomy Nexus / ZeroDev Kernel selector for
+/// `execute(address to, uint256 value, bytes data)` — same wire format
+/// every major smart-account stack uses, so a UserOp built by an external
+/// tool (Biconomy SDK, Pimlico bundler, web wallet) is dispatched here.
+pub const EXECUTE_SELECTOR: [u8; 4] = [0xb6, 0x1d, 0x27, 0xf6];
+
+/// Decode `execute(address,uint256,bytes)` calldata into `(to, value, data)`.
+///
+/// ABI layout (all big-endian, 32-byte slots):
+///   [0..4]      selector 0xb61d27f6
+///   [4..36]     to (left-padded to 32, low 20 bytes are the address)
+///   [36..68]    value (uint256; low 128 bits are the VmTransaction.value)
+///   [68..100]   offset of `data` (always 0x60 for this layout)
+///   [100..132]  length of `data`
+///   [132..]     `data` bytes
+///
+/// Returns `None` when the calldata doesn't match (the caller falls back
+/// to the legacy self-call shape).
+fn decode_execute_calldata(call_data: &[u8]) -> Option<(Vec<u8>, u128, Vec<u8>)> {
+    if call_data.len() < 132 {
+        return None;
+    }
+    if call_data[0..4] != EXECUTE_SELECTOR {
+        return None;
+    }
+
+    // to: low 20 bytes of slot 0
+    let to = call_data[16..36].to_vec();
+
+    // value: uint256 → u128. Reject the call if the high 128 bits are
+    // non-zero so we never silently truncate.
+    if call_data[36..52].iter().any(|b| *b != 0) {
+        return None;
+    }
+    let mut v_bytes = [0u8; 16];
+    v_bytes.copy_from_slice(&call_data[52..68]);
+    let value = u128::from_be_bytes(v_bytes);
+
+    // offset must be 0x60 for the canonical single-call layout.
+    let mut off_bytes = [0u8; 32];
+    off_bytes.copy_from_slice(&call_data[68..100]);
+    let offset = u128::from_be_bytes(off_bytes[16..32].try_into().ok()?);
+    if offset != 0x60 {
+        return None;
+    }
+
+    // length of `data`
+    let mut len_bytes = [0u8; 32];
+    len_bytes.copy_from_slice(&call_data[100..132]);
+    let data_len = u128::from_be_bytes(len_bytes[16..32].try_into().ok()?) as usize;
+
+    let data_start: usize = 132;
+    let data_end = data_start.checked_add(data_len)?;
+    if call_data.len() < data_end {
+        return None;
+    }
+    let data = call_data[data_start..data_end].to_vec();
+
+    Some((to, value, data))
 }
 
 #[cfg(test)]
@@ -2475,5 +2635,106 @@ mod tests {
         // Non-designator code is not detected.
         assert_eq!(parse_7702_designator(&[0x60, 0x00]), None);
         assert_eq!(parse_7702_designator(&[0xef, 0x01, 0x00, 0x01]), None);
+    }
+
+    /// Proves that `AccountFactory::with_storage()` survives a restart:
+    /// 1. Build factory A backed by an in-memory `KvStore`, create + mutate
+    ///    accounts, drop the factory.
+    /// 2. Build factory B against the same store; verify all accounts
+    ///    (including the mutated module config) hydrated back exactly.
+    #[test]
+    fn account_factory_hydrates_after_restart() {
+        use std::sync::Arc;
+        let store: Arc<dyn tenzro_storage::KvStore> =
+            Arc::new(tenzro_storage::MemoryStore::new());
+
+        // Factory A — create two accounts and install a validator on the first.
+        let factory_addr = vec![0xAB; 20];
+        {
+            let factory = AccountFactory::with_storage(factory_addr.clone(), store.clone());
+            let _acc1 = factory.create_account(b"owner-1".to_vec(), 0);
+            let _acc2 = factory.create_account(b"owner-2".to_vec(), 7);
+            let mut mutated = factory.get_account(&factory.get_address(b"owner-1", 0)).unwrap();
+            let cfg = crate::erc7579::ValidatorModuleConfig {
+                type_id: 1,
+                module_address: [0xCD; 20],
+                init_data: vec![1, 2, 3, 4],
+                priority: 0,
+            };
+            mutated.install_validator_module(cfg.clone(), /* owner_authorized = */ true).unwrap();
+            factory.update_account(mutated);
+        }
+
+        // Factory B — same store, fresh map.
+        let factory = AccountFactory::with_storage(factory_addr.clone(), store.clone());
+        assert_eq!(factory.account_count(), 2, "both accounts must hydrate");
+        let acc1_addr = factory.get_address(b"owner-1", 0);
+        let restored = factory.get_account(&acc1_addr).expect("acc1 hydrated");
+        assert_eq!(restored.owner, b"owner-1");
+        assert!(restored.is_validator_installed(&[0xCD; 20]),
+            "installed validator must survive restart");
+
+        let acc2_addr = factory.get_address(b"owner-2", 7);
+        let restored2 = factory.get_account(&acc2_addr).expect("acc2 hydrated");
+        assert_eq!(restored2.owner, b"owner-2");
+        assert!(restored2.validator_modules.is_empty());
+    }
+
+    fn encode_execute_calldata(to: &[u8; 20], value: u128, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(132 + ((data.len() + 31) / 32) * 32);
+        out.extend_from_slice(&EXECUTE_SELECTOR);
+        // slot 1: to (32 bytes, left-padded)
+        out.extend_from_slice(&[0u8; 12]);
+        out.extend_from_slice(to);
+        // slot 2: value (32 bytes BE)
+        out.extend_from_slice(&[0u8; 16]);
+        out.extend_from_slice(&value.to_be_bytes());
+        // slot 3: offset = 0x60 (96)
+        let mut off = [0u8; 32];
+        off[31] = 0x60;
+        out.extend_from_slice(&off);
+        // slot 4: length
+        let mut len = [0u8; 32];
+        len[16..].copy_from_slice(&(data.len() as u128).to_be_bytes());
+        out.extend_from_slice(&len);
+        // data + zero-pad to 32
+        out.extend_from_slice(data);
+        let pad = (32 - data.len() % 32) % 32;
+        out.extend(std::iter::repeat(0u8).take(pad));
+        out
+    }
+
+    #[test]
+    fn test_decode_execute_roundtrip() {
+        let to = [0xAB; 20];
+        let value = 12345u128;
+        let inner = b"hello world inner call data";
+        let encoded = encode_execute_calldata(&to, value, inner);
+        let (decoded_to, decoded_value, decoded_data) =
+            decode_execute_calldata(&encoded).expect("must decode");
+        assert_eq!(decoded_to.as_slice(), &to[..]);
+        assert_eq!(decoded_value, value);
+        assert_eq!(decoded_data, inner);
+    }
+
+    #[test]
+    fn test_decode_execute_rejects_wrong_selector() {
+        let mut encoded = encode_execute_calldata(&[0x11; 20], 0, b"x");
+        encoded[0] = 0xff;
+        assert!(decode_execute_calldata(&encoded).is_none());
+    }
+
+    #[test]
+    fn test_decode_execute_rejects_oversize_value() {
+        let mut encoded = encode_execute_calldata(&[0x22; 20], 0, b"x");
+        // set high byte of value slot non-zero → must reject (no silent truncation)
+        encoded[36] = 0x01;
+        assert!(decode_execute_calldata(&encoded).is_none());
+    }
+
+    #[test]
+    fn test_decode_execute_rejects_short_calldata() {
+        let too_short = vec![0xb6, 0x1d, 0x27, 0xf6, 0x00];
+        assert!(decode_execute_calldata(&too_short).is_none());
     }
 }

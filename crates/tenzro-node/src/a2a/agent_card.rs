@@ -1,6 +1,16 @@
 //! Agent Card — A2A protocol discovery via /.well-known/agent.json
+//!
+//! As of A2A v1.0 the agent card MAY be served wrapped in a `SignedAgentCard`
+//! envelope carrying a JWS signature over the canonical card JSON. Relying
+//! parties verify the signature against the public key of the domain
+//! (typically `did:web:<host>` resolution or a `.well-known/jwks.json`
+//! published by the domain owner). This stops a hostile reverse proxy or
+//! intermediate cache from rewriting the card's `url`, `skills`, or
+//! `securitySchemes` without detection — the production-grade conformance
+//! bar in the A2A 2026 spec.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// A2A Agent Card per the Google A2A specification.
 /// Served at `GET /.well-known/agent.json` for agent discovery.
@@ -869,6 +879,125 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                 input_modes: vec!["application/json".to_string()],
                 output_modes: vec!["application/json".to_string()],
             },
+            // Wave 7/9/12 — institutional primitives.
+            AgentSkill {
+                id: "urwa".to_string(),
+                name: "ERC-7943 (uRWA) Compliance".to_string(),
+                description: "Universal Real-World Asset compliance: kill-switch, \
+                              per-account freeze, forced-transfer for tokenized RWAs."
+                    .to_string(),
+                tags: vec![
+                    "urwa".to_string(),
+                    "erc7943".to_string(),
+                    "rwa".to_string(),
+                    "kill-switch".to_string(),
+                    "freeze".to_string(),
+                ],
+                examples: vec![
+                    "Check if token 0xabc is kill-switched".to_string(),
+                    "Get frozen amount for account 0xdef on token 0xabc".to_string(),
+                    "Freeze 1000 tokens on account 0xdef pending KYC refresh".to_string(),
+                    "Activate the kill-switch on token 0xabc citing sanctions update".to_string(),
+                ],
+                input_modes: vec!["application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
+                id: "ivms101".to_string(),
+                name: "IVMS101 Travel Rule".to_string(),
+                description: "FATF Travel Rule envelope: canonical SHA-256 binding hash \
+                              for an originator + beneficiary + VASP + transfer-data record."
+                    .to_string(),
+                tags: vec![
+                    "ivms101".to_string(),
+                    "travel-rule".to_string(),
+                    "fatf".to_string(),
+                    "compliance".to_string(),
+                    "trp".to_string(),
+                ],
+                examples: vec![
+                    "Hash an IVMS101 envelope binding originator + beneficiary VASPs".to_string(),
+                    "Anchor a settlement receipt to an off-chain Travel Rule envelope".to_string(),
+                ],
+                input_modes: vec!["application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
+                id: "attested-clock".to_string(),
+                name: "TEE-Attested Clock".to_string(),
+                description: "Hardware-attested wall-clock + monotonic counter for long-running \
+                              workflows that cannot trust any single replica's wall-clock."
+                    .to_string(),
+                tags: vec![
+                    "attested-clock".to_string(),
+                    "tee".to_string(),
+                    "workflow".to_string(),
+                    "deadline".to_string(),
+                ],
+                examples: vec![
+                    "Return the current AttestedTimestamp envelope".to_string(),
+                    "Anchor an AP2 mandate expiry to a hardware-signed timestamp".to_string(),
+                    "Bind a margin-call grace deadline to an attested wall_ms".to_string(),
+                ],
+                input_modes: vec!["application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
+                id: "signed-agent-card".to_string(),
+                name: "A2A v1.0 Signed Agent Cards".to_string(),
+                description: "Compute the canonical hash for an A2A v1.0 SignedAgentCard \
+                              envelope so domain owners JWS-sign and relying parties verify."
+                    .to_string(),
+                tags: vec![
+                    "a2a".to_string(),
+                    "signed-agent-card".to_string(),
+                    "jws".to_string(),
+                    "did-web".to_string(),
+                ],
+                examples: vec![
+                    "Compute the canonical hash for an AgentCard JSON payload".to_string(),
+                ],
+                input_modes: vec!["application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
+                id: "wormhole-ntt".to_string(),
+                name: "Wormhole NTT".to_string(),
+                description: "Native Token Transfers — Wormhole's 2026 multi-chain native-token \
+                              primitive with per-chain NttManager + quorum-aggregated Transceivers."
+                    .to_string(),
+                tags: vec![
+                    "wormhole".to_string(),
+                    "ntt".to_string(),
+                    "cross-chain".to_string(),
+                    "native-token".to_string(),
+                ],
+                examples: vec![
+                    "List the Wormhole NTT chain catalog + transceiver kinds".to_string(),
+                ],
+                input_modes: vec!["application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
+                id: "bridge-fee-in-tnzo".to_string(),
+                name: "Bridge Fee in TNZO".to_string(),
+                description: "Pay cross-chain bridge fees in TNZO instead of destination-chain \
+                              gas. Cosmos ICS-29 / Hyperlane IGP / Polkadot AssetHub pattern."
+                    .to_string(),
+                tags: vec![
+                    "bridge-fee".to_string(),
+                    "tnzo".to_string(),
+                    "cross-chain".to_string(),
+                    "sponsorship".to_string(),
+                    "ics-29".to_string(),
+                ],
+                examples: vec![
+                    "Quote the CCIP fee to eip155:1 in TNZO for a 1M-wei native fee".to_string(),
+                    "Enumerate per-adapter sponsorship-pool vault addresses".to_string(),
+                ],
+                input_modes: vec!["application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
         ],
         security_schemes: vec![SecurityScheme {
             scheme_type: "bearer".to_string(),
@@ -878,6 +1007,112 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
         }],
         default_input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
         default_output_modes: vec!["text/plain".to_string(), "application/json".to_string()],
+    }
+}
+
+/// A2A v1.0 SignedAgentCard envelope. Carries the agent card alongside
+/// a JWS signature over its canonical form so relying parties can verify
+/// the card was signed by the domain owner (not rewritten by a reverse
+/// proxy or intermediary cache).
+///
+/// Wire shape per A2A v1.0:
+/// ```json
+/// {
+///   "agentCard": { ... },
+///   "signature": "<JWS Flattened JSON Serialization>"
+/// }
+/// ```
+///
+/// We use **detached** JWS payload semantics: the `signature` field carries
+/// a JWS Compact Serialization (`<base64url(header)>.<base64url(payload-hash)>.<base64url(sig)>`)
+/// over `SHA-256(canonical_agent_card_json)`. Verifiers recompute the hash
+/// from `agentCard` and check the JWS — this is byte-economical (no
+/// duplicated card body) and aligns with the A2A 2026 spec.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedAgentCard {
+    pub agent_card: AgentCard,
+    /// JWS Compact Serialization over the canonical card hash.
+    pub signature: String,
+    /// Optional JWS protected header alg identifier echoed in plain text
+    /// for callers that don't want to base64-decode `signature` just to
+    /// know the algorithm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub algorithm: Option<String>,
+    /// Optional `iss` claim from the JWS protected header — the domain
+    /// owner DID that signed the card (`did:web:tenzro.network` for the
+    /// canonical Tenzro card).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+}
+
+impl SignedAgentCard {
+    /// Compute the canonical hash of an agent card. SHA-256 over the
+    /// `serde_json::to_value` representation, sorted keys, no whitespace.
+    /// The same algorithm runs on both producer and verifier so the JWS
+    /// signature is over a stable digest regardless of which language
+    /// implementation builds the card.
+    pub fn canonical_card_hash(card: &AgentCard) -> [u8; 32] {
+        let json = serde_json::to_value(card).unwrap_or(serde_json::Value::Null);
+        let canonical = canonical_json(&json);
+        let mut h = Sha256::new();
+        h.update(b"tenzro/a2a/signed-agent-card/v1");
+        h.update(canonical.as_bytes());
+        let d = h.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&d);
+        out
+    }
+
+    /// Wrap an unsigned card with a caller-supplied JWS signature. The
+    /// caller is responsible for producing the JWS — typically by hashing
+    /// `canonical_card_hash(&card)` and signing it with the domain owner's
+    /// key via the wallet/SDK.
+    pub fn wrap(
+        card: AgentCard,
+        signature: String,
+        algorithm: Option<String>,
+        issuer: Option<String>,
+    ) -> Self {
+        Self {
+            agent_card: card,
+            signature,
+            algorithm,
+            issuer,
+        }
+    }
+}
+
+/// Canonical JSON serialization for hash stability. Sorted-keys, no
+/// whitespace. Mirrors the `Ivms101Envelope::canonical_hash` algorithm
+/// in `tenzro-identity` so the same canonicaliser ships across the
+/// workspace.
+fn canonical_json(v: &serde_json::Value) -> String {
+    use serde_json::Value;
+    match v {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => serde_json::to_string(s).unwrap_or_default(),
+        Value::Array(arr) => {
+            let parts: Vec<String> = arr.iter().map(canonical_json).collect();
+            format!("[{}]", parts.join(","))
+        }
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let parts: Vec<String> = keys
+                .iter()
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap_or_default(),
+                        canonical_json(&map[*k])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
     }
 }
 
@@ -943,7 +1178,7 @@ mod tests {
     #[test]
     fn test_agent_card_has_all_skills() {
         let card = build_agent_card("localhost:3002", "LightClient");
-        assert_eq!(card.skills.len(), 28);
+        assert_eq!(card.skills.len(), 36);
 
         let skill_ids: Vec<&str> = card.skills.iter().map(|s| s.id.as_str()).collect();
         assert!(skill_ids.contains(&"wallet"));
@@ -986,5 +1221,48 @@ mod tests {
         assert_eq!(parsed.name, card.name);
         assert_eq!(parsed.url, card.url);
         assert_eq!(parsed.skills.len(), card.skills.len());
+    }
+
+    #[test]
+    fn canonical_card_hash_is_deterministic() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("TENZRO_A2A_PUBLIC_URL"); }
+        let card = build_agent_card("0.0.0.0:3002", "Validator");
+        let h1 = SignedAgentCard::canonical_card_hash(&card);
+        let h2 = SignedAgentCard::canonical_card_hash(&card);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn canonical_card_hash_changes_with_url() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("TENZRO_A2A_PUBLIC_URL"); }
+        let card_a = build_agent_card("0.0.0.0:3002", "Validator");
+        let mut card_b = card_a.clone();
+        card_b.url = "https://attacker.example/a2a".to_string();
+        assert_ne!(
+            SignedAgentCard::canonical_card_hash(&card_a),
+            SignedAgentCard::canonical_card_hash(&card_b),
+            "rewritten URL must change the canonical hash"
+        );
+    }
+
+    #[test]
+    fn signed_agent_card_wraps_and_roundtrips() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("TENZRO_A2A_PUBLIC_URL"); }
+        let card = build_agent_card("0.0.0.0:3002", "Validator");
+        let signed = SignedAgentCard::wrap(
+            card.clone(),
+            "eyJhbGciOiJFZERTQSJ9.eyJoYXNoIjoiMHhkZWFkYmVlZiJ9.fake-sig".to_string(),
+            Some("EdDSA".to_string()),
+            Some("did:web:tenzro.network".to_string()),
+        );
+        let json = serde_json::to_string(&signed).unwrap();
+        let parsed: SignedAgentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.agent_card.name, card.name);
+        assert_eq!(parsed.algorithm.as_deref(), Some("EdDSA"));
+        assert_eq!(parsed.issuer.as_deref(), Some("did:web:tenzro.network"));
+        assert!(parsed.signature.starts_with("eyJhbGciOiJFZERTQSJ9."));
     }
 }

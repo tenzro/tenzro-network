@@ -1,6 +1,13 @@
 //! Key management for Tenzro Network.
 //!
 //! Supports Ed25519 (for native signatures) and Secp256k1 (for EVM compatibility).
+//!
+//! NIST P-256 / secp256r1 (WebAuthn / passkeys / EIP-7951 RIP-7212 precompile)
+//! is exposed via the dedicated [`crate::p256`] module — it does not share the
+//! `KeyType`/`PublicKey`/`Signature` envelope here, because passkey-bound keys
+//! live in hardware secure elements (Secure Enclave, StrongBox, TPM, YubiKey)
+//! and the `tenzro_crypto::p256::P256KeyPair` deliberately exposes a narrower
+//! surface aligned with the on-chain precompile + WebAuthn assertion path.
 
 use crate::error::{CryptoError, Result};
 use crate::hash::keccak256;

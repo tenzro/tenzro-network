@@ -696,6 +696,7 @@ mod tests {
             inline_payload: None,
             da_pointer: None,
             commitment: Hash::new([1u8; 32]),
+            mandate_ref: None,
         };
         let err = env.validate().unwrap_err();
         match err {
@@ -720,6 +721,7 @@ mod tests {
                 attestation_root: None,
             }),
             commitment: compute_commitment(&payload),
+            mandate_ref: None,
         };
         let err = env.validate().unwrap_err();
         match err {

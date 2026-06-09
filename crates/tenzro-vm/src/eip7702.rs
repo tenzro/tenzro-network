@@ -121,15 +121,82 @@ pub fn extract_delegation_target(code: &[u8]) -> Option<[u8; 20]> {
 }
 
 /// Process-wide registry of active 7702 delegations.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct DelegationRegistry {
     inner: RwLock<HashMap<[u8; 20], DelegationPointer>>,
+    storage: Option<std::sync::Arc<dyn tenzro_storage::KvStore>>,
+}
+
+impl std::fmt::Debug for DelegationRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DelegationRegistry")
+            .field("entries", &self.inner.read().len())
+            .field("persistent", &self.storage.is_some())
+            .finish()
+    }
 }
 
 impl DelegationRegistry {
-    /// Build an empty registry.
+    /// Build an empty registry. Test-only; production builds should
+    /// use [`Self::with_storage`] so delegations survive restart.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Production constructor: write-through to `CF_STATE` under
+    /// `eip7702:<authority20>`, hydrate on startup. Without
+    /// persistence, every restart drops EIP-7702 authority→target
+    /// pointers, which silently breaks subsequent calls into
+    /// delegated EOAs.
+    pub fn with_storage(storage: std::sync::Arc<dyn tenzro_storage::KvStore>) -> Self {
+        let r = Self {
+            inner: RwLock::new(HashMap::new()),
+            storage: Some(storage),
+        };
+        r.hydrate();
+        r
+    }
+
+    fn key(authority: &[u8; 20]) -> Vec<u8> {
+        let mut k = b"eip7702:".to_vec();
+        k.extend_from_slice(authority);
+        k
+    }
+
+    fn hydrate(&self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let entries = match storage.scan_prefix(tenzro_storage::CF_STATE, b"eip7702:") {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let prefix_len = "eip7702:".len();
+        let mut map = self.inner.write();
+        for (key, value) in entries {
+            if key.len() < prefix_len + 20 {
+                continue;
+            }
+            let mut authority = [0u8; 20];
+            authority.copy_from_slice(&key[prefix_len..prefix_len + 20]);
+            if let Ok(pointer) = serde_json::from_slice::<DelegationPointer>(&value) {
+                map.insert(authority, pointer);
+            }
+        }
+    }
+
+    fn persist(&self, authority: &[u8; 20], pointer: &DelegationPointer) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = serde_json::to_vec(pointer) {
+                let _ = storage.put(tenzro_storage::CF_STATE, &Self::key(authority), &bytes);
+            }
+        }
+    }
+
+    fn forget(&self, authority: &[u8; 20]) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.delete(tenzro_storage::CF_STATE, &Self::key(authority));
+        }
     }
 
     /// Apply a signed authorization tuple on behalf of `expected_authority`.
@@ -185,10 +252,12 @@ impl DelegationRegistry {
         // revokes any active delegation rather than installing a new one.
         if target == [0u8; 20] {
             self.inner.write().remove(&expected_authority);
+            self.forget(&expected_authority);
         } else {
             self.inner
                 .write()
                 .insert(expected_authority, pointer.clone());
+            self.persist(&expected_authority, &pointer);
         }
         Ok(pointer)
     }
@@ -207,7 +276,11 @@ impl DelegationRegistry {
     /// signed authorization. Used during account self-destruct, social
     /// recovery, and explicit operator override paths.
     pub fn revoke(&self, account: &[u8; 20]) -> bool {
-        self.inner.write().remove(account).is_some()
+        let removed = self.inner.write().remove(account).is_some();
+        if removed {
+            self.forget(account);
+        }
+        removed
     }
 
     /// Number of active delegations.

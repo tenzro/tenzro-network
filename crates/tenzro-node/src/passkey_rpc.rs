@@ -1,0 +1,1595 @@
+//! Passkey-first wallet onboarding + custody RPC handlers.
+//!
+//! This module implements the user-facing custody surface that backs the
+//! passkey-first wallet model laid out in the architecture notes:
+//!
+//! - **Enrollment** — `tenzro_enrollPasskey` consumes a WebAuthn attestation,
+//!   creates a TDIP human identity, deploys an ERC-4337 smart account, and
+//!   installs `WebAuthnValidator` as the primary signer. The user's signing
+//!   key never leaves their hardware secure element.
+//!
+//! - **Signing** — `tenzro_signWithPasskey` consumes a WebAuthn assertion
+//!   and routes it through the existing `EntryPoint::validate_user_op`
+//!   chain. The smart account address is the identity, not the key — so the
+//!   key can rotate without the address changing.
+//!
+//! - **Social recovery** — `tenzro_addGuardian` registers a guardian
+//!   composite public key on `SocialRecoveryValidator`.
+//!   `tenzro_initiateRecovery`, `tenzro_submitRecoverySignature`, and
+//!   `tenzro_finalizeRecovery` drive a guardian-quorum flow that rotates the
+//!   account's `WebAuthnValidator` to a freshly enrolled passkey when the
+//!   user loses access to their primary device.
+//!
+//! - **Session keys** — `tenzro_grantSessionKey` installs
+//!   `SessionKeyValidator` configs with scoped permissions (allowed selectors,
+//!   per-tx + cumulative value caps, time bounds) so an agent can sign a
+//!   bounded subset of operations without holding the human's passkey.
+//!
+//! - **Hardware signers** — `tenzro_addHardwareSigner` (Ledger / Trezor /
+//!   GridPlus / generic) installs a `HardwareValidatorModule` as an
+//!   additional ANDed validator for high-value operations.
+//!
+//! All persistence flows through the existing `CF_VALIDATOR_MODULES` column
+//! family + the per-validator `with_storage` constructors; the
+//! `PendingRecoveryStore` in this module persists in-flight recovery state
+//! so an interrupted guardian-quorum ceremony resumes cleanly after restart.
+
+use crate::node::TenzroNode;
+use crate::rpc::JsonRpcError;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::sync::Arc;
+use tenzro_crypto::webauthn::WebAuthnAssertion;
+use tenzro_storage::{CF_VALIDATOR_MODULES, KvStore};
+use tenzro_vm::{
+    HybridWebAuthnSignature, SessionKeyConfig, SocialRecoveryConfig,
+    SpendingLimitConfig, WebAuthnAccountKey,
+};
+use tenzro_crypto::composite::CompositePublicKey;
+use tenzro_crypto::pq::ML_DSA_65_VK_LEN;
+
+// =============================================================================
+// PendingRecoveryStore — in-flight guardian-quorum ceremony persistence
+// =============================================================================
+
+/// One in-flight social-recovery ceremony. Created by
+/// `tenzro_initiateRecovery`, mutated by each `tenzro_submitRecoverySignature`,
+/// and consumed by `tenzro_finalizeRecovery`. Persists to
+/// `CF_VALIDATOR_MODULES / erc7579/recovery_pending/<recovery_id>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingRecovery {
+    /// Unique recovery ID — SHA-256 of (`account_address` ‖ `new_passkey_pubkey` ‖ `created_at`).
+    pub recovery_id: String,
+    /// Target smart-account address (20 bytes hex).
+    pub account_address: String,
+    /// The new WebAuthn account-key to install once quorum is reached.
+    pub new_passkey: WebAuthnAccountKey,
+    /// Opaque credential ID for the new passkey — carried in metadata so the
+    /// desktop / web client can re-locate the credential after rotation.
+    pub new_credential_id: Vec<u8>,
+    /// `(guardian_index, composite_signature_bytes_b64)` tuples collected so far.
+    pub guardian_signatures: Vec<(u32, String)>,
+    /// Unix timestamp (millis) at which this ceremony was started.
+    pub created_at_ms: u64,
+    /// Unix timestamp (millis) after which the ceremony auto-expires.
+    pub expires_at_ms: u64,
+    /// Marker — set once the ceremony has been finalized successfully so a
+    /// duplicate `finalizeRecovery` call returns the same outcome.
+    pub finalized: bool,
+}
+
+/// Persistent store for in-flight recovery ceremonies. Backed by `CF_VALIDATOR_MODULES`.
+pub struct PendingRecoveryStore {
+    storage: Arc<dyn KvStore>,
+}
+
+impl PendingRecoveryStore {
+    pub fn with_storage(storage: Arc<dyn KvStore>) -> Self {
+        Self { storage }
+    }
+
+    fn key(recovery_id: &str) -> Vec<u8> {
+        let mut k = b"erc7579/recovery_pending/".to_vec();
+        k.extend_from_slice(recovery_id.as_bytes());
+        k
+    }
+
+    pub(crate) fn put(&self, rec: &PendingRecovery) -> Result<(), JsonRpcError> {
+        let bytes = serde_json::to_vec(rec).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("serialize pending recovery: {}", e),
+            data: None,
+        })?;
+        self.storage
+            .put(CF_VALIDATOR_MODULES, &Self::key(&rec.recovery_id), &bytes)
+            .map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("persist pending recovery: {}", e),
+                data: None,
+            })?;
+        Ok(())
+    }
+
+    pub(crate) fn get(&self, recovery_id: &str) -> Result<Option<PendingRecovery>, JsonRpcError> {
+        let bytes = self
+            .storage
+            .get(CF_VALIDATOR_MODULES, &Self::key(recovery_id))
+            .map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("read pending recovery: {}", e),
+                data: None,
+            })?;
+        match bytes {
+            Some(b) => Ok(Some(serde_json::from_slice(&b).map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("deserialize pending recovery: {}", e),
+                data: None,
+            })?)),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn delete(&self, recovery_id: &str) -> Result<(), JsonRpcError> {
+        let _ = self
+            .storage
+            .delete(CF_VALIDATOR_MODULES, &Self::key(recovery_id));
+        Ok(())
+    }
+
+    pub(crate) fn list_for_account(
+        &self,
+        account_address: &str,
+    ) -> Result<Vec<PendingRecovery>, JsonRpcError> {
+        let prefix = b"erc7579/recovery_pending/";
+        let entries = self
+            .storage
+            .get_keys_with_prefix(CF_VALIDATOR_MODULES, prefix)
+            .map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("scan pending recoveries: {}", e),
+                data: None,
+            })?;
+        let mut out = Vec::new();
+        for key in entries {
+            if let Some(rid) = key.strip_prefix(prefix) {
+                let rid_str = std::str::from_utf8(rid).unwrap_or("").to_string();
+                if let Ok(Some(rec)) = self.get(&rid_str) {
+                    if rec.account_address.eq_ignore_ascii_case(account_address) {
+                        out.push(rec);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+// =============================================================================
+// Smart-account persistence
+// =============================================================================
+//
+// All smart-account persistence flows through `AccountFactory::with_storage`
+// (CF_AGENTS under `smart_account/<addr>` prefix). The factory hydrates
+// the in-memory `deployed_accounts` map on boot and writes through on every
+// `create_account` / `update_account`. There is no node-local persistence
+// helper in this file — call `factory.update_account(...)` after mutating
+// a `SmartAccount` and the factory's storage handle does the rest.
+
+// =============================================================================
+// Request / response DTOs
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct EnrollPasskeyRequest {
+    /// Optional display name (e.g. "Hilal's iPhone"). Stored on the TDIP
+    /// identity metadata so the user can identify this account in their
+    /// device list.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Raw 64-byte uncompressed P-256 public key (X || Y) or SEC1 65-byte
+    /// (0x04 || X || Y) or COSE_Key CBOR. All three forms accepted; the
+    /// node normalizes to raw `x || y` for the on-chain validator.
+    pub passkey_public_key_hex: String,
+    /// Opaque WebAuthn credential ID — echoed back to the client on
+    /// subsequent `signWithPasskey` calls so the platform authenticator can
+    /// locate the credential.
+    pub credential_id_hex: String,
+    /// Optional companion ML-DSA-65 post-quantum public key. When provided,
+    /// the WebAuthnValidator enforces the hybrid PQ leg on every signature
+    /// (Coinbase Smart Wallet pattern + Tenzro PQ extension).
+    #[serde(default)]
+    pub ml_dsa_public_key_hex: Option<String>,
+    /// CREATE2 salt — defaults to 0. Reusing the same passkey + non-zero
+    /// salts yields multiple distinct accounts.
+    #[serde(default)]
+    pub salt: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EnrollPasskeyResponse {
+    pub did: String,
+    pub smart_account_address: String,
+    pub credential_id_hex: String,
+    pub webauthn_validator_address: String,
+    pub installed_validators: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SignWithPasskeyRequest {
+    /// Smart account address.
+    pub account_address: String,
+    /// Raw user-op hash (32 bytes hex) that the assertion challenge should
+    /// match.
+    pub op_hash_hex: String,
+    /// WebAuthn assertion delivered from the client.
+    pub assertion: WebAuthnAssertion,
+    /// Optional ML-DSA-65 signature when the account has a hybrid PQ leg.
+    #[serde(default)]
+    pub ml_dsa_signature_hex: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SignWithPasskeyResponse {
+    pub verified: bool,
+    pub validator: String,
+    pub op_hash_hex: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddGuardianRequest {
+    pub account_address: String,
+    /// Composite (Ed25519 + ML-DSA-65) public key for the guardian. The
+    /// guardian is itself an identity holder who signs recovery proofs from
+    /// their own passkey or hardware key when called upon.
+    pub guardian_ed25519_pubkey_hex: String,
+    pub guardian_ml_dsa_pubkey_hex: String,
+    /// Optional human-readable label for the guardian ("Mom", "Backup
+    /// hardware key", etc.).
+    #[serde(default)]
+    pub label: Option<String>,
+    /// New quorum threshold. If absent and a config already exists, the
+    /// previous threshold is preserved.
+    #[serde(default)]
+    pub threshold: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AddGuardianResponse {
+    pub account_address: String,
+    pub guardian_count: u32,
+    pub threshold: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InitiateRecoveryRequest {
+    pub account_address: String,
+    /// The new WebAuthn account-key the user just enrolled on a new device.
+    pub new_passkey_public_key_hex: String,
+    pub new_credential_id_hex: String,
+    #[serde(default)]
+    pub new_ml_dsa_public_key_hex: Option<String>,
+    /// How many seconds the guardian-signature collection window stays open.
+    /// Defaults to 24 hours (86400). Hard ceiling is 7 days.
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InitiateRecoveryResponse {
+    pub recovery_id: String,
+    pub account_address: String,
+    /// The 32-byte op hash the guardians must sign with their composite keys.
+    pub recovery_op_hash_hex: String,
+    pub expires_at_ms: u64,
+    pub guardians_required: u32,
+    pub guardians_total: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SubmitRecoverySignatureRequest {
+    pub recovery_id: String,
+    pub guardian_index: u32,
+    /// Composite signature: 64-byte Ed25519 || 3309-byte ML-DSA-65, hex.
+    pub composite_signature_hex: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SubmitRecoverySignatureResponse {
+    pub recovery_id: String,
+    pub guardian_signatures_collected: u32,
+    pub guardians_required: u32,
+    pub quorum_reached: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FinalizeRecoveryRequest {
+    pub recovery_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FinalizeRecoveryResponse {
+    pub recovery_id: String,
+    pub account_address: String,
+    pub new_credential_id_hex: String,
+    pub installed_validators: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GrantSessionKeyRequest {
+    pub account_address: String,
+    /// 32-byte Ed25519 verifying key of the session key (hex).
+    pub session_pubkey_hex: String,
+    /// 4-byte function selectors this session key may call (hex, no `0x`).
+    pub allowed_selectors_hex: Vec<String>,
+    /// 20-byte target contract addresses this session key may interact with.
+    /// Empty = any target.
+    #[serde(default)]
+    pub allowed_targets: Vec<String>,
+    /// Per-tx value ceiling in wei (decimal string). Empty / "0" = no value
+    /// transfer allowed; null = unlimited.
+    #[serde(default)]
+    pub max_value_per_call_wei: Option<String>,
+    /// Cumulative value ceiling in wei over the session lifetime.
+    /// null = unlimited.
+    #[serde(default)]
+    pub max_total_value_wei: Option<String>,
+    pub valid_after_unix: u64,
+    pub valid_until_unix: u64,
+    /// Optional label for audit ("Agent payment pipeline", etc.).
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GrantSessionKeyResponse {
+    pub account_address: String,
+    pub session_pubkey_hex: String,
+    pub valid_after_unix: u64,
+    pub valid_until_unix: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeSessionKeyRequest {
+    pub account_address: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RevokeSessionKeyResponse {
+    pub account_address: String,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddHardwareSignerRequest {
+    pub account_address: String,
+    /// One of "ledger", "trezor", "gridplus", "yubikey", or "generic".
+    pub device_kind: String,
+    /// 33-byte SEC1 compressed or 65-byte SEC1 uncompressed secp256k1 pubkey
+    /// for ECDSA hardware (Ledger / Trezor) OR 64-byte raw P-256 pubkey for
+    /// FIDO2 hardware (YubiKey).
+    pub public_key_hex: String,
+    /// Whether this hardware signer is required on every signing operation
+    /// (true) or only on high-value operations (false, gated by the
+    /// SpendingLimit threshold below).
+    #[serde(default)]
+    pub required_always: bool,
+    /// Value-in-wei threshold above which this hardware signer is mandatory.
+    /// Ignored when `required_always` is true.
+    #[serde(default)]
+    pub required_above_wei: Option<String>,
+    /// Optional label.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AddHardwareSignerResponse {
+    pub account_address: String,
+    pub device_kind: String,
+    pub validator_module_address: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetSpendingLimitRequest {
+    pub account_address: String,
+    pub per_tx_cap_wei: String,
+    pub daily_cap_wei: String,
+    /// 32-byte Ed25519 public key of the authenticator that signs limit
+    /// changes. Typically the smart account's primary passkey or a guardian
+    /// composite-key digest.
+    pub authenticator_pubkey_hex: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SetSpendingLimitResponse {
+    pub account_address: String,
+    pub per_tx_cap_wei: String,
+    pub daily_cap_wei: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetSmartAccountRequest {
+    pub account_address: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SmartAccountSummary {
+    pub address: String,
+    pub owner_hex: String,
+    pub nonce: u64,
+    pub is_deployed: bool,
+    pub installed_validators: Vec<InstalledValidatorSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InstalledValidatorSummary {
+    pub module_address: String,
+    pub type_id: u64,
+    pub priority: u32,
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn parse_params<T: for<'de> Deserialize<'de>>(
+    params: Option<Value>,
+) -> Result<T, JsonRpcError> {
+    let p = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    serde_json::from_value(p).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid params: {}", e),
+        data: None,
+    })
+}
+
+fn decode_hex(s: &str) -> Result<Vec<u8>, JsonRpcError> {
+    let stripped = s.strip_prefix("0x").unwrap_or(s);
+    hex::decode(stripped).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid hex: {}", e),
+        data: None,
+    })
+}
+
+fn decode_address_20(s: &str) -> Result<[u8; 20], JsonRpcError> {
+    let bytes = decode_hex(s)?;
+    if bytes.len() != 20 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("Expected 20-byte address, got {}", bytes.len()),
+            data: None,
+        });
+    }
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn normalize_p256_pubkey_to_raw_xy(bytes: &[u8]) -> Result<[u8; 64], JsonRpcError> {
+    let xy = if bytes.len() == 64 {
+        let mut a = [0u8; 64];
+        a.copy_from_slice(bytes);
+        a
+    } else if bytes.len() == 65 && bytes[0] == 0x04 {
+        let mut a = [0u8; 64];
+        a.copy_from_slice(&bytes[1..]);
+        a
+    } else {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "Unsupported P-256 public key form: expected raw 64 or SEC1 65-byte, got {}",
+                bytes.len()
+            ),
+            data: None,
+        });
+    };
+    Ok(xy)
+}
+
+fn now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+// =============================================================================
+// Handler: tenzro_enrollPasskey
+// =============================================================================
+
+/// Enroll a passkey-bound smart account. Creates a TDIP human identity,
+/// deploys a smart account via the shared `AccountFactory`, installs the
+/// `WebAuthnValidator` as the primary validator, and persists everything.
+pub(crate) async fn handle_enroll_passkey(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: EnrollPasskeyRequest = parse_params(params)?;
+
+    let factory = node.account_factory().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "AccountFactory not initialized on this node".to_string(),
+        data: None,
+    })?;
+    let webauthn_validator = node.webauthn_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "WebAuthnValidator not initialized on this node".to_string(),
+        data: None,
+    })?;
+    let identity_registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "IdentityRegistry not initialized".to_string(),
+        data: None,
+    })?;
+
+    // 1. Normalize passkey public key.
+    let passkey_pubkey_bytes = decode_hex(&req.passkey_public_key_hex)?;
+    let p256_xy = normalize_p256_pubkey_to_raw_xy(&passkey_pubkey_bytes)?;
+    let mut pubkey_x = [0u8; 32];
+    let mut pubkey_y = [0u8; 32];
+    pubkey_x.copy_from_slice(&p256_xy[..32]);
+    pubkey_y.copy_from_slice(&p256_xy[32..]);
+
+    // 2. ML-DSA-65 verifying key is REQUIRED for hybrid PQ custody (Tenzro
+    //    PQ migration per genesis v3 — pre-quantum classical-only enrollments
+    //    are refused at this layer to keep the audit trail clean).
+    let ml_dsa_vk_bytes = req
+        .ml_dsa_public_key_hex
+        .as_deref()
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "ml_dsa_public_key_hex is required for hybrid PQ custody".to_string(),
+            data: None,
+        })?;
+    let ml_dsa_vk = decode_hex(ml_dsa_vk_bytes)?;
+    if ml_dsa_vk.len() != ML_DSA_65_VK_LEN {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "ml_dsa_public_key must be {} bytes (ML-DSA-65 vk), got {}",
+                ML_DSA_65_VK_LEN,
+                ml_dsa_vk.len()
+            ),
+            data: None,
+        });
+    }
+    let account_key = WebAuthnAccountKey::new(pubkey_x, pubkey_y, ml_dsa_vk).map_err(|e| {
+        JsonRpcError {
+            code: -32603,
+            message: format!("WebAuthnAccountKey: {}", e),
+            data: None,
+        }
+    })?;
+    let credential_id = decode_hex(&req.credential_id_hex)?;
+
+    // 3. Register the human TDIP identity (re-uses the binder so a wallet is
+    //    NOT auto-provisioned — the passkey IS the custody).
+    let display_name = req.display_name.unwrap_or_else(|| "Passkey User".to_string());
+    let registration = identity_registry
+        .register_human_via_binder(
+            display_name.clone(),
+            tenzro_types::identity::KycTier::Unverified,
+        )
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("identity registration: {}", e),
+            data: None,
+        })?;
+    let did_string = registration.identity.did_string();
+
+    // 4. Deploy the smart account via CREATE2. Owner bytes = SHA-256 of
+    //    (passkey || credential || did) so the account address is
+    //    deterministically bound to all three.
+    let mut owner_seed = Vec::with_capacity(p256_xy.len() + credential_id.len() + did_string.len());
+    owner_seed.extend_from_slice(&p256_xy);
+    owner_seed.extend_from_slice(&credential_id);
+    owner_seed.extend_from_slice(did_string.as_bytes());
+    let owner_hash = tenzro_crypto::sha256(&owner_seed);
+    let owner = owner_hash.as_bytes().to_vec();
+    let mut smart_account = factory.create_account(owner.clone(), req.salt);
+
+    // 5. Install the WebAuthnValidator as the primary validator (priority 0).
+    let init_data = serde_json::to_vec(&account_key).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize WebAuthnAccountKey: {}", e),
+        data: None,
+    })?;
+    let webauthn_module_addr = {
+        let mut a = [0u8; 20];
+        a[18] = 0x10;
+        a[19] = 0x20;
+        a
+    };
+    let module_config = tenzro_vm::erc7579::ValidatorModuleConfig {
+        type_id: tenzro_vm::aa_validators::ModuleType::Validator as u64,
+        module_address: webauthn_module_addr,
+        init_data: init_data.clone(),
+        priority: 0,
+    };
+    smart_account
+        .install_validator_module(module_config, /* owner_authorized = */ true)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("install WebAuthnValidator on smart account: {}", e),
+            data: None,
+        })?;
+
+    // 6. Register the per-account WebAuthn key with the validator instance
+    //    (this is the in-memory lookup the validator uses at op-verify time).
+    webauthn_validator
+        .enroll(smart_account.address.clone(), account_key.clone())
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("WebAuthn enroll: {}", e),
+            data: None,
+        })?;
+
+    // 7. Persist via the factory. `create_account` populated
+    //    `deployed_accounts` with the bare account; the post-install
+    //    state (with WebAuthnValidator added to `validator_modules`)
+    //    lives on the local `smart_account` until we call
+    //    `update_account`. That call does both: replaces the map entry
+    //    AND writes through to `CF_AGENTS / smart_account/<addr>` so
+    //    the rotated state survives node restart.
+    factory.update_account(smart_account.clone());
+
+    // 8. Bind the smart-account address to the TDIP identity metadata for
+    //    cross-reference.
+    // Bind the smart-account address + credential ID into the identity
+    // metadata so subsequent resolves carry the binding. Uses the
+    // registry's `set_identity_metadata` so both the in-memory cache
+    // and CF_IDENTITIES get the write through one call. If the
+    // registry write fails (race on revocation, etc.) we surface a
+    // warning but do not unwind — the smart account and TDIP identity
+    // are already created and don't need to be re-rolled.
+    let metadata_kv = [
+        (
+            "smart_account_address".to_string(),
+            format!("0x{}", hex::encode(&smart_account.address)),
+        ),
+        (
+            "passkey_credential_id".to_string(),
+            format!("0x{}", hex::encode(&credential_id)),
+        ),
+    ];
+    if let Err(e) = identity_registry.set_identity_metadata(&did_string, metadata_kv) {
+        tracing::warn!(
+            did = %did_string,
+            error = %e,
+            "passkey enroll: identity metadata write skipped (identity unknown)"
+        );
+    }
+
+    let resp = EnrollPasskeyResponse {
+        did: did_string,
+        smart_account_address: format!("0x{}", hex::encode(&smart_account.address)),
+        credential_id_hex: format!("0x{}", hex::encode(&credential_id)),
+        webauthn_validator_address: format!("0x{}", hex::encode(&webauthn_module_addr)),
+        installed_validators: vec!["webauthn".to_string()],
+    };
+    serde_json::to_value(resp).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+// =============================================================================
+// Handler: tenzro_signWithPasskey
+// =============================================================================
+
+/// Verify a WebAuthn assertion against the registered passkey on the target
+/// smart account. Returns success iff:
+///  - the assertion validates against the registered P-256 pubkey,
+///  - the embedded challenge matches the user-op hash,
+///  - the ML-DSA leg (when present) validates against the registered hash.
+pub(crate) async fn handle_sign_with_passkey(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: SignWithPasskeyRequest = parse_params(params)?;
+    let webauthn_validator = node.webauthn_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "WebAuthnValidator not initialized".to_string(),
+        data: None,
+    })?;
+    let account_addr_bytes = decode_hex(&req.account_address)?;
+    let op_hash = decode_hex(&req.op_hash_hex)?;
+    if op_hash.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("op_hash must be 32 bytes, got {}", op_hash.len()),
+            data: None,
+        });
+    }
+    let mut op_hash_arr = [0u8; 32];
+    op_hash_arr.copy_from_slice(&op_hash);
+    let pq_sig = req
+        .ml_dsa_signature_hex
+        .as_deref()
+        .map(|s| decode_hex(s))
+        .transpose()?
+        .unwrap_or_default();
+    let payload = HybridWebAuthnSignature {
+        assertion: req.assertion,
+        ml_dsa_signature: pq_sig,
+    };
+    let sig_bytes = payload.encode().map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("encode hybrid sig: {}", e),
+        data: None,
+    })?;
+    // Build a minimal UserOperation carrying only what the validator reads
+    // (sender + signature). The actual call_data path is irrelevant for the
+    // verify-only RPC — the validator only inspects op.sender and op.signature
+    // when computing the WebAuthn challenge from the supplied op_hash.
+    let op = tenzro_vm::UserOperation {
+        sender: account_addr_bytes.clone(),
+        nonce: 0,
+        factory: Vec::new(),
+        factory_data: Vec::new(),
+        call_data: Vec::new(),
+        call_gas_limit: 0,
+        verification_gas_limit: 0,
+        pre_verification_gas: 0,
+        max_fee_per_gas: 0,
+        max_priority_fee_per_gas: 0,
+        paymaster: Vec::new(),
+        paymaster_verification_gas_limit: 0,
+        paymaster_post_op_gas_limit: 0,
+        paymaster_data: Vec::new(),
+        signature: sig_bytes,
+    };
+    use tenzro_vm::aa_validators::IValidator as _;
+    let validation = webauthn_validator
+        .validate_user_op(&op, &op_hash_arr)
+        .map_err(|e| JsonRpcError {
+            code: -32003,
+            message: format!("passkey verification failed: {}", e),
+            data: None,
+        })?;
+    let verified = !validation.is_failure();
+
+    let webauthn_module_addr = {
+        let mut a = [0u8; 20];
+        a[18] = 0x10;
+        a[19] = 0x20;
+        a
+    };
+    let resp = SignWithPasskeyResponse {
+        verified,
+        validator: format!("0x{}", hex::encode(&webauthn_module_addr)),
+        op_hash_hex: req.op_hash_hex,
+    };
+    serde_json::to_value(resp).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+// =============================================================================
+// Handler: tenzro_addGuardian
+// =============================================================================
+
+pub(crate) async fn handle_add_guardian(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: AddGuardianRequest = parse_params(params)?;
+    let validator = node.social_recovery_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "SocialRecoveryValidator not initialized".to_string(),
+        data: None,
+    })?;
+    let account_addr = decode_hex(&req.account_address)?;
+    let ed_pk_bytes = decode_hex(&req.guardian_ed25519_pubkey_hex)?;
+    let pq_pk_bytes = decode_hex(&req.guardian_ml_dsa_pubkey_hex)?;
+    if ed_pk_bytes.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "Ed25519 pubkey must be 32 bytes, got {}",
+                ed_pk_bytes.len()
+            ),
+            data: None,
+        });
+    }
+    if pq_pk_bytes.len() != ML_DSA_65_VK_LEN {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "guardian_ml_dsa_pubkey must be {} bytes (ML-DSA-65 vk), got {}",
+                ML_DSA_65_VK_LEN,
+                pq_pk_bytes.len()
+            ),
+            data: None,
+        });
+    }
+    let classical = tenzro_crypto::PublicKey::new(tenzro_crypto::KeyType::Ed25519, ed_pk_bytes);
+    let composite = CompositePublicKey::new(classical, pq_pk_bytes);
+    // Merge into existing config if present.
+    let mut guardians = validator
+        .config_for(&account_addr)
+        .map(|c| c.guardians.clone())
+        .unwrap_or_default();
+    guardians.push(composite);
+    let prev_threshold = validator
+        .config_for(&account_addr)
+        .map(|c| c.threshold)
+        .unwrap_or(1);
+    let threshold = req
+        .threshold
+        .unwrap_or_else(|| prev_threshold.max(1).min(guardians.len() as u32));
+    let cfg = SocialRecoveryConfig::new(guardians.clone(), threshold).map_err(|e| {
+        JsonRpcError {
+            code: -32602,
+            message: format!("invalid recovery config: {}", e),
+            data: None,
+        }
+    })?;
+    validator
+        .install_for(account_addr.clone(), cfg.clone())
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("install social recovery: {}", e),
+            data: None,
+        })?;
+    let resp = AddGuardianResponse {
+        account_address: req.account_address,
+        guardian_count: cfg.guardians.len() as u32,
+        threshold: cfg.threshold,
+    };
+    serde_json::to_value(resp).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+// =============================================================================
+// Handler: tenzro_initiateRecovery
+// =============================================================================
+
+pub(crate) async fn handle_initiate_recovery(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: InitiateRecoveryRequest = parse_params(params)?;
+    let store = node.recovery_pending().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Recovery store not initialized (node lacks storage backend)".to_string(),
+        data: None,
+    })?;
+    let validator = node.social_recovery_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "SocialRecoveryValidator not initialized".to_string(),
+        data: None,
+    })?;
+    let account_addr_bytes = decode_hex(&req.account_address)?;
+    let cfg = validator
+        .config_for(&account_addr_bytes)
+        .ok_or_else(|| JsonRpcError {
+            code: -32404,
+            message: "no guardians registered for this account; call tenzro_addGuardian first".to_string(),
+            data: None,
+        })?;
+    let new_passkey_bytes = decode_hex(&req.new_passkey_public_key_hex)?;
+    let p256_xy = normalize_p256_pubkey_to_raw_xy(&new_passkey_bytes)?;
+    let mut pubkey_x = [0u8; 32];
+    let mut pubkey_y = [0u8; 32];
+    pubkey_x.copy_from_slice(&p256_xy[..32]);
+    pubkey_y.copy_from_slice(&p256_xy[32..]);
+    let credential_id = decode_hex(&req.new_credential_id_hex)?;
+    let ml_dsa_bytes = req
+        .new_ml_dsa_public_key_hex
+        .as_deref()
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "new_ml_dsa_public_key_hex required (hybrid PQ custody)".to_string(),
+            data: None,
+        })?;
+    let ml_dsa_vk = decode_hex(ml_dsa_bytes)?;
+    if ml_dsa_vk.len() != ML_DSA_65_VK_LEN {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "ml_dsa vk must be {} bytes, got {}",
+                ML_DSA_65_VK_LEN,
+                ml_dsa_vk.len()
+            ),
+            data: None,
+        });
+    }
+    let new_key = WebAuthnAccountKey::new(pubkey_x, pubkey_y, ml_dsa_vk).map_err(|e| {
+        JsonRpcError {
+            code: -32603,
+            message: format!("WebAuthnAccountKey: {}", e),
+            data: None,
+        }
+    })?;
+    let ttl_secs = req.ttl_secs.unwrap_or(86_400).min(86_400 * 7);
+    let now = now_ms();
+    let mut id_seed = Vec::new();
+    id_seed.extend_from_slice(&account_addr_bytes);
+    id_seed.extend_from_slice(&p256_xy);
+    id_seed.extend_from_slice(&now.to_le_bytes());
+    let recovery_id = hex::encode(tenzro_crypto::sha256(&id_seed).as_bytes());
+    let recovery_op_hash = tenzro_crypto::sha256(&{
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"tenzro/recovery/v1");
+        buf.extend_from_slice(&account_addr_bytes);
+        buf.extend_from_slice(&p256_xy);
+        buf.extend_from_slice(&new_key.pq_pubkey_hash());
+        buf.extend_from_slice(&credential_id);
+        buf
+    });
+    let rec = PendingRecovery {
+        recovery_id: recovery_id.clone(),
+        account_address: req.account_address.clone(),
+        new_passkey: new_key,
+        new_credential_id: credential_id,
+        guardian_signatures: Vec::new(),
+        created_at_ms: now,
+        expires_at_ms: now + ttl_secs * 1000,
+        finalized: false,
+    };
+    store.put(&rec)?;
+    let resp = InitiateRecoveryResponse {
+        recovery_id,
+        account_address: req.account_address,
+        recovery_op_hash_hex: format!("0x{}", hex::encode(recovery_op_hash.as_bytes())),
+        expires_at_ms: rec.expires_at_ms,
+        guardians_required: cfg.threshold,
+        guardians_total: cfg.guardians.len() as u32,
+    };
+    serde_json::to_value(resp).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+// =============================================================================
+// Handler: tenzro_submitRecoverySignature
+// =============================================================================
+
+pub(crate) async fn handle_submit_recovery_signature(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: SubmitRecoverySignatureRequest = parse_params(params)?;
+    let store = node.recovery_pending().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Recovery store not initialized".to_string(),
+        data: None,
+    })?;
+    let validator = node.social_recovery_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "SocialRecoveryValidator not initialized".to_string(),
+        data: None,
+    })?;
+    let mut rec = store
+        .get(&req.recovery_id)?
+        .ok_or_else(|| JsonRpcError {
+            code: -32404,
+            message: "Unknown recovery_id".to_string(),
+            data: None,
+        })?;
+    if rec.finalized {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Recovery already finalized".to_string(),
+            data: None,
+        });
+    }
+    let now = now_ms();
+    if now > rec.expires_at_ms {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Recovery ceremony expired".to_string(),
+            data: None,
+        });
+    }
+    let account_addr = decode_hex(&rec.account_address)?;
+    let cfg = validator
+        .config_for(&account_addr)
+        .ok_or_else(|| JsonRpcError {
+            code: -32404,
+            message: "no SocialRecovery config for this account".to_string(),
+            data: None,
+        })?;
+    if req.guardian_index as usize >= cfg.guardians.len() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("guardian_index {} out of range", req.guardian_index),
+            data: None,
+        });
+    }
+    // Dedup — one signature per guardian_index.
+    if rec
+        .guardian_signatures
+        .iter()
+        .any(|(idx, _)| *idx == req.guardian_index)
+    {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "guardian {} has already signed this recovery",
+                req.guardian_index
+            ),
+            data: None,
+        });
+    }
+    use base64::Engine;
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(decode_hex(&req.composite_signature_hex)?);
+    rec.guardian_signatures.push((req.guardian_index, sig_b64));
+    let collected = rec.guardian_signatures.len() as u32;
+    let quorum_reached = collected >= cfg.threshold;
+    store.put(&rec)?;
+    let resp = SubmitRecoverySignatureResponse {
+        recovery_id: req.recovery_id,
+        guardian_signatures_collected: collected,
+        guardians_required: cfg.threshold,
+        quorum_reached,
+    };
+    serde_json::to_value(resp).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+// =============================================================================
+// Handler: tenzro_finalizeRecovery
+// =============================================================================
+
+pub(crate) async fn handle_finalize_recovery(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: FinalizeRecoveryRequest = parse_params(params)?;
+    let store = node.recovery_pending().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Recovery store not initialized".to_string(),
+        data: None,
+    })?;
+    let factory = node.account_factory().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "AccountFactory not initialized".to_string(),
+        data: None,
+    })?;
+    let webauthn_validator = node.webauthn_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "WebAuthnValidator not initialized".to_string(),
+        data: None,
+    })?;
+    let social_validator = node.social_recovery_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "SocialRecoveryValidator not initialized".to_string(),
+        data: None,
+    })?;
+    let mut rec = store
+        .get(&req.recovery_id)?
+        .ok_or_else(|| JsonRpcError {
+            code: -32404,
+            message: "Unknown recovery_id".to_string(),
+            data: None,
+        })?;
+    if rec.finalized {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Recovery already finalized".to_string(),
+            data: None,
+        });
+    }
+    let now = now_ms();
+    if now > rec.expires_at_ms {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Recovery ceremony expired".to_string(),
+            data: None,
+        });
+    }
+    let account_addr = decode_hex(&rec.account_address)?;
+    let cfg = social_validator
+        .config_for(&account_addr)
+        .ok_or_else(|| JsonRpcError {
+            code: -32404,
+            message: "no SocialRecovery config".to_string(),
+            data: None,
+        })?;
+    if (rec.guardian_signatures.len() as u32) < cfg.threshold {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "insufficient guardian signatures: {} < {}",
+                rec.guardian_signatures.len(),
+                cfg.threshold
+            ),
+            data: None,
+        });
+    }
+    // Rotate the WebAuthnValidator config on this account to the new passkey.
+    webauthn_validator
+        .enroll(account_addr.clone(), rec.new_passkey.clone())
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("re-enroll passkey: {}", e),
+            data: None,
+        })?;
+    let mut smart_account = factory
+        .get_account(&account_addr)
+        .ok_or_else(|| JsonRpcError {
+            code: -32404,
+            message: format!("Smart account 0x{} not found", hex::encode(&account_addr)),
+            data: None,
+        })?;
+    let init_data = serde_json::to_vec(&rec.new_passkey).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize new passkey: {}", e),
+        data: None,
+    })?;
+    let webauthn_module_addr = {
+        let mut a = [0u8; 20];
+        a[18] = 0x10;
+        a[19] = 0x20;
+        a
+    };
+    let module_config = tenzro_vm::erc7579::ValidatorModuleConfig {
+        type_id: tenzro_vm::aa_validators::ModuleType::Validator as u64,
+        module_address: webauthn_module_addr,
+        init_data,
+        priority: 0,
+    };
+    smart_account
+        .install_validator_module_with_recovery(module_config, /* recovery_authorized = */ true)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("install rotated WebAuthnValidator: {}", e),
+            data: None,
+        })?;
+    // Persist the rotated account state via the factory (in-memory map +
+    // CF_AGENTS write-through).
+    factory.update_account(smart_account.clone());
+    rec.finalized = true;
+    store.put(&rec)?;
+    // Drop the finalized ceremony from the pending namespace — the rotated
+    // account state under CF_AGENTS / smart_account is the audit-of-record;
+    // an in-flight recovery has no value once it has completed.
+    let _ = store.delete(&rec.recovery_id);
+    let resp = FinalizeRecoveryResponse {
+        recovery_id: rec.recovery_id,
+        account_address: rec.account_address,
+        new_credential_id_hex: format!("0x{}", hex::encode(&rec.new_credential_id)),
+        installed_validators: smart_account
+            .validator_modules
+            .keys()
+            .map(|k| format!("0x{}", hex::encode(k)))
+            .collect(),
+    };
+    serde_json::to_value(resp).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+// =============================================================================
+// Handler: tenzro_grantSessionKey
+// =============================================================================
+
+pub(crate) async fn handle_grant_session_key(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: GrantSessionKeyRequest = parse_params(params)?;
+    let validator = node.session_key_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "SessionKeyValidator not initialized".to_string(),
+        data: None,
+    })?;
+    let account_addr = decode_hex(&req.account_address)?;
+    let session_pubkey_bytes = decode_hex(&req.session_pubkey_hex)?;
+    if session_pubkey_bytes.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "session_pubkey must be 32 bytes (Ed25519 vk), got {}",
+                session_pubkey_bytes.len()
+            ),
+            data: None,
+        });
+    }
+    let mut session_pubkey = [0u8; 32];
+    session_pubkey.copy_from_slice(&session_pubkey_bytes);
+    let allowed_selectors: Vec<[u8; 4]> = req
+        .allowed_selectors_hex
+        .iter()
+        .map(|s| {
+            let bytes = decode_hex(s)?;
+            if bytes.len() != 4 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("selector must be 4 bytes, got {}", bytes.len()),
+                    data: None,
+                });
+            }
+            let mut a = [0u8; 4];
+            a.copy_from_slice(&bytes);
+            Ok(a)
+        })
+        .collect::<Result<Vec<_>, JsonRpcError>>()?;
+    let allowed_targets: Vec<[u8; 20]> = req
+        .allowed_targets
+        .iter()
+        .map(|s| decode_address_20(s))
+        .collect::<Result<Vec<_>, JsonRpcError>>()?;
+    let max_per_call: Option<u128> = match req.max_value_per_call_wei.as_deref() {
+        Some(s) if !s.is_empty() => Some(s.parse().map_err(|e: std::num::ParseIntError| {
+            JsonRpcError {
+                code: -32602,
+                message: format!("max_value_per_call_wei: {}", e),
+                data: None,
+            }
+        })?),
+        _ => None,
+    };
+    let max_total: Option<u128> = match req.max_total_value_wei.as_deref() {
+        Some(s) if !s.is_empty() => Some(s.parse().map_err(|e: std::num::ParseIntError| {
+            JsonRpcError {
+                code: -32602,
+                message: format!("max_total_value_wei: {}", e),
+                data: None,
+            }
+        })?),
+        _ => None,
+    };
+    let cfg = SessionKeyConfig {
+        session_pubkey,
+        allowed_selectors,
+        allowed_targets,
+        max_value_per_call: max_per_call,
+        max_total_value: max_total,
+        valid_after: req.valid_after_unix,
+        valid_until: req.valid_until_unix,
+    };
+    validator.install_for(account_addr.clone(), cfg.clone());
+    let resp = GrantSessionKeyResponse {
+        account_address: req.account_address,
+        session_pubkey_hex: req.session_pubkey_hex,
+        valid_after_unix: req.valid_after_unix,
+        valid_until_unix: req.valid_until_unix,
+    };
+    serde_json::to_value(resp).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+// =============================================================================
+// Handler: tenzro_revokeSessionKey
+// =============================================================================
+
+pub(crate) async fn handle_revoke_session_key(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: RevokeSessionKeyRequest = parse_params(params)?;
+    let validator = node.session_key_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "SessionKeyValidator not initialized".to_string(),
+        data: None,
+    })?;
+    let account_addr = decode_hex(&req.account_address)?;
+    let had_config = validator.config_for(&account_addr).is_some();
+    validator.uninstall_for(&account_addr);
+    let resp = RevokeSessionKeyResponse {
+        account_address: req.account_address,
+        revoked: had_config,
+    };
+    serde_json::to_value(resp).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+// =============================================================================
+// Handler: tenzro_setSpendingLimit
+// =============================================================================
+
+pub(crate) async fn handle_set_spending_limit(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: SetSpendingLimitRequest = parse_params(params)?;
+    let validator = node.spending_limit_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "SpendingLimitValidator not initialized".to_string(),
+        data: None,
+    })?;
+    let account_addr = decode_hex(&req.account_address)?;
+    let per_tx: u128 = req.per_tx_cap_wei.parse().map_err(|e: std::num::ParseIntError| {
+        JsonRpcError {
+            code: -32602,
+            message: format!("per_tx_cap_wei: {}", e),
+            data: None,
+        }
+    })?;
+    let daily: u128 = req.daily_cap_wei.parse().map_err(|e: std::num::ParseIntError| {
+        JsonRpcError {
+            code: -32602,
+            message: format!("daily_cap_wei: {}", e),
+            data: None,
+        }
+    })?;
+    let cfg = SpendingLimitConfig {
+        max_per_transaction: if per_tx == 0 { None } else { Some(per_tx) },
+        max_daily_spend: if daily == 0 { None } else { Some(daily) },
+        window_seconds: 86_400,
+        enabled: true,
+    };
+    let auth_bytes = decode_hex(&req.authenticator_pubkey_hex)?;
+    if auth_bytes.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "authenticator_pubkey must be 32 bytes, got {}",
+                auth_bytes.len()
+            ),
+            data: None,
+        });
+    }
+    let mut auth = [0u8; 32];
+    auth.copy_from_slice(&auth_bytes);
+    validator.install_for(account_addr, cfg, auth);
+    let resp = SetSpendingLimitResponse {
+        account_address: req.account_address,
+        per_tx_cap_wei: req.per_tx_cap_wei,
+        daily_cap_wei: req.daily_cap_wei,
+    };
+    serde_json::to_value(resp).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+// =============================================================================
+// Handler: tenzro_addHardwareSigner
+// =============================================================================
+
+pub(crate) async fn handle_add_hardware_signer(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: AddHardwareSignerRequest = parse_params(params)?;
+    let factory = node.account_factory().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "AccountFactory not initialized".to_string(),
+        data: None,
+    })?;
+    let account_addr = decode_hex(&req.account_address)?;
+    let mut smart_account = factory
+        .get_account(&account_addr)
+        .ok_or_else(|| JsonRpcError {
+            code: -32404,
+            message: format!("Smart account 0x{} not found", hex::encode(&account_addr)),
+            data: None,
+        })?;
+    let pubkey_bytes = decode_hex(&req.public_key_hex)?;
+    let device = req.device_kind.to_lowercase();
+    if !matches!(
+        device.as_str(),
+        "ledger" | "trezor" | "gridplus" | "yubikey" | "generic"
+    ) {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("Unsupported device_kind: {}", device),
+            data: None,
+        });
+    }
+    // Hardware signers install as a parallel ANDed validator module. The
+    // module address slot 0x1030..0x103f is reserved for hardware validators;
+    // each device kind gets a distinct slot so multiple hardware signers can
+    // coexist on the same account.
+    let module_addr_slot = match device.as_str() {
+        "ledger" => 0x30,
+        "trezor" => 0x31,
+        "gridplus" => 0x32,
+        "yubikey" => 0x33,
+        _ => 0x3f,
+    };
+    let mut module_addr = [0u8; 20];
+    module_addr[18] = 0x10;
+    module_addr[19] = module_addr_slot;
+
+    #[derive(Serialize)]
+    struct HardwareValidatorInit {
+        device_kind: String,
+        public_key: Vec<u8>,
+        required_always: bool,
+        required_above_wei: Option<String>,
+        label: Option<String>,
+    }
+    let init = HardwareValidatorInit {
+        device_kind: device.clone(),
+        public_key: pubkey_bytes,
+        required_always: req.required_always,
+        required_above_wei: req.required_above_wei.clone(),
+        label: req.label.clone(),
+    };
+    let init_data = serde_json::to_vec(&init).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize hardware init: {}", e),
+        data: None,
+    })?;
+    let module_config = tenzro_vm::erc7579::ValidatorModuleConfig {
+        type_id: tenzro_vm::aa_validators::ModuleType::Validator as u64,
+        module_address: module_addr,
+        init_data,
+        priority: 5, // ANDed after WebAuthn primary
+    };
+    smart_account
+        .install_validator_module(module_config.clone(), /* owner_authorized = */ true)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("install hardware validator: {}", e),
+            data: None,
+        })?;
+    factory.update_account(smart_account);
+
+    // Hand the init_data to the shared HardwareSignerValidator so the
+    // validator-chain actually consults the configured pubkey at
+    // signing time (not just the smart-account install record).
+    if let Some(hw_validator) = node.hardware_signer_validator(&module_addr) {
+        if let Err(e) =
+            hw_validator.install_from_init_data(account_addr.clone(), &module_config.init_data)
+        {
+            return Err(JsonRpcError {
+                code: -32603,
+                message: format!("hardware validator install_from_init_data: {}", e),
+                data: None,
+            });
+        }
+    }
+
+    let resp = AddHardwareSignerResponse {
+        account_address: req.account_address,
+        device_kind: device,
+        validator_module_address: format!("0x{}", hex::encode(&module_addr)),
+    };
+    serde_json::to_value(resp).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+// =============================================================================
+// Handler: tenzro_getSmartAccount
+// =============================================================================
+
+pub(crate) async fn handle_get_smart_account(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: GetSmartAccountRequest = parse_params(params)?;
+    let factory = node.account_factory().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "AccountFactory not initialized".to_string(),
+        data: None,
+    })?;
+    let account_addr = decode_hex(&req.account_address)?;
+    let account = factory
+        .get_account(&account_addr)
+        .ok_or_else(|| JsonRpcError {
+            code: -32404,
+            message: format!("Smart account 0x{} not found", hex::encode(&account_addr)),
+            data: None,
+        })?;
+    let installed: Vec<InstalledValidatorSummary> = account
+        .validator_modules
+        .iter()
+        .map(|(addr, cfg)| InstalledValidatorSummary {
+            module_address: format!("0x{}", hex::encode(addr)),
+            type_id: cfg.type_id,
+            priority: cfg.priority,
+        })
+        .collect();
+    let resp = SmartAccountSummary {
+        address: format!("0x{}", hex::encode(&account.address)),
+        owner_hex: format!("0x{}", hex::encode(&account.owner)),
+        nonce: account.nonce,
+        is_deployed: account.is_deployed,
+        installed_validators: installed,
+    };
+    serde_json::to_value(resp).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+// =============================================================================
+// Handler: tenzro_listPendingRecoveries
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct ListPendingRecoveriesRequest {
+    pub account_address: String,
+}
+
+pub(crate) async fn handle_list_pending_recoveries(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: ListPendingRecoveriesRequest = parse_params(params)?;
+    let store = node.recovery_pending().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Recovery store not initialized".to_string(),
+        data: None,
+    })?;
+    let recs = store.list_for_account(&req.account_address)?;
+    let body = serde_json::json!({
+        "account_address": req.account_address,
+        "count": recs.len(),
+        "pending_recoveries": recs.into_iter().map(|r| serde_json::json!({
+            "recovery_id": r.recovery_id,
+            "created_at_ms": r.created_at_ms,
+            "expires_at_ms": r.expires_at_ms,
+            "guardian_signatures_collected": r.guardian_signatures.len(),
+            "finalized": r.finalized,
+        })).collect::<Vec<_>>(),
+    });
+    Ok(body)
+}
+
+// =============================================================================
+// Handler: tenzro_listSmartAccounts
+// =============================================================================
+
+pub(crate) async fn handle_list_smart_accounts(
+    node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let factory = node.account_factory().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "AccountFactory not initialized".to_string(),
+        data: None,
+    })?;
+    let all = factory.get_all_accounts();
+    let items: Vec<SmartAccountSummary> = all
+        .into_iter()
+        .map(|account| SmartAccountSummary {
+            address: format!("0x{}", hex::encode(&account.address)),
+            owner_hex: format!("0x{}", hex::encode(&account.owner)),
+            nonce: account.nonce,
+            is_deployed: account.is_deployed,
+            installed_validators: account
+                .validator_modules
+                .iter()
+                .map(|(addr, cfg)| InstalledValidatorSummary {
+                    module_address: format!("0x{}", hex::encode(addr)),
+                    type_id: cfg.type_id,
+                    priority: cfg.priority,
+                })
+                .collect(),
+        })
+        .collect();
+    let body = serde_json::json!({
+        "count": items.len(),
+        "smart_accounts": items,
+    });
+    Ok(body)
+}

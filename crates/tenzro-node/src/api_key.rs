@@ -45,6 +45,39 @@ pub enum ApiKeyScope {
     /// Canton JSON Ledger API mediated by this node's bearer token.
     /// Gates `tenzro_*Canton*` RPC methods and the Canton MCP tools.
     Canton,
+    /// EVM contract execution + queries that the operator has chosen
+    /// to gate (e.g. private model-router contracts, paid model
+    /// inference, premium TEE attestation). Gates `eth_call`,
+    /// `eth_estimateGas`, `eth_sendRawTransaction` when the operator
+    /// has enabled the EVM gate. Disabled by default — operators
+    /// running a public RPC can leave EVM ungated; operators running
+    /// a private/B2B RPC turn it on.
+    Evm,
+    /// SVM program execution that the operator has chosen to gate.
+    /// Mirror of `Evm` for solana_rbpf-routed dispatches.
+    Svm,
+    /// Model inference + serving endpoints
+    /// (`tenzro_chat`, `tenzro_inferenceRequest`, the multi-modal
+    /// runtimes). Used by operators that monetise inference.
+    Inference,
+    /// TEE attestation + ZK verification endpoints. Operators that
+    /// monetise the verification surface (or that want to rate-limit
+    /// it) gate it with this scope.
+    Tee,
+    /// Cross-chain bridge dispatch (LayerZero, CCIP, Wormhole,
+    /// deBridge, Hyperlane, Axelar). Operators of public RPCs may
+    /// gate this to prevent unbounded gas use through their relays.
+    Bridge,
+    /// Chainlink Data Feeds — `eth_call` against AggregatorV3Interface
+    /// on the operator's configured Ethereum mainnet RPC. The upstream
+    /// RPC quota is operator-paid (Alchemy/Infura/dRPC paid tier);
+    /// callers must hold a `chainlink`-scoped key so the operator can
+    /// attribute the cost and apply per-tenant rate limits. Gates
+    /// `tenzro_quoteBridgeFeeInTnzo`, `tenzro_sponsorBridgeFee`,
+    /// `tenzro_listBridgeSponsorshipPools` when the
+    /// `ChainlinkFeedFeeOracle` backing is active. Same operator-gated
+    /// model as `Canton` per the established hard rule.
+    Chainlink,
 }
 
 impl ApiKeyScope {
@@ -53,6 +86,12 @@ impl ApiKeyScope {
     pub fn as_str(&self) -> &'static str {
         match self {
             ApiKeyScope::Canton => "canton",
+            ApiKeyScope::Evm => "evm",
+            ApiKeyScope::Svm => "svm",
+            ApiKeyScope::Inference => "inference",
+            ApiKeyScope::Tee => "tee",
+            ApiKeyScope::Bridge => "bridge",
+            ApiKeyScope::Chainlink => "chainlink",
         }
     }
 }
@@ -173,6 +212,29 @@ pub struct ApiKeyRecord {
     pub created_at: i64,
     /// Unix timestamp (seconds) of revocation, if any.
     pub revoked_at: Option<i64>,
+    /// Optional Canton User Management Service user id this key acts as
+    /// (e.g. `tenzro-labs@clients`). When set, the node forwards Canton
+    /// calls with `actAs = primaryParty(canton_user_id)` and Canton's
+    /// AuthService enforces per-user CanActAs rights. When `None`, the
+    /// node falls back to the operator's primary party (legacy shared
+    /// path). See `docs/operators/CANTON_MULTITENANT.md` for the
+    /// multi-tenant architecture decision.
+    #[serde(default)]
+    pub canton_user_id: Option<String>,
+
+    /// Stage 2.b: the Canton IdentityProviderConfig id
+    /// auto-registered for this tenant at issuance. Used by
+    /// `tenzro_revokeApiKey` to tear down the IDP in lockstep with
+    /// revoking the key.
+    #[serde(default)]
+    pub canton_identity_provider_id: Option<String>,
+
+    /// Stage 2.b: the upstream OAuth client_id minted for this
+    /// tenant. Used by `tenzro_revokeApiKey` to delete the upstream
+    /// client. The `client_secret` is NOT stored — the tenant holds
+    /// it exclusively.
+    #[serde(default)]
+    pub tenant_oauth_client_id: Option<String>,
 }
 
 impl ApiKeyRecord {
@@ -251,12 +313,22 @@ impl ApiKeyManager {
 
     /// Generates a new key, persists its hash + record, and returns the
     /// plaintext exactly once. Scopes must be non-empty.
+    ///
+    /// `canton_user_id` optionally binds this key to a Canton User
+    /// Management Service user id (e.g. `tenzro-labs@clients`). When
+    /// present, the node uses this user's primary party as `actAs` for
+    /// every canton-scoped call made with this key, and Canton's
+    /// AuthService enforces per-user CanActAs rights. See
+    /// `docs/operators/CANTON_MULTITENANT.md`.
     pub fn issue(
         &self,
         subject: Option<String>,
         label: impl Into<String>,
         scopes: Vec<ApiKeyScope>,
         class: KeyClass,
+        canton_user_id: Option<String>,
+        canton_identity_provider_id: Option<String>,
+        tenant_oauth_client_id: Option<String>,
     ) -> Result<IssuedApiKey> {
         if scopes.is_empty() {
             return Err(NodeError::Internal(
@@ -283,6 +355,9 @@ impl ApiKeyManager {
             class,
             created_at,
             revoked_at: None,
+            canton_user_id,
+            canton_identity_provider_id,
+            tenant_oauth_client_id,
         };
 
         let storage_key = format!("apikey:{}", hash_hex);
@@ -382,6 +457,18 @@ impl ApiKeyManager {
     /// are not stored and cannot be returned.
     pub fn list(&self) -> Vec<ApiKeyRecord> {
         self.cache.read().values().cloned().collect()
+    }
+
+    /// Looks up a record by its non-secret `key_id`. Returns the
+    /// active record (or the revoked one if no active record exists)
+    /// so callers can introspect tenant metadata for cleanup.
+    pub fn find_by_key_id(&self, key_id: &str) -> Option<ApiKeyRecord> {
+        let cache = self.cache.read();
+        cache
+            .values()
+            .find(|r| r.key_id == key_id && r.is_active())
+            .cloned()
+            .or_else(|| cache.values().find(|r| r.key_id == key_id).cloned())
     }
 
     /// Lists records whose `subject` matches `caller_subject` (active +
@@ -491,6 +578,24 @@ pub fn required_scope_for_method(method: &str) -> Option<ApiKeyScope> {
     {
         return Some(ApiKeyScope::Canton);
     }
+    // Chainlink-mediated bridge fee oracle paths. The upstream
+    // Ethereum mainnet RPC quota is operator-paid, so these calls are
+    // gated the same way as `Canton` — per-tenant attribution +
+    // rate-limit. The mutation surfaces (`tenzro_setBridgeFeeRate`,
+    // `tenzro_setBridgeFeeFeed`, `tenzro_setSponsorshipRefillThreshold`)
+    // are admin-token-gated separately and don't fall under the
+    // tenant-scope here.
+    if matches!(
+        method,
+        "tenzro_quoteBridgeFeeInTnzo"
+            | "tenzro_sponsorBridgeFee"
+            | "tenzro_listBridgeSponsorshipPools"
+            | "tenzro_listBridgeFeeFeeds"
+            | "tenzro_getBridgeFeeFeed"
+            | "tenzro_getBridgeAnalytics"
+    ) {
+        return Some(ApiKeyScope::Chainlink);
+    }
     None
 }
 
@@ -512,6 +617,9 @@ mod tests {
                 "test key",
                 vec![ApiKeyScope::Canton],
                 KeyClass::Subject,
+                None,
+                None,
+                None,
             )
             .unwrap();
         assert!(issued.key.starts_with("tnz_"));
@@ -525,7 +633,7 @@ mod tests {
     fn admin_revoke_makes_key_unusable() {
         let mgr = ApiKeyManager::new(mem_store()).unwrap();
         let issued = mgr
-            .issue(None, "to revoke", vec![ApiKeyScope::Canton], KeyClass::Subject)
+            .issue(None, "to revoke", vec![ApiKeyScope::Canton], KeyClass::Subject, None, None, None)
             .unwrap();
         let outcome = mgr.revoke_by_id_admin(&issued.record.key_id).unwrap();
         assert_eq!(outcome, AdminRevokeOutcome::Revoked);
@@ -541,6 +649,9 @@ mod tests {
                 "locked",
                 vec![ApiKeyScope::Canton],
                 KeyClass::OperatorProtected,
+                None,
+                None,
+                None,
             )
             .unwrap();
         let outcome = mgr.revoke_by_id_admin(&issued.record.key_id).unwrap();
@@ -565,6 +676,9 @@ mod tests {
                 "alice",
                 vec![ApiKeyScope::Canton],
                 KeyClass::Subject,
+                None,
+                None,
+                None,
             )
             .unwrap();
         let bob = mgr
@@ -573,6 +687,9 @@ mod tests {
                 "bob",
                 vec![ApiKeyScope::Canton],
                 KeyClass::Subject,
+                None,
+                None,
+                None,
             )
             .unwrap();
 
@@ -601,6 +718,9 @@ mod tests {
                     "ops",
                     vec![ApiKeyScope::Canton],
                     class,
+                    None,
+                    None,
+                    None,
                 )
                 .unwrap();
             let outcome = mgr
@@ -623,6 +743,9 @@ mod tests {
             "alice-1",
             vec![ApiKeyScope::Canton],
             KeyClass::Subject,
+            None,
+            None,
+            None,
         )
         .unwrap();
         mgr.issue(
@@ -630,6 +753,9 @@ mod tests {
             "alice-2",
             vec![ApiKeyScope::Canton],
             KeyClass::Subject,
+            None,
+            None,
+            None,
         )
         .unwrap();
         mgr.issue(
@@ -637,6 +763,9 @@ mod tests {
             "bob-1",
             vec![ApiKeyScope::Canton],
             KeyClass::Subject,
+            None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -685,7 +814,7 @@ mod tests {
     fn authorize_rejects_revoked_key() {
         let mgr = ApiKeyManager::new(mem_store()).unwrap();
         let issued = mgr
-            .issue(None, "tmp", vec![ApiKeyScope::Canton], KeyClass::Subject)
+            .issue(None, "tmp", vec![ApiKeyScope::Canton], KeyClass::Subject, None, None, None)
             .unwrap();
         mgr.revoke_by_id_admin(&issued.record.key_id).unwrap();
         let outcome = mgr.authorize(Some(&issued.key), "tenzro_listCantonDomains");
@@ -702,6 +831,9 @@ mod tests {
                 "persisted",
                 vec![ApiKeyScope::Canton],
                 KeyClass::Subject,
+                None,
+                None,
+                None,
             )
             .unwrap();
         // Drop and rebuild against the same backing store.

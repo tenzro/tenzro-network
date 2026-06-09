@@ -1,0 +1,78 @@
+{
+  "template_id": "ref-agentic-margin-call-v1",
+  "name": "Agentic Margin Call Officer",
+  "description": "Margin-call agent for collateralized lending. Continuously evaluates collateralization across leveraged positions, issues TEE-attested margin calls when the maintenance margin ratio breaches, and executes forced liquidations via the on-chain escrow primitive if the call is not met within the grace window.",
+  "template_type": "specialist",
+  "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  "version": "1.0.0",
+  "status": "published",
+  "created_at": 1749470400,
+  "updated_at": 1749470400,
+  "capabilities": [
+    {
+      "id": "collateral_health",
+      "name": "Collateral Health Check",
+      "description": "Loads borrower positions and collateral, prices via on-chain oracles, computes Loan-to-Value and maintenance margin ratio",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"borrower_did\":{\"type\":\"string\"},\"position_ids\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"ltv\":{\"type\":\"string\"},\"maintenance_margin_ratio\":{\"type\":\"string\"},\"breach\":{\"type\":\"boolean\"}}}"
+    },
+    {
+      "id": "issue_margin_call",
+      "name": "Issue Margin Call",
+      "description": "Emits a TEE-attested margin call: notice, required top-up amount, grace deadline. Records the call as an on-chain receipt with attested wall-time so the grace window cannot be repudiated",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"borrower_did\":{\"type\":\"string\"},\"required_topup_usd\":{\"type\":\"string\"},\"grace_seconds\":{\"type\":\"integer\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"margin_call_id\":{\"type\":\"string\"},\"attested_at_ms\":{\"type\":\"integer\"},\"deadline_ms\":{\"type\":\"integer\"},\"receipt_hash\":{\"type\":\"string\"}}}"
+    },
+    {
+      "id": "forced_liquidation",
+      "name": "Forced Liquidation",
+      "description": "Executes a forced sale of collateral via the escrow primitive when the grace window expires. Routes through the configured DEX aggregator with slippage caps and emits a TEE-attested liquidation receipt",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"margin_call_id\":{\"type\":\"string\"},\"max_slippage_bps\":{\"type\":\"integer\"}}}",
+      "output_schema": "{\"type\":\"object\",\"properties\":{\"liquidated_amount_usd\":{\"type\":\"string\"},\"average_price\":{\"type\":\"string\"},\"residual_collateral\":{\"type\":\"string\"},\"receipt_hash\":{\"type\":\"string\"}}}"
+    }
+  ],
+  "runtime_requirements": {
+    "min_memory_mb": 2048,
+    "min_storage_mb": 512,
+    "gpu_required": false,
+    "network_access": true,
+    "tee_required": true,
+    "supported_platforms": ["linux-x86_64", "linux-aarch64"]
+  },
+  "pricing": "free",
+  "system_prompt": "You are a margin-call officer for collateralized lending. Your responsibilities: (1) Re-evaluate every leveraged position every 60 seconds against the configured on-chain price feeds. (2) When the maintenance margin ratio falls below the configured floor, issue a TEE-attested margin call with the required top-up amount and a grace window. (3) The TEE-attested wall-time on the call receipt is the authoritative clock — the borrower cannot dispute the grace deadline. (4) On grace expiry without top-up, execute a forced sale via the configured DEX route, respecting the max-slippage cap. (5) Emit a final liquidation receipt to the on-chain settlement layer with the residual collateral returned to the borrower's account. NEVER liquidate before grace expires. NEVER liquidate above the max-slippage. ALWAYS attest the wall-time of every state transition.",
+  "examples": [
+    {
+      "description": "Margin call followed by top-up",
+      "user_input": "Monitor borrower DID with positions",
+      "expected_output": "Re-evaluated positions. One position breaches MMR floor. Issued margin call at attested wall-time and monotonic counter. Borrower posted top-up within grace; MMR restored. Margin call resolved without liquidation."
+    },
+    {
+      "description": "Forced liquidation on grace expiry",
+      "user_input": "Grace window expired on margin call identifier",
+      "expected_output": "Margin call grace expired at attested wall-time. Executed forced sale through DEX route within max-slippage. Debt settled; residual returned to borrower. Liquidation receipt emitted."
+    }
+  ],
+  "tags": ["margin-call", "liquidation", "tee-attested-clock", "collateralized-lending"],
+  "download_count": 0,
+  "rating": 0,
+  "content_hash": null,
+  "docs_url": "https://docs.tenzro.network/agent-kit/templates/agentic-margin-call",
+  "policy": {
+    "tools_allowlist": [
+      { "tool_id": "tenzro_createEscrow", "tool_type": "rpc" },
+      { "tool_id": "tenzro_releaseEscrow", "tool_type": "rpc" }
+    ],
+    "delegation_scope": {
+      "max_per_op_wei": "10000000000000000000000000",
+      "max_per_day_wei": "50000000000000000000000000",
+      "max_tx_count_per_day": 50,
+      "allowed_chains": ["tenzro", "ethereum"],
+      "allowed_protocols": ["mpp"]
+    },
+    "hard_caps": {
+      "per_operation_value": "10000000000000000000000000",
+      "per_day_value": "50000000000000000000000000"
+    }
+  }
+}

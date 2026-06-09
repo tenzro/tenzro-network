@@ -82,15 +82,83 @@ impl SecureMintPolicy {
 }
 
 /// In-memory registry of Secure-Mint policies keyed by token address.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct SecureMintRegistry {
     inner: RwLock<HashMap<[u8; 20], SecureMintPolicy>>,
+    storage: Option<std::sync::Arc<dyn tenzro_storage::KvStore>>,
+}
+
+impl std::fmt::Debug for SecureMintRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecureMintRegistry")
+            .field("policies", &self.inner.read().len())
+            .field("persistent", &self.storage.is_some())
+            .finish()
+    }
 }
 
 impl SecureMintRegistry {
-    /// Build an empty registry.
+    /// Build an empty registry (test-only; production should use
+    /// `with_storage`).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Production constructor: write-through to `CF_TOKENS` under
+    /// `secure_mint:<token20>` with hydration on startup. Without
+    /// persistence, every restart drops policies and either bricks
+    /// reserve-backed assets (mint refuses with NotConfigured) or
+    /// silently passes mints that should have failed if the operator
+    /// set a more conservative `circulating` cap.
+    pub fn with_storage(storage: std::sync::Arc<dyn tenzro_storage::KvStore>) -> Self {
+        let r = Self {
+            inner: RwLock::new(HashMap::new()),
+            storage: Some(storage),
+        };
+        r.hydrate();
+        r
+    }
+
+    fn key(token: &[u8; 20]) -> Vec<u8> {
+        let mut k = b"secure_mint:".to_vec();
+        k.extend_from_slice(token);
+        k
+    }
+
+    fn hydrate(&self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let entries = match storage.scan_prefix(tenzro_storage::CF_TOKENS, b"secure_mint:") {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let prefix_len = "secure_mint:".len();
+        let mut map = self.inner.write();
+        for (key, value) in entries {
+            if key.len() < prefix_len + 20 {
+                continue;
+            }
+            let mut token = [0u8; 20];
+            token.copy_from_slice(&key[prefix_len..prefix_len + 20]);
+            if let Ok(policy) = serde_json::from_slice::<SecureMintPolicy>(&value) {
+                map.insert(token, policy);
+            }
+        }
+    }
+
+    fn persist(&self, token: &[u8; 20], policy: &SecureMintPolicy) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = serde_json::to_vec(policy) {
+                let _ = storage.put(tenzro_storage::CF_TOKENS, &Self::key(token), &bytes);
+            }
+        }
+    }
+
+    fn forget(&self, token: &[u8; 20]) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.delete(tenzro_storage::CF_TOKENS, &Self::key(token));
+        }
     }
 
     /// Install or refresh the policy for `token`. Returns the prior policy
@@ -100,12 +168,17 @@ impl SecureMintRegistry {
         token: [u8; 20],
         policy: SecureMintPolicy,
     ) -> Option<SecureMintPolicy> {
+        self.persist(&token, &policy);
         self.inner.write().insert(token, policy)
     }
 
     /// Drop the policy for `token`. Returns true if a policy was removed.
     pub fn clear(&self, token: &[u8; 20]) -> bool {
-        self.inner.write().remove(token).is_some()
+        let removed = self.inner.write().remove(token).is_some();
+        if removed {
+            self.forget(token);
+        }
+        removed
     }
 
     /// Snapshot the current policy for `token`.
@@ -161,7 +234,10 @@ impl SecureMintRegistry {
             });
         }
         policy.circulating = new_circulating;
-        Ok(policy.clone())
+        let snapshot = policy.clone();
+        drop(inner);
+        self.persist(token, &snapshot);
+        Ok(snapshot)
     }
 
     /// Subtract `amount` from circulating supply on burn / redemption.
@@ -171,7 +247,10 @@ impl SecureMintRegistry {
         let mut inner = self.inner.write();
         let policy = inner.get_mut(token)?;
         policy.circulating = policy.circulating.saturating_sub(amount);
-        Some(policy.clone())
+        let snapshot = policy.clone();
+        drop(inner);
+        self.persist(token, &snapshot);
+        Some(snapshot)
     }
 
     /// Convenience read-only check (used by callers that want to know

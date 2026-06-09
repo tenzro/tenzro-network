@@ -92,6 +92,16 @@ pub struct ApiKeyCreateCmd {
     #[arg(long)]
     confirm_operator_protected: bool,
 
+    /// Optional Canton User Management Service user id this key acts
+    /// as (e.g. `manexus@clients`). Binds the key to a Canton user so
+    /// the node forwards canton-scoped calls with that user's primary
+    /// party as `actAs`. Canton's AuthService enforces per-user
+    /// CanActAs rights — keys without this binding fall back to the
+    /// operator's primary party. See
+    /// `docs/operators/CANTON_MULTITENANT.md`.
+    #[arg(long)]
+    canton_user_id: Option<String>,
+
     /// RPC endpoint.
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -147,6 +157,12 @@ impl ApiKeyCreateCmd {
                 serde_json::Value::Bool(true),
             );
         }
+        if let Some(canton_user_id) = &self.canton_user_id {
+            params.insert(
+                "canton_user_id".to_string(),
+                serde_json::Value::String(canton_user_id.clone()),
+            );
+        }
 
         let spinner = output::create_spinner("Minting key...");
         let result: serde_json::Value = rpc
@@ -175,6 +191,9 @@ impl ApiKeyCreateCmd {
         }
         output::print_field("Scopes", &scopes.join(","));
         output::print_field("Class", &self.class);
+        if let Some(cuid) = result.get("canton_user_id").and_then(|v| v.as_str()) {
+            output::print_field("Canton User", cuid);
+        }
         output::print_field("Created At", &created_at);
         output::print_info("");
         output::print_info("API key (shown ONCE — save it now):");

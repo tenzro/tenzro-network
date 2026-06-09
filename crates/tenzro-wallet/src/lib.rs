@@ -87,6 +87,7 @@ pub mod history;
 pub mod keystore;
 pub mod mpc_signing;
 pub mod nonce;
+pub mod pluggable_signer;
 pub mod provisioning;
 pub mod rpc_provider;
 pub mod service;

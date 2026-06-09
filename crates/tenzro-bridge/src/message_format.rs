@@ -270,13 +270,86 @@ impl TenzroMessage {
 pub struct NonceTracker {
     /// Map of sender address to their last used nonce
     nonces: Arc<DashMap<String, u64>>,
+    /// Optional persistence backend. When set, every check_and_update
+    /// writes through to `CF_SETTLEMENTS / bridge_nonce:<scope>:<sender>`
+    /// so replay protection survives node restart. Without this,
+    /// every cross-chain message processed before the restart becomes
+    /// replayable — double-mint on token bridging, double-execute on
+    /// arbitrary GMP.
+    storage: Option<Arc<dyn tenzro_storage::KvStore>>,
+    /// Scope prefix so multiple adapters can share the column family
+    /// without collisions (e.g. "wormhole", "hyperlane", "ccip").
+    scope: String,
 }
 
 impl NonceTracker {
-    /// Creates a new nonce tracker
+    /// Creates a new nonce tracker (in-memory only — test/dev path).
     pub fn new() -> Self {
         Self {
             nonces: Arc::new(DashMap::new()),
+            storage: None,
+            scope: String::new(),
+        }
+    }
+
+    /// Production constructor: write-through to `CF_SETTLEMENTS` with
+    /// `scope` prefix. Hydrates on construction.
+    pub fn with_storage(
+        scope: impl Into<String>,
+        storage: Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        let t = Self {
+            nonces: Arc::new(DashMap::new()),
+            storage: Some(storage),
+            scope: scope.into(),
+        };
+        t.hydrate();
+        t
+    }
+
+    fn key(&self, sender: &str) -> Vec<u8> {
+        let mut k = b"bridge_nonce:".to_vec();
+        k.extend_from_slice(self.scope.as_bytes());
+        k.push(b':');
+        k.extend_from_slice(sender.as_bytes());
+        k
+    }
+
+    fn hydrate(&self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let mut prefix = b"bridge_nonce:".to_vec();
+        prefix.extend_from_slice(self.scope.as_bytes());
+        prefix.push(b':');
+        let entries =
+            match storage.scan_prefix(tenzro_storage::CF_SETTLEMENTS, &prefix) {
+                Ok(e) => e,
+                Err(_) => return,
+            };
+        let prefix_len = prefix.len();
+        for (key, value) in entries {
+            if key.len() <= prefix_len || value.len() != 8 {
+                continue;
+            }
+            let sender = match std::str::from_utf8(&key[prefix_len..]) {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            };
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&value);
+            let last = u64::from_le_bytes(buf);
+            self.nonces.insert(sender, last);
+        }
+    }
+
+    fn persist(&self, sender: &str, nonce: u64) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(
+                tenzro_storage::CF_SETTLEMENTS,
+                &self.key(sender),
+                &nonce.to_le_bytes(),
+            );
         }
     }
 
@@ -297,6 +370,8 @@ impl NonceTracker {
 
         // Update the last used nonce
         *entry = nonce;
+        drop(entry);
+        self.persist(sender, nonce);
         Ok(())
     }
 

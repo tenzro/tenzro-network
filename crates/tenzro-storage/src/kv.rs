@@ -58,6 +58,36 @@ pub const CF_API_KEYS: &str = "api_keys";
 /// `KeyshareEnvelope` (sealed `Party<C>` ciphertext + public coordinates);
 /// `mpc/keyshare/by_group/<group_id_hex>` → JSON `Vec<u64>` (epoch index).
 pub const CF_MPC_KEYSHARES: &str = "mpc_keyshares";
+/// Canton multi-tenant analytics. Per-API-key transaction counters,
+/// last-seen timestamp, per-method call counts, and party usage —
+/// scoped to each tenant so an RPC operator can answer "how many
+/// DAML txes has the tenzro-labs team submitted this month".
+/// Keys: `canton_analytics:<key_id>` → JSON `CantonKeyAnalytics`
+/// (calls_total, calls_by_method, errors_total, last_called_at,
+/// first_seen_at, canton_user_id, party_id_hint).
+pub const CF_CANTON_ANALYTICS: &str = "canton_analytics";
+/// Bridge multi-tenant analytics. Per-API-key call counters for
+/// `chainlink`-scoped methods (Chainlink Data Feed reads via the
+/// operator's paid Ethereum mainnet RPC) so the RPC operator can
+/// attribute upstream costs to each tenant. Keys:
+/// `bridge_analytics:<key_id>` → JSON `BridgeKeyAnalytics`
+/// (calls_total, calls_by_method, errors_total, last_called_at,
+/// first_seen_at, cu_consumed_total).
+pub const CF_BRIDGE_ANALYTICS: &str = "bridge_analytics";
+/// ERC-7579 validator modules state. Per-smart-account configuration
+/// for SocialRecovery, SessionKey, SpendingLimit validators, plus
+/// the installed-modules index. Custody enforcement at signing time
+/// depends on this being durable across restarts.
+/// Keys:
+///   `erc7579/social/<account20>` → JSON `SocialRecoveryConfig`
+///   `erc7579/session/<account20>` → JSON `SessionKeyConfig`
+///   `erc7579/session_state/<account20>` → JSON `SessionKeyState`
+///   `erc7579/spending/<account20>` → JSON `SpendingLimitConfig`
+///   `erc7579/spending_state/<account20>` → JSON `SpendingLimitState`
+///   `erc7579/installed/<account20>/<validator20>` → JSON
+///       `ValidatorModuleConfig` (installed-module index for the
+///       AND-combined gate).
+pub const CF_VALIDATOR_MODULES: &str = "validator_modules";
 
 /// Key-value store trait
 pub trait KvStore: Send + Sync {
@@ -150,6 +180,9 @@ impl RocksDbStore {
             ColumnFamilyDescriptor::new(CF_APPROVALS, Options::default()),
             ColumnFamilyDescriptor::new(CF_API_KEYS, Options::default()),
             ColumnFamilyDescriptor::new(CF_MPC_KEYSHARES, Options::default()),
+            ColumnFamilyDescriptor::new(CF_CANTON_ANALYTICS, Options::default()),
+            ColumnFamilyDescriptor::new(CF_BRIDGE_ANALYTICS, Options::default()),
+            ColumnFamilyDescriptor::new(CF_VALIDATOR_MODULES, Options::default()),
         ]
     }
 

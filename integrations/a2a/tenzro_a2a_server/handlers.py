@@ -1065,7 +1065,33 @@ async def handle_canton(text: str, metadata: dict = None) -> str:
         return (
             "Allocate a new Canton party:\n"
             "  tenzro_allocateParty { party_id_hint, display_name? }\n"
-            "Returns the fully-qualified party id `<hint>::<participant-hash>`."
+            "Returns the fully-qualified party id `<hint>::<participant-hash>`.\n"
+            "Note: a newly-allocated party has no CanActAs/CanReadAs grants on "
+            "any user by default — follow up with `grant user rights` so the "
+            "operator's OAuth user can submit DAML commands as the party."
+        )
+
+    if "grant" in t and ("right" in t or "rights" in t):
+        return (
+            "Grant CanActAs / CanReadAs rights on a Canton party (Canton 3.5+ CIP-26):\n"
+            "  tenzro_canton_grantUserRights { party, user_id?, can_act_as?, can_read_as? }\n"
+            "Pass `user_id` omitted to grant to the OAuth principal's own user."
+        )
+
+    if "list" in t and ("right" in t or "rights" in t):
+        result = await rpc_call("tenzro_canton_listUserRights", {})
+        return f"Canton user rights:\n{json.dumps(result, indent=2)}"
+
+    if "analytics" in t or ("my" in t and ("usage" in t or "calls" in t)):
+        result = await rpc_call("tenzro_canton_getMyAnalytics", {})
+        return (
+            "Canton per-tenant analytics (self-read):\n"
+            f"{json.dumps(result, indent=2)}\n\n"
+            "Counters are maintained server-side in RocksDB "
+            "(`CF_CANTON_ANALYTICS`) — every canton-scoped JSON-RPC call "
+            "increments calls_total (or errors_total) plus the per-method "
+            "bucket. Operators can list every tenant via "
+            "tenzro_canton_listApiKeyAnalytics (admin token gated)."
         )
 
     if "contract" in t:
@@ -1088,11 +1114,13 @@ async def handle_canton(text: str, metadata: dict = None) -> str:
         "    - 'Canton health' / 'Canton version' / 'Canton my user'\n"
         "    - 'Canton list parties' / 'list packages' / 'connected synchronizers'\n"
         "    - 'Canton coin balance' / 'Canton fee schedule' / 'List domains'\n"
+        "    - 'List Canton user rights'\n"
         "  Reads (with args):\n"
         "    - 'List DAML contracts for template <tid>'\n"
         "    - 'Get Canton transaction <hex-update-id>'\n"
         "  Writes:\n"
         "    - 'Allocate Canton party'\n"
+        "    - 'Grant Canton user rights for party <fq-party-id>'\n"
         "    - 'Submit DAML command'\n"
         "    - 'Upload DAR'"
     )

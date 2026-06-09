@@ -966,6 +966,8 @@ Also accepts `"evm_address": "0x<hex>"` or `"token_id": "<hex>"` instead of `sym
     "token_type": "Erc20",
     "evm_address": "0x<hex>",
     "svm_mint": null,
+    "daml_template_id": null,
+    "tempo_address": null,
     "creator": "0x<hex>"
   },
   "id": 1

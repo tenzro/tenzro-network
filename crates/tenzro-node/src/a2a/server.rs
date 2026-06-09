@@ -302,11 +302,40 @@ struct Ap2CancelParams {
 // Route handlers
 // ---------------------------------------------------------------------------
 
-/// Serve the Agent Card at `GET /.well-known/agent.json`
+/// Serve the Agent Card at `GET /.well-known/agent.json`.
+///
+/// A2A v1.0 introduced the `SignedAgentCard` envelope that wraps the
+/// raw card with a JWS signature over the canonical card hash. When
+/// the caller passes `?signed=1`, the server wraps the card in the
+/// signed envelope so relying parties can verify the domain owner's
+/// signature; otherwise we serve the legacy bare card for backwards
+/// compatibility with A2A v0.3 / v0.2.5 clients.
 async fn agent_card_handler(
     State(state): State<Arc<A2aState>>,
-) -> Json<AgentCard> {
-    Json(state.agent_card.clone())
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use super::agent_card::SignedAgentCard;
+
+    if params.get("signed").map(|v| v == "1" || v == "true").unwrap_or(false) {
+        let card = state.agent_card.clone();
+        let canonical_hash = SignedAgentCard::canonical_card_hash(&card);
+        // Production-grade signing: the JWS leg is added once the
+        // node-level domain signing key is wired. Until then we expose
+        // the canonical hash as the `signature` placeholder so callers
+        // can compute the hash themselves and verify it matches what
+        // the server intends to sign. The `algorithm` field reads
+        // `unsigned` to make the unsigned-state explicit.
+        let signed = SignedAgentCard::wrap(
+            card,
+            format!("hash:{}", hex::encode(canonical_hash)),
+            Some("unsigned".to_string()),
+            Some("did:web:tenzro.network".to_string()),
+        );
+        Json(signed).into_response()
+    } else {
+        Json(state.agent_card.clone()).into_response()
+    }
 }
 
 /// Serve a bridged Agent Card for an arbitrary DID at

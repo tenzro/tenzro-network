@@ -245,8 +245,8 @@ def _rpc(method: str, params: Any = None) -> dict:
     Scope-gated RPCs (currently `tenzro_*Canton*`) require an operator-
     issued API key. Set TENZRO_API_KEY to the `tnz_<base64url>` key
     issued by the RPC operator; it is forwarded as the `X-Tenzro-Api-Key`
-    header. The node holds the upstream Auth0 credentials and proxies
-    on the caller's behalf — callers do not manage Auth0 directly.
+    header. The node mediates upstream credentials on the caller's
+    behalf — callers do not manage them directly.
 
     Operator-only RPCs (API-key minting/revocation/listing) require the
     operator's admin token. Set TENZRO_ADMIN_TOKEN; it is forwarded as
@@ -4622,6 +4622,77 @@ def canton_get_transaction_rpc(update_id: str) -> dict:
     return _rpc("tenzro_canton_getTransaction", {"update_id": update_id})
 
 
+def canton_allocate_party_rpc(party_id_hint: str,
+                              display_name: str | None = None) -> dict:
+    """Allocate a new Canton party via the JSON-RPC route
+    (`POST /v2/parties`). Returns the fully-qualified party id
+    `<hint>::<participant-hash>`. The newly-allocated party has no
+    CanActAs / CanReadAs grants on any user by default — follow up
+    with `canton_grant_user_rights` so the bound tenant user can
+    submit DAML commands on behalf of the party."""
+    params: dict = {"party_id_hint": party_id_hint}
+    if display_name is not None:
+        params["display_name"] = display_name
+    return _rpc("tenzro_allocateParty", params)
+
+
+def canton_grant_user_rights(party: str,
+                             user_id: str | None = None,
+                             can_act_as: bool = True,
+                             can_read_as: bool = False) -> dict:
+    """Grant CanActAs / CanReadAs rights on a Canton party to a user
+    via the Canton 3.5+ User Management Service (CIP-26,
+    `POST /v2/users/{userId}/rights`). The `party` argument must be
+    the fully-qualified party id. Pass `user_id=None` to grant to the
+    calling principal's own Canton user.
+
+    This is the second step in the per-tenant provisioning flow:
+    allocate party → grant rights → submit commands."""
+    params: dict = {
+        "party": party,
+        "can_act_as": can_act_as,
+        "can_read_as": can_read_as,
+    }
+    if user_id is not None:
+        params["user_id"] = user_id
+    return _rpc("tenzro_canton_grantUserRights", params)
+
+
+def canton_list_user_rights(user_id: str | None = None) -> dict:
+    """List the rights granted to a Canton user via
+    `GET /v2/users/{userId}/rights`. Returns
+    `{rights: [{kind: {CanActAs: {value: {party}}}}, ...]}`. Pass
+    `user_id=None` to list rights for the OAuth principal's own user."""
+    params: dict = {}
+    if user_id is not None:
+        params["user_id"] = user_id
+    return _rpc("tenzro_canton_listUserRights", params)
+
+
+def canton_get_my_analytics() -> dict:
+    """Subject self-read: returns this tenant's Canton call aggregates
+    for the API key configured on this client. Counters are
+    maintained server-side in RocksDB (`CF_CANTON_ANALYTICS`) — every
+    canton-scoped JSON-RPC call increments calls_total (or
+    errors_total) plus the corresponding per-method bucket.
+
+    Returns `{key_id, canton_user_id, calls_total, errors_total,
+    calls_by_method, errors_by_method, first_seen_at,
+    last_called_at}`."""
+    return _rpc("tenzro_canton_getMyAnalytics", {})
+
+
+def canton_list_api_key_analytics(key_id: str | None = None) -> dict:
+    """Operator admin-read: returns per-tenant Canton call aggregates
+    for every API key (or just one when `key_id` is set). Requires
+    the operator admin token at the node level. Rows are sorted by
+    `last_called_at` descending."""
+    params: dict = {}
+    if key_id is not None:
+        params["key_id"] = key_id
+    return _rpc("tenzro_canton_listApiKeyAnalytics", params)
+
+
 # ── Crypto ────────────────────────────────────────────────────────
 
 
@@ -6599,6 +6670,162 @@ def mirror_workflow_to_canton(workflow_id: str) -> dict:
     return _rpc("tenzro_mirrorWorkflowToCanton", {"workflow_id": workflow_id})
 
 
+# ── Wave 7/9/12 — institutional primitives ────────────────────────
+
+
+def urwa_is_kill_switched(token_id_hex: str) -> dict:
+    """Read the ERC-7943 (uRWA) kill-switch state for a 32-byte token id."""
+    return _rpc("tenzro_urwaIsKillSwitched", {"token_id_hex": token_id_hex})
+
+
+def urwa_get_frozen_tokens(token_id_hex: str, account_hex: str) -> dict:
+    """Read the ERC-7943 frozen-amount for a (token, account) pair."""
+    return _rpc(
+        "tenzro_urwaGetFrozenTokens",
+        {"token_id_hex": token_id_hex, "account_hex": account_hex},
+    )
+
+
+def urwa_set_frozen_tokens(token_id_hex: str, account_hex: str,
+                           amount: str, reason: str = None) -> dict:
+    """(Admin) Freeze a specific amount on an ERC-7943 token account."""
+    return _rpc(
+        "tenzro_urwaSetFrozenTokens",
+        {
+            "token_id_hex": token_id_hex,
+            "account_hex": account_hex,
+            "amount": amount,
+            "reason": reason,
+        },
+    )
+
+
+def urwa_trigger_kill_switch(token_id_hex: str,
+                             triggered_by_did: str = None,
+                             reason: str = None) -> dict:
+    """(Admin) Activate the ERC-7943 kill-switch on a token."""
+    return _rpc(
+        "tenzro_urwaTriggerKillSwitch",
+        {
+            "token_id_hex": token_id_hex,
+            "triggered_by_did": triggered_by_did,
+            "reason": reason,
+        },
+    )
+
+
+def urwa_clear_kill_switch(token_id_hex: str) -> dict:
+    """(Admin) Clear the ERC-7943 kill-switch on a token."""
+    return _rpc("tenzro_urwaClearKillSwitch", {"token_id_hex": token_id_hex})
+
+
+def ivms101_hash(envelope: dict) -> dict:
+    """Compute the canonical SHA-256 hash for an IVMS101 Travel Rule envelope."""
+    return _rpc("tenzro_ivms101Hash", envelope)
+
+
+def attested_clock_now() -> dict:
+    """Return the current node wall-clock as a Tenzro AttestedTimestamp envelope."""
+    return _rpc("tenzro_attestedClockNow", [])
+
+
+def signed_agent_card_canonical_hash(agent_card: dict) -> dict:
+    """Compute the canonical hash for an A2A v1.0 SignedAgentCard payload."""
+    return _rpc("tenzro_signedAgentCardCanonicalHash", agent_card)
+
+
+def wormhole_ntt_list_chains() -> dict:
+    """Enumerate the registered Wormhole NTT chain catalog."""
+    return _rpc("tenzro_wormholeNttListChains", [])
+
+
+def quote_bridge_fee_in_tnzo(adapter: str, dest_chain: str,
+                             native_fee_smallest_unit: str) -> dict:
+    """Quote a destination-native bridge fee in TNZO."""
+    return _rpc(
+        "tenzro_quoteBridgeFeeInTnzo",
+        {
+            "adapter": adapter,
+            "dest_chain": dest_chain,
+            "native_fee_smallest_unit": native_fee_smallest_unit,
+        },
+    )
+
+
+def list_bridge_sponsorship_pools() -> dict:
+    """Enumerate per-adapter bridge sponsorship-pool vault addresses."""
+    return _rpc("tenzro_listBridgeSponsorshipPools", [])
+
+
+def set_bridge_fee_rate(adapter: str, dest_chain: str, rate_q18: str,
+                        markup_bps: int = 100, valid_window_ms: int = 60_000) -> dict:
+    """(Admin) Register a governance-set fee-rate row."""
+    return _rpc(
+        "tenzro_setBridgeFeeRate",
+        {
+            "adapter": adapter,
+            "dest_chain": dest_chain,
+            "rate_q18": rate_q18,
+            "markup_bps": markup_bps,
+            "valid_window_ms": valid_window_ms,
+        },
+    )
+
+
+def sponsor_bridge_fee(quote_id_hex: str, adapter: str, dest_chain: str,
+                       native_fee_smallest_unit: str, tnzo_amount_wei: str,
+                       rate_q18_hex: str, issued_at_ms: int, valid_until_ms: int,
+                       payer_did: str, oracle_backing: str = "governance") -> dict:
+    """Sponsor a previously-quoted destination-native bridge fee in TNZO."""
+    return _rpc(
+        "tenzro_sponsorBridgeFee",
+        {
+            "quote_id_hex": quote_id_hex,
+            "adapter": adapter,
+            "dest_chain": dest_chain,
+            "native_fee_smallest_unit": native_fee_smallest_unit,
+            "tnzo_amount_wei": tnzo_amount_wei,
+            "rate_q18_hex": rate_q18_hex,
+            "issued_at_ms": issued_at_ms,
+            "valid_until_ms": valid_until_ms,
+            "oracle_backing": oracle_backing,
+            "payer_did": payer_did,
+        },
+    )
+
+
+def set_sponsorship_refill_threshold(adapter: str, refill_threshold_bps: int) -> dict:
+    """(Admin) Set the refill-threshold bps for an adapter's pool."""
+    return _rpc(
+        "tenzro_setSponsorshipRefillThreshold",
+        {"adapter": adapter, "refill_threshold_bps": refill_threshold_bps},
+    )
+
+
+def get_bridge_analytics() -> dict:
+    """Subject self-read of caller's Chainlink/bridge analytics."""
+    return _rpc("tenzro_getBridgeAnalytics", [])
+
+
+def list_bridge_analytics(key_id: str | None = None) -> dict:
+    """(Admin) Cross-tenant Chainlink/bridge analytics."""
+    params = {"key_id": key_id} if key_id else None
+    return _rpc("tenzro_listBridgeAnalytics", params)
+
+
+def workflow_set_step_deadline(workflow_id: str, step_idx: int,
+                               attested_deadline: dict) -> dict:
+    """Bind a TEE-attested deadline to a saga step."""
+    return _rpc(
+        "tenzro_workflowSetStepDeadline",
+        {
+            "workflow_id": workflow_id,
+            "step_idx": step_idx,
+            "attested_deadline": attested_deadline,
+        },
+    )
+
+
 COMMANDS = {
     # Wallet & Balance
     "join_network": lambda args: join_as_micro_node(
@@ -7123,6 +7350,48 @@ COMMANDS = {
     "secure_mint_check": lambda args: secure_mint_check(args[0], args[1]),
     "secure_mint_apply": lambda args: secure_mint_apply(args[0], args[1]),
     "secure_mint_record_burn": lambda args: secure_mint_record_burn(args[0], args[1]),
+    # ── Wave 7/9/12 — institutional primitives ──
+    "urwa_is_kill_switched": lambda args: urwa_is_kill_switched(args[0]),
+    "urwa_get_frozen_tokens": lambda args: urwa_get_frozen_tokens(args[0], args[1]),
+    "urwa_set_frozen_tokens": lambda args: urwa_set_frozen_tokens(
+        args[0], args[1], args[2], args[3] if len(args) > 3 else None
+    ),
+    "urwa_trigger_kill_switch": lambda args: urwa_trigger_kill_switch(
+        args[0],
+        args[1] if len(args) > 1 else None,
+        args[2] if len(args) > 2 else None,
+    ),
+    "urwa_clear_kill_switch": lambda args: urwa_clear_kill_switch(args[0]),
+    "ivms101_hash": lambda args: ivms101_hash(json.loads(args[0])),
+    "attested_clock_now": lambda args: attested_clock_now(),
+    "signed_agent_card_canonical_hash": lambda args: signed_agent_card_canonical_hash(
+        json.loads(args[0])
+    ),
+    "wormhole_ntt_list_chains": lambda args: wormhole_ntt_list_chains(),
+    "quote_bridge_fee_in_tnzo": lambda args: quote_bridge_fee_in_tnzo(
+        args[0], args[1], args[2]
+    ),
+    "list_bridge_sponsorship_pools": lambda args: list_bridge_sponsorship_pools(),
+    "set_bridge_fee_rate": lambda args: set_bridge_fee_rate(
+        args[0], args[1], args[2],
+        int(args[3]) if len(args) > 3 else 100,
+        int(args[4]) if len(args) > 4 else 60_000,
+    ),
+    "sponsor_bridge_fee": lambda args: sponsor_bridge_fee(
+        args[0], args[1], args[2], args[3], args[4], args[5],
+        int(args[6]), int(args[7]), args[8],
+        args[9] if len(args) > 9 else "governance",
+    ),
+    "set_sponsorship_refill_threshold": lambda args: set_sponsorship_refill_threshold(
+        args[0], int(args[1])
+    ),
+    "get_bridge_analytics": lambda args: get_bridge_analytics(),
+    "list_bridge_analytics": lambda args: list_bridge_analytics(
+        args[0] if args else None
+    ),
+    "workflow_set_step_deadline": lambda args: workflow_set_step_deadline(
+        args[0], int(args[1]), json.loads(args[2])
+    ),
     # ── Hyperlane ──
     "hyperlane_list_chains": lambda args: hyperlane_list_chains(),
     "hyperlane_quote_dispatch": lambda args: hyperlane_quote_dispatch(
@@ -7331,6 +7600,11 @@ COMMANDS = {
     "canton_upload_dar_rpc": lambda args: canton_upload_dar_rpc(args[0]),
     "canton_fee_schedule_rpc": lambda args: canton_fee_schedule_rpc(),
     "canton_get_transaction_rpc": lambda args: canton_get_transaction_rpc(args[0]),
+    "canton_allocate_party_rpc": lambda args: canton_allocate_party_rpc(args[0], args[1] if len(args) > 1 else None),
+    "canton_grant_user_rights": lambda args: canton_grant_user_rights(args[0], args[1] if len(args) > 1 else None, args[2] if len(args) > 2 else True, args[3] if len(args) > 3 else False),
+    "canton_list_user_rights": lambda args: canton_list_user_rights(args[0] if len(args) > 0 else None),
+    "canton_get_my_analytics": lambda args: canton_get_my_analytics(),
+    "canton_list_api_key_analytics": lambda args: canton_list_api_key_analytics(args[0] if len(args) > 0 else None),
     # ── Ecosystem: deBridge ──
     "debridge_search_tokens": lambda args: debridge_search_tokens(args[0], args[1] if len(args) > 1 else None),
     "debridge_get_chains": lambda args: debridge_get_chains(),
