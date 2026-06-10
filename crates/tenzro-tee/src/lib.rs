@@ -12,6 +12,7 @@ pub mod attestation;
 pub mod certs;
 pub mod detection;
 pub mod enclave_crypto;
+pub mod enclave_keystore;
 pub mod error;
 pub mod registry;
 pub mod sealed_agent_keypair;

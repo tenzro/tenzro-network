@@ -1183,20 +1183,33 @@ async fn wallet_menu(rpc: &rpc::RpcClient) -> Result<()> {
             output::print_field("Balance", &rpc::format_tnzo(wei));
         }
         2 => {
-            let _from: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("From address").interact_text()?;
+            let from: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("From address").interact_text()?;
             let to: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("To address").interact_text()?;
             let amount: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Amount (TNZO)").interact_text()?;
             let amount_float: f64 = amount.parse().unwrap_or(0.0);
-            let amount_wei = (amount_float * 1e18) as u64;
-            let tx_json = serde_json::json!({
-                "to": to, "value": format!("0x{:x}", amount_wei),
-                "nonce": "0x0", "gas_limit": "0x5208", "gas_price": "0x3b9aca00",
-                "chain_id": "0x539", "data": "0x"
-            });
-            let raw_tx = format!("0x{}", hex::encode(tx_json.to_string().as_bytes()));
-            let tx_hash: String = rpc.call("eth_sendRawTransaction", serde_json::json!([raw_tx])).await?;
+            let amount_wei = (amount_float * 1e18) as u128;
+
+            // Server-side signing via tenzro_signAndSendTransaction: the
+            // server resolves the auth-bound wallet, signs with the keypair
+            // that owns `from`, and binds the signing pubkey to `from`
+            // before admission. Requires DPoP+JWT (set via
+            // TENZRO_BEARER_JWT / TENZRO_DPOP_PROOF env vars).
+            let result: serde_json::Value = rpc
+                .call(
+                    "tenzro_signAndSendTransaction",
+                    serde_json::json!({
+                        "from": from,
+                        "to": to,
+                        "value": amount_wei.to_string(),
+                    }),
+                )
+                .await?;
             output::print_success("Transaction sent!");
-            output::print_field("Tx Hash", &tx_hash);
+            if let Some(tx_hash) = result.get("tx_hash").and_then(|v| v.as_str()) {
+                output::print_field("Tx Hash", tx_hash);
+            } else {
+                output::print_field("Result", &result.to_string());
+            }
         }
         3 => {
             let addr: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Address").interact_text()?;

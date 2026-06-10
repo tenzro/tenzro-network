@@ -2208,6 +2208,22 @@ impl EventLoop {
             return Err(NodeError::InvalidTransaction(format!("Invalid signature: {}", e)));
         }
 
+        // Off-chain spend-ceiling enforcement on the gossip-relay path.
+        // Closes the same gap as the RPC-side `enforce_typed_tx_spend_ceilings`:
+        // a delegated machine identity that has not installed an ERC-7579
+        // validator module would otherwise have NO spend ceiling at all
+        // when its transactions arrive via gossip. Mirrors the
+        // DelegationScope + SpendingPolicy check enforced on the RPC
+        // raw-tx admission path.
+        if let Err(e) = self.enforce_relay_spend_ceilings(&tx.transaction) {
+            warn!(
+                hash = %tx_hash,
+                error = %e,
+                "Rejecting relayed transaction at spend-ceiling gate"
+            );
+            return Err(e);
+        }
+
         info!(
             hash = %tx_hash,
             from = %tx.transaction.from,
@@ -2559,7 +2575,14 @@ impl EventLoop {
                 continue;
             }
 
-            let vm_tx = convert_transaction(signed_tx);
+            // Stamp the finalized block's timestamp onto the VmTransaction
+            // so native-VM handlers that depend on wall-clock state read
+            // a deterministic value across all validators (vs each one's
+            // `Utc::now()`). Without this, escrow-expiry / time-bound
+            // delegation / lifecycle TTL checks could diverge between
+            // validators and split finalized state.
+            let vm_tx = convert_transaction(signed_tx)
+                .with_block_timestamp_ms(block.header.timestamp.as_millis());
 
             debug!(
                 tx_hash = %tx_hash,
@@ -4359,6 +4382,94 @@ impl EventLoop {
         let registry = self.identity_registry.as_ref()?;
         registry.resolve(agent_did).ok().map(|id| id.wallet_address)
     }
+
+    /// Off-chain spend-ceiling enforcement on the gossip-relay path.
+    /// Mirrors `enforce_typed_tx_spend_ceilings` in `rpc.rs` — both
+    /// admission paths now consult the same DelegationScope + runtime
+    /// SpendingPolicy gate so a delegated machine identity cannot
+    /// bypass enforcement by signing locally and submitting via gossip
+    /// instead of RPC.
+    ///
+    /// Returns `Ok(())` for:
+    ///   - Senders that do not resolve to a registered DID (human EOAs).
+    ///   - Lifecycle/validator/TEE ops (authorized via separate gates).
+    ///   - Nodes without an identity registry wired (early bootstrap).
+    fn enforce_relay_spend_ceilings(
+        &self,
+        tx: &tenzro_types::Transaction,
+    ) -> Result<()> {
+        let registry = match self.identity_registry.as_ref() {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+        let did = match registry.find_did_by_address(&tx.from) {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+
+        let (operation, value): (&str, u128) = match &tx.tx_type {
+            tenzro_types::TransactionType::Transfer { amount } => ("transfer", *amount),
+            tenzro_types::TransactionType::ContractCall { .. } => ("contract_call", 0),
+            tenzro_types::TransactionType::ContractDeploy { .. } => ("contract_deploy", 0),
+            tenzro_types::TransactionType::AgentRegister { .. } => ("agent_register", 0),
+            tenzro_types::TransactionType::AgentExecute { .. } => ("agent_execute", 0),
+            tenzro_types::TransactionType::ModelInference { .. } => ("model_inference", 0),
+            tenzro_types::TransactionType::ProviderStake { amount, .. } => ("stake", *amount),
+            tenzro_types::TransactionType::ProviderUnstake { .. } => ("unstake", 0),
+            tenzro_types::TransactionType::CreateEscrow { amount, .. } => ("create_escrow", *amount),
+            tenzro_types::TransactionType::ReleaseEscrow { .. } => ("release_escrow", 0),
+            tenzro_types::TransactionType::RefundEscrow { .. } => ("refund_escrow", 0),
+            tenzro_types::TransactionType::BridgeTransfer { amount, .. } => ("bridge", *amount),
+            tenzro_types::TransactionType::GovernancePropose { .. } => ("governance_propose", 0),
+            tenzro_types::TransactionType::GovernanceVote { .. } => ("governance_vote", 0),
+            tenzro_types::TransactionType::PostAgentBond { amount, .. } => ("post_bond", *amount),
+            tenzro_types::TransactionType::IncreaseAgentBond { amount, .. } => ("increase_bond", *amount),
+            tenzro_types::TransactionType::WithdrawAgentBond { .. } => ("withdraw_bond", 0),
+            tenzro_types::TransactionType::PayInsuranceClaim { amount, .. } => ("insurance_claim", *amount),
+            tenzro_types::TransactionType::PauseAgent { .. }
+            | tenzro_types::TransactionType::QuarantineAgent { .. }
+            | tenzro_types::TransactionType::TerminateAgent { .. } => return Ok(()),
+            tenzro_types::TransactionType::TeeProviderRegister { .. }
+            | tenzro_types::TransactionType::RegisterValidator { .. }
+            | tenzro_types::TransactionType::UpdateValidatorMetadata { .. }
+            | tenzro_types::TransactionType::ExitValidator => return Ok(()),
+        };
+
+        // (1) DelegationScope. Humans pass through inside enforce_operation.
+        let value_opt = if value == 0 { None } else { Some(value) };
+        if let Err(e) = registry.enforce_operation(&did, operation, value_opt) {
+            return Err(NodeError::InvalidTransaction(format!(
+                "DelegationScope violation on relayed transaction: {e}"
+            )));
+        }
+
+        // (2) Runtime SpendingPolicy.
+        if value > 0
+            && let Some(runtime) = self.agent_runtime.as_ref()
+            && let Some(policy) = runtime.get_spending_policy(&did)
+        {
+            if !policy.enabled {
+                return Err(NodeError::InvalidTransaction(format!(
+                    "Runtime SpendingPolicy disabled for {did}"
+                )));
+            }
+            if value > policy.max_per_transaction as u128 {
+                return Err(NodeError::InvalidTransaction(format!(
+                    "Runtime SpendingPolicy: value {value} exceeds max_per_transaction {} for {did}",
+                    policy.max_per_transaction
+                )));
+            }
+            let projected = (policy.current_daily_spend as u128).saturating_add(value);
+            if projected > policy.max_daily_spend as u128 {
+                return Err(NodeError::InvalidTransaction(format!(
+                    "Runtime SpendingPolicy: projected daily spend {projected} exceeds max_daily_spend {} for {did}",
+                    policy.max_daily_spend
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Decode a Solidity ABI-encoded single dynamic `string` from a log
@@ -4646,18 +4757,35 @@ fn decode_validator_metadata_update_log(
 /// Returns `Ok(())` only when both legs verify; `Err(InvalidTransaction)`
 /// otherwise.
 fn verify_transaction_signature(signed_tx: &SignedTransaction) -> Result<()> {
+    use subtle::ConstantTimeEq;
     use tenzro_crypto::{PublicKey, KeyType, signatures};
 
     // Compute the transaction hash (this is the signed message for both legs).
     let tx_hash = signed_tx.transaction.hash();
     let message = tx_hash.as_bytes();
 
+    // 0. Sender-impersonation guard. The classical pubkey MUST derive the
+    //    declared `from` address. Without this bind, a peer can sign a tx
+    //    with their own key while placing a victim's address in `from`; the
+    //    pubkey-bound signature check below would then pass, debiting the
+    //    victim on every node that admits the tx via gossip.
+    //    `PublicKey::to_address()` already implements the deterministic
+    //    derivation (SHA-256 first-20 for Ed25519, Keccak-256 last-20 for
+    //    Secp256k1). Address is a 32-byte canonical slot; compare in
+    //    constant time to avoid an oracle on partial-match length.
+    let public_key = PublicKey::new(KeyType::Ed25519, signed_tx.signature.public_key.clone());
+    let derived = public_key.to_address();
+    if !bool::from(derived.as_bytes().ct_eq(signed_tx.transaction.from.as_bytes())) {
+        return Err(NodeError::InvalidTransaction(
+            "Signature public_key does not derive the declared 'from' address".to_string(),
+        ));
+    }
+
     // 1. Classical Ed25519 leg.
     let crypto_sig = tenzro_crypto::Signature::new(
         KeyType::Ed25519,
         signed_tx.signature.bytes.clone(),
     );
-    let public_key = PublicKey::new(KeyType::Ed25519, signed_tx.signature.public_key.clone());
     signatures::verify(&public_key, message, &crypto_sig).map_err(|e| {
         NodeError::InvalidTransaction(format!(
             "Classical Ed25519 signature verification failed: {}",

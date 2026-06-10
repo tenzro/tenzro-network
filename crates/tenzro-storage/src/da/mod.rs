@@ -468,14 +468,13 @@ impl InlineFallbackBackend {
     pub fn submit_sync(&self, namespace: &[u8], payload: &[u8]) -> DaPointer {
         let locator = Self::make_locator(payload);
         self.store.insert(locator.clone(), payload.to_vec());
-        if let Some(storage) = &self.storage {
-            if let Err(e) = storage.put(crate::kv::CF_METADATA, &Self::storage_key(&locator), payload) {
+        if let Some(storage) = &self.storage
+            && let Err(e) = storage.put(crate::kv::CF_METADATA, &Self::storage_key(&locator), payload) {
                 tracing::warn!(
                     "InlineFallbackBackend: failed to mirror-write payload to storage: {}",
                     e
                 );
             }
-        }
         *self.last_submission_ms.lock() = Some(Self::now_ms());
         DaPointer {
             backend: DaBackendId::InlineFallback,
@@ -502,8 +501,8 @@ impl InlineFallbackBackend {
             *self.last_fetch_ms.lock() = Some(Self::now_ms());
             return Ok(entry.value().clone());
         }
-        if let Some(storage) = &self.storage {
-            if let Some(bytes) = storage
+        if let Some(storage) = &self.storage
+            && let Some(bytes) = storage
                 .get(crate::kv::CF_METADATA, &Self::storage_key(&pointer.locator))
                 .map_err(|e| StorageError::Generic(format!("storage read: {}", e)))?
             {
@@ -511,7 +510,6 @@ impl InlineFallbackBackend {
                 *self.last_fetch_ms.lock() = Some(Self::now_ms());
                 return Ok(bytes);
             }
-        }
         Err(StorageError::KeyNotFound(format!(
             "InlineFallbackBackend has no payload for locator {}",
             String::from_utf8_lossy(&pointer.locator)
@@ -567,15 +565,14 @@ impl DaBackend for InlineFallbackBackend {
         if self.store.contains_key(&pointer.locator) {
             return Ok(());
         }
-        if let Some(storage) = &self.storage {
-            if storage
+        if let Some(storage) = &self.storage
+            && storage
                 .get(crate::kv::CF_METADATA, &Self::storage_key(&pointer.locator))
                 .map_err(|e| StorageError::Generic(format!("storage read: {}", e)))?
                 .is_some()
             {
                 return Ok(());
             }
-        }
         Err(StorageError::KeyNotFound(format!(
             "InlineFallbackBackend has no payload for locator {}",
             String::from_utf8_lossy(&pointer.locator)

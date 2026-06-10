@@ -1,10 +1,6 @@
 //! Plonky3 STARK AIRs for Tenzro circuits.
 //!
-//! Each module ports one of the legacy R1CS circuits in
-//! [`crate::circuits`] to a [`p3_air::Air`] over the [`KoalaBear`] field.
-//! Once all consumers (tenzro-vm, tenzro-settlement, tenzro-node, …) have
-//! migrated to these AIRs, the legacy R1CS circuit modules will be deleted
-//! per task #143.
+//! Each module is a [`p3_air::Air`] over the [`KoalaBear`] field.
 //!
 //! [`KoalaBear`]: p3_koala_bear::KoalaBear
 

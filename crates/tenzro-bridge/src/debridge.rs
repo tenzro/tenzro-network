@@ -13,7 +13,6 @@
 use crate::{
     error::{BridgeError, Result},
     evm_signer::EvmTransactionSigner,
-    message_format::{NonceTracker, TenzroMessage},
     traits::{BridgeAdapter, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo, TransferStatus},
 };
 use async_trait::async_trait;
@@ -38,8 +37,10 @@ pub struct DeBridgeAdapter {
     order_counter: Arc<DashMap<String, u64>>,
     /// Optional EVM transaction signer for real on-chain submission
     signer: Option<Arc<EvmTransactionSigner>>,
-    /// Nonce tracker for replay protection on received messages
-    nonce_tracker: NonceTracker,
+    /// Per-source-chain DLN Submission validator set. Inbound delivery
+    /// requires `threshold`-many DLN-validator signatures over the
+    /// submission prehash `keccak256(submissionId || dst_chain_id)`.
+    validator_sets: Arc<parking_lot::RwLock<std::collections::HashMap<u64, crate::secp256k1_multisig::ValidatorSet>>>,
 }
 
 impl DeBridgeAdapter {
@@ -57,7 +58,7 @@ impl DeBridgeAdapter {
             transfers: Arc::new(DashMap::new()),
             order_counter: Arc::new(DashMap::new()),
             signer: None,
-            nonce_tracker: NonceTracker::new(),
+            validator_sets: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -70,8 +71,25 @@ impl DeBridgeAdapter {
             transfers: Arc::new(DashMap::new()),
             order_counter: Arc::new(DashMap::new()),
             signer: None,
-            nonce_tracker: NonceTracker::new(),
+            validator_sets: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Install the DLN validator set for a source chain id. Inbound
+    /// `receive_message` requires `threshold`-many DLN validator
+    /// signatures over the submission prehash.
+    pub fn install_validator_set(
+        &self,
+        source_chain_id: u64,
+        validator_addresses: Vec<[u8; 20]>,
+        threshold: u8,
+    ) {
+        let set = crate::secp256k1_multisig::ValidatorSet::new(
+            validator_addresses,
+            threshold,
+            "deBridge DLN",
+        );
+        self.validator_sets.write().insert(source_chain_id, set);
     }
 
     /// Configures an EVM transaction signer for real on-chain order creation
@@ -656,53 +674,53 @@ impl BridgeAdapter for DeBridgeAdapter {
     }
 
     async fn receive_message(&self, source_chain: &str, payload: Vec<u8>) -> Result<()> {
+        // Real deBridge DLN verifier. The cross-chain authority is the
+        // DLN validator set installed for the source chain via
+        // `install_validator_set`. Without an installed set the
+        // adapter refuses delivery (no fail-open).
+        //
+        // Tenzro framing (inbound):
+        //   [0..32]              submission_id (bytes32)
+        //   [32..N-1-T]          submission body (opaque payload)
+        //   [N-1-T..N-1]         sig_count * (addr20 || sig65)
+        //   [N-1]                sig_count (u8)
+        //
+        // The DLN-signed prehash is `keccak256(submission_id || dst_chain_id_le8)`
+        // per the deBridge DLN gate contract — the dst chain id is the
+        // ADAPTER'S own chain id (the chain this node is delivering
+        // onto), which we keep constant per-adapter.
         let src_chain_id = self.get_chain_id(source_chain)?;
+        let set = self
+            .validator_sets
+            .read()
+            .get(&src_chain_id)
+            .cloned()
+            .ok_or_else(|| BridgeError::AdapterError(format!(
+                "deBridge adapter has no DLN validator set installed for chain \
+                 {src_chain_id} — inbound traffic refused. Call \
+                 install_validator_set at startup."
+            )))?;
 
+        let (body, signatures) = crate::secp256k1_multisig::parse_trailing_signature_set(&payload)?;
+        if body.len() < 32 {
+            return Err(BridgeError::InvalidParameter(
+                "deBridge: payload too short for 32-byte submission_id".into(),
+            ));
+        }
+        let submission_id: &[u8] = &body[..32];
+        // The adapter's own chain id is the destination chain for inbound
+        // delivery; that's the value the source-side DLN gate signed against.
+        let dst_chain_id: u64 = self.config.chain_id;
+        use sha3::{Digest as Sha3Digest, Keccak256};
+        let mut k = Keccak256::new();
+        Sha3Digest::update(&mut k, submission_id);
+        Sha3Digest::update(&mut k, &dst_chain_id.to_le_bytes());
+        let prehash: [u8; 32] = k.finalize().into();
+        set.verify_quorum(&prehash, &signatures)?;
         info!(
-            "deBridge: Receiving message from chain {} (chain_id: {}), payload_size={}",
-            source_chain,
-            src_chain_id,
-            payload.len()
+            "deBridge DLN: validator quorum verified ({} sigs, threshold {}, src {})",
+            signatures.len(), set.threshold, src_chain_id
         );
-
-        // 1. Deserialize the payload as a TenzroMessage
-        let message = TenzroMessage::decode(&payload)?;
-
-        // 2. Validate message format (version, addresses, timestamp drift)
-        message.validate()?;
-
-        // 3. Verify message hash integrity
-        if !message.verify_hash() {
-            return Err(BridgeError::InvalidMessageHash);
-        }
-
-        // 4. Verify the source chain ID matches the message's source_chain_id
-        if message.source_chain_id != src_chain_id {
-            return Err(BridgeError::AdapterError(format!(
-                "Source chain mismatch: message says {} but received from chain_id {}",
-                message.source_chain_id, src_chain_id
-            )));
-        }
-
-        // 5. Verify cryptographic signature if present
-        if message.signature.is_some() {
-            let valid = message.verify_signature()?;
-            if !valid {
-                return Err(BridgeError::AdapterError(
-                    "deBridge: Message signature verification failed".to_string(),
-                ));
-            }
-            debug!("deBridge: Message signature verified successfully");
-        }
-
-        // 6. Replay protection — nonce must be monotonically increasing per sender
-        self.nonce_tracker.check_and_update(&message.sender, message.nonce)?;
-
-        info!(
-            "deBridge: Message from {} verified and processed (type={:?}, nonce={})",
-            message.sender, message.message_type, message.nonce
-        );
-
         Ok(())
     }
 

@@ -68,11 +68,27 @@ fn execute_cross_vm_bridge(
     }
 
     let selector = &input[..4];
-    let calldata = &input[4..];
+
+    // Frame contract when invoked via `PrecompileRegistry::execute`:
+    //   [0..4]     selector
+    //   [4..N]     caller-supplied calldata
+    //   [N..N+32]  trusted msg.sender (32-byte left-padded) — RUNTIME
+    let (caller_opt, calldata): (Option<[u8; 20]>, &[u8]) = if input.len() >= 4 + 32 {
+        let split = input.len() - 32;
+        let mut caller = [0u8; 20];
+        caller.copy_from_slice(&input[split + 12..]);
+        (Some(caller), &input[4..split])
+    } else {
+        (None, &input[4..])
+    };
 
     match selector {
         s if s == selectors::CROSS_VM_TRANSFER => {
-            handle_cross_vm_transfer(token, registry, nonce_counter, calldata, gas_limit)
+            let caller = caller_opt.ok_or_else(|| VmError::PrecompileFailed(
+                "crossVmTransfer requires trusted msg.sender; invoke precompile \
+                 via PrecompileRegistry::execute (EVM runtime path).".to_string(),
+            ))?;
+            handle_cross_vm_transfer(token, registry, nonce_counter, &caller, calldata, gas_limit)
         }
         s if s == selectors::GET_VM_BALANCE => {
             handle_get_vm_balance(token, registry, calldata, gas_limit)
@@ -92,19 +108,20 @@ fn execute_cross_vm_bridge(
 /// For user tokens: This would burn on the source VM and mint on the destination VM.
 /// Currently, only TNZO is supported for cross-VM transfers.
 ///
-/// Input layout (after selector):
+/// The source-VM debit binds to the TRUSTED `msg.sender` supplied by
+/// the EVM runtime, NOT to caller-supplied calldata bytes.
+///
+/// `calldata` layout (after selector + trusted-caller slot stripped):
 ///   [0..32]    tokenId (bytes32)
 ///   [32..64]   amount (uint256)
 ///   [64..96]   destVm (uint8, right-aligned)
-///   [96..128]  destAddress offset (= 0xa0, points to length slot below)
-///   [128..160] caller address (right-aligned 20 bytes — populated by the
-///              transaction sender, not auto-injected by the runtime)
-///   [160..192] destAddress length (uint256, big-endian)
-///   [192..]    destAddress data (right-padded to 32-byte multiple)
+///   [96..128]  destAddress offset (points to length slot below)
+///   [128..]    destAddress dynamic bytes (length-prefixed, right-padded)
 fn handle_cross_vm_transfer(
     token: &TnzoToken,
     registry: &TokenRegistry,
     nonce_counter: &AtomicU64,
+    caller: &[u8; 20],
     calldata: &[u8],
     gas_limit: u64,
 ) -> Result<PrecompileResult> {
@@ -112,7 +129,7 @@ fn handle_cross_vm_transfer(
         return Err(VmError::OutOfGas);
     }
 
-    if calldata.len() < 160 {
+    if calldata.len() < 128 {
         return Ok(PrecompileResult::failed(GAS_CROSS_VM_TRANSFER));
     }
 
@@ -132,8 +149,7 @@ fn handle_cross_vm_transfer(
         VmError::PrecompileFailed(format!("crossVmTransfer: invalid VM type {}", dest_vm_byte))
     })?;
 
-    // Parse caller (sender) address
-    let caller_20 = abi::decode_address_at(calldata, 128).unwrap_or([0u8; 20]);
+    let caller_20 = *caller;
 
     // Parse destination address from dynamic bytes
     let dest_address = decode_dynamic_bytes(calldata, 96).unwrap_or_default();

@@ -427,6 +427,47 @@ pub struct BridgeAdapterConfig {
     /// full private scalar.
     #[serde(default)]
     pub mpc_threshold: Option<MpcThresholdConfig>,
+
+    /// Inbound verifier set(s). Required for `receive_message` to admit
+    /// any cross-chain payload. Each adapter chooses its own subset:
+    ///   - LayerZero V2: one `InboundVerifierSet` per source EID under
+    ///     the canonical `kind = "dvn"`.
+    ///   - Chainlink CCIP: TWO entries per source-chain selector,
+    ///     `kind = "ccip_commit"` and `kind = "ccip_rmn"`; both must
+    ///     verify for delivery.
+    ///   - deBridge DLN: one entry per source chain id, `kind = "dln"`.
+    ///   - Hyperlane: one entry per origin domain, `kind = "hyperlane"`.
+    ///   - Axelar: one entry per source chain, `kind = "axelar"`.
+    ///   - Wormhole: install the GuardianSet directly via the
+    ///     Wormhole-specific Guardian wire format (not via this list).
+    ///
+    /// Absent entry = adapter refuses inbound traffic at startup
+    /// (fail-closed). This is the required production posture.
+    #[serde(default)]
+    pub inbound_verifier_sets: Vec<InboundVerifierSet>,
+}
+
+/// One inbound verifier set entry. The calling adapter is responsible
+/// for scoping `source_id` correctly (EID, chain selector, origin
+/// domain, etc) and dispatching to the right `kind`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InboundVerifierSet {
+    /// Verifier kind. Recognized values:
+    /// `"dvn"`, `"ccip_commit"`, `"ccip_rmn"`, `"dln"`, `"hyperlane"`,
+    /// `"axelar"`. Unknown kinds are logged and skipped at startup.
+    pub kind: String,
+    /// Source-chain identifier. Interpretation depends on `kind`:
+    /// LayerZero EID (u32), CCIP selector (u64), Hyperlane domain (u32),
+    /// etc. Encoded as a JSON number so operators can paste the value
+    /// directly from the upstream config.
+    pub source_id: u64,
+    /// Hex-encoded 20-byte authorised signer addresses (with or without
+    /// `0x` prefix). MUST match the upstream chain's published validator
+    /// set; copy them from the canonical source (LZ docs, CCIP commit-store
+    /// committee, DLN admin, Hyperlane registry, etc).
+    pub addresses: Vec<String>,
+    /// Quorum threshold (number of distinct signatures required).
+    pub threshold: u8,
 }
 
 /// Per-adapter DKLS23 t-of-n threshold-signer configuration.

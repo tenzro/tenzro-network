@@ -158,11 +158,31 @@ struct Cli {
     /// peer's RPC endpoint, verify chunk hashes against the manifest, and
     /// commit it to the local KV store before starting consensus. Skips
     /// block replay from genesis. Used to bring a fresh / wedged validator
-    /// online quickly. The caller is responsible for verifying the
-    /// snapshot's `state_root_hex` against a trusted QC out of band.
+    /// online quickly.
+    ///
+    /// MUST be combined with `--state-sync-anchor` (the operator-vetted
+    /// state root at the snapshot height). Without an anchor the
+    /// bootstrap refuses to apply chunks — a malicious peer could
+    /// otherwise serve a forged manifest with any state.
     /// Example: `--state-sync-from https://rpc.tenzro.network`
     #[arg(long, value_name = "URL")]
     state_sync_from: Option<String>,
+
+    /// Weak-subjectivity anchor for state-sync: the 32-byte state root
+    /// (hex, with or without `0x`) the operator has verified out of band
+    /// at the snapshot height the peer will serve. The snapshot's
+    /// declared `state_root_hex` is matched bit-for-bit against this
+    /// value before any chunk is applied. Required whenever
+    /// `--state-sync-from` is set.
+    ///
+    /// Obtain this value from a trusted source: a known-good validator's
+    /// signed gossip, a published weak-subjectivity checkpoint, or a
+    /// personally-verified RPC's `tenzro_getSnapshotManifest` cross-checked
+    /// against the network's finalized header.
+    ///
+    /// Example: `--state-sync-anchor 0xabc123...def`
+    #[arg(long, value_name = "HEX", requires = "state_sync_from")]
+    state_sync_anchor: Option<String>,
 
     /// Optional subcommand. When omitted, the binary runs as a full node
     /// using the top-level flags above. Subcommands are administrative
@@ -339,6 +359,38 @@ async fn main() -> Result<()> {
     if let Some(peer) = cli.state_sync_from.clone() {
         info!(peer = %peer, "State-sync requested via --state-sync-from");
         node.set_state_sync_peer(peer);
+
+        // Operator-supplied weak-subjectivity anchor is REQUIRED
+        // alongside the peer URL — the snapshot manifest's declared
+        // state_root must match this value bit-for-bit before any
+        // chunk is applied. Without it the bootstrap is unauthenticated.
+        let anchor_hex = cli
+            .state_sync_anchor
+            .clone()
+            .ok_or_else(|| error::NodeError::Other(
+                "--state-sync-from requires --state-sync-anchor (32-byte hex state \
+                 root). The anchor is matched bit-for-bit against the snapshot \
+                 manifest's declared state_root before any chunk is applied — \
+                 without it the peer's RPC has no cryptographic authority to \
+                 seed local state.".to_string()
+            ))?;
+        let cleaned = anchor_hex.trim_start_matches("0x");
+        let anchor_bytes = hex::decode(cleaned).map_err(|e| error::NodeError::Other(
+            format!("--state-sync-anchor is not valid hex: {e}")
+        ))?;
+        if anchor_bytes.len() != 32 {
+            return Err(error::NodeError::Other(format!(
+                "--state-sync-anchor must be exactly 32 bytes (got {})",
+                anchor_bytes.len()
+            )));
+        }
+        let mut anchor = [0u8; 32];
+        anchor.copy_from_slice(&anchor_bytes);
+        node.set_state_sync_anchor(anchor);
+        info!(
+            anchor = %format!("0x{}", hex::encode(anchor)),
+            "State-sync anchor installed"
+        );
     }
     node.start().await?;
 
@@ -582,15 +634,17 @@ async fn main() -> Result<()> {
     let mcp_addr = config.mcp_addr.clone();
     let mcp_node = node_arc.clone();
     let mcp_web_state = web_state.clone();
-    let mut mcp_shutdown_rx = shutdown_tx.subscribe();
+    let mcp_shutdown_rx = shutdown_tx.subscribe();
     let mut mcp_handle = tokio::spawn(async move {
-        tokio::select! {
-            result = mcp::server::start_mcp_server(mcp_addr, mcp_node, mcp_web_state) => {
-                if let Err(e) = result { error!("MCP server error: {}", e); }
-            }
-            _ = async { let _ = mcp_shutdown_rx.recv().await; } => {
-                info!("MCP server shutting down");
-            }
+        if let Err(e) = mcp::server::start_mcp_server_with_shutdown(
+            mcp_addr,
+            mcp_node,
+            mcp_web_state,
+            mcp_shutdown_rx,
+        )
+        .await
+        {
+            error!("MCP server error: {}", e);
         }
     });
 
@@ -643,30 +697,37 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Start ecosystem MCP servers (Solana, Ethereum, Canton, LayerZero, Chainlink)
+    // Start ecosystem MCP servers (Solana, Ethereum, Canton, LayerZero, Chainlink,
+    // LI.FI). Each uses axum's `with_graceful_shutdown` plumbed through the
+    // shared `shutdown_tx` broadcast — in-flight requests are allowed to drain
+    // before the listener future resolves, instead of being torn down via
+    // `tokio::select!` cancellation on the running future.
     let solana_addr = config.solana_mcp_addr.clone();
-    let mut solana_shutdown_rx = shutdown_tx.subscribe();
+    let solana_shutdown_rx = shutdown_tx.subscribe();
+    let solana_rpc_url = std::env::var("SOLANA_RPC_URL")
+        .unwrap_or_else(|_| mcp::solana::default_solana_rpc_url());
     tokio::spawn(async move {
-        tokio::select! {
-            result = mcp::solana::start_solana_mcp_server(solana_addr) => {
-                if let Err(e) = result { error!("Solana MCP server error: {}", e); }
-            }
-            _ = async { let _ = solana_shutdown_rx.recv().await; } => {
-                info!("Solana MCP server shutting down");
-            }
+        if let Err(e) = mcp::solana::start_solana_mcp_server_with_rpc_and_shutdown(
+            solana_addr,
+            solana_rpc_url,
+            solana_shutdown_rx,
+        )
+        .await
+        {
+            error!("Solana MCP server error: {}", e);
         }
     });
 
     let ethereum_addr = config.ethereum_mcp_addr.clone();
-    let mut ethereum_shutdown_rx = shutdown_tx.subscribe();
+    let ethereum_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
-        tokio::select! {
-            result = mcp::ethereum::start_ethereum_mcp_server(ethereum_addr) => {
-                if let Err(e) = result { error!("Ethereum MCP server error: {}", e); }
-            }
-            _ = async { let _ = ethereum_shutdown_rx.recv().await; } => {
-                info!("Ethereum MCP server shutting down");
-            }
+        if let Err(e) = mcp::ethereum::start_ethereum_mcp_server_with_shutdown(
+            ethereum_addr,
+            ethereum_shutdown_rx,
+        )
+        .await
+        {
+            error!("Ethereum MCP server error: {}", e);
         }
     });
 
@@ -724,64 +785,62 @@ async fn main() -> Result<()> {
             };
             (ledger, admin, provider, jwt)
         };
-    let mut canton_shutdown_rx = shutdown_tx.subscribe();
+    let canton_shutdown_rx = shutdown_tx.subscribe();
     let canton_api_key_mgr = node_arc.api_key_manager().cloned();
     let canton_analytics_mgr = node_arc.canton_analytics().cloned();
     tokio::spawn(async move {
-        tokio::select! {
-            result = mcp::canton::start_canton_mcp_server(
-                canton_addr,
-                canton_ledger_api_url,
-                canton_admin_api_url,
-                canton_jwt_token,
-                canton_token_provider,
-                canton_api_key_mgr,
-                canton_analytics_mgr,
-            ) => {
-                if let Err(e) = result { error!("Canton MCP server error: {}", e); }
-            }
-            _ = async { let _ = canton_shutdown_rx.recv().await; } => {
-                info!("Canton MCP server shutting down");
-            }
+        if let Err(e) = mcp::canton::start_canton_mcp_server_with_shutdown(
+            canton_addr,
+            canton_ledger_api_url,
+            canton_admin_api_url,
+            canton_jwt_token,
+            canton_token_provider,
+            canton_api_key_mgr,
+            canton_analytics_mgr,
+            canton_shutdown_rx,
+        )
+        .await
+        {
+            error!("Canton MCP server error: {}", e);
         }
     });
 
     let layerzero_addr = config.layerzero_mcp_addr.clone();
-    let mut layerzero_shutdown_rx = shutdown_tx.subscribe();
+    let layerzero_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
-        tokio::select! {
-            result = mcp::layerzero::start_layerzero_mcp_server(layerzero_addr) => {
-                if let Err(e) = result { error!("LayerZero MCP server error: {}", e); }
-            }
-            _ = async { let _ = layerzero_shutdown_rx.recv().await; } => {
-                info!("LayerZero MCP server shutting down");
-            }
+        if let Err(e) = mcp::layerzero::start_layerzero_mcp_server_with_shutdown(
+            layerzero_addr,
+            layerzero_shutdown_rx,
+        )
+        .await
+        {
+            error!("LayerZero MCP server error: {}", e);
         }
     });
 
     let chainlink_addr = config.chainlink_mcp_addr.clone();
-    let mut chainlink_shutdown_rx = shutdown_tx.subscribe();
+    let chainlink_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
-        tokio::select! {
-            result = mcp::chainlink::start_chainlink_mcp_server(chainlink_addr) => {
-                if let Err(e) = result { error!("Chainlink MCP server error: {}", e); }
-            }
-            _ = async { let _ = chainlink_shutdown_rx.recv().await; } => {
-                info!("Chainlink MCP server shutting down");
-            }
+        if let Err(e) = mcp::chainlink::start_chainlink_mcp_server_with_shutdown(
+            chainlink_addr,
+            chainlink_shutdown_rx,
+        )
+        .await
+        {
+            error!("Chainlink MCP server error: {}", e);
         }
     });
 
     let lifi_addr = config.lifi_mcp_addr.clone();
-    let mut lifi_shutdown_rx = shutdown_tx.subscribe();
+    let lifi_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
-        tokio::select! {
-            result = mcp::lifi::start_lifi_mcp_server(lifi_addr) => {
-                if let Err(e) = result { error!("LI.FI MCP server error: {}", e); }
-            }
-            _ = async { let _ = lifi_shutdown_rx.recv().await; } => {
-                info!("LI.FI MCP server shutting down");
-            }
+        if let Err(e) = mcp::lifi::start_lifi_mcp_server_with_shutdown(
+            lifi_addr,
+            lifi_shutdown_rx,
+        )
+        .await
+        {
+            error!("LI.FI MCP server error: {}", e);
         }
     });
 

@@ -74,7 +74,20 @@ pub fn create_token_factory_precompile(
     })
 }
 
-/// Main dispatch for the token factory precompile
+/// Main dispatch for the token factory precompile.
+///
+/// Frame contract when invoked via `PrecompileRegistry::execute`:
+///
+/// ```text
+///   [0..4]    selector
+///   [4..N]    caller-supplied calldata (any ABI shape)
+///   [N..N+32] trusted msg.sender (32-byte left-padded) — REQUIRED for
+///             write selectors (CREATE_TOKEN); read-only selectors
+///             accept a missing slot.
+/// ```
+///
+/// Authorization-sensitive selectors read the creator from `caller`,
+/// never from caller-supplied calldata bytes.
 fn execute_token_factory(
     registry: &TokenRegistry,
     input: &[u8],
@@ -85,10 +98,23 @@ fn execute_token_factory(
     }
 
     let selector = &input[..4];
-    let calldata = &input[4..];
+    let (caller_opt, calldata): (Option<[u8; 20]>, &[u8]) = if input.len() >= 4 + 32 {
+        let split = input.len() - 32;
+        let mut caller = [0u8; 20];
+        caller.copy_from_slice(&input[split + 12..]);
+        (Some(caller), &input[4..split])
+    } else {
+        (None, &input[4..])
+    };
 
     match selector {
-        s if s == selectors::CREATE_TOKEN => handle_create_token(registry, calldata, gas_limit),
+        s if s == selectors::CREATE_TOKEN => {
+            let caller = caller_opt.ok_or_else(|| VmError::PrecompileFailed(
+                "createToken requires trusted msg.sender; invoke precompile \
+                 via PrecompileRegistry::execute (EVM runtime path).".to_string(),
+            ))?;
+            handle_create_token(registry, &caller, calldata, gas_limit)
+        }
         s if s == selectors::PREDICT_ADDRESS => handle_predict_address(calldata, gas_limit),
         s if s == selectors::GET_IMPLEMENTATION => handle_get_implementation(gas_limit),
         s if s == selectors::GET_TOKEN_COUNT => handle_get_token_count(registry, gas_limit),
@@ -99,18 +125,20 @@ fn execute_token_factory(
 /// createToken(string name, string symbol, uint8 decimals, uint256 initialSupply, uint8 flags)
 ///
 /// Creates a new ERC-20 token via ERC-1167 minimal proxy clone.
-/// The caller address is appended as the last 32 bytes of calldata by the EVM runtime.
+/// The creator is the trusted `msg.sender` supplied by the EVM runtime;
+/// caller-supplied bytes in `calldata` are never used for authorization.
 ///
-/// Input layout (after selector):
+/// `calldata` is the original Solidity ABI payload (after the selector,
+/// and with the runtime-appended trusted-caller slot stripped). Layout:
 ///   [0..32]   name_offset (dynamic)
 ///   [32..64]  symbol_offset (dynamic)
 ///   [64..96]  decimals (uint8)
 ///   [96..128] initial_supply (uint256)
 ///   [128..160] flags (uint8)
-///   [160..192] caller address (appended by EVM runtime)
-///   [192..]   dynamic name and symbol data
+///   [160..]   dynamic name and symbol data
 fn handle_create_token(
     registry: &TokenRegistry,
+    caller: &[u8; 20],
     calldata: &[u8],
     gas_limit: u64,
 ) -> Result<PrecompileResult> {
@@ -118,8 +146,8 @@ fn handle_create_token(
         return Err(VmError::OutOfGas);
     }
 
-    // We need at least the fixed-size parameters
-    if calldata.len() < 192 {
+    // We need at least the five fixed-size head words.
+    if calldata.len() < 160 {
         return Ok(PrecompileResult::failed(GAS_CREATE_TOKEN));
     }
 
@@ -128,10 +156,9 @@ fn handle_create_token(
     let initial_supply = abi::decode_uint256_at(calldata, 96).unwrap_or(0);
     let flags = calldata[159]; // Last byte of [128..160]
 
-    // Parse caller address
-    let caller_20 = abi::decode_address_at(calldata, 160).unwrap_or([0u8; 20]);
+    // Creator is the trusted caller from the EVM runtime.
     let mut creator = [0u8; 32];
-    creator[12..32].copy_from_slice(&caller_20);
+    creator[12..32].copy_from_slice(caller);
 
     // Parse dynamic strings (simplified: read from offsets)
     let name = decode_dynamic_string(calldata, 0).unwrap_or_else(|| "Unnamed Token".to_string());

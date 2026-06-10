@@ -53,20 +53,45 @@
   "rating": 0,
   "content_hash": null,
   "docs_url": "https://docs.tenzro.network/agent-kit/templates/agentic-best-ex-router",
-  "policy": {
-    "tools_allowlist": [
-      { "tool_id": "tenzro_capitalIntentOpen", "tool_type": "rpc" },
-      { "tool_id": "tenzro_capitalIntentExecute", "tool_type": "rpc" },
-      { "tool_id": "tenzro_createEscrow", "tool_type": "rpc" },
-      { "tool_id": "tenzro_releaseEscrow", "tool_type": "rpc" }
-    ],
-    "delegation_scope": {
-      "max_per_op_wei": "10000000000000000000000000",
-      "max_per_day_wei": "100000000000000000000000000",
-      "max_tx_count_per_day": 1000,
+  "metadata": {},
+  "execution_spec": {
+    "backend": "MultiVm",
+    "delegation": {
+      "max_transaction_value": "10000000000000000000000000",
+      "max_daily_spend": "100000000000000000000000000",
+      "allowed_operations": ["capital_intent_open", "capital_intent_execute", "sign_and_send_transaction"],
       "allowed_chains": ["tenzro", "ethereum", "solana", "base"],
-      "allowed_protocols": ["mpp", "ap2", "x402"]
+      "time_bound_days": 30,
+      "kyc_tier": "Enhanced"
     },
+    "required_tool_tags": ["capital-intent", "escrow"],
+    "required_skill_tags": ["best-execution", "router"],
+    "steps": [
+      {
+        "NodeRpc": {
+          "method": "tenzro_capitalIntentOpen",
+          "params": { "intent_json": "{{intent_json}}" }
+        }
+      },
+      {
+        "NodeRpc": {
+          "method": "tenzro_signAndSendTransaction",
+          "params": { "transaction": "{{create_escrow_tx_json}}" }
+        }
+      },
+      {
+        "NodeRpc": {
+          "method": "tenzro_capitalIntentExecute",
+          "params": { "intent_id": "{{intent_id}}" }
+        }
+      },
+      {
+        "NodeRpc": {
+          "method": "tenzro_signAndSendTransaction",
+          "params": { "transaction": "{{release_escrow_tx_json}}" }
+        }
+      }
+    ],
     "hard_caps": {
       "per_operation_value": "10000000000000000000000000",
       "per_day_value": "100000000000000000000000000"

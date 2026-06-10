@@ -1110,10 +1110,10 @@ pub(crate) async fn handle_request(
         "tenzro_faucetInfo" => handle_faucet_info(node).await,
 
         // Agent memory tier (Phase B): Lance vector + Tantivy BM25 + DA archive.
-        "tenzro_memoryGrant" => handle_memory_grant(node, request.params).await,
-        "tenzro_memoryRecall" => handle_memory_recall(node, request.params).await,
-        "tenzro_memoryArchive" => handle_memory_archive(node, request.params).await,
-        "tenzro_listMemoryRecords" => handle_list_memory_records(node, request.params).await,
+        "tenzro_memoryGrant" => handle_memory_grant(node, request.params, auth_ctx).await,
+        "tenzro_memoryRecall" => handle_memory_recall(node, request.params, auth_ctx).await,
+        "tenzro_memoryArchive" => handle_memory_archive(node, request.params, auth_ctx).await,
+        "tenzro_listMemoryRecords" => handle_list_memory_records(node, request.params, auth_ctx).await,
 
         // Iroh consumer surface (Phases A2 → D2). Exposes the shared
         // `IrohBackedResolver` (QUIC + Pkarr + iroh-blobs) and the
@@ -5303,6 +5303,68 @@ fn require_memory_manager(
     })
 }
 
+/// Enforce that the authenticated bearer is allowed to read/write the
+/// memory rows owned by `agent_did`. Allowed when:
+///
+///   - bearer DID exactly equals `agent_did` (the agent operates on
+///     its own memory), or
+///   - bearer is the controller_did of `agent_did` (delegated agent;
+///     the controller can read its delegate's memory).
+///
+/// All other combinations — including unauthenticated requests and
+/// requests where bearer is a stranger to `agent_did` — are rejected
+/// with `-32001`. This closes the cross-DID memory exfiltration where
+/// any caller could pass an arbitrary `agent_did` and read its rows.
+async fn enforce_memory_access(
+    node: &Arc<TenzroNode>,
+    auth_ctx: &AuthContext,
+    agent_did: &str,
+) -> std::result::Result<(), JsonRpcError> {
+    let outcome = resolve_auth_to_wallet(node, auth_ctx, None).await;
+    let bearer_did = match outcome {
+        AuthOutcome::Authenticated { bearer_did, .. } => bearer_did,
+        AuthOutcome::AuthError(err) => return Err(err),
+        AuthOutcome::Unauthenticated => {
+            return Err(JsonRpcError {
+                code: -32001,
+                message: "Authentication required: agent memory access requires \
+                          DPoP+JWT bearer auth so the server can bind the request \
+                          to a specific DID. Unauthenticated reads would let any \
+                          caller exfiltrate any agent's memory.".to_string(),
+                data: None,
+            });
+        }
+    };
+
+    if bearer_did == agent_did {
+        return Ok(());
+    }
+
+    // Delegated-agent path: bearer == controller_did(agent_did)?
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    if let Ok(target) = registry.resolve(agent_did)
+        && let Some(controller) = target.controller_did()
+        && controller == bearer_did.as_str()
+    {
+        return Ok(());
+    }
+
+    Err(JsonRpcError {
+        code: -32001,
+        message: format!(
+            "Bearer DID '{}' is not authorized to access memory of agent '{}'. \
+             Memory access is restricted to the owning agent and its controller.",
+            bearer_did, agent_did
+        ),
+        data: None,
+    })
+}
+
 fn memory_record_to_json(r: &tenzro_agent::memory::MemoryRecord) -> Value {
     serde_json::json!({
         "id": r.id,
@@ -5320,6 +5382,7 @@ fn memory_record_to_json(r: &tenzro_agent::memory::MemoryRecord) -> Value {
 async fn handle_memory_grant(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    auth_ctx: &AuthContext,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -5335,6 +5398,7 @@ async fn handle_memory_grant(
             data: None,
         })?
         .to_string();
+    enforce_memory_access(node, auth_ctx, &agent_did).await?;
     let text = params
         .get("text")
         .and_then(|v| v.as_str())
@@ -5382,6 +5446,7 @@ async fn handle_memory_grant(
 async fn handle_memory_recall(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    auth_ctx: &AuthContext,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -5397,6 +5462,7 @@ async fn handle_memory_recall(
             data: None,
         })?
         .to_string();
+    enforce_memory_access(node, auth_ctx, &agent_did).await?;
     let query = params
         .get("query")
         .and_then(|v| v.as_str())
@@ -5444,6 +5510,7 @@ async fn handle_memory_recall(
 async fn handle_memory_archive(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    auth_ctx: &AuthContext,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -5468,6 +5535,7 @@ async fn handle_memory_archive(
             data: None,
         })?
         .to_string();
+    enforce_memory_access(node, auth_ctx, &agent_did).await?;
     let mgr = require_memory_manager(node)?;
     let archived = mgr
         .archive(&record_id, &agent_did)
@@ -5483,6 +5551,7 @@ async fn handle_memory_archive(
 async fn handle_list_memory_records(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    auth_ctx: &AuthContext,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -5498,6 +5567,7 @@ async fn handle_list_memory_records(
             data: None,
         })?
         .to_string();
+    enforce_memory_access(node, auth_ctx, &agent_did).await?;
     let limit = params
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -11074,12 +11144,14 @@ async fn handle_syncing(node: &Arc<TenzroNode>) -> std::result::Result<Value, Js
     // status from block N-1 is still in flight.
     const SYNC_LAG_THRESHOLD: u64 = 2;
 
-    // Network-tip estimate: max height across fresh peer status messages on
-    // tenzro/status. None ⇒ no fresh peer status (single-node, or
-    // network silence). Defaults to local_tip in that case so we don't
-    // falsely report syncing. TODO mainnet: use median (or local_tip + cap)
-    // to harden against a malicious peer claiming a huge height.
-    let network_tip = node.network_tip().unwrap_or(local_tip);
+    // Robust network-tip estimate: median of fresh peer heights, capped
+    // at local_tip + MAX_TIP_LEAD. The median filter tolerates a
+    // minority of peers reporting bogus heights, and the cap prevents
+    // an attacker who controls a majority within the 60s freshness
+    // window from dragging the node into a multi-day fake sync. None ⇒
+    // no fresh peers (single-node or network silence) ⇒ we report
+    // syncing:false because there is nothing to compare against.
+    let network_tip = node.network_tip_capped(local_tip).unwrap_or(local_tip);
     let highest_block = local_tip.max(network_tip);
 
     let is_syncing = network_tip > local_tip + SYNC_LAG_THRESHOLD;
@@ -12599,10 +12671,37 @@ async fn handle_send_raw_transaction(
     // a bogus tx_hash that never finalized. Now we reject at RPC time so the
     // caller gets immediate feedback.
     {
+        use subtle::ConstantTimeEq;
         use tenzro_crypto::{PublicKey, KeyType, signatures};
         let crypto_sig = tenzro_crypto::Signature::new(KeyType::Ed25519, sig_bytes);
         let public_key = PublicKey::new(KeyType::Ed25519, pubkey_bytes);
         let message = signed_tx.transaction.hash();
+
+        // 0. Sender-impersonation guard: the signing pubkey MUST derive the
+        //    `from` address. Without this bind, any caller can sign a tx with
+        //    their own key, place a victim's address in `from`, and the
+        //    hybrid signature checks below would pass — debiting the victim.
+        //    `PublicKey::to_address()` returns a 32-byte canonical slot with
+        //    the 20-byte derived address at [0..20] (zero-padded tail);
+        //    `Address` storage shares the same shape, so constant-time
+        //    compare the raw bytes.
+        let derived = public_key.to_address();
+        if !bool::from(derived.as_bytes().ct_eq(signed_tx.transaction.from.as_bytes())) {
+            warn!(
+                target: "rpc",
+                tx_hash = %tx_hash,
+                claimed_from = %from_str,
+                "eth_sendRawTransaction: signing pubkey does not derive 'from' address (-32003)"
+            );
+            return Err(JsonRpcError {
+                code: -32003,
+                message: "Signature public_key does not derive the claimed 'from' address. \
+                          A transaction can only be sent from the address controlled by the \
+                          signing keypair."
+                    .to_string(),
+                data: None,
+            });
+        }
 
         // 1. Classical Ed25519 leg.
         if let Err(e) = signatures::verify(&public_key, message.as_bytes(), &crypto_sig) {
@@ -12708,6 +12807,15 @@ async fn handle_send_raw_transaction(
         signed_tx.transaction.gas_price,
         &signed_tx.transaction.tx_type,
     )?;
+
+    // === Off-chain spend-ceiling enforcement (defence-in-depth) ===
+    // The ERC-7579 chain above is the primary cryptographic gate, but
+    // only fires when validator modules are installed on `from`. A
+    // delegated machine identity that hasn't installed any module
+    // would otherwise bypass on-chain custody entirely. This helper
+    // closes that gap by consulting the same DelegationScope +
+    // SpendingPolicy ceilings the payments-side gate uses.
+    enforce_typed_tx_spend_ceilings(node, &signed_tx.transaction)?;
 
     // Synchronous Spec-2 admission: try the local consensus mempool first so
     // rate-limited senders see JSON-RPC error -32011 immediately instead of a
@@ -32137,8 +32245,6 @@ async fn handle_verify_zk_proof(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    let _ = node;
-
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602, message: "Missing params".to_string(), data: None,
     })?;
@@ -32184,8 +32290,16 @@ async fn handle_verify_zk_proof(
         circuit_id.clone(),
     );
 
+    // Compute the commitment hash up front so we can attest it on a
+    // successful verification. The hash binds the circuit id, the proof
+    // bytes, AND the public inputs — substituting different inputs
+    // produces a different commitment, so attesting after a real verify
+    // gives the EVM `ZK_VERIFY` precompile a sound O(1) lookup.
+    let commitment = tenzro_vm::precompiles::compute_zk_commitment(&envelope);
+
+    let envelope_for_verify = envelope.clone();
     let verify_result = tokio::task::spawn_blocking(move || {
-        tenzro_zk::verify_proof_envelope(&envelope)
+        tenzro_zk::verify_proof_envelope(&envelope_for_verify)
     })
     .await
     .unwrap_or_else(|join_err| {
@@ -32195,13 +32309,49 @@ async fn handle_verify_zk_proof(
     });
 
     match verify_result {
-        Ok(()) => Ok(serde_json::json!({
-            "valid": true,
-            "circuit_id": circuit_id,
-            "public_inputs_count": public_inputs_count,
-            "proof_size_bytes": proof_size,
-            "status": "plonky3_verified",
-        })),
+        Ok(()) => {
+            // Attest the commitment so downstream EVM contracts that
+            // gate via the `ZK_VERIFY` precompile (0x0101) can confirm
+            // the proof was off-EVM-verified by this validator. Without
+            // this attestation the precompile would always return 0
+            // and the entire commitment-attestation model would be a
+            // stub. `attest()` is idempotent.
+            let newly_inserted = node.zk_commitment_registry().attest(commitment);
+
+            // Surface the known soundness limitation of the current
+            // AIRs (see `tenzro_zk::circuits::airs::inference`) so
+            // relying parties don't silently treat the proof as a
+            // value-binding artefact-hash proof. Until the AIRs bind
+            // the full Poseidon2 digest of each witness, public-input
+            // slots 1..7 of each digest are unconstrained and a
+            // malicious prover can deceive a relying party that uses
+            // those slots as canonical hashes.
+            let advisory = matches!(
+                circuit_id.as_str(),
+                "inference" | "settlement" | "identity"
+            );
+            Ok(serde_json::json!({
+                "valid": true,
+                "circuit_id": circuit_id,
+                "public_inputs_count": public_inputs_count,
+                "proof_size_bytes": proof_size,
+                "status": "plonky3_verified",
+                "commitment_hex": format!("0x{}", hex::encode(commitment)),
+                "newly_attested": newly_inserted,
+                "soundness_class": if advisory { "advisory" } else { "binding" },
+                "soundness_note": if advisory {
+                    "AIR binds ALL DIGEST_LEN slots of each public-input digest to \
+                     the corresponding trace cell (wave 5 hardening). Remaining gap: \
+                     the trace's hash cells are computed off-circuit, so the AIR \
+                     does not bind the witness to its declared hash itself — only \
+                     the trace cells to the declared public inputs. Relying parties \
+                     that treat the public-input digests as canonical artefact \
+                     hashes must verify the witness↔hash binding out of band until \
+                     Poseidon2 is implemented in-circuit. See \
+                     tenzro_zk::circuits::airs::inference."
+                } else { "" },
+            }))
+        },
         Err(e) => {
             let (status, error) = match &e {
                 tenzro_zk::VerifyEnvelopeError::UnknownCircuit(id) => {
@@ -32966,7 +33116,7 @@ fn unwrap_params(params: Option<Value>) -> std::result::Result<Value, JsonRpcErr
 /// path, since that would let an attacker bypass auth by sending a bad
 /// JWT alongside a stolen private key.
 enum AuthOutcome {
-    Authenticated { wallet_id: String },
+    Authenticated { wallet_id: String, bearer_did: String },
     Unauthenticated,
     AuthError(JsonRpcError),
 }
@@ -33094,10 +33244,11 @@ async fn resolve_auth_to_wallet(
     };
 
     // If an intent was supplied, run RAR scope check.
+    let bearer_did = claims.sub.clone();
     if let Some(req) = intent {
         match engine.resolve_authority(&claims, &req, Some(wallet_id.clone())) {
             Ok(tenzro_auth::AuthorityDecision::Permit { wallet_id }) => {
-                return AuthOutcome::Authenticated { wallet_id };
+                return AuthOutcome::Authenticated { wallet_id, bearer_did };
             }
             Ok(tenzro_auth::AuthorityDecision::RequireApproval { approval_id }) => {
                 return AuthOutcome::AuthError(JsonRpcError {
@@ -33126,7 +33277,7 @@ async fn resolve_auth_to_wallet(
         }
     }
 
-    AuthOutcome::Authenticated { wallet_id }
+    AuthOutcome::Authenticated { wallet_id, bearer_did }
 }
 
 /// Deterministic 4-byte selector for a Tenzro `TransactionType` variant,
@@ -33337,6 +33488,155 @@ fn aa_pre_sign_check(
     Ok(())
 }
 
+/// Off-chain spend-ceiling enforcement for typed Tenzro transactions
+/// submitted via RPC (`eth_sendRawTransaction`) or relayed via gossip
+/// (`verify_transaction_signature` in event_loop).
+///
+/// The ERC-7579 validator chain (run by `aa_pre_sign_check`) is the
+/// PRIMARY cryptographic gate for accounts that have installed
+/// validator modules. But a delegated/autonomous machine identity that
+/// has not installed any ERC-7579 module would otherwise bypass the
+/// on-chain gate entirely and have NO spend ceiling at all. This helper
+/// closes that gap by consulting the same two ceilings the payments-
+/// side `IdentityPaymentBinder::validate_payer_for_protocol` enforces:
+///
+///   1. **TDIP `DelegationScope`** (structural ceiling) — per-tx value,
+///      operation kind, scope activity window. Enforced via
+///      `IdentityRegistry::enforce_operation` so the typed error is
+///      surfaced and impossible to ignore.
+///   2. **Runtime `SpendingPolicy`** (execution ceiling) — per-tx and
+///      rolling daily-spend caps, mutable at runtime. Looked up via the
+///      `SpendingPolicyResolver` bound on the node.
+///
+/// Together with `aa_pre_sign_check`, this enforces the full triple
+/// (DelegationScope + SpendingPolicy + ERC-7579) on every fund-moving
+/// typed transaction, regardless of whether the sender has installed
+/// AA validator modules.
+///
+/// Skipped (returns `Ok(())`) when:
+///   - The `from` address does not resolve to any known DID (human EOA,
+///     unregistered account — there is no scope to consult).
+///   - The resolved DID is human (humans bypass delegation; their
+///     authority is the signature itself).
+///   - The identity registry is unwired (early bootstrap / test).
+///
+/// Returns `JsonRpcError(-32003)` on violation so the caller sees the
+/// same code as the AA chain rejection.
+fn enforce_typed_tx_spend_ceilings(
+    node: &Arc<TenzroNode>,
+    tx: &tenzro_types::Transaction,
+) -> std::result::Result<(), JsonRpcError> {
+    let Some(registry) = node.identity_registry() else {
+        return Ok(());
+    };
+
+    // Reverse-lookup `from` → DID. Anonymous (no registered identity)
+    // senders pass through — they have no scope to enforce. Humans
+    // also pass through inside `enforce_operation` itself.
+    let did = match registry.find_did_by_address(&tx.from) {
+        Some(d) => d,
+        None => return Ok(()),
+    };
+
+    // Map TransactionType → operation name used in DelegationScope's
+    // allowed_operations axis + value to charge against per-tx ceiling.
+    // Field shapes match the canonical definitions in
+    // `tenzro_types::transaction::TransactionType`; variants without an
+    // `amount` field bind value to 0 (operation gate still fires).
+    let (operation, value) = match &tx.tx_type {
+        tenzro_types::TransactionType::Transfer { amount } => ("transfer", *amount),
+        tenzro_types::TransactionType::ContractCall { .. } => ("contract_call", 0u128),
+        tenzro_types::TransactionType::ContractDeploy { .. } => ("contract_deploy", 0u128),
+        tenzro_types::TransactionType::AgentRegister { .. } => ("agent_register", 0u128),
+        tenzro_types::TransactionType::AgentExecute { .. } => ("agent_execute", 0u128),
+        tenzro_types::TransactionType::ModelInference { .. } => ("model_inference", 0u128),
+        tenzro_types::TransactionType::ProviderStake { amount, .. } => ("stake", *amount),
+        tenzro_types::TransactionType::ProviderUnstake { .. } => ("unstake", 0u128),
+        tenzro_types::TransactionType::CreateEscrow { amount, .. } => ("create_escrow", *amount),
+        tenzro_types::TransactionType::ReleaseEscrow { .. } => ("release_escrow", 0u128),
+        tenzro_types::TransactionType::RefundEscrow { .. } => ("refund_escrow", 0u128),
+        tenzro_types::TransactionType::BridgeTransfer { amount, .. } => ("bridge", *amount),
+        tenzro_types::TransactionType::GovernancePropose { .. } => ("governance_propose", 0u128),
+        tenzro_types::TransactionType::GovernanceVote { .. } => ("governance_vote", 0u128),
+        tenzro_types::TransactionType::PostAgentBond { amount, .. } => ("post_bond", *amount),
+        tenzro_types::TransactionType::IncreaseAgentBond { amount, .. } => ("increase_bond", *amount),
+        tenzro_types::TransactionType::WithdrawAgentBond { .. } => ("withdraw_bond", 0u128),
+        tenzro_types::TransactionType::PayInsuranceClaim { amount, .. } => ("insurance_claim", *amount),
+        // Lifecycle ops (kill-switch family) are authorized through a
+        // separate controller-DID check, not the spend axis.
+        tenzro_types::TransactionType::PauseAgent { .. }
+        | tenzro_types::TransactionType::QuarantineAgent { .. }
+        | tenzro_types::TransactionType::TerminateAgent { .. } => return Ok(()),
+        tenzro_types::TransactionType::TeeProviderRegister { .. }
+        | tenzro_types::TransactionType::RegisterValidator { .. }
+        | tenzro_types::TransactionType::UpdateValidatorMetadata { .. }
+        | tenzro_types::TransactionType::ExitValidator => return Ok(()),
+    };
+
+    // (1) DelegationScope — typed error on violation. `enforce_operation`
+    //     returns Ok for human identities, so anything that resolves to
+    //     a human DID transparently passes this gate.
+    let value_opt = if value == 0 { None } else { Some(value) };
+    if let Err(e) = registry.enforce_operation(&did, operation, value_opt) {
+        return Err(JsonRpcError {
+            code: -32003,
+            message: format!(
+                "DelegationScope violation: {e}. Typed-transaction admission \
+                 enforces the same protocol ceiling as the payments-side gate."
+            ),
+            data: None,
+        });
+    }
+
+    // (2) Runtime SpendingPolicy — only applies to value-bearing ops.
+    //     Looked up directly off `AgentRuntime::get_spending_policy`
+    //     (the same registry that backs the
+    //     `AgentRuntimeSpendingPolicyResolver` used by the payments
+    //     middleware). If no policy bound or no runtime, fall through —
+    //     the structural DelegationScope above is the only gate at
+    //     that point.
+    if value > 0
+        && let Some(runtime) = node.agent_runtime()
+        && let Some(policy) = runtime.get_spending_policy(&did)
+    {
+        if !policy.enabled {
+            return Err(JsonRpcError {
+                code: -32003,
+                message: format!(
+                    "Runtime SpendingPolicy violation: policy for {did} is \
+                     disabled; transaction rejected."
+                ),
+                data: None,
+            });
+        }
+        if value > policy.max_per_transaction as u128 {
+            return Err(JsonRpcError {
+                code: -32003,
+                message: format!(
+                    "Runtime SpendingPolicy violation: value {value} exceeds \
+                     max_per_transaction {} for {did}.",
+                    policy.max_per_transaction
+                ),
+                data: None,
+            });
+        }
+        let projected = (policy.current_daily_spend as u128).saturating_add(value);
+        if projected > policy.max_daily_spend as u128 {
+            return Err(JsonRpcError {
+                code: -32003,
+                message: format!(
+                    "Runtime SpendingPolicy violation: projected daily spend \
+                     {projected} exceeds max_daily_spend {} for {did}.",
+                    policy.max_daily_spend
+                ),
+                data: None,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 /// Build an `AuthorityRequest` from a Tenzro `Transaction`. Maps
 /// `TransactionType` variants onto `AuthorityAction` so the auth engine
 /// can scope-check the request against the JWT's RAR envelope.
@@ -33396,7 +33696,7 @@ async fn handle_sign_message(
     // the JWT/DPoP only.
     let outcome = resolve_auth_to_wallet(node, auth_ctx, None).await;
     let wallet_id = match outcome {
-        AuthOutcome::Authenticated { wallet_id } => wallet_id,
+        AuthOutcome::Authenticated { wallet_id, .. } => wallet_id,
         AuthOutcome::AuthError(err) => return Err(err),
         AuthOutcome::Unauthenticated => {
             return Err(JsonRpcError {
@@ -33539,7 +33839,7 @@ async fn handle_ap2_sign_mandate(
     // AP2 signing is a low-level primitive, the engine validates JWT/DPoP only.
     let outcome = resolve_auth_to_wallet(node, auth_ctx, None).await;
     let wallet_id = match outcome {
-        AuthOutcome::Authenticated { wallet_id } => wallet_id,
+        AuthOutcome::Authenticated { wallet_id, .. } => wallet_id,
         AuthOutcome::AuthError(err) => return Err(err),
         AuthOutcome::Unauthenticated => {
             return Err(JsonRpcError {
@@ -33743,7 +34043,7 @@ async fn handle_sign_transaction(
     let intent = intent_for_transaction(&intent_tx);
     let outcome = resolve_auth_to_wallet(node, auth_ctx, intent).await;
     let wallet_id = match outcome {
-        AuthOutcome::Authenticated { wallet_id } => wallet_id,
+        AuthOutcome::Authenticated { wallet_id, .. } => wallet_id,
         AuthOutcome::AuthError(err) => return Err(err),
         AuthOutcome::Unauthenticated => {
             return Err(JsonRpcError {
@@ -34072,7 +34372,7 @@ async fn handle_svm_dispatch(
     // doc comment for why scope-checking lives in the executor.
     let outcome = resolve_auth_to_wallet(node, auth_ctx, None).await;
     let wallet_id = match outcome {
-        AuthOutcome::Authenticated { wallet_id } => wallet_id,
+        AuthOutcome::Authenticated { wallet_id, .. } => wallet_id,
         AuthOutcome::AuthError(err) => return Err(err),
         AuthOutcome::Unauthenticated => {
             return Err(JsonRpcError {
@@ -35669,6 +35969,7 @@ fn training_err(e: tenzro_training::TrainingError) -> JsonRpcError {
         TE::TaskNotFound(_)
         | TE::InvalidTaskSpec(_)
         | TE::AlreadyEnrolled(_)
+        | TE::TrainerNotEnrolled(_)
         | TE::EnrollmentClosed(_)
         | TE::InvalidRound { .. }
         | TE::FragmentOutOfRange { .. }

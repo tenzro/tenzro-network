@@ -1087,8 +1087,22 @@ impl TeeProvider for NvidiaGpuProvider {
                 "Failed to parse GPU attestation report: {}", e
             )))?;
 
-        // Verify locally first (age, CC status, architecture, driver version, measurements)
+        // Verify locally first (age, CC status, architecture, driver version, measurements).
+        // Local-only checks are STRUCTURAL — they verify the report
+        // payload looks plausible, but provide no cryptographic backing.
+        // Cryptographic authority on NVIDIA comes from NRAS attesting
+        // the GPU's manufacturing-device certificate chain. Simulated
+        // reports are explicitly NEVER valid: they pass local checks
+        // but cannot be NRAS-attested, and a relying party branching
+        // on `result.valid` must reject them.
         let mut valid = self.verify_gpu_attestation_local(&gpu_report).await?;
+        if self.simulate {
+            tracing::warn!(
+                "NVIDIA GPU verifier: simulated report — AttestationResult.valid \
+                 will be false. Simulated reports carry no cryptographic authority."
+            );
+            valid = false;
+        }
 
         // When remote attestation is configured, additionally verify via NRAS.
         // NRAS validates against NVIDIA's golden RIMs and the GPU's manufacturing
@@ -1718,27 +1732,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_verify_attestation_simulated() {
+    async fn test_verify_attestation_simulated_is_invalid() {
+        // Simulated NVIDIA reports have no NRAS backing and therefore
+        // no cryptographic authority. The verifier must reject them
+        // outright — `result.valid` is false and the relying party
+        // must not branch into the success path.
         let config = NvidiaGpuConfig::default();
         let provider = NvidiaGpuProvider::new(config).with_simulate();
 
         let report = provider.generate_attestation(b"test").await.unwrap();
         let result = provider.verify_attestation(&report).await.unwrap();
 
-        assert!(result.valid);
+        assert!(
+            !result.valid,
+            "simulated NVIDIA GPU reports must never report valid=true"
+        );
         assert_eq!(result.vendor, TeeVendor::NvidiaGpu);
-        assert_eq!(result.measurements.len(), 3);
-
-        // Check measurement descriptions
-        assert_eq!(result.measurements[0].register, "vbios");
-        assert_eq!(result.measurements[1].register, "driver");
-        assert_eq!(result.measurements[2].register, "cc_firmware");
-
-        // All SHA-384 measurements should be 48 bytes
-        for m in &result.measurements {
-            assert_eq!(m.value.len(), 48, "SHA-384 measurement should be 48 bytes");
-            assert_eq!(m.algorithm, "SHA-384");
-        }
     }
 
     #[tokio::test]

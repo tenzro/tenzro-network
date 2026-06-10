@@ -94,6 +94,7 @@ pub mod layerzero;
 pub mod lifi;
 pub mod message_format;
 pub mod monitor;
+pub mod secp256k1_multisig;
 pub mod mpc;
 pub mod axelar;
 pub mod babylon;

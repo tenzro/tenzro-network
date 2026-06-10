@@ -1477,6 +1477,34 @@ pub async fn start_canton_mcp_server(
     api_key_manager: Option<Arc<ApiKeyManager>>,
     canton_analytics: Option<Arc<crate::canton_analytics::CantonAnalyticsManager>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (_keep_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+    start_canton_mcp_server_with_shutdown(
+        listen_addr,
+        ledger_api_url,
+        admin_api_url,
+        jwt_token,
+        token_provider,
+        api_key_manager,
+        canton_analytics,
+        shutdown_rx,
+    )
+    .await
+}
+
+/// Start the Canton MCP server with a graceful-shutdown channel. When the
+/// broadcast sender fires, axum stops accepting new connections and lets
+/// in-flight requests drain before the future resolves.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_canton_mcp_server_with_shutdown(
+    listen_addr: String,
+    ledger_api_url: String,
+    admin_api_url: String,
+    jwt_token: Option<String>,
+    token_provider: Option<Arc<CantonTokenProvider>>,
+    api_key_manager: Option<Arc<ApiKeyManager>>,
+    canton_analytics: Option<Arc<crate::canton_analytics::CantonAnalyticsManager>>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
     };
@@ -1536,7 +1564,9 @@ pub async fn start_canton_mcp_server(
             api_key_manager.clone(),
             require_canton_api_key,
         ))
-        .layer(cors);
+        .layer(cors)
+        .layer(tower::limit::ConcurrencyLimitLayer::new(100))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(2 * 1024 * 1024));
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     tracing::info!(
@@ -1547,7 +1577,12 @@ pub async fn start_canton_mcp_server(
         "Canton MCP Server listening (endpoint: /mcp, X-Tenzro-Api-Key scope=canton required)"
     );
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.recv().await;
+            tracing::info!("Canton MCP server shutting down gracefully");
+        })
+        .await?;
 
     Ok(())
 }

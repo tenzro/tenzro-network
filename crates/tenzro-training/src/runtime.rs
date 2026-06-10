@@ -148,6 +148,16 @@ impl SyncerState {
 
     /// Validate and buffer an outer gradient submission.
     pub fn accept_outer_gradient(&self, gradient: OuterGradient) -> Result<()> {
+        // Enrollment gate (fail-closed): only trainers who completed
+        // `enroll_trainer` may submit gradients. Without this, the Open-tier
+        // mean aggregator would happily fold poison gradients from any
+        // anonymous submitter into the next-round model state.
+        {
+            let run = self.run.read();
+            if !run.trainers.contains(&gradient.trainer_did) {
+                return Err(TrainingError::TrainerNotEnrolled(gradient.trainer_did));
+            }
+        }
         // Round must match current.
         let current_round = self.run.read().current_round;
         if gradient.round != current_round {

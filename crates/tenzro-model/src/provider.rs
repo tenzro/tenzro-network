@@ -537,9 +537,41 @@ impl ProviderManager {
     /// `RoutingStrategy::Cortex`, and the weighted-score path in
     /// `ProviderWithMetrics::calculate_score`, so this is the only producer
     /// for the score axis.
+    ///
+    /// Updates LATENCY metrics only, NOT reputation.
+    /// HTTP-200 is a circuit-breaker signal (the provider answered) and
+    /// is not a settled-payment signal (the consumer actually got value).
+    /// A provider could otherwise self-deal by hitting its own endpoint to
+    /// manufacture HTTP-200 responses, so the reputation axis is reserved
+    /// for [`Self::record_settled_success`] — that fires only when the
+    /// inference→settlement loop confirms a real payment from the
+    /// consumer to the provider.
     pub fn record_success(&self, provider_address: &Address, latency_ms: u64) {
         if let Some(mut entry) = self.providers.get_mut(provider_address) {
             entry.metrics.record_success(latency_ms);
+            let pwm = entry.clone();
+            drop(entry);
+            self.persist_provider(provider_address, &pwm);
+        }
+    }
+
+    /// Records a payment-bound success: the consumer received the
+    /// inference AND a real settlement to the provider has cleared. This
+    /// is the ONLY path that moves the reputation axis upward, closing
+    /// the self-deal attack where a provider could earn reputation by
+    /// hitting its own endpoint.
+    ///
+    /// Caller invariant: only call this after the settlement engine
+    /// confirms a non-zero TNZO transfer from the consumer to the
+    /// provider. The `settled_amount` parameter is passed through for
+    /// metrics correlation but does not gate the reputation bump — the
+    /// caller is responsible for verifying it is non-zero before
+    /// invoking this method.
+    pub fn record_settled_success(&self, provider_address: &Address, settled_amount: u128) {
+        if settled_amount == 0 {
+            return;
+        }
+        if let Some(mut entry) = self.providers.get_mut(provider_address) {
             entry.provider.reputation = entry.provider.reputation.saturating_add(1).min(1000);
             let pwm = entry.clone();
             drop(entry);

@@ -5824,11 +5824,20 @@ def unload_video_model(model_id: str) -> dict:
 
 
 # Agent memory tier ----------------------------------------------------
+#
+# Every memory_* RPC requires DPoP+JWT bearer auth. Set TENZRO_BEARER_JWT
+# and TENZRO_DPOP_PROOF in the environment before calling these helpers.
+# The server matches the bearer's DID against `agent_did` (or its
+# controller_did for delegated agents) and rejects cross-agent reads
+# with JSON-RPC -32001.
 
 
 def memory_grant(agent_did: str, text: str, kind: str = "granted",
                  source: str = "controller", metadata: dict = None) -> dict:
-    """Grant a memory to an agent. Embeds via TextEmbeddingRuntime + writes to Lance + Tantivy."""
+    """Grant a memory to an agent. Embeds via TextEmbeddingRuntime + writes to Lance + Tantivy.
+
+    Requires DPoP+JWT bearer auth — see module-level note above.
+    """
     params = {
         "agent_did": agent_did,
         "text": text,

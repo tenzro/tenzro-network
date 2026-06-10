@@ -82,6 +82,33 @@ pub struct CantonAdapter {
     /// hint as a filter / requesting-party key — only the `<hint>::<participant-hash>`
     /// form is accepted. Populated lazily by `resolve_act_as_party_fq()`.
     resolved_act_as_party_fq: Arc<RwLock<Option<String>>>,
+    /// Inbound channel for decoded `TenzroBridge:Message` payloads.
+    /// When wired by the node, `receive_message` polls the synchronizer,
+    /// decodes each matched contract's payload, and pushes a typed
+    /// `CantonInboundMessage` onto this channel for downstream
+    /// processing. When unset, `receive_message` still decodes and
+    /// validates the payload but logs+returns Ok(()) — useful for
+    /// adapter-only deployments where the relying party drains the
+    /// queue out of band.
+    inbound_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<CantonInboundMessage>>>>,
+}
+
+/// Decoded `TenzroBridge:Message` payload delivered via
+/// [`CantonAdapter::receive_message`].
+#[derive(Debug, Clone)]
+pub struct CantonInboundMessage {
+    /// Canton contract id that carried the message.
+    pub contract_id: String,
+    /// `sender` field from the contract (Canton party id).
+    pub sender: String,
+    /// `recipient` field from the contract.
+    pub recipient: String,
+    /// `synchronizerId` field from the contract.
+    pub synchronizer_id: String,
+    /// Decoded payload bytes (base64 → raw).
+    pub payload: Vec<u8>,
+    /// `messageId` field from the contract.
+    pub message_id: String,
 }
 
 /// Recursively walks a `serde_json::Value` looking for any string field
@@ -113,7 +140,19 @@ impl CantonAdapter {
             pending_transfers: Arc::new(DashMap::new()),
             token_provider: None,
             resolved_act_as_party_fq: Arc::new(RwLock::new(None)),
+            inbound_tx: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Wire an inbound channel for decoded `TenzroBridge:Message`
+    /// payloads. The node-level integration calls this once at startup
+    /// to receive every Canton-side inbound message via the returned
+    /// `mpsc::UnboundedReceiver`.
+    pub async fn set_inbound_channel(
+        &self,
+        tx: tokio::sync::mpsc::UnboundedSender<CantonInboundMessage>,
+    ) {
+        *self.inbound_tx.write().await = Some(tx);
     }
 
     /// Returns a sibling adapter that uses the provided JWT instead
@@ -135,6 +174,7 @@ impl CantonAdapter {
             pending_transfers: Arc::clone(&self.pending_transfers),
             token_provider: None,
             resolved_act_as_party_fq: Arc::clone(&self.resolved_act_as_party_fq),
+            inbound_tx: Arc::clone(&self.inbound_tx),
         }
     }
 
@@ -2308,37 +2348,121 @@ impl BridgeAdapter for CantonAdapter {
             "synchronizerId": synchronizer_id,
         });
 
-        match self
+        let contracts = self
             .query_contracts(vec!["TenzroBridge:Message".to_string()], query_filter, None)
             .await
-        {
-            Ok(contracts) => {
-                debug!(
-                    "Canton: Found {} message contracts from synchronizer {}",
-                    contracts.len(),
-                    synchronizer_id
-                );
-
-                // Process the first matching message (in production, would need more sophisticated matching)
-                if let Some(contract) = contracts.first() {
-                    info!(
-                        "Canton: Processing message contract_id={}",
-                        contract.contract_id
-                    );
-                    // In production, decode payload from contract.payload and process
-                    // For now, just acknowledge receipt
-                }
-
-                Ok(())
-            }
-            Err(e) => {
+            .map_err(|e| {
                 error!(
                     "Canton: Failed to query message contracts from synchronizer {}: {}",
                     synchronizer_id, e
                 );
-                Err(e)
+                e
+            })?;
+
+        debug!(
+            "Canton: Found {} message contracts from synchronizer {}",
+            contracts.len(),
+            synchronizer_id
+        );
+
+        let inbound_tx = self.inbound_tx.read().await.clone();
+
+        // Decode every matched contract. The TenzroBridge:Message
+        // template defined in the DAML model declares fields
+        // `{sender, recipient, synchronizerId, payload (b64), messageId}`
+        // matching the create-args we use when sending. Any contract
+        // whose payload doesn't structurally match is rejected — that
+        // catches schema drift before any state mutation happens.
+        let mut decoded = 0usize;
+        for contract in &contracts {
+            let payload = &contract.payload;
+            let sender = payload
+                .get("sender")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| BridgeError::InvalidParameter(format!(
+                    "TenzroBridge:Message contract {} missing 'sender' field",
+                    contract.contract_id
+                )))?;
+            let recipient = payload
+                .get("recipient")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| BridgeError::InvalidParameter(format!(
+                    "TenzroBridge:Message contract {} missing 'recipient' field",
+                    contract.contract_id
+                )))?;
+            let contract_synchronizer = payload
+                .get("synchronizerId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| BridgeError::InvalidParameter(format!(
+                    "TenzroBridge:Message contract {} missing 'synchronizerId' field",
+                    contract.contract_id
+                )))?;
+            let message_id = payload
+                .get("messageId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| BridgeError::InvalidParameter(format!(
+                    "TenzroBridge:Message contract {} missing 'messageId' field",
+                    contract.contract_id
+                )))?;
+            let payload_b64 = payload
+                .get("payload")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| BridgeError::InvalidParameter(format!(
+                    "TenzroBridge:Message contract {} missing 'payload' field",
+                    contract.contract_id
+                )))?;
+
+            // Defence-in-depth: the contract MUST claim the synchronizer
+            // we queried. The participant should already filter this
+            // server-side via the JSON-API query, but a misconfigured
+            // participant could leak cross-domain messages.
+            if contract_synchronizer != synchronizer_id {
+                return Err(BridgeError::InvalidParameter(format!(
+                    "TenzroBridge:Message contract {} declares synchronizerId='{}' \
+                     but was returned for synchronizer '{}' — server-side filter \
+                     leak, refusing delivery",
+                    contract.contract_id, contract_synchronizer, synchronizer_id
+                )));
             }
+
+            let payload_bytes = BASE64.decode(payload_b64).map_err(|e| {
+                BridgeError::InvalidParameter(format!(
+                    "TenzroBridge:Message contract {} payload base64 decode failed: {}",
+                    contract.contract_id, e
+                ))
+            })?;
+
+            let inbound = CantonInboundMessage {
+                contract_id: contract.contract_id.clone(),
+                sender: sender.to_string(),
+                recipient: recipient.to_string(),
+                synchronizer_id: contract_synchronizer.to_string(),
+                payload: payload_bytes,
+                message_id: message_id.to_string(),
+            };
+
+            if let Some(tx) = inbound_tx.as_ref() {
+                tx.send(inbound).map_err(|e| BridgeError::AdapterError(format!(
+                    "Canton inbound channel receiver dropped: {e}"
+                )))?;
+            } else {
+                debug!(
+                    "Canton: decoded inbound message_id={} contract={} sender={} ({} bytes) \
+                     (no consumer wired — payload discarded)",
+                    inbound.message_id, inbound.contract_id, inbound.sender,
+                    inbound.payload.len()
+                );
+            }
+            decoded += 1;
         }
+
+        info!(
+            "Canton: receive_message synchronizer={} decoded={} delivered={}",
+            synchronizer_id,
+            decoded,
+            inbound_tx.is_some()
+        );
+        Ok(())
     }
 
     async fn bridge_tokens(&self, request: BridgeTokenRequest) -> Result<BridgeTokenReceipt> {

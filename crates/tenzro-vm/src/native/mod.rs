@@ -808,7 +808,7 @@ impl NativeExecutor {
         let payee_bytes = payload.payee.as_bytes();
         let payee_addr_padded = pad_address_32(payee_bytes)?;
 
-        let now_millis = chrono::Utc::now().timestamp_millis();
+        let now_millis = deterministic_now_ms(tx);
         let escrow = EscrowAccount {
             escrow_id: escrow_id_hex.clone(),
             payer: payer_addr,
@@ -911,7 +911,7 @@ impl NativeExecutor {
                 escrow_id_hex, escrow.status
             )));
         }
-        let now_millis = chrono::Utc::now().timestamp_millis();
+        let now_millis = deterministic_now_ms(tx);
         if now_millis > escrow.expires_at.0 {
             return Err(VmError::InvalidTransaction(format!(
                 "Escrow {} has expired",
@@ -1061,7 +1061,7 @@ impl NativeExecutor {
 
         // Refund is permitted if expired OR if release conditions don't require
         // a counterparty (Timeout / Custom).
-        let now_millis = chrono::Utc::now().timestamp_millis();
+        let now_millis = deterministic_now_ms(tx);
         let is_expired = now_millis > escrow.expires_at.0;
         let conditions_allow_refund = matches!(
             escrow.release_conditions,
@@ -1231,7 +1231,7 @@ impl NativeExecutor {
             // Stand-in: node-side scan rewrites this to the real block height
             // before persisting to KillSwitchStore.
             frozen_at_block: BlockHeight::new(tx.nonce),
-            timestamp: Timestamp::new(chrono::Utc::now().timestamp_millis()),
+            timestamp: Timestamp::new(deterministic_now_ms(tx)),
         };
         let blob = serde_json::to_vec(&receipt).map_err(|e| {
             VmError::Internal(format!("Failed to serialize KillSwitchReceipt: {}", e))
@@ -1330,7 +1330,7 @@ impl NativeExecutor {
             cascade: None,
             pause_until: None,
             frozen_at_block: BlockHeight::new(tx.nonce),
-            timestamp: Timestamp::new(chrono::Utc::now().timestamp_millis()),
+            timestamp: Timestamp::new(deterministic_now_ms(tx)),
         };
         let blob = serde_json::to_vec(&receipt).map_err(|e| {
             VmError::Internal(format!("Failed to serialize KillSwitchReceipt: {}", e))
@@ -1431,7 +1431,7 @@ impl NativeExecutor {
             cascade: Some(payload.cascade),
             pause_until: None,
             frozen_at_block: BlockHeight::new(tx.nonce),
-            timestamp: Timestamp::new(chrono::Utc::now().timestamp_millis()),
+            timestamp: Timestamp::new(deterministic_now_ms(tx)),
         };
         let blob = serde_json::to_vec(&receipt).map_err(|e| {
             VmError::Internal(format!("Failed to serialize KillSwitchReceipt: {}", e))
@@ -3023,6 +3023,26 @@ struct PayInsuranceClaimPayload {
 /// Storage key for an escrow record under `SYSTEM_ADDRESS`: `escrow:<hex_id>`.
 fn escrow_storage_key(escrow_id_hex: &str) -> String {
     format!("escrow:{}", escrow_id_hex)
+}
+
+/// Returns the deterministic wall-clock timestamp (Unix milliseconds)
+/// for native-VM handlers that need to make time-based decisions.
+///
+/// CRITICAL: native-VM handlers MUST NOT call `chrono::Utc::now()`
+/// directly. Each validator's host clock drifts independently, so a
+/// transaction that compares `now > expires_at` could produce
+/// different results on different validators, splitting the
+/// finalized state and breaking consensus.
+///
+/// This helper:
+/// 1. Prefers `tx.block_timestamp_ms` when the consensus event loop
+///    has supplied it (the canonical case under finalized execution).
+/// 2. Falls back to `Utc::now()` ONLY when no block timestamp is set,
+///    which is the test / read-only-call path that doesn't go through
+///    consensus and therefore can't break replay determinism.
+fn deterministic_now_ms(tx: &VmTransaction) -> i64 {
+    tx.block_timestamp_ms
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
 }
 
 /// Storage key for a kill-switch receipt under `SYSTEM_ADDRESS`:

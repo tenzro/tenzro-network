@@ -52,8 +52,6 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sha2::{Digest, Sha384};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use tenzro_types::tee::*;
@@ -134,14 +132,26 @@ struct NitroAttestationDoc {
 ///
 /// - **Real** (default): Uses actual NSM device via ioctl (`/dev/nsm`)
 /// - **Simulation** (`TENZRO_SIMULATE_NITRO=1`): Returns plausible fake attestations for local development
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AwsNitroProvider {
-    /// In-memory key storage
-    keys: Arc<RwLock<HashMap<Uuid, EnclaveKeyHandle>>>,
+    /// Real enclave-key store: every `enclave_keygen` call derives a
+    /// fresh key via HKDF-SHA256 over a Nitro NSM-signed COSE_Sign1
+    /// attestation document. Signatures and encryption use the real
+    /// derived material.
+    keystore: std::sync::Arc<crate::enclave_keystore::EnclaveKeystore>,
     /// Whether Nitro is available
     available: bool,
     /// Whether running in simulation mode
     simulate: bool,
+}
+
+impl std::fmt::Debug for AwsNitroProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwsNitroProvider")
+            .field("available", &self.available)
+            .field("simulate", &self.simulate)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AwsNitroProvider {
@@ -156,7 +166,7 @@ impl AwsNitroProvider {
         };
 
         Self {
-            keys: Arc::new(RwLock::new(HashMap::new())),
+            keystore: std::sync::Arc::new(crate::enclave_keystore::EnclaveKeystore::new("aws-nitro")),
             available,
             simulate,
         }
@@ -575,11 +585,15 @@ impl AwsNitroProvider {
         }
 
         let mut cert_chain_valid = false;
+        let mut cose_signature_valid = false;
 
         if doc.simulated {
             details.insert("simulated".to_string(), "true".to_string());
             details.insert("type".to_string(), "simulated".to_string());
-            tracing::debug!("Verifying simulated AWS Nitro document");
+            tracing::warn!(
+                "Verifying SIMULATED AWS Nitro document — AttestationResult.valid \
+                 will be false. Simulated documents carry no cryptographic authority."
+            );
         } else {
             details.insert("type".to_string(), "real".to_string());
             // Surface raw COSE_Sign1 byte length so downstream verifiers can
@@ -612,7 +626,6 @@ impl AwsNitroProvider {
             // Per RFC 8152 §4.4, the ES384 signature covers the CBOR-encoded
             // Sig_structure1 = ["Signature1", body_protected, external_aad, payload]
             // where external_aad is h'' (empty bstr) for Nitro attestation documents.
-            let mut cose_signature_valid = false;
             if !doc.certificate.is_empty() && !doc.signature.is_empty() {
                 match attestation::parse_x509_certificate(&doc.certificate) {
                     Ok(leaf_cert) => {
@@ -685,8 +698,14 @@ impl AwsNitroProvider {
             );
         }
 
+        // Fail-closed validity. A real Nitro attestation is `valid` only
+        // when BOTH the COSE_Sign1 ES384 signature (over Sig_structure1)
+        // verifies and the certificate chain chains to the pinned AWS
+        // Nitro Root CA. Simulated documents are NEVER valid.
+        let valid = !doc.simulated && cose_signature_valid && cert_chain_valid;
+
         Ok(AttestationResult {
-            valid: true,
+            valid,
             vendor: TeeVendor::AwsNitro,
             tcb_version: "4".to_string(), // Nitro attestation version
             measurements,
@@ -845,29 +864,24 @@ impl TeeProvider for AwsNitroProvider {
         if !self.available {
             return Err(TeeError::not_available("AWS Nitro Enclaves not available"));
         }
-
-        // In real Nitro, keys are generated inside the enclave.
-        // The NSM can also be used for random number generation.
-        let key_id = Uuid::new_v4();
-        let public_key = {
-            use sha2::Sha256;
-            let mut hasher = Sha256::new();
-            hasher.update(key_id.as_bytes());
-            hasher.update(b"nitro-keygen");
-            Some(hasher.finalize().to_vec())
-        };
-
-        let handle = EnclaveKeyHandle {
-            id: key_id,
-            algorithm: params.algorithm,
-            public_key,
-            created_at: tenzro_types::Timestamp::now(),
-            attestation: None,
-        };
-
-        self.keys.write().await.insert(key_id, handle.clone());
-        tracing::info!("Generated key in Nitro Enclave: {}", key_id);
-
+        if self.simulate {
+            return Err(TeeError::not_available(
+                "AWS Nitro simulation mode cannot supply real NSM attestation IKM",
+            ));
+        }
+        // Use a one-shot NSM attestation as IKM. The NSM-signed
+        // COSE_Sign1 document is unpredictable to a remote attacker
+        // and binds to the enclave's identity (PCRs, image hash).
+        let report = self.generate_attestation(b"tenzro-enclave-keygen-ikm").await?;
+        let mut ikm = Vec::with_capacity(report.attestation_data.len() + 32);
+        ikm.extend_from_slice(&report.attestation_data);
+        ikm.extend_from_slice(&report.measurement);
+        let handle = self.keystore.keygen(params, &ikm).await?;
+        tracing::info!(
+            key_id = %handle.id,
+            algorithm = ?handle.algorithm,
+            "Generated key in Nitro Enclave keystore"
+        );
         Ok(handle)
     }
 
@@ -875,48 +889,21 @@ impl TeeProvider for AwsNitroProvider {
         if !self.available {
             return Err(TeeError::not_available("AWS Nitro Enclaves not available"));
         }
-
-        let keys = self.keys.read().await;
-        if !keys.contains_key(&key.id) {
-            return Err(TeeError::InvalidKeyHandle(format!("Key not found: {}", key.id)));
-        }
-
-        use sha2::Sha256;
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        hasher.update(key.id.as_bytes());
-        hasher.update(b"nitro-sign");
-        Ok(hasher.finalize().to_vec())
+        self.keystore.sign(key, data).await
     }
 
     async fn enclave_encrypt(&self, key: &EnclaveKeyHandle, plaintext: &[u8]) -> Result<Vec<u8>> {
         if !self.available {
             return Err(TeeError::not_available("AWS Nitro Enclaves not available"));
         }
-
-        let keys = self.keys.read().await;
-        if !keys.contains_key(&key.id) {
-            return Err(TeeError::InvalidKeyHandle(format!("Key not found: {}", key.id)));
-        }
-
-        tracing::debug!("Encrypting {} bytes with key {} in Nitro Enclave", plaintext.len(), key.id);
-        // In real Nitro Enclaves, the AES key would be managed by KMS (Key Management
-        // Service) with enclave attestation. In simulation mode we derive it from UUID.
-        crate::enclave_crypto::enclave_encrypt_aes256gcm(&key.id, b"aws-nitro", plaintext)
+        self.keystore.encrypt(key, plaintext).await
     }
 
     async fn enclave_decrypt(&self, key: &EnclaveKeyHandle, ciphertext: &[u8]) -> Result<Vec<u8>> {
         if !self.available {
             return Err(TeeError::not_available("AWS Nitro Enclaves not available"));
         }
-
-        let keys = self.keys.read().await;
-        if !keys.contains_key(&key.id) {
-            return Err(TeeError::InvalidKeyHandle(format!("Key not found: {}", key.id)));
-        }
-
-        tracing::debug!("Decrypting {} bytes with key {} in Nitro Enclave", ciphertext.len(), key.id);
-        crate::enclave_crypto::enclave_decrypt_aes256gcm(&key.id, b"aws-nitro", ciphertext)
+        self.keystore.decrypt(key, ciphertext).await
     }
 }
 
@@ -1475,18 +1462,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_nitro_verify_simulated_document() {
+    async fn test_nitro_verify_simulated_document_is_invalid() {
+        // Simulated documents carry no cryptographic authority; verifier
+        // populates measurements + details for observability but `valid`
+        // MUST be false.
         unsafe { std::env::set_var("TENZRO_SIMULATE_NITRO", "1"); }
         let provider = AwsNitroProvider::new();
 
         let report = provider.generate_attestation(b"test").await.unwrap();
         let result = provider.verify_attestation(&report).await.unwrap();
 
-        assert!(result.valid);
+        assert!(
+            !result.valid,
+            "simulated Nitro documents must never report valid=true"
+        );
         assert_eq!(result.vendor, TeeVendor::AwsNitro);
         assert_eq!(result.details.get("simulated"), Some(&"true".to_string()));
 
-        // Should have PCR measurements
+        // Should still expose PCR measurements for observability
         assert!(!result.measurements.is_empty());
         for m in &result.measurements {
             assert_eq!(m.algorithm, "SHA384");
@@ -1513,7 +1506,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_nitro_keygen_and_sign() {
+    async fn test_nitro_keygen_in_simulation_returns_not_available() {
+        // Simulation cannot supply a real NSM-signed attestation IKM;
+        // `enclave_keygen` rejects with NotAvailable. No fabrication.
         unsafe { std::env::set_var("TENZRO_SIMULATE_NITRO", "1"); }
         let provider = AwsNitroProvider::new();
 
@@ -1524,17 +1519,36 @@ mod tests {
             params: HashMap::new(),
         };
 
-        let key = provider.enclave_keygen(params).await.unwrap();
-        assert!(key.public_key.is_some());
+        let err = provider.enclave_keygen(params).await.unwrap_err();
+        assert!(
+            matches!(err, TeeError::NotAvailable(_)),
+            "expected NotAvailable, got {err:?}"
+        );
+    }
 
-        let sig = provider.enclave_sign(&key, b"test data").await.unwrap();
-        assert!(!sig.is_empty());
+    #[tokio::test]
+    async fn test_nitro_keystore_real_ed25519_verifies() {
+        use ed25519_dalek::Verifier;
+        let ks = crate::enclave_keystore::EnclaveKeystore::new("aws-nitro-test");
+        let ikm: Vec<u8> = (0u8..64).collect();
+        let params = KeyGenParams {
+            algorithm: KeyAlgorithm::Ed25519,
+            purpose: KeyPurpose::Signing,
+            exportable: false,
+            params: HashMap::new(),
+        };
+        let handle = ks.keygen(params, &ikm).await.unwrap();
+        let pk = handle.public_key.clone().unwrap();
+        let msg = b"aws-nitro real Ed25519";
+        let sig = ks.sign(&handle, msg).await.unwrap();
 
-        let sig2 = provider.enclave_sign(&key, b"test data").await.unwrap();
-        assert_eq!(sig, sig2);
-
-        let sig3 = provider.enclave_sign(&key, b"different data").await.unwrap();
-        assert_ne!(sig, sig3);
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(
+            <&[u8; 32]>::try_from(pk.as_slice()).unwrap(),
+        )
+        .unwrap();
+        let sig_arr: [u8; 64] = sig.as_slice().try_into().unwrap();
+        let signature = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        vk.verify(msg, &signature).expect("real Ed25519 signature must verify");
     }
 
     #[tokio::test]

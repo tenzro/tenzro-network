@@ -476,11 +476,26 @@ impl VmExecutor for EvmExecutor {
             hex::encode(&call.contract)
         );
 
-        // Check if target is a precompile
+        // Check if target is a precompile.
+        //
+        // The precompile registry takes the runtime-supplied
+        // `msg.sender` and appends it to the input for authorization-
+        // sensitive precompiles (TNZO bridge, token factory,
+        // cross-VM bridge). Authorization handlers read the caller
+        // from the trailing 32 bytes and never trust calldata-supplied
+        // bytes for authorization.
         if self.precompiles.is_precompile(&call.contract) {
+            // `call.caller` is `Vec<u8>` 20 bytes (EVM-shaped). Pad to
+            // the canonical 20-byte slot. Empty caller is the zero
+            // address (anonymous read-only call) — auth-sensitive
+            // precompiles will reject operations that require a
+            // registered caller.
+            let mut caller_20 = [0u8; 20];
+            let take = call.caller.len().min(20);
+            caller_20[20 - take..].copy_from_slice(&call.caller[call.caller.len() - take..]);
             let result =
                 self.precompiles
-                    .execute(&call.contract, &call.data, call.gas_limit)?;
+                    .execute(&caller_20, &call.contract, &call.data, call.gas_limit)?;
             return Ok(CallResult {
                 output: result.output,
                 gas_used: result.gas_used,

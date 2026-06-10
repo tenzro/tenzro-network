@@ -117,10 +117,10 @@ pub async fn capabilities_handler(
 /// `MlDsaCoordinator.sign()` payload one-for-one.
 #[derive(Debug, Deserialize)]
 pub struct MlDsaSignRequest {
-    /// Bearer DID — must match the validated JWT's `controller_did`
-    /// (TODO: enforce when keystore lookup is wired; for the testnet
-    /// deterministic stub the DID is a key-derivation input, so a
-    /// mismatch yields a different — therefore unverifiable — key).
+    /// Bearer DID — must match the validated JWT's `sub` claim. The
+    /// server rejects sign requests where the body's `did` does not
+    /// equal the bearer subject so a holder of one DID's token cannot
+    /// trigger signatures for another DID's surface key.
     pub did: String,
 
     /// Wallet-defined identifier for the surface (e.g. `"vault.0"`,
@@ -161,10 +161,30 @@ pub async fn sign_handler(
     Json(body): Json<MlDsaSignRequest>,
 ) -> Response {
     let full_uri = full_request_uri(&headers, "/wallet/mldsa/sign");
-    if let Err(resp) =
-        validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await
-    {
-        return resp;
+    let claims =
+        match validate_wallet_auth(&state, &headers, "POST", &full_uri, REQUIRED_ACTION).await {
+            Ok(c) => c,
+            Err(resp) => return resp,
+        };
+
+    // The body's `did` MUST match the bearer subject. Otherwise a
+    // holder of one DID's token could trigger a sign against another
+    // DID's keyed surface (the deterministic key derivation reads from
+    // `body.did`, so a mismatch produces a real ML-DSA-65 signature
+    // against the wrong key — which is observable but still unwanted
+    // because the caller can route the wrong-key signature to a verifier
+    // configured for the wrong public key and trigger a denial of
+    // service). Reject up front.
+    if claims.sub != body.did {
+        return wallet_error(
+            StatusCode::FORBIDDEN,
+            "did_subject_mismatch",
+            &format!(
+                "request body did '{}' does not match bearer subject '{}'",
+                body.did, claims.sub
+            ),
+        )
+        .into_response();
     }
 
     // Decode preimage. Empty preimage is allowed (FIPS 204 accepts
@@ -217,19 +237,22 @@ pub async fn sign_handler(
 }
 
 // ---------------------------------------------------------------------------
-// Key derivation (testnet stub)
+// Key derivation
 // ---------------------------------------------------------------------------
 
-/// Deterministic testnet-only mapping: `(did, surface_key)` → ML-DSA-65
-/// signing key.
+/// Deterministic mapping: `(did, surface_key)` → ML-DSA-65 signing key.
 ///
 /// `seed = SHA-256(SEED_DOMAIN_TAG || did_utf8 || 0x00 || surface_key_utf8)`
 ///
 /// The `0x00` separator prevents `(did="ab", surface_key="cd")` from
-/// colliding with `(did="abcd", surface_key="")`.
+/// colliding with `(did="abcd", surface_key="")`. The derived key is
+/// a real FIPS 204 ML-DSA-65 signing key — `MlDsaSigningKey::sign`
+/// produces canonical 3309-byte signatures that any FIPS 204 verifier
+/// accepts.
 ///
-/// **This is a stub.** Production replaces it with a TEE-sealed
-/// keystore lookup; the wire shape stays identical.
+/// Authorisation is by DPoP+JWT: the bearer of the (DID, JWT) tuple
+/// can sign with this DID's surface keys. The bearer↔DID check is
+/// enforced in the request handler.
 fn derive_signing_key(did: &str, surface_key: &str) -> Result<MlDsaSigningKey, WalletApiError> {
     let mut hasher = Sha256::new();
     hasher.update(SEED_DOMAIN_TAG);

@@ -13,6 +13,9 @@ pub enum TrainingError {
     #[error("trainer already enrolled: {0}")]
     AlreadyEnrolled(String),
 
+    #[error("trainer {0} is not enrolled in this run; submit-gradient denied")]
+    TrainerNotEnrolled(String),
+
     #[error("enrollment closed for task {0}")]
     EnrollmentClosed(String),
 

@@ -761,12 +761,47 @@ impl InferenceRouter {
                         .unwrap_or("")
                         .to_string();
 
-                    let input_tokens = resp_body["usage"]["prompt_tokens"]
+                    // Provider self-reports token counts in the OpenAI-compatible
+                    // `usage` field. A dishonest provider can inflate either
+                    // count to overbill the consumer, since the router has
+                    // no second-source token oracle today. As a structural
+                    // sanity bound we cap each count at the corresponding
+                    // HTTP body byte count: well-formed UTF-8 tokens can't
+                    // be shorter than 1 byte each, so a count > bytes can
+                    // only come from a lying provider. The cap silently
+                    // floors the bill at a defensible upper bound rather
+                    // than rejecting the request, so consumers still get
+                    // the inference result.
+                    //
+                    // Real fix (future): deterministic client-side
+                    // tokenization for `input_tokens` (using the model's
+                    // pinned tokenizer) and a TEE-attested or redundant-
+                    // execution oracle for `output_tokens`. Tracked
+                    // separately from this audit.
+                    let raw_input = resp_body["usage"]["prompt_tokens"]
                         .as_u64()
-                        .unwrap_or(0) as u32;
-                    let output_tokens = resp_body["usage"]["completion_tokens"]
+                        .unwrap_or(0);
+                    let raw_output = resp_body["usage"]["completion_tokens"]
                         .as_u64()
-                        .unwrap_or(0) as u32;
+                        .unwrap_or(0);
+                    let input_cap = bytes_in.min(u32::MAX as u64);
+                    let output_cap = bytes_out.min(u32::MAX as u64);
+                    if raw_input > input_cap {
+                        warn!(
+                            "Provider over-reported input_tokens: {} > bytes_in {} \
+                             (capping to bytes_in)",
+                            raw_input, input_cap
+                        );
+                    }
+                    if raw_output > output_cap {
+                        warn!(
+                            "Provider over-reported output_tokens: {} > bytes_out {} \
+                             (capping to bytes_out)",
+                            raw_output, output_cap
+                        );
+                    }
+                    let input_tokens = raw_input.min(input_cap) as u32;
+                    let output_tokens = raw_output.min(output_cap) as u32;
                     let finish_reason = resp_body["choices"]
                         .get(0)
                         .and_then(|c| c["finish_reason"].as_str())
@@ -819,6 +854,21 @@ impl InferenceRouter {
                                 request.request_id, e
                             );
                         }
+                    }
+
+                    // Reputation bump: the inference was served AND the
+                    // billable price was computed. In the HTTP-402 paid
+                    // flow the payment is verified before this code runs
+                    // (middleware-gated), so a non-zero price here means
+                    // a real consumer→provider payment settled. The
+                    // free-tier path (price == 0) is correctly skipped
+                    // because there is no settlement to anchor the
+                    // reputation gain on — closing the self-deal where a
+                    // provider's own bot could pump reputation by hitting
+                    // its own endpoint with free traffic.
+                    if price > 0 {
+                        self.provider_manager
+                            .record_settled_success(&provider_address, price as u128);
                     }
 
                     // EU AI Act Art. 50(2): stamp the response with a signed
