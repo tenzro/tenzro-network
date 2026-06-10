@@ -1,0 +1,75 @@
+# SOTA hard-threshold gate for criterion benchmarks.
+#
+# Each entry pins the p99 / op bound from docs/operators/BENCHMARKS.md.
+# CI runs the matching criterion bench and fails the build when the
+# measured value exceeds `max_ns` (or falls below `min_ops_per_sec` for
+# throughput-shaped targets).
+#
+# The bench id format is `<group_id>/<bench_id>` as criterion emits to
+# `target/criterion/<group>/<bench>/new/estimates.json` after a run.
+
+[[bench]]
+id = "consensus_benchmarks/bench_vote_verification"
+metric = "mean_ns"
+max_ns = 1_000_000  # 1.0 ms — HotStuff-2 single vote verify+add hybrid path
+reference = "Aptos BFT vote-verify 0.6-0.9ms + BLS12-381 G1 mul"
+
+[[bench]]
+id = "consensus_benchmarks/bench_qc_formation"
+metric = "mean_ns"
+max_ns = 5_000_000  # 5 ms — BLS12-381 aggregate over 10 sigs
+reference = "blst aggregate-signature scales linearly"
+
+[[bench]]
+id = "zk_benchmarks/plonky3_verify"
+metric = "mean_ns"
+max_ns = 25_000_000  # 25 ms — Plonky3 STARK verify, our pinned config
+reference = "Plonky3 5-20ms verify for comparable AIRs"
+
+[[bench]]
+id = "crypto_benchmarks/bls_aggregate_verify_96"
+metric = "mean_ns"
+max_ns = 30_000_000  # 30 ms — 96 BLS12-381 signatures
+reference = "blst 26-28ms on Apple M-series"
+
+[[bench]]
+id = "crypto_benchmarks/ed25519_sign"
+metric = "mean_ns"
+max_ns = 50_000  # 50 µs single sign
+reference = "ed25519-dalek 22 µs sign on M2"
+
+[[bench]]
+id = "crypto_benchmarks/ed25519_verify"
+metric = "mean_ns"
+max_ns = 100_000  # 100 µs single verify
+reference = "ed25519-dalek 70 µs verify on M2"
+
+[[bench]]
+id = "crypto_benchmarks/aes256_gcm_seal_4kb"
+metric = "mean_ns"
+max_ns = 15_000  # 15 µs for 4 KB plaintext
+reference = "RustCrypto AES-NI 3-5 GB/s"
+
+[[bench]]
+id = "storage_benchmarks/write_batch_sync_single"
+metric = "ops_per_sec"
+min_ops_per_sec = 5_000  # 5 kops/s single-thread fsync floor
+reference = "RocksDB Perf Wiki NVMe fsync-bound"
+
+[[bench]]
+id = "storage_benchmarks/write_batch_sync_32"
+metric = "ops_per_sec"
+min_ops_per_sec = 500  # 500 batches/sec amortized
+reference = "Same RocksDB baseline / 32 puts per fsync"
+
+[[bench]]
+id = "storage_benchmarks/point_get_cold"
+metric = "mean_ns"
+max_ns = 100_000  # 100 µs cold-cache point-get
+reference = "RocksDB NVMe + block-cache hit ~80 µs"
+
+[[bench]]
+id = "vm_benchmarks/eip1559_base_fee_adjust"
+metric = "mean_ns"
+max_ns = 5_000  # 5 µs per-tx admission
+reference = "Pure arithmetic + DashMap insert"
