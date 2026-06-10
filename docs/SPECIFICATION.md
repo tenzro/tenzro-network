@@ -202,19 +202,23 @@ The system is implemented as a Rust workspace of 26 crates plus SDKs, organized 
 
 ### 2.4 Node Roles
 
-Participants in the Tenzro Network operate nodes in one of several roles. Nodes can serve multiple roles simultaneously (e.g., a validator can also be a Model Provider and/or TEE Provider):
+Participants in the Tenzro Network operate nodes in one of several roles. Nodes can serve multiple roles simultaneously (e.g., a validator can also be a Model Provider and/or TEE Provider, or a validator can additionally serve as an RPC Provider):
 
-- **Validator.** Participates in consensus, proposes and votes on blocks, earns block rewards and transaction fees (gas paid in TNZO). Each validator also runs a Canton participant node natively, connecting to one or more Canton synchronizers for Daml smart contract execution. Requires a minimum stake of 10,000 TNZO. Validators secure the Ledger.
+- **Validator.** Participates in HotStuff-2 consensus, proposes and votes on blocks, earns block rewards and priority fees (gas paid in TNZO). Each validator also runs a Canton participant node natively, connecting to one or more Canton synchronizers for Daml smart contract execution. **Three-tier model** detailed in §3.5: Tier 1 (resource-only, no stake required), Tier 2 (staked, ≥ 10,000 TNZO), Tier 3 (RPC provider, ≥ 100,000 TNZO and implies Tier 2). Validators secure the Ledger.
 
-- **Model Provider.** Serves AI models for inference requests. Earns per-inference fees (paid in TNZO) settled through micropayment channels. The Network takes a 0.5% commission on provider earnings, which flows to the treasury. Model providers provide **intelligence** to the Network.
+- **RPC Provider.** A Tier 3 validator role. Serves public JSON-RPC + REST verification API. Sanctioned to mint scoped tenant API keys (`tenzro_createApiKey`), broker access to operator-held upstream credentials (Canton participants, AI provider keys, data feed subscriptions), and route cross-chain mint/burn flows. Requires ≥ 100,000 TNZO bonded (implies the Tier 2 minimum). Tenzro Labs operates the first RPC Provider at `rpc.tenzro.network`.
 
-- **TEE Provider.** Operates hardware TEE enclaves (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU TEEs) for confidential computation, key management, custody services, and attestation. Earns fees for TEE services (paid in TNZO). The Network takes a 0.5% commission on provider earnings, which flows to the treasury. TEE providers provide **security** to the Network.
+- **Model Provider.** Serves AI models for inference requests. **Open entry, no stake required**; optional bond unlocks higher reward multiplier (1.1× per TOKENOMICS §9). Earns per-inference fees (paid in TNZO) settled through micropayment channels. The Network takes a 0.5% commission on provider earnings, which flows to the treasury. Model providers provide **intelligence** to the Network.
 
-- **Storage Provider.** Stores and serves blockchain state, model weights, and historical data. Earns storage fees.
+- **TEE Provider.** Operates hardware TEE enclaves (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU TEEs, Intel Tiber) for confidential computation, key management, custody services, and attestation. **Open entry, no stake required**; optional bond unlocks higher reward multiplier (1.2× per TOKENOMICS §9, reflecting the capital cost of confidential hardware). Earns fees for TEE services (paid in TNZO). The Network takes a 0.5% commission on provider earnings, which flows to the treasury. TEE providers provide **security** to the Network.
+
+- **Storage Provider.** Stores and serves blockchain state, model weights, and historical data. **Open entry, no stake required.** Earns storage fees.
+
+- **Training Provider.** Participates in Tenzro Train distributed training runs as a trainer. **Open entry, no stake required.** Optional bond required for participation in the witness committee (Tier 2 staked validators only).
 
 - **Light Client.** Verifies block headers and proofs without storing full state. Suitable for end-user devices.
 
-- **Bootstrap Node.** Initial peer discovery endpoint for new nodes joining the network.
+- **Bootstrap Node.** Initial peer discovery endpoint for new nodes joining the network. Any node can serve this role; in practice the Tenzro Labs validator-0 serves as the canonical bootstrap seed, advertised via DNS (`bootstrap.tenzro.network`) and pkarr-relay.
 
 - **Archive Node.** Stores complete historical state for analytics and indexing.
 
@@ -308,6 +312,20 @@ The quorum threshold follows classic BFT: for n validators, the protocol tolerat
 ### 3.4 Optimistic Responsiveness
 
 When `optimistic_responsiveness` is enabled (default), the protocol advances at network speed rather than waiting for fixed timeouts. If a quorum of honest validators respond before the view timeout, the protocol proceeds immediately. This allows block times below the configured 400ms target under favorable network conditions.
+
+### 3.4a Three-Tier Validator Model
+
+Validator participation follows a three-tier model. All three tiers run the same HotStuff-2 protocol and sign the same hybrid Ed25519 + ML-DSA-65 + BLS12-381 QCs; what differs is the block classes they're eligible to propose, their governance voting weight, their slashing exposure, and (Tier 3 only) their sanction to mint scoped tenant API keys.
+
+**Tier 1 — Resource-only validator.** Open entry, no stake required. Eligibility is based on hardware profile (CPU, RAM, disk, bandwidth, IOPS thresholds), stability profile (probation uptime, no equivocation history, no slashed peers in operator history), optional TEE attestation, and geographic/network/jurisdictional diversity bonus. Earns priority fees on proposed blocks plus a base reward share (reputation-weighted, capped at base multiplier). No independent governance voting weight. **No financial slashing exposure** — misbehavior results in ejection from the set plus reputation collapse, but cannot be slashed because there is no bond. Excluded from leader election for high-trust block classes.
+
+**Tier 2 — Staked validator.** Tier 1 eligibility plus ≥ 10,000 TNZO bonded self-stake. Earns priority fees + base + Tier 2 multiplier (up to 2× base) + stake-weighted share of commission. **Stake-weighted governance voting.** Slashing: 10% bond burn on equivocation; additional slashing on invalid TEE attestations, withholding training results, persistent SLA failures. Eligible for all block classes including high-trust. Eligible for high-trust roles: witness committee membership for training round finalization, high-value bridge node duties (Hyperlane ISM, Wormhole Guardian participation, threshold MPC bridge signer), AP2 high-value mandate validation, institutional Canton route operator.
+
+**Tier 3 — RPC provider.** Tier 2 eligibility plus ≥ 100,000 TNZO bonded (implies the Tier 2 minimum — effective bond is 100k total, not 110k). Tier 3 implies Tier 2. Additionally **sanctioned to mint scoped tenant API keys** via `tenzro_createApiKey`, serve public JSON-RPC + REST verification API, broker tenant access to operator-held upstream credentials (Canton participants, AI provider keys, data feed subscriptions, banking rails), and route cross-chain mint/burn flows. Tier 3 earnings: Tier 2 earnings + tenant access fees + per-call fees + commission on routed flow. Tier 3 slashing: Tier 2 conditions + censoring tenant transactions, frontrunning, mishandled tenant secrets, billing fraud, persistent SLA failures.
+
+Tier transitions are upgrades-only forward (1→2→3 by bonding more stake) or downgrades on stake withdrawal (3→2 below 100k while staying above 10k; 2→1 below 10k; 1→exit). All transitions take effect at the next epoch boundary. The TEE 1.5× multiplier on the leader-election draw applies to all three tiers.
+
+Tenzro Labs operates the first Tier 3 RPC provider as validator-0 — the genesis seed bootstrap peer plus public RPC at `rpc.tenzro.network`. Tenzro Labs is the first Tier 3, not architecturally privileged; any other operator that bonds 100k can register their own Tier 3 endpoint, mint their own tenant API keys, and front their own upstream credential vault with the same protocol guarantees.
 
 ### 3.5 Reputation-Weighted Proposer Election
 

@@ -112,10 +112,38 @@ struct ViewState {
     view_start_time: Instant,
 }
 
-/// Manages view change timeouts with exponential backoff
+/// Manages view change timeouts with exponential backoff AND adaptive
+/// base-timeout tuning.
+///
+/// The base timeout self-tunes to the cluster's observed
+/// quorum-formation latency rather than relying on a hard-coded
+/// default. This is what makes consensus work across an open,
+/// permissionless validator set with arbitrary cross-region
+/// topology — a validator in Frankfurt joining a fleet whose other
+/// members are in Tokyo and São Paulo cannot share a fixed default
+/// with a single-datacenter testnet.
+///
+/// **Algorithm**: every successful view (Commit QC observed) records
+/// the wall-clock time it took from view-start to QC-formation. An
+/// EWMA tracks the rolling mean; the base timeout is set to
+/// `multiplier × ewma`, clamped to `[base_floor, base_ceiling]`. The
+/// multiplier is intentionally generous (2× by default) so a single
+/// slow view doesn't trigger premature view-change on the next.
+///
+/// **Convergence**: when the cluster composition shifts (validator
+/// joins or leaves, region distribution changes), the EWMA tracks the
+/// new steady-state within `~5/alpha` views. With `alpha=0.15` that's
+/// ~33 views. During the transient, exponential backoff (which is
+/// PRESERVED unchanged) absorbs spikes.
+///
+/// **Safety floor + ceiling**: `base_floor=200ms` prevents tight loops
+/// when the cluster is pathologically fast; `base_ceiling=10000ms`
+/// prevents runaway when an outlier delay would otherwise push the
+/// EWMA into the seconds range. Operators can override both via
+/// `ConsensusConfig::with_adaptive_bounds`.
 #[derive(Debug, Clone)]
 struct ViewChangeTimer {
-    /// Base timeout duration
+    /// Adaptive base timeout, retuned after every successful view.
     base_timeout: Duration,
 
     /// Current timeout duration (with backoff)
@@ -129,6 +157,23 @@ struct ViewChangeTimer {
 
     /// Number of consecutive timeouts
     consecutive_timeouts: u32,
+
+    /// EWMA of observed view-to-QC formation latency, in milliseconds.
+    /// `None` until the first successful view completes.
+    observed_latency_ewma_ms: Option<f64>,
+
+    /// Smoothing factor for the EWMA. 0.15 = ~6-7 view memory.
+    ewma_alpha: f64,
+
+    /// Safety-multiplier applied to EWMA to derive base_timeout.
+    /// 2.0 = "wait 2× the observed mean before assuming view stalled".
+    safety_multiplier: f64,
+
+    /// Floor on the adaptive base timeout. Prevents tight loops.
+    base_floor: Duration,
+
+    /// Ceiling on the adaptive base timeout. Prevents runaway.
+    base_ceiling: Duration,
 }
 
 impl ViewState {
@@ -161,6 +206,11 @@ impl ViewChangeTimer {
             max_timeout,
             backoff_multiplier: 2.0,
             consecutive_timeouts: 0,
+            observed_latency_ewma_ms: None,
+            ewma_alpha: 0.15,
+            safety_multiplier: 2.0,
+            base_floor: Duration::from_millis(200),
+            base_ceiling: Duration::from_millis(10_000),
         }
     }
 
@@ -197,12 +247,61 @@ impl ViewChangeTimer {
         );
     }
 
-    /// Resets the timeout on successful view completion
-    fn on_success(&mut self) {
+    /// Records the observed view-to-QC formation latency for a
+    /// successful view and updates the adaptive base timeout.
+    ///
+    /// This is the load-bearing adaptive mechanism. Each successful
+    /// view contributes its wall-clock latency to the EWMA; the
+    /// updated base timeout is `safety_multiplier × ewma`, clamped to
+    /// `[base_floor, base_ceiling]`. The timer then resets backoff
+    /// state (delegated to `on_success`).
+    ///
+    /// Call this from the consensus path that observes Commit QC
+    /// formation. Must be called from `on_success` so a single code
+    /// path owns the post-view bookkeeping.
+    fn record_observed_view_latency(&mut self, observed: Duration) {
+        let observed_ms = observed.as_millis() as f64;
+        let new_ewma = match self.observed_latency_ewma_ms {
+            Some(prev) => self.ewma_alpha * observed_ms + (1.0 - self.ewma_alpha) * prev,
+            None => observed_ms,
+        };
+        self.observed_latency_ewma_ms = Some(new_ewma);
+
+        let target_ms = new_ewma * self.safety_multiplier;
+        let target = Duration::from_millis(target_ms as u64)
+            .max(self.base_floor)
+            .min(self.base_ceiling);
+
+        if target != self.base_timeout {
+            tracing::info!(
+                old_base_ms = self.base_timeout.as_millis(),
+                new_base_ms = target.as_millis(),
+                ewma_ms = new_ewma,
+                observed_ms = observed_ms,
+                "Adaptive view_timeout retuned from observed cluster latency"
+            );
+            self.base_timeout = target;
+        }
+    }
+
+    /// Resets the timeout on successful view completion.
+    ///
+    /// Caller should pass the observed view latency so the adaptive
+    /// algorithm can retune the base timeout. Pass `None` when the
+    /// caller does not have a clean view-start timestamp (e.g.
+    /// recovery paths); the timer then preserves the existing base
+    /// without retuning.
+    fn on_success(&mut self, observed: Option<Duration>) {
+        if let Some(o) = observed {
+            self.record_observed_view_latency(o);
+        }
         self.consecutive_timeouts = 0;
         self.current_timeout = self.base_timeout;
 
-        tracing::debug!("View completed successfully, timeout reset to base");
+        tracing::debug!(
+            base_ms = self.base_timeout.as_millis(),
+            "View completed successfully, timeout reset to adaptive base"
+        );
     }
 }
 
@@ -216,6 +315,7 @@ impl ViewChangeTimer {
 // workspace `Cargo.toml` already lists `large_enum_variant = "allow"` for
 // exactly this reason.
 #[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
 pub enum ConsensusOutMessage {
     /// A vote this node cast that peers must receive to form quorum
     Vote(Vote),
@@ -1944,8 +2044,15 @@ impl HotStuff2Engine {
                 return Ok(None);
             }
 
-            // Reset timeout on successful finalization
-            self.view_timer.write().on_success();
+            // Reset timeout on successful finalization, feeding the
+            // observed view-to-QC latency into the adaptive base-timeout
+            // tuner. This lets the cluster's `view_timeout_ms` track
+            // whatever cross-region topology actually exists, without
+            // any hardcoded default. See `ViewChangeTimer::record_observed_view_latency`.
+            let observed_view_latency = state.time_in_view();
+            self.view_timer
+                .write()
+                .on_success(Some(observed_view_latency));
 
             // Advance height for next block
             state.height = state.height + 1u64;
@@ -2372,7 +2479,15 @@ impl HotStuff2Engine {
                 return Ok(());
             }
 
-            self.view_timer.write().on_success();
+            // Feed the observed view latency into the adaptive base-
+            // timeout tuner. The base_timeout self-tracks the cluster's
+            // empirical quorum-formation latency so an open validator
+            // set with heterogeneous topology converges to a stable
+            // rate without operator hand-tuning.
+            let observed_view_latency = state.time_in_view();
+            self.view_timer
+                .write()
+                .on_success(Some(observed_view_latency));
 
             // Feed the success into LeaderReputation: the proposer at the
             // finalized view produced a finalized block (`success = true`)
@@ -3158,6 +3273,37 @@ impl ConsensusEngine for HotStuff2Engine {
 
     async fn is_leader(&self) -> bool {
         self.get_leader().map(|l| l == self.address).unwrap_or(false)
+    }
+}
+
+// Test-only inherent impl: exposes private inbound handlers
+// (`on_proposal`, `on_vote`) so multi-engine integration tests can
+// wire the cluster directly without spinning the full event-loop
+// layer. NOT a production message route — production receives via the
+// consensus_out channel + the node's event loop.
+impl HotStuff2Engine {
+    /// Test-only wrapper around `on_proposal`. See module-level note.
+    #[doc(hidden)]
+    pub async fn test_on_proposal(
+        &self,
+        block: &Block,
+        timeout_certificate: Option<crate::timeout::TimeoutCertificate>,
+        no_endorsement_certificate: Option<crate::timeout::NoEndorsementCertificate>,
+        proposer_high_qc_view: u64,
+    ) -> Result<Vote> {
+        self.on_proposal(
+            block,
+            timeout_certificate,
+            no_endorsement_certificate,
+            proposer_high_qc_view,
+        )
+        .await
+    }
+
+    /// Test-only wrapper around `on_vote`. See module-level note.
+    #[doc(hidden)]
+    pub async fn test_on_vote(&self, vote: &Vote) -> Result<()> {
+        self.on_vote(vote).await
     }
 }
 

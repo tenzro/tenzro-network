@@ -28,7 +28,12 @@ bincode = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true }
 tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[bench]]
 name = "consensus_benchmarks"
 harness = false
+
+[[test]]
+name = "tail_fork_regression"
+path = "tests/tail_fork_regression.rs"

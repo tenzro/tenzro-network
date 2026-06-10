@@ -34,6 +34,11 @@ struct Args {
     count: usize,
     chain_id: u64,
     stake_per_validator: u64,
+    /// Per-validator stakes (overrides `stake_per_validator` when set).
+    /// Length must match `count`. Used to model the three-tier model
+    /// at genesis (e.g. v0 at Tier 3 with 100,000 TNZO, v1..vN at
+    /// Tier 1 with 0 TNZO).
+    per_validator_stakes: Option<Vec<u64>>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -41,6 +46,7 @@ fn parse_args() -> Result<Args> {
     let mut count: usize = 10;
     let mut chain_id: u64 = 1338; // distinct from local 1337
     let mut stake_per_validator: u64 = 1000;
+    let mut per_validator_stakes: Option<Vec<u64>> = None;
 
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
@@ -71,6 +77,14 @@ fn parse_args() -> Result<Args> {
                     .parse()
                     .context("--stake-per-validator must be u64")?;
             }
+            "--stakes" => {
+                let raw = argv
+                    .next()
+                    .context("--stakes requires a comma-separated list of u64s")?;
+                let parts: std::result::Result<Vec<u64>, _> =
+                    raw.split(',').map(|s| s.trim().parse::<u64>()).collect();
+                per_validator_stakes = Some(parts.context("--stakes parse")?);
+            }
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
@@ -78,11 +92,23 @@ fn parse_args() -> Result<Args> {
             other => anyhow::bail!("unknown argument: {other}"),
         }
     }
+
+    if let Some(s) = &per_validator_stakes
+        && s.len() != count
+    {
+        anyhow::bail!(
+            "--stakes length ({}) must match --count ({})",
+            s.len(),
+            count
+        );
+    }
+
     Ok(Args {
         out_dir: out_dir.context("--out is required")?,
         count,
         chain_id,
         stake_per_validator,
+        per_validator_stakes,
     })
 }
 
@@ -90,9 +116,14 @@ fn print_help() {
     println!(
         "tenzro-genkeys — offline validator key generator\n\n\
          USAGE:\n  \
-           tenzro-genkeys --out <DIR> [--count 10] [--chain-id 1338] [--stake-per-validator 1000]\n\n\
+           tenzro-genkeys --out <DIR> [--count 10] [--chain-id 1338] \\\n  \
+           [--stake-per-validator 1000] [--stakes 100000,0,0,0]\n\n\
          Produces per-validator subdirs under <DIR>/validator-{{i}}/ plus a top-level\n\
-         genesis-prod.toml. Files have permission 0600.\n"
+         genesis-prod.toml. Files have permission 0600.\n\n\
+         --stakes accepts a comma-separated list of per-validator stakes (length\n\
+         must match --count). Use this to model the three-tier model at genesis:\n  \
+           --stakes 100000,0,0,0  → v0 Tier 3 (RPC provider), v1..v3 Tier 1\n\
+         When --stakes is unset, all validators receive --stake-per-validator.\n"
     );
 }
 
@@ -175,16 +206,34 @@ fn main() -> Result<()> {
         write_secret(&vdir.join("bls.seed"), &bls_seed)?;
         write_public(&vdir.join("bls.pub"), &bls_pub_hex)?;
 
+        // Per-validator stake derives from --stakes (if set) or
+        // --stake-per-validator (uniform). Used to model the
+        // three-tier model at genesis: e.g. v0 = 100,000 (Tier 3 RPC
+        // provider), v1..vN = 0 (Tier 1 resource-only). The tier is
+        // derived from the stake by `ValidatorTier::from_stake` at
+        // node startup against the registry config thresholds.
+        let stake = match &args.per_validator_stakes {
+            Some(stakes) => stakes[i],
+            None => args.stake_per_validator,
+        };
+        let tier_label = if stake >= 100_000 {
+            "Tier 3 (RPC provider)"
+        } else if stake >= 10_000 {
+            "Tier 2 (staked)"
+        } else {
+            "Tier 1 (resource-only)"
+        };
+
         // Genesis entry — comments preserved across roundtrip via toml_edit
         // would be nicer, but a plain string template is sufficient and
         // mirrors the format of config/genesis-local.toml exactly.
         genesis_validators.push(format!(
-            "[[validators]]\n# validator-{i} (peer_id={peer_id})\n\
+            "[[validators]]\n# validator-{i} (peer_id={peer_id}) — {tier_label}\n\
              public_key = \"{}\"\npq_public_key = \"{}\"\nbls_public_key = \"{}\"\nstake = {}\n",
             hex::encode(consensus_pub.as_bytes()),
             pq_vk_hex,
             bls_pub_hex,
-            args.stake_per_validator,
+            stake,
         ));
         peer_id_summary.push((i, peer_id));
     }

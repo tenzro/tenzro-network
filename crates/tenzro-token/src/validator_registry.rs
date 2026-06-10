@@ -28,10 +28,28 @@ use std::sync::Arc;
 use tenzro_types::primitives::{Address, Timestamp};
 use tracing::{info, warn};
 
-/// Default minimum self-bonded stake to register as a candidate validator:
-/// 10 000 TNZO. This is intentionally above [`crate::staking::DEFAULT_MIN_STAKE`]
-/// (1 000 TNZO) — validator slots cost more than service-provider slots.
+/// Default minimum self-bonded stake to register as a **Tier 2** (staked)
+/// validator: 10 000 TNZO. This is intentionally above
+/// [`crate::staking::DEFAULT_MIN_STAKE`] (1 000 TNZO) — validator slots
+/// cost more than service-provider slots. Per WHITEPAPER §5 +
+/// TOKENOMICS §7, Tier 1 (resource-only) validators require **no
+/// stake**; only Tier 2 must meet this minimum.
 pub const DEFAULT_MIN_VALIDATOR_SELF_STAKE: u128 = 10_000 * 1_000_000_000_000_000_000;
+
+/// Default minimum self-bonded stake to register as a **Tier 3** (RPC
+/// provider) validator: 100 000 TNZO. Tier 3 implies Tier 2 — the
+/// 100k bond satisfies the 10k Tier 2 minimum, so the effective bond
+/// is 100k total (not 110k).
+///
+/// Per the 2026-06-10 canonical model (memory:
+/// `project_validator_and_rpc_provider_model_2026_06_10`), Tier 3
+/// requires the higher bond because RPC providers carry the larger
+/// trust surface: they mint scoped `tnz_...` API keys for tenants,
+/// route signed transactions, broker access to operator-held upstream
+/// credentials (Canton participants, AI provider keys, data feed
+/// subscriptions), front cross-chain mint/burn flows, and mediate
+/// per-tenant billing. The 10× multiple over Tier 2 reflects this.
+pub const DEFAULT_MIN_RPC_PROVIDER_STAKE: u128 = 100_000 * 1_000_000_000_000_000_000;
 
 /// Default activation churn cap: percentage of active set, in basis points.
 /// 400 bps = 4% per epoch (matching EIP-8061 conservative profile).
@@ -66,6 +84,93 @@ pub const VALIDATOR_CONFIG_KEY: &str = "validator:config";
 /// Column family used for registry persistence. Co-located with staking under
 /// the unified token storage.
 const REGISTRY_CF: &str = tenzro_storage::CF_TOKENS;
+
+/// Participation tier of a registered validator.
+///
+/// Per the canonical three-tier model (WHITEPAPER §5 + TOKENOMICS §7,
+/// crystallized in memory
+/// `project_validator_and_rpc_provider_model_2026_06_10`):
+///
+/// - **Tier 1 — ResourceOnly:** open entry, no stake required. Standard
+///   block classes only. Reputation + TEE multiplier weight. No
+///   independent governance vote. No financial slash (ejection +
+///   reputation collapse only).
+/// - **Tier 2 — Staked:** ≥ 10,000 TNZO bonded. All block classes
+///   including high-trust. Stake-weighted weight. Governance vote.
+///   10% slash on equivocation + other slashable conditions.
+/// - **Tier 3 — RpcProvider:** ≥ 100,000 TNZO bonded (implies Tier 2).
+///   Sanctioned to mint scoped `tnz_...` API keys, serve public RPC,
+///   broker upstream credentials, route cross-chain mint/burn, front
+///   per-tenant billing. Tier 2 slashable conditions + censorship,
+///   frontrunning, mishandled tenant secrets, billing fraud,
+///   persistent SLA failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidatorTier {
+    ResourceOnly,
+    Staked,
+    RpcProvider,
+}
+
+impl ValidatorTier {
+    /// Returns the tier inferred from the validator's self-stake
+    /// amount, used during admission and on every stake-change event.
+    pub fn from_stake(self_stake: u128, cfg: &ValidatorRegistryConfig) -> Self {
+        if self_stake >= cfg.min_rpc_provider_stake {
+            Self::RpcProvider
+        } else if self_stake >= cfg.min_self_stake {
+            Self::Staked
+        } else {
+            Self::ResourceOnly
+        }
+    }
+
+    /// Returns true if this tier is eligible for HighTrust block class
+    /// proposer election. Per the spec, Tier 1 is excluded from
+    /// high-trust blocks; Tier 2 and Tier 3 are admitted.
+    pub fn admits_high_trust(&self) -> bool {
+        !matches!(self, Self::ResourceOnly)
+    }
+
+    /// Returns true if this tier has independent governance voting
+    /// weight via its stake. Tier 1 has none; Tier 2 and Tier 3 are
+    /// stake-weighted.
+    pub fn has_governance_weight(&self) -> bool {
+        !matches!(self, Self::ResourceOnly)
+    }
+
+    /// Returns true if this tier has financial slashing exposure on
+    /// equivocation. Tier 1 does not; Tier 2 and Tier 3 do.
+    pub fn has_financial_slashing(&self) -> bool {
+        !matches!(self, Self::ResourceOnly)
+    }
+
+    /// Returns true if this tier is sanctioned to mint scoped tenant
+    /// API keys (`tenzro_createApiKey`) and serve public RPC. Tier 3
+    /// only.
+    pub fn admits_rpc_role(&self) -> bool {
+        matches!(self, Self::RpcProvider)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ResourceOnly => "resource_only",
+            Self::Staked => "staked",
+            Self::RpcProvider => "rpc_provider",
+        }
+    }
+}
+
+impl Default for ValidatorTier {
+    fn default() -> Self {
+        // Old persisted rows without a tier field default to Staked —
+        // matches the pre-tier behaviour where every registered
+        // validator carried at least `min_self_stake`. On a stake
+        // change, `from_stake` recomputes the correct tier and
+        // overwrites this default.
+        Self::Staked
+    }
+}
 
 /// Lifecycle status of a registered validator.
 ///
@@ -148,6 +253,20 @@ pub struct ValidatorRegistryEntry {
     pub withdrawal_address: Address,
     /// Self-bonded stake. Counted as voting power when active.
     pub self_stake: u128,
+    /// Participation tier — derived from `self_stake` against the
+    /// registry config's `min_self_stake` / `min_rpc_provider_stake`
+    /// thresholds. Recomputed on every stake change. The field is
+    /// stored explicitly (rather than re-derived on every read) so
+    /// downstream code (leader election, governance, slashing,
+    /// API-key minting) can branch on tier without taking the config
+    /// lock.
+    ///
+    /// Persistence-safe `#[serde(default)]` for back-compat read of
+    /// pre-tier registry entries: those rows default to `Staked` (see
+    /// `ValidatorTier::default`) because pre-tier code required at
+    /// least `min_self_stake`.
+    #[serde(default)]
+    pub tier: ValidatorTier,
     /// Current lifecycle status.
     pub status: ValidatorRegistryStatus,
     /// Epoch in which the candidate was first registered.
@@ -171,7 +290,15 @@ pub struct ValidatorRegistryEntry {
 }
 
 impl ValidatorRegistryEntry {
-    /// Constructs a fresh `Candidate` entry. Validates key lengths.
+    /// Constructs a fresh `Candidate` entry. Validates key lengths and
+    /// derives the participation tier from `self_stake` against
+    /// `cfg.min_self_stake` / `cfg.min_rpc_provider_stake`.
+    ///
+    /// Tier 1 (resource-only) admission: `self_stake == 0` is the
+    /// canonical case but any value below `cfg.min_self_stake` is
+    /// admitted as Tier 1.
+    /// Tier 2 (staked) admission: `self_stake >= cfg.min_self_stake`.
+    /// Tier 3 (RPC provider) admission: `self_stake >= cfg.min_rpc_provider_stake`.
     pub fn new_candidate(
         address: Address,
         consensus_pubkey: Vec<u8>,
@@ -181,6 +308,7 @@ impl ValidatorRegistryEntry {
         self_stake: u128,
         registered_at_epoch: u64,
         metadata_uri: String,
+        cfg: &ValidatorRegistryConfig,
     ) -> Result<Self> {
         if consensus_pubkey.len() != 32 {
             return Err(TokenError::InvalidParameter(format!(
@@ -207,6 +335,7 @@ impl ValidatorRegistryEntry {
                 metadata_uri.len()
             )));
         }
+        let tier = ValidatorTier::from_stake(self_stake, cfg);
         Ok(Self {
             address,
             consensus_pubkey,
@@ -214,6 +343,7 @@ impl ValidatorRegistryEntry {
             bls_pubkey,
             withdrawal_address,
             self_stake,
+            tier,
             status: ValidatorRegistryStatus::Candidate,
             registered_at_epoch,
             activated_at_epoch: None,
@@ -229,8 +359,18 @@ impl ValidatorRegistryEntry {
 /// Registry configuration (mutable via governance).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ValidatorRegistryConfig {
-    /// Minimum self-bonded stake to register.
+    /// Minimum self-bonded stake to register as a **Tier 2 (staked)**
+    /// validator. Tier 1 (resource-only) registrations are not gated
+    /// by this — they require `self_stake == 0` and meet only the
+    /// resource + stability profile.
     pub min_self_stake: u128,
+    /// Minimum self-bonded stake to register as a **Tier 3 (RPC
+    /// provider)** validator. Implies the Tier 2 minimum is also met.
+    /// 10× Tier 2 by default, reflecting the larger trust surface
+    /// RPC providers carry (tenant API keys, upstream credentials,
+    /// cross-chain mint routing, billing).
+    #[serde(default = "default_min_rpc_provider_stake")]
+    pub min_rpc_provider_stake: u128,
     /// Activation churn cap, in basis points of current active-set size.
     pub activation_churn_bps: u32,
     /// Exit churn cap, in basis points of current active-set size.
@@ -239,10 +379,18 @@ pub struct ValidatorRegistryConfig {
     pub reentry_cooldown_epochs: u64,
 }
 
+/// Serde-default for the RPC provider stake on a config row written
+/// before the field existed. Read-side compat for pre-tier registry
+/// snapshots.
+fn default_min_rpc_provider_stake() -> u128 {
+    DEFAULT_MIN_RPC_PROVIDER_STAKE
+}
+
 impl Default for ValidatorRegistryConfig {
     fn default() -> Self {
         Self {
             min_self_stake: DEFAULT_MIN_VALIDATOR_SELF_STAKE,
+            min_rpc_provider_stake: DEFAULT_MIN_RPC_PROVIDER_STAKE,
             activation_churn_bps: DEFAULT_ACTIVATION_CHURN_BPS,
             exit_churn_bps: DEFAULT_EXIT_CHURN_BPS,
             reentry_cooldown_epochs: DEFAULT_REENTRY_COOLDOWN_EPOCHS,
@@ -458,12 +606,15 @@ impl ValidatorRegistry {
         metadata_uri: String,
     ) -> Result<()> {
         let cfg = *self.config.read();
-        if self_stake < cfg.min_self_stake {
-            return Err(TokenError::MinimumStakeNotMet {
-                required: cfg.min_self_stake,
-                provided: self_stake,
-            });
-        }
+
+        // Per the canonical three-tier model: Tier 1 (resource-only)
+        // registrations are admitted with `self_stake == 0` (or any
+        // amount below `min_self_stake`). Tier 2 (staked) admitted at
+        // `>= min_self_stake`. Tier 3 (RPC provider) at
+        // `>= min_rpc_provider_stake`. The tier is derived inside
+        // `ValidatorRegistryEntry::new_candidate`. No stake floor is
+        // enforced here — all three tiers are valid registration
+        // outcomes.
 
         // Re-registration path: must have exited and waited the cooldown.
         if let Some(existing) = self.entries.get(&address) {
@@ -498,13 +649,15 @@ impl ValidatorRegistry {
             self_stake,
             current_epoch,
             metadata_uri,
+            &cfg,
         )?;
+        let tier = entry.tier;
         self.entries.insert(address, entry.clone());
         self.persist_entry(&entry);
         self.persist_index();
         info!(
-            "Registered validator candidate {} at epoch {} with stake {}",
-            address, current_epoch, self_stake
+            "Registered validator candidate {} at epoch {} with stake {} (tier={})",
+            address, current_epoch, self_stake, tier.as_str()
         );
         Ok(())
     }
@@ -558,6 +711,13 @@ impl ValidatorRegistry {
                 metadata_uri.len()
             )));
         }
+        // Derive the genesis validator's tier from its self-stake.
+        // The genesis-prod.toml may seed validators at any tier; the
+        // first Tenzro Labs validator is Tier 3 (RPC provider) per
+        // the canonical model, others may be Tier 1 / 2 / 3 depending
+        // on the genesis allocation.
+        let cfg = *self.config.read();
+        let tier = ValidatorTier::from_stake(self_stake, &cfg);
         let entry = ValidatorRegistryEntry {
             address,
             consensus_pubkey,
@@ -565,6 +725,7 @@ impl ValidatorRegistry {
             bls_pubkey,
             withdrawal_address,
             self_stake,
+            tier,
             status: ValidatorRegistryStatus::Active,
             registered_at_epoch: 0,
             activated_at_epoch: Some(0),
@@ -578,8 +739,8 @@ impl ValidatorRegistry {
         self.persist_entry(&entry);
         self.persist_index();
         info!(
-            "Seeded genesis Active validator {} with stake {}",
-            address, self_stake
+            "Seeded genesis Active validator {} with stake {} (tier={})",
+            address, self_stake, tier.as_str()
         );
         Ok(true)
     }
@@ -917,14 +1078,61 @@ mod tests {
     }
 
     #[test]
-    fn register_below_min_stake_fails() {
+    fn register_below_min_stake_admits_as_tier_1() {
+        // Per the canonical three-tier model (WHITEPAPER §5 +
+        // TOKENOMICS §7): registrations with `self_stake == 0` (or
+        // any amount below `min_self_stake`) are admitted as Tier 1
+        // (resource-only) validators. Stake-floor enforcement is
+        // gone; tier is derived from stake instead.
         let reg = ValidatorRegistry::new();
         let (ck, pk, bk) = make_keys();
         let a = make_address(1);
-        let err = reg
-            .register_candidate(a, ck, pk, bk, a, 100, 0, String::new())
-            .unwrap_err();
-        assert!(matches!(err, TokenError::MinimumStakeNotMet { .. }));
+
+        // Zero stake → Tier 1 admission succeeds.
+        reg.register_candidate(a, ck.clone(), pk.clone(), bk.clone(), a, 0, 0, String::new())
+            .unwrap();
+        let entry = reg.get(&a).unwrap();
+        assert_eq!(entry.tier, ValidatorTier::ResourceOnly);
+        assert_eq!(entry.self_stake, 0);
+        assert_eq!(entry.status, ValidatorRegistryStatus::Candidate);
+    }
+
+    #[test]
+    fn register_at_tier_2_threshold_sets_staked() {
+        let reg = ValidatorRegistry::new();
+        let (ck, pk, bk) = make_keys();
+        let a = make_address(2);
+        reg.register_candidate(
+            a,
+            ck,
+            pk,
+            bk,
+            a,
+            DEFAULT_MIN_VALIDATOR_SELF_STAKE,
+            0,
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(reg.get(&a).unwrap().tier, ValidatorTier::Staked);
+    }
+
+    #[test]
+    fn register_at_tier_3_threshold_sets_rpc_provider() {
+        let reg = ValidatorRegistry::new();
+        let (ck, pk, bk) = make_keys();
+        let a = make_address(3);
+        reg.register_candidate(
+            a,
+            ck,
+            pk,
+            bk,
+            a,
+            DEFAULT_MIN_RPC_PROVIDER_STAKE,
+            0,
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(reg.get(&a).unwrap().tier, ValidatorTier::RpcProvider);
     }
 
     #[test]
