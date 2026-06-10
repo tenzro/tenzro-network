@@ -36,7 +36,7 @@ use tenzro_model::{
 };
 use tenzro_model::hf_download::{ArtifactSpec, DownloadProgress, DownloadState, HfArtifactDownloader};
 use tenzro_network::{NetworkMessage, MessagePayload, NetworkService};
-use tenzro_storage::{BlockStoreImpl, AccountStoreImpl, KvStore, CF_IDENTITIES, CF_TASKS, CF_AGENT_TEMPLATES, CF_MODELS, CF_AGENTS, CF_SKILLS, CF_TOOLS, CF_METADATA, CF_SETTLEMENTS, traits::{BlockStore, AccountStore}};
+use tenzro_storage::{BlockStoreImpl, AccountStoreImpl, KvStore, CF_IDENTITIES, CF_TASKS, CF_AGENT_TEMPLATES, CF_MODELS, CF_AGENTS, CF_SKILLS, CF_TOOLS, CF_KNOWLEDGE, CF_WORKFLOW_TEMPLATES, CF_METADATA, CF_SETTLEMENTS, traits::{BlockStore, AccountStore}};
 use tenzro_types::block::Block;
 use tenzro_types::model::ModelLocation;
 use tenzro_types::primitives::{Address, BlockHeight, ChainId, Hash, Nonce};
@@ -637,6 +637,7 @@ fn requires_admin_token(method: &str) -> bool {
             | "tenzro_gossipStats"
             // Canton operator surfaces
             | "tenzro_canton_listApiKeyAnalytics"
+            | "tenzro_canton_aggregateAnalytics"
             | "tenzro_canton_createIdp"
             | "tenzro_canton_listIdps"
             | "tenzro_canton_deleteIdp"
@@ -674,6 +675,13 @@ fn requires_admin_token(method: &str) -> bool {
             // treasury auto-rebalances the per-adapter pool.
             | "tenzro_setBridgeFeeRate"
             | "tenzro_setSponsorshipRefillThreshold"
+            // MCP plugin host: vault writes are operator-only. Tenants
+            // never set / forget upstream credentials. Eviction of a
+            // persistent stdio subprocess is also operator-only (it
+            // affects all tenants currently using the MCP).
+            | "tenzro_storeMcpSecret"
+            | "tenzro_forgetMcpSecret"
+            | "tenzro_evictMcpSubprocess"
             // Operator admin-read of per-tenant CU consumption + call
             // counters for the chainlink-scoped bridge fee path. Strict
             // cross-tenant read — operator-only.
@@ -1479,6 +1487,9 @@ pub(crate) async fn handle_request(
         "tenzro_canton_listUserRights" => handle_canton_list_user_rights(node, request.params).await,
         "tenzro_canton_getMyAnalytics" => handle_canton_get_my_analytics(node, api_key).await,
         "tenzro_canton_listApiKeyAnalytics" => handle_canton_list_api_key_analytics(node, request.params).await,
+        "tenzro_canton_aggregateAnalytics" => handle_canton_aggregate_analytics(node, request.params).await,
+        "tenzro_canton_watchParty" => handle_canton_watch_party(node, request.params, api_key.as_deref()).await,
+        "tenzro_canton_submitWithMandate" => handle_canton_submit_with_mandate(node, request.params, api_key.as_deref()).await,
         "tenzro_canton_createIdp" => handle_canton_create_idp(node, request.params).await,
         "tenzro_canton_listIdps" => handle_canton_list_idps(node).await,
         "tenzro_canton_deleteIdp" => handle_canton_delete_idp(node, request.params).await,
@@ -1491,6 +1502,11 @@ pub(crate) async fn handle_request(
         // API key management — subject (X-Tenzro-Api-Key authenticated)
         "tenzro_revokeMyApiKey" => handle_revoke_my_api_key(node, request.params, api_key).await,
         "tenzro_listMyApiKeys" => handle_list_my_api_keys(node, api_key).await,
+
+        // MCP plugin host — operator (admin-token-gated) credential vault + subprocess control
+        "tenzro_storeMcpSecret" => handle_store_mcp_secret(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_forgetMcpSecret" => handle_forget_mcp_secret(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_evictMcpSubprocess" => handle_evict_mcp_subprocess(node.clone(), request.params.clone().unwrap_or_default()).await,
 
         // Staking methods
         "tenzro_stake" | "tenzro_stakeTokens" => handle_stake(node, request.params).await,
@@ -1607,8 +1623,29 @@ pub(crate) async fn handle_request(
         "tenzro_registerTool" => handle_register_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_listTools" => handle_list_tools(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_searchTools" => handle_search_tools(node.clone(), request.params.clone().unwrap_or_default()).await,
-        "tenzro_useTool" => handle_use_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_useTool" => handle_use_tool(node.clone(), request.params.clone().unwrap_or_default(), api_key.as_deref()).await,
         "tenzro_getTool" => handle_get_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
+
+        // Knowledge registry (CF_KNOWLEDGE)
+        "tenzro_registerKnowledge" => handle_register_knowledge(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_listKnowledge" | "tenzro_searchKnowledge" => handle_list_knowledge(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_useKnowledge" => handle_use_knowledge(node.clone(), request.params.clone().unwrap_or_default(), api_key.as_deref()).await,
+        "tenzro_getKnowledge" => handle_get_knowledge(node.clone(), request.params.clone().unwrap_or_default()).await,
+
+        // Workflow template catalog (CF_WORKFLOW_TEMPLATES)
+        "tenzro_registerWorkflowTemplate" => handle_register_workflow_template(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_listWorkflowTemplates" => handle_list_workflow_templates(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_getWorkflowTemplate" => handle_get_workflow_template(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_instantiateWorkflow" => handle_instantiate_workflow(node.clone(), request.params.clone().unwrap_or_default(), api_key.as_deref()).await,
+
+        // Unified resource discovery + invocation (cross-registry)
+        "tenzro_listResources" => handle_list_resources(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_useResource" => handle_use_resource(node.clone(), request.params.clone().unwrap_or_default(), api_key.as_deref()).await,
+
+        // Child-agent atomic spawn — TDIP identity + MPC wallet +
+        // parent-funded TNZO budget + spending policy + delegation
+        // scope, all in one call. Composes existing primitives.
+        "tenzro_spawnChildAgent" => handle_spawn_child_agent(&node, request.params.clone()).await,
         "tenzro_updateTool" => handle_update_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_heartbeatTool" => handle_heartbeat_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_heartbeatAgentTemplate" => handle_heartbeat_agent_template(node.clone(), request.params.clone().unwrap_or_default()).await,
@@ -20673,6 +20710,258 @@ async fn handle_canton_list_api_key_analytics(
     Ok(serde_json::json!({ "analytics": rows }))
 }
 
+// ─── Scoped Canton scan surface ─────────────────────────────────────────────
+//
+// `tenzro_canton_watchParty(party, template_ids?)` — get the live
+// active-contracts snapshot for a single party. Gated against the
+// presenting API key's `can_read_as_parties` allow-list. Tenants only
+// see parties they're authorized to read for.
+//
+// `tenzro_canton_aggregateAnalytics()` — operator admin-read of
+// rolled-up per-key Canton call counters, grouped by method shape.
+// Useful for billing + capacity planning. Admin-token-gated.
+
+// ─── Mandate-bound Canton write ─────────────────────────────────────────────
+//
+// `tenzro_canton_submitWithMandate` is the autonomous-agent write path:
+// the caller presents an AP2 mandate pair (checkout VDC + payment VDC)
+// alongside the DAML command. The handler validates the mandate against
+// (a) AP2 invariants (signature + freshness + invariants), (b) TDIP
+// DelegationScope, (c) per-machine SpendingPolicy, (d) on-chain escrow
+// if the mandate names one, (e) SPT ceiling if named. Only when all
+// applicable ceilings pass does the DAML command submit. The response
+// returns both the AP2 validation receipt and the Canton submission
+// receipt so the caller has the full audit trail in one round-trip.
+
+async fn handle_canton_submit_with_mandate(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+    api_key: Option<&str>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.clone().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Pull the mandate pair out of params. We accept them inline at
+    // either `mandate.checkout` / `mandate.payment` (preferred) or top-
+    // level `checkout_vdc` / `payment_vdc` (back-compat with the
+    // existing AP2 validator wire shape).
+    let (checkout_val, payment_val) = if let Some(m) = p.get("mandate") {
+        let c = m.get("checkout").cloned().ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "mandate.checkout missing".to_string(),
+            data: None,
+        })?;
+        let pay = m.get("payment").cloned().ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "mandate.payment missing".to_string(),
+            data: None,
+        })?;
+        (c, pay)
+    } else {
+        let c = p
+            .get("checkout_vdc")
+            .cloned()
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Missing mandate.checkout (or checkout_vdc)".to_string(),
+                data: None,
+            })?;
+        let pay = p.get("payment_vdc").cloned().ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing mandate.payment (or payment_vdc)".to_string(),
+            data: None,
+        })?;
+        (c, pay)
+    };
+
+    // Always enforce delegation when the mandate ships with the
+    // submission — the whole point of this RPC is to bind the write
+    // to the agent's bounded authority. Build a params object that
+    // pipes the validator's `enforce_delegation=true` path.
+    let validate_params = serde_json::json!({
+        "checkout_vdc": checkout_val,
+        "payment_vdc": payment_val,
+        "enforce_delegation": true,
+    });
+    let ap2_receipt = crate::rpc_integrations::handle_ap2_validate_mandate_pair(
+        node,
+        Some(validate_params),
+    )
+    .await
+    .map_err(|e| JsonRpcError {
+        code: e.code,
+        message: format!("AP2 validation rejected: {}", e.message),
+        data: e.data,
+    })?;
+
+    // Validation passed. Strip the mandate fields from the submission
+    // params and forward to the existing DAML submit handler so we
+    // don't duplicate the substantial command-encoding logic.
+    let mut submit_params = p;
+    if let Value::Object(obj) = &mut submit_params {
+        obj.remove("mandate");
+        obj.remove("checkout_vdc");
+        obj.remove("payment_vdc");
+        obj.remove("enforce_delegation");
+    }
+    let canton_receipt =
+        handle_submit_daml_command(node, Some(submit_params), api_key).await?;
+
+    Ok(serde_json::json!({
+        "ap2_receipt": ap2_receipt,
+        "canton_receipt": canton_receipt,
+    }))
+}
+
+async fn handle_canton_watch_party(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+    api_key: Option<&str>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let config = node.config();
+    if !config.canton.enabled {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Canton/DAML is not enabled on this node".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let party = params
+        .get("party")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing party (fully-qualified party id)".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    // Per-tenant authorization: the presenting key must allow reading
+    // for this party. `can_act_as` implies `can_read_as`. When no
+    // allow-list is set (legacy key), any party the operator's
+    // participant can read is accessible — the operator still has
+    // upstream Canton's AuthService as the second gate.
+    if let Some(plaintext) = api_key
+        && let Some(mgr) = node.api_key_manager()
+        && let Some(record) = mgr.lookup(plaintext)
+    {
+        if !record.is_active() {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: "Unauthorized: API key inactive".to_string(),
+                data: None,
+            });
+        }
+        if !record.can_read_as(&party) {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: format!(
+                    "Unauthorized: key not allowed to read for party {}",
+                    party
+                ),
+                data: None,
+            });
+        }
+    }
+
+    let template_ids: Vec<String> = params
+        .get("template_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if template_ids.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "template_ids required (Canton v2 active-contracts mandates at least one)"
+                .to_string(),
+            data: None,
+        });
+    }
+
+    let adapter = canton_adapter_or_err(node)?;
+    let contracts = adapter
+        .query_active_contracts_as(template_ids.clone(), Value::Null, Some(party.as_str()))
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Canton watchParty failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "party": party,
+        "template_ids": template_ids,
+        "active_contracts": contracts,
+        "count": contracts.len(),
+    }))
+}
+
+async fn handle_canton_aggregate_analytics(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let analytics = node.canton_analytics().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Canton analytics not initialized".to_string(),
+        data: None,
+    })?;
+
+    let group_by = params
+        .as_ref()
+        .and_then(|p| p.get("group_by"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("subject");
+
+    let rows = analytics.list_all();
+    let mut buckets: std::collections::BTreeMap<String, (u64, i64)> =
+        std::collections::BTreeMap::new();
+    for r in &rows {
+        // The analytics row keys are scoped by `key_id` only. When the
+        // caller groups by "subject", we look the subject up through
+        // the api-key manager so the bucket label is human-friendly.
+        let key = match group_by {
+            "key_id" => r.key_id.clone(),
+            _ => node
+                .api_key_manager()
+                .and_then(|mgr| mgr.find_by_key_id(&r.key_id))
+                .and_then(|rec| rec.subject)
+                .unwrap_or_else(|| format!("key:{}", r.key_id)),
+        };
+        let entry = buckets.entry(key).or_insert((0, 0));
+        entry.0 += r.calls_total;
+        entry.1 = entry.1.max(r.last_called_at.unwrap_or(0));
+    }
+
+    let bucket_list: Vec<Value> = buckets
+        .into_iter()
+        .map(|(k, (calls, last))| {
+            serde_json::json!({
+                "key": k,
+                "total_calls": calls,
+                "last_called_at": last,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "group_by": group_by,
+        "buckets": bucket_list,
+        "row_count": rows.len(),
+    }))
+}
+
 /// Operator admin-write: register a Canton IdentityProviderConfig
 /// (`POST /v2/idps`). Stage 2 operator surface — used for explicit
 /// tenant IDP management outside the `tenzro_createApiKey`
@@ -21169,8 +21458,84 @@ async fn handle_create_api_key(
         }
     }
 
+    // Agent-delegation parameters — optional, additive, all default-empty.
+    // When any field is non-default, the RPC enforcement layer applies
+    // per-party / per-template / per-command authorization on every
+    // Canton call presenting the key. Empty fields preserve the legacy
+    // unrestricted behavior of pre-delegation keys.
+    //
+    // Wire format mirrors the field names exactly: can_act_as_parties,
+    // can_read_as_parties, allowed_templates, allowed_commands,
+    // max_per_command_amulet, max_per_day_amulet, requires_mandate_for,
+    // valid_until.
+    let delegation = {
+        use crate::api_key::AgentDelegation;
+        let str_array = |key: &str| -> Vec<String> {
+            params
+                .get(key)
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let u128_opt = |key: &str| -> Option<u128> {
+            params.get(key).and_then(|v| {
+                if let Some(s) = v.as_str() {
+                    s.parse::<u128>().ok()
+                } else {
+                    v.as_u64().map(|n| n as u128)
+                }
+            })
+        };
+        // Per-resource TNZO ceiling map: { "<resource_id>": "<u128>" }
+        // Strings preferred so callers don't lose precision on the
+        // JSON-number side; u64 also accepted for convenience.
+        let max_per_resource_tnzo = {
+            let mut out = std::collections::BTreeMap::new();
+            if let Some(obj) = params
+                .get("max_per_resource_tnzo")
+                .and_then(|v| v.as_object())
+            {
+                for (rid, raw) in obj {
+                    let parsed: Option<u128> = if let Some(s) = raw.as_str() {
+                        s.parse().ok()
+                    } else {
+                        raw.as_u64().map(|n| n as u128)
+                    };
+                    if let Some(v) = parsed {
+                        out.insert(rid.clone(), v);
+                    }
+                }
+            }
+            out
+        };
+
+        AgentDelegation {
+            can_act_as_parties: str_array("can_act_as_parties"),
+            can_read_as_parties: str_array("can_read_as_parties"),
+            allowed_templates: str_array("allowed_templates"),
+            allowed_commands: str_array("allowed_commands"),
+            max_per_command_amulet: u128_opt("max_per_command_amulet"),
+            max_per_day_amulet: u128_opt("max_per_day_amulet"),
+            requires_mandate_for: str_array("requires_mandate_for"),
+            valid_until: params
+                .get("valid_until")
+                .and_then(|v| v.as_i64()),
+            allowed_tools: str_array("allowed_tools"),
+            allowed_skills: str_array("allowed_skills"),
+            allowed_knowledge: str_array("allowed_knowledge"),
+            allowed_workflow_templates: str_array("allowed_workflow_templates"),
+            allowed_agent_templates: str_array("allowed_agent_templates"),
+            allowed_models: str_array("allowed_models"),
+            max_per_resource_tnzo,
+        }
+    };
+
     let issued = mgr
-        .issue(
+        .issue_with_delegation(
             subject,
             label.clone(),
             scopes,
@@ -21178,12 +21543,171 @@ async fn handle_create_api_key(
             canton_user_id,
             provisioned_idp.clone(),
             stage2b_idp_client.as_ref().map(|c| c.client_id.clone()),
+            delegation,
         )
         .map_err(|e| JsonRpcError {
             code: -32603,
             message: format!("issue API key: {}", e),
             data: None,
         })?;
+
+    // Provision Canton-side CanActAs / CanReadAs rights for every party
+    // named in the delegation. This binds the Tenzro API key 1:1 to the
+    // Canton-side user's authority — when the tenant presents this key
+    // for canton-scoped RPCs, Canton's AuthService will accept their
+    // forwarded `actAs` / `readAs` lists because the user's rights
+    // already include those parties.
+    //
+    // Atomicity contract: if ANY single grant fails, we roll back every
+    // grant we already made (best-effort revoke, errors logged) AND
+    // revoke the freshly-issued Tenzro key (so the caller sees a clean
+    // failure with no partial state). Only when every requested grant
+    // succeeds do we keep the key live and return success.
+    //
+    // Preconditions: (a) the issued record has a canton_user_id (set by
+    // the Stage 1 auto-provision block above when `canton` scope is
+    // requested), (b) the canton adapter is available, (c) at least one
+    // party is named in can_act_as_parties or can_read_as_parties.
+    let mut canton_rights_granted: Vec<serde_json::Value> = Vec::new();
+    let needs_rights = !issued.record.can_act_as_parties.is_empty()
+        || !issued.record.can_read_as_parties.is_empty();
+    if needs_rights {
+        let user_id_for_rights = issued.record.canton_user_id.clone();
+        let canton_adapter = node.canton_adapter();
+        match (user_id_for_rights.as_deref(), canton_adapter) {
+            (Some(user_id), Some(adapter)) => {
+                // Track every (party, can_act_as, can_read_as) we grant
+                // so we can revoke on partial failure.
+                let mut grants: Vec<(String, bool, bool)> = Vec::new();
+                let mut failure: Option<String> = None;
+
+                'grants: for party in issued.record.can_act_as_parties.iter() {
+                    match adapter
+                        .grant_user_rights(Some(user_id), party, true, false)
+                        .await
+                    {
+                        Ok(_) => {
+                            grants.push((party.clone(), true, false));
+                            canton_rights_granted.push(serde_json::json!({
+                                "party": party,
+                                "kind": "CanActAs",
+                            }));
+                        }
+                        Err(e) => {
+                            failure = Some(format!(
+                                "grant_user_rights(CanActAs, {}) failed: {}",
+                                party, e
+                            ));
+                            break 'grants;
+                        }
+                    }
+                }
+
+                if failure.is_none() {
+                    'reads: for party in issued.record.can_read_as_parties.iter() {
+                        match adapter
+                            .grant_user_rights(Some(user_id), party, false, true)
+                            .await
+                        {
+                            Ok(_) => {
+                                grants.push((party.clone(), false, true));
+                                canton_rights_granted.push(serde_json::json!({
+                                    "party": party,
+                                    "kind": "CanReadAs",
+                                }));
+                            }
+                            Err(e) => {
+                                failure = Some(format!(
+                                    "grant_user_rights(CanReadAs, {}) failed: {}",
+                                    party, e
+                                ));
+                                break 'reads;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(err) = failure {
+                    // Roll back every grant we already made. Best-effort:
+                    // log errors but continue so we make maximal progress
+                    // on cleanup. Order is reverse to mirror typical
+                    // unwind semantics, though Canton's rights endpoint
+                    // is order-independent.
+                    for (party, can_act_as, can_read_as) in grants.iter().rev() {
+                        if let Err(e) = adapter
+                            .revoke_user_rights(
+                                Some(user_id),
+                                party,
+                                *can_act_as,
+                                *can_read_as,
+                            )
+                            .await
+                        {
+                            warn!(
+                                "Rollback: revoke_user_rights({}, act={}, read={}) failed: {}",
+                                party, can_act_as, can_read_as, e
+                            );
+                        }
+                    }
+
+                    // Revoke the just-issued Tenzro key so the caller can
+                    // never re-present it. Best-effort — if this fails
+                    // we still surface the original grant error to the
+                    // caller, but we log it.
+                    if let Err(e) = mgr.revoke_by_id_admin(&issued.record.key_id) {
+                        warn!(
+                            "Rollback: revoke_by_id_admin({}) failed: {}",
+                            issued.record.key_id, e
+                        );
+                    }
+
+                    return Err(JsonRpcError {
+                        code: -32000,
+                        message: format!(
+                            "Canton rights provisioning failed; rolled back issued key {}: {}",
+                            issued.record.key_id, err
+                        ),
+                        data: Some(serde_json::json!({
+                            "key_id": issued.record.key_id,
+                            "rolled_back": true,
+                        })),
+                    });
+                }
+            }
+            (None, _) => {
+                // The delegation names parties but the issued key has
+                // no canton_user_id — almost certainly because the
+                // canton scope was not granted. Reject before billing
+                // the caller a key they cannot use.
+                if let Err(e) = mgr.revoke_by_id_admin(&issued.record.key_id) {
+                    warn!(
+                        "Rollback: revoke_by_id_admin({}) failed: {}",
+                        issued.record.key_id, e
+                    );
+                }
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: "delegation parties named but the issued key has no canton_user_id (was the `canton` scope granted?)".to_string(),
+                    data: None,
+                });
+            }
+            (_, None) => {
+                // The delegation names parties but the canton adapter
+                // is not configured on this node. Same disposition.
+                if let Err(e) = mgr.revoke_by_id_admin(&issued.record.key_id) {
+                    warn!(
+                        "Rollback: revoke_by_id_admin({}) failed: {}",
+                        issued.record.key_id, e
+                    );
+                }
+                return Err(JsonRpcError {
+                    code: -32000,
+                    message: "delegation parties named but this node has no Canton adapter configured".to_string(),
+                    data: None,
+                });
+            }
+        }
+    }
 
     let tenant_oauth = stage2b_idp_client.as_ref().map(|c| {
         serde_json::json!({
@@ -21195,6 +21719,52 @@ async fn handle_create_api_key(
             "audience": c.audience,
         })
     });
+    // Echo the delegation fields back so clients can verify what was
+    // applied. The `agent_delegation` object is `null` when no
+    // delegation parameters were supplied (legacy unrestricted key).
+    let rec = &issued.record;
+    let any_delegation = !rec.can_act_as_parties.is_empty()
+        || !rec.can_read_as_parties.is_empty()
+        || !rec.allowed_templates.is_empty()
+        || !rec.allowed_commands.is_empty()
+        || rec.max_per_command_amulet.is_some()
+        || rec.max_per_day_amulet.is_some()
+        || !rec.requires_mandate_for.is_empty()
+        || rec.valid_until.is_some()
+        || !rec.allowed_tools.is_empty()
+        || !rec.allowed_skills.is_empty()
+        || !rec.allowed_knowledge.is_empty()
+        || !rec.allowed_workflow_templates.is_empty()
+        || !rec.allowed_agent_templates.is_empty()
+        || !rec.allowed_models.is_empty()
+        || !rec.max_per_resource_tnzo.is_empty();
+    let agent_delegation = if !any_delegation {
+        Value::Null
+    } else {
+        let max_per_resource_obj: serde_json::Map<String, Value> = rec
+            .max_per_resource_tnzo
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.to_string())))
+            .collect();
+        serde_json::json!({
+            "can_act_as_parties": rec.can_act_as_parties,
+            "can_read_as_parties": rec.can_read_as_parties,
+            "allowed_templates": rec.allowed_templates,
+            "allowed_commands": rec.allowed_commands,
+            "max_per_command_amulet": rec.max_per_command_amulet.map(|v| v.to_string()),
+            "max_per_day_amulet": rec.max_per_day_amulet.map(|v| v.to_string()),
+            "requires_mandate_for": rec.requires_mandate_for,
+            "valid_until": rec.valid_until,
+            "allowed_tools": rec.allowed_tools,
+            "allowed_skills": rec.allowed_skills,
+            "allowed_knowledge": rec.allowed_knowledge,
+            "allowed_workflow_templates": rec.allowed_workflow_templates,
+            "allowed_agent_templates": rec.allowed_agent_templates,
+            "allowed_models": rec.allowed_models,
+            "max_per_resource_tnzo": Value::Object(max_per_resource_obj),
+        })
+    };
+
     Ok(serde_json::json!({
         "key": issued.key,
         "key_id": issued.record.key_id,
@@ -21215,6 +21785,17 @@ async fn handle_create_api_key(
         // and they present the resulting JWT on canton-scoped Tenzro
         // calls via `X-Canton-Auth: Bearer <jwt>`.
         "tenant_oauth_client": tenant_oauth,
+        // Agent-delegation parameters applied to this key (or null
+        // when none were supplied). When non-null, every canton-scoped
+        // RPC call presenting this key is enforced against these
+        // bounds at the RPC layer before any forwarding to Canton.
+        "agent_delegation": agent_delegation,
+        // Canton-side rights actually granted to the canton_user_id
+        // backing this key. Empty when no delegation parties were
+        // named. Each entry is { party, kind: "CanActAs"|"CanReadAs" }.
+        // These rights are revoked atomically with the key by
+        // tenzro_revokeApiKey.
+        "canton_rights_granted": canton_rights_granted,
         "note": "Save the `key` field now — it is shown only once.",
     }))
 }
@@ -21303,6 +21884,67 @@ async fn handle_revoke_api_key(
                         Value::String(format!("{}", e)),
                     );
                 }
+            }
+        }
+
+        // Revoke Canton-side CanActAs / CanReadAs rights granted at
+        // key issuance. Best-effort — errors are surfaced in
+        // tenant_cleanup but do NOT undo the key revocation: the
+        // tenant must never be able to re-present a revoked key,
+        // even if upstream cleanup fails. The operator can re-run
+        // cleanup manually via tenzro_canton_revokeUserRights if
+        // needed.
+        let needs_rights_revoke = !record.can_act_as_parties.is_empty()
+            || !record.can_read_as_parties.is_empty();
+        if needs_rights_revoke
+            && let Some(user_id) = record.canton_user_id.as_deref()
+            && let Some(adapter) = node.canton_adapter()
+        {
+            let mut revoked: Vec<Value> = Vec::new();
+            let mut errors: Vec<Value> = Vec::new();
+
+            for party in record.can_act_as_parties.iter() {
+                match adapter
+                    .revoke_user_rights(Some(user_id), party, true, false)
+                    .await
+                {
+                    Ok(_) => revoked.push(serde_json::json!({
+                        "party": party,
+                        "kind": "CanActAs",
+                    })),
+                    Err(e) => errors.push(serde_json::json!({
+                        "party": party,
+                        "kind": "CanActAs",
+                        "error": format!("{}", e),
+                    })),
+                }
+            }
+            for party in record.can_read_as_parties.iter() {
+                match adapter
+                    .revoke_user_rights(Some(user_id), party, false, true)
+                    .await
+                {
+                    Ok(_) => revoked.push(serde_json::json!({
+                        "party": party,
+                        "kind": "CanReadAs",
+                    })),
+                    Err(e) => errors.push(serde_json::json!({
+                        "party": party,
+                        "kind": "CanReadAs",
+                        "error": format!("{}", e),
+                    })),
+                }
+            }
+
+            tenant_cleanup.insert(
+                "canton_rights_revoked".to_string(),
+                Value::Array(revoked),
+            );
+            if !errors.is_empty() {
+                tenant_cleanup.insert(
+                    "canton_rights_revoke_errors".to_string(),
+                    Value::Array(errors),
+                );
             }
         }
     }
@@ -26556,6 +27198,109 @@ async fn handle_use_skill(
 
 // ─── Tool Registry Handlers ───────────────────────────────────────────────────
 
+// ─── MCP Plugin Host — Operator Credential Vault + Subprocess Control ──────
+//
+// Operator-only (admin-token-gated) RPCs for managing the MCP plugin
+// host. Tenants never call these — they only present an API key and
+// invoke tools via `tenzro_useTool`. The operator pre-populates the
+// vault with their upstream credentials (Stripe secret, OpenAI key,
+// Bloomberg subscription, etc.), then registers MCPs that reference
+// those credentials via `sealed_secret_ref`. At tenzro_useTool time,
+// the plugin host fetches the sealed secret, injects it into the
+// outbound MCP request, and zeroizes the plaintext after the call.
+
+async fn handle_store_mcp_secret(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let sealed_secret_ref = params
+        .get("sealed_secret_ref")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: sealed_secret_ref".to_string(),
+            data: None,
+        })?;
+    let plaintext = params
+        .get("plaintext")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: plaintext".to_string(),
+            data: None,
+        })?;
+    let host = node.mcp_plugin_host().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "MCP plugin host not initialized".to_string(),
+        data: None,
+    })?;
+    host.vault()
+        .store_secret(sealed_secret_ref, plaintext.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("store secret: {}", e),
+            data: None,
+        })?;
+    Ok(serde_json::json!({
+        "sealed_secret_ref": sealed_secret_ref,
+        "stored": true,
+    }))
+}
+
+async fn handle_forget_mcp_secret(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let sealed_secret_ref = params
+        .get("sealed_secret_ref")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: sealed_secret_ref".to_string(),
+            data: None,
+        })?;
+    let host = node.mcp_plugin_host().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "MCP plugin host not initialized".to_string(),
+        data: None,
+    })?;
+    host.vault()
+        .forget_secret(sealed_secret_ref)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("forget secret: {}", e),
+            data: None,
+        })?;
+    Ok(serde_json::json!({
+        "sealed_secret_ref": sealed_secret_ref,
+        "forgotten": true,
+    }))
+}
+
+async fn handle_evict_mcp_subprocess(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let tool_id = params
+        .get("tool_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: tool_id".to_string(),
+            data: None,
+        })?;
+    let host = node.mcp_plugin_host().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "MCP plugin host not initialized".to_string(),
+        data: None,
+    })?;
+    host.supervisor().evict(tool_id);
+    Ok(serde_json::json!({
+        "tool_id": tool_id,
+        "evicted": true,
+    }))
+}
+
 async fn handle_register_tool(
     node: Arc<TenzroNode>,
     params: Value,
@@ -26610,6 +27355,45 @@ async fn handle_register_tool(
         tool.creator_wallet = Some(parse_address(wallet_str)?);
     }
 
+    // Plugin-host extensions: upstream_auth, spawn_spec for stdio
+    // MCPs, optional subject-level allow-list. All optional; default-
+    // None preserves legacy remote-Streamable-HTTP behavior.
+    if let Some(auth_v) = params.get("upstream_auth") {
+        let auth: tenzro_types::UpstreamAuth = serde_json::from_value(auth_v.clone())
+            .map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid upstream_auth: {}", e),
+                data: None,
+            })?;
+        tool.upstream_auth = Some(auth);
+    }
+    if let Some(spec_v) = params.get("spawn_spec") {
+        let spec: tenzro_types::StdioSpawnSpec = serde_json::from_value(spec_v.clone())
+            .map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid spawn_spec: {}", e),
+                data: None,
+            })?;
+        tool.spawn_spec = Some(spec);
+    }
+    if let Some(subjects) = params.get("allowed_to_subjects").and_then(|v| v.as_array()) {
+        tool.allowed_to_subjects = Some(
+            subjects
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect(),
+        );
+    }
+    // stdio transport requires spawn_spec; reject at registration
+    // time so an unusable tool never lands in the registry.
+    if tool.tool_type == "mcp-stdio" && tool.spawn_spec.is_none() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "tool_type 'mcp-stdio' requires spawn_spec (command + args)".to_string(),
+            data: None,
+        });
+    }
+
     // Enforce paid-tool registration invariant: a non-zero price
     // requires a creator_wallet to receive the 95% creator share.
     tool.validate_for_registration().map_err(|e| JsonRpcError {
@@ -26632,7 +27416,10 @@ async fn handle_register_tool(
     tracing::info!(
         tool_id = %tool.tool_id,
         name = %tool.name,
+        transport = %tool.tool_type,
         price_per_call = tool.price_per_call,
+        upstream_auth = tool.upstream_auth.is_some(),
+        spawn_spec = tool.spawn_spec.is_some(),
         "Tool registered"
     );
     Ok(serde_json::to_value(&tool).unwrap_or_else(|_| serde_json::json!({})))
@@ -26730,6 +27517,7 @@ async fn handle_search_tools(
 async fn handle_use_tool(
     node: Arc<TenzroNode>,
     params: Value,
+    api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
     use crate::commission_policy::{settle_paid_invocation, CommissionError};
 
@@ -26754,6 +27542,60 @@ async fn handle_use_tool(
 
     if !tool.is_available() {
         return Err(JsonRpcError { code: -32602, message: format!("Tool is not available: {:?}", tool.status), data: None });
+    }
+
+    // Per-tenant scope check. When the caller presents an API key
+    // that has any allow-list set, the tool_id must be in the
+    // `allowed_tools` set AND the tool's posted price must fit under
+    // any per-resource TNZO cap. This gate is fail-closed: a missing
+    // api_key + a tool with `allowed_to_subjects = Some(_)` rejects.
+    // A tool without `allowed_to_subjects` AND a missing api_key is
+    // legacy-permissive (open access — typical for the 5 built-ins).
+    if let Some(plaintext) = api_key
+        && let Some(mgr) = node.api_key_manager()
+    {
+        let key_record = mgr.lookup(plaintext).ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: "Unauthorized: API key is unknown or revoked".to_string(),
+            data: None,
+        })?;
+        if !key_record.is_active() {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: "Unauthorized: API key is inactive".to_string(),
+                data: None,
+            });
+        }
+        // Per-resource-class allow-list + per-resource TNZO cap.
+        key_record
+            .check_resource_authorization("tool", tool_id, tool.price_per_call)
+            .map_err(|reason| JsonRpcError {
+                code: -32004,
+                message: format!("Unauthorized: {}", reason),
+                data: None,
+            })?;
+        // Optional subject-level allow-list on the tool side.
+        if !tool.is_subject_allowed(key_record.subject.as_deref()) {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: format!(
+                    "Unauthorized: tool {} restricts access to specific subjects",
+                    tool_id
+                ),
+                data: None,
+            });
+        }
+    } else if tool.allowed_to_subjects.is_some() {
+        // Tool requires subject-level authorization but no API key
+        // was presented. Fail closed.
+        return Err(JsonRpcError {
+            code: -32004,
+            message: format!(
+                "Unauthorized: tool {} requires an API key (subject-gated)",
+                tool_id
+            ),
+            data: None,
+        });
     }
 
     // Settle the commission split BEFORE dispatching to the tool. Free
@@ -26786,57 +27628,31 @@ async fn handle_use_tool(
         },
     })?;
 
-    // Dispatch to tool endpoint
-    let output = match tool.tool_type.as_str() {
-        "mcp" => {
-            // MCP Streamable HTTP — JSON-RPC 2.0 POST
-            let body = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "tools/call",
-                "params": {
-                    "name": tool_name,
-                    "arguments": tool_params
-                },
-                "id": 1
-            });
-            let client = reqwest::Client::new();
-            let resp = client.post(&tool.endpoint)
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|e| JsonRpcError { code: -32603, message: format!("MCP request failed: {}", e), data: None })?;
-            let resp_json: Value = resp.json().await
-                .map_err(|e| JsonRpcError { code: -32603, message: format!("MCP response parse error: {}", e), data: None })?;
-            // Extract result from JSON-RPC response
-            resp_json.get("result").cloned().unwrap_or(resp_json)
-        }
-        "api" => {
-            // OpenAPI REST POST
-            let client = reqwest::Client::new();
-            let resp = client.post(&tool.endpoint)
-                .header("Content-Type", "application/json")
-                .json(&tool_params)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|e| JsonRpcError { code: -32603, message: format!("API request failed: {}", e), data: None })?;
-            resp.json::<Value>().await
-                .map_err(|e| JsonRpcError { code: -32603, message: format!("API response parse error: {}", e), data: None })?
-        }
-        "native" => {
-            // Built-in node capability — return a description
-            serde_json::json!({
-                "type": "native",
-                "tool_id": tool_id,
-                "params": tool_params,
-                "message": "Native tool invocation acknowledged"
-            })
-        }
-        _ => {
-            return Err(JsonRpcError { code: -32602, message: format!("Unknown tool type: {}", tool.tool_type), data: None });
-        }
+    // Dispatch through the MCP plugin host for non-native tools.
+    // The plugin host owns all three MCP transports (Streamable HTTP,
+    // stdio subprocess, legacy SSE) plus the OpenAPI `api` path, and
+    // injects the operator's upstream credentials from the sealed
+    // vault. Native tools are handled inline.
+    let output = if tool.tool_type == "native" {
+        serde_json::json!({
+            "type": "native",
+            "tool_id": tool_id,
+            "params": tool_params,
+            "message": "Native tool invocation acknowledged"
+        })
+    } else {
+        let host = node.mcp_plugin_host().ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: "MCP plugin host not initialized".to_string(),
+            data: None,
+        })?;
+        host.invoke(&tool, tool_name, tool_params)
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("Tool invocation failed: {}", e),
+                data: None,
+            })?
     };
 
     // Increment invocation count and persist
@@ -27164,6 +27980,1562 @@ async fn handle_heartbeat_tool(
         "last_seen_at": tool.last_seen_at,
         "status": tool.status,
     }))
+}
+
+// ─── Knowledge Registry (CF_KNOWLEDGE) ──────────────────────────────────────
+//
+// Operator-curated, queryable data resources: vector DBs, RAG indices,
+// document corpora, indexed datasets, live data feeds, embedding stores.
+// Same shape as the tools registry — register/list/search/use/get with
+// per-call TNZO settlement, 5% commission split, reputation scoring,
+// per-tenant allow-list via AgentDelegation.allowed_knowledge.
+
+async fn handle_register_knowledge(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let version = params
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1.0.0")
+        .to_string();
+    let kind_str = params.get("kind").and_then(|v| v.as_str()).unwrap_or("other");
+    let kind = tenzro_types::KnowledgeKind::parse_str(kind_str).ok_or_else(|| {
+        JsonRpcError {
+            code: -32602,
+            message: format!("Unknown knowledge kind: {}", kind_str),
+            data: None,
+        }
+    })?;
+    let endpoint = params
+        .get("endpoint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let description = params
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let category = params
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("general")
+        .to_string();
+
+    if name.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: name".to_string(),
+            data: None,
+        });
+    }
+    if endpoint.is_empty() && params.get("backing_tool_id").is_none() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Either endpoint or backing_tool_id is required".to_string(),
+            data: None,
+        });
+    }
+
+    let mut k = tenzro_types::KnowledgeRecord::new(
+        name, version, kind, endpoint, description, category,
+    );
+
+    if let Some(caps) = params.get("capabilities").and_then(|v| v.as_array()) {
+        k.capabilities = caps
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    if let Some(did) = params.get("creator_did").and_then(|v| v.as_str()) {
+        k.creator_did = Some(did.to_string());
+    }
+    if let Some(price_v) = params.get("price_per_call") {
+        let price: u128 = if let Some(n) = price_v.as_u64() {
+            n as u128
+        } else if let Some(s) = price_v.as_str() {
+            s.parse().map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid price_per_call: {}", e),
+                data: None,
+            })?
+        } else {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "price_per_call must be number or decimal string".to_string(),
+                data: None,
+            });
+        };
+        k.price_per_call = price;
+    }
+    if let Some(wallet_str) = params.get("creator_wallet").and_then(|v| v.as_str()) {
+        k.creator_wallet = Some(parse_address(wallet_str)?);
+    }
+    if let Some(schema) = params.get("params_schema") {
+        k.params_schema = Some(schema.clone());
+    }
+    if let Some(schema) = params.get("response_schema") {
+        k.response_schema = Some(schema.clone());
+    }
+    if let Some(subjects) = params.get("allowed_to_subjects").and_then(|v| v.as_array()) {
+        k.allowed_to_subjects = Some(
+            subjects
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect(),
+        );
+    }
+    if let Some(tid) = params.get("backing_tool_id").and_then(|v| v.as_str()) {
+        k.backing_tool_id = Some(tid.to_string());
+    }
+
+    k.validate_for_registration().map_err(|e| JsonRpcError {
+        code: -32602,
+        message: e.to_string(),
+        data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let key = k.knowledge_id.as_bytes().to_vec();
+    let value = serde_json::to_vec(&k).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+    storage
+        .put(CF_KNOWLEDGE, &key, &value)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?;
+
+    tracing::info!(
+        knowledge_id = %k.knowledge_id,
+        name = %k.name,
+        kind = %k.kind.as_str(),
+        price_per_call = k.price_per_call,
+        "Knowledge resource registered"
+    );
+    Ok(serde_json::to_value(&k).unwrap_or_default())
+}
+
+async fn handle_list_knowledge(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let filter: tenzro_types::KnowledgeFilter =
+        serde_json::from_value(params.clone()).unwrap_or_default();
+    let query = filter.query.clone().map(|q| q.to_lowercase());
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let keys = storage
+        .get_keys_with_prefix(CF_KNOWLEDGE, b"")
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?;
+    let mut out: Vec<tenzro_types::KnowledgeRecord> = Vec::new();
+    for key in keys {
+        if let Ok(Some(bytes)) = storage.get(CF_KNOWLEDGE, &key)
+            && let Ok(rec) = serde_json::from_slice::<tenzro_types::KnowledgeRecord>(&bytes)
+        {
+            if let Some(ref kind) = filter.kind
+                && rec.kind.as_str() != kind
+            {
+                continue;
+            }
+            if let Some(ref cat) = filter.category
+                && &rec.category != cat
+            {
+                continue;
+            }
+            if let Some(ref status_str) = filter.status {
+                let s = format!("{:?}", rec.status).to_lowercase();
+                if !s.contains(status_str.as_str()) {
+                    continue;
+                }
+            } else if !rec.is_available() {
+                continue;
+            }
+            if let Some(ref did) = filter.creator_did
+                && rec.creator_did.as_deref() != Some(did.as_str())
+            {
+                continue;
+            }
+            if let Some(ref q) = query {
+                let name_match = rec.name.to_lowercase().contains(q.as_str());
+                let desc_match = rec.description.to_lowercase().contains(q.as_str());
+                let cap_match = rec
+                    .capabilities
+                    .iter()
+                    .any(|c| c.to_lowercase().contains(q.as_str()));
+                if !name_match && !desc_match && !cap_match {
+                    continue;
+                }
+            }
+            out.push(rec);
+        }
+    }
+    let offset = filter.offset.unwrap_or(0);
+    let limit = filter.limit.unwrap_or(50);
+    let paginated: Vec<_> = out.into_iter().skip(offset).take(limit).collect();
+    Ok(serde_json::to_value(&paginated).unwrap_or_default())
+}
+
+async fn handle_get_knowledge(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let knowledge_id = params
+        .get("knowledge_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: knowledge_id".to_string(),
+            data: None,
+        })?;
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let bytes = storage
+        .get(CF_KNOWLEDGE, knowledge_id.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Knowledge resource not found: {}", knowledge_id),
+            data: None,
+        })?;
+    let rec: tenzro_types::KnowledgeRecord = serde_json::from_slice(&bytes)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Deserialization error: {}", e),
+            data: None,
+        })?;
+    Ok(serde_json::to_value(&rec).unwrap_or_default())
+}
+
+async fn handle_use_knowledge(
+    node: Arc<TenzroNode>,
+    params: Value,
+    api_key: Option<&str>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use crate::commission_policy::{settle_paid_invocation, CommissionError};
+
+    let knowledge_id = params
+        .get("knowledge_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: knowledge_id".to_string(),
+            data: None,
+        })?;
+    let query_params = params.get("params").cloned().unwrap_or(serde_json::json!({}));
+    let payer_wallet_param = params
+        .get("payer_wallet")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let bytes = storage
+        .get(CF_KNOWLEDGE, knowledge_id.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Knowledge resource not found: {}", knowledge_id),
+            data: None,
+        })?;
+    let mut rec: tenzro_types::KnowledgeRecord = serde_json::from_slice(&bytes)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Deserialization error: {}", e),
+            data: None,
+        })?;
+    if !rec.is_available() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("Knowledge resource not available: {:?}", rec.status),
+            data: None,
+        });
+    }
+
+    // Per-tenant scope check.
+    if let Some(plaintext) = api_key
+        && let Some(mgr) = node.api_key_manager()
+    {
+        let key_record = mgr.lookup(plaintext).ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: "Unauthorized: API key unknown or revoked".to_string(),
+            data: None,
+        })?;
+        if !key_record.is_active() {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: "Unauthorized: API key inactive".to_string(),
+                data: None,
+            });
+        }
+        key_record
+            .check_resource_authorization("knowledge", knowledge_id, rec.price_per_call)
+            .map_err(|reason| JsonRpcError {
+                code: -32004,
+                message: format!("Unauthorized: {}", reason),
+                data: None,
+            })?;
+        if !rec.is_subject_allowed(key_record.subject.as_deref()) {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: format!(
+                    "Unauthorized: knowledge {} restricts to specific subjects",
+                    knowledge_id
+                ),
+                data: None,
+            });
+        }
+    } else if rec.allowed_to_subjects.is_some() {
+        return Err(JsonRpcError {
+            code: -32004,
+            message: format!(
+                "Unauthorized: knowledge {} requires an API key (subject-gated)",
+                knowledge_id
+            ),
+            data: None,
+        });
+    }
+
+    // Settle BEFORE dispatching.
+    let fee = rec.price_per_call;
+    let receipt = settle_paid_invocation(
+        rec.creator_wallet,
+        fee,
+        payer_wallet_param.as_deref(),
+        node.token().map(|t| &**t),
+        |s| parse_address(s).map_err(|e| e.message),
+    )
+    .map_err(|e| match e {
+        CommissionError::MissingPayerWallet => JsonRpcError {
+            code: -32602,
+            message: e.to_string(),
+            data: None,
+        },
+        CommissionError::MissingCreatorWallet
+        | CommissionError::TokenUnavailable
+        | CommissionError::TreasuryUnavailable => JsonRpcError {
+            code: -32603,
+            message: e.to_string(),
+            data: None,
+        },
+        CommissionError::TransferFailed(_) => JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+            data: None,
+        },
+    })?;
+
+    // Dispatch. When a backing_tool_id is set, route through the
+    // plugin host (the tool entry holds the transport + auth
+    // configuration). Otherwise, treat as a plain HTTP endpoint and
+    // POST the query params directly.
+    let output = if let Some(tool_id) = &rec.backing_tool_id {
+        let tool_bytes = storage
+            .get(CF_TOOLS, tool_id.as_bytes())
+            .map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("Backing tool lookup: {}", e),
+                data: None,
+            })?
+            .ok_or_else(|| JsonRpcError {
+                code: -32603,
+                message: format!("Backing tool not found: {}", tool_id),
+                data: None,
+            })?;
+        let tool: tenzro_types::ToolDefinition = serde_json::from_slice(&tool_bytes)
+            .map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("Backing tool decode: {}", e),
+                data: None,
+            })?;
+        let host = node.mcp_plugin_host().ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: "MCP plugin host not initialized".to_string(),
+            data: None,
+        })?;
+        host.invoke(&tool, "query", query_params)
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("Knowledge invocation failed: {}", e),
+                data: None,
+            })?
+    } else {
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&rec.endpoint)
+            .header("Content-Type", "application/json")
+            .json(&query_params)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("Knowledge HTTP request: {}", e),
+                data: None,
+            })?;
+        resp.json::<Value>().await.map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Knowledge response parse: {}", e),
+            data: None,
+        })?
+    };
+
+    rec.invocation_count = rec.invocation_count.saturating_add(1);
+    let updated = serde_json::to_vec(&rec).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+    let _ = storage.put(CF_KNOWLEDGE, knowledge_id.as_bytes(), &updated);
+
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+    let completed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut value = serde_json::to_value(&tenzro_types::KnowledgeInvocationResult {
+        knowledge_id: knowledge_id.to_string(),
+        invocation_id,
+        output,
+        settlement_tx: None,
+        amount_paid: fee,
+        completed_at,
+    })
+    .unwrap_or_default();
+    if let (serde_json::Value::Object(obj), Some(r)) = (&mut value, receipt) {
+        obj.insert(
+            "network_commission".to_string(),
+            serde_json::Value::String(r.commission.to_string()),
+        );
+        obj.insert(
+            "creator_share".to_string(),
+            serde_json::Value::String(r.creator_share.to_string()),
+        );
+        obj.insert(
+            "creator_wallet".to_string(),
+            serde_json::Value::String(format!("0x{}", hex::encode(r.creator_wallet.as_bytes()))),
+        );
+        obj.insert(
+            "payer_wallet".to_string(),
+            serde_json::Value::String(format!("0x{}", hex::encode(r.payer.as_bytes()))),
+        );
+    }
+    Ok(value)
+}
+
+// ─── Workflow Template Catalog (CF_WORKFLOW_TEMPLATES) ──────────────────────
+//
+// Operator-curated reusable workflow blueprints. Tenants discover
+// via tenzro_listWorkflowTemplates, instantiate via
+// tenzro_instantiateWorkflow which opens a running saga in
+// tenzro-workflow. Settled in TNZO at instantiation time with the
+// 5% commission split.
+
+async fn handle_register_workflow_template(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let version = params
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1.0.0")
+        .to_string();
+    let description = params
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let category = params
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("general")
+        .to_string();
+    let steps: Vec<tenzro_types::WorkflowStepSpec> = match params.get("steps") {
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid steps: {}", e),
+            data: None,
+        })?,
+        None => Vec::new(),
+    };
+
+    if name.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: name".to_string(),
+            data: None,
+        });
+    }
+
+    let mut tpl = tenzro_types::WorkflowTemplate::new(
+        name, version, description, category, steps,
+    );
+
+    if let Some(caps) = params.get("capabilities").and_then(|v| v.as_array()) {
+        tpl.capabilities = caps
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    if let Some(did) = params.get("creator_did").and_then(|v| v.as_str()) {
+        tpl.creator_did = Some(did.to_string());
+    }
+    if let Some(price_v) = params.get("price_per_instantiate") {
+        let price: u128 = if let Some(n) = price_v.as_u64() {
+            n as u128
+        } else if let Some(s) = price_v.as_str() {
+            s.parse().map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid price_per_instantiate: {}", e),
+                data: None,
+            })?
+        } else {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "price_per_instantiate must be number or string".to_string(),
+                data: None,
+            });
+        };
+        tpl.price_per_instantiate = price;
+    }
+    if let Some(wallet_str) = params.get("creator_wallet").and_then(|v| v.as_str()) {
+        tpl.creator_wallet = Some(parse_address(wallet_str)?);
+    }
+    if let Some(req) = params.get("required_inputs") {
+        tpl.required_inputs = req.clone();
+    }
+    if let Some(out) = params.get("expected_outputs") {
+        tpl.expected_outputs = out.clone();
+    }
+    if let Some(subjects) = params.get("allowed_to_subjects").and_then(|v| v.as_array()) {
+        tpl.allowed_to_subjects = Some(
+            subjects
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect(),
+        );
+    }
+
+    tpl.validate_for_registration().map_err(|e| JsonRpcError {
+        code: -32602,
+        message: e.to_string(),
+        data: None,
+    })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let key = tpl.template_id.as_bytes().to_vec();
+    let value = serde_json::to_vec(&tpl).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+    storage
+        .put(CF_WORKFLOW_TEMPLATES, &key, &value)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?;
+
+    tracing::info!(
+        template_id = %tpl.template_id,
+        name = %tpl.name,
+        steps = tpl.steps.len(),
+        price_per_instantiate = tpl.price_per_instantiate,
+        "Workflow template registered"
+    );
+    Ok(serde_json::to_value(&tpl).unwrap_or_default())
+}
+
+async fn handle_list_workflow_templates(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let filter: tenzro_types::WorkflowTemplateFilter =
+        serde_json::from_value(params.clone()).unwrap_or_default();
+    let query = filter.query.clone().map(|q| q.to_lowercase());
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let keys = storage
+        .get_keys_with_prefix(CF_WORKFLOW_TEMPLATES, b"")
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?;
+    let mut out: Vec<tenzro_types::WorkflowTemplate> = Vec::new();
+    for key in keys {
+        if let Ok(Some(bytes)) = storage.get(CF_WORKFLOW_TEMPLATES, &key)
+            && let Ok(rec) = serde_json::from_slice::<tenzro_types::WorkflowTemplate>(&bytes)
+        {
+            if let Some(ref cat) = filter.category
+                && &rec.category != cat
+            {
+                continue;
+            }
+            if let Some(ref status_str) = filter.status {
+                let s = format!("{:?}", rec.status).to_lowercase();
+                if !s.contains(status_str.as_str()) {
+                    continue;
+                }
+            } else if !rec.is_available() {
+                continue;
+            }
+            if let Some(ref did) = filter.creator_did
+                && rec.creator_did.as_deref() != Some(did.as_str())
+            {
+                continue;
+            }
+            if let Some(ref q) = query {
+                let name_match = rec.name.to_lowercase().contains(q.as_str());
+                let desc_match = rec.description.to_lowercase().contains(q.as_str());
+                let cap_match = rec
+                    .capabilities
+                    .iter()
+                    .any(|c| c.to_lowercase().contains(q.as_str()));
+                if !name_match && !desc_match && !cap_match {
+                    continue;
+                }
+            }
+            out.push(rec);
+        }
+    }
+    let offset = filter.offset.unwrap_or(0);
+    let limit = filter.limit.unwrap_or(50);
+    let paginated: Vec<_> = out.into_iter().skip(offset).take(limit).collect();
+    Ok(serde_json::to_value(&paginated).unwrap_or_default())
+}
+
+async fn handle_get_workflow_template(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    let template_id = params
+        .get("template_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: template_id".to_string(),
+            data: None,
+        })?;
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let bytes = storage
+        .get(CF_WORKFLOW_TEMPLATES, template_id.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Workflow template not found: {}", template_id),
+            data: None,
+        })?;
+    let rec: tenzro_types::WorkflowTemplate = serde_json::from_slice(&bytes)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Deserialization error: {}", e),
+            data: None,
+        })?;
+    Ok(serde_json::to_value(&rec).unwrap_or_default())
+}
+
+async fn handle_instantiate_workflow(
+    node: Arc<TenzroNode>,
+    params: Value,
+    api_key: Option<&str>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use crate::commission_policy::{settle_paid_invocation, CommissionError};
+
+    let template_id = params
+        .get("template_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: template_id".to_string(),
+            data: None,
+        })?;
+    let inputs = params.get("inputs").cloned().unwrap_or(serde_json::json!({}));
+    let payer_wallet_param = params
+        .get("payer_wallet")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+    let bytes = storage
+        .get(CF_WORKFLOW_TEMPLATES, template_id.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Storage error: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Workflow template not found: {}", template_id),
+            data: None,
+        })?;
+    let mut tpl: tenzro_types::WorkflowTemplate = serde_json::from_slice(&bytes)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Deserialization error: {}", e),
+            data: None,
+        })?;
+    if !tpl.is_available() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("Workflow template not available: {:?}", tpl.status),
+            data: None,
+        });
+    }
+
+    // Per-tenant scope check.
+    if let Some(plaintext) = api_key
+        && let Some(mgr) = node.api_key_manager()
+    {
+        let key_record = mgr.lookup(plaintext).ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: "Unauthorized: API key unknown or revoked".to_string(),
+            data: None,
+        })?;
+        if !key_record.is_active() {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: "Unauthorized: API key inactive".to_string(),
+                data: None,
+            });
+        }
+        key_record
+            .check_resource_authorization(
+                "workflow_template",
+                template_id,
+                tpl.price_per_instantiate,
+            )
+            .map_err(|reason| JsonRpcError {
+                code: -32004,
+                message: format!("Unauthorized: {}", reason),
+                data: None,
+            })?;
+        if !tpl.is_subject_allowed(key_record.subject.as_deref()) {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: format!(
+                    "Unauthorized: workflow template {} restricts to specific subjects",
+                    template_id
+                ),
+                data: None,
+            });
+        }
+    } else if tpl.allowed_to_subjects.is_some() {
+        return Err(JsonRpcError {
+            code: -32004,
+            message: format!(
+                "Unauthorized: workflow template {} requires an API key (subject-gated)",
+                template_id
+            ),
+            data: None,
+        });
+    }
+
+    // Settle the instantiation fee.
+    let _receipt = settle_paid_invocation(
+        tpl.creator_wallet,
+        tpl.price_per_instantiate,
+        payer_wallet_param.as_deref(),
+        node.token().map(|t| &**t),
+        |s| parse_address(s).map_err(|e| e.message),
+    )
+    .map_err(|e| match e {
+        CommissionError::MissingPayerWallet => JsonRpcError {
+            code: -32602,
+            message: e.to_string(),
+            data: None,
+        },
+        CommissionError::MissingCreatorWallet
+        | CommissionError::TokenUnavailable
+        | CommissionError::TreasuryUnavailable => JsonRpcError {
+            code: -32603,
+            message: e.to_string(),
+            data: None,
+        },
+        CommissionError::TransferFailed(_) => JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+            data: None,
+        },
+    })?;
+
+    // Generate a workflow_id, bump the template's instantiation counter,
+    // and hand the run off to the workflow executor. The executor
+    // handles per-step dispatch (UseTool / UseModel / UseKnowledge /
+    // SpawnAgent / Wait / Compound) with durable saga state in
+    // CF_SETTLEMENTS — every transition writes through so the run
+    // survives operator restart.
+    let workflow_id = uuid::Uuid::new_v4().to_string();
+    tpl.instantiation_count = tpl.instantiation_count.saturating_add(1);
+    let updated = serde_json::to_vec(&tpl).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Serialization error: {}", e),
+        data: None,
+    })?;
+    let _ = storage.put(CF_WORKFLOW_TEMPLATES, template_id.as_bytes(), &updated);
+
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Get-or-create executor. The executor is constructed lazily
+    // because its dispatcher closes over the node Arc itself.
+    let executor = node
+        .ensure_workflow_executor()
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Workflow executor init: {}", e),
+            data: None,
+        })?;
+
+    // Caller-provided inputs + the payer DID (best-effort lookup via
+    // the presenting api_key). Without payer_did, SpawnAgent steps
+    // will fail at dispatch — that's the documented contract.
+    let payer_did = match (api_key, node.api_key_manager()) {
+        (Some(plaintext), Some(mgr)) => mgr.lookup(plaintext).and_then(|r| r.subject),
+        _ => None,
+    };
+
+    let run = executor
+        .begin(
+            workflow_id.clone(),
+            template_id.to_string(),
+            inputs.clone(),
+            payer_did,
+            payer_wallet_param.clone(),
+            api_key.map(|k| crate::api_key::hash_key(k)),
+        )
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Workflow begin failed: {}", e),
+            data: None,
+        })?;
+
+    // Drive to terminal state inline. The executor is durable: on
+    // operator restart, in-flight runs are rehydrated from CF_SETTLEMENTS
+    // via `hydrate` so this synchronous drive is purely a latency
+    // optimization for short workflows.
+    let terminal = executor
+        .run_to_completion(&workflow_id, &tpl, api_key)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Workflow execution failed: {}", e),
+            data: None,
+        })?;
+
+    let status_str = match terminal.status {
+        crate::workflow_executor::WorkflowRunStatus::Completed => "completed",
+        crate::workflow_executor::WorkflowRunStatus::Failed => "failed",
+        crate::workflow_executor::WorkflowRunStatus::Cancelled => "cancelled",
+        crate::workflow_executor::WorkflowRunStatus::Running => "running",
+        crate::workflow_executor::WorkflowRunStatus::AwaitingSignal => "awaiting_signal",
+    };
+
+    Ok(serde_json::json!({
+        "template_id": template_id,
+        "workflow_id": workflow_id,
+        "started_at": started_at,
+        "status": status_str,
+        "run": terminal,
+        // Keep the marker fields for back-compat with the original
+        // WorkflowInstantiationResult shape.
+        "instantiation": tenzro_types::WorkflowInstantiationResult {
+            template_id: template_id.to_string(),
+            workflow_id: run.workflow_id.clone(),
+            started_at,
+            status: status_str.to_string(),
+        },
+    }))
+}
+
+// ─── Child Agent Atomic Spawn ──────────────────────────────────────────────
+//
+// tenzro_spawnChildAgent composes the primitives needed to bring a
+// new autonomous child agent into being in a single call:
+//
+//   1. Register a new machine identity (TDIP) with controller_did =
+//      parent_did. Auto-provisions an MPC wallet via WalletBinder.
+//   2. Transfer the requested TNZO budget from parent_wallet to the
+//      new child's auto-provisioned wallet.
+//   3. Bind a runtime SpendingPolicy on AgentRuntime so the child's
+//      autonomous activity is bounded by max_per_transaction and
+//      max_daily_spend.
+//   4. Return the child DID + child wallet address + the registration
+//      receipt for audit.
+//
+// Failure semantics: identity registration is the load-bearing step;
+// if it fails, no funds are moved and no state is touched. If funding
+// fails after identity registration, the identity remains (the
+// operator can fund later) and the response surfaces the funding
+// error explicitly. Spending policy is best-effort — if AgentRuntime
+// is not initialized, the call returns success with the wallet funded
+// but logs a warning that the policy was not applied.
+
+async fn handle_spawn_child_agent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let parent_did = params
+        .get("parent_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: parent_did".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let display_name = params
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Child Agent")
+        .to_string();
+
+    let tnzo_budget: u128 = match params.get("tnzo_budget") {
+        Some(v) => {
+            if let Some(n) = v.as_u64() {
+                n as u128
+            } else if let Some(s) = v.as_str() {
+                s.parse().map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid tnzo_budget: {}", e),
+                    data: None,
+                })?
+            } else {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: "tnzo_budget must be number or decimal string".to_string(),
+                    data: None,
+                });
+            }
+        }
+        None => 0,
+    };
+
+    let parent_wallet_str = params
+        .get("parent_wallet")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let valid_until = params.get("valid_until").and_then(|v| v.as_i64());
+    let max_per_tx: Option<u128> = params.get("max_per_transaction").and_then(|v| {
+        if let Some(s) = v.as_str() {
+            s.parse().ok()
+        } else {
+            v.as_u64().map(|n| n as u128)
+        }
+    });
+    let max_per_day: Option<u128> = params.get("max_daily_spend").and_then(|v| {
+        if let Some(s) = v.as_str() {
+            s.parse().ok()
+        } else {
+            v.as_u64().map(|n| n as u128)
+        }
+    });
+
+    // Step 1 — register the child machine identity via the existing
+    // handler. We pass identity_type=machine and controller_did=parent_did
+    // so the TDIP registry knows this is a delegated machine and
+    // who its controller is.
+    let mut id_params = serde_json::json!({
+        "identity_type": "machine",
+        "controller_did": parent_did,
+        "display_name": display_name,
+        "key_type": params.get("key_type").and_then(|v| v.as_str()).unwrap_or("ed25519"),
+    });
+    if let Value::Object(obj) = &mut id_params
+        && let Some(vu) = valid_until
+    {
+        obj.insert("valid_until".to_string(), Value::Number(vu.into()));
+    }
+    let id_response = handle_register_identity(node, Some(id_params)).await?;
+
+    let child_did = id_response
+        .get("did")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: "Identity registration did not return a DID".to_string(),
+            data: None,
+        })?;
+
+    let child_wallet = id_response
+        .get("wallet_address")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            id_response
+                .get("address")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+
+    // Step 2 — fund the child if a budget was specified. The transfer
+    // path goes through the token engine; we use the live TnzoToken
+    // ledger rather than building a signed transaction here because
+    // the spawn is a node-internal composition, not a user-presented
+    // signed payload. The parent_wallet is required when budget > 0.
+    let mut funding_status: Value = serde_json::json!({"funded": false});
+    if tnzo_budget > 0 {
+        let parent_wallet_str = parent_wallet_str.ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "parent_wallet is required when tnzo_budget > 0".to_string(),
+            data: None,
+        })?;
+        let parent_addr = parse_address(&parent_wallet_str)?;
+        let child_addr_str = child_wallet.clone().ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: "Child wallet address missing from registration response"
+                .to_string(),
+            data: None,
+        })?;
+        let child_addr = parse_address(&child_addr_str)?;
+        let token = node.token().ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: "Token engine not initialized".to_string(),
+            data: None,
+        })?;
+        token
+            .transfer(&parent_addr, &child_addr, tnzo_budget)
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Child funding transfer failed: {}", e),
+                data: None,
+            })?;
+        funding_status = serde_json::json!({
+            "funded": true,
+            "amount": tnzo_budget.to_string(),
+            "from": parent_wallet_str,
+            "to": child_addr_str,
+        });
+    }
+
+    // Step 3 — bind a runtime SpendingPolicy on AgentRuntime if either
+    // max_per_transaction or max_daily_spend is set. Best-effort — log
+    // and continue if AgentRuntime is not initialized.
+    let mut policy_status: Value = serde_json::json!({"applied": false});
+    if (max_per_tx.is_some() || max_per_day.is_some())
+        && let Some(rt) = node.agent_runtime()
+    {
+        let policy = tenzro_agent::SpendingPolicy::new(
+            max_per_tx.map(|v| v.min(u64::MAX as u128) as u64).unwrap_or(u64::MAX),
+            max_per_day.map(|v| v.min(u64::MAX as u128) as u64).unwrap_or(u64::MAX),
+        );
+        rt.set_spending_policy(child_did.clone(), policy);
+        policy_status = serde_json::json!({
+            "applied": true,
+            "max_per_transaction": max_per_tx.map(|v| v.to_string()),
+            "max_daily_spend": max_per_day.map(|v| v.to_string()),
+        });
+    }
+
+    Ok(serde_json::json!({
+        "child_did": child_did,
+        "parent_did": parent_did,
+        "child_wallet": child_wallet,
+        "registration": id_response,
+        "funding": funding_status,
+        "spending_policy": policy_status,
+    }))
+}
+
+// ─── External handler bridge (used by the workflow executor) ───────────────
+//
+// These wrappers expose the per-class invocation handlers to the
+// workflow_dispatcher module without crossing the (private) module
+// boundary of rpc.rs. The error mapping flattens JsonRpcError → String
+// for the executor's ExecutorError::Dispatch arm.
+
+pub async fn handle_use_tool_external(
+    node: &Arc<TenzroNode>,
+    params: Value,
+    api_key: Option<&str>,
+) -> std::result::Result<Value, String> {
+    handle_use_tool(node.clone(), params, api_key)
+        .await
+        .map_err(|e| e.message)
+}
+
+pub async fn handle_use_knowledge_external(
+    node: &Arc<TenzroNode>,
+    params: Value,
+    api_key: Option<&str>,
+) -> std::result::Result<Value, String> {
+    handle_use_knowledge(node.clone(), params, api_key)
+        .await
+        .map_err(|e| e.message)
+}
+
+pub async fn handle_chat_external(
+    node: &Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, String> {
+    handle_chat(node, Some(params))
+        .await
+        .map_err(|e| e.message)
+}
+
+pub async fn handle_spawn_child_agent_external(
+    node: &Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, String> {
+    handle_spawn_child_agent(node, Some(params))
+        .await
+        .map_err(|e| e.message)
+}
+
+// ─── Unified Resource Discovery + Invocation ────────────────────────────────
+//
+// tenzro_listResources collapses CF_TOOLS / CF_SKILLS / CF_KNOWLEDGE /
+// CF_WORKFLOW_TEMPLATES / CF_AGENT_TEMPLATES / CF_MODELS into a single
+// query surface. An agent sends one request, gets one result set, and
+// can decide what to invoke without per-registry plumbing.
+//
+// tenzro_useResource auto-detects the resource_id's class by looking
+// it up in each registry in turn, then dispatches to the matching
+// handler (tenzro_useTool / tenzro_useSkill / tenzro_useKnowledge /
+// tenzro_instantiateWorkflow / tenzro_spawnAgentFromTemplate /
+// tenzro_chat). Transparent TNZO settlement runs in the per-class
+// handlers; the unified surface is purely a routing convenience.
+
+async fn handle_list_resources(
+    node: Arc<TenzroNode>,
+    params: Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_types::{ResourceClass, ResourceDescriptor, ResourceFilter};
+
+    let filter: ResourceFilter = serde_json::from_value(params).unwrap_or_default();
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    // Which classes to query. Empty = all.
+    let classes: Vec<ResourceClass> = if filter.classes.is_empty() {
+        vec![
+            ResourceClass::Tool,
+            ResourceClass::Skill,
+            ResourceClass::Knowledge,
+            ResourceClass::WorkflowTemplate,
+            ResourceClass::AgentTemplate,
+            ResourceClass::Model,
+        ]
+    } else {
+        filter
+            .classes
+            .iter()
+            .filter_map(|s| ResourceClass::parse_str(s))
+            .collect()
+    };
+
+    let query = filter.query.as_deref().map(str::to_lowercase);
+    let mut out: Vec<ResourceDescriptor> = Vec::new();
+
+    for class in classes {
+        let cf = match class {
+            ResourceClass::Tool => CF_TOOLS,
+            ResourceClass::Skill => CF_SKILLS,
+            ResourceClass::Knowledge => CF_KNOWLEDGE,
+            ResourceClass::WorkflowTemplate => CF_WORKFLOW_TEMPLATES,
+            ResourceClass::AgentTemplate => CF_AGENT_TEMPLATES,
+            ResourceClass::Model => CF_MODELS,
+        };
+        let keys = match storage.get_keys_with_prefix(cf, b"") {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+        for key in keys {
+            let bytes = match storage.get(cf, &key) {
+                Ok(Some(b)) => b,
+                _ => continue,
+            };
+            let desc = match class {
+                ResourceClass::Tool => serde_json::from_slice::<tenzro_types::ToolDefinition>(&bytes)
+                    .ok()
+                    .map(|t| ResourceDescriptor {
+                        class,
+                        resource_id: t.tool_id,
+                        name: t.name,
+                        version: t.version,
+                        description: t.description,
+                        category: t.category,
+                        capabilities: t.capabilities,
+                        creator_did: t.creator_did,
+                        creator_wallet: t.creator_wallet,
+                        price_per_call: t.price_per_call,
+                        is_available: matches!(t.status, tenzro_types::ToolStatus::Active),
+                        last_seen_at: t.last_seen_at,
+                        subtype: Some(t.tool_type),
+                        reputation: None,
+                    }),
+                ResourceClass::Skill => serde_json::from_slice::<tenzro_types::SkillDefinition>(
+                    &bytes,
+                )
+                .ok()
+                .map(|s| ResourceDescriptor {
+                    class,
+                    resource_id: s.skill_id,
+                    name: s.name,
+                    version: s.version,
+                    description: s.description,
+                    category: s.category,
+                    capabilities: s.tags,
+                    creator_did: Some(s.creator_did),
+                    creator_wallet: s.creator_wallet,
+                    price_per_call: s.price_per_call,
+                    is_available: matches!(s.status, tenzro_types::SkillStatus::Active),
+                    last_seen_at: s.last_seen_at,
+                    subtype: None,
+                    reputation: None,
+                }),
+                ResourceClass::Knowledge => serde_json::from_slice::<tenzro_types::KnowledgeRecord>(
+                    &bytes,
+                )
+                .ok()
+                .map(|k| ResourceDescriptor {
+                    class,
+                    resource_id: k.knowledge_id,
+                    name: k.name,
+                    version: k.version,
+                    description: k.description,
+                    category: k.category,
+                    capabilities: k.capabilities,
+                    creator_did: k.creator_did,
+                    creator_wallet: k.creator_wallet,
+                    price_per_call: k.price_per_call,
+                    is_available: matches!(k.status, tenzro_types::KnowledgeStatus::Active),
+                    last_seen_at: k.last_seen_at,
+                    subtype: Some(k.kind.as_str().to_string()),
+                    reputation: None,
+                }),
+                ResourceClass::WorkflowTemplate => {
+                    serde_json::from_slice::<tenzro_types::WorkflowTemplate>(&bytes)
+                        .ok()
+                        .map(|w| ResourceDescriptor {
+                            class,
+                            resource_id: w.template_id,
+                            name: w.name,
+                            version: w.version,
+                            description: w.description,
+                            category: w.category,
+                            capabilities: w.capabilities,
+                            creator_did: w.creator_did,
+                            creator_wallet: w.creator_wallet,
+                            price_per_call: w.price_per_instantiate,
+                            is_available: matches!(
+                                w.status,
+                                tenzro_types::WorkflowTemplateStatus::Active
+                            ),
+                            last_seen_at: w.last_seen_at,
+                            subtype: None,
+                            reputation: None,
+                        })
+                }
+                ResourceClass::AgentTemplate => {
+                    serde_json::from_slice::<tenzro_types::AgentTemplate>(&bytes)
+                        .ok()
+                        .map(|a| {
+                            let price = match &a.pricing {
+                                tenzro_types::AgentPricingModel::Free => 0,
+                                tenzro_types::AgentPricingModel::PerExecution { price } => *price,
+                                tenzro_types::AgentPricingModel::PerToken {
+                                    price_per_token,
+                                } => *price_per_token,
+                                tenzro_types::AgentPricingModel::Subscription {
+                                    monthly_rate,
+                                } => *monthly_rate,
+                                tenzro_types::AgentPricingModel::RevenueShare { .. } => 0,
+                            };
+                            ResourceDescriptor {
+                                class,
+                                resource_id: a.template_id,
+                                name: a.name,
+                                version: a.version,
+                                description: a.description,
+                                category: format!("{:?}", a.template_type).to_lowercase(),
+                                capabilities: a
+                                    .capabilities
+                                    .iter()
+                                    .map(|c| c.name.clone())
+                                    .collect(),
+                                creator_did: a.creator_did,
+                                creator_wallet: a.creator_wallet,
+                                price_per_call: price,
+                                is_available: matches!(
+                                    a.status,
+                                    tenzro_types::AgentTemplateStatus::Published
+                                ),
+                                last_seen_at: a.updated_at.0.max(0) as u64,
+                                subtype: Some(format!("{:?}", a.template_type).to_lowercase()),
+                                reputation: None,
+                            }
+                        })
+                }
+                ResourceClass::Model => serde_json::from_slice::<tenzro_types::ModelInfo>(&bytes)
+                    .ok()
+                    .and_then(|m| {
+                        // Only project entries serialized under the
+                        // `info:<model_id>` key prefix used by
+                        // ModelRegistry::with_storage. Other rows in
+                        // CF_MODELS belong to per-model service
+                        // bookkeeping and aren't catalog entries.
+                        let key_str = std::str::from_utf8(&key).unwrap_or("");
+                        if !key_str.starts_with("info:") {
+                            return None;
+                        }
+                        Some(ResourceDescriptor {
+                            class,
+                            resource_id: m.model_id.clone(),
+                            name: m.name.clone(),
+                            version: m.version.clone(),
+                            description: m.description.clone(),
+                            category: format!("{:?}", m.modality).to_lowercase(),
+                            capabilities: Vec::new(),
+                            creator_did: None,
+                            creator_wallet: None,
+                            price_per_call: 0,
+                            is_available: true,
+                            last_seen_at: 0,
+                            subtype: Some(format!("{:?}", m.modality).to_lowercase()),
+                            reputation: None,
+                        })
+                    }),
+            };
+            let Some(desc) = desc else { continue };
+
+            // Active-only by default.
+            if !desc.is_available {
+                continue;
+            }
+            // Free-text match.
+            if let Some(q) = &query {
+                let m = desc.name.to_lowercase().contains(q)
+                    || desc.description.to_lowercase().contains(q)
+                    || desc
+                        .capabilities
+                        .iter()
+                        .any(|c| c.to_lowercase().contains(q));
+                if !m {
+                    continue;
+                }
+            }
+            // Category match.
+            if let Some(cat) = &filter.category
+                && &desc.category != cat
+            {
+                continue;
+            }
+            // Capability tags — AND match.
+            if !filter.capability_tags.is_empty() {
+                let all = filter
+                    .capability_tags
+                    .iter()
+                    .all(|t| desc.capabilities.iter().any(|c| c == t));
+                if !all {
+                    continue;
+                }
+            }
+            // Price ceiling.
+            if let Some(cap) = filter.max_tnzo_price
+                && desc.price_per_call > cap
+            {
+                continue;
+            }
+            // Creator DID.
+            if let Some(did) = &filter.creator_did
+                && desc.creator_did.as_deref() != Some(did.as_str())
+            {
+                continue;
+            }
+            out.push(desc);
+        }
+    }
+
+    let offset = filter.offset.unwrap_or(0);
+    let limit = filter.limit.unwrap_or(100);
+    let paginated: Vec<_> = out.into_iter().skip(offset).take(limit).collect();
+    Ok(serde_json::to_value(&paginated).unwrap_or_default())
+}
+
+/// Auto-detects which registry holds `resource_id` and dispatches to
+/// the per-class handler. Tries each CF in order: Tools → Knowledge →
+/// WorkflowTemplates → AgentTemplates → Skills → Models. Returns
+/// `-32602` if no registry holds the id.
+async fn handle_use_resource(
+    node: Arc<TenzroNode>,
+    params: Value,
+    api_key: Option<&str>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let resource_id = params
+        .get("resource_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing required parameter: resource_id".to_string(),
+            data: None,
+        })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not available".to_string(),
+        data: None,
+    })?;
+
+    // Caller may supply `class` to short-circuit lookup. Otherwise
+    // we try each CF in turn.
+    let force_class = params
+        .get("class")
+        .and_then(|v| v.as_str())
+        .and_then(tenzro_types::ResourceClass::parse_str);
+    let attempt_classes: Vec<tenzro_types::ResourceClass> = if let Some(c) = force_class {
+        vec![c]
+    } else {
+        vec![
+            tenzro_types::ResourceClass::Tool,
+            tenzro_types::ResourceClass::Knowledge,
+            tenzro_types::ResourceClass::WorkflowTemplate,
+            tenzro_types::ResourceClass::AgentTemplate,
+            tenzro_types::ResourceClass::Skill,
+            tenzro_types::ResourceClass::Model,
+        ]
+    };
+
+    for class in attempt_classes {
+        let cf = match class {
+            tenzro_types::ResourceClass::Tool => CF_TOOLS,
+            tenzro_types::ResourceClass::Knowledge => CF_KNOWLEDGE,
+            tenzro_types::ResourceClass::WorkflowTemplate => CF_WORKFLOW_TEMPLATES,
+            tenzro_types::ResourceClass::AgentTemplate => CF_AGENT_TEMPLATES,
+            tenzro_types::ResourceClass::Skill => CF_SKILLS,
+            tenzro_types::ResourceClass::Model => CF_MODELS,
+        };
+        let lookup_key = if matches!(class, tenzro_types::ResourceClass::Model) {
+            format!("info:{}", resource_id).into_bytes()
+        } else {
+            resource_id.as_bytes().to_vec()
+        };
+        if matches!(storage.get(cf, &lookup_key), Ok(Some(_))) {
+            // Hit. Dispatch to the per-class handler. We rewrite
+            // params to set the class-specific id key so the inner
+            // handler doesn't need any changes.
+            let mut p = params.clone();
+            if let Value::Object(obj) = &mut p {
+                match class {
+                    tenzro_types::ResourceClass::Tool => {
+                        obj.insert("tool_id".to_string(), Value::String(resource_id.to_string()));
+                        return handle_use_tool(node, p, api_key).await;
+                    }
+                    tenzro_types::ResourceClass::Knowledge => {
+                        obj.insert(
+                            "knowledge_id".to_string(),
+                            Value::String(resource_id.to_string()),
+                        );
+                        return handle_use_knowledge(node, p, api_key).await;
+                    }
+                    tenzro_types::ResourceClass::WorkflowTemplate => {
+                        obj.insert(
+                            "template_id".to_string(),
+                            Value::String(resource_id.to_string()),
+                        );
+                        return handle_instantiate_workflow(node, p, api_key).await;
+                    }
+                    tenzro_types::ResourceClass::AgentTemplate => {
+                        obj.insert(
+                            "template_id".to_string(),
+                            Value::String(resource_id.to_string()),
+                        );
+                        return handle_spawn_agent_from_template(&node, Some(p)).await;
+                    }
+                    tenzro_types::ResourceClass::Skill => {
+                        obj.insert("skill_id".to_string(), Value::String(resource_id.to_string()));
+                        return handle_use_skill(node, p).await;
+                    }
+                    tenzro_types::ResourceClass::Model => {
+                        obj.insert("model".to_string(), Value::String(resource_id.to_string()));
+                        return handle_chat(&node, Some(p)).await;
+                    }
+                }
+            }
+        }
+    }
+
+    Err(JsonRpcError {
+        code: -32602,
+        message: format!("Resource not found in any registry: {}", resource_id),
+        data: None,
+    })
 }
 
 async fn handle_heartbeat_agent_template(

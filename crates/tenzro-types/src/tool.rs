@@ -7,9 +7,170 @@
 //! Tools are MCP servers (or API/native endpoints) that agents use to
 //! take actions in the world. Skills teach agents HOW to use tools;
 //! tools ARE the actual capabilities being invoked.
+//!
+//! Three transport modes are supported for MCP servers:
+//!
+//! - `mcp` — remote MCP over JSON-RPC 2.0 Streamable HTTP (POST). This is
+//!   how hosted MCPs ship today (Anthropic-hosted MCPs, partner MCPs).
+//! - `mcp-stdio` — local MCP subprocess. The operator declares the
+//!   command + args + env vars in `spawn_spec`; the node spawns and
+//!   supervises the subprocess and speaks JSON-RPC over stdin/stdout.
+//!   This is how most third-party MCPs ship (Stripe MCP, GitHub MCP,
+//!   Notion MCP, Linear MCP, Slack MCP, etc.).
+//! - `mcp-sse` — legacy SSE transport. Some older MCPs still ship this.
+//!
+//! For all three modes, the operator's upstream credentials (their
+//! Stripe secret, OpenAI key, etc.) are injected into the MCP via
+//! `upstream_auth`, sealed at rest, and NEVER exposed to the tenant
+//! that presents a Tenzro API key. The tenant only sees the MCP's
+//! tool output.
 
 use crate::primitives::Address;
 use serde::{Deserialize, Serialize};
+
+/// Transport mode for an MCP / tool resource.
+///
+/// Old code that stored `tool_type: String` is preserved via
+/// `ToolDefinition::tool_type`; new code should prefer
+/// `transport_mode` which is strongly typed. The two are kept in sync
+/// at write time via `ToolDefinition::set_transport_mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolTransportMode {
+    /// Remote MCP over JSON-RPC 2.0 Streamable HTTP POST.
+    Mcp,
+    /// Local MCP subprocess speaking JSON-RPC over stdin/stdout.
+    /// Requires `spawn_spec` to be set.
+    McpStdio,
+    /// Legacy MCP over Server-Sent Events.
+    McpSse,
+    /// OpenAPI-compatible REST endpoint (POST JSON body).
+    Api,
+    /// Built-in node capability — handled inline.
+    Native,
+}
+
+impl ToolTransportMode {
+    /// Wire-format string for the legacy `tool_type` field. Used to
+    /// keep old clients reading the type as a string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolTransportMode::Mcp => "mcp",
+            ToolTransportMode::McpStdio => "mcp-stdio",
+            ToolTransportMode::McpSse => "mcp-sse",
+            ToolTransportMode::Api => "api",
+            ToolTransportMode::Native => "native",
+        }
+    }
+
+    /// Inverse of `as_str`. Returns `None` for unknown strings rather
+    /// than panicking so the registry can refuse to load unknown
+    /// transport modes safely.
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "mcp" => Some(ToolTransportMode::Mcp),
+            "mcp-stdio" => Some(ToolTransportMode::McpStdio),
+            "mcp-sse" => Some(ToolTransportMode::McpSse),
+            "api" => Some(ToolTransportMode::Api),
+            "native" => Some(ToolTransportMode::Native),
+            _ => None,
+        }
+    }
+}
+
+/// How the operator's upstream credentials are injected into an MCP
+/// invocation. The actual secret is NOT stored in this struct — it is
+/// stored separately by the node in a sealed credential vault, keyed
+/// by `sealed_secret_ref`. The operator's secret is fetched only at
+/// invocation time and zeroized after the request completes.
+///
+/// Tenants who present a Tenzro API key never see `sealed_secret_ref`
+/// or the underlying secret. They see only the MCP's response payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UpstreamAuth {
+    /// `Authorization: Bearer <secret>` header on the outbound request.
+    Bearer {
+        /// Opaque reference into the operator's sealed credential
+        /// vault. The node maps this to the actual secret at
+        /// invocation time.
+        sealed_secret_ref: String,
+    },
+    /// Arbitrary header injection: `<header_name>: <secret>`.
+    Header {
+        header_name: String,
+        sealed_secret_ref: String,
+    },
+    /// For stdio MCPs only: secret is injected as an environment
+    /// variable in the spawned subprocess. Common for npm-package
+    /// MCPs that expect e.g. `OPENAI_API_KEY`, `STRIPE_API_KEY`, etc.
+    EnvVar {
+        env_var_name: String,
+        sealed_secret_ref: String,
+    },
+    /// Query-string parameter on the endpoint URL (rare; some legacy
+    /// services). Discouraged for new integrations because of URL
+    /// logging concerns, but supported for completeness.
+    QueryParam {
+        param_name: String,
+        sealed_secret_ref: String,
+    },
+}
+
+impl UpstreamAuth {
+    /// Returns the sealed-secret reference for vault lookup.
+    pub fn sealed_secret_ref(&self) -> &str {
+        match self {
+            UpstreamAuth::Bearer { sealed_secret_ref }
+            | UpstreamAuth::Header {
+                sealed_secret_ref, ..
+            }
+            | UpstreamAuth::EnvVar {
+                sealed_secret_ref, ..
+            }
+            | UpstreamAuth::QueryParam {
+                sealed_secret_ref, ..
+            } => sealed_secret_ref,
+        }
+    }
+}
+
+/// Spawn specification for stdio MCP subprocesses. Required when
+/// `transport_mode == ToolTransportMode::McpStdio`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StdioSpawnSpec {
+    /// Executable command. Looked up via `$PATH` on the operator's
+    /// node. E.g. `npx`, `python`, `/usr/local/bin/stripe-mcp`.
+    pub command: String,
+
+    /// Arguments passed to the command. E.g. `["-y", "@stripe/mcp",
+    /// "--tools=all"]` for the Stripe MCP via npx.
+    pub args: Vec<String>,
+
+    /// Working directory for the subprocess. `None` = node's cwd.
+    pub working_dir: Option<String>,
+
+    /// Environment variables (key → value). The `UpstreamAuth::EnvVar`
+    /// variant injects the operator's sealed credential as an
+    /// additional env var at spawn time — it is NOT stored here.
+    /// Use this map for non-secret config like `LOG_LEVEL`, `REGION`,
+    /// `STRIPE_TEST_MODE`, etc.
+    pub env: std::collections::BTreeMap<String, String>,
+
+    /// Per-call timeout in seconds. Default 30s if `None`.
+    pub timeout_secs: Option<u64>,
+
+    /// Whether to keep the subprocess alive between invocations
+    /// (persistent mode) or spawn-per-call (ephemeral mode). Most MCPs
+    /// support persistent mode and respond faster that way; some legacy
+    /// MCPs require per-call spawn. Default: persistent.
+    #[serde(default = "default_persistent")]
+    pub persistent: bool,
+}
+
+fn default_persistent() -> bool {
+    true
+}
 
 /// Status of a tool in the registry
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +255,32 @@ pub struct ToolDefinition {
     /// alive until they actually go silent.
     #[serde(default = "default_last_seen")]
     pub last_seen_at: u64,
+
+    // ── Plugin-host extensions (operator brokerage of custom + third-
+    // party MCPs). All optional; default-None preserves the legacy
+    // remote-Streamable-HTTP behavior for existing entries.
+
+    /// Upstream credential injection for this tool. When `Some`, the
+    /// operator's sealed secret (looked up by `sealed_secret_ref` at
+    /// invocation time) is injected per the variant rules — into a
+    /// request header for `Mcp` / `McpSse` / `Api`, into an env var
+    /// for `McpStdio`. Tenants NEVER see the underlying secret.
+    /// Default `None` means no credentials are injected (public MCPs).
+    #[serde(default)]
+    pub upstream_auth: Option<UpstreamAuth>,
+
+    /// Subprocess spawn specification for `McpStdio` transport.
+    /// Required when `tool_type == "mcp-stdio"`. Ignored for other
+    /// transports.
+    #[serde(default)]
+    pub spawn_spec: Option<StdioSpawnSpec>,
+
+    /// Optional subject-level access list. When `Some(vec)`, only
+    /// API-key subjects whose `subject` appears in `vec` are permitted
+    /// to invoke this tool. `None` (the default) means the tool is
+    /// open to any API key that is allowed by `AgentDelegation`.
+    #[serde(default)]
+    pub allowed_to_subjects: Option<Vec<String>>,
 }
 
 fn default_last_seen() -> u64 {
@@ -135,6 +322,35 @@ impl ToolDefinition {
             created_at,
             invocation_count: 0,
             last_seen_at: created_at,
+            upstream_auth: None,
+            spawn_spec: None,
+            allowed_to_subjects: None,
+        }
+    }
+
+    /// Returns the typed transport mode derived from the legacy
+    /// `tool_type` string. Returns `None` for unknown strings so the
+    /// caller can refuse to invoke an unknown transport safely.
+    pub fn transport_mode(&self) -> Option<ToolTransportMode> {
+        ToolTransportMode::parse_str(&self.tool_type)
+    }
+
+    /// Sets both the typed transport mode and the legacy `tool_type`
+    /// string field in lockstep. Use this from the registration RPC
+    /// when the caller passes a strongly-typed transport mode.
+    pub fn set_transport_mode(&mut self, mode: ToolTransportMode) {
+        self.tool_type = mode.as_str().to_string();
+    }
+
+    /// Returns `true` when `subject` is permitted to invoke this tool
+    /// per the optional subject-level access list. When the list is
+    /// `None`, the tool is open to any API key (subject-gating is
+    /// disabled). When `Some(vec)`, only subjects in `vec` are allowed.
+    pub fn is_subject_allowed(&self, subject: Option<&str>) -> bool {
+        match (&self.allowed_to_subjects, subject) {
+            (None, _) => true,
+            (Some(list), Some(s)) => list.iter().any(|x| x == s),
+            (Some(_), None) => false,
         }
     }
 

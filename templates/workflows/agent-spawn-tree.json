@@ -1,0 +1,59 @@
+{
+  "name": "agent-spawn-tree",
+  "version": "1.0.0",
+  "description": "Parent agent spawns 3 child specialist agents under bounded TNZO sub-budgets.",
+  "category": "orchestration",
+  "capabilities": ["multi-agent", "delegation"],
+  "required_inputs": {
+    "type": "object",
+    "properties": {
+      "research_budget": { "type": "string" },
+      "trading_budget": { "type": "string" },
+      "monitoring_budget": { "type": "string" }
+    },
+    "required": ["research_budget", "trading_budget", "monitoring_budget"]
+  },
+  "expected_outputs": {
+    "type": "object",
+    "properties": {
+      "research_agent": { "type": "object" },
+      "trading_agent": { "type": "object" },
+      "monitoring_agent": { "type": "object" }
+    }
+  },
+  "steps": [
+    {
+      "kind": "spawn_agent",
+      "agent_template_id": "agent-template-research",
+      "tnzo_budget": 0,
+      "scope_overrides": {
+        "display_name": "Research subagent",
+        "max_per_transaction": "{{ inputs.research_budget }}",
+        "max_daily_spend": "{{ inputs.research_budget }}"
+      },
+      "output_as": "research_agent"
+    },
+    {
+      "kind": "spawn_agent",
+      "agent_template_id": "agent-template-trading",
+      "tnzo_budget": 0,
+      "scope_overrides": {
+        "display_name": "Trading subagent",
+        "max_per_transaction": "{{ inputs.trading_budget }}",
+        "max_daily_spend": "{{ inputs.trading_budget }}"
+      },
+      "output_as": "trading_agent"
+    },
+    {
+      "kind": "spawn_agent",
+      "agent_template_id": "agent-template-monitoring",
+      "tnzo_budget": 0,
+      "scope_overrides": {
+        "display_name": "Monitoring subagent",
+        "max_per_transaction": "{{ inputs.monitoring_budget }}",
+        "max_daily_spend": "{{ inputs.monitoring_budget }}"
+      },
+      "output_as": "monitoring_agent"
+    }
+  ]
+}

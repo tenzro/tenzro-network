@@ -1118,6 +1118,84 @@ impl CantonAdapter {
         )))
     }
 
+    /// Revokes rights previously granted to a Canton user via
+    /// `POST /v2/users/{userId}/rights/revoke`. The body shape mirrors
+    /// `grant_user_rights`: `{ userId, rights: [{ kind: { CanActAs|CanReadAs:
+    /// { value: { party } } } }, ...] }`. Pass `user_id = None` to revoke
+    /// rights from the OAuth principal's own user (`<client_id>@clients`).
+    /// Returns the server response which lists the rights actually revoked
+    /// (rights that were not held are silently ignored by Canton).
+    pub async fn revoke_user_rights(
+        &self,
+        user_id: Option<&str>,
+        party: &str,
+        can_act_as: bool,
+        can_read_as: bool,
+    ) -> Result<serde_json::Value> {
+        if !can_act_as && !can_read_as {
+            return Err(BridgeError::AdapterError(
+                "revoke_user_rights requires at least one of can_act_as or can_read_as".to_string(),
+            ));
+        }
+
+        let resolved_user_id = match user_id {
+            Some(u) => u.to_string(),
+            None => match self.token_provider.as_ref() {
+                Some(p) => format!("{}@clients", p.client_id()),
+                None => return Err(BridgeError::AdapterError(
+                    "revoke_user_rights with user_id=None requires an OAuth2 token provider to derive the user id; this adapter was constructed without one".to_string()
+                )),
+            },
+        };
+
+        let mut rights: Vec<serde_json::Value> = Vec::new();
+        if can_act_as {
+            rights.push(serde_json::json!({
+                "kind": { "CanActAs": { "value": { "party": party } } }
+            }));
+        }
+        if can_read_as {
+            rights.push(serde_json::json!({
+                "kind": { "CanReadAs": { "value": { "party": party } } }
+            }));
+        }
+
+        let body = serde_json::json!({
+            "userId": resolved_user_id,
+            "rights": rights,
+        });
+
+        let path = format!(
+            "/users/{}/rights/revoke",
+            urlencoding::encode(&resolved_user_id),
+        );
+        let response = self
+            .build_request(reqwest::Method::POST, &path)
+            .await?
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| BridgeError::AdapterError(format!(
+                "Canton revoke-user-rights failed: {}",
+                Self::classify_reqwest_error(&e)
+            )))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            error!("Canton revoke-user-rights HTTP {}: {}", status, text);
+            return Err(BridgeError::AdapterError(format!(
+                "Canton revoke-user-rights HTTP {}: {}",
+                status, text
+            )));
+        }
+
+        response.json().await.map_err(|e| BridgeError::AdapterError(format!(
+            "Invalid Canton revoke-user-rights response: {}",
+            Self::classify_reqwest_error(&e)
+        )))
+    }
+
     /// Lists the rights granted to a Canton user via
     /// `GET /v2/users/{userId}/rights`. Returns
     /// `{ rights: [{ kind: { CanActAs: { value: { party } } } }, ...] }`.
@@ -1701,10 +1779,12 @@ impl CantonAdapter {
             }
         }
 
-        // Fallback: wildcard active-contracts scan.
+        // Fallback: wildcard active-contracts scan. Canton 3.5 uses the
+        // `eventFormat` wrapper (see the main query path below).
         let offset = self.fetch_ledger_end().await?;
         let request_body = serde_json::json!({
-            "filter": {
+            "eventFormat": {
+                "filtersByParty": serde_json::Map::new(),
                 "filtersForAnyParty": {
                     "cumulative": [{
                         "identifierFilter": {
@@ -1713,9 +1793,9 @@ impl CantonAdapter {
                             }
                         }
                     }]
-                }
+                },
+                "verbose": true,
             },
-            "verbose": true,
             "activeAtOffset": offset,
         });
 
@@ -1813,9 +1893,17 @@ impl CantonAdapter {
             }),
         );
 
+        // Canton 3.5 changed the request body shape: the legacy `filter`
+        // + top-level `verbose` fields are gone; the new contract uses
+        // `eventFormat: { filtersByParty, filtersForAnyParty, verbose }`.
+        // Canton 3.4 still accepts the legacy shape; from 3.5 onward the
+        // server returns `Invalid value for: body` on the old layout.
         let request_body = serde_json::json!({
-            "filter": { "filtersByParty": filters_by_party },
-            "verbose": true,
+            "eventFormat": {
+                "filtersByParty": filters_by_party,
+                "filtersForAnyParty": serde_json::Value::Null,
+                "verbose": true,
+            },
             "activeAtOffset": offset,
         });
 
@@ -3441,6 +3529,101 @@ mod tests {
         assert_eq!(obj.len(), 1);
         assert!(obj["commands"].is_object());
         assert!(obj["commands"]["commands"].is_array());
+    }
+
+    /// Regression for the Canton 3.5 `/v2/state/active-contracts` wire
+    /// shape. Canton 3.5 dropped the legacy top-level `filter` field;
+    /// the new contract uses `eventFormat: { filtersByParty,
+    /// filtersForAnyParty, verbose }`. A regression to the legacy shape
+    /// makes the participant return `Invalid value for: body` and
+    /// every downstream `tenzro_listDamlContracts` call fails with
+    /// `-32000 "Canton query failed"`. This test pins the bytes the
+    /// adapter sends so the regression is caught offline.
+    #[test]
+    fn active_contracts_request_uses_event_format_wrapper() {
+        // Mirror what `query_contracts` builds for the per-party,
+        // per-template case (the production path).
+        let party_fq = "tenzro-validator-1::1220ed9c20663dfc3b6180d5dd879ba3d7063a68b0016e26ba2549a9ae61ee0247b4".to_string();
+        let template_id = "#splice-amulet:Splice.Amulet:Amulet".to_string();
+        let offset: i64 = 1_328_472;
+
+        let mut filters_by_party = serde_json::Map::new();
+        let cumulative_filters: Vec<serde_json::Value> = vec![serde_json::json!({
+            "identifierFilter": {
+                "TemplateFilter": {
+                    "value": { "templateId": template_id }
+                }
+            }
+        })];
+        filters_by_party.insert(
+            party_fq.clone(),
+            serde_json::json!({
+                "cumulative": cumulative_filters,
+            }),
+        );
+        let request_body = serde_json::json!({
+            "eventFormat": {
+                "filtersByParty": filters_by_party,
+                "filtersForAnyParty": serde_json::Value::Null,
+                "verbose": true,
+            },
+            "activeAtOffset": offset,
+        });
+
+        // Top-level keys MUST be exactly `eventFormat` and
+        // `activeAtOffset` — no legacy `filter` or top-level `verbose`.
+        let obj = request_body.as_object().unwrap();
+        assert!(obj.contains_key("eventFormat"));
+        assert!(obj.contains_key("activeAtOffset"));
+        assert!(!obj.contains_key("filter"), "regression: Canton 3.5 dropped top-level 'filter'");
+        assert_eq!(obj.len(), 2);
+
+        // The eventFormat sub-object MUST carry the three required fields.
+        let ef = obj["eventFormat"].as_object().unwrap();
+        assert!(ef.contains_key("filtersByParty"));
+        assert!(ef.contains_key("filtersForAnyParty"));
+        assert!(ef.contains_key("verbose"));
+
+        // activeAtOffset MUST serialize as a JSON number (rejecting null
+        // and string offsets is the other Canton 3.4+ wire contract).
+        assert!(obj["activeAtOffset"].is_number());
+
+        // The per-party filter must be keyed by the fully-qualified
+        // party id, not the bare hint — Canton matches names against
+        // FQ ids only.
+        assert!(ef["filtersByParty"][&party_fq].is_object());
+    }
+
+    /// Same regression for the wildcard fallback scan used inside
+    /// `resolve_act_as_party_fq`. The shape must match the main path
+    /// or the FQ-resolve loop fails before the production query even
+    /// runs.
+    #[test]
+    fn wildcard_resolve_uses_event_format_wrapper() {
+        let offset: i64 = 1_328_472;
+        let request_body = serde_json::json!({
+            "eventFormat": {
+                "filtersByParty": serde_json::Map::new(),
+                "filtersForAnyParty": {
+                    "cumulative": [{
+                        "identifierFilter": {
+                            "WildcardFilter": {
+                                "value": { "includeCreatedEventBlob": false }
+                            }
+                        }
+                    }]
+                },
+                "verbose": true,
+            },
+            "activeAtOffset": offset,
+        });
+
+        let obj = request_body.as_object().unwrap();
+        assert!(obj.contains_key("eventFormat"));
+        assert!(obj.contains_key("activeAtOffset"));
+        assert!(!obj.contains_key("filter"));
+        let ef = obj["eventFormat"].as_object().unwrap();
+        assert!(ef["filtersForAnyParty"]["cumulative"].is_array());
     }
 
     #[tokio::test]

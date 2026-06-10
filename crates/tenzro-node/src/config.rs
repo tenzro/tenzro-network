@@ -1012,6 +1012,12 @@ pub struct NodeConfig {
     #[serde(default)]
     pub canton: CantonConfig,
 
+    /// MCP plugin host configuration. Operator-curated MCP runtime.
+    /// Empty default = vault root auto-derived from node identity,
+    /// no subprocess cap.
+    #[serde(default)]
+    pub mcp_plugin_host: McpPluginHostConfig,
+
     /// HTTP 402 payment gate configuration for the Web API
     #[serde(default)]
     pub payments: PaymentsConfig,
@@ -1122,6 +1128,31 @@ pub struct Erc8004DamlConfig {
     pub default_controller_party: String,
 }
 
+/// Configuration for the MCP plugin host. Lets operators run custom +
+/// third-party MCPs on their node without recompiling.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct McpPluginHostConfig {
+    /// 64-hex-character root master secret for the operator credential
+    /// vault. AES-256-GCM root IKM via HKDF-SHA256. When set, every
+    /// `tenzro_storeMcpSecret` call seals the secret under this IKM and
+    /// persists the envelope to `CF_VALIDATOR_MODULES`.
+    ///
+    /// When unset, the node auto-derives the IKM from a deterministic
+    /// HKDF over the node's persistent identity key (graceful default
+    /// for single-operator dev). On production multi-tenant operators,
+    /// set this explicitly so the vault root is auditable and rotatable
+    /// independent of the node identity.
+    #[serde(default)]
+    pub master_secret_hex: Option<String>,
+
+    /// Hard cap on the number of stdio MCP subprocesses kept alive in
+    /// persistent mode. When the cap is hit, the oldest subprocess is
+    /// evicted to make room. `None` = no cap (each operator-registered
+    /// stdio MCP gets its own subprocess for the lifetime of the node).
+    #[serde(default)]
+    pub max_persistent_subprocesses: Option<usize>,
+}
+
 impl Default for NodeConfig {
     fn default() -> Self {
         Self::default_user()
@@ -1171,6 +1202,7 @@ impl NodeConfig {
             health_enabled: true,
             genesis: Some(GenesisConfig::default_testnet()),
             canton: CantonConfig::default(),
+            mcp_plugin_host: McpPluginHostConfig::default(),
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
@@ -1207,6 +1239,7 @@ impl NodeConfig {
             health_enabled: true,
             genesis: None,
             canton: CantonConfig::default(),
+            mcp_plugin_host: McpPluginHostConfig::default(),
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
@@ -1243,6 +1276,7 @@ impl NodeConfig {
             health_enabled: true,
             genesis: None,
             canton: CantonConfig::default(),
+            mcp_plugin_host: McpPluginHostConfig::default(),
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
@@ -1279,6 +1313,7 @@ impl NodeConfig {
             health_enabled: true,
             genesis: None,
             canton: CantonConfig::from_env(),
+            mcp_plugin_host: McpPluginHostConfig::default(),
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),

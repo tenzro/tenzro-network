@@ -1282,6 +1282,20 @@ pub struct TenzroNode {
     /// `CF_API_KEYS` via [`crate::api_key::ApiKeyManager::new`].
     api_key_manager: Option<Arc<crate::api_key::ApiKeyManager>>,
 
+    /// MCP plugin host. Runs operator-curated custom + third-party
+    /// MCPs (stdio subprocesses, remote Streamable HTTP, legacy SSE).
+    /// Holds the sealed credential vault for operator's upstream API
+    /// keys. `None` when storage is unavailable or the operator has
+    /// not configured a vault root (no TEE + no master secret).
+    mcp_plugin_host: Option<Arc<crate::mcp_plugin_host::McpPluginHost>>,
+
+    /// Workflow executor for agent workflow templates. Drives a
+    /// template's saga to completion against the node's RPC handlers.
+    /// Hydrates in-flight runs from `CF_SETTLEMENTS` on startup so
+    /// workflows survive operator restarts. Constructed lazily on
+    /// first use because it needs `Arc<TenzroNode>` self-reference.
+    workflow_executor: parking_lot::Mutex<Option<Arc<crate::workflow_executor::WorkflowExecutor>>>,
+
     /// Per-tenant Canton usage counter. Incremented from the canton
     /// RPC dispatch path so the operator can answer "how many DAML
     /// transactions has the tenzro-labs team submitted this month, and
@@ -1709,6 +1723,8 @@ impl TenzroNode {
             fee_collector: None,
             auth_engine: None,
             api_key_manager: None,
+            mcp_plugin_host: None,
+            workflow_executor: parking_lot::Mutex::new(None),
             canton_analytics: None,
             bridge_analytics: None,
             chainlink_rate_limiter: Arc::new(
@@ -2355,6 +2371,61 @@ impl TenzroNode {
             store.clone() as Arc<dyn tenzro_storage::KvStore>,
         )?;
         self.api_key_manager = Some(api_keys);
+
+        // MCP plugin host. Lets the operator broker custom + third-
+        // party MCPs (stdio + remote Streamable HTTP + legacy SSE)
+        // through their Tenzro node. Initializes the sealed credential
+        // vault rooted at either:
+        // - `node_config.mcp_plugin_host.master_secret_hex` (explicit
+        //   operator-supplied 32-byte hex string), or
+        // - HKDF-SHA256 over a deterministic node-identity-derived
+        //   seed (graceful default for single-operator dev).
+        //
+        // The vault root is opaque to tenants. Tenants never see the
+        // operator's upstream credentials — they only present a
+        // Tenzro API key, the operator's upstream auth is injected at
+        // invocation time from the sealed vault.
+        let vault_ikm: [u8; 32] = if let Some(hex) =
+            self.config.mcp_plugin_host.master_secret_hex.as_deref()
+        {
+            let bytes = hex::decode(hex).map_err(|e| {
+                NodeError::Internal(format!(
+                    "mcp_plugin_host.master_secret_hex: invalid hex: {}",
+                    e
+                ))
+            })?;
+            if bytes.len() != 32 {
+                return Err(NodeError::Internal(format!(
+                    "mcp_plugin_host.master_secret_hex: expected 32 bytes, got {}",
+                    bytes.len()
+                ))
+                .into());
+            }
+            let mut ikm = [0u8; 32];
+            ikm.copy_from_slice(&bytes);
+            ikm
+        } else {
+            // Auto-derive IKM from the node's persistent identity.
+            // The identity key is fixed per data_dir so the vault root
+            // is stable across restarts without operator config. We
+            // hash a domain-separated label || data_dir path so two
+            // node identities on the same machine produce different
+            // IKMs.
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(b"tenzro/mcp/plugin-host/auto-ikm/v1");
+            hasher.update(self.config.data_dir.to_string_lossy().as_bytes());
+            let digest = hasher.finalize();
+            let mut ikm = [0u8; 32];
+            ikm.copy_from_slice(&digest);
+            ikm
+        };
+        let vault = Arc::new(crate::mcp_plugin_host::OperatorCredentialVault::new(
+            store.clone() as Arc<dyn tenzro_storage::KvStore>,
+            vault_ikm,
+        ));
+        let plugin_host = Arc::new(crate::mcp_plugin_host::McpPluginHost::new(vault));
+        self.mcp_plugin_host = Some(plugin_host);
 
         // Per-tenant Canton usage counters. Hydrates `CantonKeyAnalytics`
         // cache from `CF_CANTON_ANALYTICS` so historical counters survive
@@ -8042,6 +8113,53 @@ impl TenzroNode {
     /// header.
     pub fn api_key_manager(&self) -> Option<&Arc<crate::api_key::ApiKeyManager>> {
         self.api_key_manager.as_ref()
+    }
+
+    /// Returns the MCP plugin host if initialized. The plugin host runs
+    /// operator-curated stdio + remote MCPs, holds the sealed credential
+    /// vault, and dispatches `tenzro_useTool` calls for non-native tools.
+    /// `None` when storage is unavailable or the operator has not
+    /// configured a vault root (no TEE-derived IKM + no
+    /// `mcp_vault_master_secret_hex` in node config).
+    pub fn mcp_plugin_host(
+        &self,
+    ) -> Option<&Arc<crate::mcp_plugin_host::McpPluginHost>> {
+        self.mcp_plugin_host.as_ref()
+    }
+
+    /// Returns the workflow executor if initialized. The executor
+    /// drives `WorkflowTemplate` sagas to completion against the
+    /// node's RPC handlers. Constructed lazily via
+    /// `ensure_workflow_executor()` since the executor needs an
+    /// `Arc<TenzroNode>` (for the dispatcher) which only exists after
+    /// node construction.
+    pub fn workflow_executor(
+        &self,
+    ) -> Option<Arc<crate::workflow_executor::WorkflowExecutor>> {
+        self.workflow_executor.lock().clone()
+    }
+
+    /// Initialize the workflow executor if not yet present. Idempotent.
+    /// Called from the `tenzro_instantiateWorkflow` handler the first
+    /// time a workflow is run; subsequent calls hit the cached arc.
+    pub fn ensure_workflow_executor(
+        self: &Arc<Self>,
+    ) -> Result<Arc<crate::workflow_executor::WorkflowExecutor>> {
+        if let Some(existing) = self.workflow_executor.lock().clone() {
+            return Ok(existing);
+        }
+        let storage = self.storage.clone().ok_or_else(|| {
+            NodeError::Internal("workflow executor: storage not available".to_string())
+        })?;
+        let dispatcher = crate::workflow_dispatcher::NodeStepDispatcher::new(self.clone())
+            as Arc<dyn crate::workflow_executor::StepDispatcher>;
+        let exec = crate::workflow_executor::WorkflowExecutor::new(
+            storage as Arc<dyn tenzro_storage::KvStore>,
+            dispatcher,
+        )
+        .map_err(|e| NodeError::Internal(format!("workflow executor init: {}", e)))?;
+        *self.workflow_executor.lock() = Some(exec.clone());
+        Ok(exec)
     }
 
     /// Returns the per-tenant Canton analytics manager, populated once

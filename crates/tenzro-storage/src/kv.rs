@@ -29,6 +29,16 @@ pub const CF_TASKS: &str = "tasks";
 pub const CF_AGENT_TEMPLATES: &str = "agent_templates";
 pub const CF_SKILLS: &str = "skills";
 pub const CF_TOOLS: &str = "tools";
+/// Operator-curated knowledge resource registry: vector DBs, RAG
+/// indices, document corpora, indexed historical datasets, real-time
+/// data feeds. Persists `KnowledgeRecord` rows. Mirrors `CF_TOOLS`
+/// pattern but for queryable data resources.
+pub const CF_KNOWLEDGE: &str = "knowledge";
+/// Operator-curated workflow template catalog: reusable multi-step
+/// saga specs that tenants can instantiate via `tenzro_instantiateWorkflow`.
+/// Persists `WorkflowTemplate` rows. Distinct from running-workflow
+/// state (which lives in tenzro-workflow's own storage).
+pub const CF_WORKFLOW_TEMPLATES: &str = "workflow_templates";
 pub const CF_TOKENS: &str = "tokens";
 pub const CF_SETTLEMENTS: &str = "settlements";
 pub const CF_MODEL_SERVICES: &str = "model_services";
@@ -167,6 +177,8 @@ impl RocksDbStore {
             ColumnFamilyDescriptor::new(CF_AGENT_TEMPLATES, Options::default()),
             ColumnFamilyDescriptor::new(CF_SKILLS, Options::default()),
             ColumnFamilyDescriptor::new(CF_TOOLS, Options::default()),
+            ColumnFamilyDescriptor::new(CF_KNOWLEDGE, Options::default()),
+            ColumnFamilyDescriptor::new(CF_WORKFLOW_TEMPLATES, Options::default()),
             ColumnFamilyDescriptor::new(CF_TOKENS, Options::default()),
             ColumnFamilyDescriptor::new(CF_SETTLEMENTS, Options::default()),
             ColumnFamilyDescriptor::new(CF_MODEL_SERVICES, Options::default()),

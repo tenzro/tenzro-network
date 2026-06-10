@@ -1,0 +1,49 @@
+{
+  "name": "research-then-trade",
+  "version": "1.0.0",
+  "description": "Query a price feed, generate trade analysis with an LLM, then execute a trade via a tool.",
+  "category": "trading",
+  "capabilities": ["trading", "research", "automation"],
+  "required_inputs": {
+    "type": "object",
+    "properties": {
+      "symbol": { "type": "string", "description": "Trading symbol (e.g. SOL/USD)" },
+      "max_position_size": { "type": "string", "description": "Max position in atto-TNZO" }
+    },
+    "required": ["symbol", "max_position_size"]
+  },
+  "expected_outputs": {
+    "type": "object",
+    "properties": {
+      "analysis": { "type": "object" },
+      "trade": { "type": "object" }
+    }
+  },
+  "steps": [
+    {
+      "kind": "use_knowledge",
+      "knowledge_id": "kb-price-feed-default",
+      "params": { "symbol": "{{ inputs.symbol }}" },
+      "output_as": "price_quote"
+    },
+    {
+      "kind": "use_model",
+      "model_id": "qwen3-7b",
+      "params": {
+        "prompt": "Given price quote {{ steps.price_quote.output }} and max size {{ inputs.max_position_size }}, recommend buy/sell/hold with size. Reply JSON: {recommendation, size}."
+      },
+      "output_as": "analysis"
+    },
+    {
+      "kind": "use_tool",
+      "tool_id": "tool-trade-execution-default",
+      "tool_name": "submit_order",
+      "params": {
+        "symbol": "{{ inputs.symbol }}",
+        "side": "{{ steps.analysis.output.recommendation }}",
+        "size": "{{ steps.analysis.output.size }}"
+      },
+      "output_as": "trade"
+    }
+  ]
+}

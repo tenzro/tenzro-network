@@ -1,0 +1,59 @@
+{
+  "name": "autonomous-monitor",
+  "version": "1.0.0",
+  "description": "Poll a knowledge source on a duration cadence; LLM evaluates against an alert condition; trigger a tool when condition fires.",
+  "category": "monitoring",
+  "capabilities": ["monitoring", "alerting", "autonomy"],
+  "required_inputs": {
+    "type": "object",
+    "properties": {
+      "feed_id": { "type": "string" },
+      "feed_params": { "type": "object" },
+      "alert_condition": { "type": "string" },
+      "alert_tool_id": { "type": "string" },
+      "alert_recipient": { "type": "string" },
+      "poll_interval_secs": { "type": "integer", "minimum": 30 }
+    },
+    "required": ["feed_id", "feed_params", "alert_condition", "alert_tool_id", "alert_recipient", "poll_interval_secs"]
+  },
+  "expected_outputs": {
+    "type": "object",
+    "properties": {
+      "polls": { "type": "integer" },
+      "alerts_fired": { "type": "integer" }
+    }
+  },
+  "steps": [
+    {
+      "kind": "use_knowledge",
+      "knowledge_id": "{{ inputs.feed_id }}",
+      "params": "{{ inputs.feed_params }}",
+      "output_as": "reading"
+    },
+    {
+      "kind": "use_model",
+      "model_id": "qwen3-7b",
+      "params": {
+        "prompt": "Reading: {{ steps.reading.output }}. Condition: {{ inputs.alert_condition }}. Reply JSON: {fire: true|false, reason}."
+      },
+      "output_as": "decision"
+    },
+    {
+      "kind": "use_tool",
+      "tool_id": "{{ inputs.alert_tool_id }}",
+      "tool_name": "send_alert",
+      "params": {
+        "recipient": "{{ inputs.alert_recipient }}",
+        "should_fire": "{{ steps.decision.output.fire }}",
+        "reason": "{{ steps.decision.output.reason }}",
+        "reading": "{{ steps.reading.output }}"
+      },
+      "output_as": "alert_dispatch"
+    },
+    {
+      "kind": "wait",
+      "wait_kind": "duration",
+      "params": { "seconds": "{{ inputs.poll_interval_secs }}" }
+    }
+  ]
+}

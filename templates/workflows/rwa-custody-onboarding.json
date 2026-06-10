@@ -1,0 +1,52 @@
+{
+  "name": "rwa-custody-onboarding",
+  "version": "1.0.0",
+  "description": "Tokenized real-world-asset custody onboarding: KYC knowledge query → identity registration → custody MPC bind.",
+  "category": "rwa",
+  "capabilities": ["rwa", "kyc", "custody", "identity"],
+  "required_inputs": {
+    "type": "object",
+    "properties": {
+      "customer_id": { "type": "string" },
+      "asset_type": { "type": "string" }
+    },
+    "required": ["customer_id", "asset_type"]
+  },
+  "expected_outputs": {
+    "type": "object",
+    "properties": {
+      "did": { "type": "string" },
+      "mpc_wallet": { "type": "string" },
+      "kyc_status": { "type": "string" }
+    }
+  },
+  "steps": [
+    {
+      "kind": "use_knowledge",
+      "knowledge_id": "kb-kyc-provider-default",
+      "params": { "customer_id": "{{ inputs.customer_id }}" },
+      "output_as": "kyc"
+    },
+    {
+      "kind": "use_tool",
+      "tool_id": "tool-identity-register",
+      "tool_name": "register_identity",
+      "params": {
+        "identity_type": "human",
+        "display_name": "{{ steps.kyc.output.legal_name }}",
+        "kyc_tier": "{{ steps.kyc.output.tier }}"
+      },
+      "output_as": "identity"
+    },
+    {
+      "kind": "use_tool",
+      "tool_id": "tool-custody-bind",
+      "tool_name": "bind_custody",
+      "params": {
+        "did": "{{ steps.identity.output.did }}",
+        "asset_type": "{{ inputs.asset_type }}"
+      },
+      "output_as": "custody"
+    }
+  ]
+}

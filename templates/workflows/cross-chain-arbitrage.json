@@ -1,0 +1,68 @@
+{
+  "name": "cross-chain-arbitrage",
+  "version": "1.0.0",
+  "description": "Detect cross-chain price spread → quote LLM-driven trade → open ERC-7683 origin order.",
+  "category": "trading",
+  "capabilities": ["arbitrage", "cross-chain", "erc7683"],
+  "required_inputs": {
+    "type": "object",
+    "properties": {
+      "asset": { "type": "string" },
+      "source_chain": { "type": "string" },
+      "dest_chain": { "type": "string" },
+      "max_size": { "type": "string" }
+    },
+    "required": ["asset", "source_chain", "dest_chain", "max_size"]
+  },
+  "expected_outputs": {
+    "type": "object",
+    "properties": {
+      "order_id": { "type": "string" },
+      "expected_pnl": { "type": "string" }
+    }
+  },
+  "steps": [
+    {
+      "kind": "use_knowledge",
+      "knowledge_id": "kb-bridge-fee-default",
+      "params": {
+        "asset": "{{ inputs.asset }}",
+        "source": "{{ inputs.source_chain }}",
+        "dest": "{{ inputs.dest_chain }}"
+      },
+      "output_as": "bridge_quote"
+    },
+    {
+      "kind": "use_knowledge",
+      "knowledge_id": "kb-price-feed-default",
+      "params": { "symbol": "{{ inputs.asset }}", "chain": "{{ inputs.source_chain }}" },
+      "output_as": "src_price"
+    },
+    {
+      "kind": "use_knowledge",
+      "knowledge_id": "kb-price-feed-default",
+      "params": { "symbol": "{{ inputs.asset }}", "chain": "{{ inputs.dest_chain }}" },
+      "output_as": "dst_price"
+    },
+    {
+      "kind": "use_model",
+      "model_id": "qwen3-7b",
+      "params": {
+        "prompt": "Source price: {{ steps.src_price.output }}, Dest price: {{ steps.dst_price.output }}, Bridge cost: {{ steps.bridge_quote.output }}. Max size: {{ inputs.max_size }}. Recommend trade size and side. JSON: {size, side, expected_pnl}."
+      },
+      "output_as": "decision"
+    },
+    {
+      "kind": "use_tool",
+      "tool_id": "tool-erc7683-origin",
+      "tool_name": "open_order",
+      "params": {
+        "asset": "{{ inputs.asset }}",
+        "source_chain": "{{ inputs.source_chain }}",
+        "dest_chain": "{{ inputs.dest_chain }}",
+        "size": "{{ steps.decision.output.size }}"
+      },
+      "output_as": "order"
+    }
+  ]
+}
