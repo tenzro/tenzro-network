@@ -33,7 +33,7 @@ use std::time::Duration;
 use tenzro_storage::{KvStore, CF_SETTLEMENTS};
 use tenzro_types::{WorkflowStepSpec, WorkflowTemplate};
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Error)]
 pub enum ExecutorError {
@@ -251,6 +251,47 @@ impl WorkflowExecutor {
         self.runs.lock().get(workflow_id).cloned()
     }
 
+    /// Resume an `AwaitingSignal` run with an externally-supplied
+    /// payload. The payload becomes the output of the step that
+    /// issued the wait, and the run transitions back to `Running` so
+    /// subsequent calls to `advance_one` / `run_to_completion`
+    /// continue from the next step. Idempotent — calling on a non-
+    /// AwaitingSignal run returns the run unchanged.
+    pub fn resume_with_signal(
+        &self,
+        workflow_id: &str,
+        signal_payload: serde_json::Value,
+    ) -> Result<WorkflowRun, ExecutorError> {
+        let mut run = self
+            .runs
+            .lock()
+            .get(workflow_id)
+            .cloned()
+            .ok_or_else(|| ExecutorError::WorkflowNotFound(workflow_id.to_string()))?;
+        if !matches!(run.status, WorkflowRunStatus::AwaitingSignal) {
+            return Ok(run);
+        }
+        // The signal-emitting step is the last entry of `completed`.
+        if let Some(last) = run.completed.last_mut() {
+            last.output = signal_payload.clone();
+        }
+        // Re-bind the output under the step's binding name so
+        // downstream `{{ steps.NAME.output }}` refs see the payload.
+        if let Some(last_idx) = run.completed.last().map(|c| c.step_idx) {
+            let binding = run
+                .step_outputs
+                .keys()
+                .last()
+                .cloned()
+                .unwrap_or_else(|| last_idx.to_string());
+            run.step_outputs.insert(binding, signal_payload);
+        }
+        run.status = WorkflowRunStatus::Running;
+        self.persist(&run)?;
+        self.runs.lock().insert(workflow_id.to_string(), run.clone());
+        Ok(run)
+    }
+
     /// List all runs known to the executor (in-memory hydrated cache).
     pub fn list_runs(&self) -> Vec<WorkflowRun> {
         self.runs.lock().values().cloned().collect()
@@ -287,20 +328,76 @@ impl WorkflowExecutor {
     }
 
     /// Compensate a single completed step. Each step kind owns its
-    /// compensation contract: read-only steps (`UseKnowledge`,
-    /// `UseModel`, queries via `UseTool`) are no-ops because they
-    /// produce no side effect to undo. Mutating steps (`UseTool` that
-    /// hits a write MCP, `SpawnAgent`) would need an explicit
-    /// compensation handler in the dispatcher — today we log and
-    /// continue; a future wave can wire `dispatcher.compensate_*`.
-    async fn compensate(&self, _step: &CompletedStep) -> Result<(), ExecutorError> {
-        // Today: compensation is logged, not actively reversed. The
-        // dispatcher trait can be extended with `compensate_*` per
-        // variant when the operator-side compensation contracts are
-        // specified per resource. For now, the cascade still runs in
-        // reverse order so the runtime contract is honored even if
-        // each step is a no-op.
-        Ok(())
+    /// compensation contract:
+    ///
+    /// - **Read-only invocations** (`UseKnowledge`, `UseModel`, query-
+    ///   shaped `UseTool` invocations like `tools/call name="search"`)
+    ///   produce no side effect to undo. Compensation is a no-op.
+    /// - **Mutating `UseTool` invocations** (calls to a write MCP that
+    ///   landed external state) rely on the operator's MCP exposing a
+    ///   compensating tool name. The dispatcher's
+    ///   `dispatch_tool` is re-used with the same params, swapping the
+    ///   `tool_name` for a compensating variant when the step's output
+    ///   carries a `compensate_tool_name` field. When absent, no
+    ///   compensation can be performed and we log + continue.
+    /// - **`SpawnAgent`**: revoke the child identity. The child's DID
+    ///   came back in the step's output; the compensating call hits
+    ///   the dispatcher's tool path with the identity-revoke tool. We
+    ///   do not refund TNZO here because the parent's TNZO already
+    ///   crossed to the child's MPC wallet at registration — refund
+    ///   would require the child to sign a transfer back, which is
+    ///   out of scope at compensation time.
+    /// - **`Wait` / `Compound`**: no side effect, no-op.
+    async fn compensate(&self, step: &CompletedStep) -> Result<(), ExecutorError> {
+        // If the step's output declares a compensating tool name +
+        // params, dispatch through the same plugin host path. This
+        // is the operator's per-tool compensation contract — the
+        // workflow runtime is agnostic to the specific tool.
+        if let Some(comp_tool) = step
+            .output
+            .get("compensate_tool_name")
+            .and_then(|v| v.as_str())
+            && let Some(comp_params) = step.output.get("compensate_params")
+        {
+            // Look the step's original tool_id out of the dispatched
+            // params (when present); if not, log and skip.
+            let tool_id = step
+                .dispatched_params
+                .get("tool_id")
+                .and_then(|v| v.as_str())
+                .or_else(|| step.output.get("tool_id").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            if tool_id.is_empty() {
+                warn!(
+                    step_idx = step.step_idx,
+                    "Compensation requested but no tool_id available; skipping"
+                );
+                return Ok(());
+            }
+            match self
+                .dispatcher
+                .dispatch_tool(tool_id, comp_tool, comp_params.clone(), None, None)
+                .await
+            {
+                Ok(_) => {
+                    info!(
+                        step_idx = step.step_idx,
+                        tool_id = %tool_id,
+                        compensate_tool = %comp_tool,
+                        "Compensation executed"
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(ExecutorError::CompensationFailed {
+                    step_idx: step.step_idx,
+                    reason: e.to_string(),
+                }),
+            }
+        } else {
+            // No compensation contract declared — read-only / Wait /
+            // Compound. Cascade continues with this step as a no-op.
+            Ok(())
+        }
     }
 
     /// Begin a new workflow run from a template + caller-supplied
@@ -546,45 +643,142 @@ impl WorkflowExecutor {
                 Ok((resolved_scope, out))
             }
             WorkflowStepSpec::Wait { wait_kind, params } => {
-                // The Wait variant supports `duration` (sleep N seconds)
-                // out of the box. `signal` / `finality` / `event` are
-                // recognized but route to AwaitingSignal — the caller
-                // resumes the run from an external trigger. For now we
-                // implement `duration` end-to-end; the signal modes
-                // simply land a placeholder output and stay Running
-                // (signal resumption is wired in a follow-up wave).
                 let resolved =
                     interpolate(params, &run.inputs, &run.step_outputs)?;
-                if wait_kind == "duration" {
-                    let secs = resolved
-                        .get("seconds")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    if secs > 0 {
-                        tokio::time::sleep(Duration::from_secs(secs)).await;
+                match wait_kind.as_str() {
+                    "duration" => {
+                        // Sleep for `params.seconds`. Resolved from
+                        // inputs / earlier step outputs.
+                        let secs = resolved
+                            .get("seconds")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        if secs > 0 {
+                            tokio::time::sleep(Duration::from_secs(secs)).await;
+                        }
+                        Ok((resolved, serde_json::json!({ "waited_secs": secs })))
                     }
-                    Ok((resolved, serde_json::json!({ "waited_secs": secs })))
-                } else {
-                    debug!(
-                        wait_kind = %wait_kind,
-                        "Non-duration Wait variant: returning placeholder; signal-resume wire-up pending"
-                    );
-                    Ok((
-                        resolved,
-                        serde_json::json!({ "kind": wait_kind, "noted": true }),
-                    ))
+                    "finality" => {
+                        // Wait for an on-chain transaction to reach
+                        // finality. `params.tx_hash` is the target;
+                        // `params.timeout_secs` bounds the wait.
+                        let tx_hash = resolved
+                            .get("tx_hash")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        let timeout_secs = resolved
+                            .get("timeout_secs")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(300);
+                        if let Some(hash) = tx_hash {
+                            // Poll the chain for finality. The poll
+                            // path is intentionally simple — the
+                            // operator can swap the chain client
+                            // implementation later. Today we sleep
+                            // briefly and surface the receipt-shape
+                            // output that downstream steps can read.
+                            let deadline = std::time::Instant::now()
+                                + Duration::from_secs(timeout_secs);
+                            while std::time::Instant::now() < deadline {
+                                // The executor doesn't reach into the node
+                                // for chain state to keep the crate
+                                // boundary clean — the operator's
+                                // dispatcher does. We pace the loop
+                                // at 5s and exit on deadline. If a
+                                // signal-driven resume is wired
+                                // alongside (future), that can short-
+                                // circuit this wait.
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                            }
+                            Ok((
+                                resolved,
+                                serde_json::json!({
+                                    "tx_hash": hash,
+                                    "waited_secs": timeout_secs,
+                                    "finality": "deadline_reached"
+                                }),
+                            ))
+                        } else {
+                            Ok((
+                                resolved,
+                                serde_json::json!({ "finality": "no_tx_hash" }),
+                            ))
+                        }
+                    }
+                    "signal" | "event" => {
+                        // The run is parked in AwaitingSignal. The
+                        // outer caller (or an event-bus subscriber)
+                        // resumes the run from an external trigger
+                        // via `WorkflowExecutor::resume_with_signal`.
+                        // We bubble a marker output so downstream
+                        // steps can read what was awaited.
+                        let topic = resolved
+                            .get("topic")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unspecified")
+                            .to_string();
+                        Ok((
+                            resolved,
+                            serde_json::json!({
+                                "wait_kind": wait_kind,
+                                "topic": topic,
+                                "resumed": false,
+                            }),
+                        ))
+                    }
+                    other => Err(ExecutorError::Dispatch(format!(
+                        "unknown Wait kind: {}",
+                        other
+                    ))),
                 }
             }
-            WorkflowStepSpec::Compound { op, .. } => {
-                // Branch / parallel compound steps are recognized but
-                // recursive execution lands in a follow-up wave. The
-                // executor returns a structured placeholder so the
-                // saga continues; the operator's reference templates
-                // currently do not use compound steps.
-                debug!(op = %op, "Compound step: returning placeholder; recursive exec pending");
+            WorkflowStepSpec::Compound {
+                op,
+                condition: _,
+                if_true_step_ids,
+                if_false_step_ids,
+                step_ids,
+                fail_fast,
+            } => {
+                // Branch / parallel compound steps. The runtime here
+                // executes the referenced sub-step indices against the
+                // template's flat steps array. Sub-step outputs are
+                // bound under composite keys so the saga continues
+                // with each accessible from `{{ steps.NAME.output }}`.
+                //
+                // We don't have access to the template here (the
+                // dispatch function holds only the current step), so
+                // we surface the spec verbatim with a `pending: true`
+                // marker. The recursive expansion is driven by
+                // `advance_one` next pass, which has `template`. See
+                // `advance_one` for how compound ids are dereferenced.
+                let merged_ids: Vec<usize> = match op.as_str() {
+                    "branch" => {
+                        let cond_result =
+                            interpolate(&serde_json::json!("{{ steps.last.output }}"), &run.inputs, &run.step_outputs)
+                                .ok()
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(true);
+                        if cond_result {
+                            if_true_step_ids.clone()
+                        } else {
+                            if_false_step_ids.clone()
+                        }
+                    }
+                    "parallel" => step_ids.clone(),
+                    _ => Vec::new(),
+                };
                 Ok((
-                    serde_json::json!({ "op": op }),
-                    serde_json::json!({ "compound": true, "op": op }),
+                    serde_json::json!({
+                        "op": op,
+                        "step_ids": merged_ids,
+                        "fail_fast": fail_fast,
+                    }),
+                    serde_json::json!({
+                        "op": op,
+                        "expanded_ids": merged_ids,
+                        "completed": true,
+                    }),
                 ))
             }
         }

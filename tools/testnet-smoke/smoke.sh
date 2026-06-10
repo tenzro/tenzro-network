@@ -184,6 +184,33 @@ echo "[8] Canton read surface"
 r=$(call tenzro_listCantonDomains '[]')
 if echo "$r" | grep -qE '"result":\['; then ok "tenzro_listCantonDomains"; elif echo "$r" | grep -qiE "api.key|unauthorized|missing.*header|required scope|-32004"; then skip "tenzro_listCantonDomains" "requires Canton-scoped X-Tenzro-Api-Key (operator-gated)"; else bad "tenzro_listCantonDomains" "$r"; fi
 
+# Canton binary version drift check. Splice protocol version drift recurs
+# on the devnet (HTTP 502 "Participant binary version is too old"); this
+# check alerts the operator before user traffic hits it. Floor is set via
+# CANTON_BINARY_VERSION_FLOOR — when unset, we only verify that the
+# version endpoint returns *something* parseable. When set (e.g.
+# CANTON_BINARY_VERSION_FLOOR=0.6.6), the test fails if the running
+# version is below the floor.
+r=$(call tenzro_canton_version '[]')
+if echo "$r" | grep -qE '"version":"[^"]+"'; then
+  vrun=$(echo "$r" | grep -oE '"version":"[^"]+"' | head -1 | sed 's/"version":"\(.*\)"/\1/')
+  floor=${CANTON_BINARY_VERSION_FLOOR:-}
+  if [ -z "$floor" ]; then
+    ok "tenzro_canton_version returned $vrun (no floor set)"
+  else
+    # Floor check: lexicographic comparison works fine for semver-shaped strings.
+    if [ "$(printf '%s\n%s\n' "$floor" "$vrun" | sort -V | head -1)" = "$floor" ]; then
+      ok "tenzro_canton_version $vrun ≥ floor $floor"
+    else
+      bad "tenzro_canton_version drift" "running $vrun, floor $floor"
+    fi
+  fi
+elif echo "$r" | grep -qiE "api.key|unauthorized|missing.*header|required scope|-32004"; then
+  skip "tenzro_canton_version drift check" "requires Canton-scoped X-Tenzro-Api-Key"
+else
+  bad "tenzro_canton_version" "$r"
+fi
+
 # Canton MCP smoke
 r=$(curl -s --max-time 5 -X POST "$CANTON_MCP" -H "content-type: application/json" -H "accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}')
 if echo "$r" | grep -qE '"protocolVersion"|"serverInfo"'; then
