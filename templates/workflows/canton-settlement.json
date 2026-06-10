@@ -1,0 +1,40 @@
+{
+  "name": "canton-settlement",
+  "version": "1.0.0",
+  "description": "AP2 mandate → multi-party Canton DAML create → settlement receipt. Demonstrates bounded autonomous write to Canton.",
+  "category": "settlement",
+  "capabilities": ["canton", "settlement", "ap2"],
+  "required_inputs": {
+    "type": "object",
+    "properties": {
+      "counterparty_party_fq": { "type": "string" },
+      "amulet_amount": { "type": "string" },
+      "memo": { "type": "string" }
+    },
+    "required": ["counterparty_party_fq", "amulet_amount"]
+  },
+  "expected_outputs": {
+    "type": "object",
+    "properties": {
+      "contract_id": { "type": "string" },
+      "receipt": { "type": "object" }
+    }
+  },
+  "steps": [
+    {
+      "kind": "use_tool",
+      "tool_id": "tool-canton-submit-mandate",
+      "tool_name": "submit_with_mandate",
+      "params": {
+        "command_type": "create",
+        "template_id": "#Splice.AmuletRules:AmuletRules:Transfer",
+        "create_arguments": {
+          "to": "{{ inputs.counterparty_party_fq }}",
+          "amount": "{{ inputs.amulet_amount }}",
+          "memo": "{{ inputs.memo }}"
+        }
+      },
+      "output_as": "receipt"
+    }
+  ]
+}

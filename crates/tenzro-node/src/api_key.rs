@@ -195,6 +195,77 @@ pub enum SubjectRevokeOutcome {
 /// The raw key is hashed with SHA-256 and never stored. The key id
 /// (first 8 bytes of the hash, hex-encoded) is a non-secret handle
 /// used for revocation and audit.
+/// Agent-delegation parameters passed at key-issuance time.
+///
+/// All fields are optional and individually opt-in. The empty default
+/// produces a legacy-shaped key with no per-party / per-template /
+/// per-command authorization. Setting any field activates the
+/// corresponding enforcement check on the RPC path.
+///
+/// Wire format on the `tenzro_createApiKey` JSON-RPC params mirrors
+/// the field names exactly (snake_case).
+#[derive(Debug, Clone, Default)]
+pub struct AgentDelegation {
+    /// Fully-qualified party ids the key is allowed to act for.
+    pub can_act_as_parties: Vec<String>,
+    /// Fully-qualified party ids the key is allowed to observe.
+    pub can_read_as_parties: Vec<String>,
+    /// DAML template ids the key is allowed to query or submit against.
+    pub allowed_templates: Vec<String>,
+    /// DAML choice / command shapes the key is allowed to exercise.
+    pub allowed_commands: Vec<String>,
+    /// Per-command value ceiling in amulet smallest units.
+    pub max_per_command_amulet: Option<u128>,
+    /// Rolling-day cumulative value ceiling in amulet smallest units.
+    pub max_per_day_amulet: Option<u128>,
+    /// Command shapes that require an AP2 cart mandate.
+    pub requires_mandate_for: Vec<String>,
+    /// Unix timestamp (seconds) after which the key is rejected.
+    pub valid_until: Option<i64>,
+
+    // ── Per-resource-class allow-lists ────────────────────────────
+    //
+    // Each list is empty-by-default. Empty means "no per-resource
+    // restriction in this class" (legacy unrestricted behavior). Non-
+    // empty means the RPC layer refuses invocations against
+    // resources outside the set. The seven resource classes mirror
+    // the operator-brokerage model.
+
+    /// Tool / MCP resource_ids the key is allowed to invoke. Gated at
+    /// `tenzro_useTool` / `tenzro_invokeMcpTool`. Includes stdio
+    /// MCPs, remote MCPs, and API tools alike.
+    pub allowed_tools: Vec<String>,
+
+    /// Skill ids the key is allowed to invoke. Gated at
+    /// `tenzro_useSkill`.
+    pub allowed_skills: Vec<String>,
+
+    /// Knowledge resource_ids the key is allowed to query. Gated at
+    /// `tenzro_useKnowledge` (added with the knowledge registry).
+    pub allowed_knowledge: Vec<String>,
+
+    /// Workflow template_ids the key is allowed to instantiate.
+    /// Gated at `tenzro_instantiateWorkflow` (added with the workflow
+    /// template catalog).
+    pub allowed_workflow_templates: Vec<String>,
+
+    /// Agent template_ids the key is allowed to instantiate. Gated at
+    /// `tenzro_spawnAgentFromTemplate` and the related agent-kit RPCs.
+    pub allowed_agent_templates: Vec<String>,
+
+    /// Model_ids the key is allowed to call for inference. Gated at
+    /// `tenzro_chat` / `tenzro_inferenceRequest` / the multi-modal
+    /// `*` family. Empty = no model restriction.
+    pub allowed_models: Vec<String>,
+
+    /// Per-resource TNZO ceiling override. Maps resource_id to the
+    /// per-invocation max in atto-TNZO. Caller refused if the
+    /// resource's posted `price_per_call` exceeds the cap for that
+    /// resource_id. Empty = no per-resource cap (only the resource's
+    /// own price applies).
+    pub max_per_resource_tnzo: std::collections::BTreeMap<String, u128>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyRecord {
     /// Non-secret handle for revocation (8-byte hex prefix of the hash).
@@ -235,17 +306,285 @@ pub struct ApiKeyRecord {
     /// it exclusively.
     #[serde(default)]
     pub tenant_oauth_client_id: Option<String>,
+
+    /// Agent delegation: fully-qualified party ids the key is allowed
+    /// to act for. Empty = no per-party restriction (legacy keys before
+    /// the agentic-Canton feature shipped). Non-empty = the RPC layer
+    /// refuses requests targeting parties outside this set, and on
+    /// Canton-side the corresponding `CanActAs` rights are provisioned
+    /// when the key is issued.
+    #[serde(default)]
+    pub can_act_as_parties: Vec<String>,
+
+    /// Agent delegation: fully-qualified party ids the key is allowed
+    /// to observe. Same semantics as `can_act_as_parties` but for read
+    /// surfaces (`tenzro_canton_watchParty`, `tenzro_canton_streamEvents`).
+    #[serde(default)]
+    pub can_read_as_parties: Vec<String>,
+
+    /// Agent delegation: DAML template ids the key is allowed to query
+    /// or submit commands against. Format matches Canton template ids
+    /// (`#package:Module:Template` or `package-id:Module:Template`).
+    /// Empty = no template restriction.
+    #[serde(default)]
+    pub allowed_templates: Vec<String>,
+
+    /// Agent delegation: DAML choice / command shapes the key is
+    /// allowed to exercise (e.g. `Transfer`, `Redeem`, `Approve`).
+    /// Empty = no command restriction. Applies to write paths only.
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+
+    /// Agent delegation: per-command value ceiling, denominated in
+    /// the underlying asset's smallest unit (e.g. amulet `1e-10` units).
+    /// `None` = no per-command cap.
+    #[serde(default)]
+    pub max_per_command_amulet: Option<u128>,
+
+    /// Agent delegation: rolling-day cumulative value ceiling. The
+    /// runtime tracks `current_day_spend_amulet` across all commands
+    /// the key has exercised. `None` = no per-day cap.
+    #[serde(default)]
+    pub max_per_day_amulet: Option<u128>,
+
+    /// Agent delegation: command shapes that require an AP2 cart
+    /// mandate signed by the controlling party. Refusal without a
+    /// mandate even if the command is in `allowed_commands`. Maps
+    /// directly to the AP2 mandate flow already implemented for
+    /// HTTP-payment paths.
+    #[serde(default)]
+    pub requires_mandate_for: Vec<String>,
+
+    /// Agent delegation: expiration. Unix timestamp (seconds) after
+    /// which the key is rejected even if not explicitly revoked.
+    /// Defense-in-depth alongside `revoked_at`. `None` = no expiration.
+    #[serde(default)]
+    pub valid_until: Option<i64>,
+
+    // ── Per-resource-class allow-lists (cross-class delegation) ────
+    //
+    // Empty-by-default means "no restriction in this class" (legacy
+    // unrestricted). Non-empty means the RPC layer refuses invocations
+    // against resources outside the set. The seven classes mirror the
+    // operator-brokerage model: tools / skills / knowledge / workflow
+    // templates / agent templates / models / per-resource TNZO caps.
+
+    /// Tool / MCP resource_ids the key is allowed to invoke. Gated at
+    /// `tenzro_useTool` and the `tenzro_invokeMcpTool` wrapper.
+    /// Includes stdio + remote MCPs + native + API tools alike.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+
+    /// Skill ids the key is allowed to invoke. Gated at
+    /// `tenzro_useSkill`.
+    #[serde(default)]
+    pub allowed_skills: Vec<String>,
+
+    /// Knowledge resource_ids the key is allowed to query. Gated at
+    /// `tenzro_useKnowledge` (knowledge registry).
+    #[serde(default)]
+    pub allowed_knowledge: Vec<String>,
+
+    /// Workflow template_ids the key is allowed to instantiate.
+    /// Gated at `tenzro_instantiateWorkflow`.
+    #[serde(default)]
+    pub allowed_workflow_templates: Vec<String>,
+
+    /// Agent template_ids the key is allowed to instantiate. Gated at
+    /// the agent-kit spawn RPCs. Distinct from `allowed_templates`
+    /// (which is Canton DAML template ids).
+    #[serde(default)]
+    pub allowed_agent_templates: Vec<String>,
+
+    /// Model_ids the key is allowed to call for inference. Gated at
+    /// `tenzro_chat` + `tenzro_inferenceRequest` + the multi-modal
+    /// family (`tenzro_forecast`, `tenzro_imageEmbed`, etc.).
+    #[serde(default)]
+    pub allowed_models: Vec<String>,
+
+    /// Per-resource TNZO ceiling override. Maps resource_id to the
+    /// per-invocation max in atto-TNZO. Caller refused if the
+    /// resource's posted `price_per_call` exceeds the cap for that
+    /// resource_id. Empty = no per-resource cap (only the resource's
+    /// own price applies, plus any wallet-level spending policy).
+    #[serde(default)]
+    pub max_per_resource_tnzo: std::collections::BTreeMap<String, u128>,
 }
 
 impl ApiKeyRecord {
     /// Returns true if the record is still active.
+    ///
+    /// Active means: not revoked, has at least one scope, and (if the
+    /// agent delegation `valid_until` is set) the expiration is in the
+    /// future. The expiration check uses wall-clock at call time —
+    /// callers in critical paths should re-check on every request,
+    /// not cache the active flag.
     pub fn is_active(&self) -> bool {
-        self.revoked_at.is_none() && !self.scopes.is_empty()
+        if self.revoked_at.is_some() {
+            return false;
+        }
+        if self.scopes.is_empty() {
+            return false;
+        }
+        if let Some(expiry) = self.valid_until {
+            let now = chrono::Utc::now().timestamp();
+            if now >= expiry {
+                return false;
+            }
+        }
+        true
     }
 
     /// Returns true if the record carries the given scope.
     pub fn has_scope(&self, scope: ApiKeyScope) -> bool {
         self.scopes.contains(&scope)
+    }
+
+    /// Returns true if the agent-delegation fields restrict the key to
+    /// specific parties. When false, the key has the legacy unrestricted
+    /// behavior (act for the operator-default party). When true, the
+    /// RPC enforcement layer must check per-party + per-template +
+    /// per-command authorization on every Canton call.
+    pub fn has_party_delegation(&self) -> bool {
+        !self.can_act_as_parties.is_empty() || !self.can_read_as_parties.is_empty()
+    }
+
+    /// Returns true if this key is authorized to act as the given
+    /// fully-qualified party id. Returns true if the key has no
+    /// `can_act_as_parties` restriction (legacy unrestricted) or if
+    /// the requested party is in the allowed set.
+    pub fn can_act_as(&self, party_fq: &str) -> bool {
+        self.can_act_as_parties.is_empty()
+            || self.can_act_as_parties.iter().any(|p| p == party_fq)
+    }
+
+    /// Returns true if this key is authorized to read for the given
+    /// fully-qualified party id. `can_act_as` implies `can_read_as`
+    /// (the actor-class includes the reader-class).
+    pub fn can_read_as(&self, party_fq: &str) -> bool {
+        self.can_read_as_parties.is_empty()
+            || self.can_read_as_parties.iter().any(|p| p == party_fq)
+            || self.can_act_as(party_fq)
+    }
+
+    /// Returns true if this key is authorized for the given template id.
+    /// Returns true if the key has no `allowed_templates` restriction.
+    pub fn allows_template(&self, template_id: &str) -> bool {
+        self.allowed_templates.is_empty()
+            || self.allowed_templates.iter().any(|t| t == template_id)
+    }
+
+    /// Returns true if this key is authorized for the given command
+    /// shape (DAML choice name or command kind like `Transfer`).
+    /// Returns true if the key has no `allowed_commands` restriction.
+    pub fn allows_command(&self, command: &str) -> bool {
+        self.allowed_commands.is_empty()
+            || self.allowed_commands.iter().any(|c| c == command)
+    }
+
+    /// Returns true if the given command shape requires a mandate to
+    /// be presented. When true, the RPC handler refuses without an
+    /// AP2 cart mandate signed by the controlling party.
+    pub fn requires_mandate(&self, command: &str) -> bool {
+        self.requires_mandate_for.iter().any(|c| c == command)
+    }
+
+    /// Returns true if this key is authorized to invoke the given
+    /// tool / MCP resource_id. Returns true if the key has no
+    /// `allowed_tools` restriction (legacy unrestricted behavior) or
+    /// if the resource_id is in the allow-list.
+    pub fn allows_tool(&self, tool_id: &str) -> bool {
+        self.allowed_tools.is_empty() || self.allowed_tools.iter().any(|t| t == tool_id)
+    }
+
+    /// Returns true if this key is authorized to invoke the given
+    /// skill_id. Same semantics as [`allows_tool`].
+    pub fn allows_skill(&self, skill_id: &str) -> bool {
+        self.allowed_skills.is_empty() || self.allowed_skills.iter().any(|s| s == skill_id)
+    }
+
+    /// Returns true if this key is authorized to query the given
+    /// knowledge resource_id. Same semantics as [`allows_tool`].
+    pub fn allows_knowledge(&self, knowledge_id: &str) -> bool {
+        self.allowed_knowledge.is_empty()
+            || self.allowed_knowledge.iter().any(|k| k == knowledge_id)
+    }
+
+    /// Returns true if this key is authorized to instantiate the
+    /// given workflow template_id. Same semantics as [`allows_tool`].
+    pub fn allows_workflow_template(&self, template_id: &str) -> bool {
+        self.allowed_workflow_templates.is_empty()
+            || self
+                .allowed_workflow_templates
+                .iter()
+                .any(|t| t == template_id)
+    }
+
+    /// Returns true if this key is authorized to instantiate the
+    /// given agent template_id. Same semantics as [`allows_tool`].
+    pub fn allows_agent_template(&self, template_id: &str) -> bool {
+        self.allowed_agent_templates.is_empty()
+            || self
+                .allowed_agent_templates
+                .iter()
+                .any(|t| t == template_id)
+    }
+
+    /// Returns true if this key is authorized to call the given
+    /// model_id for inference. Same semantics as [`allows_tool`].
+    pub fn allows_model(&self, model_id: &str) -> bool {
+        self.allowed_models.is_empty() || self.allowed_models.iter().any(|m| m == model_id)
+    }
+
+    /// Returns the per-resource TNZO ceiling for `resource_id`, if
+    /// one is configured. The caller is refused if the resource's
+    /// posted price exceeds this cap. `None` = no cap for that
+    /// resource_id (only the resource's own price applies, plus any
+    /// wallet-level spending policy).
+    pub fn max_tnzo_for_resource(&self, resource_id: &str) -> Option<u128> {
+        self.max_per_resource_tnzo.get(resource_id).copied()
+    }
+
+    /// Bundles all per-resource-class checks for a given resource into
+    /// a single result. Returns `Ok(())` when the key is allowed to
+    /// invoke the resource AND the resource's price fits under the
+    /// per-resource TNZO ceiling. Returns `Err` with a one-line
+    /// reason describing which check failed.
+    ///
+    /// `class` is one of `"tool"`, `"skill"`, `"knowledge"`,
+    /// `"workflow_template"`, `"agent_template"`, `"model"`. Caller
+    /// of this method must use the matching string — RPC handlers
+    /// have a single source of truth so we don't drift names.
+    pub fn check_resource_authorization(
+        &self,
+        class: &str,
+        resource_id: &str,
+        posted_price: u128,
+    ) -> std::result::Result<(), String> {
+        let allowed = match class {
+            "tool" => self.allows_tool(resource_id),
+            "skill" => self.allows_skill(resource_id),
+            "knowledge" => self.allows_knowledge(resource_id),
+            "workflow_template" => self.allows_workflow_template(resource_id),
+            "agent_template" => self.allows_agent_template(resource_id),
+            "model" => self.allows_model(resource_id),
+            _ => return Err(format!("unknown resource class: {}", class)),
+        };
+        if !allowed {
+            return Err(format!(
+                "key not authorized for {} resource {}: not in allow-list",
+                class, resource_id
+            ));
+        }
+        if let Some(cap) = self.max_tnzo_for_resource(resource_id)
+            && posted_price > cap
+        {
+            return Err(format!(
+                "resource {} price {} exceeds per-key cap {}",
+                resource_id, posted_price, cap
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -330,6 +669,36 @@ impl ApiKeyManager {
         canton_identity_provider_id: Option<String>,
         tenant_oauth_client_id: Option<String>,
     ) -> Result<IssuedApiKey> {
+        self.issue_with_delegation(
+            subject,
+            label,
+            scopes,
+            class,
+            canton_user_id,
+            canton_identity_provider_id,
+            tenant_oauth_client_id,
+            AgentDelegation::default(),
+        )
+    }
+
+    /// Issue a key with the optional agent-delegation parameters set.
+    /// When [`AgentDelegation::default`] is used, the resulting key has
+    /// the same shape and behavior as a legacy key issued via
+    /// [`Self::issue`]. When any delegation field is non-default, the
+    /// RPC enforcement layer applies per-party / per-template /
+    /// per-command authorization on every Canton call presenting the
+    /// key.
+    pub fn issue_with_delegation(
+        &self,
+        subject: Option<String>,
+        label: impl Into<String>,
+        scopes: Vec<ApiKeyScope>,
+        class: KeyClass,
+        canton_user_id: Option<String>,
+        canton_identity_provider_id: Option<String>,
+        tenant_oauth_client_id: Option<String>,
+        delegation: AgentDelegation,
+    ) -> Result<IssuedApiKey> {
         if scopes.is_empty() {
             return Err(NodeError::Internal(
                 "api_key issue: at least one scope required".to_string(),
@@ -358,6 +727,21 @@ impl ApiKeyManager {
             canton_user_id,
             canton_identity_provider_id,
             tenant_oauth_client_id,
+            can_act_as_parties: delegation.can_act_as_parties,
+            can_read_as_parties: delegation.can_read_as_parties,
+            allowed_templates: delegation.allowed_templates,
+            allowed_commands: delegation.allowed_commands,
+            max_per_command_amulet: delegation.max_per_command_amulet,
+            max_per_day_amulet: delegation.max_per_day_amulet,
+            requires_mandate_for: delegation.requires_mandate_for,
+            valid_until: delegation.valid_until,
+            allowed_tools: delegation.allowed_tools,
+            allowed_skills: delegation.allowed_skills,
+            allowed_knowledge: delegation.allowed_knowledge,
+            allowed_workflow_templates: delegation.allowed_workflow_templates,
+            allowed_agent_templates: delegation.allowed_agent_templates,
+            allowed_models: delegation.allowed_models,
+            max_per_resource_tnzo: delegation.max_per_resource_tnzo,
         };
 
         let storage_key = format!("apikey:{}", hash_hex);
@@ -523,7 +907,7 @@ pub enum AuthorizeOutcome {
 /// cache key. Constant-time comparison is not required because the
 /// attacker cannot influence which key we look up — we hash the
 /// presented plaintext first.
-fn hash_key(plaintext: &str) -> String {
+pub fn hash_key(plaintext: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(plaintext.as_bytes());
     hex::encode(hasher.finalize())

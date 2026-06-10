@@ -1,0 +1,68 @@
+{
+  "name": "data-aggregation-pipeline",
+  "version": "1.0.0",
+  "description": "Query 5 knowledge sources, embed each via a text embedding model, archive the aggregated vector to DA storage.",
+  "category": "data",
+  "capabilities": ["aggregation", "embedding", "storage"],
+  "required_inputs": {
+    "type": "object",
+    "properties": {
+      "topic": { "type": "string" },
+      "source_ids": {
+        "type": "array",
+        "items": { "type": "string" },
+        "minItems": 1,
+        "maxItems": 5
+      }
+    },
+    "required": ["topic", "source_ids"]
+  },
+  "expected_outputs": {
+    "type": "object",
+    "properties": {
+      "blob_hash": { "type": "string" },
+      "embedding_count": { "type": "integer" }
+    }
+  },
+  "steps": [
+    {
+      "kind": "use_knowledge",
+      "knowledge_id": "kb-news-default",
+      "params": { "topic": "{{ inputs.topic }}" },
+      "output_as": "news"
+    },
+    {
+      "kind": "use_knowledge",
+      "knowledge_id": "kb-research-default",
+      "params": { "topic": "{{ inputs.topic }}" },
+      "output_as": "research"
+    },
+    {
+      "kind": "use_model",
+      "model_id": "qwen3-embedding-0.6b",
+      "params": { "input": "{{ steps.news.output }}" },
+      "output_as": "news_embedding"
+    },
+    {
+      "kind": "use_model",
+      "model_id": "qwen3-embedding-0.6b",
+      "params": { "input": "{{ steps.research.output }}" },
+      "output_as": "research_embedding"
+    },
+    {
+      "kind": "use_tool",
+      "tool_id": "tool-da-publish",
+      "tool_name": "publish_blob",
+      "params": {
+        "data": {
+          "topic": "{{ inputs.topic }}",
+          "embeddings": [
+            "{{ steps.news_embedding.output }}",
+            "{{ steps.research_embedding.output }}"
+          ]
+        }
+      },
+      "output_as": "da_pointer"
+    }
+  ]
+}

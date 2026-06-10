@@ -13643,6 +13643,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.2",
  "hex",
+ "hkdf",
  "jsonwebtoken",
  "k256 0.14.0-rc.9",
  "libp2p",
@@ -13693,6 +13694,7 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

@@ -49,6 +49,9 @@ pub mod marketplace;
 pub mod agent_template;
 pub mod skill;
 pub mod tool;
+pub mod knowledge;
+pub mod workflow_template;
+pub mod resource;
 pub mod error;
 pub mod config;
 pub mod constants;
@@ -96,7 +99,19 @@ pub use capital_intent::{
 pub use reserve::{ReserveAttestation, ReserveSource};
 pub use agent_template::{AgentTemplate, AgentTemplateStatus, AgentTemplateType, AgentCapability, AgentRuntimeRequirements, AgentPricingModel, AgentExample, AgentTemplateFilter, AgentTemplateInstance};
 pub use skill::{SkillDefinition, SkillStatus, SkillFilter, SkillInvocationResult};
-pub use tool::{ToolDefinition, ToolStatus, ToolFilter, ToolInvocationResult};
+pub use tool::{
+    StdioSpawnSpec, ToolDefinition, ToolFilter, ToolInvocationResult, ToolStatus,
+    ToolTransportMode, UpstreamAuth,
+};
+pub use knowledge::{
+    KnowledgeFilter, KnowledgeInvocationResult, KnowledgeKind, KnowledgeRecord,
+    KnowledgeStatus,
+};
+pub use workflow_template::{
+    WorkflowInstantiationResult, WorkflowStepSpec, WorkflowTemplate, WorkflowTemplateFilter,
+    WorkflowTemplateStatus,
+};
+pub use resource::{ResourceClass, ResourceDescriptor, ResourceFilter};
 pub use tenzro_uri::{TenzroUri, TenzroUriError, TENZRO_URI_SCHEME};
 pub use error::TenzroError;
 pub use config::{NetworkConfig, NodeConfig};

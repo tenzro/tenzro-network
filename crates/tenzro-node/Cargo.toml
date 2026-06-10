@@ -78,6 +78,8 @@ frost-ed25519 = { workspace = true }
 frost-secp256k1 = { workspace = true }
 ed25519-dalek = { workspace = true }
 aes-gcm = { workspace = true }
+hkdf = "0.12"
+zeroize = { workspace = true }
 k256 = { workspace = true }
 # getrandom 0.4 → SysRng impls rand_core 0.10's TryCryptoRng; wrap in
 # UnwrapErr to satisfy the `CryptoRng` bound that k256/p256 0.14-rc's

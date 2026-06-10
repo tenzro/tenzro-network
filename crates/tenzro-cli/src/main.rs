@@ -16,7 +16,7 @@ use commands::{
     IdentityCommand, PaymentCommand, JoinCmd, ScheduleCommand,
     SetUsernameCmd, AgentCommand, CantonCommand,
     EscrowCommand, TaskCommand, MarketplaceCommand, SkillCommand,
-    ToolCommand, TokenCommand, ContractCommand, BridgeCommand,
+    ToolCommand, McpCommand, ResourcesCommand, TokenCommand, ContractCommand, BridgeCommand,
     DebridgeCommand, LifiCommand, NftCommand, ComplianceCommand,
     CrosschainCommand, EventsCommand, CryptoCommand, TeeCommand,
     ZkCommand, VrfCommand, CustodyCommand, AppCommand,
@@ -127,6 +127,14 @@ enum Command {
     /// Tool registry commands (MCP server management)
     #[command(subcommand)]
     Tool(ToolCommand),
+
+    /// MCP plugin host — operator credential vault + subprocess control
+    #[command(subcommand)]
+    Mcp(McpCommand),
+
+    /// Unified resource discovery + invocation + child-agent spawn
+    #[command(subcommand)]
+    Resources(ResourcesCommand),
 
     /// Token management commands (create, query, cross-VM transfers)
     #[command(subcommand)]
@@ -501,6 +509,8 @@ async fn main() -> Result<()> {
         Command::Marketplace(cmd) => cmd.execute().await?,
         Command::Skill(cmd) => cmd.execute().await?,
         Command::Tool(cmd) => cmd.execute().await?,
+        Command::Mcp(cmd) => cmd.execute().await?,
+        Command::Resources(cmd) => cmd.execute().await?,
         Command::Token(cmd) => cmd.execute().await?,
         Command::Contract(cmd) => cmd.execute().await?,
         Command::Bridge(cmd) => cmd.execute().await?,
