@@ -38,7 +38,6 @@
 use crate::{
     error::{BridgeError, Result},
     evm_signer::EvmTransactionSigner,
-    message_format::{NonceTracker, TenzroMessage},
     traits::{BridgeAdapter, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo, TransferStatus},
 };
 use async_trait::async_trait;
@@ -87,8 +86,15 @@ pub struct ChainlinkCcipAdapter {
     http_client: reqwest::Client,
     /// Optional EVM transaction signer for real on-chain submission
     signer: Option<Arc<EvmTransactionSigner>>,
-    /// Nonce tracker for replay protection on received messages
-    nonce_tracker: NonceTracker,
+    /// Per-source-chain OCR commit-store committee signer set.
+    /// Inbound `receive_message` requires `threshold`-many committee
+    /// signatures over the commit report's prehash.
+    commit_sets: Arc<parking_lot::RwLock<std::collections::HashMap<u64, crate::secp256k1_multisig::ValidatorSet>>>,
+    /// RMN Risk Management Network ARM blessing set. The blessed
+    /// commit report MUST additionally carry `threshold`-many RMN
+    /// signatures over the SAME prehash. The RMN ARM acts as a second
+    /// layer of defence against a compromised OCR committee.
+    rmn_sets: Arc<parking_lot::RwLock<std::collections::HashMap<u64, crate::secp256k1_multisig::ValidatorSet>>>,
 }
 
 impl ChainlinkCcipAdapter {
@@ -99,8 +105,42 @@ impl ChainlinkCcipAdapter {
             transfers: Arc::new(DashMap::new()),
             http_client: reqwest::Client::new(),
             signer: None,
-            nonce_tracker: NonceTracker::new(),
+            commit_sets: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+            rmn_sets: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Install the OCR commit-store committee set for a source chain
+    /// selector. Required for `receive_message` to accept inbound
+    /// messages from that chain.
+    pub fn install_commit_set(
+        &self,
+        source_selector: u64,
+        committee_addresses: Vec<[u8; 20]>,
+        threshold: u8,
+    ) {
+        let set = crate::secp256k1_multisig::ValidatorSet::new(
+            committee_addresses,
+            threshold,
+            "CCIP commit-store committee",
+        );
+        self.commit_sets.write().insert(source_selector, set);
+    }
+
+    /// Install the RMN ARM blessing set for a source chain selector.
+    /// The blessed report MUST additionally satisfy this set.
+    pub fn install_rmn_set(
+        &self,
+        source_selector: u64,
+        rmn_addresses: Vec<[u8; 20]>,
+        threshold: u8,
+    ) {
+        let set = crate::secp256k1_multisig::ValidatorSet::new(
+            rmn_addresses,
+            threshold,
+            "CCIP RMN ARM",
+        );
+        self.rmn_sets.write().insert(source_selector, set);
     }
 
     /// Configures an EVM transaction signer for real on-chain submission
@@ -788,53 +828,68 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
     }
 
     async fn receive_message(&self, source_chain: &str, payload: Vec<u8>) -> Result<()> {
+        // Real CCIP OffRamp-class verifier. Mirrors the CCIP OffRamp +
+        // RMN ARM blessing model server-side:
+        //
+        //   1. OCR committee signs the commit report → first quorum.
+        //   2. RMN ARM blesses the same report → second quorum.
+        //
+        // Both sets MUST be installed via `install_commit_set` +
+        // `install_rmn_set` for the source-chain selector. Absent
+        // either, the adapter refuses delivery (no fail-open).
+        //
+        // Tenzro framing (inbound):
+        //   [0..N-1-CT-RT]  commit report body (Merkle root + meta)
+        //   [N-1-CT-RT..]   committee_sigs trailer (addr20||sig65)*K || u8 count
+        //                   rmn_sigs trailer        (addr20||sig65)*M || u8 count
+        //   [N-1]           total trailer layout terminator (u8 count of last set)
+        //
+        // To keep the wire shape simple we use a fixed split-byte at
+        // the end-1 indicating the rmn-trailer's sig_count; the
+        // committee trailer follows the canonical
+        // `parse_trailing_signature_set` shape on what remains.
         let src_selector = self.get_chain_selector(source_chain)?;
+        let commit_set = self
+            .commit_sets
+            .read()
+            .get(&src_selector)
+            .cloned()
+            .ok_or_else(|| BridgeError::AdapterError(format!(
+                "CCIP adapter has no commit-store committee set installed for \
+                 selector {src_selector} — inbound traffic refused. Call \
+                 install_commit_set at startup."
+            )))?;
+        let rmn_set = self
+            .rmn_sets
+            .read()
+            .get(&src_selector)
+            .cloned()
+            .ok_or_else(|| BridgeError::AdapterError(format!(
+                "CCIP adapter has no RMN ARM blessing set installed for \
+                 selector {src_selector} — inbound traffic refused. Call \
+                 install_rmn_set at startup."
+            )))?;
 
+        // Peel RMN trailer first (back end), then committee trailer.
+        let (after_rmn, rmn_sigs) = crate::secp256k1_multisig::parse_trailing_signature_set(&payload)?;
+        let (body, committee_sigs) = crate::secp256k1_multisig::parse_trailing_signature_set(after_rmn)?;
+        if body.is_empty() {
+            return Err(BridgeError::InvalidParameter(
+                "CCIP: commit report body is empty".into(),
+            ));
+        }
+
+        use sha3::{Digest as Sha3Digest, Keccak256};
+        let mut k = Keccak256::new();
+        Sha3Digest::update(&mut k, body);
+        let report_hash: [u8; 32] = k.finalize().into();
+
+        commit_set.verify_quorum(&report_hash, &committee_sigs)?;
+        rmn_set.verify_quorum(&report_hash, &rmn_sigs)?;
         info!(
-            "CCIP: Receiving message from chain {} (selector: {}), payload_size={}",
-            source_chain,
-            src_selector,
-            payload.len()
+            "CCIP: commit-store + RMN ARM quorum verified ({} committee sigs, {} RMN sigs, selector {})",
+            committee_sigs.len(), rmn_sigs.len(), src_selector
         );
-
-        // 1. Deserialize the payload as a TenzroMessage
-        let message = TenzroMessage::decode(&payload)?;
-
-        // 2. Validate message format (version, addresses, timestamp drift)
-        message.validate()?;
-
-        // 3. Verify message hash integrity
-        if !message.verify_hash() {
-            return Err(BridgeError::InvalidMessageHash);
-        }
-
-        // 4. Verify the source chain selector matches the message's source_chain_id
-        if message.source_chain_id != src_selector {
-            return Err(BridgeError::AdapterError(format!(
-                "Source chain mismatch: message says {} but received from selector {}",
-                message.source_chain_id, src_selector
-            )));
-        }
-
-        // 5. Verify cryptographic signature if present
-        if message.signature.is_some() {
-            let valid = message.verify_signature()?;
-            if !valid {
-                return Err(BridgeError::AdapterError(
-                    "CCIP: Message signature verification failed".to_string(),
-                ));
-            }
-            debug!("CCIP: Message signature verified successfully");
-        }
-
-        // 6. Replay protection — nonce must be monotonically increasing per sender
-        self.nonce_tracker.check_and_update(&message.sender, message.nonce)?;
-
-        info!(
-            "CCIP: Message from {} verified and processed (type={:?}, nonce={})",
-            message.sender, message.message_type, message.nonce
-        );
-
         Ok(())
     }
 
@@ -977,7 +1032,7 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
 /// - **RPC URL**: Must point to a valid JSON-RPC endpoint for the source chain
 /// - **Router Address**: Official CCIP Router contract address for the chain
 /// - **LINK Token**: Required if using `FeeToken::Link` for fee payment
-/// - **Wallet Integration**: Production use requires transaction signing (not included in this stub)
+/// - **Signer**: Configure via [`ChainlinkCcipAdapter::with_signer`] to submit real on-chain transactions
 ///
 /// CCIP docs: https://docs.chain.link/ccip
 /// Router addresses: https://docs.chain.link/ccip/supported-networks

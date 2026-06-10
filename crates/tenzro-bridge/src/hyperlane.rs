@@ -431,62 +431,60 @@ impl BridgeAdapter for HyperlaneAdapter {
             return Err(BridgeError::ReplayAttack(hex::encode(id.as_bytes())));
         }
 
-        // Hyperlane multisig ISM verification. When a validator set is
-        // configured for this origin domain, the inbound payload is
-        // expected to carry trailing ISM metadata in the form
-        // `body || u8 sig_count || sig_count * (addr20 || sig65)`. We
-        // peel the trailing metadata, compute the message id over the
-        // canonical Mailbox encoding, and run the ECDSA multisig quorum
-        // check. Without an installed set the path falls through to
-        // the inner TenzroMessage signature check (consistent with
-        // pre-ISM adapter behaviour); the operator MUST call
-        // `install_validator_set` on the production node before
-        // bridging real value.
+        // Hyperlane multisig ISM verification — fail-closed. The
+        // inbound payload carries trailing ISM metadata in the form
+        // `body || u8 sig_count || sig_count * (addr20 || sig65)`. A
+        // validator set MUST be installed for the originating domain;
+        // without it the adapter refuses the payload.
         let set_opt = self
             .validator_sets
             .read()
             .get(&source_domain)
             .cloned();
-        if let Some(set) = set_opt {
-            let n = payload.len();
-            if n < 1 {
-                return Err(BridgeError::InvalidParameter(
-                    "Hyperlane ISM: payload too short".into(),
-                ));
-            }
-            let sig_count = payload[n - 1] as usize;
-            let sig_record_len = 20 + 65;
-            let trailer_len = 1 + sig_count * sig_record_len;
-            if n < trailer_len + 1 {
-                return Err(BridgeError::InvalidParameter(
-                    "Hyperlane ISM: payload truncated for declared signature count".into(),
-                ));
-            }
-            let body = &payload[..n - trailer_len];
-            let mut signatures: Vec<([u8; 20], [u8; 65])> =
-                Vec::with_capacity(sig_count);
-            for i in 0..sig_count {
-                let off = n - trailer_len + i * sig_record_len;
-                let mut a = [0u8; 20];
-                a.copy_from_slice(&payload[off..off + 20]);
-                let mut s = [0u8; 65];
-                s.copy_from_slice(&payload[off + 20..off + 20 + 65]);
-                signatures.push((a, s));
-            }
-            let body_digest: [u8; 32] = Sha256::digest(body).into();
-            set.verify_quorum(&body_digest, &signatures)?;
-            // Re-derive the inner-message id from the verified body for
-            // downstream dedup, replacing the original payload-hash id.
-            let inner_id = Hash::new(body_digest);
-            if self.seen_messages.contains_key(&inner_id) {
-                return Err(BridgeError::ReplayAttack(hex::encode(inner_id.as_bytes())));
-            }
+        let set = set_opt.ok_or_else(|| BridgeError::AdapterError(format!(
+            "Hyperlane adapter has no validator set installed for origin \
+             domain {source_domain} — inbound traffic refused. Call \
+             install_validator_set at startup."
+        )))?;
+        let n = payload.len();
+        if n < 1 {
+            return Err(BridgeError::InvalidParameter(
+                "Hyperlane ISM: payload too short".into(),
+            ));
+        }
+        let sig_count = payload[n - 1] as usize;
+        let sig_record_len = 20 + 65;
+        let trailer_len = 1 + sig_count * sig_record_len;
+        if n < trailer_len + 1 {
+            return Err(BridgeError::InvalidParameter(
+                "Hyperlane ISM: payload truncated for declared signature count".into(),
+            ));
+        }
+        let body = &payload[..n - trailer_len];
+        let mut signatures: Vec<([u8; 20], [u8; 65])> =
+            Vec::with_capacity(sig_count);
+        for i in 0..sig_count {
+            let off = n - trailer_len + i * sig_record_len;
+            let mut a = [0u8; 20];
+            a.copy_from_slice(&payload[off..off + 20]);
+            let mut s = [0u8; 65];
+            s.copy_from_slice(&payload[off + 20..off + 20 + 65]);
+            signatures.push((a, s));
+        }
+        let body_digest: [u8; 32] = Sha256::digest(body).into();
+        set.verify_quorum(&body_digest, &signatures)?;
+        // Re-derive the inner-message id from the verified body for
+        // downstream dedup, replacing the original payload-hash id.
+        let inner_id = Hash::new(body_digest);
+        if self.seen_messages.contains_key(&inner_id) {
+            return Err(BridgeError::ReplayAttack(hex::encode(inner_id.as_bytes())));
         }
 
-        // If the body is a TenzroMessage, run the standard 6-step
-        // verification path that LayerZero, CCIP, deBridge, and Li.Fi
-        // use.
-        if let Ok(message) = TenzroMessage::decode(&payload) {
+        // Inner Tenzro-side check operates on the verified `body`, not
+        // the raw outer payload. The outer ISM multisig is the cross-
+        // chain authority gate; this inner check guards malformed
+        // Tenzro-native payloads.
+        if let Ok(message) = TenzroMessage::decode(body) {
             message.validate()?;
             if !message.verify_hash() {
                 return Err(BridgeError::InvalidParameter(

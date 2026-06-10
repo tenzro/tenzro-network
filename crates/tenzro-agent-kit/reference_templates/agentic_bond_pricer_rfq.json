@@ -53,18 +53,33 @@
   "rating": 0,
   "content_hash": null,
   "docs_url": "https://docs.tenzro.network/agent-kit/templates/agentic-bond-pricer-rfq",
-  "policy": {
-    "tools_allowlist": [
-      { "tool_id": "tenzro_capitalIntentQuote", "tool_type": "rpc" },
-      { "tool_id": "tenzro_capitalIntentExecute", "tool_type": "rpc" }
-    ],
-    "delegation_scope": {
-      "max_per_op_wei": "100000000000000000000000000",
-      "max_per_day_wei": "1000000000000000000000000000",
-      "max_tx_count_per_day": 5000,
+  "metadata": {},
+  "execution_spec": {
+    "backend": "MultiVm",
+    "delegation": {
+      "max_transaction_value": "100000000000000000000000000",
+      "max_daily_spend": "1000000000000000000000000000",
+      "allowed_operations": ["capital_intent_quote", "capital_intent_execute"],
       "allowed_chains": ["tenzro"],
-      "allowed_protocols": ["mpp"]
+      "time_bound_days": 30,
+      "kyc_tier": "Full"
     },
+    "required_tool_tags": ["capital-intent", "bond-pricer"],
+    "required_skill_tags": ["fixed-income", "rfq"],
+    "steps": [
+      {
+        "NodeRpc": {
+          "method": "tenzro_capitalIntentQuote",
+          "params": { "intent_id": "{{intent_id}}", "quote_json": "{{quote_json}}" }
+        }
+      },
+      {
+        "NodeRpc": {
+          "method": "tenzro_capitalIntentExecute",
+          "params": { "intent_id": "{{intent_id}}" }
+        }
+      }
+    ],
     "hard_caps": {
       "per_operation_value": "100000000000000000000000000",
       "per_day_value": "1000000000000000000000000000"

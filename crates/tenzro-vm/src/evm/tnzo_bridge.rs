@@ -64,7 +64,35 @@ fn execute_tnzo_bridge(
     }
 
     let selector = &input[..4];
-    let calldata = &input[4..];
+
+    // Frame contract (set by `PrecompileRegistry::execute`):
+    //   [0..4]    selector
+    //   [4..N]    caller-supplied calldata (any ABI shape)
+    //   [N..N+32] trusted msg.sender (32-byte left-padded) — RUNTIME-SET
+    //
+    // Read-only selectors (NAME / SYMBOL / DECIMALS / TOTAL_SUPPLY /
+    // BALANCE_OF / ALLOWANCE) don't depend on the trusted caller and
+    // can be invoked with no trailing slot. Write selectors REQUIRE
+    // the trailing 32 bytes.
+    //
+    // Stripping the trailing slot off `calldata` keeps callers' encoded
+    // ABI offsets (which were computed against their original calldata
+    // length) intact.
+    let (caller_opt, calldata): (Option<[u8; 20]>, &[u8]) = if input.len() >= 4 + 32 {
+        let split = input.len() - 32;
+        let mut caller = [0u8; 20];
+        caller.copy_from_slice(&input[split + 12..]);
+        (Some(caller), &input[4..split])
+    } else {
+        (None, &input[4..])
+    };
+
+    let require_caller = |sel_name: &str| -> Result<[u8; 20]> {
+        caller_opt.ok_or_else(|| VmError::PrecompileFailed(format!(
+            "TNZO bridge: {sel_name} requires trusted msg.sender; invoke \
+             precompile via PrecompileRegistry::execute (EVM runtime path)."
+        )))
+    };
 
     match selector {
         s if s == selectors::NAME => handle_name(gas_limit),
@@ -72,20 +100,35 @@ fn execute_tnzo_bridge(
         s if s == selectors::DECIMALS => handle_decimals(gas_limit),
         s if s == selectors::TOTAL_SUPPLY => handle_total_supply(token, gas_limit),
         s if s == selectors::BALANCE_OF => handle_balance_of(token, calldata, gas_limit),
-        s if s == selectors::TRANSFER => handle_transfer(token, calldata, gas_limit),
-        s if s == selectors::APPROVE => handle_approve(registry, calldata, gas_limit),
+        s if s == selectors::TRANSFER => {
+            let caller = require_caller("transfer")?;
+            handle_transfer(token, &caller, calldata, gas_limit)
+        }
+        s if s == selectors::APPROVE => {
+            let caller = require_caller("approve")?;
+            handle_approve(registry, &caller, calldata, gas_limit)
+        }
         s if s == selectors::ALLOWANCE => handle_allowance(registry, calldata, gas_limit),
         s if s == selectors::TRANSFER_FROM => {
-            handle_transfer_from(token, registry, calldata, gas_limit)
+            let caller = require_caller("transferFrom")?;
+            handle_transfer_from(token, registry, &caller, calldata, gas_limit)
         }
-        s if s == selectors::DEPOSIT => handle_deposit(token, calldata, gas_limit),
-        s if s == selectors::WITHDRAW => handle_withdraw(token, calldata, gas_limit),
+        s if s == selectors::DEPOSIT => {
+            let caller = require_caller("deposit")?;
+            handle_deposit(token, &caller, calldata, gas_limit)
+        }
+        s if s == selectors::WITHDRAW => {
+            let caller = require_caller("withdraw")?;
+            handle_withdraw(token, &caller, calldata, gas_limit)
+        }
         // ERC-7802 Cross-Chain Token Interface
         s if s == selectors::CROSSCHAIN_MINT => {
-            handle_crosschain_mint(token, calldata, gas_limit)
+            let caller = require_caller("crosschainMint")?;
+            handle_crosschain_mint(token, &caller, calldata, gas_limit)
         }
         s if s == selectors::CROSSCHAIN_BURN => {
-            handle_crosschain_burn(token, calldata, gas_limit)
+            let caller = require_caller("crosschainBurn")?;
+            handle_crosschain_burn(token, &caller, calldata, gas_limit)
         }
         _ => {
             warn!(
@@ -163,11 +206,14 @@ fn handle_balance_of(
 
 /// transfer(address to, uint256 amount) -> bool
 ///
-/// Transfers native TNZO from the transaction sender to the destination.
-/// The sender address is encoded in the first 32 bytes of calldata by the EVM runtime
-/// (the EVM sets msg.sender before calling the precompile).
+/// Transfers native TNZO from the trusted `msg.sender` to the
+/// destination. The caller is supplied by the EVM runtime via
+/// `PrecompileRegistry::execute`, not by caller-supplied
+/// calldata — this is the only signal that prevents arbitrary
+/// impersonation.
 fn handle_transfer(
     token: &TnzoToken,
+    caller: &[u8; 20],
     calldata: &[u8],
     gas_limit: u64,
 ) -> Result<PrecompileResult> {
@@ -189,19 +235,7 @@ fn handle_transfer(
         return Ok(PrecompileResult::success(abi::encode_bool(true), GAS_TRANSFER));
     }
 
-    // The caller address is passed as the first 20 bytes of the extended calldata
-    // In practice, the EVM runtime prepends msg.sender before calling the precompile
-    // For now, we extract it from additional context bytes if present, or use a sentinel
-    let from_addr = if calldata.len() >= 96 {
-        let from_20 = abi::decode_address_at(calldata, 64).unwrap_or([0u8; 20]);
-        evm_addr_to_tenzro(&from_20)
-    } else {
-        // Fallback: in production, the EVM runtime must supply the sender
-        return Err(VmError::PrecompileFailed(
-            "transfer: missing sender context".to_string(),
-        ));
-    };
-
+    let from_addr = evm_addr_to_tenzro(caller);
     let to_addr = evm_addr_to_tenzro(&to_20);
 
     match token.transfer(&from_addr, &to_addr, amount) {
@@ -224,14 +258,16 @@ fn handle_transfer(
 /// approve(address spender, uint256 amount) -> bool
 ///
 /// Stores approval in the token registry (not in EVM storage).
+/// Owner is the trusted `msg.sender` supplied by the EVM runtime.
 fn handle_approve(
     registry: &TokenRegistry,
+    caller: &[u8; 20],
     calldata: &[u8],
     gas_limit: u64,
 ) -> Result<PrecompileResult> {
     check_gas(gas_limit, GAS_APPROVE)?;
 
-    if calldata.len() < 96 {
+    if calldata.len() < 64 {
         return Ok(PrecompileResult::failed(GAS_APPROVE));
     }
 
@@ -243,10 +279,7 @@ fn handle_approve(
         VmError::PrecompileFailed("approve: invalid amount".to_string())
     })?;
 
-    // Owner is the caller (appended by EVM runtime)
-    let owner = abi::decode_address_at(calldata, 64).ok_or_else(|| {
-        VmError::PrecompileFailed("approve: missing owner context".to_string())
-    })?;
+    let owner = *caller;
 
     let token_id = TokenId::tnzo();
     registry
@@ -294,16 +327,18 @@ fn handle_allowance(
 
 /// transferFrom(address from, address to, uint256 amount) -> bool
 ///
-/// Spends from approval then transfers native TNZO.
+/// Spends from approval then transfers native TNZO. The spender is the
+/// trusted `msg.sender` from the EVM runtime, not caller-supplied bytes.
 fn handle_transfer_from(
     token: &TnzoToken,
     registry: &TokenRegistry,
+    caller: &[u8; 20],
     calldata: &[u8],
     gas_limit: u64,
 ) -> Result<PrecompileResult> {
     check_gas(gas_limit, GAS_TRANSFER_FROM)?;
 
-    if calldata.len() < 128 {
+    if calldata.len() < 96 {
         return Ok(PrecompileResult::failed(GAS_TRANSFER_FROM));
     }
 
@@ -319,10 +354,7 @@ fn handle_transfer_from(
         VmError::PrecompileFailed("transferFrom: invalid amount".to_string())
     })?;
 
-    // Spender (msg.sender) is appended by EVM runtime
-    let spender = abi::decode_address_at(calldata, 96).ok_or_else(|| {
-        VmError::PrecompileFailed("transferFrom: missing spender context".to_string())
-    })?;
+    let spender = *caller;
 
     if amount == 0 {
         return Ok(PrecompileResult::success(abi::encode_bool(true), GAS_TRANSFER_FROM));
@@ -359,27 +391,27 @@ fn handle_transfer_from(
 
 /// deposit() — payable
 ///
-/// Locks native TNZO (sent as msg.value) and credits the sender's EVM balance.
-/// In the pointer model, this is a no-op since balances are already shared.
-/// But we keep the interface for WETH9 compatibility.
+/// Pointer model: balances are shared between native TNZO and wTNZO,
+/// so deposit is a structural no-op. We still require a trusted caller
+/// (rejected upstream) so a contract cannot pretend to credit a
+/// third-party EVM balance via this path.
 fn handle_deposit(
     _token: &TnzoToken,
+    _caller: &[u8; 20],
     _calldata: &[u8],
     gas_limit: u64,
 ) -> Result<PrecompileResult> {
     check_gas(gas_limit, GAS_TRANSFER)?;
-    // In the pointer model, native TNZO and wTNZO share the same balance.
-    // deposit() just emits a Deposit event for compatibility — the balance is
-    // already reflected via balanceOf() reading from TnzoToken.
     debug!("TNZO bridge deposit: no-op in pointer model (balances are unified)");
     Ok(PrecompileResult::success(Vec::new(), GAS_TRANSFER))
 }
 
 /// withdraw(uint256 amount)
 ///
-/// In the pointer model, this is also a no-op since balances are shared.
+/// Same pointer-model no-op as `deposit`. Trusted caller required upstream.
 fn handle_withdraw(
     _token: &TnzoToken,
+    _caller: &[u8; 20],
     calldata: &[u8],
     gas_limit: u64,
 ) -> Result<PrecompileResult> {
@@ -413,12 +445,13 @@ fn handle_withdraw(
 ///   [128..]   data (length-prefixed: source_chain_id(32) + msg_sender(32))
 fn handle_crosschain_mint(
     token: &TnzoToken,
+    caller: &[u8; 20],
     calldata: &[u8],
     gas_limit: u64,
 ) -> Result<PrecompileResult> {
     check_gas(gas_limit, GAS_CROSSCHAIN)?;
 
-    if calldata.len() < 128 {
+    if calldata.len() < 96 {
         return Ok(PrecompileResult::failed(GAS_CROSSCHAIN));
     }
 
@@ -436,18 +469,15 @@ fn handle_crosschain_mint(
         return Ok(PrecompileResult::success(Vec::new(), GAS_CROSSCHAIN));
     }
 
-    // Caller (msg.sender) is the bridge adapter, appended by EVM runtime at slot 96
-    let caller_20 = abi::decode_address_at(calldata, 96).ok_or_else(|| {
-        VmError::PrecompileFailed("crosschainMint: missing caller context".to_string())
-    })?;
-
-    // Verify caller is an authorized bridge adapter.
-    // Authorized callers: the TNZO bridge precompile itself (self-call via delegatecall),
-    // the cross-VM bridge precompile (0x1003), or the treasury.
-    if !is_authorized_bridge_caller(&caller_20, token) {
+    // Verify the TRUSTED runtime-supplied caller is an authorized bridge
+    // adapter. Authorized callers: the cross-VM bridge precompile
+    // (0x1003), or the treasury. Previously this read the caller from
+    // calldata slot 96 (caller-supplied!), which let anyone impersonate
+    // the bridge by writing the bridge address into their own calldata.
+    if !is_authorized_bridge_caller(caller, token) {
         warn!(
             "crosschainMint: unauthorized caller 0x{}",
-            hex::encode(caller_20)
+            hex::encode(caller)
         );
         return Err(VmError::PrecompileFailed(
             "crosschainMint: caller is not an authorized bridge adapter".to_string(),
@@ -509,12 +539,13 @@ fn handle_crosschain_mint(
 ///   [128..]   data (length-prefixed: dest_chain_id(32) + dest_address(32))
 fn handle_crosschain_burn(
     token: &TnzoToken,
+    caller: &[u8; 20],
     calldata: &[u8],
     gas_limit: u64,
 ) -> Result<PrecompileResult> {
     check_gas(gas_limit, GAS_CROSSCHAIN)?;
 
-    if calldata.len() < 128 {
+    if calldata.len() < 96 {
         return Ok(PrecompileResult::failed(GAS_CROSSCHAIN));
     }
 
@@ -532,16 +563,12 @@ fn handle_crosschain_burn(
         return Ok(PrecompileResult::success(Vec::new(), GAS_CROSSCHAIN));
     }
 
-    // Caller (msg.sender) appended by EVM runtime at slot 96
-    let caller_20 = abi::decode_address_at(calldata, 96).ok_or_else(|| {
-        VmError::PrecompileFailed("crosschainBurn: missing caller context".to_string())
-    })?;
-
-    // Verify caller is an authorized bridge adapter
-    if !is_authorized_bridge_caller(&caller_20, token) {
+    // Verify the TRUSTED runtime-supplied caller is an authorized bridge
+    // adapter (see crosschainMint commentary).
+    if !is_authorized_bridge_caller(caller, token) {
         warn!(
             "crosschainBurn: unauthorized caller 0x{}",
-            hex::encode(caller_20)
+            hex::encode(caller)
         );
         return Err(VmError::PrecompileFailed(
             "crosschainBurn: caller is not an authorized bridge adapter".to_string(),

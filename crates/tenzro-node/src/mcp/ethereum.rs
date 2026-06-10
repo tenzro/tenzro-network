@@ -1352,6 +1352,15 @@ impl ServerHandler for EthereumMcpServer {
 
 /// Start the Ethereum MCP server as a standalone Streamable HTTP service.
 pub async fn start_ethereum_mcp_server(listen_addr: String) -> crate::error::Result<()> {
+    let (_keep_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+    start_ethereum_mcp_server_with_shutdown(listen_addr, shutdown_rx).await
+}
+
+/// Start the Ethereum MCP server with a graceful-shutdown channel.
+pub async fn start_ethereum_mcp_server_with_shutdown(
+    listen_addr: String,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) -> crate::error::Result<()> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
     };
@@ -1390,7 +1399,9 @@ pub async fn start_ethereum_mcp_server(listen_addr: String) -> crate::error::Res
         .route(
             "/health",
             axum::routing::get(|| async { "ok" }),
-        );
+        )
+        .layer(tower::limit::ConcurrencyLimitLayer::new(100))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(2 * 1024 * 1024));
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     tracing::info!(
@@ -1400,7 +1411,12 @@ pub async fn start_ethereum_mcp_server(listen_addr: String) -> crate::error::Res
         "Ethereum MCP Server listening (endpoint: /mcp)"
     );
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.recv().await;
+            tracing::info!("Ethereum MCP server shutting down gracefully");
+        })
+        .await?;
 
     Ok(())
 }

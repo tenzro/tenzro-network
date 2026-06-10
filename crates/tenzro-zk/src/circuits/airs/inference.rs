@@ -4,42 +4,53 @@
 //!
 //! # What this AIR proves
 //!
-//! Given public inputs `(model_hash, input_hash, output_hash)` and private
-//! witness `(model_checksum, input_checksum, computed_output)`, the AIR
-//! enforces:
+//! Public inputs: `(model_hash[..8], input_hash[..8], output_hash[..8])`.
+//! Private witness: `(model_checksum, input_checksum, computed_output)`.
 //!
-//! 1. `model_checksum * input_checksum == computed_output` — the simplified
-//!    "computation" being attested.
-//! 2. The trace's hash columns equal the corresponding public-input hashes.
-//!    Hash columns are filled by the trace generator using [`hash_one`]
-//!    off-circuit; the AIR enforces equality between trace and public input.
+//! Constraints:
+//! 1. `model_checksum * input_checksum == computed_output`.
+//! 2. The trace's hash columns equal the public-input digest slots for
+//!    every `DIGEST_LEN` element. This binds the declared
+//!    `(model_hash, input_hash, output_hash)` to the trace's own copy
+//!    bit-for-bit.
 //!
-//! # Trace layout
+//! # Soundness scope
 //!
-//! Single execution trace with 6 columns:
+//! The trace generator computes `hash_one(witness)` off-circuit and
+//! writes the result into the hash columns. The AIR checks that the
+//! trace's hash columns equal the public-input slots, but it does NOT
+//! evaluate Poseidon2 in-circuit, so a prover can supply arbitrary
+//! `(witness, declared_hash)` pairs as long as `m*i==o` AND the trace's
+//! hash columns match the public-input slots.
 //!
-//! | col | meaning              |
-//! |-----|----------------------|
-//! | 0   | model_checksum       |
-//! | 1   | input_checksum       |
-//! | 2   | computed_output      |
-//! | 3   | model_checksum_hash0 |
-//! | 4   | input_checksum_hash0 |
-//! | 5   | output_checksum_hash0|
+//! A relying party that treats the public-input digests as canonical
+//! artefact hashes (e.g. `sha256(model_bytes)`) must additionally
+//! verify out of band that the witness's off-circuit hash matches the
+//! declared artefact. The `tenzro_verifyZkProof` RPC reports
+//! `soundness_class: "advisory"` for this AIR so relying parties cannot
+//! silently use it as a value-binding gate.
 //!
-//! The hash columns hold the **first** field element of the 8-element
-//! Poseidon2 digest. The remaining 7 elements of each digest are checked via
-//! 7 additional public-input slots — see the public-input layout below.
+//! # Trace layout (`NUM_INFERENCE_COLS = 3 + 3 × DIGEST_LEN`)
 //!
-//! Trace height is padded to the smallest power of two ≥ 1 that satisfies
-//! Plonky3's FRI constraints. The first row carries the live witness; later
-//! rows are zero-padded copies (the AIR uses only `when_first_row`).
+//! | col index             | meaning                          |
+//! |-----------------------|----------------------------------|
+//! | 0                     | model_checksum                   |
+//! | 1                     | input_checksum                   |
+//! | 2                     | computed_output                  |
+//! | 3..3+DIGEST_LEN       | Poseidon2 digest of model        |
+//! | …+DIGEST_LEN          | Poseidon2 digest of input        |
+//! | …+DIGEST_LEN          | Poseidon2 digest of output       |
 //!
-//! # Public input layout (3 × 8 = 24 field elements)
+//! Trace height is padded to the smallest power of two ≥ 1 that
+//! satisfies Plonky3's FRI constraints. The first row carries the live
+//! witness; later rows are zero-padded (the AIR uses only
+//! `when_first_row`).
 //!
-//! Slots `[0..8]` = `model_hash` digest, `[8..16]` = `input_hash` digest,
-//! `[16..24]` = `output_hash` digest. Each digest matches the 8-element
-//! output of [`hash_one`].
+//! # Public input layout (3 × `DIGEST_LEN` = 24 field elements)
+//!
+//! `[0..DIGEST_LEN]` model_hash, `[DIGEST_LEN..2*DIGEST_LEN]` input_hash,
+//! `[2*DIGEST_LEN..3*DIGEST_LEN]` output_hash. Each digest matches the
+//! `DIGEST_LEN`-element output of [`hash_one`].
 
 use core::borrow::Borrow;
 
@@ -50,27 +61,36 @@ use p3_matrix::dense::RowMajorMatrix;
 
 use crate::plonky3::poseidon2_hash::{DIGEST_LEN, hash_one};
 
-/// Number of trace columns (3 witnesses + 3 hash anchors).
-pub const NUM_INFERENCE_COLS: usize = 6;
+/// Number of trace columns: 3 witnesses + 3 × [`DIGEST_LEN`] hash
+/// anchors. The trace carries the full 8-element Poseidon2 output for
+/// each of the three digests, and the AIR constrains every trace cell
+/// against its public-input slot.
+pub const NUM_INFERENCE_COLS: usize = 3 + 3 * DIGEST_LEN;
 /// Number of public values (3 digests of length [`DIGEST_LEN`]).
 pub const NUM_INFERENCE_PUBLIC_VALUES: usize = 3 * DIGEST_LEN;
 
 const COL_MODEL_CHECKSUM: usize = 0;
 const COL_INPUT_CHECKSUM: usize = 1;
 const COL_COMPUTED_OUTPUT: usize = 2;
-const COL_MODEL_HASH0: usize = 3;
-const COL_INPUT_HASH0: usize = 4;
-const COL_OUTPUT_HASH0: usize = 5;
+const COL_MODEL_HASH_BASE: usize = 3;
+const COL_INPUT_HASH_BASE: usize = 3 + DIGEST_LEN;
+const COL_OUTPUT_HASH_BASE: usize = 3 + 2 * DIGEST_LEN;
 
-/// Layout of one inference trace row — used for safe column access.
+/// Layout of one inference trace row.
+///
+/// The row holds the three private witnesses followed by three
+/// `DIGEST_LEN`-element Poseidon2 digests. `#[repr(C)]` + the
+/// `[KoalaBear; DIGEST_LEN]` shape keeps the contiguous-bytes alignment
+/// that `align_to::<InferenceRow<F>>()` relies on for safe column access
+/// from a `&[F]`.
 #[repr(C)]
 pub struct InferenceRow<F> {
     pub model_checksum: F,
     pub input_checksum: F,
     pub computed_output: F,
-    pub model_hash0: F,
-    pub input_hash0: F,
-    pub output_hash0: F,
+    pub model_hash: [F; DIGEST_LEN],
+    pub input_hash: [F; DIGEST_LEN],
+    pub output_hash: [F; DIGEST_LEN],
 }
 
 impl<F> Borrow<InferenceRow<F>> for [F] {
@@ -107,49 +127,50 @@ impl<F> BaseAir<F> for InferenceAir {
 
 impl<AB: AirBuilder> Air<AB> for InferenceAir {
     fn eval(&self, builder: &mut AB) {
-        // Copy locals out of `builder.main()` and `builder.public_values()`
-        // before any mutable borrow (e.g. when_first_row()) — the latter
-        // re-borrows `builder` mutably, which would conflict with retained
-        // immutable borrows.
-        let (model_checksum, input_checksum, computed_output, model_hash0, input_hash0, output_hash0) = {
+        // Snapshot the row + public inputs BEFORE acquiring the
+        // `when_first_row()` filter, which mutably re-borrows `builder`.
+        // The trace row carries 3 witnesses followed by 3 × DIGEST_LEN
+        // hash elements; we copy each of the 8 elements per digest
+        // because the AIR constraints below enforce equality across
+        // every slot.
+        let (model_checksum, input_checksum, computed_output, model_hash, input_hash, output_hash) = {
             let main = builder.main();
             let local: &InferenceRow<AB::Var> = main.current_slice().borrow();
             (
                 local.model_checksum,
                 local.input_checksum,
                 local.computed_output,
-                local.model_hash0,
-                local.input_hash0,
-                local.output_hash0,
+                local.model_hash,
+                local.input_hash,
+                local.output_hash,
             )
         };
 
-        let (pi_model_hash0, pi_input_hash0, pi_output_hash0) = {
+        let pi_model_hash: [AB::PublicVar; DIGEST_LEN];
+        let pi_input_hash: [AB::PublicVar; DIGEST_LEN];
+        let pi_output_hash: [AB::PublicVar; DIGEST_LEN];
+        {
             let pis = builder.public_values();
-            (
-                pis[0],
-                pis[DIGEST_LEN],
-                pis[2 * DIGEST_LEN],
-            )
-        };
+            pi_model_hash = core::array::from_fn(|k| pis[k]);
+            pi_input_hash = core::array::from_fn(|k| pis[DIGEST_LEN + k]);
+            pi_output_hash = core::array::from_fn(|k| pis[2 * DIGEST_LEN + k]);
+        }
 
         let mut when_first_row = builder.when_first_row();
 
-        // Constraint: model_checksum * input_checksum == computed_output
+        // Constraint: model_checksum * input_checksum == computed_output.
         when_first_row.assert_eq(
             model_checksum.into() * input_checksum.into(),
             computed_output,
         );
 
-        // Constraint: trace hash[0] columns equal public-input hash[0] slots.
-        // (Hash columns 1..7 of each digest are bound to the public input by
-        // the trace generator producing the same Poseidon2 hash; the AIR only
-        // needs to anchor the first element to detect any tampering — a
-        // single-element collision against Poseidon2 over KoalaBear is
-        // computationally infeasible for the field sizes we use.)
-        when_first_row.assert_eq(model_hash0, pi_model_hash0);
-        when_first_row.assert_eq(input_hash0, pi_input_hash0);
-        when_first_row.assert_eq(output_hash0, pi_output_hash0);
+        // Constraint: full DIGEST_LEN binding — trace[hash[k]] equals
+        // public-input[hash[k]] for every k.
+        for k in 0..DIGEST_LEN {
+            when_first_row.assert_eq(model_hash[k], pi_model_hash[k]);
+            when_first_row.assert_eq(input_hash[k], pi_input_hash[k]);
+            when_first_row.assert_eq(output_hash[k], pi_output_hash[k]);
+        }
     }
 }
 
@@ -177,9 +198,13 @@ pub fn generate_inference_trace(
     values[COL_MODEL_CHECKSUM] = model_checksum;
     values[COL_INPUT_CHECKSUM] = input_checksum;
     values[COL_COMPUTED_OUTPUT] = computed_output;
-    values[COL_MODEL_HASH0] = model_digest[0];
-    values[COL_INPUT_HASH0] = input_digest[0];
-    values[COL_OUTPUT_HASH0] = output_digest[0];
+    // Populate the full DIGEST_LEN of each digest; the AIR constrains
+    // every cell against its public-input slot.
+    for k in 0..DIGEST_LEN {
+        values[COL_MODEL_HASH_BASE + k] = model_digest[k];
+        values[COL_INPUT_HASH_BASE + k] = input_digest[k];
+        values[COL_OUTPUT_HASH_BASE + k] = output_digest[k];
+    }
 
     // Rows 1.. are zero-padding. Constraints are guarded by when_first_row
     // so they remain trivially satisfied on the padding rows.
@@ -212,7 +237,7 @@ mod tests {
 
     #[test]
     fn prove_and_verify_valid_inference() {
-        // Witness: 3 * 5 = 15 (matches the legacy R1CS test).
+        // Witness: 3 * 5 = 15.
         let model = KoalaBear::from_u64(3);
         let input = KoalaBear::from_u64(5);
         let output = KoalaBear::from_u64(15);

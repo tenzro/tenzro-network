@@ -8,6 +8,14 @@
 //! Recall mode `hybrid` (default) merges Lance vector kNN with Tantivy BM25
 //! via Reciprocal Rank Fusion (k=60). `vector` and `text` restrict to one
 //! backend.
+//!
+//! ## Auth (required)
+//!
+//! Every memory RPC requires DPoP+JWT bearer auth. Set
+//! `TENZRO_BEARER_JWT` and `TENZRO_DPOP_PROOF` in the environment before
+//! calling these commands. The server matches the bearer's DID against
+//! the requested `agent_did` (or its controller) and rejects
+//! cross-agent reads with `-32001`.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

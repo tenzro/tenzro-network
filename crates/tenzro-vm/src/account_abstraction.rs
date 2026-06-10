@@ -986,6 +986,14 @@ impl EntryPoint {
                     signature: None,
                     public_key: None,
                     signing_digest: None,
+                    // ERC-4337 EntryPoint executes user operations within
+                    // a parent block context; the caller must supply the
+                    // block timestamp via `with_block_timestamp_ms` when
+                    // it actually goes through native VM time-dependent
+                    // handlers. Left as None here because EntryPoint-
+                    // driven sub-execution is not currently routed through
+                    // native VM escrow/expiry paths.
+                    block_timestamp_ms: None,
                 };
 
                 let mut state = match self.storage.as_ref() {

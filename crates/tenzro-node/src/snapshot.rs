@@ -39,9 +39,14 @@
 //!
 //! The manifest carries the height + state root. A receiving node MUST
 //! verify the state root against a known-good QC out of band before
-//! trusting any chunk. v1 leaves QC verification to the bootstrap
-//! caller (see `bootstrap_from_peer` in `main.rs`); v2 will fold the
-//! QC into the manifest payload itself.
+//! trusting any chunk. [`bootstrap_from_peer`] enforces this via the
+//! `expected_state_root` operator anchor: a syncing node may not
+//! accept a snapshot whose declared `state_root` differs from a value
+//! the operator vetted out of band (e.g. by reading the canonical
+//! chain tip from a trusted RPC, signed gossip from a known-good
+//! validator, or a weak-subjectivity checkpoint). Without an anchor
+//! the function refuses to sync, because the peer URL could be a
+//! malicious RPC that would serve a forged state root.
 
 use crate::error::{NodeError, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -523,7 +528,24 @@ pub async fn bootstrap_from_peer(
     store: Arc<SnapshotStore>,
     peer_url: &str,
     min_height: u64,
+    expected_state_root: Option<[u8; 32]>,
 ) -> Result<SnapshotManifest> {
+    // Fail-closed trust anchor. Without an operator-supplied
+    // `expected_state_root`, the snapshot's declared root is
+    // unverifiable: a malicious peer could serve a forged manifest with
+    // any state and the syncing node would commit it as canonical
+    // state. Refuse the bootstrap entirely until QC-verification
+    // against a known-good finalized header is wired.
+    let anchor = expected_state_root.ok_or_else(|| NodeError::Other(
+        "state-sync refused: no trust anchor supplied. Operator MUST \
+         provide an out-of-band-verified state_root (e.g. a weak-\
+         subjectivity checkpoint or a known-good QC at the snapshot \
+         height) so the manifest's declared root can be cross-checked. \
+         Without an anchor the peer's RPC is untrusted authority and \
+         must not be allowed to seed local state."
+            .to_string(),
+    ))?;
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
@@ -602,6 +624,32 @@ pub async fn bootstrap_from_peer(
         .ok_or_else(|| NodeError::Other("get_manifest: no result".into()))?;
     let manifest: SnapshotManifest = serde_json::from_value(manifest_val.clone())
         .map_err(|e| NodeError::Other(format!("parse manifest: {}", e)))?;
+
+    // 2b. Trust-anchor check. The manifest's declared `state_root` must
+    //     match the operator-supplied anchor BIT-FOR-BIT. Any difference
+    //     (length, hex case, leading 0x) is a hard reject — a forged
+    //     manifest from a malicious peer would otherwise be applied to
+    //     the local KV store.
+    let declared_hex = manifest.state_root_hex.trim_start_matches("0x");
+    let declared_bytes = hex::decode(declared_hex).map_err(|e| NodeError::Other(format!(
+        "manifest state_root_hex is not valid hex: {e}"
+    )))?;
+    if declared_bytes.len() != 32 {
+        return Err(NodeError::Other(format!(
+            "manifest state_root has wrong length {} (expected 32)",
+            declared_bytes.len()
+        )));
+    }
+    let mut declared = [0u8; 32];
+    declared.copy_from_slice(&declared_bytes);
+    if declared != anchor {
+        return Err(NodeError::Other(format!(
+            "snapshot state_root mismatch: declared 0x{} but operator anchor 0x{}. \
+             Refusing to apply unverified state.",
+            hex::encode(declared),
+            hex::encode(anchor),
+        )));
+    }
 
     // 3. Offer to local store.
     store.offer(manifest.clone()).await?;

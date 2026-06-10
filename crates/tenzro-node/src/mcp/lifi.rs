@@ -534,6 +534,15 @@ impl ServerHandler for LifiMcpServer {
 pub async fn start_lifi_mcp_server(
     listen_addr: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (_keep_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+    start_lifi_mcp_server_with_shutdown(listen_addr, shutdown_rx).await
+}
+
+/// Start the LI.FI MCP server with a graceful-shutdown channel.
+pub async fn start_lifi_mcp_server_with_shutdown(
+    listen_addr: String,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
     };
@@ -555,7 +564,10 @@ pub async fn start_lifi_mcp_server(
         config,
     );
 
-    let app = axum::Router::new().nest_service("/mcp", service);
+    let app = axum::Router::new()
+        .nest_service("/mcp", service)
+        .layer(tower::limit::ConcurrencyLimitLayer::new(100))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(2 * 1024 * 1024));
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     tracing::info!(
         addr = %listen_addr,
@@ -564,7 +576,12 @@ pub async fn start_lifi_mcp_server(
         mode = "stateless-json",
         "LI.FI MCP Server listening (endpoint: /mcp)"
     );
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.recv().await;
+            tracing::info!("LI.FI MCP server shutting down gracefully");
+        })
+        .await?;
     Ok(())
 }
 

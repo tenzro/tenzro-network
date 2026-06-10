@@ -276,6 +276,7 @@ pub async fn verify_did_envelope(
 }
 
 pub async fn verify_zk_proof(
+    State(state): State<Arc<WebState>>,
     Json(request): Json<VerifyZkProofRequest>,
 ) -> Json<VerificationResponse> {
     let now = || Utc::now().to_rfc3339();
@@ -330,10 +331,16 @@ pub async fn verify_zk_proof(
     // Build a wire-format Proof envelope and run the Plonky3 verifier.
     // tenzro-zk::verify_proof_envelope dispatches by circuit_id internally.
     let envelope = Proof::new(proof_bytes, public_inputs, circuit_id.clone());
+    // Commitment hash binds circuit_id + proof bytes + public_inputs; on
+    // successful verification we attest it to the on-node
+    // ZkCommitmentRegistry so the EVM `ZK_VERIFY` precompile can answer
+    // affirmatively without re-running Plonky3 on-chain.
+    let commitment = tenzro_vm::precompiles::compute_zk_commitment(&envelope);
 
     // Run verification on a blocking thread — the verifier is CPU-bound and
     // would otherwise stall the axum executor on large proofs.
-    let verify_result = tokio::task::spawn_blocking(move || verify_proof_envelope(&envelope))
+    let envelope_for_verify = envelope.clone();
+    let verify_result = tokio::task::spawn_blocking(move || verify_proof_envelope(&envelope_for_verify))
         .await
         .unwrap_or_else(|join_err| {
             Err(VerifyEnvelopeError::VerifierRejected(format!(
@@ -342,17 +349,25 @@ pub async fn verify_zk_proof(
         });
 
     match verify_result {
-        Ok(()) => Json(VerificationResponse {
-            valid: true,
-            details: serde_json::json!({
-                "proof_type": "plonky3",
-                "circuit_id": circuit_id,
-                "public_inputs_count": public_inputs_count,
-                "proof_size_bytes": proof_size,
-                "status": "plonky3_verified",
-            }),
-            verified_at: now(),
-        }),
+        Ok(()) => {
+            let newly_attested = state
+                .node
+                .as_ref()
+                .map(|n| n.zk_commitment_registry().attest(commitment));
+            Json(VerificationResponse {
+                valid: true,
+                details: serde_json::json!({
+                    "proof_type": "plonky3",
+                    "circuit_id": circuit_id,
+                    "public_inputs_count": public_inputs_count,
+                    "proof_size_bytes": proof_size,
+                    "status": "plonky3_verified",
+                    "commitment_hex": format!("0x{}", hex::encode(commitment)),
+                    "newly_attested": newly_attested,
+                }),
+                verified_at: now(),
+            })
+        },
         Err(e) => {
             let (status, error) = match &e {
                 VerifyEnvelopeError::UnknownCircuit(id) => {

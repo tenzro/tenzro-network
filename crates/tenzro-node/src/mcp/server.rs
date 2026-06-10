@@ -5639,9 +5639,14 @@ impl TenzroMcpServer {
             public_inputs,
             circuit_id.clone(),
         );
+        // Commitment hash bound to (circuit_id, proof_bytes, public_inputs).
+        // Attest on success so EVM ZK_VERIFY precompile can answer for
+        // this exact (proof, inputs) tuple without re-running Plonky3.
+        let commitment = tenzro_vm::precompiles::compute_zk_commitment(&envelope);
 
+        let envelope_for_verify = envelope.clone();
         let verify_result = tokio::task::spawn_blocking(move || {
-            tenzro_zk::verify_proof_envelope(&envelope)
+            tenzro_zk::verify_proof_envelope(&envelope_for_verify)
         })
         .await
         .unwrap_or_else(|join_err| {
@@ -5651,14 +5656,19 @@ impl TenzroMcpServer {
         });
 
         match verify_result {
-            Ok(()) => json_result(serde_json::json!({
-                "valid": true,
-                "circuit_id": circuit_id,
-                "public_inputs_count": public_inputs_count,
-                "proof_size_bytes": proof_size,
-                "status": "plonky3_verified",
-                "verified_at": chrono::Utc::now().to_rfc3339(),
-            })),
+            Ok(()) => {
+                let newly_attested = self.node.zk_commitment_registry().attest(commitment);
+                json_result(serde_json::json!({
+                    "valid": true,
+                    "circuit_id": circuit_id,
+                    "public_inputs_count": public_inputs_count,
+                    "proof_size_bytes": proof_size,
+                    "status": "plonky3_verified",
+                    "verified_at": chrono::Utc::now().to_rfc3339(),
+                    "commitment_hex": format!("0x{}", hex::encode(commitment)),
+                    "newly_attested": newly_attested,
+                }))
+            },
             Err(e) => {
                 let (status, error) = match &e {
                     tenzro_zk::VerifyEnvelopeError::UnknownCircuit(id) => {
@@ -7813,36 +7823,27 @@ impl TenzroMcpServer {
         &self,
         Parameters(params): Parameters<MemoryGrantParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let runtime = self
-            .node
-            .agent_runtime()
-            .ok_or_else(|| err_internal("Agent runtime not initialized"))?;
-        let mgr = runtime
-            .memory_manager()
-            .ok_or_else(|| err_internal("Memory manager not initialized"))?
-            .clone();
-        let kind_s = params.kind.as_deref().unwrap_or("granted");
-        let source_s = params.source.as_deref().unwrap_or("controller");
-        let kind = tenzro_agent::memory::MemoryKind::parse(kind_s)
-            .ok_or_else(|| err_internal(format!("invalid kind: {}", kind_s)))?;
-        let source = tenzro_agent::memory::MemorySource::parse(source_s)
-            .ok_or_else(|| err_internal(format!("invalid source: {}", source_s)))?;
-        let metadata = params.metadata.unwrap_or_else(|| serde_json::json!({}));
-        let record = mgr
-            .grant(params.agent_did, kind, source, params.text, metadata)
+        // Dispatch via JSON-RPC so the bearer-DID memory access gate
+        // (`enforce_memory_access`) fires here too. Bypassing RPC and
+        // hitting the memory manager directly was the original cross-DID
+        // write path.
+        let mut p = serde_json::json!({
+            "agent_did": params.agent_did,
+            "text": params.text,
+        });
+        if let Some(k) = params.kind {
+            p["kind"] = serde_json::json!(k);
+        }
+        if let Some(s) = params.source {
+            p["source"] = serde_json::json!(s);
+        }
+        if let Some(m) = params.metadata {
+            p["metadata"] = m;
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_memoryGrant", p)
             .await
-            .map_err(|e| err_internal(format!("memory.grant: {}", e)))?;
-        json_result(serde_json::json!({
-            "id": record.id,
-            "agent_did": record.agent_did,
-            "created_at_ms": record.created_at_ms,
-            "kind": record.kind.as_str(),
-            "source": record.source.as_str(),
-            "text": record.text,
-            "metadata": record.metadata,
-            "da_pointer": record.da_pointer,
-            "has_embedding": record.embedding.is_some(),
-        }))
+            .map_err(|e| err_internal(format!("memoryGrant: {}", e)))?;
+        json_result(result)
     }
 
     #[tool(description = "Recall memories for an agent. Mode 'hybrid' (default) merges Lance vector kNN and Tantivy BM25 via Reciprocal Rank Fusion (k=60); 'vector' or 'text' restrict to one backend. Returns ranked MemoryRecord stubs (no embeddings).")]
@@ -7850,46 +7851,22 @@ impl TenzroMcpServer {
         &self,
         Parameters(params): Parameters<MemoryRecallParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let runtime = self
-            .node
-            .agent_runtime()
-            .ok_or_else(|| err_internal("Agent runtime not initialized"))?;
-        let mgr = runtime
-            .memory_manager()
-            .ok_or_else(|| err_internal("Memory manager not initialized"))?
-            .clone();
-        let k = params.k.unwrap_or(10) as usize;
-        let mode_s = params.mode.as_deref().unwrap_or("hybrid");
-        let modes = match mode_s {
-            "vector" => tenzro_agent::memory::SearchModes::VECTOR,
-            "text" => tenzro_agent::memory::SearchModes::TEXT,
-            "hybrid" => tenzro_agent::memory::SearchModes::HYBRID,
-            other => return Err(err_internal(format!("invalid mode: {}", other))),
-        };
-        let hits = mgr
-            .recall(params.agent_did, params.query, k, modes)
+        // Dispatch through the JSON-RPC layer so the bearer-DID memory
+        // access gate (`enforce_memory_access`) fires here too. Bypassing
+        // RPC and hitting the memory manager directly was the original
+        // cross-DID exfiltration path.
+        let mut p = serde_json::json!({
+            "agent_did": params.agent_did,
+            "query": params.query,
+            "k": params.k.unwrap_or(10),
+        });
+        if let Some(mode) = params.mode {
+            p["mode"] = serde_json::json!(mode);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_memoryRecall", p)
             .await
-            .map_err(|e| err_internal(format!("memory.recall: {}", e)))?;
-        let records: Vec<serde_json::Value> = hits
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "id": r.id,
-                    "agent_did": r.agent_did,
-                    "created_at_ms": r.created_at_ms,
-                    "kind": r.kind.as_str(),
-                    "source": r.source.as_str(),
-                    "text": r.text,
-                    "metadata": r.metadata,
-                    "da_pointer": r.da_pointer,
-                    "has_embedding": r.embedding.is_some(),
-                })
-            })
-            .collect();
-        json_result(serde_json::json!({
-            "count": records.len(),
-            "records": records,
-        }))
+            .map_err(|e| err_internal(format!("memoryRecall: {}", e)))?;
+        json_result(result)
     }
 
     #[tool(description = "Archive a memory record. Pushes the canonical payload to the configured DA backend, then rewrites the on-tier rows with kind='archived' and the resulting DaPointer attached. Frees hot search budget; payload is fetchable on demand via the pointer.")]
@@ -7897,29 +7874,16 @@ impl TenzroMcpServer {
         &self,
         Parameters(params): Parameters<MemoryArchiveParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let runtime = self
-            .node
-            .agent_runtime()
-            .ok_or_else(|| err_internal("Agent runtime not initialized"))?;
-        let mgr = runtime
-            .memory_manager()
-            .ok_or_else(|| err_internal("Memory manager not initialized"))?
-            .clone();
-        let archived = mgr
-            .archive(&params.record_id, &params.agent_did)
+        // Dispatch via JSON-RPC so the bearer-DID memory access gate
+        // fires here too.
+        let p = serde_json::json!({
+            "record_id": params.record_id,
+            "agent_did": params.agent_did,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_memoryArchive", p)
             .await
-            .map_err(|e| err_internal(format!("memory.archive: {}", e)))?;
-        json_result(serde_json::json!({
-            "id": archived.id,
-            "agent_did": archived.agent_did,
-            "created_at_ms": archived.created_at_ms,
-            "kind": archived.kind.as_str(),
-            "source": archived.source.as_str(),
-            "text": archived.text,
-            "metadata": archived.metadata,
-            "da_pointer": archived.da_pointer,
-            "has_embedding": archived.embedding.is_some(),
-        }))
+            .map_err(|e| err_internal(format!("memoryArchive: {}", e)))?;
+        json_result(result)
     }
 
     #[tool(description = "List newest-first memories for an agent. Optional `kind` filter ('granted' | 'recalled' | 'self_noted' | 'archived'). Pure read against the on-tier text index. Use memory_recall for query-driven hybrid retrieval.")]
@@ -13394,7 +13358,12 @@ pub async fn start_mcp_server_with_shutdown(
                 );
                 response
             },
-        ));
+        ))
+        // DoS hardening: concurrency throttle + body size limit. MCP is
+        // JSON-RPC over HTTP; the same DoS surface as the main RPC server
+        // applies. MCP tool calls carry small JSON envelopes, not blobs.
+        .layer(tower::limit::ConcurrencyLimitLayer::new(200))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(4 * 1024 * 1024));
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     tracing::info!(addr = %listen_addr, tools = 20, mode = "stateless-json", oauth = true, "MCP Server listening (endpoint: /mcp, OAuth 2.1 enabled)");

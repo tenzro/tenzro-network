@@ -213,6 +213,15 @@ pub fn compute_zk_commitment(proof: &tenzro_zk::Proof) -> ZkCommitmentHash {
 pub struct PrecompileRegistry {
     /// Map of address to precompile function
     precompiles: DashMap<Vec<u8>, PrecompileFn>,
+    /// Precompile addresses that read `msg.sender` for authorization.
+    /// [`Self::execute`] appends the runtime-supplied caller as a
+    /// 32-byte trailer on inputs to these addresses; authorization
+    /// handlers read the caller from the trailer and never from
+    /// caller-supplied calldata.
+    ///
+    /// Populated at registration time by the token / cross-VM-bridge
+    /// registration helpers.
+    requires_trusted_caller: dashmap::DashSet<Vec<u8>>,
 }
 
 impl PrecompileRegistry {
@@ -252,6 +261,7 @@ impl PrecompileRegistry {
     ) -> Self {
         let registry = Self {
             precompiles: DashMap::new(),
+            requires_trusted_caller: dashmap::DashSet::new(),
         };
 
         // Register standard EVM precompiles
@@ -278,10 +288,50 @@ impl PrecompileRegistry {
         self.precompiles.contains_key(address)
     }
 
-    /// Execute a precompile
-    pub fn execute(&self, address: &[u8], input: &[u8], gas_limit: u64) -> Result<PrecompileResult> {
+    /// Execute a precompile.
+    /// Execute a precompile with the runtime-supplied `msg.sender`.
+    ///
+    /// For precompiles in [`Self::requires_trusted_caller`] (TNZO
+    /// bridge, cross-VM bridge, token factory), the 20-byte `caller` is
+    /// left-padded to 32 bytes and APPENDED to the end of the input.
+    /// The on-wire frame seen by the precompile is:
+    ///
+    /// ```text
+    ///   [0..4]      selector (caller-supplied)
+    ///   [4..N]      caller-supplied calldata (any ABI shape)
+    ///   [N..N+32]   trusted msg.sender (32-byte left-padded, RUNTIME)
+    /// ```
+    ///
+    /// Appending at the tail keeps any Solidity ABI dynamic offsets
+    /// valid — they still point into the original calldata region.
+    /// Authorization handlers read the caller from the last 32 bytes;
+    /// any address from elsewhere in calldata is caller-supplied and
+    /// is never used for authorization.
+    ///
+    /// For precompiles that are not in the trusted-caller set,
+    /// `caller` is ignored and the input is passed through unchanged.
+    pub fn execute(
+        &self,
+        caller: &[u8; 20],
+        address: &[u8],
+        input: &[u8],
+        gas_limit: u64,
+    ) -> Result<PrecompileResult> {
         let precompile = self.precompiles.get(address)
             .ok_or_else(|| VmError::PrecompileFailed(format!("Precompile not found at address: {}", hex::encode(address))))?;
+
+        if self.requires_trusted_caller.contains(address) {
+            if input.len() < 4 {
+                return Err(VmError::PrecompileFailed(
+                    "trusted-caller precompile requires at least a 4-byte selector".to_string(),
+                ));
+            }
+            let mut framed = Vec::with_capacity(input.len() + 32);
+            framed.extend_from_slice(input);
+            framed.extend_from_slice(&[0u8; 12]);
+            framed.extend_from_slice(caller);
+            return precompile(&framed, gas_limit);
+        }
 
         precompile(input, gas_limit)
     }
@@ -476,23 +526,33 @@ impl PrecompileRegistry {
         use crate::evm::token_factory::create_token_factory_precompile;
         use crate::cross_vm_bridge::create_cross_vm_bridge_precompile;
 
-        // TNZO Bridge (0x1001) — wTNZO ERC-20 pointer
+        // TNZO Bridge (0x1001) — wTNZO ERC-20 pointer. Authorization
+        // for transfer / approve / transferFrom / crosschainMint /
+        // crosschainBurn / deposit / withdraw reads the trusted
+        // `msg.sender` appended by the registry.
         self.register(
             PRECOMPILE_TNZO_BRIDGE.to_vec(),
             create_tnzo_bridge_precompile(token.clone(), registry.clone()),
         );
+        self.requires_trusted_caller.insert(PRECOMPILE_TNZO_BRIDGE.to_vec());
 
-        // Token Factory (0x1002) — ERC-20 creation
+        // Token Factory (0x1002) — ERC-20 creation. Creator is bound
+        // to the trusted `msg.sender`, not caller-supplied bytes, so
+        // a malicious caller cannot claim ownership of a token they
+        // didn't deploy.
         self.register(
             PRECOMPILE_TOKEN_FACTORY.to_vec(),
             create_token_factory_precompile(registry.clone()),
         );
+        self.requires_trusted_caller.insert(PRECOMPILE_TOKEN_FACTORY.to_vec());
 
-        // Cross-VM Bridge (0x1003) — cross-VM transfers
+        // Cross-VM Bridge (0x1003) — cross-VM transfers. From-address
+        // for the source-VM debit MUST be the trusted msg.sender.
         self.register(
             PRECOMPILE_CROSS_VM_BRIDGE.to_vec(),
             create_cross_vm_bridge_precompile(token, registry),
         );
+        self.requires_trusted_caller.insert(PRECOMPILE_CROSS_VM_BRIDGE.to_vec());
 
         // NFT Factory (0x1006) — ERC-721/1155 collection creation and management
         {
@@ -3161,7 +3221,7 @@ mod tests {
         );
 
         // execute() on an unregistered address returns an error.
-        let result = registry.execute(PRECOMPILE_MODEL_INFERENCE, &[1, 2, 3], 100_000);
+        let result = registry.execute(&[0u8; 20], PRECOMPILE_MODEL_INFERENCE, &[1, 2, 3], 100_000);
         assert!(result.is_err(), "execute on unregistered address must error");
     }
 
@@ -3285,7 +3345,7 @@ mod tests {
         let input = serde_json::to_vec(&proof).unwrap();
 
         // Not yet attested → returns [0]
-        let r = registry.execute(PRECOMPILE_ZK_VERIFY, &input, 500_000).unwrap();
+        let r = registry.execute(&[0u8; 20], PRECOMPILE_ZK_VERIFY, &input, 500_000).unwrap();
         assert!(r.success);
         assert_eq!(r.output, vec![0u8]);
 
@@ -3293,7 +3353,7 @@ mod tests {
         let commitment = compute_zk_commitment(&proof);
         zk_registry.attest(commitment);
 
-        let r2 = registry.execute(PRECOMPILE_ZK_VERIFY, &input, 500_000).unwrap();
+        let r2 = registry.execute(&[0u8; 20], PRECOMPILE_ZK_VERIFY, &input, 500_000).unwrap();
         assert!(r2.success);
         assert_eq!(r2.output, vec![1u8]);
     }
@@ -3304,12 +3364,12 @@ mod tests {
         let registry = PrecompileRegistry::new_with_services(None, None, Some(zk_registry), None);
 
         // Garbage bytes → [0]
-        let r = registry.execute(PRECOMPILE_ZK_VERIFY, &[0xff; 16], 500_000).unwrap();
+        let r = registry.execute(&[0u8; 20], PRECOMPILE_ZK_VERIFY, &[0xff; 16], 500_000).unwrap();
         assert!(r.success);
         assert_eq!(r.output, vec![0u8]);
 
         // Empty input → [0]
-        let r = registry.execute(PRECOMPILE_ZK_VERIFY, &[], 500_000).unwrap();
+        let r = registry.execute(&[0u8; 20], PRECOMPILE_ZK_VERIFY, &[], 500_000).unwrap();
         assert!(r.success);
         assert_eq!(r.output, vec![0u8]);
     }
@@ -3925,7 +3985,7 @@ mod tests {
         let proof = prove(&sk, alpha).unwrap();
         let input = vrf_build_input(&pk.0, &proof.0, alpha);
         let res = reg
-            .execute(PRECOMPILE_VRF_VERIFY, &input, 1_000_000)
+            .execute(&[0u8; 20], PRECOMPILE_VRF_VERIFY, &input, 1_000_000)
             .unwrap();
         assert_eq!(res.output.len(), 32 + 64);
         assert_eq!(res.output[31], 1);

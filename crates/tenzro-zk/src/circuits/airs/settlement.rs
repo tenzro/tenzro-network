@@ -1,7 +1,5 @@
 //! Plonky3 AIR for settlement validity proofs.
 //!
-//! Replaces the legacy R1CS [`SettlementProofCircuit`].
-//!
 //! # What this AIR proves
 //!
 //! Given public inputs `(settlement_hash, service_hash, amount)` and private
@@ -19,11 +17,11 @@
 //!    settlement engine which already validates balance vs payments before
 //!    asking for a STARK).
 //!
-//! As with [`super::inference`], hash bindings use a single-anchor pattern:
-//! the trace generator computes the full Poseidon2 digest off-circuit, the
-//! AIR enforces equality on the first digest element against the public
-//! input, and the remaining 7 elements ride along through the public input
-//! vector.
+//! Hash bindings constrain every `DIGEST_LEN` element of each digest
+//! against the public input. The trace generator computes the
+//! Poseidon2 digest off-circuit, so the AIR binds the trace cells to
+//! the declared public inputs but does NOT bind the witness to its
+//! own hash. See [`super::inference`] for the soundness scope.
 
 use core::borrow::Borrow;
 
@@ -34,8 +32,11 @@ use p3_matrix::dense::RowMajorMatrix;
 
 use crate::plonky3::poseidon2_hash::{DIGEST_LEN, hash_one};
 
-/// 7 trace columns (witness fields + 2 hash anchors).
-pub const NUM_SETTLEMENT_COLS: usize = 7;
+/// Trace columns: 5 witness/scratch fields + 2 × [`DIGEST_LEN`] hash
+/// anchors. The trace carries the full `DIGEST_LEN`-element Poseidon2
+/// output for both digests, and the AIR constrains every trace cell
+/// against its public-input slot.
+pub const NUM_SETTLEMENT_COLS: usize = 5 + 2 * DIGEST_LEN;
 /// 2 digests of [`DIGEST_LEN`] + 1 raw amount = 17 public values.
 pub const NUM_SETTLEMENT_PUBLIC_VALUES: usize = 2 * DIGEST_LEN + 1;
 
@@ -47,8 +48,8 @@ pub struct SettlementRow<F> {
     pub nonce: F,
     pub prev_nonce: F,
     pub remaining_balance: F,
-    pub service_hash0: F,
-    pub settlement_hash0: F,
+    pub service_hash: [F; DIGEST_LEN],
+    pub settlement_hash: [F; DIGEST_LEN],
 }
 
 impl<F> Borrow<SettlementRow<F>> for [F] {
@@ -84,8 +85,8 @@ impl<F> BaseAir<F> for SettlementAir {
 
 impl<AB: AirBuilder> Air<AB> for SettlementAir {
     fn eval(&self, builder: &mut AB) {
-        // Snapshot trace cells.
-        let row = {
+        // Snapshot trace cells before acquiring the when_first_row mut borrow.
+        let (payer_balance, _service_proof, nonce, prev_nonce, remaining_balance, service_hash, settlement_hash) = {
             let main = builder.main();
             let local: &SettlementRow<AB::Var> = main.current_slice().borrow();
             (
@@ -94,18 +95,22 @@ impl<AB: AirBuilder> Air<AB> for SettlementAir {
                 local.nonce,
                 local.prev_nonce,
                 local.remaining_balance,
-                local.service_hash0,
-                local.settlement_hash0,
+                local.service_hash,
+                local.settlement_hash,
             )
         };
-        let (payer_balance, _service_proof, nonce, prev_nonce, remaining_balance, service_hash0, settlement_hash0) = row;
 
         // Snapshot public inputs.
-        // Layout: [settlement_digest(8) | service_digest(8) | amount(1)]
-        let (pi_settlement_hash0, pi_service_hash0, pi_amount) = {
+        // Layout: [settlement_digest(DIGEST_LEN) | service_digest(DIGEST_LEN) | amount(1)]
+        let pi_settlement_hash: [AB::PublicVar; DIGEST_LEN];
+        let pi_service_hash: [AB::PublicVar; DIGEST_LEN];
+        let pi_amount;
+        {
             let pis = builder.public_values();
-            (pis[0], pis[DIGEST_LEN], pis[2 * DIGEST_LEN])
-        };
+            pi_settlement_hash = core::array::from_fn(|k| pis[k]);
+            pi_service_hash = core::array::from_fn(|k| pis[DIGEST_LEN + k]);
+            pi_amount = pis[2 * DIGEST_LEN];
+        }
 
         let mut when_first_row = builder.when_first_row();
 
@@ -120,9 +125,12 @@ impl<AB: AirBuilder> Air<AB> for SettlementAir {
             pi_amount.into() + remaining_balance.into(),
         );
 
-        // Constraint 3: trace hash anchors match public-input hash anchors.
-        when_first_row.assert_eq(service_hash0, pi_service_hash0);
-        when_first_row.assert_eq(settlement_hash0, pi_settlement_hash0);
+        // Constraint 3: trace hash columns equal public-input
+        // hash slots for ALL DIGEST_LEN elements, not just slot 0.
+        for k in 0..DIGEST_LEN {
+            when_first_row.assert_eq(service_hash[k], pi_service_hash[k]);
+            when_first_row.assert_eq(settlement_hash[k], pi_settlement_hash[k]);
+        }
     }
 }
 
@@ -151,8 +159,13 @@ pub fn generate_settlement_trace(
     values[2] = nonce;
     values[3] = prev_nonce;
     values[4] = remaining_balance;
-    values[5] = service_digest[0];
-    values[6] = settlement_digest[0];
+    // Trace cells 5..5+DIGEST_LEN = service digest, then settlement digest.
+    let service_base: usize = 5;
+    let settlement_base: usize = 5 + DIGEST_LEN;
+    for k in 0..DIGEST_LEN {
+        values[service_base + k] = service_digest[k];
+        values[settlement_base + k] = settlement_digest[k];
+    }
 
     RowMajorMatrix::new(values, NUM_SETTLEMENT_COLS)
 }

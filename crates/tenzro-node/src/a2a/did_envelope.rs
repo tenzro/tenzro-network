@@ -38,12 +38,20 @@
 //! 5. Checks timestamp skew is within ±60s of the local clock.
 //! 6. Verifies the signature via `tenzro_crypto::signatures::verify()`.
 //!
-//! Replay protection beyond timestamp skew (nonce cache) is out-of-scope
-//! for this module — a stateful nonce cache is appropriate for a future
-//! hardening pass once mutation traffic warrants it.
+//! Replay protection: timestamp skew + a process-local LRU nonce cache.
+//! The cache holds `(sender_did, nonce_hex)` keys with a TTL slightly
+//! larger than `MAX_SKEW_MS` so a captured envelope cannot be replayed
+//! inside its still-valid skew window. Sized to `REPLAY_CACHE_CAPACITY`
+//! entries with FIFO eviction; an attacker who floods the cache simply
+//! forces premature eviction of their own earlier entries — they cannot
+//! evict a victim's pending mutation because that's still being processed
+//! synchronously by the dispatch path.
 
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::collections::VecDeque;
 
 /// Reserved metadata keys for the Tenzro DID envelope.
 pub const KEY_SENDER: &str = "tenzro.a2a.envelope.sender";
@@ -54,6 +62,82 @@ pub const KEY_TIMESTAMP: &str = "tenzro.a2a.envelope.timestamp";
 
 /// Maximum allowed clock skew between client and server, in milliseconds.
 pub const MAX_SKEW_MS: i64 = 60_000;
+
+/// Replay-cache TTL. Slightly larger than `MAX_SKEW_MS` so an envelope's
+/// nonce cannot be replayed inside the still-valid skew window after a
+/// brief restart or cache evict.
+pub const REPLAY_TTL_MS: i64 = 90_000;
+
+/// Maximum entries in the process-local replay cache. A burst above this
+/// triggers FIFO eviction of the oldest entries. 65k entries × ~64 bytes
+/// each ≈ 4 MiB — bounded and fits comfortably in any node footprint.
+pub const REPLAY_CACHE_CAPACITY: usize = 65_536;
+
+/// Process-local replay cache. Keyed by `(sender_did, nonce_hex_lower)`;
+/// value is the wall-clock millisecond timestamp at insertion. The
+/// `VecDeque` records insertion order so the eviction sweep can walk it
+/// in O(1) per entry without scanning the HashMap.
+///
+/// Static `OnceLock<Mutex<_>>` so the cache survives across multiple
+/// independent `verify_envelope` callers without threading state through
+/// every handler. The mutex is held only across O(1) hashmap ops —
+/// signature verification happens before acquiring it.
+struct ReplayCache {
+    seen: HashMap<(String, String), i64>,
+    order: VecDeque<(String, String)>,
+}
+
+fn replay_cache() -> &'static Mutex<ReplayCache> {
+    static CACHE: OnceLock<Mutex<ReplayCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(ReplayCache {
+        seen: HashMap::new(),
+        order: VecDeque::new(),
+    }))
+}
+
+/// Atomically check that `(sender_did, nonce_hex)` is unseen within the
+/// replay window AND record it. Returns `true` on first occurrence (proceed),
+/// `false` if the nonce was already in the cache (reject as replay).
+/// Lazily expires stale entries and enforces FIFO capacity bounds inside
+/// the same critical section.
+fn check_and_record_nonce(sender_did: &str, nonce_hex: &str, now_ms: i64) -> bool {
+    let key = (sender_did.to_string(), nonce_hex.to_lowercase());
+    let mut cache = match replay_cache().lock() {
+        Ok(g) => g,
+        // Poisoned mutex: a previous thread panicked while holding it.
+        // Fail-closed — reject the envelope rather than silently weakening
+        // replay protection. The operator sees panic logs separately.
+        Err(_) => return false,
+    };
+
+    // Expire stale entries from the front of the order queue. We only
+    // need to walk until we hit a still-valid entry; everything behind it
+    // is younger.
+    while let Some(front) = cache.order.front().cloned() {
+        match cache.seen.get(&front).copied() {
+            Some(ts) if now_ms.saturating_sub(ts) > REPLAY_TTL_MS => {
+                cache.order.pop_front();
+                cache.seen.remove(&front);
+            }
+            _ => break,
+        }
+    }
+
+    if cache.seen.contains_key(&key) {
+        return false;
+    }
+
+    // FIFO eviction if at capacity.
+    if cache.order.len() >= REPLAY_CACHE_CAPACITY {
+        if let Some(victim) = cache.order.pop_front() {
+            cache.seen.remove(&victim);
+        }
+    }
+
+    cache.seen.insert(key.clone(), now_ms);
+    cache.order.push_back(key);
+    true
+}
 
 /// Outcome of envelope verification. The error variants are intentionally
 /// coarse — the verifier returns the same `InvalidEnvelope` for "wrong
@@ -70,6 +154,9 @@ pub enum EnvelopeError {
     UnknownSender(String),
     /// Identity registry not initialized on this node.
     NoIdentityRegistry,
+    /// The nonce was already seen within the replay window — captured
+    /// envelope is being replayed by an attacker or a buggy client.
+    NonceReplayed,
 }
 
 impl EnvelopeError {
@@ -96,6 +183,9 @@ impl EnvelopeError {
             ),
             Self::NoIdentityRegistry => {
                 "Identity registry not initialized — cannot verify A2A envelope".to_string()
+            }
+            Self::NonceReplayed => {
+                "A2A envelope nonce was already used (replay rejected)".to_string()
             }
         }
     }
@@ -215,6 +305,15 @@ pub fn verify_envelope(
     verify(&pk, preimage.as_bytes(), &sig)
         .map_err(|_| EnvelopeError::InvalidEnvelope("signature".to_string()))?;
 
+    // Nonce-replay guard. Runs only after the signature has verified so an
+    // attacker spamming bogus envelopes cannot fill the cache and force
+    // premature eviction of legitimate entries — they would have to forge a
+    // valid signature for each spam entry, which is the cost we want.
+    // Atomic check-and-record inside the cache mutex.
+    if !check_and_record_nonce(&sender, &nonce_hex, now_ms) {
+        return Err(EnvelopeError::NonceReplayed);
+    }
+
     Ok(sender)
 }
 
@@ -262,5 +361,34 @@ mod tests {
         // path without a real node, but the unit tests above cover the pure
         // helpers; full integration is exercised by the A2A handler tests.
         let _ = metadata;
+    }
+
+    #[test]
+    fn replay_cache_first_admit_then_reject() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let did = "did:tenzro:test:replay-1";
+        let nonce = "deadbeefcafef00d";
+
+        // First insertion admits.
+        assert!(check_and_record_nonce(did, nonce, now));
+        // Immediate replay rejects.
+        assert!(!check_and_record_nonce(did, nonce, now));
+        // A different nonce from the same DID is fine.
+        assert!(check_and_record_nonce(did, "1234567890abcdef", now));
+        // Case-insensitive: uppercase nonce_hex still treated as replay.
+        assert!(!check_and_record_nonce(did, "DEADBEEFCAFEF00D", now));
+    }
+
+    #[test]
+    fn replay_cache_expires_after_ttl() {
+        let did = "did:tenzro:test:replay-2";
+        let nonce = "aaaaaaaabbbbbbbb";
+        let t0 = chrono::Utc::now().timestamp_millis();
+
+        assert!(check_and_record_nonce(did, nonce, t0));
+        // Same nonce just after TTL expiry is accepted because the lazy
+        // sweep retires the stale entry before checking.
+        let t1 = t0 + REPLAY_TTL_MS + 1;
+        assert!(check_and_record_nonce(did, nonce, t1));
     }
 }

@@ -23,7 +23,6 @@
 use crate::{
     error::{BridgeError, Result},
     evm_signer::EvmTransactionSigner,
-    message_format::{NonceTracker, TenzroMessage},
     traits::{BridgeAdapter, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo, TransferStatus},
 };
 use async_trait::async_trait;
@@ -602,8 +601,6 @@ pub struct LiFiAdapter {
     transfers: Arc<DashMap<String, LiFiTransferRecord>>,
     /// Optional EVM transaction signer for real on-chain submission
     signer: Option<Arc<EvmTransactionSigner>>,
-    /// Nonce tracker for replay protection on received messages
-    nonce_tracker: NonceTracker,
     /// Cached chains list (avoid repeated /chains calls)
     cached_chains: Arc<RwLock<Option<Vec<ChainInfo>>>>,
     /// Transfer ID counter for unique ID generation
@@ -623,7 +620,6 @@ impl LiFiAdapter {
             http_client,
             transfers: Arc::new(DashMap::new()),
             signer: None,
-            nonce_tracker: NonceTracker::new(),
             cached_chains: Arc::new(RwLock::new(None)),
             transfer_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
@@ -636,7 +632,6 @@ impl LiFiAdapter {
             http_client,
             transfers: Arc::new(DashMap::new()),
             signer: None,
-            nonce_tracker: NonceTracker::new(),
             cached_chains: Arc::new(RwLock::new(None)),
             transfer_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
@@ -1308,56 +1303,22 @@ impl BridgeAdapter for LiFiAdapter {
         ))
     }
 
-    async fn receive_message(&self, source_chain: &str, payload: Vec<u8>) -> Result<()> {
-        let src_chain_id = Self::chain_name_to_evm_id(source_chain)?;
-
-        info!(
-            "LI.FI: Receiving message from chain {} (chain_id: {}), payload_size={}",
-            source_chain,
-            src_chain_id,
-            payload.len()
-        );
-
-        // 1. Deserialize the payload as a TenzroMessage
-        let message = TenzroMessage::decode(&payload)?;
-
-        // 2. Validate message format (version, addresses, timestamp drift)
-        message.validate()?;
-
-        // 3. Verify message hash integrity
-        if !message.verify_hash() {
-            return Err(BridgeError::InvalidMessageHash);
-        }
-
-        // 4. Verify the source chain ID matches the message's source_chain_id
-        if message.source_chain_id != src_chain_id {
-            return Err(BridgeError::AdapterError(format!(
-                "Source chain mismatch: message says {} but received from chain_id {}",
-                message.source_chain_id, src_chain_id
-            )));
-        }
-
-        // 5. Verify cryptographic signature if present
-        if message.signature.is_some() {
-            let valid = message.verify_signature()?;
-            if !valid {
-                return Err(BridgeError::AdapterError(
-                    "LI.FI: Message signature verification failed".to_string(),
-                ));
-            }
-            debug!("LI.FI: Message signature verified successfully");
-        }
-
-        // 6. Replay protection — nonce must be monotonically increasing per sender
-        self.nonce_tracker
-            .check_and_update(&message.sender, message.nonce)?;
-
-        info!(
-            "LI.FI: Message from {} verified and processed (type={:?}, nonce={})",
-            message.sender, message.message_type, message.nonce
-        );
-
-        Ok(())
+    async fn receive_message(&self, _source_chain: &str, _payload: Vec<u8>) -> Result<()> {
+        // Fail-closed. LI.FI is a route aggregator — it does not
+        // deliver messages itself. Inbound traffic for a LI.FI route
+        // must be admitted by the underlying provider adapter (LZ,
+        // CCIP, Wormhole, Hyperlane, Axelar, deBridge) using THAT
+        // provider's real cross-chain authority. Accepting inbound
+        // payload via the LI.FI adapter would short-circuit the
+        // underlying authority check, so this path is closed
+        // entirely.
+        Err(BridgeError::AdapterError(
+            "LI.FI is a route aggregator and does not admit inbound \
+             cross-chain messages directly. Route inbound traffic through \
+             the underlying provider adapter (Wormhole / Hyperlane / Axelar \
+             / LZ / CCIP / deBridge)."
+                .into(),
+        ))
     }
 
     async fn bridge_tokens(&self, request: BridgeTokenRequest) -> Result<BridgeTokenReceipt> {

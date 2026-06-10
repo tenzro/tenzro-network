@@ -793,6 +793,30 @@ fn bytes_to_address(bytes: &[u8]) -> Address {
     Address(buf)
 }
 
+/// Decode hex-encoded 20-byte EVM-style addresses for inbound bridge
+/// verifier sets (LayerZero DVN, CCIP committee + RMN, deBridge DLN).
+/// Accepts an optional `0x` prefix. Returns a single error string
+/// naming the first malformed entry so the operator can fix their
+/// config before retrying.
+fn decode_verifier_addresses(hex_addrs: &[String]) -> std::result::Result<Vec<[u8; 20]>, String> {
+    let mut out = Vec::with_capacity(hex_addrs.len());
+    for (i, raw) in hex_addrs.iter().enumerate() {
+        let cleaned = raw.trim_start_matches("0x").trim_start_matches("0X");
+        let bytes = hex::decode(cleaned)
+            .map_err(|e| format!("address #{i} '{raw}' is not valid hex: {e}"))?;
+        if bytes.len() != 20 {
+            return Err(format!(
+                "address #{i} '{raw}' is {} bytes (expected 20)",
+                bytes.len()
+            ));
+        }
+        let mut a = [0u8; 20];
+        a.copy_from_slice(&bytes);
+        out.push(a);
+    }
+    Ok(out)
+}
+
 /// Build a `ModelInfo` record describing a Cortex recurrent-depth worker so
 /// it can be published in the shared `ModelRegistry` catalog. Pricing is
 /// mapped from the worker's `CortexPricing` (per-input/per-output tokens, all
@@ -1509,6 +1533,15 @@ pub struct TenzroNode {
     /// skipping block replay from genesis.
     state_sync_peer: Option<String>,
 
+    /// Operator-supplied weak-subjectivity anchor for state-sync. MUST be
+    /// the 32-byte state root committed at the snapshot height the peer
+    /// will serve; the snapshot manifest's declared root is compared
+    /// bit-for-bit against this anchor before any chunk is applied.
+    /// Without this anchor, [`crate::snapshot::bootstrap_from_peer`]
+    /// refuses to sync (a malicious peer could otherwise seed forged
+    /// state). Typically passed via CLI alongside `--state-sync-from`.
+    state_sync_anchor: Option<[u8; 32]>,
+
     /// Live chain tip height — shared with EventLoop for lock-free RPC reads.
     ///
     /// The EventLoop updates this atomically on every finalized block (both local
@@ -1728,6 +1761,7 @@ impl TenzroNode {
             event_loop_tx: None,
             snapshot_store: None,
             state_sync_peer: None,
+            state_sync_anchor: None,
             chain_tip: Arc::new(AtomicU64::new(0)),
             peer_status,
             provider_schedule: Arc::new(RwLock::new(ProviderSchedule::default())),
@@ -1775,8 +1809,21 @@ impl TenzroNode {
     /// excluded so that a peer that disconnects without sending an explicit
     /// goodbye doesn't pin the network tip at its last advertised height
     /// indefinitely.
+    ///
+    /// **Diagnostic only.** RPC handlers must call
+    /// [`Self::network_tip_capped`] for sync detection — `network_tip`
+    /// uses the unfiltered maximum and can be inflated by a single
+    /// malicious peer.
     pub fn network_tip(&self) -> Option<u64> {
         self.peer_status.network_tip()
+    }
+
+    /// Robust network-tip estimator: median of fresh peer heights,
+    /// capped at `local_tip + MAX_TIP_LEAD`. Used by `eth_syncing` /
+    /// `tenzro_syncing` so a malicious peer cannot drag the local node
+    /// into a fake-sync state.
+    pub fn network_tip_capped(&self, local_tip: u64) -> Option<u64> {
+        self.peer_status.network_tip_capped(local_tip)
     }
 
     /// Returns a snapshot of all non-expired network-discovered models.
@@ -1859,6 +1906,7 @@ impl TenzroNode {
                         store.clone(),
                         &peer_url,
                         0,
+                        self.state_sync_anchor,
                     )
                     .await
                     {
@@ -1866,7 +1914,7 @@ impl TenzroNode {
                             height = m.height,
                             num_chunks = m.num_chunks,
                             state_root = %m.state_root_hex,
-                            "State-sync bootstrap complete"
+                            "State-sync bootstrap complete (state_root matched operator anchor)"
                         ),
                         Err(e) => warn!(
                             error = %e,
@@ -5331,10 +5379,38 @@ impl TenzroNode {
                     "0x0000000000000000000000000000000000000001",
                     "0x0000000000000000000000000000000000000002",
                 );
-                let mut adapter = LayerZeroAdapter::new(lz_config);
+                let adapter = LayerZeroAdapter::new(lz_config);
 
+                let mut adapter = adapter;
                 if let Some(signer) = self.build_bridge_signer("LayerZero", lz_cfg).await {
                     adapter = adapter.with_signer(signer);
+                }
+
+                // Install configured DVN sets. Without at least one DVN set
+                // the adapter refuses inbound traffic at runtime
+                // (fail-closed).
+                for entry in &lz_cfg.inbound_verifier_sets {
+                    if entry.kind != "dvn" {
+                        warn!(
+                            kind = %entry.kind,
+                            "Skipping non-'dvn' inbound_verifier_set entry on LayerZero adapter"
+                        );
+                        continue;
+                    }
+                    match decode_verifier_addresses(&entry.addresses) {
+                        Ok(addrs) => {
+                            adapter.install_dvn_set(entry.source_id as u32, addrs, entry.threshold);
+                            info!(
+                                src_eid = entry.source_id,
+                                threshold = entry.threshold,
+                                "LayerZero DVN set installed"
+                            );
+                        }
+                        Err(e) => warn!(
+                            error = %e,
+                            "Failed to decode LayerZero DVN addresses"
+                        ),
+                    }
                 }
 
                 bridge_router.register_adapter("layerzero", Box::new(adapter)).await;
@@ -5350,6 +5426,41 @@ impl TenzroNode {
 
                 if let Some(signer) = self.build_bridge_signer("CCIP", ccip_cfg).await {
                     adapter = adapter.with_signer(signer);
+                }
+
+                // CCIP requires BOTH a commit-store committee set and an
+                // RMN ARM blessing set per source selector. Either missing
+                // = adapter refuses inbound traffic for that selector.
+                for entry in &ccip_cfg.inbound_verifier_sets {
+                    match decode_verifier_addresses(&entry.addresses) {
+                        Ok(addrs) => match entry.kind.as_str() {
+                            "ccip_commit" => {
+                                adapter.install_commit_set(entry.source_id, addrs, entry.threshold);
+                                info!(
+                                    selector = entry.source_id,
+                                    threshold = entry.threshold,
+                                    "CCIP commit-store set installed"
+                                );
+                            }
+                            "ccip_rmn" => {
+                                adapter.install_rmn_set(entry.source_id, addrs, entry.threshold);
+                                info!(
+                                    selector = entry.source_id,
+                                    threshold = entry.threshold,
+                                    "CCIP RMN ARM set installed"
+                                );
+                            }
+                            other => warn!(
+                                kind = %other,
+                                "Skipping unknown inbound_verifier_set kind on CCIP adapter"
+                            ),
+                        },
+                        Err(e) => warn!(
+                            error = %e,
+                            kind = %entry.kind,
+                            "Failed to decode CCIP verifier addresses"
+                        ),
+                    }
                 }
 
                 bridge_router.register_adapter("ccip", Box::new(adapter)).await;
@@ -5369,6 +5480,32 @@ impl TenzroNode {
 
                 if let Some(signer) = self.build_bridge_signer("deBridge", db_cfg).await {
                     adapter = adapter.with_signer(signer);
+                }
+
+                // Install configured DLN validator sets. Without at least
+                // one set the adapter refuses inbound traffic (fail-closed).
+                for entry in &db_cfg.inbound_verifier_sets {
+                    if entry.kind != "dln" {
+                        warn!(
+                            kind = %entry.kind,
+                            "Skipping non-'dln' inbound_verifier_set entry on deBridge adapter"
+                        );
+                        continue;
+                    }
+                    match decode_verifier_addresses(&entry.addresses) {
+                        Ok(addrs) => {
+                            adapter.install_validator_set(entry.source_id, addrs, entry.threshold);
+                            info!(
+                                src_chain = entry.source_id,
+                                threshold = entry.threshold,
+                                "deBridge DLN validator set installed"
+                            );
+                        }
+                        Err(e) => warn!(
+                            error = %e,
+                            "Failed to decode deBridge DLN validator addresses"
+                        ),
+                    }
                 }
 
                 bridge_router.register_adapter("debridge", Box::new(adapter)).await;
@@ -7622,12 +7759,37 @@ impl TenzroNode {
         self.snapshot_store.as_ref()
     }
 
+    /// Shared handle to the on-node ZK commitment registry.
+    ///
+    /// The EVM `ZK_VERIFY` precompile (0x0101) returns `1` iff the
+    /// queried commitment hash is present in this set. Off-EVM
+    /// callers — primarily the `tenzro_verifyZkProof` RPC handler —
+    /// MUST insert a commitment via `attest()` after a successful
+    /// `verify_proof_envelope`, otherwise downstream EVM contracts
+    /// that gate on ZK verification will reject otherwise-valid
+    /// proofs.
+    pub fn zk_commitment_registry(&self)
+        -> &Arc<tenzro_vm::precompiles::ZkCommitmentRegistry>
+    {
+        &self.zk_commitment_registry
+    }
+
     /// Set the state-sync peer URL. Must be called BEFORE
     /// [`TenzroNode::start`]; the start sequence checks this field
     /// between `init_storage` and `init_network` and, if set, fetches
     /// the highest snapshot from that peer's JSON-RPC endpoint.
     pub fn set_state_sync_peer(&mut self, peer_url: String) {
         self.state_sync_peer = Some(peer_url);
+    }
+
+    /// Set the weak-subjectivity state-root anchor for state-sync.
+    /// MUST be the 32-byte state root committed at the snapshot height
+    /// the peer will serve. Operators obtain this value out of band
+    /// (signed gossip from a known-good validator, a published
+    /// checkpoint, or a personally-verified RPC). Without this anchor,
+    /// `bootstrap_from_peer` refuses to apply any chunks.
+    pub fn set_state_sync_anchor(&mut self, anchor: [u8; 32]) {
+        self.state_sync_anchor = Some(anchor);
     }
 
     /// Returns the consensus engine if initialized.

@@ -53,19 +53,39 @@
   "rating": 0,
   "content_hash": null,
   "docs_url": "https://docs.tenzro.network/agent-kit/templates/agentic-nav-calculator",
-  "policy": {
-    "tools_allowlist": [
-      { "tool_id": "tenzro_secureMintCheck", "tool_type": "rpc" },
-      { "tool_id": "tenzro_submitReserveAttestation", "tool_type": "rpc" },
-      { "tool_id": "tenzro_getReserve", "tool_type": "rpc" }
-    ],
-    "delegation_scope": {
-      "max_per_op_wei": "0",
-      "max_per_day_wei": "0",
-      "max_tx_count_per_day": 144,
+  "metadata": {},
+  "execution_spec": {
+    "backend": "MultiVm",
+    "delegation": {
+      "max_transaction_value": "0",
+      "max_daily_spend": "0",
+      "allowed_operations": ["secure_mint_check", "submit_reserve_attestation", "get_reserve"],
       "allowed_chains": ["tenzro"],
-      "allowed_protocols": []
+      "time_bound_days": 365,
+      "kyc_tier": "Full"
     },
+    "required_tool_tags": ["secure-mint", "por", "reserve"],
+    "required_skill_tags": ["rwa", "nav"],
+    "steps": [
+      {
+        "NodeRpc": {
+          "method": "tenzro_submitReserveAttestation",
+          "params": { "token_id": "{{token_id}}", "por_feed_id": "{{por_feed_id}}" }
+        }
+      },
+      {
+        "NodeRpc": {
+          "method": "tenzro_getReserve",
+          "params": { "token_id": "{{token_id}}" }
+        }
+      },
+      {
+        "NodeRpc": {
+          "method": "tenzro_secureMintCheck",
+          "params": { "token_id": "{{token_id}}", "amount": "{{mint_amount}}" }
+        }
+      }
+    ],
     "hard_caps": {
       "per_operation_value": "0",
       "per_day_value": "0"

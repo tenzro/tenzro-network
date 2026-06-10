@@ -1871,6 +1871,15 @@ impl rmcp::ServerHandler for LayerZeroMcpServer {
 pub async fn start_layerzero_mcp_server(
     listen_addr: String,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (_keep_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+    start_layerzero_mcp_server_with_shutdown(listen_addr, shutdown_rx).await
+}
+
+/// Start the LayerZero MCP server with a graceful-shutdown channel.
+pub async fn start_layerzero_mcp_server_with_shutdown(
+    listen_addr: String,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
     };
@@ -1892,7 +1901,10 @@ pub async fn start_layerzero_mcp_server(
         config,
     );
 
-    let app = axum::Router::new().nest_service("/mcp", service);
+    let app = axum::Router::new()
+        .nest_service("/mcp", service)
+        .layer(tower::limit::ConcurrencyLimitLayer::new(100))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(2 * 1024 * 1024));
 
     let listener = tokio::net::TcpListener::bind(&listen_addr)
         .await
@@ -1904,6 +1916,10 @@ pub async fn start_layerzero_mcp_server(
     );
 
     axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.recv().await;
+            tracing::info!("LayerZero MCP server shutting down gracefully");
+        })
         .await
         .map_err(|e| format!("LayerZero MCP server error: {}", e))?;
 

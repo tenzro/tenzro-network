@@ -42,8 +42,6 @@
 use async_trait::async_trait;
 use sha2::{Digest, Sha384};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use tenzro_types::tee::*;
@@ -173,14 +171,27 @@ struct SnpReport {
 ///
 /// - **Real** (default): Uses actual SEV-SNP hardware via Linux kernel interface (`/dev/sev-guest`)
 /// - **Simulation** (`TENZRO_SIMULATE_SEV=1`): Returns plausible fake attestations for local development
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AmdSevSnpProvider {
-    /// In-memory key storage (production would use SEV-sealed storage)
-    keys: Arc<RwLock<HashMap<Uuid, EnclaveKeyHandle>>>,
+    /// Real enclave-key store: every `enclave_keygen` call derives a
+    /// fresh Ed25519 / Secp256k1 / AES-256-GCM key via HKDF-SHA256 over
+    /// the SEV-SNP `SNP_GET_DERIVED_KEY` IKM. Signatures and encryption
+    /// produced by [`Self::enclave_sign`] / [`Self::enclave_encrypt`]
+    /// use the real key material.
+    keystore: std::sync::Arc<crate::enclave_keystore::EnclaveKeystore>,
     /// Whether SEV-SNP is available
     available: bool,
     /// Whether running in simulation mode
     simulate: bool,
+}
+
+impl std::fmt::Debug for AmdSevSnpProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AmdSevSnpProvider")
+            .field("available", &self.available)
+            .field("simulate", &self.simulate)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AmdSevSnpProvider {
@@ -195,7 +206,7 @@ impl AmdSevSnpProvider {
         };
 
         Self {
-            keys: Arc::new(RwLock::new(HashMap::new())),
+            keystore: std::sync::Arc::new(crate::enclave_keystore::EnclaveKeystore::new("amd-sev-snp")),
             available,
             simulate,
         }
@@ -698,11 +709,15 @@ impl AmdSevSnpProvider {
         ]);
 
         let mut cert_chain_valid = false;
+        let mut signature_valid = false;
 
         if report.simulated {
             details.insert("simulated".to_string(), "true".to_string());
             details.insert("type".to_string(), "simulated".to_string());
-            tracing::debug!("Verifying simulated AMD SEV-SNP report");
+            tracing::warn!(
+                "Verifying SIMULATED AMD SEV-SNP report — AttestationResult.valid \
+                 will be false. Simulated reports carry no cryptographic authority."
+            );
         } else {
             details.insert("type".to_string(), "real".to_string());
             details.insert("chip_id".to_string(), hex::encode(&report.chip_id));
@@ -726,6 +741,7 @@ impl AmdSevSnpProvider {
                         Ok(true) => {
                             tracing::info!("SNP report signature verified successfully");
                             details.insert("signature_verified".to_string(), "true".to_string());
+                            signature_valid = true;
                         }
                         Ok(false) => {
                             tracing::warn!("SNP report signature verification failed");
@@ -758,8 +774,13 @@ impl AmdSevSnpProvider {
             },
         ];
 
+        // Fail-closed validity. A real SNP report is `valid` only when BOTH
+        // the VCEK-anchored report-body signature and the ARK→ASK→VCEK
+        // certificate chain verify. Simulated reports are NEVER valid.
+        let valid = !report.simulated && signature_valid && cert_chain_valid;
+
         Ok(AttestationResult {
-            valid: true,
+            valid,
             vendor: TeeVendor::AmdSevSnp,
             tcb_version: tcb_components,
             measurements,
@@ -1116,27 +1137,23 @@ impl TeeProvider for AmdSevSnpProvider {
         if !self.available {
             return Err(TeeError::not_available("AMD SEV-SNP not available"));
         }
-
-        let key_id = Uuid::new_v4();
-        let public_key = {
-            use sha2::Sha256;
-            let mut hasher = Sha256::new();
-            hasher.update(key_id.as_bytes());
-            hasher.update(b"sev-snp-keygen");
-            Some(hasher.finalize().to_vec())
-        };
-
-        let handle = EnclaveKeyHandle {
-            id: key_id,
-            algorithm: params.algorithm,
-            public_key,
-            created_at: tenzro_types::Timestamp::now(),
-            attestation: None,
-        };
-
-        self.keys.write().await.insert(key_id, handle.clone());
-        tracing::info!("Generated key in SEV-SNP VM: {}", key_id);
-
+        if self.simulate {
+            return Err(TeeError::not_available(
+                "AMD SEV-SNP simulation mode cannot supply real SNP_GET_DERIVED_KEY IKM",
+            ));
+        }
+        // Pin the derivation to MEASUREMENT|IMAGE_ID|GUEST_SVN so two
+        // different boots of the same workload reproduce the same key
+        // and a tampered boot chain cannot recover prior keys.
+        const ROOT_KEY_SELECT: u32 = 0;
+        const GUEST_FIELD_SELECT: u64 = 0b101; // MEASUREMENT|IMAGE_ID|GUEST_SVN
+        let ikm = self.derived_key(ROOT_KEY_SELECT, GUEST_FIELD_SELECT, 0, 0, 0)?;
+        let handle = self.keystore.keygen(params, &ikm).await?;
+        tracing::info!(
+            key_id = %handle.id,
+            algorithm = ?handle.algorithm,
+            "Generated key in SEV-SNP VM keystore"
+        );
         Ok(handle)
     }
 
@@ -1144,48 +1161,21 @@ impl TeeProvider for AmdSevSnpProvider {
         if !self.available {
             return Err(TeeError::not_available("AMD SEV-SNP not available"));
         }
-
-        let keys = self.keys.read().await;
-        if !keys.contains_key(&key.id) {
-            return Err(TeeError::InvalidKeyHandle(format!("Key not found: {}", key.id)));
-        }
-
-        use sha2::Sha256;
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        hasher.update(key.id.as_bytes());
-        hasher.update(b"sev-snp-sign");
-        Ok(hasher.finalize().to_vec())
+        self.keystore.sign(key, data).await
     }
 
     async fn enclave_encrypt(&self, key: &EnclaveKeyHandle, plaintext: &[u8]) -> Result<Vec<u8>> {
         if !self.available {
             return Err(TeeError::not_available("AMD SEV-SNP not available"));
         }
-
-        let keys = self.keys.read().await;
-        if !keys.contains_key(&key.id) {
-            return Err(TeeError::InvalidKeyHandle(format!("Key not found: {}", key.id)));
-        }
-
-        tracing::debug!("Encrypting {} bytes with key {} in SEV-SNP VM", plaintext.len(), key.id);
-        // In real SEV-SNP, the AES key would be protected by VMSA (VM Save Area)
-        // encryption. In simulation mode we derive it from the key UUID.
-        crate::enclave_crypto::enclave_encrypt_aes256gcm(&key.id, b"amd-sev-snp", plaintext)
+        self.keystore.encrypt(key, plaintext).await
     }
 
     async fn enclave_decrypt(&self, key: &EnclaveKeyHandle, ciphertext: &[u8]) -> Result<Vec<u8>> {
         if !self.available {
             return Err(TeeError::not_available("AMD SEV-SNP not available"));
         }
-
-        let keys = self.keys.read().await;
-        if !keys.contains_key(&key.id) {
-            return Err(TeeError::InvalidKeyHandle(format!("Key not found: {}", key.id)));
-        }
-
-        tracing::debug!("Decrypting {} bytes with key {} in SEV-SNP VM", ciphertext.len(), key.id);
-        crate::enclave_crypto::enclave_decrypt_aes256gcm(&key.id, b"amd-sev-snp", ciphertext)
+        self.keystore.decrypt(key, ciphertext).await
     }
 }
 
@@ -1281,14 +1271,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sev_snp_verify_simulated_report() {
+    async fn test_sev_snp_verify_simulated_report_is_invalid() {
+        // Simulated reports carry no cryptographic authority — verifier
+        // exposes measurements + details for observability but `valid`
+        // MUST be false.
         unsafe { std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1"); }
         let provider = AmdSevSnpProvider::new();
 
         let report = provider.generate_attestation(b"test").await.unwrap();
         let result = provider.verify_attestation(&report).await.unwrap();
 
-        assert!(result.valid);
+        assert!(
+            !result.valid,
+            "simulated SEV-SNP reports must never report valid=true"
+        );
         assert_eq!(result.vendor, TeeVendor::AmdSevSnp);
         assert_eq!(result.details.get("simulated"), Some(&"true".to_string()));
         assert!(!result.measurements.is_empty());
@@ -1297,7 +1293,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sev_snp_keygen_and_sign() {
+    async fn test_sev_snp_keygen_in_simulation_returns_not_available() {
+        // Simulation cannot supply the SNP_GET_DERIVED_KEY IKM, so
+        // `enclave_keygen` rejects with NotAvailable. No fabrication.
         unsafe { std::env::set_var("TENZRO_SIMULATE_SEV_SNP", "1"); }
         let provider = AmdSevSnpProvider::new();
 
@@ -1308,11 +1306,44 @@ mod tests {
             params: HashMap::new(),
         };
 
-        let key = provider.enclave_keygen(params).await.unwrap();
-        assert!(key.public_key.is_some());
+        let err = provider.enclave_keygen(params).await.unwrap_err();
+        assert!(
+            matches!(err, TeeError::NotAvailable(_)),
+            "expected NotAvailable, got {err:?}"
+        );
+    }
 
-        let sig = provider.enclave_sign(&key, b"test").await.unwrap();
-        assert!(!sig.is_empty());
+    #[tokio::test]
+    async fn test_sev_snp_keystore_real_secp256k1_recovers() {
+        use k256::ecdsa::{
+            RecoveryId, Signature as K256Sig, VerifyingKey as Secp256k1Verifying,
+        };
+        use k256::elliptic_curve::sec1::ToSec1Point;
+        use sha2::{Digest, Sha256};
+        let ks = crate::enclave_keystore::EnclaveKeystore::new("amd-sev-snp-test");
+        let ikm: Vec<u8> = (0u8..64).collect();
+        let params = KeyGenParams {
+            algorithm: KeyAlgorithm::Secp256k1,
+            purpose: KeyPurpose::Signing,
+            exportable: false,
+            params: HashMap::new(),
+        };
+        let handle = ks.keygen(params, &ikm).await.unwrap();
+        let pk_uncompressed = handle.public_key.clone().unwrap();
+        let msg = b"amd-sev-snp real Secp256k1";
+        let sig = ks.sign(&handle, msg).await.unwrap();
+
+        let mut h = Sha256::new();
+        h.update(msg);
+        let digest = h.finalize();
+        let r_s: [u8; 64] = sig[..64].try_into().unwrap();
+        let v = sig[64];
+        let parsed = K256Sig::from_slice(&r_s).unwrap();
+        let rec = RecoveryId::from_byte(v).unwrap();
+        let recovered = Secp256k1Verifying::recover_from_prehash(&digest, &parsed, rec).unwrap();
+        let recovered_encoded =
+            k256::PublicKey::from(&recovered).to_sec1_point(false);
+        assert_eq!(recovered_encoded.as_bytes(), pk_uncompressed.as_slice());
     }
 
     #[tokio::test]

@@ -17,7 +17,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
+use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{info, warn};
 
 use tenzro_storage::KvStore;
@@ -2499,7 +2501,15 @@ pub async fn start_a2a_server_with_shutdown(
                 );
                 response
             },
-        ));
+        ))
+        // Concurrency limit: max 200 in-flight A2A requests. Mirrors the RPC
+        // server limit; A2A is JSON-RPC over HTTP so the same DoS surface
+        // applies.
+        .layer(ConcurrencyLimitLayer::new(200))
+        // Request body size limit: 2 MB. Caps the memory footprint of any
+        // single inbound message — A2A messages carry small JSON envelopes,
+        // not arbitrary blobs.
+        .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024));
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     info!(addr = %listen_addr, "A2A Protocol server listening");

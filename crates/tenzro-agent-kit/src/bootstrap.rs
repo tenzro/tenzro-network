@@ -135,8 +135,11 @@ mod tests {
         let manifests = load_bundled_manifests().expect("bundled manifests should parse");
         // 10 original templates + 1 Solana Jupiter swap +
         // 3 Tenzro Train trainer templates +
-        // 4 multi-modal inference templates (forecast, vision, audio, video).
-        assert_eq!(manifests.len(), 18);
+        // 4 multi-modal inference templates (forecast, vision, audio, video) +
+        // 7 institutional + DvP saga templates (NAV calculator, LC examiner,
+        // treasury rebalancer, margin call, bond pricer RFQ, best-ex router,
+        // DvP atomic-swap saga).
+        assert_eq!(manifests.len(), 25);
         assert!(manifests.iter().all(|t| !t.name.is_empty()));
         assert!(manifests.iter().all(|t| t.execution_spec.is_some()));
     }

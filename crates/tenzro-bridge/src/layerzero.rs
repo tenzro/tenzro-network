@@ -16,7 +16,6 @@
 use crate::{
     error::{BridgeError, Result},
     evm_signer::EvmTransactionSigner,
-    message_format::{NonceTracker, TenzroMessage},
     traits::{BridgeAdapter, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo, TransferStatus},
 };
 use async_trait::async_trait;
@@ -48,8 +47,10 @@ pub struct LayerZeroAdapter {
     transfers: Arc<DashMap<String, TransferStatus>>,
     /// Optional EVM transaction signer for real on-chain submission
     signer: Option<Arc<EvmTransactionSigner>>,
-    /// Nonce tracker for replay protection on received messages
-    inbound_nonce_tracker: NonceTracker,
+    /// Per-source-EID DVN attestation set. Inbound delivery requires
+    /// threshold-many DVN signatures over the LayerZero V2 ULN payload
+    /// hash. Absent set → `receive_message` refuses (no fail-open).
+    dvn_sets: Arc<parking_lot::RwLock<std::collections::HashMap<u32, crate::secp256k1_multisig::ValidatorSet>>>,
 }
 
 impl LayerZeroAdapter {
@@ -67,8 +68,30 @@ impl LayerZeroAdapter {
             nonce: Arc::new(DashMap::new()),
             transfers: Arc::new(DashMap::new()),
             signer: None,
-            inbound_nonce_tracker: NonceTracker::new(),
+            dvn_sets: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Install the DVN attestation set for a source EID. Inbound
+    /// `receive_message` calls from `src_eid` will require
+    /// `threshold`-many DVN signatures over the ULN payload hash.
+    pub fn install_dvn_set(
+        &self,
+        src_eid: u32,
+        dvn_addresses: Vec<[u8; 20]>,
+        threshold: u8,
+    ) {
+        let set = crate::secp256k1_multisig::ValidatorSet::new(
+            dvn_addresses,
+            threshold,
+            "LayerZero ULN DVN",
+        );
+        self.dvn_sets.write().insert(src_eid, set);
+    }
+
+    /// Whether a DVN set is installed for a given source EID.
+    pub fn has_dvn_set(&self, src_eid: u32) -> bool {
+        self.dvn_sets.read().contains_key(&src_eid)
     }
 
     /// Configures an EVM transaction signer for real on-chain submission
@@ -482,53 +505,70 @@ impl BridgeAdapter for LayerZeroAdapter {
     }
 
     async fn receive_message(&self, source_chain: &str, payload: Vec<u8>) -> Result<()> {
+        // Real LayerZero V2 Uln302-class verifier. The cross-chain
+        // authority is the DVN attestation set installed for the
+        // source EID via `install_dvn_set`. Without an installed set
+        // the adapter refuses delivery (no fail-open).
+        //
+        // Wire shape (Tenzro framing for inbound LZ messages):
+        //
+        //   [0..89]         packet_header (LZ V2 Uln spec):
+        //                     version(1) || nonce(8) || src_eid(4) ||
+        //                     sender(32) || dst_eid(4) || receiver(32) ||
+        //                     guid(32) -- TOTAL 113 bytes, but our framing
+        //                     keeps the canonical Uln layout where:
+        //                       packet_header_size = 81 (version..receiver),
+        //                       guid is part of the payload region.
+        //   [81..81+GUID]   guid (32)
+        //   [113..N-1-T]    message bytes
+        //   [N-1-T..N-1]    sig_count * (addr20 || sig65)
+        //   [N-1]           sig_count (u8)
+        //
+        // The DVN-signed prehash is `keccak256(headerHash || payloadHash)`
+        // per `ReceiveUln302.verify` where:
+        //   headerHash  = keccak256(packet_header_81)
+        //   payloadHash = keccak256(guid || message_bytes)
         let src_eid = self.get_chain_eid(source_chain)?;
-
+        let set = self
+            .dvn_sets
+            .read()
+            .get(&src_eid)
+            .cloned()
+            .ok_or_else(|| BridgeError::AdapterError(format!(
+                "LayerZero adapter has no DVN set installed for source EID \
+                 {src_eid} — inbound traffic refused. Call install_dvn_set \
+                 at startup."
+            )))?;
+        if payload.len() < 113 + 1 {
+            return Err(BridgeError::InvalidParameter(
+                "LayerZero ULN: payload too short for packet header + guid".into(),
+            ));
+        }
+        let (body, signatures) = crate::secp256k1_multisig::parse_trailing_signature_set(&payload)?;
+        if body.len() < 113 {
+            return Err(BridgeError::InvalidParameter(
+                "LayerZero ULN: body shorter than packet header (81) + guid (32)".into(),
+            ));
+        }
+        // packet_header_size is 81 (version..receiver). The guid begins at 81.
+        let header_81 = &body[..81];
+        let guid_and_message = &body[81..];
+        use sha3::{Digest as Sha3Digest, Keccak256};
+        let mut k = Keccak256::new();
+        Sha3Digest::update(&mut k, header_81);
+        let header_hash: [u8; 32] = k.finalize().into();
+        let mut k = Keccak256::new();
+        Sha3Digest::update(&mut k, guid_and_message);
+        let payload_hash: [u8; 32] = k.finalize().into();
+        let mut k = Keccak256::new();
+        Sha3Digest::update(&mut k, &header_hash);
+        Sha3Digest::update(&mut k, &payload_hash);
+        let prehash: [u8; 32] = k.finalize().into();
+        set.verify_quorum(&prehash, &signatures)?;
         info!(
-            "LayerZero: Receiving message from chain {} (EID: {}), payload_size={}",
-            source_chain,
-            src_eid,
-            payload.len()
+            "LayerZero ULN: DVN quorum verified ({} sigs, threshold {}, src_eid {})",
+            signatures.len(), set.threshold, src_eid
         );
-
-        // 1. Deserialize the payload as a TenzroMessage
-        let message = TenzroMessage::decode(&payload)?;
-
-        // 2. Validate message format (version, addresses, timestamp drift)
-        message.validate()?;
-
-        // 3. Verify message hash integrity
-        if !message.verify_hash() {
-            return Err(BridgeError::InvalidMessageHash);
-        }
-
-        // 4. Verify the source EID matches the message's source_chain_id
-        if message.source_chain_id != src_eid as u64 {
-            return Err(BridgeError::AdapterError(format!(
-                "Source chain mismatch: message says {} but received from EID {}",
-                message.source_chain_id, src_eid
-            )));
-        }
-
-        // 5. Verify cryptographic signature if present
-        if message.signature.is_some() {
-            let valid = message.verify_signature()?;
-            if !valid {
-                return Err(BridgeError::AdapterError(
-                    "LayerZero: Message signature verification failed".to_string(),
-                ));
-            }
-            debug!("LayerZero: Message signature verified successfully");
-        }
-
-        // 6. Replay protection — nonce must be monotonically increasing per sender
-        self.inbound_nonce_tracker.check_and_update(&message.sender, message.nonce)?;
-
-        info!(
-            "LayerZero: Message from {} verified and processed (type={:?}, nonce={})",
-            message.sender, message.message_type, message.nonce
-        );
-
         Ok(())
     }
 

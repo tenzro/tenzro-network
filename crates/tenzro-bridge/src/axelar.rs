@@ -354,46 +354,45 @@ impl BridgeAdapter for AxelarAdapter {
             return Err(BridgeError::ReplayAttack(command_key));
         }
 
-        // Axelar multisig validator-quorum check. Same trailing
-        // signature trailer format as Hyperlane: `body || u8
-        // sig_count || sig_count * (addr20 || sig65)`. When a
-        // validator set is installed, we verify threshold-many
-        // distinct signatures over the body digest. Without a set
-        // we fall through to the inner TenzroMessage check
-        // (consistent with pre-quorum-verification behaviour);
-        // production deployments MUST install a set.
-        let set_opt = self.validator_set.read().clone();
-        if let Some(set) = set_opt {
-            let n = payload.len();
-            if n < 1 {
-                return Err(BridgeError::InvalidParameter(
-                    "Axelar quorum: payload too short".into(),
-                ));
-            }
-            let sig_count = payload[n - 1] as usize;
-            let sig_record_len = 20 + 65;
-            let trailer_len = 1 + sig_count * sig_record_len;
-            if n < trailer_len + 1 {
-                return Err(BridgeError::InvalidParameter(
-                    "Axelar quorum: payload truncated for declared signature count".into(),
-                ));
-            }
-            let body = &payload[..n - trailer_len];
-            let mut signatures: Vec<([u8; 20], [u8; 65])> =
-                Vec::with_capacity(sig_count);
-            for i in 0..sig_count {
-                let off = n - trailer_len + i * sig_record_len;
-                let mut a = [0u8; 20];
-                a.copy_from_slice(&payload[off..off + 20]);
-                let mut s = [0u8; 65];
-                s.copy_from_slice(&payload[off + 20..off + 20 + 65]);
-                signatures.push((a, s));
-            }
-            let body_digest: [u8; 32] = Sha256::digest(body).into();
-            set.verify_quorum(&body_digest, &signatures)?;
+        // Axelar multisig validator-quorum check — fail-closed. Same
+        // trailing signature trailer format as Hyperlane: `body || u8
+        // sig_count || sig_count * (addr20 || sig65)`. A validator set
+        // MUST be installed; absence rejects all inbound traffic.
+        let set = self.validator_set.read().clone().ok_or_else(|| BridgeError::AdapterError(
+            "Axelar adapter has no validator set installed — inbound \
+             traffic refused. Call install_validator_set at startup."
+                .into(),
+        ))?;
+        let n = payload.len();
+        if n < 1 {
+            return Err(BridgeError::InvalidParameter(
+                "Axelar quorum: payload too short".into(),
+            ));
         }
+        let sig_count = payload[n - 1] as usize;
+        let sig_record_len = 20 + 65;
+        let trailer_len = 1 + sig_count * sig_record_len;
+        if n < trailer_len + 1 {
+            return Err(BridgeError::InvalidParameter(
+                "Axelar quorum: payload truncated for declared signature count".into(),
+            ));
+        }
+        let body = &payload[..n - trailer_len];
+        let mut signatures: Vec<([u8; 20], [u8; 65])> =
+            Vec::with_capacity(sig_count);
+        for i in 0..sig_count {
+            let off = n - trailer_len + i * sig_record_len;
+            let mut a = [0u8; 20];
+            a.copy_from_slice(&payload[off..off + 20]);
+            let mut s = [0u8; 65];
+            s.copy_from_slice(&payload[off + 20..off + 20 + 65]);
+            signatures.push((a, s));
+        }
+        let body_digest: [u8; 32] = Sha256::digest(body).into();
+        set.verify_quorum(&body_digest, &signatures)?;
 
-        if let Ok(message) = TenzroMessage::decode(&payload) {
+        // Inner Tenzro-side check operates on the verified `body`.
+        if let Ok(message) = TenzroMessage::decode(body) {
             message.validate()?;
             if !message.verify_hash() {
                 return Err(BridgeError::InvalidParameter(

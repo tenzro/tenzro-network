@@ -54,6 +54,23 @@ pub struct VmTransaction {
     /// has no signature to verify in the first place).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_digest: Option<Vec<u8>>,
+
+    /// Block timestamp (Unix milliseconds) under which this transaction
+    /// is being executed, supplied by the consensus event loop from the
+    /// finalized block being applied. Native-VM handlers that depend on
+    /// wall-clock time (escrow expiry checks, time-bound delegation
+    /// checks, lifecycle TTL) MUST read this field instead of calling
+    /// `chrono::Utc::now()` — the latter is a non-deterministic
+    /// system call and breaks consensus replay across validators with
+    /// even a few ms of clock skew.
+    ///
+    /// `None` indicates the transaction is being executed outside a
+    /// consensus context (e.g. tests, eth_call read-only paths). In
+    /// that case time-dependent handlers fall back to `Utc::now()` for
+    /// best-effort observability, but consensus admission MUST always
+    /// set this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_timestamp_ms: Option<i64>,
 }
 
 impl VmTransaction {
@@ -82,6 +99,7 @@ impl VmTransaction {
             signature: None,
             public_key: None,
             signing_digest: None,
+            block_timestamp_ms: None,
         }
     }
 
@@ -91,6 +109,16 @@ impl VmTransaction {
     /// the admission boundary verified against.
     pub fn with_signing_digest(mut self, digest: Vec<u8>) -> Self {
         self.signing_digest = Some(digest);
+        self
+    }
+
+    /// Attach the block timestamp under which this transaction executes.
+    /// MUST be set by the consensus event loop to the finalized block's
+    /// timestamp so all validators observe identical wall-clock state
+    /// during replay. Native-VM handlers that depend on time should
+    /// read [`Self::block_timestamp_ms`] instead of `Utc::now()`.
+    pub fn with_block_timestamp_ms(mut self, ts_ms: i64) -> Self {
+        self.block_timestamp_ms = Some(ts_ms);
         self
     }
 

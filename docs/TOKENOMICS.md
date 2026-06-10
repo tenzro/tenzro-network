@@ -1,1031 +1,990 @@
-# TNZO Tokenomics: Designed for the AI and Agentic Era
+# TNZO Token Economics
 
-**Tenzro Network | March 2026**
+## Version 1.0
 
----
+TNZO is the gas, settlement, staking, and governance token of Tenzro Network. The supply is fixed at one billion. The model is designed for the agentic decade: demand is multi-sourced (gas, settlement, bonds, governance), burn channels track real usage rather than emission schedules, providers and validators earn from real economic activity rather than speculative yield, and human users retain control over agent spending through scope and policy primitives that are part of the protocol layer.
 
-## Executive Summary
-
-The TNZO token is the economic primitive of Tenzro Network -- a purpose-built L1 for the AI age where humans and autonomous agents access intelligence (AI models) and security (TEE enclaves) and settle all value exchange on the Tenzro Ledger. This document details the TNZO token economics, situates them in the 2026 token-economy landscape, and provides a sustainability framework ensuring the protocol can fund itself indefinitely from real demand rather than inflationary subsidies.
-
-The 2026 AI-native protocol landscape has reached an inflection point. Protocols that tied their tokenomics to real compute demand (Bittensor's flow-based emissions, Render's burn-mint equilibrium, io.net's Incentive Dynamic Engine, Akash's BME) are surviving. Those relying on speculative staking yields and unsustainable inflation are struggling. Tenzro's architecture positions it well: a two-tier fee model (gas + network commission) with dual burn mechanisms creates natural deflationary pressure that scales with adoption. The key is ensuring every TNZO burned or staked corresponds to real demand for intelligence or security.
+This document specifies the economic model, the rationale behind each parameter choice, and how the pieces compose into a sustainable system through and after the bootstrap phase.
 
 ---
 
-## Table of Contents
+## Table of contents
 
-1. [TNZO Token Fundamentals](#1-tnzo-token-fundamentals)
-2. [The Two-Tier Fee Architecture](#2-the-two-tier-fee-architecture)
-3. [Burn Mechanisms and Deflationary Dynamics](#3-burn-mechanisms-and-deflationary-dynamics)
-4. [Staking Economics](#4-staking-economics)
-5. [Liquid Staking (stTNZO)](#5-liquid-staking-sttnzo)
-6. [Treasury and Revenue Model](#6-treasury-and-revenue-model)
-7. [Agent-Native Payments (MPP + x402)](#7-agent-native-payments-mpp--x402)
-8. [Micropayment Channels](#8-micropayment-channels)
-9. [Cross-Chain Settlement](#9-cross-chain-settlement)
-10. [The 2026 Token-Economy Landscape](#10-the-2026-token-economy-landscape)
-11. [Sustainability Analysis](#11-sustainability-analysis)
-12. [Supply and Distribution](#12-supply-and-distribution)
-13. [Governance Economics](#13-governance-economics)
-14. [What Tenzro Does Differently in Token Economics](#14-what-tenzro-does-differently-in-token-economics)
-15. [Strategic Recommendations](#15-strategic-recommendations)
+1. [Why TNZO](#1-why-tnzo)
+2. [Supply and decimals](#2-supply-and-decimals)
+3. [Demand sources](#3-demand-sources)
+4. [Fee architecture](#4-fee-architecture)
+5. [Burn channels and net supply](#5-burn-channels-and-net-supply)
+6. [Adaptive burn dial](#6-adaptive-burn-dial)
+7. [Staking](#7-staking)
+8. [Liquid staking](#8-liquid-staking)
+9. [Provider economies](#9-provider-economies)
+10. [Bonds and slashing](#10-bonds-and-slashing)
+11. [Bridge fee model](#11-bridge-fee-model)
+12. [Treasury](#12-treasury)
+13. [SeedAgent bootstrap allocation](#13-seedagent-bootstrap-allocation)
+14. [Agent-economy specific surfaces](#14-agent-economy-specific-surfaces)
+15. [Distributed training economics](#15-distributed-training-economics)
+16. [Governance economics](#16-governance-economics)
+17. [Sustainability](#17-sustainability)
+18. [Where the agentic decade is going](#18-where-the-agentic-decade-is-going)
 
 ---
 
-## 1. TNZO Token Fundamentals
+## 1. Why TNZO
+
+TNZO is the primary utility token of Tenzro Network. It is the single asset every participant — humans, agents, machines — uses to pay transaction fees, access network resources, and vote in governance. The point of the design is simple: a participant on Tenzro does not have to juggle a dozen tokens to get things done. One token covers every protocol-layer action.
+
+- **Gas.** Every transaction pays gas in TNZO. No separate fee token.
+- **Resource access.** Resources on Tenzro are everything participants can offer or consume — agents, skills, data, workflows, models, compute, apps, tools, TEE attestation, storage, distributed training participation, micropayment channels, cross-chain messages, marketplace templates. Every paid resource settles its protocol-layer commission in TNZO. Counterparties can still settle the underlying payment in any asset they agree on (stablecoins, native chain assets, off-chain rails); TNZO is the protocol's denominator.
+- **Governance.** Voting weight is TNZO-stake-weighted. A single asset is the basis for proposal bonds, voting, delegation, and constitutional decisions.
+- **Bonds and security.** Validators, providers (model, TEE, storage, compute, data, training), bridge nodes, marketplace agents, and template creators bond TNZO. The bond aligns the participant with honest behavior; misbehavior is slashed.
+
+TNZO does not replace user-facing stablecoins. AP2 cart settlements, x402 USDC flows, Tempo stablecoin transfers, Stripe Payment Intents, and Canton CIP-56 Canton Coin holdings all flow in their own assets. TNZO is the protocol-layer denominator that makes the rails work: gas, network commission, bond, and governance vote.
+
+---
+
+## 2. Supply and distribution
+
+### Parameters
+
+| Parameter | Value | Notes |
+|---|---|---|
+| Token name | TNZO | |
+| Symbol | TNZO | |
+| Decimals | 18 | u128 arithmetic throughout |
+| Maximum supply | 1,000,000,000 TNZO | Fixed cap |
+| Smallest unit | 10⁻¹⁸ TNZO | One wei-equivalent |
+| Chain ID | 1337 | |
+| Circuit-breaker maximum outflow | 1% of max supply per circuit-breaker window | Defense in depth on emergency operations |
+
+Supply is fixed. There is no protocol-level mint authority beyond the genesis distribution; staking rewards are paid out of the rewards pool seeded at genesis (see section 7), not minted.
+
+### Distribution model
+
+**There is no team allocation and no investor allocation.** Tenzro Network is community-owned from day one. The genesis distribution funds the participants that produce value on the network and the long-term incentive pools that pay future participants for future contributions.
+
+**The way to earn TNZO is to contribute value to the network.** This is open-ended by design. The protocol does not enumerate every legitimate path to earnings, and the list below is examples rather than a closed set — anyone finding a new way to create value for the network can earn from that activity. Representative paths include:
+
+| Path | How value flows back as TNZO |
+|---|---|
+| Running a validator | Run a node that meets the resource profile (hardware, bandwidth, uptime, optional TEE attestation) and participate in HotStuff-2 consensus. Two tiers: resource-only validators earn priority fees and a base reward share with no stake required; staked validators bond TNZO on top of meeting the profile and earn higher reward multipliers, full leader-election eligibility, and governance weight (section 7) |
+| Serving compute or hardware | Run a model provider, TEE provider, storage provider, distributed-training participant, or any other resource-serving role; earn per-call / per-token / per-service / per-attestation / per-byte fees, plus the provider class reward multiplier on staking rewards |
+| Operating an RPC provider | Run a public or gated RPC endpoint that brokers access to network resources (Canton, regulated bridge routes, KYC-tier-gated services, admin-gated cross-chain mint/burn). Mint scoped API keys for tenants, manage per-tenant party allocation and identity-provider provisioning, expose per-tenant analytics; earn from tenant access fees, per-call fees, and commission on the underlying flow routed through your endpoint |
+| Building and running apps on Tenzro | Ship an application that drives transactions through the network — settlements, payments, inference billing, marketplace flows; earn from the underlying activity (provider fees, marketplace commissions, agent template invocations, AP2 / MPP / x402 settlement flow your app routes) |
+| Running agents that do useful work | Deploy autonomous or delegated agents that fulfill inference requests, payment routing, cross-chain settlement, capital intent, or any other paid service; earn per fulfilled task plus reputation-driven routing share |
+| Building tools, skills, and integrations | Ship MCP tools, A2A skills, agent templates, libraries, SDKs, bridges, oracle integrations, payment-rail adapters, and other ecosystem components; earn template invocation commissions, tool / skill usage fees, and ecosystem grants |
+| Data and content contributions | Contribute to skills, tools, model catalogs, training datasets, knowledge bases, reference data, or any other public resource the network consumes; earn through usage fees and governance-approved contribution rewards |
+| Protocol and infrastructure work | Build the protocol itself, audit code, ship core integrations, write documentation, run security research, operate public infrastructure; receive grants from the public treasury through the Tenzro Foundation's governance-approved allocation process |
+| Community participation | Participate in governance votes, contribute to community channels and learning resources, file useful bug reports, refer new participants; receive community incentive allocations, faucet allocations, marketplace rewards, and governance-approved incentives |
+
+Beyond the above, the Tenzro Foundation runs a public, governance-controlled grant program. Grants fund work the community proposes and the network rewards — research, ecosystem development, public-good infrastructure, regional onboarding, education, security audits, integrations, and anything else governance approves as serving the network. The grant pool sits in the public treasury (section 12); allocation is on-chain and auditable.
+
+There are no privileged token-holder classes. There are no lock-ups for special parties because there are no special parties. Every TNZO holder is holding because they earned it from the network or bought it from another participant who did.
+
+### Circulating supply
+
+Circulating supply at any point is the genesis distribution that has actually been claimed, plus net staking rewards paid, minus the cumulative burn from all five burn channels (section 5). The full supply does not enter circulation at genesis; participation-class allocations unlock as participants earn them (run a validator → earn validator rewards; serve inference → earn provider settlement; build a template → earn invocation commissions).
+
+The treasury (40% of all network commission) accumulates a public, on-chain balance that governance disburses through grants and ecosystem incentives. Treasury holdings are not circulating; they enter circulation only when governance approves a specific disbursement.
+
+### No reserved or vesting allocations
+
+Because there is no team allocation and no investor allocation:
+
+- There is no investor unlock cliff. There are no quarterly vesting events that release a wave of supply onto the market.
+- There is no team unlock schedule. Contributors who build the protocol receive grants in the same way ecosystem builders do — through governance-approved disbursements from the public treasury, on terms the community can see.
+- There is no early-backer carry. Anyone holding TNZO at any point in time is holding it because they earned it from the network or bought it from another participant who did.
+
+This is the simplest possible alignment: every token holder has either contributed value to the network or has bought into a system where everyone else has.
+
+---
+
+## 3. Demand sources
+
+A token's market behavior reflects the structure of its demand. TNZO has four orthogonal sources:
+
+**Gas.** Every transaction on Tenzro Ledger — every EVM call, every SVM instruction, every Canton-routed command, every identity operation, every governance vote, every cross-chain message — pays gas in TNZO. EIP-1559 sets a dynamic base fee that adjusts ±12.5% per block to target half the block gas limit. The base fee is burned (see section 5). The priority fee goes to validators and stakers.
+
+**Settlement commission.** Every payment routed through Tenzro's settlement layer (inference billing, TEE service payment, agent-to-agent settlement, AP2 cart, MPP receipt, x402 verification, micropayment channel close) pays a 0.5% network commission. The commission is split 40% treasury / 30% burn / 30% stakers.
+
+**Bonds.** Every provider class bonds TNZO. Validators, model providers, TEE providers, storage providers, training participants, bridge nodes, marketplace agents — all bond. The bond aligns the provider with honest behavior. Misbehavior is slashed against the bond.
+
+**Governance.** Voting weight is stake-weighted (see section 16). Proposers post a proposal bond; voters lock TNZO for the voting window.
+
+Each demand source grows with usage rather than with speculation. The economic model favors networks where real activity (transactions, settlements, services, governance participation) produces real demand for TNZO.
+
+---
+
+## 4. Fee architecture
+
+Tenzro implements two tiers of fees: gas (infrastructure layer) and network commission (service layer). The two are deliberately independent because they meter different things.
+
+### Tier 1 — Gas fees (EIP-1559)
 
 | Parameter | Value |
-|-----------|-------|
-| Token name | TNZO |
-| Decimals | 18 |
-| Maximum supply | 1,000,000,000 (1 billion) |
-| Smallest unit | 1 wei-equivalent (10^-18 TNZO) |
-| Precision | u128 (overflow-safe arithmetic) |
-| Chain ID | 1337 (Tenzro Ledger) |
+|---|---|
+| Max gas per block | 30,000,000 |
+| Target gas per block | 15,000,000 (50% of max) |
+| Initial base fee | 1 Gwei (10⁹ wei-equivalent) |
+| Min base fee | 0.1 Gwei |
+| Max base fee | 1,000 Gwei |
+| Elasticity multiplier | 2× |
+| Base fee change rate | ±12.5% per block (denominator 8) |
+| Max contract code size | 24,576 bytes |
+| Max call depth | 1,024 |
 
-### Four Utility Functions
-
-1. **Gas** -- Pay transaction fees on the Tenzro Ledger (EIP-1559 dynamic pricing)
-2. **Settlement** -- Settle payments for AI inference, TEE services, and agent operations
-3. **Staking** -- Stake to validate, provide models, operate TEE enclaves, or store data
-4. **Governance** -- Vote on protocol parameters, treasury grants, and upgrades
-
-### Why a Native Token (Not Just Stablecoins)
-
-AI-native protocols face a fundamental design choice: settle in stablecoins or native tokens. Tenzro uses TNZO as the settlement layer with stablecoin support because:
-
-- **Burn mechanics require a native token.** EIP-1559 base fee burns and commission burns create deflationary pressure only if there is a burnable native asset. Stablecoin-only protocols cannot create this reflexive demand loop.
-- **Staking security requires alignment.** Validators, model providers, and TEE providers must have economic skin-in-the-game denominated in the asset they secure. Stablecoin staking lacks this alignment.
-- **Governance weight requires non-pegged value.** Governance votes weighted by staked TNZO create real cost to attacking governance. Stablecoin-weighted governance can be trivially Sybil-attacked.
-- **Stablecoins remain supported** for user-facing pricing (MPP sessions, x402 payments), bridged via tenzro-payments. Providers receive TNZO rewards regardless of the user's payment denomination.
-
----
-
-## 2. The Two-Tier Fee Architecture
-
-Tenzro implements a two-tier fee system that separates infrastructure security (gas) from service-layer value capture (network commission). This is architecturally distinct from single-fee protocols and draws from the most sustainable models in the 2026 landscape.
-
-### Tier 1: Gas Fees (EIP-1559)
-
-Gas fees secure the Tenzro Ledger itself. Every transaction -- transfers, smart contract calls, identity registration, governance votes -- pays gas.
-
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| Max gas per block | 30,000,000 | `tenzro-vm/eip1559.rs` |
-| Target gas per block | 15,000,000 (50% of max) | `tenzro-vm/eip1559.rs` |
-| Initial base fee | 1 Gwei (10^9 wei) | `tenzro-vm/eip1559.rs` |
-| Min base fee | 0.1 Gwei | `tenzro-vm/eip1559.rs` |
-| Max base fee | 1,000 Gwei | `tenzro-vm/eip1559.rs` |
-| Elasticity multiplier | 2x | `tenzro-vm/eip1559.rs` |
-| Base fee change rate | 12.5% per block (denominator 8) | `tenzro-vm/eip1559.rs` |
-
-**Base fee adjustment formula:**
+Base fee adjustment formula:
 
 ```
 if gas_used > target:
-    fee_delta = (base_fee * (gas_used - target)) / target / 8
-    next_base_fee = base_fee + max(fee_delta, 1)
+    delta = (base_fee × (gas_used − target)) / target / 8
+    next_base_fee = base_fee + max(delta, 1)
 else:
-    fee_delta = (base_fee * (target - gas_used)) / target / 8
-    next_base_fee = base_fee - fee_delta
+    delta = (base_fee × (target − gas_used)) / target / 8
+    next_base_fee = base_fee − delta
 
-next_base_fee = clamp(next_base_fee, 0.1 Gwei, 1000 Gwei)
+next_base_fee = clamp(next_base_fee, min_base_fee, max_base_fee)
 ```
 
-**Fee split:**
-- **Base fee** --> BURNED (removed from total supply permanently)
-- **Priority fee** --> Validators and stakers (tips for inclusion priority)
+Fee split:
 
-**Priority fee suggestions by urgency:**
+- **Base fee → burn.** Removed from circulating supply.
+- **Priority fee → validators and stakers.** Tips for inclusion priority.
 
-| Urgency | Priority Fee |
-|---------|-------------|
+Priority fee suggestions by urgency:
+
+| Urgency | Priority fee |
+|---|---|
 | Low | 10% of base fee |
 | Medium | 20% of base fee |
 | High | 50% of base fee |
 | Urgent | 100% of base fee |
 
-### Tier 2: Network Commission (0.5%)
+### Tier 2 — Network commission
 
-The network commission captures value from AI inference, TEE services, and any settlement processed through the Tenzro Ledger. This is the primary revenue engine for the protocol.
+| Parameter | Value |
+|---|---|
+| Network commission rate | 0.5% (50 basis points) |
+| Treasury share | 40% (4,000 bps of commission) |
+| Burn share | 30% (3,000 bps of commission) |
+| Staker share | 30% (3,000 bps of commission) |
+| Minimum settlement amount | 1,000 base units (dust protection) |
+| Max batch size | 100 settlements per atomic batch |
 
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| Network fee rate | 0.5% (50 basis points) | `tenzro-settlement/engine.rs` |
-| Min settlement amount | 1,000 units (dust protection) | `tenzro-settlement/engine.rs` |
-| Max batch size | 100 settlements per batch | `tenzro-settlement/engine.rs` |
-
-**Settlement fee formula:**
+Settlement fee formula:
 
 ```
-network_fee = (amount * 50) / 10,000
-provider_receives = amount - network_fee
-
-Example: 10,000 TNZO inference payment
-  Network fee: 50 TNZO (0.5%)
-  Provider receives: 9,950 TNZO
+network_fee     = (amount × 50) / 10,000          // 0.5%
+provider_amount = amount − network_fee
+treasury_amount = (network_fee × 4,000) / 10,000  // 40% of fee → 0.2% of amount
+burn_amount     = (network_fee × 3,000) / 10,000  // 30% of fee → 0.15% of amount
+staker_amount   = (network_fee × 3,000) / 10,000  // 30% of fee → 0.15% of amount
 ```
 
-**Commission distribution (40/30/30):**
+The 0.5% rate is set low to maximize adoption. Comparable take rates: traditional cloud (5–30%), centralized payment processors (2–4%), centralized model APIs (varies), traditional brokerages (basis points to percent). Governance can adjust the network commission rate upward as the network matures, with timelock-bounded magnitude caps.
 
-| Destination | Share | Purpose |
-|-------------|-------|---------|
-| Treasury | 40% (4,000 bps) | Protocol development, grants, operations |
-| Burn | 30% (3,000 bps) | Permanent supply reduction |
-| Stakers | 30% (3,000 bps) | Reward active network participants |
+### Why two tiers
 
-This split is enforced on-chain and must sum to exactly 10,000 basis points.
+Gas fees self-regulate via EIP-1559 to track infrastructure demand. Commission fees track service-layer activity. The two grow independently:
 
-### Why Two Tiers
+- A network running heavy DeFi but no inference burns gas heavily but accrues little commission.
+- A network running heavy inference but no on-chain trades accrues heavy commission but burns less gas.
+- A network running both — the steady state — does both.
 
-Single-fee protocols face a dilemma: set fees too low and validators are underpaid; set them too high and users leave. Tenzro's two-tier system resolves this:
-
-- **Gas fees** self-regulate via EIP-1559 to reflect infrastructure demand
-- **Commission fees** are fixed at 0.5%, competitive with centralized alternatives
-- **Validators earn from gas tips**, independent of service-layer activity
-- **Providers earn from settlements**, independent of on-chain congestion
-- **The protocol earns from both**, creating diversified revenue
-
-Comparable take rates in the 2026 landscape: Akash proposed 20% (currently 1-2%), Apple 30%, Uber 23%. Tenzro's 0.5% is deliberately low to maximize adoption during growth, with governance able to adjust upward as the network matures.
+The two-tier design diversifies revenue and reduces the dependence on any single demand source.
 
 ---
 
-## 3. Burn Mechanisms and Deflationary Dynamics
+## 5. Burn channels and net supply
 
-Tenzro has two independent burn channels. This is a structural advantage over single-burn protocols.
-
-### Burn Channel 1: EIP-1559 Gas Base Fee
-
-Every block burns `base_fee * gas_used`. This is the primary, demand-driven deflationary mechanism.
+Tenzro has two independent demand-driven burn channels. Net supply change is the algebraic sum:
 
 ```
-burn_per_block = base_fee * gas_used
+Net supply change per epoch =
+    + staking rewards paid             (inflationary, capped at 5% APY)
+    − base-fee burn                     (deflationary, EIP-1559)
+    − commission burn                   (deflationary, 0.15% of all settled volume)
+    − paymaster burn                    (deflationary, 100% of paymaster fees)
+    − slashing burn                     (deflationary, 10% of slashed bond)
+    − SeedAgent surplus burn            (deflationary, sunset disposition)
 ```
 
-- **Self-regulating:** Burns more when network is congested, less when idle
-- **No cap:** Supply can decrease below initial issuance
-- **Unlimited:** Tracks accumulated `total_burned` counter
+### Base-fee burn
 
-At Ethereum-like utilization (15M gas/block at 30 gwei base fee), this burns approximately 450 TNZO per block. The block budget below assumes a sustained network-average effective burn-per-block which factors in idle blocks; at peak load with 400ms blocks the rate is substantially higher.
+Every block burns `base_fee × gas_used`. The default burn fraction is 100% — under EIP-1559, the entire base fee is removed from circulation. The base fee tracks network congestion: more activity, more burn.
 
-### Burn Channel 2: Network Commission Burn (30%)
+### Commission burn
 
-30% of all network commission fees are burned:
+30% of every network commission is burned. Concretely: 0.15% of every settled amount is burned. For a network running on inference, training settlement, agent-to-agent commerce, micropayment channels, and bridge flows, commission burn is the second deflationary channel — it tracks service-layer demand independently of on-chain congestion.
 
-```
-commission_burn = (settlement_amount * 50 / 10,000) * 3,000 / 10,000
-               = settlement_amount * 0.15 / 100
-               = 0.015% of all settled volume
-```
+### Paymaster burn
 
-### Combined Deflationary Formula
+ERC-4337 paymasters can sponsor user gas. Tenzro paymasters burn 100% of the paymaster fee. This is structurally fixed (the paymaster burn fraction is locked at 100% so that sponsored gas does not become an inflation back-door).
 
-```
-Annual Net Supply Change =
-    Staking Rewards (inflationary)
-  - EIP-1559 Gas Burns (deflationary)
-  - Commission Burns (deflationary)
+### Slashing burn
 
-Break-even condition:
-  Staking Rewards = Gas Burns + Commission Burns
-```
+Slashed stake is burned, not redistributed. 10% of an equivocator's stake disappears from circulating supply at the moment of slashing. Burning rather than redistributing keeps slashing purely punitive (avoiding the moral-hazard problem where slashing benefits the surviving validators).
 
-### Deflationary Threshold
+### SeedAgent surplus burn
 
-With 5% APY staking rewards on a hypothetical 30% staking ratio (300M TNZO staked):
+Any unused SeedAgent earmark at sunset is burned (see section 13).
 
-```
-Annual staking inflation: 300M * 5% = 15M TNZO
+### Combined dynamics
 
-Required annual burn to offset:
-  Gas burns: ~6.5M TNZO (at Ethereum-like utilization)
-  Commission burns: requires ~56.7B TNZO settled volume per year
-    (56.7B * 0.015% = ~8.5M TNZO burned)
+Whether net supply is inflationary or deflationary in any given epoch is a function of network usage:
 
-Total burns needed: 15M TNZO --> achievable at moderate utilization
-```
+- **Low-activity epoch.** Base-fee burn is small; commission burn is small; staking rewards still pay out; net inflationary.
+- **Steady-state epoch.** Base-fee burn and commission burn together typically offset staking rewards.
+- **High-activity epoch.** Both burn channels accelerate; net deflationary.
 
-This means TNZO can become net-deflationary at moderate network usage. The key insight: both burn channels scale independently with different types of demand (transactions vs. service payments), providing diversified deflationary pressure.
+The model deliberately does not target a fixed inflation rate. The protocol does not need to issue tokens to subsidize participation; participation is funded by real network use.
 
 ---
 
-## 4. Staking Economics
+## 6. Adaptive burn dial
 
-### Staking Parameters
+Tenzro carries a governance-controlled adaptive burn dial that lets the protocol adjust burn fractions in response to circulating-supply targets.
 
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| Minimum stake | 1,000 TNZO | `tenzro-token/staking.rs` |
-| Unbonding period | 7 days (604,800,000 ms) | `tenzro-token/staking.rs` |
-| Base reward rate | 5% APY (500 bps) | `tenzro-token/rewards.rs` |
-| Epoch duration | 14,400 blocks (~1 day at 6s/block) | `tenzro-token/rewards.rs` |
-| Epochs per year | 365 | `tenzro-token/rewards.rs` |
+### Configuration
 
-### Provider Types and Reward Multipliers
+The `BurnRateConfig` carries three independently-adjustable burn fractions:
 
-| Provider Type | Multiplier | Rationale |
-|---------------|-----------|-----------|
-| Validator | 1.0x | Baseline -- secures consensus |
-| TEE Provider | 1.2x | Higher capital cost (confidential hardware) |
-| Model Provider | 1.1x | Higher operational cost (GPU, bandwidth) |
-| Storage Provider | 1.0x | Baseline -- stores ledger state |
+| Parameter | Default | Adjustable |
+|---|---|---|
+| `base_fee_burn_bps` | 10,000 (100% of base fee burned) | Yes, by governance |
+| `local_fee_burn_bps` | 10,000 (100% of local fee burned) | Yes, by governance |
+| `paymaster_burn_bps` | 10,000 (100% of paymaster fee burned) | No, locked at 100% |
 
-### Reward Calculation
+### Supply targets
 
-```
-1. epoch_budget = (total_staked * reward_rate_bps / 10,000) / epochs_per_year
-2. epoch_budget = min(epoch_budget, reward_pool)  // Cap by available pool
-3. For each staker:
-     stake_proportion = stake_amount / total_staked
-     base_reward = epoch_budget * stake_proportion
-     adjusted_reward = base_reward * uptime_multiplier  // 0.0 to 1.0
-     final_reward = adjusted_reward * type_multiplier   // 1.0x to 1.2x
-```
+A `SupplyTargets` configuration sets:
 
-### Quality-of-Service (QoS) Based Rewards
+- A rolling-window length (in epochs)
+- A neutral band (basis points around zero net supply change)
+- An inflation alarm threshold and a deflation alarm threshold
+- A target annual supply change in basis points
+- Magnitude caps (normal and alarm)
+- A fast-track timelock for alarm-triggered adjustments
 
-The `uptime_multiplier` (0.0 to 1.0) ensures rewards flow to active, reliable providers rather than passive stakers. This aligns with the 2026 industry shift toward QoS-based emissions:
+### Recommendation engine
 
-- **Bittensor** shifted to flow-based emissions (net TAO inflows, not price)
-- **Nosana** proposed NNP-001 (usage-driven, not yield-driven)
-- **Grass** introduced QoS thresholds (100+ hours uptime per epoch, latency metrics)
-- **io.net** launched IDE (stable USD-targeted payouts tied to actual GPU utilization)
+A pure transfer function `compute_recommendation(metrics, targets)` reads the latest supply metrics snapshot and emits one of:
 
-Tenzro's uptime multiplier achieves the same goal: a validator with 95% uptime earns 95% of their potential reward; one with 50% uptime earns 50%. Zero uptime = zero rewards.
+- `NoChange` — within the neutral band
+- `IncreaseBurnPct(bps)` — net supply tracking above target
+- `DecreaseBurnPct(bps)` — net supply tracking below target
+- `AlarmHighInflation(bps)` — net supply above the alarm threshold; fast-track adjustment
+- `AlarmHighDeflation(bps)` — net supply below the alarm threshold; fast-track adjustment
+- `Disabled` — adaptive burn is off; no recommendation
 
-### Slashing
+Magnitude is bounded by the configured caps. Recommendations are auto-proposed for governance vote and execute through the standard governance timelock.
 
-Slashing is fully implemented with automatic equivocation detection and enforcement. When a slash is executed, the unbonding period is reset and stake can be reduced below minimum, forcing the provider into unbonding:
+### Why this matters
 
-- **Equivocation** -- Double-signing or conflicting votes (detected via `EquivocationDetector` in consensus, 10% stake penalty)
-- **Downtime** -- Extended offline periods
-- **Invalid proofs** -- TEE providers submitting false attestations
-- **Service failure** -- Model providers returning incorrect inference results
-
-The consensus layer's `EquivocationDetector` monitors all votes for conflicting signatures in the same view. When equivocation is detected, the `SlashingCallback` trait bridges to `StakingManager::slash()` which automatically enforces the penalty and preserves evidence on-chain.
-
-Slashed TNZO is burned, not redistributed -- ensuring slashing is punitive rather than redistributive.
+A fixed burn fraction works well at one usage band. As the network grows, the burn rate that produces sustainable net supply changes. The adaptive dial lets the protocol respond to actual on-chain conditions rather than guessing the right fraction at launch.
 
 ---
 
-## 5. Liquid Staking (stTNZO)
+## 7. Staking and validator participation
 
-Liquid staking allows staked TNZO to remain economically productive. The stTNZO token represents a claim on staked TNZO plus accrued rewards.
+Validators secure the network through HotStuff-2 consensus. Tenzro uses a two-tier validator model: eligibility is open to anyone meeting the resource profile, and staking is optional but unlocks additional benefits.
+
+### Tier 1 — Resource-only validators
+
+Open entry, no stake required. Eligibility is based on:
+
+- **Hardware profile.** CPU cores, memory, disk, bandwidth, and storage IOPS thresholds checked at admission. Continuous monitoring confirms the validator continues to meet the profile during operation.
+- **Stability profile.** Demonstrated uptime over a probation window, no equivocation history, no slashed peers in the operator's history.
+- **TEE attestation (optional).** Hardware attestation through any supported vendor (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC, Intel Tiber). Not required, but attested validators receive the 1.5× multiplier on their leader-selection draw.
+- **Geographic and network diversity.** The protocol's admission process favors validators that add geographic, ISP, or jurisdictional diversity to the existing set.
+
+Resource-only validators are full participants in the BFT set: they vote in HotStuff-2 PREPARE / COMMIT / DECIDE, they propose blocks when elected, and they sign quorum certificates with hybrid Ed25519 + ML-DSA-65 + BLS12-381 signatures.
+
+**Earnings.** Priority fees on blocks they propose, plus a base reward share. The base reward share scales with reputation (uptime, block-production success, no-equivocation history) and the provider class multiplier. Resource-only validators cap at a base reward multiplier and are excluded from leader election for the highest-trust block classes (e.g., blocks that include large-value institutional settlement or training round finalization) — those require staked tier validators.
+
+**No slashing exposure.** Without bonded stake, a misbehaving resource-only validator can be removed from the set and have their reputation collapse, but cannot be financially slashed. This is the trade-off for open entry: the protocol's economic security on high-value blocks depends on the staked tier (below).
+
+### Tier 2 — Staked validators
+
+Resource-only eligibility plus bonded TNZO. Staked validators get:
+
+- **Full leader-election eligibility** across every block class.
+- **Higher reward multiplier** on top of the resource-only base.
+- **Governance weight** — voting weight is stake-weighted (section 16). Resource-only validators do not have governance voting weight independent of their staking.
+- **Slashing exposure** as the cost of higher trust: 10% bond burn on equivocation, additional slashing on withholding training results, invalid TEE attestations, or persistent SLA failures.
+
+Stake also makes the validator eligible for high-trust roles:
+
+- Witness committee membership for training round finalization (`tenzro-training`)
+- High-value bridge node duties (Hyperlane Tenzro-set ISM, Wormhole Guardian-quorum participation when configured, threshold MPC bridge signer)
+- AP2 high-value mandate validation surface
+- Institutional Canton route operator
+
+The TEE attestation multiplier (1.5×) is multiplicative and applies to both tiers. A staked TEE-attested validator has the highest combined leader-election draw probability.
 
 ### Parameters
 
 | Parameter | Value | Source |
-|-----------|-------|--------|
-| Token | stTNZO | `tenzro-token/liquid_staking.rs` |
-| Decimals | 18 | Same as TNZO |
-| Initial exchange rate | 1:1 | `tenzro-token/liquid_staking.rs` |
-| Protocol fee | 10% of rewards (1,000 bps) | `tenzro-token/liquid_staking.rs` |
-| Minimum deposit | 0.1 TNZO | `tenzro-token/liquid_staking.rs` |
-| Maximum total deposits | Unlimited (default) | `tenzro-token/liquid_staking.rs` |
-| Unbonding period | 7 days | Matches native staking |
-| Max validators | 50 | Diversification limit |
+|---|---|---|
+| Default minimum stake | 1,000 TNZO | `tenzro-token/staking.rs` |
+| Default unbonding period | 7 days | `tenzro-token/staking.rs` |
+| Base reward rate | 5% APY (500 bps) | `tenzro-token/rewards.rs` |
+| Epoch duration | 14,400 blocks (~1 day at 6-second block target) | `tenzro-token/rewards.rs` |
+| Epochs per year | 365 | |
+| Equivocation slash | 10% of stake | `tenzro-consensus + tenzro-token` |
+| TEE-attested validator multiplier | 1.5× on leader-selection draw | `tenzro-consensus` |
+| Resource-only base reward share | Reputation-weighted base | Governance-set |
+| Staked validator multiplier on base | Up to 2× the resource-only base, plus stake-weighted share of commission | Governance-set |
 
-### Exchange Rate Mechanics
+The minimum stake, unbonding period, resource profile thresholds, and reward share between tiers are governance-adjustable.
 
-stTNZO uses a rebasing model where the exchange rate increases as staking rewards accrue:
-
-```
-exchange_rate = (total_underlying_wei * 10^18) / total_sttnzo_supply
-
-// Overflow-safe calculation (u128):
-quotient = underlying / supply
-remainder = underlying % supply
-exchange_rate = quotient * 10^18 + (remainder * 10^18 / supply)
-```
-
-When rewards arrive:
+### Reward calculation
 
 ```
-protocol_fee = reward_amount * 1,000 / 10,000    // 10%
-staker_share = reward_amount - protocol_fee       // 90%
+epoch_budget = (total_staked × reward_rate_bps / 10,000) / epochs_per_year
+epoch_budget = min(epoch_budget, reward_pool_available)
 
-total_underlying_wei += staker_share
-// stTNZO supply unchanged --> exchange rate increases
-// Each stTNZO now redeemable for more TNZO
+For each staker:
+    stake_proportion = stake_amount / total_staked
+    base_reward      = epoch_budget × stake_proportion
+    qos_adjusted     = base_reward × uptime_multiplier      // 0.0 to 1.0
+    final_reward     = qos_adjusted × provider_multiplier   // 1.0× to 1.2×
 ```
 
-### Why 10% Protocol Fee
+### Provider reward multipliers
 
-The 10% protocol fee on liquid staking rewards funds protocol development from real yield, not token sales. This is structurally similar to how AO Computer funds development from deposited asset yield rather than pre-mine.
+| Provider class | Multiplier | Rationale |
+|---|---|---|
+| Validator | 1.0× | Baseline — secures consensus |
+| Model provider | 1.1× | Operational cost (GPU, bandwidth) |
+| TEE provider | 1.2× | Capital cost (confidential hardware) |
+| Storage provider | 1.0× | Baseline |
 
-At 300M TNZO staked at 5% APY:
-- Annual rewards: 15M TNZO
-- Protocol fee (10%): 1.5M TNZO
-- Staker yield: 13.5M TNZO (effective 4.5% APY)
+### Quality of service
 
-This creates a sustainable revenue stream that grows with staking participation.
+The `uptime_multiplier` (0.0 to 1.0) scales rewards by actual contribution: a 95% uptime validator earns 95% of the potential reward, a 50% uptime validator earns 50%, zero uptime means zero reward. Reputation tracking (separate from stake) further influences proposer-election probability through reputation-weighted leader selection.
+
+### Slashing
+
+Equivocation is detected by the consensus equivocation detector watching every vote stream. When a double-sign is detected, the slashing callback burns 10% of the offender's stake and preserves the evidence in audit storage. Slashing automatically resets unbonding and can push stake below minimum, forcing the offender into involuntary unbonding.
+
+Other slashable conditions follow per-class rules:
+
+- **Downtime** — extended offline periods trigger graceful unbonding before slashing where possible.
+- **Invalid TEE attestations** — TEE providers submitting forged attestations are slashed against their bond.
+- **Inference failure** — model providers returning consistently incorrect inference results are slashed through reputation-driven mechanisms (see section 9).
+- **Training misbehavior** — trainers submitting invalid outer gradients or withholding finalizations are slashed against the training bond.
+
+### Burning vs. redistributing
+
+Slashed TNZO is burned. This keeps slashing purely punitive — surviving validators do not benefit from a peer's loss, eliminating the moral-hazard incentive to encourage slashing events.
 
 ---
 
-## 6. Treasury and Revenue Model
+## 8. Liquid staking
 
-### Revenue Sources
+Liquid staking lets users earn staking rewards while preserving liquidity. The stTNZO token is a rebasing representation of staked TNZO plus accrued rewards minus the protocol fee.
 
-The treasury collects from three independent channels:
+| Parameter | Value |
+|---|---|
+| Token | stTNZO |
+| Decimals | 18 (matches TNZO) |
+| Initial exchange rate | 1:1 |
+| Protocol fee | 10% of staking rewards (1,000 bps) |
+| Minimum deposit | 0.1 TNZO |
+| Maximum total deposits | Unlimited (operator-configurable cap) |
+| Unbonding period | 7 days (matches native staking) |
+| Maximum validator diversification | 50 validators per pool |
 
-1. **Commission share (40% of 0.5% network fee):**
-   ```
-   treasury_income = settled_volume * 0.5% * 40% = settled_volume * 0.2%
-   ```
+### Exchange rate
 
-2. **Liquid staking protocol fee (10% of staking rewards):**
-   ```
-   treasury_income = total_staked * 5% APY * 10%
-   ```
-
-3. **Gas priority fees** (when validators route tips through treasury for redistribution)
-
-### Treasury Operations
-
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| Multisig threshold | Configurable M-of-N | `tenzro-token/treasury.rs` |
-| Max grant per proposal | Governance-determined | `tenzro-token/governance.rs` |
-| Multi-asset support | TNZO, USDC, USDT, ETH, SOL, BTC | `tenzro-token/treasury.rs` |
-| Supply invariant | collected = current_balance + distributed | `tenzro-token/treasury.rs` |
-
-### Treasury Sustainability Model
+Rebasing model. The exchange rate increases as the underlying staked TNZO accrues rewards:
 
 ```
-Annual Treasury Revenue (at various utilization levels):
-
-Low utilization ($10M settled/year):
-  Commission share: $10M * 0.2% = $20K
-  Staking fee: 50M staked * 5% * 10% = 250K TNZO
-  Total: $20K + 250K TNZO
-
-Medium utilization ($1B settled/year):
-  Commission share: $1B * 0.2% = $2M
-  Staking fee: 200M staked * 5% * 10% = 1M TNZO
-  Total: $2M + 1M TNZO
-
-High utilization ($100B settled/year):
-  Commission share: $100B * 0.2% = $200M
-  Staking fee: 400M staked * 5% * 10% = 2M TNZO
-  Total: $200M + 2M TNZO
+exchange_rate = (total_underlying_wei × 10¹⁸) / total_sttnzo_supply
 ```
 
-The treasury is self-funding at medium utilization. No reliance on token sales or inflationary grants.
+Overflow-safe computation uses quotient/remainder decomposition to handle u128 arithmetic on values that have both been multiplied by 10¹⁸:
+
+```
+quotient    = total_underlying / total_sttnzo_supply
+remainder   = total_underlying % total_sttnzo_supply
+exchange_rate = quotient × 10¹⁸ + (remainder × 10¹⁸) / total_sttnzo_supply
+```
+
+### Mint and redeem
+
+- **Deposit TNZO → mint stTNZO** at the current exchange rate.
+- **Burn stTNZO → withdraw TNZO** at the current exchange rate, subject to the 7-day unbonding.
+
+### Multi-validator diversification
+
+A liquid staking pool spreads its stake across up to 50 validators. Allocation is configurable per pool (proportional, weighted, or governance-set). Diversification reduces the risk that any one validator's slashing event materially impacts pool participants.
+
+### Protocol fee
+
+10% of accrued staking rewards goes to the protocol; the other 90% accrues to stTNZO holders via the rising exchange rate. The protocol fee is the operator's compensation for running the pool, validator selection, and slashing management.
 
 ---
 
-## 7. Agent-Native Payments (MPP + x402)
+## 9. Provider economies
 
-The AI agent economy requires machines to pay machines without human intermediation. Tenzro natively supports both dominant machine payment protocols:
+Tenzro has multiple provider classes, each with its own micro-economy.
 
-### Machine Payments Protocol (MPP)
+### Model providers
 
-Co-authored by Stripe and Tempo, MPP is the session-based payment protocol for autonomous AI agents.
+A model provider:
 
-**How it works on Tenzro:**
-1. Agent requests a resource (inference, TEE attestation)
-2. Tenzro node returns HTTP 402 with `MppChallenge` (amount, currency, expiry)
-3. Agent creates `MppCredential` (payment proof, signed by wallet)
-4. Node verifies credential, settles on-chain, returns `MppReceipt`
-5. Session continues with pre-funded balance for subsequent requests
+- Stakes TNZO (min stake configurable; see section 7).
+- Registers in the model registry with one or more model identifiers, modalities, and pricing.
+- Serves inference requests routed by the inference router (price, latency, reputation, or weighted strategy).
+- Earns per call or per token (the unit depends on modality).
+- Is rate-limited by their reputation score (250–1000 range).
 
-**2026 adoption:** 100+ services in Tempo Payment Directory. Partners include Visa, Anthropic, OpenAI, Mastercard, Shopify. MPP functions like "OAuth for payments."
+Reputation is asymmetric: success on settled payment increments reputation by +1 (capped at 1,000); failure decrements by -5 (floored at 0). The split between "successful HTTP 200" and "settled payment" matters: HTTP 200 alone updates latency only. Reputation gain is gated to settled-payment-only so providers cannot game reputation without taking a real payment.
 
-### x402 Protocol
+Reputation is durable. RocksDB persists per-provider reputation; restarts do not reset it.
 
-Coinbase's stateless, per-request payment protocol for HTTP APIs.
+### TEE providers
 
-**How it works on Tenzro:**
-1. Agent requests a resource
-2. Server returns 402 `PaymentRequired` header
-3. Agent creates `X402PaymentPayload` (signed by wallet)
-4. Server verifies (locally or via facilitator), serves resource
+A TEE provider:
 
-**2026 adoption:** 15M+ transactions across projects. Multi-network: EVM (Base, Polygon), Solana, Avalanche, Sui, Near. Free tier: 1,000 tx/month via Coinbase facilitator.
+- Stakes TNZO (min stake configurable).
+- Registers as a TEE provider with vendor (TDX / SEV-SNP / Nitro / NVIDIA GPU / Intel Tiber) and supported services.
+- Generates attestations on demand for confidential inference, sealed key custody, or other confidential workloads.
+- Earns per attestation or per service-second.
+- Receives the 1.2× provider reward multiplier on staking rewards (reflects higher capital cost of confidential hardware).
 
-### Tenzro's Integration
+### Validators
 
-Tenzro's `tenzro-payments` crate implements both MPP and x402 with:
-- `PaymentGateway` for multi-protocol routing
-- Identity binding via TIP (Tenzro Identity Protocol) with delegation scope enforcement
-- HTTP middleware for automatic challenge/verification
-- Settlement on Tenzro Ledger with 0.5% network commission
+A validator:
 
-This means any AI agent with a Tenzro identity and MPC wallet can autonomously pay for inference, TEE services, or any HTTP 402-protected resource -- without human intervention.
+- Stakes TNZO (min stake configurable).
+- Joins the validator set through the epoch admission process (anyone with bonded stake can join at the next epoch).
+- Participates in HotStuff-2 consensus.
+- Earns priority fees and the staker share of network commission.
+- TEE-attested validators get the 1.5× leader-selection multiplier.
 
----
+### Storage providers
 
-## 8. Micropayment Channels
+A storage provider:
 
-For high-frequency, low-value transactions (per-token billing, streaming inference), Tenzro implements off-chain micropayment channels with on-chain settlement.
+- Stakes TNZO.
+- Serves snapshot / DA / blob requests.
+- Earns through DA pricing and snapshot-bootstrap fees.
 
-### Channel Parameters
+### Marketplace template creators
 
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| Challenge period | 24 hours | `tenzro-settlement/micropayments.rs` |
-| Dispute timeout | 24 hours | `tenzro-settlement/micropayments.rs` |
-| State nonce | Incremental (replay protection) | `tenzro-settlement/micropayments.rs` |
-| Signature | Ed25519 (cryptographic verification) | `tenzro-settlement/micropayments.rs` |
+A creator who publishes an agent template:
 
-### Channel Lifecycle
+- Earns a 5% commission on paid invocations of their template.
+- Earnings settle to the template's `creator_wallet` address atomically with the agent invocation.
+- Template usage is tracked through `invocation_count` and `total_revenue` on-chain.
 
-```
-1. OPEN: Customer deposits TNZO into channel
-   channel.deposit = N TNZO
-   channel.spent = 0
+### Skill and tool creators
 
-2. USE: Off-chain state updates per micropayment
-   new_spent = channel.spent + payment
-   payer_balance = deposit - new_spent
-   payee_balance = new_spent
-   State signed by payer (Ed25519)
-
-3. CLOSE: Initiate cooperative or unilateral close
-   24-hour challenge period begins
-   Newer state (higher nonce) can challenge
-
-4. SETTLE: After challenge period
-   Customer refunded: payer_balance
-   Provider paid: payee_balance
-   0.5% network commission on total spent
-```
-
-### Per-Token Billing
-
-This enables per-token billing for AI inference:
-- User opens channel with 100 TNZO deposit
-- Each generated token costs 0.001 TNZO (off-chain state update)
-- After generating 50,000 tokens (50 TNZO spent), user closes channel
-- Settlement: 50 TNZO to provider (minus 0.5% commission), 50 TNZO refunded
-
-No gas cost per token -- only on channel open and close.
+Skill and tool authors register entries in the skill / tool registries. Discovery is permissionless; usage is settled through the same micropayment substrate.
 
 ---
 
-## 9. Cross-Chain Settlement
+## 10. Bonds and slashing
 
-Tenzro bridges connect the ledger to other chains for asset movement and cross-chain agent payments.
+Every provider class carries a bond. The bond size is proportional to the economic damage the provider could cause if they misbehave.
 
-### Bridge Adapters
+| Class | Bond size guideline | Slashing event |
+|---|---|---|
+| Validator stake | Min 1,000 TNZO (governance-set) | Equivocation: 10% |
+| Model provider | Stake + AgentBond (per agent) | Persistent inference failure: reputation collapse + bond withholding |
+| TEE provider | Stake | Forged attestation: bond slash |
+| Training participant | Per-task escrow | Invalid outer gradient / withholding: per-task slash |
+| Bridge node | Per-bridge configurable | Quorum dishonesty: bond slash |
+| Agent (marketplace) | AgentBond | Insurance claim payout: bond withholding |
 
-| Adapter | Protocol | Use Case |
-|---------|----------|----------|
-| LayerZero V2 | Omnichain messaging | EVM chain interop |
-| Chainlink CCIP | Cross-chain messaging | Institutional, high-value |
-| deBridge DLN | Intent-based, no locked liquidity | Fast, competitive |
-| Canton/DAML | Enterprise ledger | Regulated environments |
+### AgentBond and insurance
 
-### Cross-Chain Agent Payment Flow
+For agent-marketplace transactions, agents post AgentBonds. If a user files an insurance claim alleging non-performance (the agent took payment but failed to deliver the service), the claim is adjudicated by the dispute resolution process. Approved claims pay out from the agent's bond. The agent's reputation reflects the outcome.
 
-1. Agent on Ethereum wants to pay for inference on Tenzro
-2. Agent bridges USDC to Tenzro via deBridge (fast, intent-based)
-3. USDC converted to TNZO on Tenzro DEX or used directly via stablecoin settlement
-4. Inference settled on Tenzro Ledger (0.5% commission collected)
-5. Provider receives payment in TNZO or stablecoin
-
-This is consistent with the 2026 trend: deBridge launched MCP integration (February 2026) enabling AI agents and developer tools (Claude, Copilot) to execute cross-chain operations directly.
+This protects users entering into agent-to-agent commerce without requiring per-transaction escrow on every interaction.
 
 ---
 
-## 9.5 Cross-VM Token Architecture
+## 11. Bridge fee model
 
-While Section 9 covers cross-chain settlement (moving assets between Tenzro and external chains), this section addresses cross-VM interoperability within the Tenzro Ledger itself. The Ledger supports three VMs (EVM, SVM, Canton/DAML), and TNZO must be usable across all three without fragmentation.
+Cross-chain settlement has direct costs (gas on the source chain, fees on the destination chain, oracle/relayer compensation) and protocol-layer costs (the bridge router, fee oracle, monitor).
 
-### The Pointer Model (No Bridge Risk)
+### Fee structure per route
 
-Tenzro adopts the **Sei V2 pointer model**: each VM has a lightweight representation (wTNZO on EVM, wTNZO SPL on SVM, TNZO CIP-56 on Canton) that points to the same underlying native balance. There is no lock-and-mint bridge between VMs. When a user interacts with wTNZO on EVM, the ERC-20 pointer contract reads and writes the user's canonical native balance in the `TnzoToken` layer directly.
+For each bridge adapter, the fee is the sum of:
 
-**Implications for tokenomics:**
-- **Zero liquidity fragmentation.** The entire TNZO supply is unified. There are no separate "EVM TNZO" and "SVM TNZO" pools that could trade at different prices or require arbitrage.
-- **No bridge risk.** Cross-VM transfers are atomic balance updates, not bridge messages. There is no attack surface for bridge exploits (the leading source of DeFi losses in 2024-2025).
-- **Single source of truth for supply.** `total_supply()`, burn accounting, and treasury calculations always reflect the true unified supply, regardless of which VM surface was used.
+- **Source-chain gas** — paid in the source chain's native asset.
+- **Destination-chain gas** — paid by the relayer/keeper.
+- **Adapter-specific fee** — LayerZero DVN fee, CCIP fee, deBridge order fee, Wormhole relayer fee, etc.
+- **Tenzro protocol fee** — a configurable basis-point fee on the routed amount.
 
-### TNZO Representation Across VMs
+The protocol fee is split per the standard commission split: 40% treasury / 30% burn / 30% stakers.
 
-| VM | Token | Decimals | Interface |
-|----|-------|----------|-----------|
-| EVM | wTNZO (ERC-20 pointer) | 18 | Standard ERC-20 (`transfer`, `approve`, `transferFrom`) with approval storage |
-| SVM | wTNZO (SPL adapter) | 9 | SPL Token Program instruction mapping; associated token account (ATA) derivation |
-| Canton | TNZO (CIP-56 holding) | 18 (DAML Decimal) | Two-step transfer: create transfer proposal, then accept or reject |
+### Fee quoting
 
-**Decimal conversion (SVM).** Solana SPL tokens use 9 decimals vs TNZO's 18. The adapter truncates the lower 9 digits on deposit to SVM and zero-pads on withdrawal. The smallest representable unit in SVM is therefore 10^9 wei (1 Gwei-equivalent), which is sufficient for all practical operations including micropayments.
+All adapters expose live fee quoting via the unified `BridgeRouter`. Callers request quotes for a desired route and receive a fresh quote per adapter, with the protocol fee already factored in. Quotes have a TTL; stale quotes are rejected.
 
-### Cross-VM Transfer Gas Costs
+### Fee sponsorship pools
 
-Cross-VM transfers invoke the `CROSS_VM_BRIDGE` precompile at address `0x1003`. Because these are internal balance updates (not cross-chain bridge messages), gas costs are predictable and low:
+Operators can contribute to bridge-fee sponsorship pools that subsidize cross-chain settlements for end users and agents on configured routes. Sponsorship pools are funded by:
 
-| Operation | Estimated Gas | Description |
-|-----------|-------------|-------------|
-| EVM to SVM transfer | ~50,000 | Balance debit + SPL adapter credit + decimal conversion |
-| EVM to Canton transfer | ~60,000 | Balance debit + CIP-56 holding creation + party mapping |
-| SVM to EVM transfer | ~50,000 | SPL adapter debit + decimal expansion + balance credit |
-| Token wrap (`TNZO_BRIDGE` at `0x1001`) | ~30,000 | No-op in pointer model (balance is already unified) |
+- Operator contributions in TNZO.
+- A configurable cut of the network commission routed through subsidized routes (capped to prevent runaway sponsorship).
+- Treasury grants approved by governance.
 
-The `wrap` operation is effectively a no-op in the pointer model -- calling it returns the user's existing balance in the target VM representation without any actual token movement. It exists for API compatibility with protocols that expect an explicit wrap step.
+Eligible flows draw automatically from the sponsorship pool when invoked through the standard bridge router. Sponsorship is logged on-chain and exposed via analytics.
 
-### Token Factory for Ecosystem Tokens
+### Fee oracle
 
-The `TOKEN_FACTORY` precompile at address `0x1002` enables permissionless token creation on the Tenzro Ledger. Any user or smart contract can create a new ERC-20 token that is automatically registered in the unified token registry (`CF_TOKENS` column family in RocksDB).
-
-**Token creation parameters:**
-- `TokenId`: Deterministic SHA-256 hash of creator address and nonce (no collisions)
-- Decimals: Configurable (default 18)
-- Initial supply: Set at creation, minted to creator
-- Cross-VM deployment: Created tokens can be deployed as pointer contracts across all three VMs
-
-**Economic impact:** The token factory lowers the barrier for ecosystem token creation (DAO governance tokens, application reward tokens, loyalty points), all of which generate gas fees on the Tenzro Ledger and increase network utilization, feeding the EIP-1559 burn mechanism.
+A per-adapter fee oracle tracks recent fee observations and feeds the router with reasonable defaults when live quoting is unavailable (network partition, adapter outage). The oracle is also used by the adaptive burn dial input layer when estimating bridge-related supply impacts.
 
 ---
 
-## 10. The 2026 Token-Economy Landscape
+## 12. Treasury
 
-### Protocol Comparison Matrix
+The Tenzro Network Treasury accumulates 40% of all network commission, plus governance-approved transfers, plus genesis-allocated treasury holdings. The treasury is multisig-controlled and on-chain.
 
-| Protocol | Supply | Fee Model | Burn Mechanism | Staking | Agent Payments | Status |
-|----------|--------|-----------|---------------|---------|----------------|--------|
-| **TNZO (Tenzro)** | 1B | 2-tier (gas + 0.5% commission) | EIP-1559 + 30% commission burn | QoS-weighted, 5% APY | MPP + x402 native | Pre-alpha |
-| **TAO (Bittensor)** | 21M | Subnet emissions | None (flow-based allocation) | Subnet staking | None | Live (post-halving) |
-| **RENDER** | 644.2M | BME (burn-mint) | User payments burned | Node operator rewards | None | Live |
-| **AO (Arweave)** | 21M | Fair launch yield | None | Asset bridging | None | Mainnet Feb 2026 |
-| **AKT (Akash)** | 388M | BME (March 2026) | Burn AKT to mint ACT | PoS (Cosmos) | None | Live |
-| **IO (io.net)** | 800M | IDE (Q2 2026) | 50%+ revenue burned | Supplier + staker | None | Live |
-| **SENT (Sentient)** | 34.36B | Stake-to-access | None | Access gating | GRID agents | Pre-launch |
-| **VANA** | 120M | Data purchase burn | DLP token burn on purchase | DataDAO staking | None | Live |
-| **SAHARA** | 10B | Per-inference | Auto fee split | PoS | Sorin agents | Pre-mainnet |
-| **GRASS** | 1B | QoS-based | None | Router staking | None | Live |
-| **NOS (Nosana)** | 100M | Usage-driven (NNP-001) | None | Up to 40% APY | None | Live |
+### Inflows
 
-### Key Findings from 2026 Research
+- **Settlement commission share** — 40% of all 0.5% network commissions across inference, training, settlement, bridge, marketplace, and agent-to-agent commerce.
+- **Bridge protocol fees** — share of cross-chain settlement protocol fees (40% to treasury per the standard split).
+- **Liquid staking protocol fee** — 10% of stTNZO pool rewards.
+- **Marketplace commissions** — 5% of paid agent template invocations.
+- **Slashing recovery** — note: slashed bond is burned, not deposited to treasury. The treasury does not benefit from slashing events.
+- **Governance-directed transfers** — explicit grants or reallocations.
 
-**1. Burn-Mint Equilibrium (BME) is the dominant sustainable model**
+### Outflows
 
-Render pioneered BME in December 2023. By March 2026, Akash adopted it (mainnet March 23, 2026) and io.net is launching IDE (a BME variant) in Q2 2026. The pattern: users burn tokens for services, providers receive minted tokens for work. If demand exceeds issuance, the token becomes deflationary.
+Multisig-controlled. Categories include:
 
-*How Tenzro handles this:* Tenzro's dual-burn model (EIP-1559 + commission burn) reaches the same deflationary outcome through a different mechanism. Rather than explicit burn-mint cycles, Tenzro burns from two independent channels. This decouples infrastructure demand (gas) from service demand (commissions), so a slowdown in either does not collapse the burn.
+- Protocol development grants (audits, core engineering, research)
+- Ecosystem incentives (developer grants, bug bounties)
+- Infrastructure (test environments, monitoring, on-call)
+- Insurance fund seed and replenishment
+- SeedAgent treasury earmark (see section 13)
+- Bridge fee sponsorship pool contributions
+- Operational costs (legal, compliance)
 
-**2. Flow-based emissions replace price-based emissions**
+### On-chain transparency
 
-Bittensor's "Taoflow" (November 2025) shifted subnet emissions from being price-based to flow-based -- measuring net TAO inflows (staking minus unstaking). Subnets with negative net flows receive zero emissions. This combats wash trading and pump-and-dump dynamics.
-
-*How Tenzro handles this:* Tenzro's QoS-weighted rewards (uptime multiplier) reach a similar goal. Providers that go offline or perform poorly see rewards decrease toward zero, while active providers earn full rewards.
-
-**3. Stable provider economics are essential**
-
-io.net's IDE targets USD-equivalent payouts to GPU providers regardless of token price volatility. Two vault system (Reward Vault + Fee Vault) buffers against demand shocks and price crashes.
-
-*How Tenzro handles this:* Tenzro's MPP integration enables stablecoin-denominated sessions (users pay in USDC, providers receive TNZO equivalent). The settlement engine handles conversion. This provides price stability for providers without requiring protocol-level vaults.
-
-**4. HTTP 402 payments are becoming the standard for machine-to-machine commerce**
-
-MPP (Stripe + Tempo) has 100+ services and partnerships with Visa, Mastercard, and Shopify. x402 (Coinbase + Cloudflare) has 15M+ transactions across projects. Both operate on the HTTP 402 response code.
-
-*How Tenzro handles this:* Tenzro carries native MPP and x402 support in its payment layer (`tenzro-payments`), so HTTP 402 challenge / credential / receipt flows are part of the chain's request path rather than a wallet plugin or middleware bolted on top.
-
-**5. High staking APY is unsustainable**
-
-Nosana offers up to 40% staking APY -- this is clearly unsustainable without proportional demand growth. Sentient's 2% annual emission is more conservative. The successful range in 2026 appears to be 2-8% APY.
-
-*How Tenzro handles this:* Tenzro's 5% APY sits in the sustainable middle range, and the QoS multiplier ensures it is earned through active contribution rather than passive holding.
-
-**6. Community-first allocation correlates with sustainability**
-
-AO Computer (0% pre-mine), Bittensor (fair launch), and Sentient (65.55% community) demonstrate stronger long-term economics than protocols with heavy VC/team allocations and short vesting.
-
-*How Tenzro handles this:* Tenzro targets 35-40% community allocation. This sits in a reasonable range; pushing toward 40-45% would further strengthen community alignment and is open to governance.
+All treasury inflows and outflows are on-chain and queryable. Multisig signers and signature thresholds are public. Audit trail is permanent.
 
 ---
 
-## 11. Sustainability Analysis
+## 13. SeedAgent bootstrap allocation
 
-### The Sustainability Equation
+Every agentic protocol faces a bootstrap problem: no organic agents exist yet, so the protocol has to seed activity to demonstrate the rails work and to give early adopters something to interact with. SeedAgents are protocol-funded autonomous agents that exercise inference, settlement, marketplace, bridge, capital intent, and dispute surfaces during the first year of mainnet.
 
-A protocol is economically sustainable when its burn rate and fee revenue can fund operations indefinitely without relying on token sales from treasury reserves.
+### Earmark
 
-```
-Sustainable when:
-  Annual Burns >= Annual Inflation
-  AND
-  Treasury Revenue >= Annual Operating Cost
-```
+The SeedAgent earmark is a TNZO allocation from the genesis distribution, governance-controlled, with:
 
-### Scenario Modeling
+- An `enabled` master switch (off by default; turned on by governance proposal).
+- A monthly decay schedule (default: 100% in months 0–2, 75% in months 3–5, 50% in months 6–8, 25% in months 9–11, 0% from month 12).
+- A `surplus_burn_bps` parameter governing what happens to unused earmark at sunset (default: 100%; sunset disposition is burn).
 
-**Assumptions:**
-- 30% staking ratio (300M TNZO staked)
-- 5% APY staking rewards
-- 400ms blocks (~78.8M blocks/year theoretical maximum; scenarios below assume realistic average load, not peak)
+### Charters
 
-#### Scenario A: Low Adoption (Year 1-2)
+A SeedAgent operates under a governance-signed Charter that declares:
 
-```
-Annual settled volume: $50M
-Annual transactions: 1M (avg 5,000 gas, base fee 1 gwei)
+- The operation kinds the agent is allowed to perform (inference consumer, task marketplace consumer, template instantiator, bridge user, settlement probe, ERC-7683 probe, dispute filer).
+- Spend caps (per operation, per day, per month).
+- Target throughput.
+- Counterparty filter (notably: `deny_other_seed_agents` to ensure SeedAgents do not transact with each other, so the network's organic-activity metrics remain meaningful).
+- Sunset date.
+- Enabled flag.
 
-Inflation:
-  Staking rewards: 300M * 5% = 15M TNZO
+### Identity marker
 
-Burns:
-  EIP-1559 gas: 5,000 * 1 gwei * 1M = 0.005 TNZO/year (negligible)
-  Commission: $50M * 0.015% = ~$7,500 in TNZO
+Every SeedAgent identity is registered with the `is_seed_agent` flag set on its TDIP record. Every analytics surface (model usage, settlement volume, bridge flows, marketplace invocations, network activity) excludes SeedAgent activity in its organic-only views.
 
-Net: INFLATIONARY (-14.99M TNZO/year, ~1.5% of supply)
+### Lifecycle
 
-Treasury revenue: $50M * 0.2% = $100K + staking fee
-Status: Requires supplementary funding from initial allocation
-```
+- **Active.** Charter-bounded operation.
+- **Paused.** Charter at sunset enters Paused — agent stops initiating new operations, completes in-flight.
+- **Quarantined.** A grace period before termination.
+- **Terminated.** Agent identity revoked, residual bond unlocked, charter closed.
 
-**Mitigation:** This is expected and acceptable in early growth. The 25% treasury allocation provides runway. Bittensor, Render, and AO all subsidized early growth from allocations.
+### Why this matters
 
-#### Scenario B: Medium Adoption (Year 3-4)
-
-```
-Annual settled volume: $5B
-Annual transactions: 50M (avg 15,000 gas, base fee 5 gwei)
-
-Inflation:
-  Staking rewards: 300M * 5% = 15M TNZO
-
-Burns:
-  EIP-1559 gas: 15,000 * 5 gwei * 50M = 3.75M TNZO/year
-  Commission: $5B * 0.015% = $750K in TNZO (~1.5M TNZO at $0.50)
-
-Net: SLIGHTLY INFLATIONARY (-9.75M TNZO/year, ~0.98%)
-
-Treasury revenue: $5B * 0.2% = $10M + 1M TNZO staking fee
-Status: Treasury self-sustaining, approaching deflationary break-even
-```
-
-#### Scenario C: High Adoption (Year 5+)
-
-```
-Annual settled volume: $100B
-Annual transactions: 500M (avg 15,000 gas, base fee 30 gwei)
-
-Inflation:
-  Staking rewards: 400M * 5% = 20M TNZO
-
-Burns:
-  EIP-1559 gas: 15,000 * 30 gwei * 500M = 225M TNZO/year
-  Commission: $100B * 0.015% = $15M in TNZO
-
-Net: STRONGLY DEFLATIONARY (+205M TNZO burned net)
-Effective annual supply reduction: ~20.5%
-
-Treasury revenue: $100B * 0.2% = $200M + staking fee
-Status: Fully self-sustaining, significant deflationary pressure
-```
-
-### Comparison to Proven Models
-
-| Protocol | Break-even Status | Revenue Model |
-|----------|-------------------|---------------|
-| Ethereum | Net deflationary since EIP-1559 + merge | Gas burns > PoS issuance |
-| Render | Not yet deflationary | BME burns < Year 1 emissions |
-| Akash | Too early (BME launched March 2026) | $8-12K/day compute revenue |
-| io.net | IDE targeting 50%+ burn | $20M+ in leases since launch |
-| **Tenzro** | Break-even at ~$5B annual settled volume | Dual-burn + commission revenue |
+SeedAgents make Tenzro work the day it launches. They demonstrate every protocol surface in real time. Their activity is loud about being protocol-funded — operators reading network analytics know what fraction of activity is organic. After 12 months they sunset and unused earmark burns, completing the bootstrap-to-organic transition.
 
 ---
 
-## 12. Supply and Distribution
+## 14. Agent-economy specific surfaces
 
-### Token Allocation
+The agentic economy has a few specific economic surfaces that do not exist in human-only systems.
 
-| Allocation | Percentage | Amount | Vesting |
-|------------|-----------|--------|---------|
-| Community | 35% | 350M | Phased distribution over epochs |
-| Treasury | 25% | 250M | Multisig-controlled, governance grants |
-| Provider Incentives | 15% | 150M | Reward pool for staking/operations |
-| Team | 10% | 100M | 4-year vest, 1-year cliff |
-| Investors | 10% | 100M | 4-year vest, 1-year cliff |
-| Liquidity | 5% | 50M | DEX liquidity, exchange listings |
+### Triple-ceiling enforcement on agent payments
 
-### Comparison to Peer Allocations
+Every agent payment passes through three independent ceiling checks:
 
-| Protocol | Community | Team | Investors | Notes |
-|----------|-----------|------|-----------|-------|
-| AO | 100% | 0% | 0% | Pure fair launch |
-| Bittensor | ~100% | 0% | 0% | Fair launch (mining) |
-| Sentient | 65.55% | 22% | 12.45% | 6-year team vest |
-| Vana | 44%+ | N/A | N/A | Community rewards |
-| SaharaAI | 64%+ | N/A | N/A | Ecosystem growth |
-| **Tenzro** | **35%** | **10%** | **10%** | 4-year vest, 1-year cliff |
+1. **AP2 mandate constraints** — the mandate itself (signed by the user) declares an item set and a max amount; the payment cannot exceed either.
+2. **Delegation scope (protocol layer)** — the agent's TDIP delegation scope declares per-transaction value cap, daily spend cap, allowed operations, allowed chains, allowed payment protocols, time bound. Enforced by `IdentityRegistry::enforce_operation`.
+3. **Runtime spending policy** — the runtime `SpendingPolicy` tracks rolling daily spend per machine DID; per-transaction and daily-window caps enforced by `SpendingPolicySnapshot::check`.
 
-Tenzro's 35% community allocation is on the lower end of 2026 norms. The 25% treasury effectively serves community purposes (grants, ecosystem development), bringing effective community + ecosystem allocation to 60%.
+All three must pass. The agent payment is refused if any single ceiling fails. The user retains the right to override via signing a new mandate or via the controller's revocation surface.
 
-### Inflation Schedule
+### ERC-7579 on-chain custody enforcement
 
-| Phase | Inflation Source | Rate | Mechanism |
-|-------|-----------------|------|-----------|
-| Year 1-2 | Staking rewards from Provider Incentives pool | ~5% on staked | Fixed pool, not new mint |
-| Year 3+ | Staking rewards (if pool depleted, governance votes on inflation) | Governance-determined | Requires proposal, quorum, vote |
-| Steady state | Targeted 2% max | Governance cap | Burns expected to offset |
+The on-chain twin of the delegation scope is the spending limit validator module. Smart accounts use both — the on-chain validator enforces the limit at `validateUserOp`, the off-chain runtime spending policy reinforces it before the user operation is even dispatched. Custody is enforced at signing time, not as a defensive afterthought.
 
-The initial Provider Incentives pool (150M TNZO) funds staking rewards without minting new tokens for approximately 10 years at 5% APY on 300M staked TNZO (15M/year from pool). This is a critical design choice: early rewards come from allocation, not inflation, preventing the dilution spiral that plagues many protocols.
+### Mandate-receipt binding
+
+Every settlement receipt can be bound to the off-chain mandate that authorized it. The `MandateRef` carries the mandate protocol (`ap2-cart`, `ap2-intent`, `ap2-payment`, `x402`, `mpp`, `stripe-spt`, `visa-tap`, `mastercard-agent-pay`, `capital-intent`, `workflow-step`), the mandate hash, the issuer DID, the optional mandate URI, and the expiration. The audit loop intent → settlement is closed: every settlement reveals which mandate authorized it.
+
+### Capital intent fee model
+
+Capital intent lifecycle operations (open / quote / assign / execute / verify / compensate / settle) pay gas per operation plus network commission on the underlying settlement. There is no per-intent protocol surcharge; the system is priced on the actual flows it executes.
+
+### Workflow fee model
+
+Workflows pay gas per step plus a commission on the underlying value movement. Per-step compensate handlers do not pay commission on the rollback; commission is on net value transferred, not gross.
+
+### Agent memory storage
+
+Per-agent memory persistence (grant / recall / archive) is metered in storage units. Archived records pay an archive-write fee to the DA backend; recall is free reading. The fee model encourages archiving stale memory to DA so the on-chain index stays small.
 
 ---
 
-## 13. Governance Economics
+## 15. Distributed training economics
 
-### Governance Parameters
+Distributed training is its own micro-economy with its own incentive structure.
 
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| Min proposal stake | 10,000 TNZO | `tenzro-token/governance.rs` |
-| Voting duration | 7 days (configurable per proposal) | `tenzro-token/governance.rs` |
-| Quorum | 20% of total supply | Governance config |
-| Approval threshold | Simple majority (votes_for > votes_against) | `tenzro-token/governance.rs` |
-| Vote delegation | Supported (cascading aggregation) | `tenzro-token/governance.rs` |
+### Sponsor escrow
 
-### Proposal Types
+A training task posts a sponsor escrow in TNZO. The escrow funds:
 
-1. **ParameterChange** -- Adjust protocol constants (fee rates, staking params, gas limits)
-2. **TreasuryGrant** -- Fund ecosystem development from treasury
-3. **ProtocolUpgrade** -- Approve code changes and hard forks
-4. **ValidatorChange** -- Add or remove validators from the active set
+- Per-step rewards to trainers who submit valid outer gradients accepted by the syncer.
+- A finalization reward to the witness committee that produces the run-root commitment.
+- A protocol commission (40% treasury / 30% burn / 30% stakers per the standard split).
 
-### Sybil Resistance
+### Trainer rewards
 
-Governance voting power is verified against actual staked balance, not self-reported. This prevents the vulnerability identified in the production audit where `vote()` accepted `voting_power` as an unverified parameter.
+Trainers are paid proportional to their accepted outer-gradient count, weighted by their contribution to the inner training loop. Misbehavior (invalid gradients, divergent state_roots, withholding) slashes against the trainer's bond.
 
-### Economic Cost of Governance Attack
+### Tier-policy
 
-To control governance (>50% of voting power), an attacker would need to stake >50% of the voting supply. At a 30% staking ratio and $1 TNZO price, this requires ~$150M in TNZO -- plus the attacker faces 7-day unbonding risk and slashing exposure. This makes governance attacks economically irrational at scale.
+Three trust tiers:
 
----
+- **Open** — anyone can train; only Mean aggregation; lowest sponsor barrier; default bond.
+- **Verified** — trainers must hold a verified credential; all four aggregators (Mean / TrimmedMean / CoordinateMedian / Krum) admitted; higher bond.
+- **Confidential** — training data is sealed (HPKE RFC 9180 wrapped); trainer must run inside an attested enclave; highest bond.
 
-## 14. What Tenzro Does Differently in Token Economics
+The sponsor picks the tier; the tier sets aggregation policy and trainer requirements.
 
-### 1. Burns From Two Independent Channels
+### Witness committee rewards
 
-Tenzro burns TNZO from two demand sources at once: an EIP-1559 base-fee burn on every transaction (infrastructure demand) and a 30% burn of the 0.5% network commission on AI inference and TEE service payments (service demand). Render, Akash, and io.net each run a single burn-mint channel; Tenzro runs two, so a slowdown in either does not collapse the deflationary pressure.
+The witness committee that finalizes a round earns a fraction of the round's sponsor disbursement. Membership rotates each round via deterministic per-round selection using the previous finalized block hash as entropy. Committee size scales with the syncer set.
 
-### 2. Settles Agent Payments Natively in HTTP 402
+### Forfeit on dishonest finalization
 
-The MPP and x402 protocols live inside `tenzro-payments` and are reachable from the chain's RPC, MCP, and A2A surfaces. The chain itself speaks HTTP 402 challenge / credential / receipt — agents do not need a wallet plugin or middleware to participate. Most AI-token protocols (Bittensor, Render, Akash, io.net) do not have a native agent-payment standard; the chains that do typically wire it through the application layer.
-
-### 3. Treats Hardware-Attested Compute as a Consensus Primitive
-
-HotStuff-2 BFT gives TEE-attested validators a 1.5× multiplier on their reputation-weighted leader-selection draw, and the EVM exposes `TEE_VERIFY` as a precompile that consumes real Intel TDX, AMD SEV-SNP, AWS Nitro, or NVIDIA GPU CC quotes. This puts confidential agent compute in the trust path of consensus rather than next to it as a sidecar.
-
-### 4. Runs EVM, SVM, and Canton/DAML in the Same Chain
-
-The Multi-VM runtime executes Solidity, Solana BPF, and DAML contracts under one settlement layer. Akash, io.net, and Render each settle on a single VM (Cosmos / Solana / Solana respectively); Tenzro can settle agent-economy flow on the same chain that holds enterprise RWA contracts.
-
-### 5. Auto-Provisions Identity, Wallet, and Payment Capability in One RPC
-
-`tenzro_participate` returns a TDIP DID, an MPC threshold wallet, a hardware profile, and the protocol bindings needed for MPP / x402 / native settlement in a single round-trip. The identity stack (`tenzro-identity`), wallet stack (`tenzro-wallet`), and payment stack (`tenzro-payments`) are integrated rather than offered as three independent products.
-
-### 6. Publishes Its Foundational Protocols as Public Standards
-
-Tenzro's identity (TDIP), token (CAIP-2 `tenzro` namespace, SLIP-44 1414421071, W3C `did:tenzro`), and payment surfaces (MPP, x402, ERC-8004, AP2) are filed upstream so other chains and tools can resolve and verify Tenzro entities without bespoke integration. The aim is the same role ERC-20 / ERC-721 played for DeFi: shared protocol primitives the rest of the ecosystem can build on.
-
-### 7. Has a Live Testnet With Production-Quality Implementations
-
-The Tenzro testnet is live and reachable at `https://rpc.tenzro.network` (Chain ID: 1337) with public Web API, Faucet, MCP, A2A, and six ecosystem MCP servers (Solana / Ethereum / Canton / LayerZero / Chainlink / Li.Fi). Genesis: 1,000,000,000 TNZO total supply, 10,000,000 TNZO faucet allocation (100 TNZO per request, 24-hour cooldown).
-
-The core infrastructure crates are production-quality implementations (testnet-ready):
-
-| Layer | Crate | Implementation |
-|-------|-------|---------------|
-| Cryptography | tenzro-crypto | FROST MPC (Shamir SSS over GF(256)), BLS12-381 via `blst`, Ed25519 via `ed25519-dalek`, Secp256k1 via `k256`, Argon2id KDF, AES-256-GCM |
-| Storage | tenzro-storage | RocksDB with 15+ column families, Merkle Patricia Trie with proof generation |
-| Consensus | tenzro-consensus | HotStuff-2 BFT with PREPARE/COMMIT/DECIDE, TEE-weighted leader selection, epoch management, equivocation detection with automatic slashing |
-| VM Execution | tenzro-vm | EVM via `revm`, SVM via `solana_rbpf`, Block-STM parallel execution, EIP-1559 fee market, ERC-4337 account abstraction |
-| Wallet | tenzro-wallet | Argon2id + AES-256-GCM encrypted keystore, MPC threshold signing |
-| Identity | tenzro-identity | W3C DID Documents, verifiable credentials, delegation scopes, cascading revocation |
-| Token Economics | tenzro-token | TNZO 18-decimal arithmetic, staking/slashing (with equivocation detection), stTNZO liquid staking, governance, treasury with multisig |
-| Networking | tenzro-network | libp2p with gossipsub topics, Kademlia DHT, peer manager |
-
-The token, in other words, runs on a working consensus engine and VM execution layer today rather than ahead of one.
-
-### 8. Adaptive Burn Governance Dial
-
-The `tenzro-token::adaptive_burn` module implements a governance-controlled dial over every burn channel. `BurnRateConfig` carries `base_fee_burn_bps`, `local_fee_burn_bps`, and `paymaster_burn_bps` (the last locked at 100% so paymasters always burn TNZO from a treasury quota). `SupplyTargets` defines a rolling window, neutral band, and inflation/deflation alarms with magnitude caps; the pure transfer function `compute_recommendation(metrics, targets)` returns a `BurnRateRecommendation` that drives an auto-proposal generator. M2M volume is empirically ~100× human volume — a calcified burn taper either drains supply or no-ops, so the dial is designed to track realized supply against target ranges and adjust within governance-set bounds.
-
-Read-only RPCs `tenzro_getBurnRateConfig`, `tenzro_getSupplyMetrics`, `tenzro_getBurnRateRecommendation`, and `tenzro_listAdaptiveBurnProposals` surface the dial. The recommendation supersedes the static R1/R2 sketches above — the same intent (utilization-aware commission, inference-tied burn) is realized through a single governance-controlled primitive that operates over realized supply rather than utilization heuristics.
-
-### 9. Dual-Rail Gas + Paymaster Burn Quota
-
-Native TNZO gas is the default rail. Stablecoin paymasters provide a second rail for enterprise users who do not hold TNZO — but every paymaster sponsorship burns TNZO from a treasury quota at 100% of `paymaster_burn_bps`. The TNZO sink is preserved while the user-facing UX is denominated in whatever stablecoin the paymaster supports.
-
-### 10. AgentBond Surety + Insurance Pool
-
-Every autonomous agent posts a slashable TNZO bond at registration. Bonds are released through the same `DelegationScope` / `IdentityRegistry::enforce_operation` path that bounds spending, with a governance-controlled minimum. Bond posts and increases flow through signed `PostAgentBond` / `IncreaseAgentBond` typed transactions; reads (`tenzro_getAgentBond`, `tenzro_listAgentBondsByController`) and claims (`tenzro_fileInsuranceClaim`) are JSON-RPC, MCP, and A2A surfaces. Slashed bonds flow into an on-chain insurance pool that pays out on file-able claims, putting the cost of bad agent behavior onto the agent itself while making victims whole from a pool funded by misbehavior — closing the externality that classical staking-only systems leave open.
-
-### 11. SeedAgent Treasury Earmark
-
-A dedicated `TreasuryEarmark` funds protocol-owned agents during the first 12 months. The `Charter` enumerates `OperationKind` (inference consumer, task marketplace consumer, template instantiator, bridge user, settlement probe, ERC-7683 settler probe, dispute filer) plus `SpendCaps`, `TargetThroughput`, `CounterpartyFilter`, and a sunset disposition. The `DecaySchedule` defaults to 100/100/100% for months 0-2, decaying through 75% / 50% / 25% in three-month tranches and reaching 0% from month 12. Surplus at sunset is burned per `surplus_burn_bps`. The SeedAgent counterparty filter explicitly excludes other SeedAgents (`CounterpartyFilter::deny_other_seed_agents`) so organic-activity metrics are not inflated by protocol-owned bootstrap traffic. The `is_seed_agent` flag on `IdentityData::Machine` is immutable, set at registration.
-
-### 12. Per-DID Flow Control + Local Fee Market
-
-Mempool admission lanes are keyed on `controller_did` rather than wallet address — multiple agents under one controller are one accountable unit, so a single swarm cannot saturate the chain. When swarms cluster on hot contracts, a per-account local fee market escalates fees on the hot contract specifically, leaving cold-path traffic at the global EIP-1559 base fee. Both lane fill rate and fee escalation thresholds are governance dials, not hardcoded constants.
+Conflicting `state_root` finalization attempts surface `ConflictingFinalize`. The witness that produced the conflicting submission forfeits its committee reward and is slashed against its bond.
 
 ---
 
-## 15. Strategic Recommendations
+## 16. Governance economics
 
-Based on the 2026 token-economy landscape (§10) and the sustainability modeling above, the following recommendations keep TNZO tokenomics sustainable and well-fitted to the AI and agentic era:
+Governance is on-chain, stake-weighted, and constitutionally bounded.
 
-### R1: Implement Adaptive Commission Rate
+### Proposal classes
 
-The current 0.5% flat commission rate should become adaptive based on network utilization:
+| Class | Bond | Voting window | Timelock | Quorum |
+|---|---|---|---|---|
+| Parameter change | Low | Standard | Standard | Simple majority |
+| Treasury disbursement | Low | Standard | Standard | Simple majority |
+| Code upgrade | Medium | Standard | Standard | Supermajority (2/3) |
+| Adaptive burn (normal) | Low | Short | Short | Simple majority |
+| Adaptive burn (alarm) | Low | Short | Fast-track | Simple majority |
+| Constitutional | High | Long | Long | Supermajority (2/3) |
+| SeedAgent charter | Medium | Standard | Standard | Simple majority |
+| Bridge authorization | Medium | Standard | Standard | Simple majority |
+| Network commission rate | Low | Standard | Standard | Simple majority |
 
-```
-if utilization > 80%: commission = 0.5% (current)
-if utilization < 20%: commission = 0.25% (attract volume)
-if utilization > 95%: commission = 1.0% (premium pricing)
-```
+### Voting weight
 
-This follows the EIP-1559 philosophy of dynamic pricing applied to the service layer.
+Stake-weighted with quadratic dampening on the upper end so any single very large staker cannot dominate. KYC-tier bonus weights apply to treasury and constitutional proposals (KYC-Full carries more weight than KYC-Basic, recognizing that constitutional decisions have higher counterparty-trust requirements). Delegate voting is supported: a staker can delegate voting weight without delegating stake.
 
-### R2: Add Inference Burn (BME Enhancement)
+### Vote economics
 
-Beyond the existing commission burn, implement a direct burn on inference settlement:
+Voters lock TNZO for the voting window. There is no slashing for voting against the eventual outcome; voting is exclusively about preference revelation, not commitment. Proposal bonds are returned to the proposer if the proposal passes; forfeited (burned) if the proposal fails.
 
-```
-When user pays for AI inference:
-  1. 0.5% network commission (existing)
-  2. Of the provider payment: X% burned, (100-X)% to provider
+### Executor
 
-  X = governance-determined burn rate (suggested: 1-2%)
-```
-
-This creates a third burn channel directly tied to AI compute demand, making TNZO more strongly deflationary as inference volume grows.
-
-### R3: Provider Stabilization Vault
-
-Adopt io.net's vault concept to buffer provider payouts during TNZO price volatility:
-
-```
-Reward Vault: 5% of treasury reserved for provider payout stabilization
-Fee Vault: 5% of treasury reserved for price crash cushion
-
-When TNZO price drops >30% in 7 days:
-  Provider payouts supplemented from Reward Vault
-  to maintain USD-equivalent earnings
-```
-
-This prevents provider churn during market downturns -- the primary failure mode for DePIN protocols.
-
-### R4: Increase Community Allocation
-
-Current 35% community allocation is below the 2026 norm (AO 100%, Sentient 65.55%, Vana 44%, SaharaAI 64%). Consider:
-
-- Move 5% from Liquidity (5% --> 2%) and Investor (10% --> 8%) to Community (35% --> 40%)
-- Or implement a community mining program where running a Tenzro node earns TNZO from the Provider Incentives pool (similar to Bittensor subnet mining)
-
-### R5: Implement Epoch-Based Emission Reduction
-
-Rather than fixed 5% APY forever, implement automatic emission reduction:
-
-```
-Year 1-2: 5% APY (bootstrap)
-Year 3-4: 4% APY (if burn_rate > 50% of issuance)
-Year 5-6: 3% APY (if burn_rate > 75% of issuance)
-Year 7+:  2% APY (steady state, matching Sentient's 2% cap)
-
-Trigger: Governance can accelerate or delay based on network metrics
-```
-
-This follows the pattern of Bittensor (halving), io.net (disinflationary from 8%), and ICP (targeting <3% by end 2026).
-
-### R6: Publish Real-Time Economics Dashboard
-
-Following Render (stats.renderfoundation.com) and io.net ($20M+ leases tracked publicly), publish:
-
-- TNZO burned vs. minted (daily, cumulative)
-- Inference requests settled per day
-- TEE attestations verified per day
-- Provider uptime and QoS scores
-- Treasury balance and revenue breakdown
-- stTNZO exchange rate history
-- Micropayment channel volume
-
-Real usage metrics build credibility. Protocols that publish metrics (Render, io.net, Akash) attract more serious participants than those that don't.
-
-### R7: Agent-First Fee Design
-
-Design fee structures specifically for autonomous agents:
-
-```
-Human user: Standard pricing (gas + 0.5% commission)
-Agent (TDIP-verified): Reduced commission (0.3%) for high-volume
-Agent-to-agent: Micropayment channel preferred (no per-tx gas)
-Batch settlement: Volume discount (0.25% for >1000 settlements/day)
-```
-
-This recognizes that in the agentic era, the majority of transactions will be machine-to-machine. Competitive pricing for agents drives volume, and volume drives burns.
-
-### R8: Governance-Controlled Parameters
-
-The following parameters should be adjustable via governance proposals:
-
-| Parameter | Current | Governance Range |
-|-----------|---------|-----------------|
-| Network commission | 0.5% | 0.1% - 2.0% |
-| Commission burn share | 30% | 20% - 50% |
-| Treasury share | 40% | 20% - 50% |
-| Staker share | 30% | 20% - 50% |
-| Min stake | 1,000 TNZO | 100 - 100,000 TNZO |
-| Staking APY | 5% | 1% - 10% |
-| Liquid staking fee | 10% | 5% - 20% |
-| Unbonding period | 7 days | 3 - 28 days |
-
-This allows the protocol to adapt to market conditions without hard forks.
+The governance executor mints, burns, transfers from treasury, and adjusts parameters by calling into the relevant subsystems' privileged surfaces. The executor itself has no off-protocol authority; it can only do what the on-chain proposal authorizes.
 
 ---
 
-## Appendix A: Key Protocol Constants
+## 17. Sustainability
 
-| Constant | Value | Crate |
-|----------|-------|-------|
-| ONE_TNZO | 10^18 | tenzro-token |
-| MAX_SUPPLY | 1,000,000,000 TNZO | tenzro-token |
-| NETWORK_FEE_BPS | 50 | tenzro-settlement |
-| TREASURY_SHARE_BPS | 4,000 | tenzro-token |
-| BURN_SHARE_BPS | 3,000 | tenzro-token |
-| STAKER_SHARE_BPS | 3,000 | tenzro-token |
-| MIN_STAKE | 1,000 TNZO | tenzro-token |
-| UNBONDING_PERIOD | 604,800,000 ms (7 days) | tenzro-token |
-| REWARD_RATE_BPS | 500 (5% APY) | tenzro-token |
-| EPOCH_DURATION | 14,400 blocks | tenzro-token |
-| STTNZO_PROTOCOL_FEE | 1,000 bps (10%) | tenzro-token |
-| MIN_DEPOSIT_STTNZO | 0.1 TNZO | tenzro-token |
-| MAX_GAS_LIMIT | 30,000,000 | tenzro-vm |
-| TARGET_GAS | 15,000,000 | tenzro-vm |
-| INITIAL_BASE_FEE | 1 Gwei | tenzro-vm |
-| MIN_BASE_FEE | 0.1 Gwei | tenzro-vm |
-| MAX_BASE_FEE | 1,000 Gwei | tenzro-vm |
-| CHALLENGE_PERIOD | 86,400,000 ms (24 hours) | tenzro-settlement |
-| MIN_SETTLEMENT | 1,000 units | tenzro-settlement |
-| MAX_BATCH_SIZE | 100 | tenzro-settlement |
-| MIN_PROPOSAL_STAKE | 10,000 TNZO | tenzro-token |
+A token economy is sustainable when participation is funded by real network use rather than emission schedules.
 
-## Appendix B: Fee Flow Diagram
+### Steady-state check
 
-```
-                         User/Agent Pays for Service
-                                    |
-                    ________________|________________
-                   |                                 |
-            Gas Transaction                   Service Payment
-            (EIP-1559)                        (AI/TEE/Agent)
-                   |                                 |
-           ________|________                   ______|______
-          |                 |                 |             |
-     Base Fee          Priority Fee      0.5% Network   99.5% to
-     BURNED            to Validators     Commission     Provider
-                                              |
-                                    __________|__________
-                                   |          |          |
-                                 40%        30%        30%
-                               Treasury    BURNED    Stakers
-                                   |
-                          _________|_________
-                         |                   |
-                    Grants/Ops          Protocol Dev
-                    (governance)        (liquid staking
-                                         fee: 10%)
+For TNZO to be sustainable at steady state, the inflationary forces (staking rewards, ecosystem incentives) must be offset by the deflationary forces (base-fee burn, commission burn, paymaster burn, slashing burn).
 
-                    BURN CHANNELS:
-                    1. EIP-1559 base fee (demand-driven, unlimited)
-                    2. 30% of network commission (0.015% of settled volume)
-                    3. Slashed stake (punitive, event-driven)
-```
+The model has no fixed emission schedule. Staking rewards are paid out of a finite rewards pool (genesis-allocated, governance-replenishable from treasury) at a rate the protocol can sustain given current activity. If activity is low, the rate is constrained; if activity is high, the rate is generous.
 
-## Appendix C: Where TNZO Sits on Three Axes
+The burn channels grow with usage:
 
-```
-                     Low Fee <-----------> High Fee
-                        |                     |
-    Tenzro (0.5%) ------+                     |
-    Akash (1-2%) -------+                     |
-                        |                     |
-                        |            Akash proposed (20%) +
-                        |            Apple (30%) ---------+
+- **Heavy DeFi activity** → high base-fee burn.
+- **Heavy inference / settlement activity** → high commission burn.
+- **High paymaster sponsorship** → high paymaster burn.
 
-                    Passive Staking <-----> QoS-Based
-                        |                     |
-    Nosana (40% APY) ---+                     |
-                        |                     |
-    Tenzro (5% + QoS) ---------+              |
-    Sentient (2%) ------+------+              |
-                        |      |              |
-                        | Bittensor (flow) ---+
-                        | io.net (IDE) -------+
-                        | Grass (QoS) --------+
+The adaptive burn dial (section 6) gives governance a finer instrument to keep net supply tracking on target even as the activity mix changes.
 
-                    Single Burn <----------> Multi Burn
-                        |                     |
-    Render (BME) -------+                     |
-    Akash (BME) --------+                     |
-    io.net (IDE) -------+                     |
-                        |                     |
-                        |     Tenzro (EIP-1559 + commission + slash) +
-```
+### Break-even target
+
+At a hypothetical 30% staking ratio (300M TNZO staked) earning 5% APY:
+
+- Annual staking rewards paid: 15M TNZO
+- Required annual burn to offset: 15M TNZO
+- At Ethereum-class utilization (15M gas/block at 30 Gwei base fee), gas burn alone produces a fraction of this; commission burn at moderate usage closes the gap.
+
+Once commission throughput crosses a threshold, net supply is deflationary. The threshold depends on the gas burn baseline and the commission throughput; both grow with the network, and so does the offset.
+
+### Demand independence
+
+Demand for TNZO does not require speculative appreciation to function. Every gas user, every settlement participant, every staker, every voter, every provider needs TNZO to do their work. The token's role is functional, not promotional.
+
+### Treasury runway
+
+The treasury accumulates 40% of all commission flows plus other inflows (section 12). As long as the network is being used, the treasury runway extends. If treasury inflows exceed planned outflows, governance can adjust either the inflow rate (lower commission), the outflow rate (more grants), or both. The treasury does not depend on token sales or external financing.
 
 ---
 
-*This document is versioned with the Tenzro Network codebase. All parameters reference implementation in `crates/tenzro-token`, `crates/tenzro-settlement`, `crates/tenzro-vm`, and `crates/tenzro-payments`. Governance can adjust any parameter listed in Appendix A via on-chain proposal.*
+## 18. Simulations
+
+The model is verified through closed-form analysis and scenario simulation across the failure modes that have broken comparable systems. The simulations test whether net supply, staking equilibrium, fee market, treasury runway, and SeedAgent sunset all behave correctly under realistic and adversarial activity profiles. Every parameter used here matches the on-chain defaults; the equations are reproducible from the constants in sections 2 through 7.
+
+### 18.1 Net supply across activity regimes
+
+Define the per-epoch (one-day) supply equation:
+
+```
+ΔS_epoch = R_stake − B_basefee − B_commission − B_paymaster − B_slash − B_seedagent_surplus
+```
+
+Where:
+
+- `R_stake` = epoch staking reward paid = `(S_staked × r_apy) / 365`
+- `B_basefee` = `Σ (base_fee_block × gas_used_block)` over all blocks in the epoch, multiplied by `base_fee_burn_bps / 10,000`
+- `B_commission` = `0.30 × 0.005 × V_settlement_epoch`
+- `B_paymaster` = `1.00 × F_paymaster_epoch`
+- `B_slash` = sum of slashed bonds (typically zero in honest operation)
+- `B_seedagent_surplus` = nonzero only at SeedAgent sunset
+
+Setting parameters from sections 4 and 7 (`base_fee_burn_bps = 10,000`, `r_apy = 0.05`, commission burn share = 30%). All quantities below are denominated in TNZO; settlement volume is in TNZO (not in USD-equivalent) so the burn math is price-independent.
+
+Gas burn baseline: assume an average base fee `b_avg` across the epoch and a total gas used per epoch `G_epoch`. With a 6-second block target and 14,400 blocks/epoch, `G_epoch = blocks_per_epoch × avg_gas_per_block`. Default `b_avg` track-rate is 1 Gwei (≈ 10⁻⁹ TNZO/gas) at the EIP-1559 floor; sustained congestion drives `b_avg` upward through the ±12.5% adjustment.
+
+Commission burn: `B_commission = 0.30 × 0.005 × V_settlement_TNZO_per_epoch = 0.0015 × V_TNZO`.
+
+| Regime | `S_staked` (TNZO) | Avg block gas | `b_avg` | Gas burn (TNZO/day) | Settlement vol (TNZO/day) | Commission burn (TNZO/day) | `R_stake` (TNZO/day) | ΔS/day | Annualized |
+|---|---|---|---|---|---|---|---|---|---|
+| Low (bootstrap) | 100M | 1M | 1 Gwei | 14.4 | 100K | 150 | 13,699 | +13,535 | +4.94% / yr |
+| Moderate | 200M | 5M | 5 Gwei | 360 | 5M | 7,500 | 27,397 | +19,537 | +3.57% / yr |
+| Breakeven | 300M | 10M | 10 Gwei | 1,440 | 25M | 37,500 | 41,096 | +2,156 | +0.26% / yr |
+| Steady-state | 300M | 15M | 30 Gwei | 6,480 | 50M | 75,000 | 41,096 | −40,384 | −4.91% / yr |
+| Heavy | 400M | 20M | 100 Gwei | 28,800 | 200M | 300,000 | 54,795 | −273,995 | −25.0% / yr |
+| Peak agentic | 500M | 25M | 200 Gwei | 72,000 | 500M | 750,000 | 68,493 | −753,507 | −55.0% / yr |
+
+Two observations:
+
+- The model is mildly inflationary in early-stage operation (under 4-5% APY net inflation at the lowest activity levels). This is the price of paying staking rewards before commission throughput catches up.
+- At a moderate steady-state — 50M TNZO of settlement volume per day with 15M gas per block at 30 Gwei — net supply already contracts at ~5% APY. At heavy agentic-economy activity the contraction is much faster.
+
+**Reality check on settlement volume.** Is "50M TNZO/day" realistic? With the network's expected activity surfaces — inference billing, training settlement, agent commerce, micropayment channels, bridge routing, marketplace invocations, AP2 / x402 / MPP payments, capital intent flows — a per-user-per-day settlement footprint in the tens to hundreds of TNZO across a base of moderate users reaches this magnitude long before mainstream adoption. At a hypothetical 1M active agents on the network each producing 50 TNZO/day in settled commerce, the daily volume is 50M TNZO. The agentic-economy projection where most discrete economic actions are agent-driven puts daily volumes orders of magnitude above this.
+
+**Stress check — permanent stagnation.** If the network is permanently stuck at the "Low" regime, annual net inflation tops out at ~5%. After ten years, cumulative inflation is ~63% (compounded); supply approaches but never reaches the 1B cap because the rewards pool is finite (paid out of the genesis-allocated pool, not minted; see section 7). The protocol does not face a runaway-emission failure mode even in worst-case stagnation. The bounded rewards pool plus the natural ramp from bootstrap to organic activity ensures the inflation phase is transient.
+
+**Stress check — runaway deflation.** At "Peak agentic" rate, supply contracts at ~55% annually. The adaptive burn dial (section 6) gives governance an instrument to throttle this — lowering `base_fee_burn_bps` from the 100% default to e.g. 50% halves the burn-channel contribution. Extreme deflation also pushes up real fees, which dampens demand on its own. The protocol can tune through this; there is no failure mode here, only a parameter to manage.
+
+### 18.2 Staking equilibrium
+
+Define the staking participation function: `participation_rate = f(real_yield, opportunity_cost)`.
+
+Real yield to a staker:
+
+```
+real_yield = (r_apy × type_multiplier × qos_multiplier) − protocol_fee
+           + staker_share_of_commission
+           − expected_slash_rate
+```
+
+Plugging in defaults (`r_apy = 5%`, validator `type_multiplier = 1.0`, QoS = 1.0, no protocol fee on native staking, expected slash rate ≈ 0 under honest operation, staker share of commission at moderate activity ≈ 0.5% APY):
+
+- Validator real yield: **≈ 5.5% APY**
+- TEE provider real yield: **≈ 6.5% APY** (1.2× multiplier)
+- Model provider real yield: **≈ 6.0% APY** (1.1× multiplier)
+- stTNZO holder real yield: **≈ 4.95% APY** (90% pass-through after 10% protocol fee)
+
+**Equilibrium check against 2026 baselines.**
+
+| Network | Nominal APY | Inflation drag | Approximate real yield |
+|---|---|---|---|
+| Ethereum (staking) | 2.8–3.8% | ~0.2% (mild) | 2.6–3.6% |
+| Solana (native) | 6–8% | ~5–6% | 0–3% |
+| Cosmos (ATOM) | 10–14% (some sources 15–20%) | ~10% | 0–8% |
+| Polkadot (DOT) | 7–12% | varies by era | 4–8% |
+| 2026 T-bills | ~4–5% | n/a (fiat baseline) | 4–5% |
+| **Tenzro (validator)** | **5.0–5.5% nominal** | **Net deflationary at moderate activity** | **5.0–7.0% real** |
+
+At 5.0–5.5% nominal with potential native-burn deflation at moderate-to-high activity (regimes from 18.1), Tenzro's real yield is competitive with or exceeds every major proof-of-stake network on a real-yield basis. The structural advantage is the absence of an emission schedule — staking rewards come from a finite genesis-allocated pool and burn channels track real usage, so real yield rises rather than falls as the network grows.
+
+**Stress check — yield collapse.** If real yield drops below ~3% APY (e.g., rewards pool depletes or commission revenue stalls), participation falls. The security budget falls. At what participation level does the network become Byzantine-vulnerable?
+
+HotStuff-2 BFT requires `> 2/3` of validator-weight honest. Tenzro's two-tier validator model splits this budget:
+
+- **High-value blocks** (training round finalization, institutional settlement, high-value bridge messages, Canton DvP) are restricted to staked validators only. The 2/3 safety bound on these blocks is measured on staked weight. An attacker breaking liveness or safety on a high-value block must acquire and bond the required share of *staked* TNZO at market price.
+- **Standard blocks** are open to both tiers. The 2/3 safety bound is measured on combined validator-weight (staked + resource-only). An attacker can theoretically break liveness on standard blocks by running enough resource-only nodes to control 1/3 of validator weight, but admission gates (hardware profile, stability profile, geographic diversity) and per-block staked weight requirements bound this.
+
+For the high-value block path, the cost to mount an attack is the cost to acquire and bond the required share of currently-staked TNZO at market price.
+
+| Staking participation | Honest stake (TNZO) | Attacker cost to break liveness (>1/3 of staked) | Attacker cost to break safety (>2/3 of staked) |
+|---|---|---|---|
+| 10% | 100M | >33M TNZO + market impact + slashing exposure | >67M TNZO + market impact + slashing exposure |
+| 20% | 200M | >67M TNZO | >133M TNZO |
+| 30% | 300M | >100M TNZO | >200M TNZO |
+| 50% | 500M | >167M TNZO | >333M TNZO |
+
+The attacker also faces (a) the slashing risk on every validator they operate (10% bond burn per equivocation; correlated attacks compound), (b) market impact on accumulating the position, and (c) the cost of running the additional infrastructure. Real attacker cost is meaningfully above the headline TNZO figure.
+
+Staking participation below ~10% (i.e., when 33M TNZO is enough to break liveness) is a security-budget signal that triggers governance intervention: raise the reward rate temporarily, raise the commission share to stakers, fund a participation incentive, or pause non-essential treasury outflows to redirect to staker rewards. The adaptive burn dial alone is insufficient at this end — direct governance intervention is the lever.
+
+**Stress check — slashing spiral.** A single equivocation slashes 10% of one offender's stake. The largest realistic single-event burn from slashing is bounded by `0.10 × (largest single validator's stake)`. With even distribution and 100 validators, this is ≤ `0.001 × S_staked`. A correlated multi-validator equivocation event (worst case, all 100 validators slashed simultaneously) is bounded at `0.10 × S_staked`. The protocol does not face a spiral failure mode — slashed stake is burned, not redistributed, so there is no positive feedback loop where surviving validators benefit from peers' slashing.
+
+### 18.3 Fee market stability
+
+Define the EIP-1559 fixed point. Given `target_gas = 15M`, `gas_used_block`, and base fee `b`:
+
+```
+b_{t+1} = b_t × (1 + (gas_used − target) / (target × 8))
+```
+
+With clamps `b ∈ [0.1 Gwei, 1000 Gwei]`. The fixed point is `b* such that gas_used(b*) = target`, i.e., the base fee where demand matches the 50%-utilization target.
+
+**Stress check — empty blocks.** If demand goes to zero, `b_{t+1} = b_t × 7/8`. After 10 blocks at zero demand, `b → 0.263 × b_0`; after 17 blocks, `b → 0.094 × b_0`, hitting the 0.1 Gwei floor from a 1 Gwei starting base fee. The fee market does not get stuck at a high base fee during demand droughts.
+
+**Stress check — sustained congestion.** If demand stays at `2× target` (full blocks), `b_{t+1} = b_t × 9/8`. After 10 blocks, `b → 3.25 × b_0`; after 25 blocks, `b → 11.4 × b_0`; converges to the 1000 Gwei ceiling from a 1 Gwei starting base fee in ~58 blocks of sustained full-block demand. Up and down adjustments are symmetric in their fixed-point ratio per block (12.5% absolute), which means the time to fully respond to a demand shock is bounded and predictable.
+
+**Stress check — adversarial spamming.** An attacker can artificially inflate `gas_used` by spamming valid transactions. Under EIP-1559, each spam transaction also pays its own gas at the elevated base fee, which is burned. The attacker pays the protocol per-block to drive the fee up, and the elevated fee both deters legitimate users and accelerates burn. Spamming is self-defeating economically unless the attacker's goal is to deny service rather than to game economics — in which case the attacker is simply purchasing block space at market rate, which is the design.
+
+### 18.4 Treasury runway
+
+Define treasury solvency:
+
+```
+T_{t+1} = T_t + I_t − O_t
+
+where:
+  I_t = 0.40 × commission flow + bridge protocol fee share + liquid-staking protocol fee + marketplace commissions
+  O_t = grants + ecosystem incentives + infrastructure + insurance fund + SeedAgent earmark + sponsorship contributions + operational
+```
+
+For the network to fund itself indefinitely from real demand:
+
+```
+I_steady_state ≥ O_steady_state
+```
+
+**Solvency check at the steady-state settlement volume** (from 18.1, 50M TNZO/day = 18.25B TNZO/year):
+
+- Annual treasury inflow from commission: `0.40 × 0.005 × 18.25B TNZO` = **36.5M TNZO/year**
+- Plus liquid-staking protocol fees on stTNZO pools: ~`0.10 × 0.05 × S_staked_in_liquid_pools` (variable; bounded by stTNZO TVL)
+- Plus marketplace commissions at moderate marketplace volume: ~1–10% of treasury inflow
+- Plus bridge protocol fees and other commission flows
+
+At steady-state activity, treasury inflow at ~36.5M TNZO/year (~3.65% of max supply per year) is ample to fund grants, audits, insurance, infrastructure, and a sponsorship pool without depleting the genesis allocation. Below steady-state activity, the treasury must rely on its genesis-allocated initial balance to extend runway; governance can throttle outflows during the bootstrap phase to preserve runway until commission throughput ramps up.
+
+**Stress check — bootstrap runway.** Treasury inflows during the first 12 months will be modest. The SeedAgent earmark explicitly funds protocol activity during this window so that commission inflows ramp up before the bootstrap balance depletes. The earmark sunset is timed to coincide with the projected organic-activity ramp.
+
+### 18.5 SeedAgent sunset disposition
+
+Define the SeedAgent earmark draw schedule (defaults from section 13):
+
+| Months | Draw rate |
+|---|---|
+| 0–2 | 100% of monthly entitlement |
+| 3–5 | 75% |
+| 6–8 | 50% |
+| 9–11 | 25% |
+| 12+ | 0% (sunset, surplus burns) |
+
+**Total SeedAgent draw bounded at:**
+
+```
+T_draw_total = E × (3 × 1.00 + 3 × 0.75 + 3 × 0.50 + 3 × 0.25) / 12
+            = E × 0.625
+```
+
+Where `E` is the annual entitlement. At sunset, the unused fraction (37.5% by default) plus any unspent in-period reserve is burned. The protocol does not retain a residual SeedAgent allocation past month 12.
+
+**Stress check — extension by governance.** If organic activity is below the projected ramp at month 12, governance can vote to extend SeedAgent operation. The amount available for extension is bounded by what the treasury can fund, not by the original earmark. This forces the trade-off explicit (extending SeedAgent draws on treasury, not on a pre-allocated reserve).
+
+**Stress check — premature sunset.** If organic activity exceeds projection by month 6, the charter can sunset early; the surplus disposition (burn) still applies. The protocol does not retain unused bootstrap capacity for any other purpose.
+
+### 18.6 Bridge sponsorship sustainability
+
+Bridge fee sponsorship draws from a configurable pool. Sustainability requires:
+
+```
+S_pool_inflow ≥ S_pool_outflow_to_sponsored_routes
+```
+
+Where pool inflow comes from operator contributions, a configurable cut of network commission on subsidized routes, and treasury grants. The cap on commission share is governance-set; the default cap prevents runaway sponsorship.
+
+**Stress check — sponsorship drain.** If sponsored routes are gamed (users routing through them solely to extract subsidies), the cap on commission share auto-throttles. Persistent gaming triggers governance to lower the cap, raise the eligibility threshold, or shut down sponsorship for a specific route.
+
+### 18.7 Failure mode coverage
+
+The simulations above cover the failure modes that have broken comparable systems in 2022–2025:
+
+| Failure mode | Tenzro mitigation | Tested in |
+|---|---|---|
+| Runaway emission | No emission schedule; rewards from finite genesis pool | 18.1 |
+| Insufficient burn | Two demand-driven channels + adaptive dial | 18.1, 18.3 |
+| Staking yield collapse → security degradation | Adaptive reward rate + governance lever | 18.2 |
+| Slashing cascade | Slashed stake is burned, not redistributed; no positive feedback | 18.2 |
+| Fee market lock-up at high base fee | Symmetric ±12.5% adjustment + ceiling | 18.3 |
+| Adversarial gas spamming | Self-paid via the same base-fee burn | 18.3 |
+| Treasury depletion | Diversified inflows; governance throttles outflows | 18.4 |
+| Bootstrap funding cliff | SeedAgent earmark + adaptive disbursement | 18.4, 18.5 |
+| Sponsorship pool drain | Governance-set commission share cap | 18.6 |
+| Investor / team unlock cliffs | No team or investor allocation; no cliffs exist | 2 |
+
+The model is conservatively parameterized — every assumption used to verify it errs on the side of pessimism (low activity, no organic ramp, adversarial staking participation, sustained congestion). The default parameters survive every simulation; the governance dials are available to retune any of them if real-world activity diverges from these projections.
+
+---
+
+## 19. Where the agentic decade is going
+
+The model above is designed for where the AI and agentic economy is going, not where it has been.
+
+**Agents do most discrete economic actions.** By the late 2020s, autonomous agents — frontier-LLM-driven, tool-using, identity-bound — will conduct the majority of routine economic transactions: quote requests, payment routing, on-chain settlement, identity verification, micro-credentialing. The protocol that wins this period is the one that gives agents a complete substrate. Tenzro's TDIP, MPC wallets, AP2 mandates, ERC-7579 custody, MCP/A2A surfaces, and protocol-level settlement are designed for that world.
+
+**Settlement converges on identity-bound payment.** Stablecoins, payment processors, card networks, agent-pay standards, and on-chain micropayments are all converging on the same model: a counterparty identity (KYC where required), a signed mandate (authorization scope), a settled receipt (audit). MPP, x402, Tempo, Visa Tap, Mastercard Agent Pay, Stripe SPT, and AP2 all express this pattern. Tenzro implements every major variant natively so an agent can serve any payment surface its counterparty needs.
+
+**Open-source AI is the default.** By late 2026, open-weight models from Qwen, Gemma, Mistral, DeepSeek, Granite, and others match or exceed closed frontier models on most benchmarks. Inference moves from a small number of hyperscaler APIs to a long tail of operators serving their own GPUs. Tenzro's permissionless model marketplace, multi-modality runtimes, and provider economy are built for this distribution.
+
+**Distributed training is production.** DiLoCo / Decoupled DiLoCo / OpenDiLoCo / INTELLECT-1/2/3 / Hermes 4 have demonstrated that frontier-quality models can be trained across regions and across operators. The protocol layer that wins is the one that provides cross-operator coordination — sponsor escrow, witness committees, on-chain run-root commitments, sealed-shard confidential training. Tenzro Train is built for this.
+
+**Institutional rails go on-chain.** Canton Network is settling tokenized money-market funds, treasuries, bonds, and equities for major asset managers. Banks settle DvP through Canton. Public chains do not have to replace this; they have to interoperate. Tenzro's Canton 3.5+ adapter — JSON Ledger API v2, CIP-26 user management, CIP-56 Canton Coin holdings, party-scoped privacy, multi-tenant isolation — is the bridge between institutional rails and the public agentic economy.
+
+**Cross-chain becomes intent-driven.** ERC-7683 cross-chain intents, deBridge DLN, LayerZero V2, and CCIP CCT are coalescing on an intent-driven model: the user signs what they want; the network finds the cheapest, fastest, or most-reliable path. Tenzro's unified `BridgeRouter` is built for this.
+
+**Regulation requires legibility.** EU AI Act Article 50 binds AI disclosure. MiCA binds stablecoin and crypto-asset service providers. Travel rule enforcement extends to virtual asset service providers. Protocols that move into 2027 without auditable identity, mandate-bound authorization, KYC-tier-bound delegation, on-chain receipts, and operator-grade analytics will not be usable by institutional counterparties. Tenzro's TDIP credential system, AP2 validation, ERC-7579 enforcement, settlement receipts with mandate binding, and per-tenant analytics are built for this regulatory shape.
+
+**Post-quantum becomes table stakes.** NIST standardized ML-DSA in 2024; CNSA 2.0 mandates PQ-hybrid signatures across federal infrastructure by the late 2020s; major TLS deployments shipped X25519MLKEM768 in 2024–2025. Protocols that store value or sign attestations for the long term need PQ-hybrid throughout. Tenzro's Ed25519 + ML-DSA-65 hybrid signatures on every safety-critical message, X25519 + ML-KEM-768 key exchange, and PQ-hybrid wallet primitives are built for this.
+
+The TNZO economic model is built around these forward trajectories. Demand sources scale with the agentic economy. Burn channels scale with real usage. Bonds align providers with the value they secure. Governance dials let the protocol respond to where the world is going.
+
+That is what TNZO is for.
+
+---
+
+**License: Apache-2.0.**
