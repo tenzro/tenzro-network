@@ -13,10 +13,20 @@ case "${COMMAND}" in
         echo "Starting local Tenzro testnet..."
         echo ""
 
-        # Generate genesis if not exists
+        # Generate genesis if not exists. Uses tools/genkeys to produce
+        # a full v3-schema genesis (Ed25519 + ML-DSA-65 + BLS12-381 per
+        # validator) so the binary can boot.
         if [ ! -f "${PROJECT_DIR}/config/genesis-local.toml" ]; then
-            echo "Genesis config not found, it should already exist at config/genesis-local.toml"
-            exit 1
+            echo "Generating local genesis via tools/genkeys (v3 schema)..."
+            (cd "${PROJECT_DIR}" && cargo build --release -p tenzro-genkeys >/dev/null 2>&1)
+            tmpdir=$(mktemp -d -t tenzro-local-genesis-XXXXXX)
+            "${PROJECT_DIR}/target/release/tenzro-genkeys" \
+                --out "${tmpdir}" \
+                --count 3 \
+                --chain-id 1337 \
+                --stake-per-validator 1000
+            cp "${tmpdir}/genesis-prod.toml" "${PROJECT_DIR}/config/genesis-local.toml"
+            echo "Wrote ${PROJECT_DIR}/config/genesis-local.toml"
         fi
 
         # Build and start
