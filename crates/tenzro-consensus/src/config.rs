@@ -18,18 +18,29 @@ pub struct ConsensusConfig {
     /// Maximum gas per block (default: 30M)
     pub max_gas_per_block: u64,
 
-    /// View timeout in milliseconds (default: 2500ms).
+    /// View timeout in milliseconds — **bootstrap seed only**.
     ///
-    /// Base timeout before any consecutive-timeout backoff. Combined with
-    /// `MAX_BACKOFF_EXPONENT = 3` and `backoff_multiplier = 2.0` in
-    /// `hotstuff2::ViewChangeTimer`, the schedule is 2.5s → 5s → 10s → 20s
-    /// (capped). The 2.5s base absorbs the worst-case ~500ms cross-region
-    /// RTT (us-central1 ↔ asia-southeast1) so a leader's proposal can
-    /// reach distant peers and collect 2/3 sigs before the local
-    /// pacemaker fires. Shorter values cause chronic tail-forking under
-    /// tri-continental topology (see `tools/testnet-smoke/FINDINGS.md`);
-    /// single-region or local clusters can lower this back to 1000ms via
-    /// the operator config.
+    /// This value seeds `ViewChangeTimer::base_timeout` at engine
+    /// construction. After the first successful view, the adaptive
+    /// tuner (`ViewChangeTimer::record_observed_view_latency`)
+    /// retunes the base timeout to track the cluster's actually-
+    /// observed quorum-formation latency.
+    ///
+    /// **Why this is a seed, not a default**: the validator set is
+    /// open. A validator on residential WiFi joining a cluster of
+    /// datacenter peers cannot share a static default with a
+    /// single-region testnet. The adaptive algorithm tracks an EWMA
+    /// of observed view-to-QC latency and sets `base_timeout =
+    /// safety_multiplier × ewma`, clamped to `[base_floor,
+    /// base_ceiling]`. The seed only matters until the cluster has
+    /// produced a few successful views — after that, this value is
+    /// overwritten.
+    ///
+    /// **Seed choice**: 1000ms is a reasonable midpoint. Lower seeds
+    /// (e.g. 200ms) cause noisy view-change storms during bootstrap
+    /// when no peer has spoken yet; higher seeds (e.g. 5000ms) waste
+    /// wall-clock on the first few views before adaptation kicks in.
+    /// Operators rarely need to tune this.
     pub view_timeout_ms: u64,
 
     /// Minimum validator count (default: 4)
@@ -78,7 +89,7 @@ impl Default for ConsensusConfig {
             max_block_size: 2 * 1024 * 1024, // 2MB
             max_transactions_per_block: 10_000,
             max_gas_per_block: 30_000_000,
-            view_timeout_ms: 2500,
+            view_timeout_ms: 1000,
             min_validators: 4,
             bft_threshold: BftThreshold::TwoThirdsPlusOne,
             epoch_duration: 10_000,
@@ -191,7 +202,7 @@ mod tests {
         let config = ConsensusConfig::default();
         assert_eq!(config.block_time_ms, 400);
         assert_eq!(config.max_block_size, 2 * 1024 * 1024);
-        assert_eq!(config.view_timeout_ms, 2500);
+        assert_eq!(config.view_timeout_ms, 1000);
     }
 
     #[test]

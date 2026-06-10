@@ -63,3 +63,13 @@ nvidia-gpu = ["reqwest"]
 # Implies `intel-tdx` because Tiber verifies TDX Quotes end-to-end.
 intel-tiber = ["intel-tdx", "jsonwebtoken"]
 all-tees = ["intel-tdx", "amd-sev-snp", "aws-nitro", "nvidia-gpu", "intel-tiber"]
+
+[dev-dependencies]
+criterion = { workspace = true }
+hkdf = "0.12"
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+
+[[bench]]
+name = "tee_benchmarks"
+harness = false

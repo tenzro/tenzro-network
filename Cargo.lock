@@ -13392,6 +13392,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -13808,6 +13809,7 @@ dependencies = [
  "bytes",
  "chrono",
  "ciborium",
+ "criterion",
  "dashmap",
  "der 0.7.10",
  "ecdsa 0.17.0-rc.18",
@@ -13895,6 +13897,7 @@ dependencies = [
  "bs58",
  "bytes",
  "chrono",
+ "criterion",
  "hex",
  "serde",
  "serde_json",

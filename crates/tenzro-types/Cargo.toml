@@ -17,3 +17,10 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
 sha3 = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "types_benchmarks"
+harness = false
