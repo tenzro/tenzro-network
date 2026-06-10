@@ -51,6 +51,32 @@ jobs:
       - name: Check bench compilation
         run: cargo check --workspace --exclude tenzro-desktop --benches
 
+      # Run benchmarks against the saved `main` baseline (cached via
+      # Swatinem/rust-cache@v2's `target/` directory) and fail the build
+      # if any benchmark regresses by more than 10%. The baseline is
+      # saved on the main branch by a separate cron job; PRs only
+      # compare. This catches hot-path regressions before they ship.
+      - name: Bench regression gate
+        if: github.event_name == 'pull_request'
+        run: |
+          set -e
+          # Only compare if baseline exists in cache.
+          if [ -d "target/criterion" ] && find target/criterion -name "base" -type d | grep -q .; then
+            cargo bench --workspace --exclude tenzro-desktop -- --baseline main 2>&1 | tee bench-output.txt
+            # criterion emits "Performance has regressed" lines when a
+            # change exceeds the threshold. Fail the job if any are seen.
+            if grep -q "Performance has regressed" bench-output.txt; then
+              echo "::error::Bench regression detected — see output above"
+              exit 1
+            fi
+          else
+            echo "No baseline cached yet — skipping regression gate"
+          fi
+
+      - name: Save bench baseline (main only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: cargo bench --workspace --exclude tenzro-desktop -- --save-baseline main
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

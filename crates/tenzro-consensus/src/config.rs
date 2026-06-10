@@ -18,16 +18,18 @@ pub struct ConsensusConfig {
     /// Maximum gas per block (default: 30M)
     pub max_gas_per_block: u64,
 
-    /// View timeout in milliseconds (default: 1000ms).
+    /// View timeout in milliseconds (default: 2500ms).
     ///
     /// Base timeout before any consecutive-timeout backoff. Combined with
     /// `MAX_BACKOFF_EXPONENT = 3` and `backoff_multiplier = 2.0` in
-    /// `hotstuff2::ViewChangeTimer`, the schedule is 1s → 2s → 4s → 8s
-    /// (capped). Short initial timeout matches Aptos AptosBFTv4 / CometBFT
-    /// production tuning — long timeouts on a freshly-bootstrapped fleet
-    /// cause cross-region pacemaker race where the leader's proposal
-    /// arrives at nearby peers in time but distant peers have already
-    /// timed out and started view-change.
+    /// `hotstuff2::ViewChangeTimer`, the schedule is 2.5s → 5s → 10s → 20s
+    /// (capped). The 2.5s base absorbs the worst-case ~500ms cross-region
+    /// RTT (us-central1 ↔ asia-southeast1) so a leader's proposal can
+    /// reach distant peers and collect 2/3 sigs before the local
+    /// pacemaker fires. Shorter values cause chronic tail-forking under
+    /// tri-continental topology (see `tools/testnet-smoke/FINDINGS.md`);
+    /// single-region or local clusters can lower this back to 1000ms via
+    /// the operator config.
     pub view_timeout_ms: u64,
 
     /// Minimum validator count (default: 4)
@@ -76,7 +78,7 @@ impl Default for ConsensusConfig {
             max_block_size: 2 * 1024 * 1024, // 2MB
             max_transactions_per_block: 10_000,
             max_gas_per_block: 30_000_000,
-            view_timeout_ms: 1000,
+            view_timeout_ms: 2500,
             min_validators: 4,
             bft_threshold: BftThreshold::TwoThirdsPlusOne,
             epoch_duration: 10_000,
@@ -189,7 +191,7 @@ mod tests {
         let config = ConsensusConfig::default();
         assert_eq!(config.block_time_ms, 400);
         assert_eq!(config.max_block_size, 2 * 1024 * 1024);
-        assert_eq!(config.view_timeout_ms, 1000);
+        assert_eq!(config.view_timeout_ms, 2500);
     }
 
     #[test]

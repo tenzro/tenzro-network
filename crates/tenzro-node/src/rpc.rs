@@ -157,8 +157,14 @@ impl RpcServer {
 
         let app = app
             .layer(cors)
-            // Concurrency limit: max 200 in-flight requests
-            .layer(ConcurrencyLimitLayer::new(200))
+            // Concurrency limit: max 1000 in-flight requests. Raised
+            // from the original 200 because the synchronized 11s
+            // unavailability windows in the soak harness traced to
+            // contention at this layer during block-commit cadence —
+            // handlers holding state locks across the commit boundary
+            // caused all 200 slots to drain in lockstep, manifesting
+            // as a periodic pause to external observers.
+            .layer(ConcurrencyLimitLayer::new(1000))
             // Request body size limit: 2 MB
             .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024));
 
