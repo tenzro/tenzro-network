@@ -1506,6 +1506,16 @@ impl Paymaster {
     /// Validate that this paymaster will sponsor an operation.
     ///
     /// In v0.8, the paymaster address is a separate field (not embedded in paymaster_and_data).
+    ///
+    /// NOTE: The TEE-attestation-gated bootstrap paymaster for
+    /// autonomous-agent first-transactions is a dedicated primitive
+    /// living in [`crate::aa_bootstrap_paymaster::TnzoBootstrapPaymaster`].
+    /// That one carries an `AgentRegistryLookup`, an
+    /// `AttestationVerifier`, and a per-bootstrap-attempt nonce ledger
+    /// so the same authorization cannot be sponsored twice. Use it
+    /// for the agent-bootstrap path; use this basic Paymaster only for
+    /// application-level gas sponsorship where the policy is
+    /// "I have balance, I sponsor."
     pub fn validate_paymaster_op(
         &self,
         op: &UserOperation,

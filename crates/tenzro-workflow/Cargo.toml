@@ -23,3 +23,9 @@ parking_lot = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+# `tempfile` so the multi-day workflow-hydration restart test can spin
+# up a temporary RocksDB, drop the manager, and rebuild from the same
+# on-disk store to verify the durability invariant.
+tempfile = "3"
