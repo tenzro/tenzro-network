@@ -68,30 +68,39 @@ fn execute_cross_vm_bridge(
     }
 
     let selector = &input[..4];
+    let after_selector = &input[4..];
 
     // Frame contract when invoked via `PrecompileRegistry::execute`:
     //   [0..4]     selector
     //   [4..N]     caller-supplied calldata
     //   [N..N+32]  trusted msg.sender (32-byte left-padded) — RUNTIME
-    let (caller_opt, calldata): (Option<[u8; 20]>, &[u8]) = if input.len() >= 4 + 32 {
-        let split = input.len() - 32;
-        let mut caller = [0u8; 20];
-        caller.copy_from_slice(&input[split + 12..]);
-        (Some(caller), &input[4..split])
-    } else {
-        (None, &input[4..])
-    };
+    //
+    // The trusted-caller slot is appended ONLY for write selectors that
+    // need to authorize against msg.sender. Read-only selectors must
+    // not strip it or their actual calldata payload would be removed.
 
     match selector {
         s if s == selectors::CROSS_VM_TRANSFER => {
-            let caller = caller_opt.ok_or_else(|| VmError::PrecompileFailed(
-                "crossVmTransfer requires trusted msg.sender; invoke precompile \
-                 via PrecompileRegistry::execute (EVM runtime path).".to_string(),
-            ))?;
-            handle_cross_vm_transfer(token, registry, nonce_counter, &caller, calldata, gas_limit)
+            if after_selector.len() < 32 {
+                return Err(VmError::PrecompileFailed(
+                    "crossVmTransfer requires trusted msg.sender; invoke precompile \
+                     via PrecompileRegistry::execute (EVM runtime path).".to_string(),
+                ));
+            }
+            let split = after_selector.len() - 32;
+            let mut caller = [0u8; 20];
+            caller.copy_from_slice(&after_selector[split + 12..]);
+            handle_cross_vm_transfer(
+                token,
+                registry,
+                nonce_counter,
+                &caller,
+                &after_selector[..split],
+                gas_limit,
+            )
         }
         s if s == selectors::GET_VM_BALANCE => {
-            handle_get_vm_balance(token, registry, calldata, gas_limit)
+            handle_get_vm_balance(token, registry, after_selector, gas_limit)
         }
         s if s == selectors::GET_SUPPORTED_VMS => handle_get_supported_vms(gas_limit),
         _ => Ok(PrecompileResult::failed(gas_limit)),

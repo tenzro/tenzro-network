@@ -105,6 +105,7 @@
 //! ```
 
 use dashmap::DashMap;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -621,6 +622,17 @@ pub struct EntryPoint {
     /// call. Bounded by caller (the bundler / RPC layer is responsible for
     /// pruning old entries); the EntryPoint itself does not evict.
     pub receipts: DashMap<Vec<u8>, UserOpReceipt>,
+
+    /// Optional TNZO bootstrap paymaster. Sponsors the **one-shot**
+    /// first UserOp of a newly-spawned autonomous TEE-resident agent.
+    /// Only fires when the incoming UserOp's paymaster address matches
+    /// the bootstrap paymaster's address AND `op.factory` is non-empty
+    /// (bootstrap signal). Detailed gating lives in the paymaster itself
+    /// (TEE attestation freshness, ERC-8004 registration, one-shot
+    /// consumption ledger). Unset = legacy "paymaster-sponsored ops
+    /// skip sender debit, no paymaster debit either" behaviour.
+    pub bootstrap_paymaster:
+        Option<Arc<RwLock<crate::aa_bootstrap_paymaster::TnzoBootstrapPaymaster>>>,
 }
 
 impl std::fmt::Debug for EntryPoint {
@@ -635,6 +647,7 @@ impl std::fmt::Debug for EntryPoint {
             .field("runtime", &self.runtime.is_some())
             .field("storage", &self.storage.is_some())
             .field("receipts_len", &self.receipts.len())
+            .field("bootstrap_paymaster", &self.bootstrap_paymaster.is_some())
             .finish()
     }
 }
@@ -652,7 +665,24 @@ impl EntryPoint {
             runtime: None,
             storage: None,
             receipts: DashMap::new(),
+            bootstrap_paymaster: None,
         }
+    }
+
+    /// Attach the TNZO bootstrap paymaster (builder pattern). When set,
+    /// `handle_single_op` routes paymaster-sponsored UserOps whose
+    /// `op.paymaster` address matches the bootstrap paymaster through
+    /// `TnzoBootstrapPaymaster::sponsor` — which atomically debits the
+    /// paymaster's balance and records the sender as consumed (one-shot).
+    /// Other paymaster addresses fall through to the legacy "skip
+    /// sender debit, no paymaster debit" behaviour and can be wired by
+    /// the bundler in a follow-up.
+    pub fn with_bootstrap_paymaster(
+        mut self,
+        paymaster: Arc<RwLock<crate::aa_bootstrap_paymaster::TnzoBootstrapPaymaster>>,
+    ) -> Self {
+        self.bootstrap_paymaster = Some(paymaster);
+        self
     }
 
     /// Attach an ERC-7579 validator registry (builder pattern). Once set,
@@ -1053,34 +1083,80 @@ impl EntryPoint {
         let actual_gas_cost = (chargeable_gas as u128).saturating_mul(actual_gas_price);
 
         // Phase 4: Payment. Debit the smart account's EVM balance unless a
-        // paymaster is sponsoring. The paymaster payment path is wired in a
-        // follow-up that adds `Paymaster::validate_paymaster_op` integration
-        // here; for now, paymaster-sponsored ops skip the sender debit.
+        // paymaster is sponsoring.
+        //
+        // Three branches:
+        //   (a) No paymaster (`op.paymaster` empty) → debit the sender's
+        //       balance for `actual_gas_cost`. Standard 4337 self-pay.
+        //   (b) Paymaster is the configured bootstrap paymaster
+        //       (`op.paymaster[..20] == bootstrap.address`) → dispatch
+        //       `TnzoBootstrapPaymaster::sponsor(op)`. The paymaster's
+        //       internal gating (TEE attestation freshness, ERC-8004
+        //       registration, one-shot consumption ledger) is the
+        //       authority; failures here translate into `success = false`.
+        //   (c) Paymaster is some other address (operator-supplied
+        //       app-level paymaster) → legacy behaviour: skip the sender
+        //       debit. The bundler is responsible for the operator's
+        //       paymaster integration; the EntryPoint does not double-
+        //       debit. This branch is unchanged from before this wave.
         let mut success = exec_success;
-        if success && !op.has_paymaster() {
-            if let Some(runtime) = self.runtime.as_ref() {
-                let mut state = match self.storage.as_ref() {
-                    Some(s) => StateAdapter::with_storage(s.clone()),
-                    None => StateAdapter::new(),
-                };
-                let _ = runtime; // state created independently; runtime owns no state
-                let current_balance = state.get_balance(&op.sender);
-                if current_balance < actual_gas_cost {
-                    tracing::warn!(
-                        sender = %hex::encode(&op.sender),
-                        required = actual_gas_cost,
-                        available = current_balance,
-                        "UserOp post-execution balance check failed"
-                    );
-                    success = false;
-                } else {
-                    state.set_balance(&op.sender, current_balance - actual_gas_cost);
-                    if let Err(e) = state.commit() {
-                        tracing::error!(error = %e, "AA balance commit failed");
+        if success {
+            if !op.has_paymaster() {
+                // Branch (a): self-pay.
+                if let Some(runtime) = self.runtime.as_ref() {
+                    let mut state = match self.storage.as_ref() {
+                        Some(s) => StateAdapter::with_storage(s.clone()),
+                        None => StateAdapter::new(),
+                    };
+                    let _ = runtime; // state created independently; runtime owns no state
+                    let current_balance = state.get_balance(&op.sender);
+                    if current_balance < actual_gas_cost {
+                        tracing::warn!(
+                            sender = %hex::encode(&op.sender),
+                            required = actual_gas_cost,
+                            available = current_balance,
+                            "UserOp post-execution balance check failed"
+                        );
                         success = false;
+                    } else {
+                        state.set_balance(&op.sender, current_balance - actual_gas_cost);
+                        if let Err(e) = state.commit() {
+                            tracing::error!(error = %e, "AA balance commit failed");
+                            success = false;
+                        }
                     }
                 }
+            } else if let Some(bootstrap) = self.bootstrap_paymaster.as_ref() {
+                // Branch (b): bootstrap-paymaster-sponsored ops, when the
+                // declared paymaster address matches the configured
+                // bootstrap paymaster.
+                let paymaster_addr_matches = {
+                    let guard = bootstrap.read();
+                    op.paymaster.len() >= 20 && op.paymaster[..20] == guard.address()[..20]
+                };
+                if paymaster_addr_matches {
+                    let sponsor_result = bootstrap.write().sponsor(&op);
+                    if let Err(e) = sponsor_result {
+                        tracing::warn!(
+                            sender = %hex::encode(&op.sender),
+                            error = %e,
+                            "Bootstrap paymaster refused sponsorship"
+                        );
+                        success = false;
+                    } else {
+                        info!(
+                            sender = %hex::encode(&op.sender),
+                            paymaster = %hex::encode(&op.paymaster[..20]),
+                            gas_cost = actual_gas_cost,
+                            "Bootstrap paymaster sponsored UserOp"
+                        );
+                    }
+                }
+                // else: branch (c) — non-bootstrap paymaster, legacy
+                // skip-sender-debit behaviour (no-op here).
             }
+            // else: no bootstrap paymaster configured AND op uses a
+            // paymaster → branch (c) legacy behaviour.
         }
 
         if success {
@@ -2754,5 +2830,148 @@ mod tests {
     fn test_decode_execute_rejects_short_calldata() {
         let too_short = vec![0xb6, 0x1d, 0x27, 0xf6, 0x00];
         assert!(decode_execute_calldata(&too_short).is_none());
+    }
+
+    /// EntryPoint integration: a bootstrap-paymaster-sponsored UserOp whose
+    /// declared paymaster address matches the configured bootstrap paymaster
+    /// must route through `TnzoBootstrapPaymaster::sponsor`, debit the
+    /// paymaster's balance, and consume the sender's one-shot slot.
+    #[tokio::test]
+    async fn entrypoint_dispatches_to_bootstrap_paymaster() {
+        use crate::aa_bootstrap_paymaster::TnzoBootstrapPaymaster;
+        use crate::aa_tee_bound_validator::{InMemoryTeeKeyOracle, TeeBoundAccountKey};
+        use std::collections::HashMap;
+        use tenzro_tee::AttestationVerifier;
+        use tenzro_types::Timestamp;
+        use tenzro_types::tee::{AttestationReport, TeeVendor};
+
+        /// Permissive ERC-8004 registry — every sender is "registered".
+        struct PermissiveRegistry;
+        impl crate::aa_bootstrap_paymaster::AgentRegistryLookup for PermissiveRegistry {
+            fn is_registered(&self, _: &[u8]) -> bool {
+                true
+            }
+        }
+
+        fn attestation_for(
+            vendor: TeeVendor,
+            measurement: Vec<u8>,
+            enclave_pubkey: &[u8; 32],
+        ) -> AttestationReport {
+            let attestation_data = serde_json::to_vec(&serde_json::json!({
+                "tdx_tcb_svn": "03000600000000000000000000000000",
+            }))
+            .unwrap();
+            let mut metadata = HashMap::new();
+            metadata.insert("simulated".to_string(), "true".to_string());
+            AttestationReport {
+                id: Default::default(),
+                vendor,
+                user_data: enclave_pubkey.to_vec(),
+                attestation_data,
+                certificates: vec![],
+                timestamp: Timestamp::now(),
+                metadata,
+                quote: vec![0x01; 32],
+                measurement,
+                signature: vec![],
+                vendor_data: vec![],
+            }
+        }
+
+        let paymaster_addr = vec![0xAA; 20];
+        let sender = vec![0x05; 20];
+        let pubkey = [0x77; 32];
+        let measurement = b"enclave-image-v1".to_vec();
+
+        // Wire the bootstrap-paymaster dependencies.
+        let oracle = Arc::new(InMemoryTeeKeyOracle::new());
+        oracle.enroll(
+            sender.clone(),
+            TeeBoundAccountKey::new(TeeVendor::IntelTdx, &measurement, pubkey),
+        );
+
+        let mut verifier = AttestationVerifier::new();
+        verifier.set_strict_cert_validation(false);
+
+        let initial_balance: u128 = 10u128.pow(20); // 100 TNZO
+        let bootstrap = TnzoBootstrapPaymaster::new(
+            paymaster_addr.clone(),
+            initial_balance,
+            oracle,
+            Arc::new(PermissiveRegistry),
+            Arc::new(verifier),
+        );
+        let bootstrap_handle = Arc::new(RwLock::new(bootstrap));
+
+        // EntryPoint wired to the paymaster only — no runtime, no validator
+        // registry. That puts the test on the validation-only path so we
+        // exercise paymaster-debit semantics in isolation.
+        let entry_point = EntryPoint::new(vec![0xEE; 20])
+            .with_chain_id(1337)
+            .with_bootstrap_paymaster(bootstrap_handle.clone());
+
+        // Build a bootstrap-shaped UserOp: non-empty factory + paymaster
+        // address matches the bootstrap paymaster + paymaster_data carries
+        // the encoded attestation that binds the sender's enclave key.
+        let attestation = attestation_for(TeeVendor::IntelTdx, measurement, &pubkey);
+        let paymaster_data = bincode::serialize(&attestation).unwrap();
+
+        let op = UserOperation {
+            sender: sender.clone(),
+            nonce: 0,
+            factory: vec![0xFA; 20],
+            factory_data: vec![],
+            call_data: vec![],
+            call_gas_limit: 200_000,
+            verification_gas_limit: 100_000,
+            pre_verification_gas: 21_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 100_000_000,
+            paymaster: paymaster_addr.clone(),
+            paymaster_verification_gas_limit: 50_000,
+            paymaster_post_op_gas_limit: 30_000,
+            paymaster_data,
+            signature: vec![0u8; 65],
+        };
+
+        let receipt = entry_point.handle_single_op(op.clone()).await;
+        assert!(
+            receipt.success,
+            "EntryPoint should succeed with bootstrap-paymaster sponsorship; logs={:?}",
+            receipt
+                .logs
+                .iter()
+                .map(|l| String::from_utf8_lossy(l).into_owned())
+                .collect::<Vec<_>>()
+        );
+
+        // Paymaster balance must have moved.
+        let pm_after = bootstrap_handle.read();
+        assert!(
+            pm_after.balance() < initial_balance,
+            "bootstrap paymaster must have debited some gas (balance: {} → {})",
+            initial_balance,
+            pm_after.balance()
+        );
+        assert_eq!(pm_after.sponsored_ops(), 1);
+        assert!(
+            pm_after.has_consumed(&sender),
+            "one-shot consumption ledger must record the sender"
+        );
+        drop(pm_after);
+
+        // Second attempt for the same sender must fail (one-shot exhausted).
+        let mut op2 = op;
+        op2.nonce = 1;
+        let receipt2 = entry_point.handle_single_op(op2).await;
+        // The op may still "succeed" at the execution layer (no-op runtime)
+        // but the paymaster must have refused — meaning the receipt records
+        // success = false because Phase 4 explicitly sets it on refusal.
+        assert!(
+            !receipt2.success,
+            "second op for same sender must be rejected by bootstrap paymaster"
+        );
+        assert_eq!(bootstrap_handle.read().sponsored_ops(), 1);
     }
 }

@@ -64,70 +64,75 @@ fn execute_tnzo_bridge(
     }
 
     let selector = &input[..4];
+    let after_selector = &input[4..];
 
     // Frame contract (set by `PrecompileRegistry::execute`):
     //   [0..4]    selector
     //   [4..N]    caller-supplied calldata (any ABI shape)
     //   [N..N+32] trusted msg.sender (32-byte left-padded) — RUNTIME-SET
     //
-    // Read-only selectors (NAME / SYMBOL / DECIMALS / TOTAL_SUPPLY /
-    // BALANCE_OF / ALLOWANCE) don't depend on the trusted caller and
-    // can be invoked with no trailing slot. Write selectors REQUIRE
-    // the trailing 32 bytes.
+    // The trusted-caller slot is appended ONLY for write selectors that
+    // need to authorize against msg.sender. Read-only selectors (NAME /
+    // SYMBOL / DECIMALS / TOTAL_SUPPLY / BALANCE_OF / ALLOWANCE) never
+    // carry the slot — stripping it for them would corrupt the encoded
+    // address / pair-of-addresses they actually take as calldata.
     //
-    // Stripping the trailing slot off `calldata` keeps callers' encoded
-    // ABI offsets (which were computed against their original calldata
-    // length) intact.
-    let (caller_opt, calldata): (Option<[u8; 20]>, &[u8]) = if input.len() >= 4 + 32 {
-        let split = input.len() - 32;
+    // Helper: extract trusted caller + return the calldata with the
+    // trailing slot removed. Fails closed when the slot is absent.
+    let strip_caller_or_fail = |sel_name: &str| -> Result<([u8; 20], &[u8])> {
+        if after_selector.len() < 32 {
+            return Err(VmError::PrecompileFailed(format!(
+                "TNZO bridge: {sel_name} requires trusted msg.sender; invoke \
+                 precompile via PrecompileRegistry::execute (EVM runtime path)."
+            )));
+        }
+        let split = after_selector.len() - 32;
         let mut caller = [0u8; 20];
-        caller.copy_from_slice(&input[split + 12..]);
-        (Some(caller), &input[4..split])
-    } else {
-        (None, &input[4..])
-    };
-
-    let require_caller = |sel_name: &str| -> Result<[u8; 20]> {
-        caller_opt.ok_or_else(|| VmError::PrecompileFailed(format!(
-            "TNZO bridge: {sel_name} requires trusted msg.sender; invoke \
-             precompile via PrecompileRegistry::execute (EVM runtime path)."
-        )))
+        caller.copy_from_slice(&after_selector[split + 12..]);
+        Ok((caller, &after_selector[..split]))
     };
 
     match selector {
+        // Read-only selectors: dispatch directly against `after_selector`.
         s if s == selectors::NAME => handle_name(gas_limit),
         s if s == selectors::SYMBOL => handle_symbol(gas_limit),
         s if s == selectors::DECIMALS => handle_decimals(gas_limit),
         s if s == selectors::TOTAL_SUPPLY => handle_total_supply(token, gas_limit),
-        s if s == selectors::BALANCE_OF => handle_balance_of(token, calldata, gas_limit),
+        s if s == selectors::BALANCE_OF => {
+            handle_balance_of(token, after_selector, gas_limit)
+        }
+        s if s == selectors::ALLOWANCE => {
+            handle_allowance(registry, after_selector, gas_limit)
+        }
+        // Write selectors: strip trusted-caller slot, dispatch on the
+        // remaining calldata.
         s if s == selectors::TRANSFER => {
-            let caller = require_caller("transfer")?;
+            let (caller, calldata) = strip_caller_or_fail("transfer")?;
             handle_transfer(token, &caller, calldata, gas_limit)
         }
         s if s == selectors::APPROVE => {
-            let caller = require_caller("approve")?;
+            let (caller, calldata) = strip_caller_or_fail("approve")?;
             handle_approve(registry, &caller, calldata, gas_limit)
         }
-        s if s == selectors::ALLOWANCE => handle_allowance(registry, calldata, gas_limit),
         s if s == selectors::TRANSFER_FROM => {
-            let caller = require_caller("transferFrom")?;
+            let (caller, calldata) = strip_caller_or_fail("transferFrom")?;
             handle_transfer_from(token, registry, &caller, calldata, gas_limit)
         }
         s if s == selectors::DEPOSIT => {
-            let caller = require_caller("deposit")?;
+            let (caller, calldata) = strip_caller_or_fail("deposit")?;
             handle_deposit(token, &caller, calldata, gas_limit)
         }
         s if s == selectors::WITHDRAW => {
-            let caller = require_caller("withdraw")?;
+            let (caller, calldata) = strip_caller_or_fail("withdraw")?;
             handle_withdraw(token, &caller, calldata, gas_limit)
         }
-        // ERC-7802 Cross-Chain Token Interface
+        // ERC-7802 Cross-Chain Token Interface — both gated.
         s if s == selectors::CROSSCHAIN_MINT => {
-            let caller = require_caller("crosschainMint")?;
+            let (caller, calldata) = strip_caller_or_fail("crosschainMint")?;
             handle_crosschain_mint(token, &caller, calldata, gas_limit)
         }
         s if s == selectors::CROSSCHAIN_BURN => {
-            let caller = require_caller("crosschainBurn")?;
+            let (caller, calldata) = strip_caller_or_fail("crosschainBurn")?;
             handle_crosschain_burn(token, &caller, calldata, gas_limit)
         }
         _ => {
@@ -815,21 +820,29 @@ mod tests {
         let to_addr = [0xAA; 20];
 
         let mut input = selectors::CROSSCHAIN_MINT.to_vec();
-        // to address
+        // ABI-encoded calldata for `crosschainMint(address to, uint256
+        // amount, bytes data)`:
+        //   [0..32]    to (left-padded address)
+        //   [32..64]   amount
+        //   [64..96]   offset to dynamic `data` (= 96 bytes after start
+        //              of args, since the args start at byte 0 of the
+        //              calldata block)
+        //   [96..128]  data length (32 bytes = source_chain_id)
+        //   [128..160] data body (source_chain_id = 1)
         let mut to_padded = vec![0u8; 32];
         to_padded[12..32].copy_from_slice(&to_addr);
         input.extend_from_slice(&to_padded);
-        // amount = 1000
         input.extend_from_slice(&abi::encode_uint256(1000));
-        // data offset (points to byte 96 from start of calldata, but we put it at 128)
-        input.extend_from_slice(&abi::encode_uint256(128));
-        // caller (cross-VM bridge = authorized)
+        input.extend_from_slice(&abi::encode_uint256(96)); // data offset
+        input.extend_from_slice(&abi::encode_uint256(32)); // data length
+        input.extend_from_slice(&abi::encode_uint256(1)); // source chain id
+
+        // Trusted-caller slot appended LAST per the precompile framing
+        // contract (`execute_tnzo_bridge` strips the trailing 32 bytes
+        // as msg.sender for write-side selectors).
         let mut caller_padded = vec![0u8; 32];
         caller_padded[12..32].copy_from_slice(&cross_vm_addr);
         input.extend_from_slice(&caller_padded);
-        // data: length=32, then source_chain_id=1
-        input.extend_from_slice(&abi::encode_uint256(32)); // length
-        input.extend_from_slice(&abi::encode_uint256(1)); // source chain id
 
         let result = execute_tnzo_bridge(&token, &registry, &input, 100_000).unwrap();
         assert!(result.success);
@@ -847,12 +860,13 @@ mod tests {
         to_padded[12..32].copy_from_slice(&to_addr);
         input.extend_from_slice(&to_padded);
         input.extend_from_slice(&abi::encode_uint256(1000));
-        input.extend_from_slice(&abi::encode_uint256(128));
-        // unauthorized caller
+        input.extend_from_slice(&abi::encode_uint256(96)); // data offset
+        input.extend_from_slice(&abi::encode_uint256(0)); // empty data length
+
+        // Trusted-caller slot — unauthorized address.
         let mut caller_padded = vec![0u8; 32];
         caller_padded[12..32].copy_from_slice(&unauthorized);
         input.extend_from_slice(&caller_padded);
-        input.extend_from_slice(&abi::encode_uint256(0)); // empty data
 
         let result = execute_tnzo_bridge(&token, &registry, &input, 100_000);
         assert!(result.is_err());
@@ -871,12 +885,14 @@ mod tests {
         from_padded[12..32].copy_from_slice(&from_addr);
         input.extend_from_slice(&from_padded);
         input.extend_from_slice(&abi::encode_uint256(500));
-        input.extend_from_slice(&abi::encode_uint256(128));
+        input.extend_from_slice(&abi::encode_uint256(96)); // data offset
+        input.extend_from_slice(&abi::encode_uint256(32)); // data length
+        input.extend_from_slice(&abi::encode_uint256(42)); // dest chain id
+
+        // Trusted-caller slot appended last per framing contract.
         let mut caller_padded = vec![0u8; 32];
         caller_padded[12..32].copy_from_slice(&cross_vm_addr);
         input.extend_from_slice(&caller_padded);
-        input.extend_from_slice(&abi::encode_uint256(32));
-        input.extend_from_slice(&abi::encode_uint256(42)); // dest chain id
 
         let result = execute_tnzo_bridge(&token, &registry, &input, 100_000).unwrap();
         assert!(result.success);

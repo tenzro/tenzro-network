@@ -129,13 +129,18 @@ impl WebAuthnAccountKey {
 
 /// Wire-format `userOp.signature` payload consumed by [`WebAuthnValidator`].
 ///
-/// Carries the raw WebAuthn assertion and the ML-DSA-65 signature over the
-/// same UserOp hash. The validator re-derives the WebAuthn challenge from
-/// the UserOp hash and verifies both legs in turn.
+/// Carries the raw WebAuthn assertion, the ML-DSA-65 signature over the
+/// same UserOp hash, and the `credential.id` identifying which enrolled
+/// passkey signed. Multi-credential per account is a first-class property
+/// of the validator — every signature MUST address its credential.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HybridWebAuthnSignature {
     pub assertion: WebAuthnAssertion,
     pub ml_dsa_signature: Vec<u8>,
+    /// Raw `credential.id` bytes (base64url-decoded). Identifies which
+    /// enrolled credential on the sender's account this signature
+    /// corresponds to. Required.
+    pub credential_id: Vec<u8>,
 }
 
 impl HybridWebAuthnSignature {
@@ -158,22 +163,35 @@ impl HybridWebAuthnSignature {
 // WebAuthnValidator
 // -----------------------------------------------------------------------------
 
-/// ERC-7579 validator module that authorises UserOperations against an
-/// enrolled passkey + hybrid ML-DSA-65 leg.
+/// ERC-7579 validator module that authorises UserOperations against any
+/// of the enrolled passkeys for a smart account, paired with a hybrid
+/// ML-DSA-65 leg.
+///
+/// **Multi-device federation.** An account can carry any number of
+/// enrolled credentials — a primary platform passkey, a phone passkey,
+/// a YubiKey, and so on. Each is keyed by its `credential.id`; the
+/// validator dispatches incoming `HybridWebAuthnSignature` to the
+/// matching enrolled credential via `signature.credential_id`. Removing
+/// one credential (lost device) does not lock the user out as long as
+/// any other enrolled credential survives.
 pub struct WebAuthnValidator {
     /// Module address (used as the registry key).
     address: [u8; 20],
     /// Pinned origin (e.g. `https://keys.tenzro.network`). The WebAuthn
     /// `clientDataJSON.origin` field must match exactly.
     expected_origin: String,
-    /// Per-account enrollment.
-    enrollments: DashMap<Vec<u8>, WebAuthnAccountKey>,
+    /// Per-account credential set. The outer map keys on the smart-
+    /// account address; the inner map keys on `credential_id` so the
+    /// validator can dispatch a signature directly to the credential
+    /// that produced it in O(1).
+    enrollments: DashMap<Vec<u8>, DashMap<Vec<u8>, WebAuthnAccountKey>>,
     /// Optional persistent storage. When present, every `enroll` /
-    /// `revoke` writes through to `CF_VALIDATOR_MODULES` under the
-    /// `erc7579/webauthn/<account_hex>` prefix and the constructor
-    /// hydrates `enrollments` from the same prefix. Production
-    /// constructor `with_storage()` always wires this; tests use
-    /// `new()` for the in-memory-only path.
+    /// `revoke_credential` / `revoke_account` writes through to
+    /// `CF_VALIDATOR_MODULES` under the
+    /// `erc7579/webauthn/<account_hex>/<credential_id_hex>` prefix and
+    /// the constructor hydrates `enrollments` from the same prefix.
+    /// Production constructor `with_storage()` always wires this; tests
+    /// use `new()` for the in-memory-only path.
     storage: Option<Arc<dyn tenzro_storage::KvStore>>,
 }
 
@@ -210,9 +228,17 @@ impl WebAuthnValidator {
         v
     }
 
-    fn enrollment_key(account: &[u8]) -> Vec<u8> {
+    /// Persistence key shape:
+    /// `erc7579/webauthn/<account_bytes>/<credential_id_bytes>`.
+    /// Account and credential id are concatenated as raw bytes with a `/`
+    /// separator; both fields are caller-controlled and the validator
+    /// does not enforce any length, so the separator is the only frame
+    /// the hydrate path uses to split them back out.
+    fn enrollment_key(account: &[u8], credential_id: &[u8]) -> Vec<u8> {
         let mut k = b"erc7579/webauthn/".to_vec();
         k.extend_from_slice(account);
+        k.push(b'/');
+        k.extend_from_slice(credential_id);
         k
     }
 
@@ -229,29 +255,41 @@ impl WebAuthnValidator {
             if key.len() <= prefix.len() {
                 continue;
             }
-            let account = key[prefix.len()..].to_vec();
+            // Split `<account>/<credential_id>` after the namespace prefix.
+            let rest = &key[prefix.len()..];
+            let Some(sep_idx) = rest.iter().rposition(|b| *b == b'/') else {
+                continue;
+            };
+            let account = rest[..sep_idx].to_vec();
+            let credential_id = rest[sep_idx + 1..].to_vec();
             if let Ok(record) = bincode::deserialize::<WebAuthnAccountKey>(&value) {
-                self.enrollments.insert(account, record);
+                let inner = self
+                    .enrollments
+                    .entry(account)
+                    .or_insert_with(DashMap::new);
+                inner.insert(credential_id, record);
             }
         }
     }
 
-    fn persist(&self, account: &[u8], key: &WebAuthnAccountKey) {
+    fn persist(&self, account: &[u8], credential_id: &[u8], key: &WebAuthnAccountKey) {
         if let Some(ref storage) = self.storage {
             if let Ok(bytes) = bincode::serialize(key) {
                 let _ = storage.put(
                     tenzro_storage::CF_VALIDATOR_MODULES,
-                    &Self::enrollment_key(account),
+                    &Self::enrollment_key(account, credential_id),
                     &bytes,
                 );
             }
         }
     }
 
-    fn forget(&self, account: &[u8]) {
+    fn forget(&self, account: &[u8], credential_id: &[u8]) {
         if let Some(ref storage) = self.storage {
-            let _ = storage
-                .delete(tenzro_storage::CF_VALIDATOR_MODULES, &Self::enrollment_key(account));
+            let _ = storage.delete(
+                tenzro_storage::CF_VALIDATOR_MODULES,
+                &Self::enrollment_key(account, credential_id),
+            );
         }
     }
 
@@ -261,35 +299,97 @@ impl WebAuthnValidator {
         Arc::new(self)
     }
 
-    /// Enroll an account with its (P-256 pubkey, ML-DSA-65 pubkey) bundle.
-    /// Overwrites any prior enrollment for the same account.
+    /// Enroll a passkey credential on an account. An account can carry
+    /// any number of enrolled credentials; each is keyed by its
+    /// `credential.id`. Re-enrolling the same `(account, credential_id)`
+    /// overwrites the existing record — useful for refreshing the
+    /// ML-DSA-65 verifying key without removing the credential.
     pub fn enroll(
         &self,
         account: Vec<u8>,
+        credential_id: Vec<u8>,
         key: WebAuthnAccountKey,
     ) -> Result<(), ValidatorError> {
-        self.persist(&account, &key);
-        self.enrollments.insert(account, key);
+        if credential_id.is_empty() {
+            return Err(ValidatorError::InvalidInput(
+                "credential_id must be non-empty".to_string(),
+            ));
+        }
+        self.persist(&account, &credential_id, &key);
+        let inner = self
+            .enrollments
+            .entry(account)
+            .or_insert_with(DashMap::new);
+        inner.insert(credential_id, key);
         Ok(())
     }
 
-    /// Remove an enrollment. Returns `true` if a record was removed.
-    pub fn revoke(&self, account: &[u8]) -> bool {
-        let removed = self.enrollments.remove(account).is_some();
+    /// Remove a single credential from an account. Returns `true` if a
+    /// record was removed. The account itself is removed from the
+    /// outer map only when its last credential is revoked.
+    pub fn revoke_credential(&self, account: &[u8], credential_id: &[u8]) -> bool {
+        let mut last_credential_removed = false;
+        let removed = if let Some(inner) = self.enrollments.get(account) {
+            let r = inner.remove(credential_id).is_some();
+            if r && inner.is_empty() {
+                last_credential_removed = true;
+            }
+            r
+        } else {
+            false
+        };
+        if last_credential_removed {
+            self.enrollments.remove(account);
+        }
         if removed {
-            self.forget(account);
+            self.forget(account, credential_id);
         }
         removed
     }
 
-    /// Look up the enrollment for `account`.
-    pub fn get_enrollment(&self, account: &[u8]) -> Option<WebAuthnAccountKey> {
-        self.enrollments.get(account).map(|e| e.value().clone())
+    /// Remove every credential for an account at once (e.g. an account
+    /// closure). Returns the number of credentials revoked. Persisted
+    /// rows for the removed credentials are also deleted.
+    pub fn revoke_account(&self, account: &[u8]) -> usize {
+        let credentials: Vec<Vec<u8>> = if let Some(inner) = self.enrollments.get(account) {
+            inner.iter().map(|e| e.key().clone()).collect()
+        } else {
+            return 0;
+        };
+        for cred in &credentials {
+            self.forget(account, cred);
+        }
+        self.enrollments.remove(account);
+        credentials.len()
     }
 
-    /// Number of enrolled accounts.
-    pub fn enrollment_count(&self) -> usize {
+    /// Look up a specific credential by `(account, credential_id)`.
+    pub fn get_credential(
+        &self,
+        account: &[u8],
+        credential_id: &[u8],
+    ) -> Option<WebAuthnAccountKey> {
+        self.enrollments
+            .get(account)
+            .and_then(|inner| inner.get(credential_id).map(|e| e.value().clone()))
+    }
+
+    /// List all credential ids enrolled for an account.
+    pub fn list_credentials(&self, account: &[u8]) -> Vec<Vec<u8>> {
+        self.enrollments
+            .get(account)
+            .map(|inner| inner.iter().map(|e| e.key().clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Number of accounts with at least one enrolled credential.
+    pub fn enrolled_account_count(&self) -> usize {
         self.enrollments.len()
+    }
+
+    /// Total credentials enrolled across every account.
+    pub fn enrolled_credential_count(&self) -> usize {
+        self.enrollments.iter().map(|e| e.value().len()).sum()
     }
 
     /// Compute the WebAuthn challenge string the relying party must have
@@ -311,21 +411,26 @@ impl IValidator for WebAuthnValidator {
         op: &UserOperation,
         op_hash: &[u8; 32],
     ) -> Result<ValidationData, ValidatorError> {
-        // 1. Look up the enrollment. Unenrolled accounts fail closed.
-        let Some(key) = self.get_enrollment(&op.sender) else {
-            return Ok(ValidationData::failure());
-        };
-
-        // 2. Decode the hybrid signature wire format.
+        // 1. Decode the hybrid signature wire format. The credential_id
+        //    inside identifies *which* enrolled passkey signed.
         let hybrid = match HybridWebAuthnSignature::decode(&op.signature) {
             Ok(h) => h,
             Err(_) => return Ok(ValidationData::failure()),
         };
 
-        // 3. Length-check the ML-DSA leg before doing any expensive crypto.
+        // 2. Length-check the ML-DSA leg before doing any expensive crypto.
         if hybrid.ml_dsa_signature.len() != ML_DSA_65_SIG_LEN {
             return Ok(ValidationData::failure());
         }
+
+        // 3. Dispatch to the specific enrolled credential. Unknown
+        //    `(sender, credential_id)` fails closed — no fallback to any
+        //    other credential on the account, because we want the
+        //    signature's identification of which device signed to be
+        //    cryptographically meaningful.
+        let Some(key) = self.get_credential(&op.sender, &hybrid.credential_id) else {
+            return Ok(ValidationData::failure());
+        };
 
         // 4. Verify the WebAuthn (P-256) leg. Challenge derives from op_hash
         // — the relying party must have issued exactly this challenge.
@@ -348,7 +453,7 @@ impl IValidator for WebAuthnValidator {
             return Ok(ValidationData::failure());
         }
 
-        // Both legs passed.
+        // Both legs passed against the addressed credential.
         Ok(ValidationData::success())
     }
 
@@ -358,15 +463,15 @@ impl IValidator for WebAuthnValidator {
         hash: &[u8; 32],
         signature: &[u8],
     ) -> [u8; 4] {
-        let Some(key) = self.get_enrollment(sender) else {
-            return ERC1271_FAILURE_VALUE;
-        };
         let Ok(hybrid) = HybridWebAuthnSignature::decode(signature) else {
             return ERC1271_FAILURE_VALUE;
         };
         if hybrid.ml_dsa_signature.len() != ML_DSA_65_SIG_LEN {
             return ERC1271_FAILURE_VALUE;
         }
+        let Some(key) = self.get_credential(sender, &hybrid.credential_id) else {
+            return ERC1271_FAILURE_VALUE;
+        };
         let expected_challenge = Self::expected_challenge_for(hash);
         let pubkey_xy = key.p256_public_key_xy();
         if verify_webauthn_assertion(
@@ -405,8 +510,28 @@ mod tests {
     const ORIGIN: &str = "https://keys.tenzro.network";
 
     /// Build a self-consistent enrollment + assertion + ML-DSA sig over `op_hash`.
-    /// Returns (enrollment, hybrid_signature_bytes).
-    fn make_hybrid_sig(op_hash: &[u8; 32]) -> (WebAuthnAccountKey, Vec<u8>) {
+    /// Returns (credential_id, enrollment, hybrid_signature_bytes). The
+    /// credential id is a freshly-generated 16-byte identifier so each
+    /// call to `make_hybrid_sig` represents a distinct passkey credential.
+    fn make_hybrid_sig(op_hash: &[u8; 32]) -> (Vec<u8>, WebAuthnAccountKey, Vec<u8>) {
+        // Synthesize a per-credential id. In production the id comes
+        // from the authenticator; tests just need uniqueness, so any
+        // 16-byte unique value works.
+        let credential_id = {
+            let mut h = Sha256::new();
+            h.update(op_hash);
+            h.update(b":cred:");
+            // Mix in a process-local counter to keep distinct calls
+            // producing distinct ids — important for the multi-
+            // credential tests that enroll several credentials per
+            // account against the same op_hash.
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            h.update(seq.to_le_bytes());
+            let d: [u8; 32] = h.finalize().into();
+            d[..16].to_vec()
+        };
         // P-256 keypair (passkey)
         let p256 = P256KeyPair::generate();
         let pubkey_xy = p256.public_key_bytes();
@@ -460,9 +585,10 @@ mod tests {
         let hybrid = HybridWebAuthnSignature {
             assertion,
             ml_dsa_signature: ml_dsa_sig,
+            credential_id: credential_id.clone(),
         };
         let bytes = hybrid.encode().expect("encode");
-        (enrollment, bytes)
+        (credential_id, enrollment, bytes)
     }
 
     fn dummy_user_op(sender: Vec<u8>, sig: Vec<u8>) -> UserOperation {
@@ -515,11 +641,13 @@ mod tests {
     #[test]
     fn validate_succeeds_with_matching_hybrid_signature() {
         let op_hash = [0x42u8; 32];
-        let (enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
+        let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
         let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
         let account = vec![0x01; 20];
-        validator.enroll(account.clone(), enrollment).unwrap();
+        validator
+            .enroll(account.clone(), cred_id, enrollment)
+            .unwrap();
 
         let op = dummy_user_op(account, sig_bytes);
         let result = validator.validate_user_op(&op, &op_hash).unwrap();
@@ -529,7 +657,7 @@ mod tests {
     #[test]
     fn validate_fails_when_account_not_enrolled() {
         let op_hash = [0x42u8; 32];
-        let (_enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
+        let (_cred_id, _enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
         let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
         let account = vec![0x01; 20];
@@ -542,11 +670,13 @@ mod tests {
     #[test]
     fn validate_fails_when_op_hash_changes() {
         let op_hash = [0x42u8; 32];
-        let (enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
+        let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
         let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
         let account = vec![0x01; 20];
-        validator.enroll(account.clone(), enrollment).unwrap();
+        validator
+            .enroll(account.clone(), cred_id, enrollment)
+            .unwrap();
 
         // Change the challenge target: WebAuthn challenge mismatch + ML-DSA fails.
         let different_op_hash = [0x99u8; 32];
@@ -558,7 +688,7 @@ mod tests {
     #[test]
     fn validate_fails_when_ml_dsa_signature_length_wrong() {
         let op_hash = [0x42u8; 32];
-        let (enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
+        let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
         // Decode, truncate the ML-DSA leg, re-encode.
         let mut hybrid = HybridWebAuthnSignature::decode(&sig_bytes).unwrap();
@@ -567,7 +697,9 @@ mod tests {
 
         let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
         let account = vec![0x01; 20];
-        validator.enroll(account.clone(), enrollment).unwrap();
+        validator
+            .enroll(account.clone(), cred_id, enrollment)
+            .unwrap();
 
         let op = dummy_user_op(account, bad_bytes);
         let result = validator.validate_user_op(&op, &op_hash).unwrap();
@@ -577,7 +709,7 @@ mod tests {
     #[test]
     fn validate_fails_when_ml_dsa_signature_tampered() {
         let op_hash = [0x42u8; 32];
-        let (enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
+        let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
         let mut hybrid = HybridWebAuthnSignature::decode(&sig_bytes).unwrap();
         hybrid.ml_dsa_signature[100] ^= 0x01;
@@ -585,7 +717,9 @@ mod tests {
 
         let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
         let account = vec![0x01; 20];
-        validator.enroll(account.clone(), enrollment).unwrap();
+        validator
+            .enroll(account.clone(), cred_id, enrollment)
+            .unwrap();
 
         let op = dummy_user_op(account, bad_bytes);
         let result = validator.validate_user_op(&op, &op_hash).unwrap();
@@ -595,13 +729,15 @@ mod tests {
     #[test]
     fn validate_fails_when_origin_mismatch() {
         let op_hash = [0x42u8; 32];
-        let (enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
+        let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
         // Validator pinned to a different origin.
         let validator =
             WebAuthnValidator::new([0xCCu8; 20], "https://attacker.example".to_string());
         let account = vec![0x01; 20];
-        validator.enroll(account.clone(), enrollment).unwrap();
+        validator
+            .enroll(account.clone(), cred_id, enrollment)
+            .unwrap();
 
         let op = dummy_user_op(account, sig_bytes);
         let result = validator.validate_user_op(&op, &op_hash).unwrap();
@@ -612,28 +748,37 @@ mod tests {
     fn enroll_and_revoke_round_trip() {
         let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
         let account = vec![0x01; 20];
+        let cred_id = vec![0xDEu8; 16];
 
         let pq = MlDsaSigningKey::generate();
         let key = WebAuthnAccountKey::new([0u8; 32], [0u8; 32], pq.verifying_key_bytes().to_vec())
             .unwrap();
-        validator.enroll(account.clone(), key).unwrap();
-        assert_eq!(validator.enrollment_count(), 1);
-        assert!(validator.get_enrollment(&account).is_some());
+        validator
+            .enroll(account.clone(), cred_id.clone(), key)
+            .unwrap();
+        assert_eq!(validator.enrolled_account_count(), 1);
+        assert_eq!(validator.enrolled_credential_count(), 1);
+        assert!(validator.get_credential(&account, &cred_id).is_some());
 
-        assert!(validator.revoke(&account));
-        assert_eq!(validator.enrollment_count(), 0);
-        assert!(validator.get_enrollment(&account).is_none());
-        assert!(!validator.revoke(&account)); // second revoke is a no-op
+        assert!(validator.revoke_credential(&account, &cred_id));
+        assert_eq!(validator.enrolled_account_count(), 0);
+        assert!(validator.get_credential(&account, &cred_id).is_none());
+        assert!(
+            !validator.revoke_credential(&account, &cred_id),
+            "second revoke is a no-op"
+        );
     }
 
     #[test]
     fn erc1271_returns_magic_on_success_and_failure_otherwise() {
         let op_hash = [0x42u8; 32];
-        let (enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
+        let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
         let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
         let account = vec![0x01; 20];
-        validator.enroll(account.clone(), enrollment).unwrap();
+        validator
+            .enroll(account.clone(), cred_id, enrollment)
+            .unwrap();
 
         let magic = validator.is_valid_signature_with_sender(&account, &op_hash, &sig_bytes);
         assert_eq!(magic, ERC1271_MAGIC_VALUE);
@@ -650,12 +795,14 @@ mod tests {
         // End-to-end: install WebAuthnValidator into a ValidatorRegistry and
         // route a UserOp through it.
         let op_hash = [0x42u8; 32];
-        let (enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
+        let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
         let module_addr = [0x77u8; 20];
         let validator = WebAuthnValidator::new(module_addr, ORIGIN.to_string());
         let account = vec![0x01; 20];
-        validator.enroll(account.clone(), enrollment).unwrap();
+        validator
+            .enroll(account.clone(), cred_id, enrollment)
+            .unwrap();
 
         let registry = ValidatorRegistry::new();
         // Attest the module so ERC-7484 install gate passes.
@@ -677,6 +824,69 @@ mod tests {
         assert!(!result.is_failure());
     }
 
+    #[test]
+    fn multi_credential_per_account_dispatches_correctly() {
+        // Enroll TWO credentials on the SAME account. Each produces a
+        // distinct signature. The validator must accept either when
+        // presented under its own credential_id and reject one when
+        // presented under the other's credential_id.
+        let op_hash_a = [0xA1u8; 32];
+        let (cred_id_a, key_a, sig_a) = make_hybrid_sig(&op_hash_a);
+        let op_hash_b = [0xB2u8; 32];
+        let (cred_id_b, key_b, sig_b) = make_hybrid_sig(&op_hash_b);
+        assert_ne!(cred_id_a, cred_id_b);
+
+        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let account = vec![0x01; 20];
+        validator
+            .enroll(account.clone(), cred_id_a.clone(), key_a)
+            .unwrap();
+        validator
+            .enroll(account.clone(), cred_id_b.clone(), key_b)
+            .unwrap();
+        assert_eq!(validator.enrolled_credential_count(), 2);
+        assert_eq!(validator.list_credentials(&account).len(), 2);
+
+        // Each signature validates against its own op_hash.
+        let op_a = dummy_user_op(account.clone(), sig_a.clone());
+        assert!(!validator.validate_user_op(&op_a, &op_hash_a).unwrap().is_failure());
+        let op_b = dummy_user_op(account.clone(), sig_b);
+        assert!(!validator.validate_user_op(&op_b, &op_hash_b).unwrap().is_failure());
+
+        // Revoking credential A: signature A no longer validates, but
+        // credential B is unaffected — the account is still usable.
+        assert!(validator.revoke_credential(&account, &cred_id_a));
+        let op_a_again = dummy_user_op(account.clone(), sig_a);
+        assert!(
+            validator
+                .validate_user_op(&op_a_again, &op_hash_a)
+                .unwrap()
+                .is_failure(),
+            "revoked credential A must no longer validate"
+        );
+        // B still works.
+        assert_eq!(validator.enrolled_credential_count(), 1);
+    }
+
+    #[test]
+    fn revoke_account_clears_every_credential() {
+        let op_hash = [0x42u8; 32];
+        let (cred_id_a, key_a, _sig_a) = make_hybrid_sig(&op_hash);
+        let (cred_id_b, key_b, _sig_b) = make_hybrid_sig(&op_hash);
+
+        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let account = vec![0x01; 20];
+        validator.enroll(account.clone(), cred_id_a, key_a).unwrap();
+        validator.enroll(account.clone(), cred_id_b, key_b).unwrap();
+        assert_eq!(validator.enrolled_credential_count(), 2);
+
+        let removed = validator.revoke_account(&account);
+        assert_eq!(removed, 2);
+        assert_eq!(validator.enrolled_account_count(), 0);
+        assert_eq!(validator.enrolled_credential_count(), 0);
+        assert!(validator.list_credentials(&account).is_empty());
+    }
+
     // Explicitly test that NoOpValidator is NOT this validator — sanity check
     // on the trait-object dispatch.
     #[test]
@@ -684,8 +894,9 @@ mod tests {
         let _ = NoOpValidator::new([0; 20]);
     }
 
-    /// Verifies WebAuthnValidator enrollments survive node restart by
-    /// rebuilding the validator against the same backing store.
+    /// Verifies WebAuthnValidator enrollments — including multi-credential
+    /// accounts — survive node restart by rebuilding the validator
+    /// against the same backing store.
     #[test]
     fn webauthn_enrollment_persists_across_restart() {
         use std::sync::Arc;
@@ -695,13 +906,22 @@ mod tests {
         let origin = "https://wallet.tenzro.network".to_string();
         let account_a = vec![0xA1u8; 20];
         let account_b = vec![0xB2u8; 20];
-        let key_a = WebAuthnAccountKey::new(
+        let cred_a1 = vec![0xC1u8; 16];
+        let cred_a2 = vec![0xC2u8; 16]; // second device on account A
+        let cred_b1 = vec![0xC3u8; 16];
+        let key_a1 = WebAuthnAccountKey::new(
             [0x11u8; 32],
             [0x22u8; 32],
             vec![0x33u8; ML_DSA_65_VK_LEN],
         )
         .unwrap();
-        let key_b = WebAuthnAccountKey::new(
+        let key_a2 = WebAuthnAccountKey::new(
+            [0x44u8; 32],
+            [0x55u8; 32],
+            vec![0x66u8; ML_DSA_65_VK_LEN],
+        )
+        .unwrap();
+        let key_b1 = WebAuthnAccountKey::new(
             [0xAAu8; 32],
             [0xBBu8; 32],
             vec![0xCCu8; ML_DSA_65_VK_LEN],
@@ -710,24 +930,34 @@ mod tests {
 
         {
             let v = WebAuthnValidator::with_storage(module_addr, origin.clone(), store.clone());
-            v.enroll(account_a.clone(), key_a.clone()).unwrap();
-            v.enroll(account_b.clone(), key_b.clone()).unwrap();
-            assert_eq!(v.enrollment_count(), 2);
+            v.enroll(account_a.clone(), cred_a1.clone(), key_a1.clone()).unwrap();
+            v.enroll(account_a.clone(), cred_a2.clone(), key_a2.clone()).unwrap();
+            v.enroll(account_b.clone(), cred_b1.clone(), key_b1.clone()).unwrap();
+            assert_eq!(v.enrolled_account_count(), 2);
+            assert_eq!(v.enrolled_credential_count(), 3);
         }
 
         let v2 = WebAuthnValidator::with_storage(module_addr, origin.clone(), store.clone());
-        assert_eq!(v2.enrollment_count(), 2, "enrollments must hydrate");
-        let restored_a = v2.get_enrollment(&account_a).expect("acc-A hydrated");
-        assert_eq!(restored_a.pubkey_x, key_a.pubkey_x);
-        assert_eq!(restored_a.pubkey_y, key_a.pubkey_y);
-        assert_eq!(restored_a.pq_pubkey, key_a.pq_pubkey);
+        assert_eq!(v2.enrolled_account_count(), 2, "accounts must hydrate");
+        assert_eq!(
+            v2.enrolled_credential_count(),
+            3,
+            "every credential must hydrate"
+        );
+        let restored_a1 = v2.get_credential(&account_a, &cred_a1).expect("a1 hydrated");
+        assert_eq!(restored_a1.pubkey_x, key_a1.pubkey_x);
+        assert_eq!(restored_a1.pubkey_y, key_a1.pubkey_y);
+        assert_eq!(restored_a1.pq_pubkey, key_a1.pq_pubkey);
+        let restored_a2 = v2.get_credential(&account_a, &cred_a2).expect("a2 hydrated");
+        assert_eq!(restored_a2.pubkey_x, key_a2.pubkey_x);
 
-        // Revoke A; rebuild; A must be gone, B must persist.
-        assert!(v2.revoke(&account_a));
+        // Revoke only credential A1; A2 must still be reachable after restart.
+        assert!(v2.revoke_credential(&account_a, &cred_a1));
         drop(v2);
         let v3 = WebAuthnValidator::with_storage(module_addr, origin, store);
-        assert_eq!(v3.enrollment_count(), 1);
-        assert!(v3.get_enrollment(&account_a).is_none());
-        assert!(v3.get_enrollment(&account_b).is_some());
+        assert_eq!(v3.enrolled_credential_count(), 2);
+        assert!(v3.get_credential(&account_a, &cred_a1).is_none());
+        assert!(v3.get_credential(&account_a, &cred_a2).is_some());
+        assert!(v3.get_credential(&account_b, &cred_b1).is_some());
     }
 }

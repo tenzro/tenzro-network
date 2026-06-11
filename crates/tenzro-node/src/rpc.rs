@@ -1276,6 +1276,15 @@ pub(crate) async fn handle_request(
         "tenzro_enrollPasskey" => {
             crate::passkey_rpc::handle_enroll_passkey(node, request.params).await
         }
+        "tenzro_addPasskey" => {
+            crate::passkey_rpc::handle_add_passkey(node, request.params).await
+        }
+        "tenzro_listPasskeys" => {
+            crate::passkey_rpc::handle_list_passkeys(node, request.params).await
+        }
+        "tenzro_removePasskey" => {
+            crate::passkey_rpc::handle_remove_passkey(node, request.params).await
+        }
         "tenzro_signWithPasskey" => {
             crate::passkey_rpc::handle_sign_with_passkey(node, request.params).await
         }
