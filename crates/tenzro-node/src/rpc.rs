@@ -19995,6 +19995,45 @@ async fn handle_list_daml_contracts(
         _ => None,
     };
 
+    // ── Agent-delegation read-side enforcement ──
+    //
+    // Refuse the query when the calling key's `allowed_templates` or
+    // `can_read_as_parties` restrict it out of the requested scope.
+    // Mirrors the write-side enforcement in handle_submit_daml_command.
+    if let (Some(plaintext), Some(mgr)) = (api_key, node.api_key_manager())
+        && let Some(record) = mgr.lookup(plaintext)
+    {
+        if !record.allowed_templates.is_empty() {
+            for tid in &template_ids {
+                if !record.allows_template(tid) {
+                    return Err(JsonRpcError {
+                        code: -32004,
+                        message: format!(
+                            "Agent delegation: api key not authorized for template `{}`. \
+                             Allowed templates: {:?}",
+                            tid, record.allowed_templates
+                        ),
+                        data: None,
+                    });
+                }
+            }
+        }
+        if let Some(party) = requesting_party_fq.as_deref()
+            && !record.can_read_as_parties.is_empty()
+            && !record.can_read_as(party)
+        {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: format!(
+                    "Agent delegation: api key not authorized to read as party `{}`. \
+                     Allowed read parties: {:?}",
+                    party, record.can_read_as_parties
+                ),
+                data: None,
+            });
+        }
+    }
+
     let contracts = adapter
         .query_active_contracts_as(
             template_ids.clone(),
@@ -20117,6 +20156,125 @@ async fn handle_submit_daml_command(
         }
     };
     let act_as_party = resolved_act_as.as_deref();
+
+    // ── Agent-delegation enforcement (party-scoped CIP feature 1) ──
+    //
+    // When the calling key has any agent-delegation restriction set
+    // (`can_act_as_parties`, `allowed_templates`, `allowed_commands`,
+    // `requires_mandate_for`, or `max_per_command_amulet`), refuse the
+    // submission before forwarding to Canton when the request falls
+    // outside the delegated scope. This is the Tenzro-side enforcement
+    // gate that complements Canton's server-side CanActAs enforcement —
+    // we fail-fast before the upstream call and produce a structured
+    // error the caller can recover from.
+    //
+    // Keys with no delegation restrictions (the legacy unrestricted
+    // case) skip this gate entirely; Canton's AuthService remains the
+    // sole authority. This preserves backward compatibility with the
+    // Stage-1 single-tenant key path.
+    if let (Some(plaintext), Some(mgr)) = (api_key, node.api_key_manager())
+        && let Some(record) = mgr.lookup(plaintext)
+    {
+        // Party check — only when an act_as party was resolved.
+        if let Some(target_party) = act_as_party
+            && !record.can_act_as_parties.is_empty()
+            && !record.can_act_as(target_party)
+        {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: format!(
+                    "Agent delegation: api key not authorized to act as party `{}`. \
+                     Allowed parties: {:?}",
+                    target_party, record.can_act_as_parties
+                ),
+                data: None,
+            });
+        }
+
+        // Template check — every submitDamlCommand carries a template_id.
+        if !record.allowed_templates.is_empty() && !record.allows_template(&template_id) {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: format!(
+                    "Agent delegation: api key not authorized for template `{}`. \
+                     Allowed templates: {:?}",
+                    template_id, record.allowed_templates
+                ),
+                data: None,
+            });
+        }
+
+        // Command-shape check — for exercise commands, the choice name
+        // is the command shape; for create commands, the template id
+        // doubles as the shape.
+        let command_shape: String = match command_type {
+            "exercise" => params
+                .get("choice")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            "create" => template_id.clone(),
+            _ => command_type.to_string(),
+        };
+        if !command_shape.is_empty()
+            && !record.allowed_commands.is_empty()
+            && !record.allows_command(&command_shape)
+        {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: format!(
+                    "Agent delegation: api key not authorized for command `{}`. \
+                     Allowed commands: {:?}",
+                    command_shape, record.allowed_commands
+                ),
+                data: None,
+            });
+        }
+
+        // Mandate-required check: when the command shape is listed in
+        // `requires_mandate_for`, the caller must present a signed AP2
+        // cart mandate via the `mandate` param. The mandate validation
+        // itself happens in the AP2 path; here we only enforce that one
+        // was supplied.
+        if !command_shape.is_empty()
+            && record.requires_mandate(&command_shape)
+            && params.get("mandate").and_then(|v| v.as_object()).is_none()
+        {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: format!(
+                    "Agent delegation: command `{}` requires an AP2 cart mandate. \
+                     Supply the signed mandate object in the `mandate` parameter.",
+                    command_shape
+                ),
+                data: None,
+            });
+        }
+
+        // Per-command amulet value cap. When the request carries an
+        // `amount` param (numeric or decimal-string), enforce the cap.
+        if let Some(cap) = record.max_per_command_amulet {
+            let amount_opt: Option<u128> = params
+                .get("amount")
+                .and_then(|v| {
+                    v.as_str()
+                        .and_then(|s| s.parse::<u128>().ok())
+                        .or_else(|| v.as_u64().map(u128::from))
+                });
+            if let Some(amount) = amount_opt
+                && amount > cap
+            {
+                return Err(JsonRpcError {
+                    code: -32004,
+                    message: format!(
+                        "Agent delegation: command amount {} exceeds per-command cap {}",
+                        amount, cap
+                    ),
+                    data: None,
+                });
+            }
+        }
+    }
 
     let result = match command_type {
         "create" => {
@@ -20856,7 +21014,10 @@ async fn handle_canton_watch_party(
     // allow-list is set (legacy key), any party the operator's
     // participant can read is accessible — the operator still has
     // upstream Canton's AuthService as the second gate.
-    if let Some(plaintext) = api_key
+    //
+    // Also enforce `allowed_templates` when set — captured below after
+    // the template_ids parse so we can check every requested template.
+    let key_record = if let Some(plaintext) = api_key
         && let Some(mgr) = node.api_key_manager()
         && let Some(record) = mgr.lookup(plaintext)
     {
@@ -20877,7 +21038,10 @@ async fn handle_canton_watch_party(
                 data: None,
             });
         }
-    }
+        Some(record)
+    } else {
+        None
+    };
 
     let template_ids: Vec<String> = params
         .get("template_ids")
@@ -20895,6 +21059,27 @@ async fn handle_canton_watch_party(
                 .to_string(),
             data: None,
         });
+    }
+
+    // Enforce `allowed_templates` if set on the key — every requested
+    // template must be in the allow-list. Done after the template
+    // parse so a malformed param doesn't bypass the gate.
+    if let Some(record) = &key_record
+        && !record.allowed_templates.is_empty()
+    {
+        for tid in &template_ids {
+            if !record.allows_template(tid) {
+                return Err(JsonRpcError {
+                    code: -32004,
+                    message: format!(
+                        "Agent delegation: api key not authorized for template `{}`. \
+                         Allowed templates: {:?}",
+                        tid, record.allowed_templates
+                    ),
+                    data: None,
+                });
+            }
+        }
     }
 
     let adapter = canton_adapter_or_err(node)?;

@@ -1441,4 +1441,105 @@ mod tests {
         assert!(rendered.contains("tenzro_workflow_fee_routes_total 3"));
         assert!(rendered.contains("tenzro_workflow_privacy_domains_total 5"));
     }
+
+    /// Multi-day workflow hydration test (agent loop closure gap c).
+    ///
+    /// Simulates an operator restart by:
+    ///   1. Creating a `WorkflowManager` with RocksDB persistence.
+    ///   2. Inserting two workflows, freezing one, signing it.
+    ///   3. Dropping the manager (drops in-memory state).
+    ///   4. Rebuilding a fresh manager from the same on-disk store.
+    ///   5. Asserting both workflows reappear with their lifecycle
+    ///      transitions and signatures intact.
+    ///
+    /// Long-workflow survival across operator restarts is a hard
+    /// requirement for an autonomous agentic economy — agents cannot
+    /// have their multi-day work die because their hosting operator
+    /// hiccuped (`project_dynamic_agentic_environment_destination`).
+    #[test]
+    fn hydration_restores_workflows_after_restart() {
+        use std::sync::Arc;
+        use tenzro_storage::{kv::RocksDbStore, StorageConfig};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let storage_cfg = StorageConfig::new(tmp.path().to_path_buf());
+
+        let alice = "did:tenzro:human:alice:1";
+        let bob = "did:tenzro:human:bob:1";
+
+        // Phase 1: live operator session — create + freeze + sign.
+        let (wf_id_a, wf_id_b) = {
+            let store = Arc::new(RocksDbStore::open(&storage_cfg).unwrap());
+            let mgr = WorkflowManager::with_storage(store).unwrap();
+
+            let wf_a = mk_workflow(alice, bob, 1_700_000_000);
+            let wf_b = mk_workflow(bob, alice, 1_700_000_001);
+
+            let id_a = mgr.create_workflow(wf_a).unwrap();
+            let id_b = mgr.create_workflow(wf_b).unwrap();
+
+            // Move workflow A through freeze + sign so it has lifecycle
+            // transitions; B stays in Draft so we can assert mixed
+            // states survive.
+            mgr.freeze(&id_a, 1_700_000_100).unwrap();
+            mgr.sign(
+                &id_a,
+                ParticipantSignature {
+                    did: alice.into(),
+                    signature: vec![0xab; 64],
+                    signed_by_pubkey: vec![0xcd; 32],
+                    at: 1_700_000_101,
+                },
+                1_700_000_101,
+            )
+            .unwrap();
+
+            // Sanity-check the in-memory snapshot before drop.
+            assert_eq!(mgr.list_by_creator(alice).len(), 1);
+            assert_eq!(mgr.list_by_creator(bob).len(), 1);
+            assert_eq!(
+                mgr.get_workflow(&id_a).unwrap().status,
+                WorkflowStatus::AwaitingSignatures
+            );
+            assert_eq!(
+                mgr.get_workflow(&id_b).unwrap().status,
+                WorkflowStatus::Draft
+            );
+
+            (id_a, id_b)
+            // mgr drops here — simulates operator restart.
+        };
+
+        // Phase 2: fresh manager over the same on-disk store.
+        let store = Arc::new(RocksDbStore::open(&storage_cfg).unwrap());
+        let restarted = WorkflowManager::with_storage(store).unwrap();
+
+        // Both workflows reload (per-creator indices are rebuilt).
+        assert_eq!(restarted.list_by_creator(alice).len(), 1);
+        assert_eq!(restarted.list_by_creator(bob).len(), 1);
+
+        let recovered_a = restarted.get_workflow(&wf_id_a).unwrap();
+        let recovered_b = restarted.get_workflow(&wf_id_b).unwrap();
+
+        // Status preserved across restart.
+        assert_eq!(recovered_a.status, WorkflowStatus::AwaitingSignatures);
+        assert_eq!(recovered_b.status, WorkflowStatus::Draft);
+
+        // Lifecycle history preserved — `create_workflow` emits a
+        // Created receipt (not a lifecycle transition), so the
+        // recorded lifecycle starts at the first explicit transition
+        // (Frozen on `freeze()`). At least one entry must survive.
+        let lifecycle_a = restarted.lifecycle_history(&wf_id_a);
+        assert!(
+            !lifecycle_a.is_empty(),
+            "lifecycle should preserve the Frozen transition across restart, got empty"
+        );
+
+        // Signature on A persists.
+        assert_eq!(
+            recovered_a.signatures.len(),
+            1,
+            "signature on workflow A must survive restart"
+        );
+    }
 }
