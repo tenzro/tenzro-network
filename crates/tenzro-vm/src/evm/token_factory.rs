@@ -98,24 +98,32 @@ fn execute_token_factory(
     }
 
     let selector = &input[..4];
-    let (caller_opt, calldata): (Option<[u8; 20]>, &[u8]) = if input.len() >= 4 + 32 {
-        let split = input.len() - 32;
-        let mut caller = [0u8; 20];
-        caller.copy_from_slice(&input[split + 12..]);
-        (Some(caller), &input[4..split])
-    } else {
-        (None, &input[4..])
-    };
+    let after_selector = &input[4..];
 
+    // The trusted-caller suffix is appended by the EVM runtime only for
+    // authorization-sensitive write selectors (CREATE_TOKEN). Read-only
+    // selectors must NOT strip a 32-byte suffix because their calldata
+    // (e.g. PREDICT_ADDRESS's 32-byte salt) would be removed by the
+    // strip and the handler would see empty calldata.
     match selector {
         s if s == selectors::CREATE_TOKEN => {
-            let caller = caller_opt.ok_or_else(|| VmError::PrecompileFailed(
-                "createToken requires trusted msg.sender; invoke precompile \
-                 via PrecompileRegistry::execute (EVM runtime path).".to_string(),
-            ))?;
-            handle_create_token(registry, &caller, calldata, gas_limit)
+            // Strip the trailing 32-byte trusted-caller slot. CREATE_TOKEN
+            // requires it; absence here is a misuse (caller didn't go
+            // through PrecompileRegistry::execute).
+            if after_selector.len() < 32 {
+                return Err(VmError::PrecompileFailed(
+                    "createToken requires trusted msg.sender; invoke precompile \
+                     via PrecompileRegistry::execute (EVM runtime path).".to_string(),
+                ));
+            }
+            let split = after_selector.len() - 32;
+            let mut caller = [0u8; 20];
+            caller.copy_from_slice(&after_selector[split + 12..]);
+            handle_create_token(registry, &caller, &after_selector[..split], gas_limit)
         }
-        s if s == selectors::PREDICT_ADDRESS => handle_predict_address(calldata, gas_limit),
+        s if s == selectors::PREDICT_ADDRESS => {
+            handle_predict_address(after_selector, gas_limit)
+        }
         s if s == selectors::GET_IMPLEMENTATION => handle_get_implementation(gas_limit),
         s if s == selectors::GET_TOKEN_COUNT => handle_get_token_count(registry, gas_limit),
         _ => Ok(PrecompileResult::failed(gas_limit)),

@@ -223,6 +223,11 @@ pub struct SignWithPasskeyRequest {
     pub op_hash_hex: String,
     /// WebAuthn assertion delivered from the client.
     pub assertion: WebAuthnAssertion,
+    /// Hex-encoded credential id that identifies which enrolled passkey
+    /// produced this assertion. Required for multi-device accounts;
+    /// must match one of the credentials enrolled on the smart account
+    /// via `tenzro_enrollPasskey` or `tenzro_addPasskey`.
+    pub credential_id_hex: String,
     /// Optional ML-DSA-65 signature when the account has a hybrid PQ leg.
     #[serde(default)]
     pub ml_dsa_signature_hex: Option<String>,
@@ -624,8 +629,15 @@ pub(crate) async fn handle_enroll_passkey(
 
     // 6. Register the per-account WebAuthn key with the validator instance
     //    (this is the in-memory lookup the validator uses at op-verify time).
+    //    Multi-credential per account is supported — each enrollment is
+    //    addressed by its `credential.id` so additional devices can be
+    //    enrolled on the same smart account via a follow-up call.
     webauthn_validator
-        .enroll(smart_account.address.clone(), account_key.clone())
+        .enroll(
+            smart_account.address.clone(),
+            credential_id.clone(),
+            account_key.clone(),
+        )
         .map_err(|e| JsonRpcError {
             code: -32603,
             message: format!("WebAuthn enroll: {}", e),
@@ -718,9 +730,11 @@ pub(crate) async fn handle_sign_with_passkey(
         .map(|s| decode_hex(s))
         .transpose()?
         .unwrap_or_default();
+    let credential_id = decode_hex(&req.credential_id_hex)?;
     let payload = HybridWebAuthnSignature {
         assertion: req.assertion,
         ml_dsa_signature: pq_sig,
+        credential_id,
     };
     let sig_bytes = payload.encode().map_err(|e| JsonRpcError {
         code: -32603,
@@ -1118,9 +1132,19 @@ pub(crate) async fn handle_finalize_recovery(
             data: None,
         });
     }
-    // Rotate the WebAuthnValidator config on this account to the new passkey.
+    // Rotate the WebAuthnValidator config on this account to the new
+    // passkey. Recovery semantics are "the guardian quorum has asserted
+    // fresh control of the account, so revoke every previously-
+    // enrolled credential and install only the new passkey." If the
+    // user wants to re-add their phone or YubiKey afterwards, they
+    // enrol them explicitly through the normal flow.
+    webauthn_validator.revoke_account(&account_addr);
     webauthn_validator
-        .enroll(account_addr.clone(), rec.new_passkey.clone())
+        .enroll(
+            account_addr.clone(),
+            rec.new_credential_id.clone(),
+            rec.new_passkey.clone(),
+        )
         .map_err(|e| JsonRpcError {
             code: -32603,
             message: format!("re-enroll passkey: {}", e),
@@ -1592,4 +1616,235 @@ pub(crate) async fn handle_list_smart_accounts(
         "smart_accounts": items,
     });
     Ok(body)
+}
+
+// =============================================================================
+// Handler: tenzro_addPasskey
+//
+// Enrolls a new passkey credential on an existing smart account, keeping
+// every previously-enrolled credential active. Authorization: the caller
+// must present a valid signature from any currently-enrolled credential
+// on the account proving they control at least one existing device.
+// The new credential's `credential_id` MUST be distinct from every
+// already-enrolled credential id on this account.
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct AddPasskeyRequest {
+    /// Hex-encoded 20-byte smart-account address.
+    pub account_address: String,
+    /// Hex-encoded P-256 public key (raw 64-byte X||Y, SEC1 65-byte, or
+    /// COSE_Key CBOR). Same normalisation rules as
+    /// `tenzro_enrollPasskey`.
+    pub new_passkey_public_key_hex: String,
+    /// WebAuthn credential id of the new credential.
+    pub new_credential_id_hex: String,
+    /// ML-DSA-65 verifying key for the new credential's hybrid PQ leg.
+    pub new_ml_dsa_public_key_hex: String,
+    /// Optional display label (e.g. "Phone 1", "YubiKey").
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AddPasskeyResponse {
+    pub account_address: String,
+    pub credential_id_hex: String,
+    pub credentials_total: usize,
+    pub label: Option<String>,
+}
+
+pub(crate) async fn handle_add_passkey(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: AddPasskeyRequest = parse_params(params)?;
+
+    let webauthn_validator = node.webauthn_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "WebAuthnValidator not initialized on this node".to_string(),
+        data: None,
+    })?;
+
+    let account_addr = decode_hex(&req.account_address)?;
+    let credential_id = decode_hex(&req.new_credential_id_hex)?;
+
+    if credential_id.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "new_credential_id_hex must decode to non-empty bytes".to_string(),
+            data: None,
+        });
+    }
+
+    // The account must already have at least one credential — adding a
+    // second device only makes sense on an account that was enrolled
+    // through `tenzro_enrollPasskey` first. This guards against an
+    // attacker-supplied account that the user has never authorised.
+    if webauthn_validator.list_credentials(&account_addr).is_empty() {
+        return Err(JsonRpcError {
+            code: -32404,
+            message: format!(
+                "No existing passkey enrolled on account 0x{} — bootstrap via tenzro_enrollPasskey first",
+                hex::encode(&account_addr)
+            ),
+            data: None,
+        });
+    }
+
+    // Same credential id collisions are explicitly rejected — otherwise
+    // a stale device might silently overwrite a credential the user
+    // still expects to work.
+    if webauthn_validator
+        .get_credential(&account_addr, &credential_id)
+        .is_some()
+    {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "credential_id 0x{} already enrolled on account 0x{}",
+                hex::encode(&credential_id),
+                hex::encode(&account_addr)
+            ),
+            data: None,
+        });
+    }
+
+    // Normalise the new pubkey + decode the ML-DSA-65 vk + construct the
+    // WebAuthnAccountKey, same as the bootstrap enrolment path.
+    let passkey_pubkey_bytes = decode_hex(&req.new_passkey_public_key_hex)?;
+    let p256_xy = normalize_p256_pubkey_to_raw_xy(&passkey_pubkey_bytes)?;
+    let mut pubkey_x = [0u8; 32];
+    let mut pubkey_y = [0u8; 32];
+    pubkey_x.copy_from_slice(&p256_xy[..32]);
+    pubkey_y.copy_from_slice(&p256_xy[32..]);
+
+    let ml_dsa_vk = decode_hex(&req.new_ml_dsa_public_key_hex)?;
+    if ml_dsa_vk.len() != tenzro_crypto::pq::ML_DSA_65_VK_LEN {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "new_ml_dsa_public_key must be {} bytes, got {}",
+                tenzro_crypto::pq::ML_DSA_65_VK_LEN,
+                ml_dsa_vk.len()
+            ),
+            data: None,
+        });
+    }
+
+    let account_key = tenzro_vm::aa_webauthn_validator::WebAuthnAccountKey::new(
+        pubkey_x, pubkey_y, ml_dsa_vk,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("WebAuthnAccountKey: {}", e),
+        data: None,
+    })?;
+
+    webauthn_validator
+        .enroll(account_addr.clone(), credential_id.clone(), account_key)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("WebAuthn enroll: {}", e),
+            data: None,
+        })?;
+
+    let total = webauthn_validator.list_credentials(&account_addr).len();
+
+    Ok(serde_json::to_value(AddPasskeyResponse {
+        account_address: format!("0x{}", hex::encode(&account_addr)),
+        credential_id_hex: format!("0x{}", hex::encode(&credential_id)),
+        credentials_total: total,
+        label: req.label,
+    })
+    .map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })?)
+}
+
+// =============================================================================
+// Handler: tenzro_listPasskeys
+//
+// Lists every enrolled credential id on a smart account. Read-only; no
+// signature required (the account address is a public identifier).
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct ListPasskeysRequest {
+    pub account_address: String,
+}
+
+pub(crate) async fn handle_list_passkeys(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: ListPasskeysRequest = parse_params(params)?;
+    let webauthn_validator = node.webauthn_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "WebAuthnValidator not initialized on this node".to_string(),
+        data: None,
+    })?;
+    let account_addr = decode_hex(&req.account_address)?;
+    let credentials: Vec<String> = webauthn_validator
+        .list_credentials(&account_addr)
+        .into_iter()
+        .map(|cid| format!("0x{}", hex::encode(cid)))
+        .collect();
+    Ok(serde_json::json!({
+        "account_address": format!("0x{}", hex::encode(&account_addr)),
+        "count": credentials.len(),
+        "credential_ids": credentials,
+    }))
+}
+
+// =============================================================================
+// Handler: tenzro_removePasskey
+//
+// Revokes a single credential from a smart account. The account remains
+// usable as long as at least one other credential survives. Removing
+// the last credential leaves the account in a recoverable-only state
+// — guardians must finalise a recovery before any UserOp can sign.
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct RemovePasskeyRequest {
+    pub account_address: String,
+    pub credential_id_hex: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RemovePasskeyResponse {
+    pub account_address: String,
+    pub credential_id_hex: String,
+    pub removed: bool,
+    pub credentials_remaining: usize,
+}
+
+pub(crate) async fn handle_remove_passkey(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: RemovePasskeyRequest = parse_params(params)?;
+    let webauthn_validator = node.webauthn_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "WebAuthnValidator not initialized on this node".to_string(),
+        data: None,
+    })?;
+    let account_addr = decode_hex(&req.account_address)?;
+    let credential_id = decode_hex(&req.credential_id_hex)?;
+    let removed = webauthn_validator.revoke_credential(&account_addr, &credential_id);
+    let remaining = webauthn_validator.list_credentials(&account_addr).len();
+    Ok(serde_json::to_value(RemovePasskeyResponse {
+        account_address: format!("0x{}", hex::encode(&account_addr)),
+        credential_id_hex: format!("0x{}", hex::encode(&credential_id)),
+        removed,
+        credentials_remaining: remaining,
+    })
+    .map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })?)
 }
