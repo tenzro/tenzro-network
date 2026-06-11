@@ -28,7 +28,7 @@ For local development, use `http://localhost:3005/mcp`.
 
 ## Canton Network Overview
 
-Canton is an enterprise-grade blockchain network built on DAML (Digital Asset Modeling Language). It powers $8T+ in tokenized assets monthly across major financial institutions including JPMorgan, Goldman Sachs, and Deutsche Börse.
+Canton is an enterprise-grade blockchain network built on DAML (Digital Asset Modeling Language). It is adopted by major global investment banks, market utilities, and exchanges to settle tokenized assets at institutional scale.
 
 **Key concepts:**
 - **Parties** — Identities on the Canton ledger (allocated per participant)

@@ -54,7 +54,7 @@ To steward, but not own, a decentralized protocol for the AI age, where humans a
 
 ### 1.3 What Tenzro Does in the 2026 Ecosystem
 
-The Foundation's stewardship is grounded in a specific architectural stance. By the start of 2026, agentic finance runs across three separate ecosystems — EVM-side agent commerce (ERC-8004 mainnet 2026-01-29, AP2 donated to FIDO in April 2026, x402 at ~$600M annualized), SVM-side agent trading (ElizaOS, SendAI, GOAT), and Canton-side institutional RWA (DTCC US Treasury tokenization, JPMorgan JPMD, CIP-56) — each with its own protocols, settlement primitives, and execution model. No L1 in 2026 combines EVM + SVM + Canton/DAML in one chain.
+The Foundation's stewardship is grounded in a specific architectural stance. By the start of 2026, agentic finance runs across three separate ecosystems — EVM-side agent commerce (ERC-8004 mainnet 2026-01-29, AP2 donated to FIDO in April 2026, x402 at ~$600M annualized), SVM-side agent trading (ElizaOS, SendAI, GOAT), and Canton-side institutional RWA (tokenized treasuries, bank deposit tokens, CIP-56 settlement) — each with its own protocols, settlement primitives, and execution model. No L1 in 2026 combines EVM + SVM + Canton/DAML in one chain.
 
 Tenzro does. Five things follow:
 

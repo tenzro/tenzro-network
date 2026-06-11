@@ -32,7 +32,7 @@ State of the network as of June 2026:
 - **Canton protocol version 35**, shipping in Canton 3.5.x. Released in 3.5.1 (May 27, 2026), with 3.5.2 (June 3, 2026) addressing OOM during synchronizer reconnect.
 - **Splice 0.6.7** is current. Notable: LSU-only upgrade mechanism (HDM removed in 0.6.2), Serial ID alongside frozen Migration ID, CIP-104 traffic-based rewards incrementally rolled out, Wallet SDK v1 multi-party / multi-transport surface, token standard controller adds `getInstrumentById` / `listInstruments`.
 - **Contract keys** are available in DAML-LF 2.3 onward (PV 35) — non-unique unlike Canton 2.x.
-- **Institutional production volume**: DTCC tokenized U.S. Treasury custody, Broadridge DLR repo, Hashnote USYC stablecoin infrastructure, Brale institutional stablecoin, October 2024 institutional collateral pilots involving 27 market participants tokenizing gilts, eurobonds, and gold. Major SVs include Tradeweb, Broadridge, 7RIDGE, Circle, Chainlink, DTCC, Visa, Nasdaq, Apollo, Societe Generale, Franklin Templeton.
+- **Institutional production volume**: tokenized U.S. Treasury custody at a major market utility, repo-platform tokenization, institutional stablecoin infrastructure, and 2024 institutional collateral pilots involving 27 market participants tokenizing gilts, eurobonds, and gold. Super Validators include large market infrastructures, fintech custodians, fund administrators, and global card networks.
 
 The Canton 2026 stack is mature for institutional asset settlement and emerging fast for agent-driven workflows. The agentic surface is the leading edge — most participants are still building observer-only tooling against the Scan API.
 
@@ -80,7 +80,7 @@ The Canton Improvement Proposal process governs every change to validators, econ
 - **CIP-0105** — SV Locking & Long-Term Commitment.
 - **CIP-0111** — SV Weight Reduction Process.
 
-SV admission CIPs (CIP-0009 through CIP-0118 sprinkled throughout) admit specific organizations as SVs with assigned weights — Broadridge, LCV, Tradeweb, 7RIDGE, Copper, Dfns, MPCH, Lukka, Five North, Kiln, Obsidian, Hexagate, Copper Clearloop, Deribit, Circle, TRM, Elliptic, Coin Metrics, AngelHack, Figment, Bitwave, Quantstamp, IntellectEU, Zero Hash, Chainlink, Kaiko, LayerZero, Wormhole, Ledger, Ubyx, Fireblocks, BitGo, Zodia, Hypernative, Taurus, Republic, YZi Labs, DTCC, Talos, Bosphorus, Blockdaemon, Nasdaq, Tharimmune, QCP Group, Visa, Apollo, Further Asset Management, Societe Generale, Franklin Templeton, Merkle Science (Proposed).
+SV admission CIPs (CIP-0009 through CIP-0118 sprinkled throughout) admit specific organizations as SVs with assigned weights. The roster includes market-data and post-trade infrastructure providers, institutional custodians, fund administrators, exchanges, MPC and HSM vendors, compliance / blockchain-analytics firms, oracle networks, cross-chain messaging networks, stablecoin issuers, retail and institutional crypto platforms, payment networks, asset managers, banking groups, and several proposed-but-not-yet-admitted entrants. Refer to the public Splice CIP repository for the canonical, dated list — Tenzro does not reproduce the roster here in order to avoid implying endorsement by, or commercial relationship with, any named SV.
 
 ### 1.3 Native primitives
 

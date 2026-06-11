@@ -23,7 +23,7 @@ This document is the **full implementation plan** (not stubs) for that layer. It
 | Global Synchronizer fees: $17/MB traffic + USD-pegged percentage tier (1% on first $100, 0.001% above $1M). CC burn-to-traffic-balance. | https://www.canton.network/blog/canton-coin-rewarding-utility | `bridge::canton::fee_quote()` updated in §7. |
 | **No production ERC-7683 origin/destination settler on Canton** as of 2026-05. | https://www.erc7683.org/ + Canton CIP repo search | Tenzro is first; §5 procurement template uses 7683-style intent envelope on the Tenzro side, CIP-56 `TransferInstruction` on the Canton side. |
 | No canonical "Obligation" template in DAML stdlib — it's a documented pattern. **Multiple Party Agreement** (`Pending` wrapper + per-party `Sign` choice) is the canonical multi-sig primitive. Choice qualifiers: `consuming` (default), `nonconsuming`, `preconsuming`, `postconsuming`. | https://docs.daml.com/daml/patterns/multiparty-agreement.html ; https://docs.daml.com/daml/reference/choices.html | §1 `Obligation` and §1 `ApprovalGate` codegen onto `Pending`/`Sign` and `nonconsuming RequestApproval` respectively. |
-| **No native autonomous-AI-agent Canton workflow in production** (2026 search). DTCC ComposerX (BlackRock, JPMorgan, 50+ firms) is the production reference for tokenized US Treasuries + atomic DvP. | https://www.canton.network/canton-network-press-releases/dtcc-and-digital-asset-partner-to-tokenize-dtc-custodied-u.s.-treasury-securities-on-the-canton-network | Greenfield. §5 reference templates target DvP, autonomous treasury, autonomous procurement — direct ComposerX-adjacent demos. |
+| **No native autonomous-AI-agent Canton workflow in production** (2026 search). The dominant production reference for tokenized US Treasuries + atomic DvP on Canton is a market-utility consortium settlement program announced by the participating institutions. | (vendor press releases of the participating market utility) | Greenfield. §5 reference templates target DvP, autonomous treasury, autonomous procurement — direct demos in the same problem space. |
 
 ---
 
@@ -783,7 +783,7 @@ Fee route (§7): 80% of network commission → seller_treasury, 15% → buyer_tr
 
 A treasury agent rebalances a multi-token portfolio across chains. PolicyExpr enforces per-asset caps + per-chain caps + counterparty whitelist. Approval gate fires for any single trade > 5% of NAV. Mirrored to Canton as a `TreasuryAction` template observed by an auditor.
 
-### 5.3 `dvp_settlement.json` — DTCC ComposerX-style
+### 5.3 `dvp_settlement.json` — institutional DvP-style
 
 Buyer pays cash CIP-56 (USDCx) and seller delivers cash-tokenized U.S. Treasuries (cBTC stand-in). Atomic DvP via a DAML choice that *both* transfers happen in one transaction. Tenzro side records the `Settlement` and emits the lifecycle transition; Canton side enforces atomicity.
 
