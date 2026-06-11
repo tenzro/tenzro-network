@@ -1784,6 +1784,7 @@ pub(crate) async fn handle_request(
         "tenzro_importKeystore" => handle_import_keystore(node, request.params).await,
         "tenzro_getKeyShares" => handle_get_key_shares(node, request.params).await,
         "tenzro_rotateKeys" => handle_rotate_keys(node, request.params).await,
+        "tenzro_rotateValidatorKey" => handle_rotate_validator_key(node, request.params).await,
         "tenzro_setSpendingLimits" => handle_set_spending_limits(node, request.params).await,
         "tenzro_getSpendingLimits" => handle_get_spending_limits(node, request.params).await,
         "tenzro_authorizeSession" => handle_authorize_session(node, request.params).await,
@@ -37742,6 +37743,255 @@ async fn handle_rotate_keys(
         "new_threshold": 2,
         "new_total_shares": 3,
         "message": "Key shares rotated. Old shares are invalidated.",
+    }))
+}
+
+/// Rotate a validator's consensus + PQ + BLS keys.
+///
+/// Parameters (JSON object):
+/// - `address` (hex, 32-byte 0x-prefixed): validator's operator address.
+/// - `new_consensus_pubkey` (hex, 32 bytes): new Ed25519 consensus pubkey.
+/// - `new_pq_pubkey` (hex, 1952 bytes): new ML-DSA-65 verifying key.
+/// - `new_bls_pubkey` (hex, 48 bytes): new BLS12-381 G1 (min_pk) verifying key.
+/// - `nonce` (u64): monotonic counter (replay protection).
+/// - `signature` (hex, 64 bytes): Ed25519 signature by the *current*
+///   consensus key over
+///   `SHA-256("tenzro/rotate-validator-key" || address || new_consensus
+///   || new_pq || new_bls || nonce_le)`.
+///
+/// Authorization: signature must verify against the current
+/// `consensus_pubkey` recorded in the validator registry for `address`.
+/// The validator proves ownership of the existing keys — no admin token
+/// required.
+///
+/// Effect on the receiving node:
+/// 1. The validator registry's persisted entry is updated in-place
+///    (`rotate_keys` preserves stake / tier / status / withdrawal).
+/// 2. The new `ValidatorInfo` is upserted into `EpochManager`'s
+///    `pending_validators` so HotStuff-2 picks up the new keys at the
+///    next epoch boundary.
+///
+/// Cross-node propagation: the caller must broadcast the same rotation
+/// to every active validator's RPC (or to a typed transaction in a
+/// future wave) so that every node's local registry + EpochManager
+/// converges on the new key tuple at the same epoch boundary. Until
+/// that broadcast lands on the full set, the rotating validator's
+/// votes after the boundary will be rejected by nodes that didn't see
+/// the rotation. Operators rotating a key SHOULD use a per-validator
+/// fan-out script (or the planned `RotateValidatorKey` typed
+/// transaction in a follow-up wave) rather than calling this RPC on a
+/// single node and assuming the network will converge.
+///
+/// Until the epoch boundary, the validator continues to sign with its
+/// old keys — that is the correct atomic-rotation semantic on a single
+/// node (no split-key window where votes from the same address can be
+/// signed by either key).
+async fn handle_rotate_validator_key(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    fn hex_field(
+        params: &Value,
+        name: &str,
+        expected_len: usize,
+    ) -> std::result::Result<Vec<u8>, JsonRpcError> {
+        let s = params
+            .get(name)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!("Missing required hex field `{}`", name),
+                data: None,
+            })?;
+        let s_trimmed = s.strip_prefix("0x").unwrap_or(s);
+        let bytes = hex::decode(s_trimmed).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("`{}` is not valid hex: {}", name, e),
+            data: None,
+        })?;
+        if bytes.len() != expected_len {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "`{}` must be {} bytes, got {}",
+                    name,
+                    expected_len,
+                    bytes.len()
+                ),
+                data: None,
+            });
+        }
+        Ok(bytes)
+    }
+
+    let address_bytes = hex_field(&params, "address", 32)?;
+    let mut addr_arr = [0u8; 32];
+    addr_arr.copy_from_slice(&address_bytes);
+    let address = tenzro_types::Address::new(addr_arr);
+
+    let new_consensus = hex_field(&params, "new_consensus_pubkey", 32)?;
+    let new_pq = hex_field(&params, "new_pq_pubkey", 1952)?;
+    let new_bls = hex_field(&params, "new_bls_pubkey", 48)?;
+    let signature_bytes = hex_field(&params, "signature", 64)?;
+
+    let nonce = params
+        .get("nonce")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing `nonce` (u64)".to_string(),
+            data: None,
+        })?;
+
+    let registry = node.validator_registry().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Validator registry not initialized".to_string(),
+        data: None,
+    })?;
+
+    let existing = registry.get(&address).ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: format!(
+            "No validator registered at address {} — call tenzro_registerProvider first",
+            address
+        ),
+        data: None,
+    })?;
+
+    // Replay protection: rotation_nonce must strictly increase. We persist
+    // the last-seen nonce under CF_TOKENS keyed by `rotation_nonce:<addr_hex>`.
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+    let nonce_key = format!("rotation_nonce:{}", hex::encode(address.as_bytes()));
+    let last_nonce: u64 = match storage.get(tenzro_storage::CF_TOKENS, nonce_key.as_bytes()) {
+        Ok(Some(bytes)) if bytes.len() == 8 => {
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&bytes);
+            u64::from_le_bytes(arr)
+        }
+        _ => 0,
+    };
+    if nonce <= last_nonce {
+        return Err(JsonRpcError {
+            code: -32004,
+            message: format!(
+                "Stale rotation nonce: got {} but registry has already accepted {}. \
+                 Nonces must strictly increase.",
+                nonce, last_nonce
+            ),
+            data: None,
+        });
+    }
+
+    // Build canonical signing preimage. Domain-separated under
+    // `tenzro/rotate-validator-key` so the same Ed25519 key signing other
+    // tenzro protocol messages cannot be replayed here.
+    let mut preimage = Vec::with_capacity(
+        b"tenzro/rotate-validator-key".len() + 32 + 32 + 1952 + 48 + 8,
+    );
+    preimage.extend_from_slice(b"tenzro/rotate-validator-key");
+    preimage.extend_from_slice(address.as_bytes());
+    preimage.extend_from_slice(&new_consensus);
+    preimage.extend_from_slice(&new_pq);
+    preimage.extend_from_slice(&new_bls);
+    preimage.extend_from_slice(&nonce.to_le_bytes());
+
+    // Verify Ed25519 signature against the CURRENT consensus pubkey
+    // recorded in the registry. This is the "old-key proves ownership"
+    // authorization gate. `verify` returns `Ok(())` only on a valid
+    // signature; any other outcome (wrong key, malformed signature,
+    // tampered preimage) is `Err` and we reject.
+    let current_pubkey = tenzro_crypto::PublicKey::new(
+        tenzro_crypto::KeyType::Ed25519,
+        existing.consensus_pubkey.clone(),
+    );
+    let sig = tenzro_crypto::Signature::new(
+        tenzro_crypto::KeyType::Ed25519,
+        signature_bytes,
+    );
+    tenzro_crypto::signatures::verify(&current_pubkey, &preimage, &sig).map_err(|_| {
+        JsonRpcError {
+            code: -32004,
+            message: format!(
+                "Rotation signature invalid: must be signed by the current \
+                 consensus key for {}",
+                address
+            ),
+            data: None,
+        }
+    })?;
+
+    // Land the rotation on the persistent registry. `rotate_keys` is
+    // idempotent on no-op input and refuses Exited / Jailed states.
+    registry
+        .rotate_keys(&address, new_consensus.clone(), new_pq.clone(), new_bls.clone())
+        .map_err(|e| JsonRpcError {
+            code: -32004,
+            message: format!("rotate_keys refused: {}", e),
+            data: None,
+        })?;
+
+    // Persist the new nonce only AFTER rotation succeeds — otherwise a
+    // refused rotation would still consume a nonce, locking out the
+    // operator from retrying with the corrected input.
+    storage
+        .put(
+            tenzro_storage::CF_TOKENS,
+            nonce_key.as_bytes(),
+            &nonce.to_le_bytes(),
+        )
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Failed to persist rotation nonce: {}", e),
+            data: None,
+        })?;
+
+    // Enqueue an upsert into the next epoch's validator set so HotStuff-2
+    // starts verifying votes against the new keys at the boundary.
+    // `add_pending_validator` upserts by address — same address, new keys.
+    if let Some(engine) = node.consensus() {
+        let new_pubkey = tenzro_crypto::PublicKey::new(
+            tenzro_crypto::KeyType::Ed25519,
+            new_consensus.clone(),
+        );
+        let validator_info = tenzro_consensus::ValidatorInfo::new(
+            address,
+            new_pubkey,
+            new_pq.clone(),
+            new_bls.clone(),
+            existing.self_stake,
+        );
+        engine.epoch_manager().add_pending_validator(validator_info);
+        tracing::info!(
+            %address,
+            new_consensus = %hex::encode(&new_consensus),
+            "Validator key rotation enqueued for next epoch"
+        );
+    } else {
+        // No consensus engine wired (LightClient role, dry-run, etc.) —
+        // the registry update is still durable so a subsequent role
+        // upgrade will pick up the new keys. Log + report rather than
+        // fail the call.
+        tracing::warn!(
+            %address,
+            "Validator registry updated but no consensus engine — \
+             pending-validator enqueue skipped"
+        );
+    }
+
+    Ok(serde_json::json!({
+        "address": format!("0x{}", hex::encode(address.as_bytes())),
+        "status": "pending_epoch_activation",
+        "new_consensus_pubkey": format!("0x{}", hex::encode(&new_consensus)),
+        "new_pq_pubkey": format!("0x{}", hex::encode(&new_pq)),
+        "new_bls_pubkey": format!("0x{}", hex::encode(&new_bls)),
+        "nonce": nonce,
+        "message": "Validator keys rotated in registry. New keys become live at the next epoch boundary.",
     }))
 }
 

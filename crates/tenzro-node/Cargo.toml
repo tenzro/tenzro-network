@@ -64,6 +64,12 @@ uuid = { workspace = true }
 reqwest = { workspace = true }
 urlencoding = "2"
 tokio-stream = "0.1"
+# DNS resolver for the bootstrap-DNS discovery primitive (Fix 2: pkarr-based
+# bootstrap peer discovery). hickory-resolver is already a transitive dep
+# via iroh; depending on it directly keeps the boot path independent of
+# iroh's address-lookup wiring and lets the resolver be invoked before
+# the iroh endpoint is bound.
+hickory-resolver = "0.26"
 async-stream = "0.3"
 futures = { workspace = true }
 futures-util = "0.3"

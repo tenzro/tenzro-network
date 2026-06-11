@@ -20,6 +20,9 @@ pub enum ValidatorCommand {
     Exit(ValidatorExitCmd),
     /// Update validator metadata / TEE attestation commitment
     UpdateMetadata(ValidatorUpdateMetadataCmd),
+    /// Rotate validator consensus + PQ + BLS keys via tenzro_rotateValidatorKey
+    /// (signed by the *current* consensus key)
+    RotateKeys(ValidatorRotateKeysCmd),
     /// Inspect a single validator entry by address (read-only)
     Get(ValidatorGetCmd),
     /// List validators (optionally filter by status) (read-only)
@@ -34,6 +37,7 @@ impl ValidatorCommand {
             Self::Register(cmd) => cmd.execute().await,
             Self::Exit(cmd) => cmd.execute().await,
             Self::UpdateMetadata(cmd) => cmd.execute().await,
+            Self::RotateKeys(cmd) => cmd.execute().await,
             Self::Get(cmd) => cmd.execute().await,
             Self::List(cmd) => cmd.execute().await,
             Self::ListActive(cmd) => cmd.execute().await,
@@ -385,6 +389,100 @@ impl ValidatorUpdateMetadataCmd {
             output::print_field("TEE attestation hash", h);
         }
         output::print_field("Transaction Hash", &extract_tx_hash(&result));
+        Ok(())
+    }
+}
+
+/// Rotate validator consensus + PQ + BLS keys.
+///
+/// This calls `tenzro_rotateValidatorKey` against the configured RPC. The
+/// signature is produced offline by the operator with the *current*
+/// consensus key over the canonical preimage; this command only marshals
+/// the request. See `tools/deploy/rotate-validator-key.sh` for the
+/// fan-out script that broadcasts the rotation to every active validator
+/// (required until the consensus-mediated `RotateValidatorKey` typed
+/// transaction lands).
+#[derive(Debug, Parser)]
+pub struct ValidatorRotateKeysCmd {
+    /// Validator operator address (32-byte hex)
+    #[arg(long)]
+    address: String,
+
+    /// New Ed25519 consensus pubkey (32-byte hex)
+    #[arg(long)]
+    new_consensus_pubkey: String,
+
+    /// New ML-DSA-65 verifying key (1952-byte hex)
+    #[arg(long)]
+    new_pq_pubkey: String,
+
+    /// New BLS12-381 G1 (min_pk) verifying key (48-byte hex)
+    #[arg(long)]
+    new_bls_pubkey: String,
+
+    /// Monotonic rotation nonce (must strictly increase per-address)
+    #[arg(long)]
+    nonce: u64,
+
+    /// Ed25519 signature over the canonical preimage (64-byte hex)
+    #[arg(long)]
+    signature: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ValidatorRotateKeysCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Rotate Validator Keys");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Submitting tenzro_rotateValidatorKey ...");
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_rotateValidatorKey",
+                serde_json::json!({
+                    "address": self.address,
+                    "new_consensus_pubkey": self.new_consensus_pubkey,
+                    "new_pq_pubkey": self.new_pq_pubkey,
+                    "new_bls_pubkey": self.new_bls_pubkey,
+                    "nonce": self.nonce,
+                    "signature": self.signature,
+                }),
+            )
+            .await?;
+        spinner.finish_and_clear();
+
+        let status = result
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        if status == "pending_epoch_activation" {
+            output::print_success("Rotation accepted — pending epoch activation");
+        } else {
+            return Err(anyhow!(
+                "Rotation returned unexpected status: {}",
+                status
+            ));
+        }
+        output::print_field("Address", &self.address);
+        output::print_field(
+            "New consensus pubkey",
+            result
+                .get("new_consensus_pubkey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
+        );
+        output::print_field("Nonce", &self.nonce.to_string());
+        eprintln!(
+            "\nNote: this rotation has been recorded on the receiving node only.\n\
+             Until the consensus-mediated RotateValidatorKey transaction lands,\n\
+             operators must broadcast the same rotation to every active validator —\n\
+             see tools/deploy/rotate-validator-key.sh for the fan-out script."
+        );
         Ok(())
     }
 }

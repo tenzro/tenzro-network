@@ -980,6 +980,70 @@ async def get_provider_stats(address: str = None) -> dict:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Validator Registry (read + key rotation)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def get_validator_state(address: str) -> dict:
+    """Fetch a single validator's registry entry by 32-byte hex address.
+
+    Returns null if the address is not registered.
+    """
+    return await rpc_call("tenzro_getValidatorState", {"address": address})
+
+
+@mcp.tool
+async def list_validators(status: str = None) -> dict:
+    """List validators in the registry, optionally filtered by status.
+
+    status: Active | Candidate | PendingActive | PendingExit | Exited | Jailed
+    """
+    params = {"status": status} if status else {}
+    return await rpc_call("tenzro_listValidators", params)
+
+
+@mcp.tool
+async def list_active_validators() -> dict:
+    """List only currently-Active validators (those producing blocks)."""
+    return await rpc_call("tenzro_listActiveValidators", {})
+
+
+@mcp.tool
+async def rotate_validator_key(
+    address: str,
+    new_consensus_pubkey: str,
+    new_pq_pubkey: str,
+    new_bls_pubkey: str,
+    nonce: int,
+    signature: str,
+) -> dict:
+    """Rotate a validator's consensus + PQ + BLS keys.
+
+    The signature is produced offline by the operator: sign
+    SHA-256("tenzro/rotate-validator-key" || address(32) ||
+    new_consensus(32) || new_pq(1952) || new_bls(48) || nonce_le(8))
+    with the *current* Ed25519 consensus key. All hex fields are
+    0x-prefixed.
+
+    The rotation lands on the receiving node only. Operators must
+    fan out the same call to every active validator before the next
+    epoch boundary — see tools/deploy/rotate-validator-key.sh.
+    """
+    return await rpc_call(
+        "tenzro_rotateValidatorKey",
+        {
+            "address": address,
+            "new_consensus_pubkey": new_consensus_pubkey,
+            "new_pq_pubkey": new_pq_pubkey,
+            "new_bls_pubkey": new_bls_pubkey,
+            "nonce": nonce,
+            "signature": signature,
+        },
+    )
+
+
 @mcp.tool
 async def list_proposals() -> dict:
     """List active governance proposals."""

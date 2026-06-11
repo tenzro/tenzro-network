@@ -65,6 +65,20 @@ struct Cli {
     #[arg(short, long, value_name = "NODES")]
     boot_nodes: Option<String>,
 
+    /// Bootstrap discovery DNS name. The node resolves
+    /// `_tenzro-boot._tcp.<NAME>` to a SRV record list of currently-healthy
+    /// validator hostnames, then `_tenzro-id._txt.<NAME>` to per-host
+    /// libp2p peer IDs. Resolved entries are appended to `boot_nodes`.
+    ///
+    /// This avoids the "rotate v0's key → break every other validator's
+    /// hardcoded BOOT_PEER_ID" failure mode by externalising the
+    /// bootstrap set to DNS. Operators rotate by editing the zone, not
+    /// by shipping a new wrapper script to every VM.
+    ///
+    /// Example: `--bootstrap-dns boot.tenzro.network`
+    #[arg(long, value_name = "NAME")]
+    bootstrap_dns: Option<String>,
+
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, value_name = "LEVEL", default_value = "info")]
     log_level: String,
@@ -324,8 +338,9 @@ async fn main() -> Result<()> {
     // Load or create configuration
     let mut config = load_config(&cli)?;
 
-    // Apply CLI overrides
-    apply_cli_overrides(&mut config, &cli)?;
+    // Apply CLI overrides (async because the bootstrap-DNS resolver
+    // path makes live DNS queries before the swarm starts).
+    apply_cli_overrides(&mut config, &cli).await?;
 
     // Validate configuration
     config.validate()?;
@@ -356,7 +371,28 @@ async fn main() -> Result<()> {
 
     // Create and start the node
     let mut node = TenzroNode::new(config.clone()).await?;
-    if let Some(peer) = cli.state_sync_from.clone() {
+
+    // State-sync wiring. Three input combinations supported:
+    //
+    // 1. Explicit `--state-sync-from <URL> --state-sync-anchor <HEX>`: the
+    //    operator drives bootstrap manually. Highest precedence.
+    // 2. `--bootstrap-dns <NAME>` + genesis `[weak_subjectivity]` block + a
+    //    detectable-fresh data dir: the node auto-discovers a peer from the
+    //    already-resolved bootstrap multiaddrs and derives the anchor from
+    //    the genesis. This is the production "fresh validator joins the
+    //    network without operator-supplied state-sync flags" path.
+    // 3. Neither: legacy genesis-replay path (only viable when the chain is
+    //    very young or the node has already bootstrapped).
+    let explicit_peer = cli.state_sync_from.clone();
+    let auto_state_sync = explicit_peer.is_none()
+        && cli.bootstrap_dns.is_some()
+        && config
+            .genesis
+            .as_ref()
+            .and_then(|g| g.weak_subjectivity.as_ref())
+            .is_some();
+
+    if let Some(peer) = explicit_peer {
         info!(peer = %peer, "State-sync requested via --state-sync-from");
         node.set_state_sync_peer(peer);
 
@@ -391,6 +427,81 @@ async fn main() -> Result<()> {
             anchor = %format!("0x{}", hex::encode(anchor)),
             "State-sync anchor installed"
         );
+    } else if auto_state_sync {
+        // Auto-derive (peer_url, anchor) for fresh-joiner catchup.
+        //
+        // Anchor source: genesis `[weak_subjectivity]` block (parsed and
+        // validated as a 32-byte hex state root).
+        //
+        // Peer source: the first bootstrap multiaddr resolved by
+        // `--bootstrap-dns`. We derive an HTTPS RPC URL by extracting the
+        // /ip4 or /ip6 component from the multiaddr; libp2p ports map 1:1
+        // to RPC ports in our deploy (the canonical fleet uses 9000/p2p
+        // + 8545/RPC, and operators are free to use bootstrap-DNS
+        // separately to advertise an explicit `_tenzro-rpc._tcp.<name>`
+        // SRV in a later release if the mapping needs to be decoupled).
+        //
+        // If the multiaddr list is empty (DNS misconfig) the auto path
+        // does nothing — same as a legacy boot without `--state-sync-from`
+        // — and consensus will proceed via gossipsub block-fetch instead.
+        let anchor_hex = config
+            .genesis
+            .as_ref()
+            .and_then(|g| g.weak_subjectivity.as_ref())
+            .map(|w| w.state_root_hex.clone())
+            .expect("auto_state_sync guard ensured weak_subjectivity is set");
+        let cleaned = anchor_hex.trim_start_matches("0x");
+        let anchor_bytes = hex::decode(cleaned).map_err(|e| error::NodeError::Other(
+            format!(
+                "genesis weak_subjectivity.state_root_hex is not valid hex: {e}"
+            ),
+        ))?;
+        if anchor_bytes.len() != 32 {
+            return Err(error::NodeError::Other(format!(
+                "genesis weak_subjectivity.state_root_hex must be exactly 32 \
+                 bytes (got {})",
+                anchor_bytes.len()
+            )));
+        }
+        let mut anchor = [0u8; 32];
+        anchor.copy_from_slice(&anchor_bytes);
+        node.set_state_sync_anchor(anchor);
+
+        // Derive a peer RPC URL from the first usable bootstrap multiaddr.
+        // The mapping is intentionally simple: `/ip4/<X>/...` → `http://<X>:8545`.
+        // This holds for the canonical Tenzro fleet (RPC bound on every
+        // validator). When operators decouple ports the same logic can
+        // be extended to consume an explicit `_tenzro-rpc._tcp.<name>` SRV.
+        let peer_url = config
+            .network
+            .boot_nodes
+            .iter()
+            .find_map(|ma| {
+                let s = ma.to_string();
+                // Multiaddrs look like `/ip4/35.184.63.8/tcp/9000/p2p/...`.
+                // Pull the first /ip4 or /ip6 component.
+                let mut parts = s.split('/').filter(|p| !p.is_empty());
+                let proto = parts.next()?;
+                let addr = parts.next()?;
+                match proto {
+                    "ip4" => Some(format!("http://{}:8545", addr)),
+                    "ip6" => Some(format!("http://[{}]:8545", addr)),
+                    _ => None,
+                }
+            });
+        if let Some(url) = peer_url {
+            info!(
+                peer = %url,
+                anchor = %format!("0x{}", hex::encode(anchor)),
+                "Auto state-sync via bootstrap-DNS + genesis weak-subjectivity anchor"
+            );
+            node.set_state_sync_peer(url);
+        } else {
+            tracing::warn!(
+                "Auto state-sync requested but no usable peer multiaddr in \
+                 boot_nodes — node will fall back to gossipsub block-fetch"
+            );
+        }
     }
     node.start().await?;
 
@@ -1122,7 +1233,7 @@ fn load_config(cli: &Cli) -> Result<NodeConfig> {
 }
 
 /// Apply CLI argument overrides to configuration
-fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
+async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
     if let Some(data_dir) = &cli.data_dir {
         config.data_dir = data_dir.clone();
     }
@@ -1224,6 +1335,48 @@ fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
         if !addrs.is_empty() {
             config.network.boot_nodes = addrs;
             info!("Boot nodes override: {} nodes", config.network.boot_nodes.len());
+        }
+    }
+
+    // Bootstrap-DNS discovery: resolve `_tenzro-boot._tcp.<NAME>` SRV +
+    // per-target `_tenzro-id._tcp.<TARGET>` TXT to derive a list of
+    // /ip*/.../p2p/<PEER_ID> multiaddrs. Append (not overwrite) to the
+    // existing boot_nodes list so operators can combine static + dynamic
+    // discovery during a transition window.
+    if let Some(name) = &cli.bootstrap_dns {
+        match tenzro_node::bootstrap_dns::resolve_bootstrap_dns(name).await {
+            Ok(resolved) => {
+                if resolved.is_empty() {
+                    tracing::warn!(
+                        "Bootstrap DNS resolution returned no peers for {}; \
+                         continuing with whatever was already in --boot-nodes",
+                        name
+                    );
+                } else {
+                    config.network.boot_nodes.extend(resolved.iter().cloned());
+                    info!(
+                        "Bootstrap DNS resolved {}: {} multiaddrs appended to boot_nodes (total {})",
+                        name,
+                        resolved.len(),
+                        config.network.boot_nodes.len(),
+                    );
+                }
+            }
+            Err(e) => {
+                // Fail loud but do not abort startup — operators using
+                // bootstrap-DNS as a *supplement* to a static --boot-nodes
+                // list should still come up if DNS is degraded. Operators
+                // using bootstrap-DNS as the *only* boot path will see
+                // an empty boot_nodes set and the node will sit isolated
+                // until the next reachable peer dials it — that's the
+                // explicit failure mode, not a silent hang.
+                tracing::warn!(
+                    "Bootstrap DNS resolution failed for {}: {}. \
+                     Node will rely on whatever was in --boot-nodes (may be empty).",
+                    name,
+                    e
+                );
+            }
         }
     }
 

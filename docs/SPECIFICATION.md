@@ -365,6 +365,18 @@ The validator set is fixed within an epoch (default 10,000 blocks). At epoch bou
 4. Staking rewards for the completed epoch are calculated and distributed.
 5. The epoch history (validator set, total stake, block range) is recorded.
 
+### 3.7a Validator Lifecycle Primitives
+
+Validators upgrade, rotate keys, and self-bootstrap without coordinated downtime. Four primitives, each independently composable:
+
+**Chain compatibility check (`verify_chain_compat`).** On boot, the node compares the configured genesis (`chain_id` + computed `genesis_state_root`) against values persisted under `CF_METADATA`. Identical genesis resumes against the existing DB; drift fails loud with an actionable error. This is what allows in-place binary upgrades to preserve consensus history.
+
+**Bootstrap discovery via DNS (`--bootstrap-dns`).** `_tenzro-boot._tcp.<zone>` SRV records advertise the active boot set; paired `_tenzro-id._tcp.<target>` TXT records carry libp2p peer IDs. Rotating a boot validator's identity is a zone edit, not a fleet-wide wrapper update. The pkarr relay handles iroh `EndpointId` resolution separately; the two surfaces are independent.
+
+**Consensus key rotation (`tenzro_rotateValidatorKey`).** The validator proves ownership of the existing keys by signing the rotation payload under the *current* Ed25519 consensus key. The canonical preimage is `SHA-256("tenzro/rotate-validator-key" || address(32) || new_consensus(32) || new_pq(1952) || new_bls(48) || nonce_le(8))`. On the receiving node, `ValidatorRegistry::rotate_keys` updates the persisted entry in place and `EpochManager::add_pending_validator` upserts the new `ValidatorInfo`; the swap is atomic at the next epoch boundary with no split-key window. Cross-node propagation is operator-driven via a fan-out script until the consensus-mediated `RotateValidatorKey` typed transaction lands (post-mainnet roadmap).
+
+**Snapshot-based auto-catchup.** Fresh validators with an empty data dir, `--bootstrap-dns` set, and a `[weak_subjectivity]` block in genesis auto-derive `state_sync_peer` from the first usable bootstrap multiaddr and `state_sync_anchor` from `weak_subjectivity.state_root_hex`. The existing `bootstrap_from_peer` flow then fetches snapshots, verifies the manifest's declared `state_root` bit-for-bit against the anchor, commits atomically, and tail-replays via gossipsub. Explicit `--state-sync-from` + `--state-sync-anchor` continue to take precedence when provided.
+
 ### 3.8 Finality
 
 Blocks achieve finality when they receive a commit certificate (2f+1 commit votes). The `FinalityTracker` enforces sequential finalization — blocks must be finalized in height order. Once finalized, a block cannot be reverted. The finality tracker also supports fork choice: when multiple candidate blocks exist at the same height, the one with the most accumulated votes is selected.

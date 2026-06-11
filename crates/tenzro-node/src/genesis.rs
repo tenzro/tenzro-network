@@ -152,8 +152,6 @@ fn install_erc8004_predeploys(
     token_entries: &mut Vec<WriteOp>,
     total_supply: &mut u128,
 ) -> Result<Hash> {
-    use sha2::{Digest, Sha256};
-
     let bundle: Erc8004Bundle = serde_json::from_str(ERC8004_PREDEPLOYS_JSON)
         .map_err(|e| NodeError::Config(format!(
             "Failed to parse erc8004-predeploys.json: {}",
@@ -202,14 +200,7 @@ fn install_erc8004_predeploys(
 
     // Commitment is bound to the exact JSON bytes — any drift in the bundle
     // (whether content or whitespace) produces a different genesis root.
-    let bundle_commitment = {
-        let mut h = Sha256::new();
-        h.update(b"tenzro/erc8004-predeploys");
-        h.update(ERC8004_PREDEPLOYS_JSON.as_bytes());
-        let digest = h.finalize();
-        Hash::from_bytes(digest.as_slice())
-            .expect("SHA-256 always produces 32 bytes")
-    };
+    let bundle_commitment = compute_erc8004_bundle_commitment();
 
     let mut code_count = 0usize;
     let mut storage_slot_count = 0usize;
@@ -310,6 +301,7 @@ pub async fn initialize_genesis(
     // Check if genesis already exists
     if genesis_exists(store)? {
         info!("Genesis block already exists, loading from storage");
+        verify_chain_compat(store, genesis_config)?;
         return load_genesis_block(store).await;
     }
 
@@ -529,12 +521,174 @@ pub async fn initialize_genesis(
         )
         .map_err(|e| NodeError::Other(format!("Failed to store chain_id: {}", e)))?;
 
+    // Persist the genesis state_root so a restart-time chain-compat check
+    // (`verify_chain_compat`) can refuse to start when the configured
+    // genesis no longer matches the on-disk chain. Without this the only
+    // way to detect "wrong genesis vs. existing DB" is by waiting for
+    // consensus to diverge from peers — silent corruption of the
+    // validator's local state until the operator notices. The state_root
+    // already binds chain_id, accounts, faucet, and ERC-8004 predeploy
+    // bundle (see `compute_genesis_state_root`), so a single 32-byte
+    // value is sufficient to detect any genesis drift.
+    store
+        .put(
+            CF_METADATA,
+            b"genesis_state_root",
+            state_root.as_bytes(),
+        )
+        .map_err(|e| NodeError::Other(format!("Failed to store genesis_state_root: {}", e)))?;
+
     info!(
         "Genesis block created at height 0, state_root={}",
         state_root
     );
 
     Ok(genesis_block)
+}
+
+/// Compute the SHA-256 commitment of the embedded ERC-8004 predeploy bundle.
+///
+/// The same commitment is folded into the genesis state_root (so validators
+/// must agree on the exact predeploy set) and is referenced by
+/// `verify_chain_compat` to detect binary-level genesis drift on restart.
+fn compute_erc8004_bundle_commitment() -> Hash {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"tenzro/erc8004-predeploys");
+    h.update(ERC8004_PREDEPLOYS_JSON.as_bytes());
+    let digest = h.finalize();
+    Hash::from_bytes(digest.as_slice())
+        .expect("SHA-256 always produces 32 bytes")
+}
+
+/// Cross-check the configured genesis against what's already persisted on
+/// disk. Refuse to start on any drift in chain_id or genesis state_root.
+///
+/// This is the production-grade safety check that lets validators preserve
+/// their RocksDB across binary upgrades without risking silent state
+/// corruption. The decision tree is:
+///
+/// - **Same chain (chain_id + state_root both match)**: log a debug line
+///   and continue — the on-disk chain is the right one.
+/// - **chain_id drift**: hard error. The operator pointed the binary at
+///   the wrong genesis file or a different network's data directory.
+///   Refusing to start is the safe action; silently continuing would
+///   give the binary one chain's transactions over another chain's
+///   state. The operator must either fix the genesis path or
+///   intentionally wipe the data directory.
+/// - **state_root drift on the same chain_id**: also a hard error.
+///   Either the genesis file was edited (different accounts, faucet, or
+///   predeploy bundle) or the binary itself shipped a new predeploy
+///   commitment. Both demand operator action — there is no safe
+///   automatic recovery.
+/// - **No `genesis_state_root` key persisted**: only possible on a pre-fix
+///   upgrade path. Back-fill the key from the configured genesis and
+///   accept the chain as-is. The on-disk genesis block's state_root will
+///   be cross-checked at `load_genesis_block` time anyway, so this
+///   back-fill is safe.
+///
+/// Errors are surfaced as `NodeError::Config` so the operator gets a
+/// clean abort with an actionable message rather than a panic.
+fn verify_chain_compat(
+    store: &Arc<RocksDbStore>,
+    genesis_config: &GenesisConfig,
+) -> Result<()> {
+    // 1. chain_id check
+    let stored_chain_id_bytes = store
+        .get(CF_METADATA, b"chain_id")
+        .map_err(|e| NodeError::Other(format!("Failed to read stored chain_id: {}", e)))?;
+    if let Some(bytes) = stored_chain_id_bytes {
+        if bytes.len() != 8 {
+            return Err(NodeError::Other(format!(
+                "Stored chain_id has wrong length: expected 8 bytes (u64 LE), got {}. \
+                 Storage may be corrupt — investigate before retrying.",
+                bytes.len()
+            )));
+        }
+        let mut chain_id_arr = [0u8; 8];
+        chain_id_arr.copy_from_slice(&bytes);
+        let stored_chain_id = u64::from_le_bytes(chain_id_arr);
+        if stored_chain_id != genesis_config.chain_id {
+            return Err(NodeError::Config(format!(
+                "Chain incompatibility detected: configured genesis chain_id={} but \
+                 on-disk chain has chain_id={}. This binary will not start against \
+                 a foreign chain's state. Either (a) point --genesis at the correct \
+                 genesis.toml for chain_id={}, or (b) intentionally wipe the data \
+                 directory (rm -rf <data-dir>/db <data-dir>/snapshots \
+                 <data-dir>/consensus) to bootstrap a fresh chain.",
+                genesis_config.chain_id, stored_chain_id, stored_chain_id
+            )));
+        }
+    } else {
+        // chain_id missing while genesis_initialized is true — back-fill so
+        // future checks have something to compare against. Storage is from
+        // a pre-fix binary; the on-disk chain is whatever the binary
+        // assumes. We accept it; the state_root check below will still
+        // catch drift in the binary's genesis assembly.
+        store
+            .put(
+                CF_METADATA,
+                b"chain_id",
+                &genesis_config.chain_id.to_le_bytes(),
+            )
+            .map_err(|e| NodeError::Other(format!("Failed to back-fill chain_id: {}", e)))?;
+        info!(
+            "Back-filled chain_id={} into CF_METADATA (pre-fix upgrade path)",
+            genesis_config.chain_id
+        );
+    }
+
+    // 2. genesis_state_root check
+    let predeploys_commitment = compute_erc8004_bundle_commitment();
+    let configured_root = compute_genesis_state_root(genesis_config, &predeploys_commitment);
+
+    let stored_root_bytes = store
+        .get(CF_METADATA, b"genesis_state_root")
+        .map_err(|e| NodeError::Other(format!("Failed to read stored genesis_state_root: {}", e)))?;
+    if let Some(bytes) = stored_root_bytes {
+        if bytes.len() != 32 {
+            return Err(NodeError::Other(format!(
+                "Stored genesis_state_root has wrong length: expected 32 bytes, got {}. \
+                 Storage may be corrupt — investigate before retrying.",
+                bytes.len()
+            )));
+        }
+        let mut stored_arr = [0u8; 32];
+        stored_arr.copy_from_slice(&bytes);
+        let stored_root = Hash::from_bytes(&stored_arr)
+            .expect("32-byte slice always converts to Hash");
+        if stored_root != configured_root {
+            return Err(NodeError::Config(format!(
+                "Genesis state_root mismatch: configured genesis hashes to {} but \
+                 on-disk genesis was {}. Either the genesis.toml was edited (different \
+                 accounts, faucet, validators, or ERC-8004 predeploy bundle), or this \
+                 binary ships a different predeploy bundle than the one used to \
+                 bootstrap the on-disk chain. Refusing to start to prevent silent \
+                 state corruption. Resolve by (a) reverting the genesis change, or \
+                 (b) intentionally wiping the data directory to bootstrap a fresh chain.",
+                configured_root, stored_root
+            )));
+        }
+        info!(
+            "Chain compatibility verified: chain_id={} genesis_state_root={}",
+            genesis_config.chain_id, configured_root
+        );
+    } else {
+        // genesis_state_root missing — back-fill, same reasoning as chain_id.
+        store
+            .put(
+                CF_METADATA,
+                b"genesis_state_root",
+                configured_root.as_bytes(),
+            )
+            .map_err(|e| NodeError::Other(format!("Failed to back-fill genesis_state_root: {}", e)))?;
+        info!(
+            "Back-filled genesis_state_root={} into CF_METADATA (pre-fix upgrade path)",
+            configured_root
+        );
+    }
+
+    Ok(())
 }
 
 /// Check if genesis block has already been initialized
@@ -977,6 +1131,7 @@ mod tests {
                 balance: 10, // 10 TNZO (whole units, multiplied by 10^18 in genesis init)
             }],
             faucet: None,
+            weak_subjectivity: None,
         };
 
         // First initialization should create genesis
@@ -1012,6 +1167,7 @@ mod tests {
                 cooldown_seconds: 86400,
                 enabled: true,
             }),
+            weak_subjectivity: None,
         };
 
         let block = initialize_genesis(&store, &genesis_config).await.unwrap();
@@ -1050,6 +1206,7 @@ mod tests {
                 balance: 1000,
             }],
             faucet: None,
+            weak_subjectivity: None,
         };
 
         let config2 = GenesisConfig {
@@ -1062,6 +1219,7 @@ mod tests {
                 balance: 2000, // Different balance
             }],
             faucet: None,
+            weak_subjectivity: None,
         };
 
         // Use a fixed dummy predeploy commitment for both — the test is
@@ -1072,5 +1230,111 @@ mod tests {
 
         // Different configurations should produce different state roots
         assert_ne!(root1, root2);
+    }
+
+    fn chain_compat_genesis(chain_id: u64, balance: u128) -> GenesisConfig {
+        GenesisConfig {
+            version: crate::config::MIN_GENESIS_VERSION,
+            chain_id,
+            timestamp: 0,
+            validators: vec![],
+            accounts: vec![crate::config::GenesisAccount {
+                address: "0x1111111111111111111111111111111111111111".to_string(),
+                balance,
+            }],
+            faucet: None,
+            weak_subjectivity: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_chain_compat_succeeds_on_identical_genesis() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_config = StorageConfig::new(temp_dir.path().to_path_buf());
+        let store = Arc::new(RocksDbStore::open(&storage_config).unwrap());
+
+        let cfg = chain_compat_genesis(7777, 100);
+
+        // First initialization writes chain_id + genesis_state_root.
+        initialize_genesis(&store, &cfg).await.unwrap();
+
+        // Second call hits the existing-genesis path → runs verify_chain_compat.
+        // Identical config must not error.
+        initialize_genesis(&store, &cfg).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn verify_chain_compat_rejects_chain_id_mismatch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_config = StorageConfig::new(temp_dir.path().to_path_buf());
+        let store = Arc::new(RocksDbStore::open(&storage_config).unwrap());
+
+        let cfg_a = chain_compat_genesis(7777, 100);
+        initialize_genesis(&store, &cfg_a).await.unwrap();
+
+        // Point at a different chain_id — must refuse.
+        let cfg_b = chain_compat_genesis(8888, 100);
+        let err = initialize_genesis(&store, &cfg_b).await.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("chain_id=7777") && msg.contains("chain_id=8888"),
+            "expected chain_id mismatch message, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_chain_compat_rejects_state_root_mismatch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_config = StorageConfig::new(temp_dir.path().to_path_buf());
+        let store = Arc::new(RocksDbStore::open(&storage_config).unwrap());
+
+        let cfg_a = chain_compat_genesis(7777, 100);
+        initialize_genesis(&store, &cfg_a).await.unwrap();
+
+        // Same chain_id, different genesis content (different account balance).
+        // state_root must differ → verify_chain_compat refuses.
+        let cfg_b = chain_compat_genesis(7777, 200);
+        let err = initialize_genesis(&store, &cfg_b).await.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Genesis state_root mismatch"),
+            "expected state_root mismatch message, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_chain_compat_backfills_when_keys_missing() {
+        // Simulate the pre-fix upgrade path: a chain was initialised by an
+        // older binary that didn't write `genesis_state_root` (and possibly
+        // not `chain_id` either). Deleting both keys after init, then
+        // re-running, should back-fill them and accept the chain instead
+        // of refusing to start.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_config = StorageConfig::new(temp_dir.path().to_path_buf());
+        let store = Arc::new(RocksDbStore::open(&storage_config).unwrap());
+
+        let cfg = chain_compat_genesis(7777, 100);
+        initialize_genesis(&store, &cfg).await.unwrap();
+
+        // Wipe the two keys to simulate pre-fix state.
+        store.delete(CF_METADATA, b"chain_id").unwrap();
+        store.delete(CF_METADATA, b"genesis_state_root").unwrap();
+
+        // Must succeed and back-fill.
+        initialize_genesis(&store, &cfg).await.unwrap();
+
+        let stored_chain_id_bytes = store
+            .get(CF_METADATA, b"chain_id")
+            .unwrap()
+            .expect("chain_id should be back-filled");
+        assert_eq!(stored_chain_id_bytes.len(), 8);
+
+        let stored_root_bytes = store
+            .get(CF_METADATA, b"genesis_state_root")
+            .unwrap()
+            .expect("genesis_state_root should be back-filled");
+        assert_eq!(stored_root_bytes.len(), 32);
     }
 }
