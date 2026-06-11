@@ -15,7 +15,7 @@ Three institutional-tokenization rails matter for agents in 2026 that are not cu
 
 | Rail | Institutional thesis | Live state (2026-Q2) |
 |---|---|---|
-| **Stellar / Soroban** | DTCC partnership for tokenizing $114T of custodied assets; Franklin Templeton USTs already on-chain; >$2B in RWAs; "Whisk" upgrade brought parallel execution to Soroban contracts | DTCC infra integration H1 2027. Meridian 2026 in Q3 targets 15 "transformational enterprise" onboardings. |
+| **Stellar / Soroban** | Announced market-utility partnership to tokenize trillions of dollars of custodied assets; tokenized money-market funds already on-chain; >$2B in RWAs; "Whisk" upgrade brought parallel execution to Soroban contracts | Market-utility infra integration H1 2027. Meridian 2026 in Q3 targets 15 "transformational enterprise" onboardings. |
 | **XRPL (mainline + EVM sidechain)** | RLUSD ($1.2B circulating, NYDFS chartered) bridged to L2s via Wormhole NTT; XLS-33 Multi-Purpose Tokens for fractionalised RWAs; XLS-85 Token Escrow now extended to IOUs and MPTs (Feb 2026); XRPL EVM Sidechain on Cosmos SDK + IBC (mainnet June 2025) | Mainline: live, used. EVM sidechain: live, slow adoption (~$120M TVL, sidechain revenue tiny). |
 | **Hyperliquid (HyperEVM + HyperCore)** | 170+ projects on HyperEVM; ~$9M/mo HYPE burned; HyperCore on-chain CLOB with ~0.07s finality and 200k+ TPS; Unit Protocol bridges BTC/ETH for institutional-grade trading | Live. Different category: trading/derivatives, not RWA. |
 
@@ -351,7 +351,7 @@ The pattern composes. An agent could hold a Stripe SPT for card-rail purchases A
 
 ## Conclusion
 
-**Yes, supporting Stellar + XRPL + Hyperliquid makes sense.** The institutional thesis for Stellar (DTCC, $114T tokenization runway) and XRPL (RLUSD, MPT-based RWAs, Token Escrow) is real and accelerating in 2026. Hyperliquid is a different (trading-focused) thesis but fits the same architectural slot trivially.
+**Yes, supporting Stellar + XRPL + Hyperliquid makes sense.** The institutional thesis for Stellar (announced market-utility tokenization partnership, multi-trillion-dollar runway) and XRPL (RLUSD, MPT-based RWAs, Token Escrow) is real and accelerating in 2026. Hyperliquid is a different (trading-focused) thesis but fits the same architectural slot trivially.
 
 **Current VMs are not enough — but they're the right thing.** `MultiVmRuntime` should stay local-execution-only. The integration is **adapter work in `tenzro-bridge`** plus a **derivation layer in `tenzro-identity`**, both consistent with the existing AP2 mandate + DelegationScope + ERC-7579 enforcement envelope.
 

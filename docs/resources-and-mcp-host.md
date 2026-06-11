@@ -33,7 +33,7 @@ The plugin host lets operators run custom and third-party MCPs (Stripe MCP, Plai
 
 ### Operator credential vault
 
-Operator's upstream credentials (Stripe secret, OpenAI key, Bloomberg subscription, etc.) are stored in the node's sealed credential vault. The vault is AES-256-GCM at rest, keyed by per-secret HKDF-derived material rooted at one of:
+Operator's upstream credentials (payment-processor secrets, model-provider API keys, premium data-feed subscriptions, etc.) are stored in the node's sealed credential vault. The vault is AES-256-GCM at rest, keyed by per-secret HKDF-derived material rooted at one of:
 
 1. **Operator-supplied master secret** — set `mcp_plugin_host.master_secret_hex` (64-char hex) in the node config TOML. Recommended for production multi-tenant operators.
 2. **Auto-derived from node identity** — when no master secret is configured, the vault root IKM is derived from the node's persistent identity. Suitable for single-operator dev nodes.
@@ -181,7 +181,7 @@ The plugin host fetches the operator's sealed credential, dispatches to the upst
 
 ## Knowledge registry
 
-For queryable data resources — vector DBs (Pinecone, Weaviate, operator-hosted Tantivy+Lance), RAG indices, document corpora, indexed historical datasets, live data feeds (Chainlink, Pyth, Bloomberg, oracle aggregators), embedding stores. The pattern mirrors tools but with knowledge-specific metadata.
+For queryable data resources — vector DBs (managed or operator-hosted), RAG indices, document corpora, indexed historical datasets, live data feeds (decentralized oracles, premium market data, oracle aggregators), embedding stores. The pattern mirrors tools but with knowledge-specific metadata.
 
 ### Registering a knowledge resource
 
@@ -467,6 +467,6 @@ Every paid resource invocation goes through the same commission split:
 - **5%** to network treasury (network commission, on every paid invocation)
 - **95%** to operator's `creator_wallet`
 
-The operator's upstream costs (Stripe subscription, OpenAI plan, Bloomberg terminal, etc.) are off-protocol — the operator converts TNZO revenue to fiat to pay them. The protocol charges only for network use.
+The operator's upstream costs (payment-processor fees, model-provider plans, premium data-feed subscriptions, etc.) are off-protocol — the operator converts TNZO revenue to fiat to pay them. The protocol charges only for network use.
 
 See [TOKENOMICS.md](TOKENOMICS.md) for the full TNZO model.

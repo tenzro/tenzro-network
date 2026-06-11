@@ -34,7 +34,7 @@ Verifiability is not optional. Inference results, settlements, and identity clai
 
 ## What Tenzro Does That No Other Chain Does
 
-Tenzro is the only L1 in 2026 that combines **EVM + SVM + Canton/DAML** in a single chain. The closest analog (Fluent, mainnet 2026-04-24) ships EVM + SVM + Wasm but no DAML, and DAML is what the institutional RWA surface (DTCC US Treasury tokenization, JPMorgan JPMD, CIP-56) actually runs on.
+Tenzro is the only L1 in 2026 that combines **EVM + SVM + Canton/DAML** in a single chain. The closest analog (Fluent, mainnet 2026-04-24) ships EVM + SVM + Wasm but no DAML — and DAML is the execution environment the institutional RWA surface (regulated tokenized treasuries, bank deposit tokens, CIP-56 settlement) is converging on.
 
 That makes Tenzro the only chain that natively bridges **retail-agent rails** (AP2 mandates, x402 micropayments, ERC-8004 trustless agents, ERC-4337 v0.8 smart accounts) and **institutional-RWA rails** (Canton DAML, CIP-56 tokens, DvP settlement) under one identity (TDIP), one settlement asset (TNZO), and one consensus layer.
 

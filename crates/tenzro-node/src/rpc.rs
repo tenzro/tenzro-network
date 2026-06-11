@@ -27395,11 +27395,12 @@ async fn handle_use_skill(
 // Operator-only (admin-token-gated) RPCs for managing the MCP plugin
 // host. Tenants never call these — they only present an API key and
 // invoke tools via `tenzro_useTool`. The operator pre-populates the
-// vault with their upstream credentials (Stripe secret, OpenAI key,
-// Bloomberg subscription, etc.), then registers MCPs that reference
-// those credentials via `sealed_secret_ref`. At tenzro_useTool time,
-// the plugin host fetches the sealed secret, injects it into the
-// outbound MCP request, and zeroizes the plaintext after the call.
+// vault with their upstream credentials (payment-processor secrets,
+// model-provider API keys, premium data-feed subscriptions, etc.),
+// then registers MCPs that reference those credentials via
+// `sealed_secret_ref`. At tenzro_useTool time, the plugin host
+// fetches the sealed secret, injects it into the outbound MCP
+// request, and zeroizes the plaintext after the call.
 
 async fn handle_store_mcp_secret(
     node: Arc<TenzroNode>,

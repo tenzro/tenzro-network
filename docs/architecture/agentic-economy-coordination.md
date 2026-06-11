@@ -7,7 +7,7 @@
 
 The agentic economy is being built as two disconnected halves:
 
-- **Asset rails** — banks tokenizing deposits (JPMorgan/Citi/BofA shared network, Kinexys on Base), asset managers tokenizing funds/credit/equities (BlackRock BUIDL, $34.5B RWA market → $30T by 2034), regulated stablecoins (GENIUS Act), pre-IPO (Republic/Jarsy/Kraken).
+- **Asset rails** &mdash; major banks tokenizing deposits (shared bank deposit-token networks; deposit-token products on public chains), asset managers tokenizing funds, credit and equities ($34.5B RWA market → $30T by 2034 per industry forecasts), regulated stablecoins (GENIUS Act), pre-IPO (Republic/Jarsy/Kraken).
 - **Agent rails** — autonomous trading/treasury agents everywhere (68% of new DeFi protocols ship one; Robinhood + Lumenai bring it to retail and funds; ElizaOS/Virtuals/exchange kits proliferate), but each in its own silo with its own wallet, its own policy, no shared identity or governance.
 
 **Neither half owns the layer between them.** Tenzro's power, stated plainly: **give an agent a single identity and a single wallet, plus every feature it needs, to do whatever is required across multiple VMs, networks, chains, and protocols (CCIP, Canton, and others) — with compliance, governance, and accountability enforced as protocol.** No other stack does this end-to-end: the asset issuers won't (not their business), the agent frameworks can't (no neutral identity/custody/compliance/cross-domain substrate), and the bridges/intent protocols only move value — they don't carry identity, mandate, or compliance with it.
@@ -29,7 +29,7 @@ This doc is the consolidated map: the SOTA, why the gap is Tenzro-shaped, the ar
 
 ## Why the gap is Tenzro-shaped (and unfilled)
 
-- **Asset issuers** (JPM, BlackRock, Circle) build walled money/asset rails — they will not build a neutral, cross-competitor coordination layer.
+- **Major asset issuers** (deposit-token banks, large RWA fund managers, stablecoin issuers) build walled money/asset rails &mdash; they will not build a neutral, cross-competitor coordination layer.
 - **Agent frameworks** (ElizaOS, Virtuals, exchange kits) build execution — each with its *own* wallet, *own* policy, *no* shared identity, custody, compliance, or cross-domain settlement.
 - **Bridges / intent protocols** (CCIP, Wormhole, ERC-7683) move *value* — they don't carry *identity, mandate, or compliance* with the value.
 
@@ -115,4 +115,4 @@ Not a bank, asset issuer, stablecoin issuer, exchange, or trading strategy — t
 
 ## References
 - `capital-intent.md`, `multi-agent-workflow-coordination.md`, `task-coordination-lifecycle.md`
-- SOTA sources (2026): JPM/Citi tokenized deposits (CoinDesk), BlackRock BUIDL Phase 2 (Bitcoin.com), GENIUS Act, AP2 (Google/Coinbase), ERC-7683/7521/3643, agentic trading (OKX/ElizaOS/Virtuals/Robinhood/Lumenai), NIST + Singapore agentic-AI governance, TRM Labs agent financial-crime.
+- SOTA sources (2026): bank deposit-token launches and announcements (industry press), BUIDL-class tokenized money-market fund rollouts (industry press), GENIUS Act, AP2 (public consortium), ERC-7683/7521/3643, agentic-trading product launches across exchanges and brokerages, NIST + Singapore agentic-AI governance, agent financial-crime research.
