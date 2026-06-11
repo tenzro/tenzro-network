@@ -389,6 +389,88 @@ async def handle_staking(text: str, metadata: dict = None) -> str:
     )
 
 
+async def handle_validator_lifecycle(text: str, metadata: dict = None) -> str:
+    """Read + key-rotation operations on the validator registry.
+
+    Read paths trigger on conversational input; the rotation path
+    requires a structured `metadata` payload because it carries a
+    1952-byte ML-DSA-65 verifying key and an offline Ed25519 signature
+    that cannot be expressed in free-text. Metadata shape:
+
+        {
+          "op": "rotate_keys",
+          "address": "0x...",
+          "new_consensus_pubkey": "0x...",
+          "new_pq_pubkey": "0x...",
+          "new_bls_pubkey": "0x...",
+          "nonce": 7,
+          "signature": "0x..."
+        }
+    """
+    t = text.lower()
+    addr = _extract_address(text)
+
+    op = (metadata or {}).get("op")
+    if op == "rotate_keys" or "rotate" in t:
+        md = metadata or {}
+        # Allow text-extracted address to fill in if metadata omits it.
+        address = md.get("address") or addr
+        if not all(
+            md.get(k)
+            for k in (
+                "new_consensus_pubkey",
+                "new_pq_pubkey",
+                "new_bls_pubkey",
+                "nonce",
+                "signature",
+            )
+        ) or not address:
+            return (
+                "Validator key rotation requires a structured metadata "
+                "payload with: address, new_consensus_pubkey, "
+                "new_pq_pubkey (1952-byte hex), new_bls_pubkey (48-byte "
+                "hex), nonce (u64), signature (64-byte hex). The "
+                "signature is produced offline with the current "
+                "consensus key over the canonical preimage. See "
+                "docs/operators/OPERATOR_GUIDE.md §9.3."
+            )
+        result = await rpc_call(
+            "tenzro_rotateValidatorKey",
+            {
+                "address": address,
+                "new_consensus_pubkey": md["new_consensus_pubkey"],
+                "new_pq_pubkey": md["new_pq_pubkey"],
+                "new_bls_pubkey": md["new_bls_pubkey"],
+                "nonce": md["nonce"],
+                "signature": md["signature"],
+            },
+        )
+        return (
+            f"Validator key rotation submitted for {address}.\n"
+            f"{json.dumps(result, indent=2)}"
+        )
+
+    if "active" in t and "validator" in t:
+        result = await rpc_call("tenzro_listActiveValidators", {})
+        return f"Active validators:\n{json.dumps(result, indent=2)}"
+
+    if "list" in t and "validator" in t:
+        result = await rpc_call("tenzro_listValidators", {})
+        return f"All validators:\n{json.dumps(result, indent=2)}"
+
+    if addr:
+        result = await rpc_call("tenzro_getValidatorState", {"address": addr})
+        return f"Validator {addr}:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Validator-lifecycle operations:\n"
+        "  - 'List active validators'\n"
+        "  - 'List all validators'\n"
+        "  - 'Get validator 0xabc...'\n"
+        "  - Rotate keys (requires structured metadata; see OPERATOR_GUIDE §9.3)."
+    )
+
+
 async def handle_provider(text: str, metadata: dict = None) -> str:
     t = text.lower()
     addr = _extract_address(text)
@@ -2810,6 +2892,7 @@ HANDLERS: dict[str, callable] = {
     "identity": handle_identity,
     "inference": handle_inference,
     "staking": handle_staking,
+    "validator-lifecycle": handle_validator_lifecycle,
     "provider": handle_provider,
     "payment": handle_payment,
     "verification": handle_verification,

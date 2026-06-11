@@ -179,6 +179,27 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "outputModes": ["text/plain", "application/json"],
             },
             {
+                "id": "validator-lifecycle",
+                "name": "Validator Lifecycle",
+                "description": (
+                    "Operate the validator registry: query a single entry, "
+                    "list candidates / active / jailed validators, and rotate "
+                    "consensus + ML-DSA-65 + BLS12-381 keys via the "
+                    "tenzro_rotateValidatorKey RPC. The rotation must be "
+                    "signed offline with the *current* consensus key and "
+                    "fanned out to every active validator before the next "
+                    "epoch boundary (see tools/deploy/rotate-validator-key.sh)."
+                ),
+                "tags": ["validator", "consensus", "key-rotation", "operator"],
+                "examples": [
+                    "List the active validators",
+                    "Get the registry entry for validator 0xabc...",
+                    "Rotate keys for validator 0xabc... with new pubkeys",
+                ],
+                "inputModes": ["application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
                 "id": "task_marketplace",
                 "name": "Task Marketplace",
                 "description": (

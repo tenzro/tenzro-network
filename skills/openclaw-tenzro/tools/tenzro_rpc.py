@@ -6483,6 +6483,46 @@ def list_active_validators() -> dict:
     return _rpc("tenzro_listActiveValidators", {})
 
 
+def rotate_validator_key(
+    address: str,
+    new_consensus_pubkey: str,
+    new_pq_pubkey: str,
+    new_bls_pubkey: str,
+    nonce: int,
+    signature: str,
+) -> dict:
+    """Rotate a validator's consensus + PQ + BLS keys.
+
+    All hex parameters are 0x-prefixed. The signature is produced
+    offline with the *current* Ed25519 consensus key over::
+
+        SHA-256("tenzro/rotate-validator-key" || address(32) ||
+                new_consensus(32) || new_pq(1952) || new_bls(48) ||
+                nonce_le(8))
+
+    The rotation lands on the receiving node only — until the
+    consensus-mediated typed transaction lands, operators must fan out
+    the same call to every active validator before the next epoch
+    boundary or consensus will fork. See
+    `tools/deploy/rotate-validator-key.sh` in the network repo for the
+    fan-out script.
+
+    Returns `{ address, status, new_consensus_pubkey, new_pq_pubkey,
+    new_bls_pubkey, nonce, message }`.
+    """
+    return _rpc(
+        "tenzro_rotateValidatorKey",
+        {
+            "address": address,
+            "new_consensus_pubkey": new_consensus_pubkey,
+            "new_pq_pubkey": new_pq_pubkey,
+            "new_bls_pubkey": new_bls_pubkey,
+            "nonce": nonce,
+            "signature": signature,
+        },
+    )
+
+
 # ── Tenzro Train read-side inspection ─────────────────────────────
 
 

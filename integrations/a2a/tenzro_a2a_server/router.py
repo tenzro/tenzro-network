@@ -180,6 +180,18 @@ def route_message(text: str) -> str:
         return "faucet"
     if any(k in t for k in ["model", "inference", "ai ", "chat"]):
         return "inference"
+    # Validator-lifecycle: registry reads + key rotation. Must precede the
+    # broader "staking" rule because both match the word "validator".
+    if any(
+        k in t
+        for k in [
+            "rotate key", "rotate-key", "rotate the key",
+            "list validator", "list active validator",
+            "active validator", "list candidate", "list jailed",
+            "validator state", "validator registry",
+        ]
+    ) or ("rotate" in t and "validator" in t):
+        return "validator-lifecycle"
     if any(k in t for k in ["stake", "staking", "unstake", "validator"]):
         return "staking"
     if any(k in t for k in ["provider", "serving", "earnings"]):

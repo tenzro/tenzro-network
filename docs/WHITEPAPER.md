@@ -177,7 +177,15 @@ The consensus equivocation detector watches every vote stream for double-signs i
 
 ### Fast catch-up
 
-A node that joins late receives the genesis, the most recent finalized block, the QC chain, and a state snapshot from a configured anchor peer. Anchor pinning (`--state-sync-anchor`) requires the joining node to specify a block hash it trusts; the snapshot must hash to that root or the bootstrap aborts. New validators do not silently adopt a hostile fork.
+A node that joins late receives the genesis, the most recent finalized block, the QC chain, and a state snapshot from a configured anchor peer. The weak-subjectivity anchor — either an `[weak_subjectivity]` block embedded in the genesis or an explicit `--state-sync-anchor` flag — is the trust gate: the snapshot's declared state_root must match the anchor bit-for-bit or the bootstrap aborts. New validators do not silently adopt a hostile fork.
+
+### Stable validator lifecycle
+
+Validators upgrade their binary in place. The deploy preserves the local chain DB across rolls, and on boot the node runs a chain-compatibility check (`verify_chain_compat`) that compares the configured genesis chain_id and computed state_root against what's persisted under `CF_METADATA`. Identical genesis loads existing state; drift fails loud with an actionable error.
+
+Bootstrap peer discovery flows through DNS (`--bootstrap-dns`): `_tenzro-boot._tcp.<zone>` SRV records advertise the active boot set, paired with `_tenzro-id._tcp.<target>` TXT records carrying libp2p peer IDs. Rotating a boot validator's identity is a zone edit, not a fleet-wide wrapper update.
+
+Consensus, ML-DSA-65, and BLS12-381 key rotation is operator-driven via the `tenzro_rotateValidatorKey` RPC. The rotating validator proves ownership of the existing keys by signing the rotation payload under the current Ed25519 consensus key. The new tuple lands in `EpochManager.pending_validators` and the swap is atomic at the next epoch boundary — no split-key window. Operators fan out the rotation to every active validator before the boundary using the provided script; the consensus-mediated typed-transaction variant is on the post-mainnet roadmap.
 
 ---
 

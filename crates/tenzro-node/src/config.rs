@@ -68,6 +68,35 @@ pub struct GenesisConfig {
 
     /// Faucet configuration
     pub faucet: Option<FaucetConfig>,
+
+    /// Weak-subjectivity anchor for snapshot-based auto-catchup.
+    ///
+    /// When set, a freshly-booted validator (empty DB) auto-discovers a
+    /// healthy peer via `--bootstrap-dns`, fetches the newest snapshot
+    /// at or above `height`, verifies its declared state_root matches
+    /// `state_root_hex` bit-for-bit, then commits it as the local
+    /// starting state. Without this anchor the snapshot bootstrap
+    /// path is unauthenticated and refuses to run — the same fail-closed
+    /// invariant `bootstrap_from_peer` already enforces, just declared
+    /// inline in the genesis instead of passed via CLI.
+    #[serde(default)]
+    pub weak_subjectivity: Option<WeakSubjectivityAnchor>,
+}
+
+/// Weak-subjectivity checkpoint embedded in genesis.toml.
+///
+/// The operator publishes an out-of-band-verified `(height, state_root)`
+/// pair signed by the active validator set. Fresh validators trust this
+/// checkpoint by virtue of trusting the genesis file itself — same trust
+/// boundary that already covers the validator set, accounts, and
+/// predeploy bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeakSubjectivityAnchor {
+    /// Block height the anchor applies to.
+    pub height: u64,
+    /// Hex-encoded 32-byte state root at that height. The snapshot
+    /// manifest's declared state_root must match this exactly.
+    pub state_root_hex: String,
 }
 
 impl GenesisConfig {
@@ -84,6 +113,7 @@ impl GenesisConfig {
                 cooldown_seconds: 86400,
                 enabled: true,
             }),
+            weak_subjectivity: None,
         }
     }
 }

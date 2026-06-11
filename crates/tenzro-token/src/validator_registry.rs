@@ -822,6 +822,86 @@ impl ValidatorRegistry {
         Ok(())
     }
 
+    /// Rotates the three-tuple of consensus keys (Ed25519 + ML-DSA-65 +
+    /// BLS12-381) for an existing validator entry, preserving every other
+    /// field (stake, tier, status, lifecycle counters, withdrawal address,
+    /// metadata).
+    ///
+    /// Key lengths are enforced (32 / 1952 / 48). The caller is
+    /// responsible for authorisation — typically a signed
+    /// `tenzro_rotateValidatorKey` RPC where the signature is verified
+    /// against the *current* `consensus_pubkey` before this call lands.
+    ///
+    /// Refused on Exited or Jailed entries — a rotation must follow
+    /// reactivation, not precede it. Idempotent on identical-keys input
+    /// (returns Ok without touching disk).
+    pub fn rotate_keys(
+        &self,
+        address: &Address,
+        new_consensus_pubkey: Vec<u8>,
+        new_pq_pubkey: Vec<u8>,
+        new_bls_pubkey: Vec<u8>,
+    ) -> Result<()> {
+        // Length checks mirror new_candidate.
+        if new_consensus_pubkey.len() != 32 {
+            return Err(TokenError::InvalidParameter(format!(
+                "rotate_keys: new consensus_pubkey must be 32 bytes (Ed25519), got {}",
+                new_consensus_pubkey.len()
+            )));
+        }
+        if new_pq_pubkey.len() != 1952 {
+            return Err(TokenError::InvalidParameter(format!(
+                "rotate_keys: new pq_pubkey must be 1952 bytes (ML-DSA-65), got {}",
+                new_pq_pubkey.len()
+            )));
+        }
+        if new_bls_pubkey.len() != 48 {
+            return Err(TokenError::InvalidParameter(format!(
+                "rotate_keys: new bls_pubkey must be 48 bytes (BLS12-381 G1 compressed), got {}",
+                new_bls_pubkey.len()
+            )));
+        }
+
+        let mut entry = self
+            .entries
+            .get_mut(address)
+            .ok_or_else(|| TokenError::NotFound(format!("validator {}", address)))?;
+
+        // Refuse rotation on terminal / penalty states. Operator must
+        // reactivate first.
+        if matches!(
+            entry.status,
+            ValidatorRegistryStatus::Exited | ValidatorRegistryStatus::Jailed
+        ) {
+            return Err(TokenError::InvalidParameter(format!(
+                "cannot rotate keys for validator {} in state {:?} — \
+                 reactivate first",
+                address, entry.status
+            )));
+        }
+
+        // Idempotent on no-op rotations.
+        if entry.consensus_pubkey == new_consensus_pubkey
+            && entry.pq_pubkey == new_pq_pubkey
+            && entry.bls_pubkey == new_bls_pubkey
+        {
+            return Ok(());
+        }
+
+        entry.consensus_pubkey = new_consensus_pubkey;
+        entry.pq_pubkey = new_pq_pubkey;
+        entry.bls_pubkey = new_bls_pubkey;
+        entry.updated_at = Timestamp::now();
+        let snapshot = entry.clone();
+        drop(entry);
+        self.persist_entry(&snapshot);
+        info!(
+            "Validator {} keys rotated — change takes effect at next epoch boundary",
+            address
+        );
+        Ok(())
+    }
+
     /// Marks a validator as jailed in response to a slash event. Forces an
     /// exit at the next epoch boundary. Idempotent.
     pub fn jail(&self, address: &Address, current_epoch: u64) -> Result<()> {
@@ -1314,5 +1394,121 @@ mod tests {
         // 4% of 5 = 0, floored to MIN_CHURN_PER_EPOCH = 1 — exactly one
         // candidate should be promoted.
         assert_eq!(plan.activations.len(), 1);
+    }
+
+    #[test]
+    fn rotate_keys_updates_registry_in_place() {
+        let reg = ValidatorRegistry::new();
+        let (ck0, pk0, bk0) = make_keys();
+        let a = make_address(11);
+        reg.register_candidate(
+            a,
+            ck0.clone(),
+            pk0.clone(),
+            bk0.clone(),
+            a,
+            DEFAULT_MIN_VALIDATOR_SELF_STAKE,
+            0,
+            String::new(),
+        )
+        .unwrap();
+
+        // Rotate to fresh keys (bytes 1 instead of 0 for the consensus key).
+        let new_ck = vec![1u8; 32];
+        let new_pk = vec![2u8; ML_DSA_65_VK_LEN];
+        let new_bk = vec![3u8; 48];
+        reg.rotate_keys(&a, new_ck.clone(), new_pk.clone(), new_bk.clone())
+            .unwrap();
+
+        let entry = reg.get(&a).unwrap();
+        assert_eq!(entry.consensus_pubkey, new_ck);
+        assert_eq!(entry.pq_pubkey, new_pk);
+        assert_eq!(entry.bls_pubkey, new_bk);
+        // Stake, tier, status, withdrawal — all unchanged.
+        assert_eq!(entry.self_stake, DEFAULT_MIN_VALIDATOR_SELF_STAKE);
+        assert_eq!(entry.tier, ValidatorTier::Staked);
+        assert_eq!(entry.status, ValidatorRegistryStatus::Candidate);
+        assert_eq!(entry.withdrawal_address, a);
+    }
+
+    #[test]
+    fn rotate_keys_rejects_wrong_lengths() {
+        let reg = ValidatorRegistry::new();
+        let (ck, pk, bk) = make_keys();
+        let a = make_address(12);
+        reg.register_candidate(a, ck, pk, bk, a, 0, 0, String::new()).unwrap();
+
+        // 31-byte consensus key — rejected.
+        let bad = reg.rotate_keys(&a, vec![1u8; 31], vec![2u8; ML_DSA_65_VK_LEN], vec![3u8; 48]);
+        assert!(bad.is_err(), "31-byte consensus_pubkey must be rejected");
+
+        // Wrong PQ length — rejected.
+        let bad = reg.rotate_keys(&a, vec![1u8; 32], vec![2u8; 1951], vec![3u8; 48]);
+        assert!(bad.is_err(), "wrong-length pq_pubkey must be rejected");
+
+        // Wrong BLS length — rejected.
+        let bad = reg.rotate_keys(&a, vec![1u8; 32], vec![2u8; ML_DSA_65_VK_LEN], vec![3u8; 47]);
+        assert!(bad.is_err(), "wrong-length bls_pubkey must be rejected");
+    }
+
+    #[test]
+    fn rotate_keys_refuses_exited_validator() {
+        let reg = ValidatorRegistry::new();
+        let (ck, pk, bk) = make_keys();
+        let a = make_address(13);
+        reg.register_candidate(
+            a,
+            ck.clone(),
+            pk.clone(),
+            bk.clone(),
+            a,
+            DEFAULT_MIN_VALIDATOR_SELF_STAKE,
+            0,
+            String::new(),
+        )
+        .unwrap();
+
+        // Force the entry into Exited state without going through the
+        // governance path — direct mutation for the test fixture.
+        reg.entries
+            .alter(&a, |_, mut e| {
+                e.status = ValidatorRegistryStatus::Exited;
+                e
+            });
+
+        let new_ck = vec![1u8; 32];
+        let err = reg
+            .rotate_keys(&a, new_ck, vec![2u8; ML_DSA_65_VK_LEN], vec![3u8; 48])
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Exited"),
+            "expected Exited-state refusal, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn rotate_keys_idempotent_on_noop() {
+        let reg = ValidatorRegistry::new();
+        let (ck, pk, bk) = make_keys();
+        let a = make_address(14);
+        reg.register_candidate(
+            a,
+            ck.clone(),
+            pk.clone(),
+            bk.clone(),
+            a,
+            DEFAULT_MIN_VALIDATOR_SELF_STAKE,
+            0,
+            String::new(),
+        )
+        .unwrap();
+
+        // Same keys → no-op success.
+        reg.rotate_keys(&a, ck.clone(), pk.clone(), bk.clone())
+            .unwrap();
+        let entry = reg.get(&a).unwrap();
+        assert_eq!(entry.consensus_pubkey, ck);
     }
 }

@@ -72,6 +72,7 @@ pub mod a2a;
 pub mod agent_kit_auth;
 pub mod api_key;
 pub mod block_sync;
+pub mod bootstrap_dns;
 pub mod bridge_analytics;
 pub mod canton_analytics;
 pub mod canton_jwt;
