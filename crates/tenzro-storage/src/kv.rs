@@ -136,6 +136,25 @@ pub trait KvStore: Send + Sync {
         }
         Ok(results)
     }
+
+    /// Streams every key-value pair with the given prefix to `f` without
+    /// materializing the full result set. Use this instead of
+    /// [`KvStore::scan_prefix`] whenever the prefix can match an unbounded
+    /// number of rows (e.g. a whole-column-family walk) — `scan_prefix`
+    /// builds one `Vec` holding every row, which for CF_BLOCKS on a
+    /// long-running chain is a multi-gigabyte allocation. An error returned
+    /// from `f` aborts the scan and propagates.
+    fn scan_prefix_for_each(
+        &self,
+        cf: &str,
+        prefix: &[u8],
+        f: &mut dyn FnMut(&[u8], &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        for (key, value) in self.scan_prefix(cf, prefix)? {
+            f(&key, &value)?;
+        }
+        Ok(())
+    }
 }
 
 /// Write operation for batch writes
@@ -394,6 +413,30 @@ impl KvStore for RocksDbStore {
         }
 
         Ok(results)
+    }
+
+    /// Streaming prefix scan — borrows each (key, value) directly from the
+    /// RocksDB iterator and never accumulates rows, so peak memory is one
+    /// row regardless of how many rows the prefix matches. This is the
+    /// path the snapshot producer uses to walk entire column families.
+    fn scan_prefix_for_each(
+        &self,
+        cf: &str,
+        prefix: &[u8],
+        f: &mut dyn FnMut(&[u8], &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        let cf_handle = self.cf_handle(cf)?;
+        let iter = self.db.prefix_iterator_cf(cf_handle, prefix);
+
+        for item in iter {
+            let (key, value) = item?;
+            if !key.starts_with(prefix) {
+                break;
+            }
+            f(&key, &value)?;
+        }
+
+        Ok(())
     }
 }
 

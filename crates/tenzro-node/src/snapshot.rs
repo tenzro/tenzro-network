@@ -372,47 +372,57 @@ impl SnapshotStore {
         Ok(())
     }
 
-    /// Produce a snapshot at `height` with the given `state_root`. Walks
-    /// every column family in [`SNAPSHOT_CFS`] and serializes into 10MiB
-    /// chunks on disk.
+    /// Produce a snapshot at `height` with the given `state_root`. Streams
+    /// every column family in [`SNAPSHOT_CFS`] into 10MiB chunks on disk.
+    ///
+    /// Streaming matters: the previous implementation used `scan_prefix`,
+    /// which materializes an entire column family as one `Vec` — for
+    /// CF_BLOCKS on a long-running chain that was a multi-gigabyte
+    /// allocation every `SNAPSHOT_INTERVAL_BLOCKS`, OOM-killing every
+    /// validator on the same height boundary. Peak memory here is now one
+    /// chunk buffer plus one KV row.
     pub fn produce_at(&self, height: u64, state_root: [u8; 32]) -> Result<SnapshotManifest> {
         let dir = self.snapshots_dir.join(height.to_string());
         std::fs::create_dir_all(&dir)
             .map_err(|e| NodeError::Other(format!("create snapshot dir: {}", e)))?;
 
+        fn flush(
+            dir: &Path,
+            buf: &mut Vec<u8>,
+            chunk_idx: &mut u32,
+            hashes: &mut Vec<String>,
+        ) -> std::io::Result<()> {
+            if buf.is_empty() {
+                return Ok(());
+            }
+            let path = dir.join(format!("chunk_{:08}.bin", chunk_idx));
+            std::fs::write(&path, &buf)?;
+            let mut h = Sha256::new();
+            h.update(&buf);
+            hashes.push(hex::encode(h.finalize()));
+            *chunk_idx += 1;
+            buf.clear();
+            Ok(())
+        }
+
         let mut current_chunk = Vec::with_capacity(CHUNK_MAX_BYTES);
         let mut chunk_idx: u32 = 0;
         let mut chunk_hashes = Vec::new();
 
-        let flush =
-            |buf: &mut Vec<u8>, chunk_idx: &mut u32, hashes: &mut Vec<String>| -> Result<()> {
-                if buf.is_empty() {
-                    return Ok(());
-                }
-                let path = dir.join(format!("chunk_{:08}.bin", chunk_idx));
-                std::fs::write(&path, &buf)
-                    .map_err(|e| NodeError::Other(format!("write chunk: {}", e)))?;
-                let mut h = Sha256::new();
-                h.update(&buf);
-                hashes.push(hex::encode(h.finalize()));
-                *chunk_idx += 1;
-                buf.clear();
-                Ok(())
-            };
-
         for cf in SNAPSHOT_CFS {
-            let pairs = self
-                .store
-                .scan_prefix(cf, b"")
+            self.store
+                .scan_prefix_for_each(cf, b"", &mut |key, value| {
+                    encode_record(cf, key, value, &mut current_chunk);
+                    if current_chunk.len() >= CHUNK_MAX_BYTES {
+                        flush(&dir, &mut current_chunk, &mut chunk_idx, &mut chunk_hashes)
+                            .map_err(tenzro_storage::StorageError::IoError)?;
+                    }
+                    Ok(())
+                })
                 .map_err(|e| NodeError::Other(format!("scan {}: {}", cf, e)))?;
-            for (key, value) in pairs {
-                encode_record(cf, &key, &value, &mut current_chunk);
-                if current_chunk.len() >= CHUNK_MAX_BYTES {
-                    flush(&mut current_chunk, &mut chunk_idx, &mut chunk_hashes)?;
-                }
-            }
         }
-        flush(&mut current_chunk, &mut chunk_idx, &mut chunk_hashes)?;
+        flush(&dir, &mut current_chunk, &mut chunk_idx, &mut chunk_hashes)
+            .map_err(|e| NodeError::Other(format!("write chunk: {}", e)))?;
 
         let manifest = SnapshotManifest {
             height,
