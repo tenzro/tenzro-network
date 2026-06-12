@@ -30,9 +30,9 @@
 //! # Wire compatibility
 //!
 //! Tenzro is pre-alpha with no live users — no backwards-compatibility window.
-//! [`TIMEOUT_MSG_FORMAT_VERSION`] is bumped to **2** and the new field
-//! [`TimeoutMsg::high_qc_view`] is mandatory. Old (version-1) messages on the
-//! wire are rejected.
+//! [`TIMEOUT_MSG_FORMAT_VERSION`] is bumped to **3** and the new field
+//! [`TimeoutMsg::finalized_height`] is mandatory. Older messages on the wire
+//! are rejected.
 
 use crate::error::{ConsensusError, Result};
 use crate::validator::ValidatorSet;
@@ -48,9 +48,15 @@ use tenzro_types::primitives::Address;
 
 /// Wire-format version for [`TimeoutMsg`]. Bumped on any breaking change.
 ///
-/// **v2** (current): adds `high_qc_view` to the canonical signing payload —
-/// the DiemBFT `(round, hqc_round)` pair. v1 messages are rejected.
-pub const TIMEOUT_MSG_FORMAT_VERSION: u8 = 2;
+/// **v3** (current): adds `finalized_height` to the canonical signing
+/// payload. A replica receiving a verified timeout that advertises a
+/// finalized height above its own engages block-sync immediately — this is
+/// the heal path for single-block finalization skew, where one replica
+/// finalized via a Commit QC the others never received and the proposer
+/// keeps re-proposing a conflicting block at the same height forever.
+/// **v2**: added `high_qc_view` — the DiemBFT `(round, hqc_round)` pair.
+/// Older messages are rejected.
+pub const TIMEOUT_MSG_FORMAT_VERSION: u8 = 3;
 
 /// Domain-separation tag for the canonical signing payload. Distinct from
 /// the `TENZRO_VOTE:` tag used by `Vote::signing_payload` so a Vote
@@ -82,6 +88,13 @@ pub struct TimeoutMsg {
     /// that the proposal's parent QC view ≥ that maximum (`safe_to_extend`).
     pub high_qc_view: u64,
 
+    /// The sender's highest finalized block height. Receivers that are
+    /// behind this height engage block-sync immediately — fetched blocks
+    /// carry their Commit QC embedded in `consensus_proof.proof_data`, so a
+    /// Byzantine lie here is harmless (the sync simply finds nothing
+    /// verifiable and aborts).
+    pub finalized_height: u64,
+
     /// Voter's address (must be a registered validator).
     pub voter: Address,
 
@@ -98,6 +111,7 @@ impl TimeoutMsg {
     pub fn new(
         view: u64,
         high_qc_view: u64,
+        finalized_height: u64,
         voter: Address,
         signature: CompositeSignature,
         public_key: CompositePublicKey,
@@ -106,6 +120,7 @@ impl TimeoutMsg {
             format_version: TIMEOUT_MSG_FORMAT_VERSION,
             view,
             high_qc_view,
+            finalized_height,
             voter,
             signature,
             public_key,
@@ -121,13 +136,15 @@ impl TimeoutMsg {
     /// - 1-byte format version
     /// - 8-byte little-endian view
     /// - 8-byte little-endian high_qc_view
+    /// - 8-byte little-endian finalized_height
     /// - 32-byte voter address
     pub fn signing_payload(&self) -> Vec<u8> {
-        let mut payload = Vec::with_capacity(15 + 1 + 8 + 8 + 32);
+        let mut payload = Vec::with_capacity(15 + 1 + 8 + 8 + 8 + 32);
         payload.extend_from_slice(TIMEOUT_SIGNING_DOMAIN);
         payload.push(self.format_version);
         payload.extend_from_slice(&self.view.to_le_bytes());
         payload.extend_from_slice(&self.high_qc_view.to_le_bytes());
+        payload.extend_from_slice(&self.finalized_height.to_le_bytes());
         payload.extend_from_slice(self.voter.as_bytes());
         payload
     }
@@ -218,6 +235,11 @@ pub struct TcSigner {
     /// `safe_to_extend(parent_qc_view)` predicate is
     /// `parent_qc_view >= max{tc.signers[i].high_qc_view}`.
     pub high_qc_view: u64,
+
+    /// The signer's claimed finalized height, carried verbatim from their
+    /// `TimeoutMsg`. Part of the signed payload, so TC verification must
+    /// reconstruct it exactly.
+    pub finalized_height: u64,
 
     /// Composite signature this signer produced over the canonical
     /// `TimeoutMsg::signing_payload()` for `(tc.view, signers[i].high_qc_view)`.
@@ -358,6 +380,7 @@ impl TimeoutCertificate {
             let unsigned = TimeoutMsg::new(
                 self.view,
                 signer.high_qc_view,
+                signer.finalized_height,
                 signer.voter,
                 placeholder,
                 signer.public_key.clone(),
@@ -490,6 +513,7 @@ impl TimeoutCollector {
                         TcSigner {
                             voter: msg.voter,
                             high_qc_view: msg.high_qc_view,
+                            finalized_height: msg.finalized_height,
                             signature: msg.signature.clone(),
                             public_key: msg.public_key.clone(),
                         },
@@ -511,6 +535,7 @@ impl TimeoutCollector {
             TcSigner {
                 voter: msg.voter,
                 high_qc_view: msg.high_qc_view,
+                finalized_height: msg.finalized_height,
                 signature: msg.signature.clone(),
                 public_key: msg.public_key.clone(),
             },
@@ -1009,6 +1034,10 @@ mod tests {
         (keypair, pq, address, info)
     }
 
+    /// Fixed finalized height used by the test helper. Non-zero so tamper
+    /// tests can mutate it in both directions.
+    const TEST_FINALIZED_HEIGHT: u64 = 7;
+
     fn sign_timeout(
         view: u64,
         high_qc_view: u64,
@@ -1024,6 +1053,7 @@ mod tests {
         let unsigned = TimeoutMsg::new(
             view,
             high_qc_view,
+            TEST_FINALIZED_HEIGHT,
             address,
             placeholder,
             composite_pk.clone(),
@@ -1037,7 +1067,14 @@ mod tests {
         let signer = InMemoryHybridSigner::new(Box::new(classical), pq_copy);
 
         let signature = signer.sign(&payload).unwrap();
-        TimeoutMsg::new(view, high_qc_view, address, signature, composite_pk)
+        TimeoutMsg::new(
+            view,
+            high_qc_view,
+            TEST_FINALIZED_HEIGHT,
+            address,
+            signature,
+            composite_pk,
+        )
     }
 
     fn vset(infos: Vec<ValidatorInfo>) -> Arc<ValidatorSet> {
@@ -1075,16 +1112,17 @@ mod tests {
     }
 
     #[test]
-    fn timeout_msg_rejects_v1_format() {
-        // v1 messages on the wire must be rejected — Tenzro is pre-alpha,
-        // no backcompat window. The chain wedged on a v1-only deploy; bumping
-        // to v2 is a flag-day cutover.
+    fn timeout_msg_rejects_older_formats() {
+        // v1/v2 messages on the wire must be rejected — Tenzro is pre-alpha,
+        // no backcompat window. Each version bump is a flag-day cutover.
         let (kp, pq, addr, info) = build_validator(1000);
         let validator_set = vset(vec![info]);
-        let mut msg = sign_timeout(42, 41, addr, &kp, &pq);
-        msg.format_version = 1;
-        let err = msg.verify(&validator_set).unwrap_err();
-        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        for old_version in [1u8, 2u8] {
+            let mut msg = sign_timeout(42, 41, addr, &kp, &pq);
+            msg.format_version = old_version;
+            let err = msg.verify(&validator_set).unwrap_err();
+            assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+        }
     }
 
     #[test]
@@ -1106,6 +1144,20 @@ mod tests {
         let validator_set = vset(vec![info]);
         let mut msg = sign_timeout(42, 10, addr, &kp, &pq);
         msg.high_qc_view = 41;
+        let err = msg.verify(&validator_set).unwrap_err();
+        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn timeout_msg_rejects_tampered_finalized_height() {
+        // Mutating finalized_height after signing must invalidate the
+        // signature — this is the new field added in v3 and must bind to
+        // the payload, otherwise a relay could inflate it and trigger
+        // futile block-sync storms.
+        let (kp, pq, addr, info) = build_validator(1000);
+        let validator_set = vset(vec![info]);
+        let mut msg = sign_timeout(42, 41, addr, &kp, &pq);
+        msg.finalized_height = TEST_FINALIZED_HEIGHT + 1_000_000;
         let err = msg.verify(&validator_set).unwrap_err();
         assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
     }
@@ -1162,6 +1214,7 @@ mod tests {
             .map(|t| TcSigner {
                 voter: t.voter,
                 high_qc_view: t.high_qc_view,
+                finalized_height: t.finalized_height,
                 signature: t.signature.clone(),
                 public_key: t.public_key.clone(),
             })
@@ -1200,6 +1253,7 @@ mod tests {
             .map(|t| TcSigner {
                 voter: t.voter,
                 high_qc_view: t.high_qc_view,
+                finalized_height: t.finalized_height,
                 signature: t.signature.clone(),
                 public_key: t.public_key.clone(),
             })
@@ -1217,6 +1271,19 @@ mod tests {
             build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let mut tc = tc_from_timeouts(100, &timeouts[..3]);
         tc.signers[0].high_qc_view = 60;
+        let err = tc.verify(&vset).unwrap_err();
+        assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn tc_rejects_tampered_finalized_height() {
+        // Flip a signer's finalized_height post-signing — the TC verify
+        // reconstructs the per-signer TimeoutMsg payload including
+        // finalized_height, so the signature must fail.
+        let (vset, _keys, timeouts) =
+            build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
+        let mut tc = tc_from_timeouts(100, &timeouts[..3]);
+        tc.signers[0].finalized_height = TEST_FINALIZED_HEIGHT + 1_000_000;
         let err = tc.verify(&vset).unwrap_err();
         assert!(matches!(err, ConsensusError::InvalidSignature(_)), "got {err:?}");
     }

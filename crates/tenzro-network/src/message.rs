@@ -228,6 +228,11 @@ pub enum ConsensusMessage {
         /// Aggregated by the receiver into the TC's `max_high_qc_view()` so
         /// the next leader can compute the Jolteon `safe_to_extend` predicate.
         high_qc_view: u64,
+        /// The sender's highest finalized block height. Part of the signed
+        /// payload. Receivers behind this height engage block-sync — the heal
+        /// path for single-block finalization skew (one replica finalized via
+        /// a Commit QC the others never received).
+        finalized_height: u64,
         voter: tenzro_types::primitives::Address,
         /// bincode-serialized `tenzro_crypto::composite::CompositeSignature`
         signature: Vec<u8>,

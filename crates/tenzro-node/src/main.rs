@@ -863,8 +863,11 @@ async fn main() -> Result<()> {
                     tenzro_bridge::canton_auth::CantonAuthConfig::devnet(secret);
                 tenzro_bridge::canton_auth::CantonTokenProvider::new(auth_cfg)
             });
+            // Base URL only — CantonMcpServer appends `/v2/...` itself
+            // (mcp/canton.rs request paths); a `/v2` suffix here would
+            // produce `/v2/v2/...` → 404.
             (
-                "https://json.devnet.tenzro.network/v2".to_string(),
+                "https://json.devnet.tenzro.network".to_string(),
                 "https://admin.devnet.tenzro.network".to_string(),
                 provider,
                 None,

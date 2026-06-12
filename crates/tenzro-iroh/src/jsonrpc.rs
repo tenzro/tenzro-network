@@ -56,7 +56,7 @@ use bytes::Bytes;
 use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler},
-    Endpoint, EndpointId,
+    Endpoint, EndpointAddr,
 };
 use parking_lot::RwLock;
 use tracing::{debug, trace, warn};
@@ -456,9 +456,14 @@ impl McpStreamHandler for DeferredMcpHandler {
 /// writes the request, reads the response, closes the stream. One stream
 /// per call — concurrent calls open independent streams over the same
 /// QUIC connection (iroh multiplexes them).
+///
+/// `remote` accepts anything convertible to an [`EndpointAddr`]: a bare
+/// `EndpointId` (resolved via the endpoint's configured address lookup,
+/// e.g. Pkarr) or a full `EndpointAddr` carrying direct addresses for
+/// discovery-free dialing.
 pub async fn call(
     endpoint: &Endpoint,
-    remote: EndpointId,
+    remote: impl Into<EndpointAddr>,
     alpn: &[u8],
     request: Bytes,
 ) -> IrohResult<Bytes> {
@@ -505,16 +510,19 @@ mod tests {
     async fn roundtrip_jsonrpc_over_iroh() {
         // Server side: bind endpoint, accept A2A ALPN.
         let server_ep = Endpoint::bind(presets::N0).await.unwrap();
-        let server_id = server_ep.id();
         let proto = JsonRpcProtocol::a2a(Arc::new(EchoDispatcher));
         let _router = Router::builder(server_ep.clone())
             .accept(ALPN_A2A, proto)
             .spawn();
 
-        // Client side: separate endpoint, call() against the server.
+        // Client side: separate endpoint, call() against the server using
+        // its full EndpointAddr (direct socket addresses) so the test is
+        // hermetic — no external discovery service involved.
+        server_ep.online().await;
+        let server_addr = server_ep.addr();
         let client_ep = Endpoint::bind(presets::N0).await.unwrap();
         let req = Bytes::from_static(b"null");
-        let resp = call(&client_ep, server_id, ALPN_A2A, req).await.unwrap();
+        let resp = call(&client_ep, server_addr, ALPN_A2A, req).await.unwrap();
         let resp_str = std::str::from_utf8(&resp).unwrap();
         assert!(resp_str.contains("\"jsonrpc\":\"2.0\""));
         assert!(resp_str.contains("\"id\":1"));

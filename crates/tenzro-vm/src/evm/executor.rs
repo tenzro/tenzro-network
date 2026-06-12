@@ -32,6 +32,41 @@ use sha3::{Digest as Sha3Digest, Keccak256};
 
 use super::revm_db::RevmStateAdapter;
 
+/// Normalize a caller/callee address to the 20-byte EVM form.
+///
+/// `RevmAddress::from_slice` panics on any input that is not exactly 20
+/// bytes, and consensus-layer transactions carry 32-byte Tenzro addresses —
+/// an unchecked pass-through lets a single malformed transaction crash every
+/// validator during block execution. Accepted forms:
+///
+/// - 20 bytes — native EVM address, used as-is.
+/// - 32 bytes — must be the canonical left-aligned slot (addr20 followed by
+///   12 zero bytes, the same layout `tnzo_balance_key` / `parse_address`
+///   use); the first 20 bytes are extracted. A non-zero tail means the value
+///   is a full 32-byte native address with no EVM representation — rejected
+///   rather than silently truncated to an aliased address.
+///
+/// Everything else is a `VmError::InvalidTransaction`.
+fn evm_address(bytes: &[u8]) -> Result<RevmAddress> {
+    match bytes.len() {
+        20 => Ok(RevmAddress::from_slice(bytes)),
+        32 => {
+            if bytes[20..].iter().any(|b| *b != 0) {
+                return Err(VmError::InvalidTransaction(format!(
+                    "32-byte address 0x{} is not a canonical left-aligned EVM slot \
+                     (non-zero tail) — no EVM representation",
+                    hex::encode(bytes)
+                )));
+            }
+            Ok(RevmAddress::from_slice(&bytes[..20]))
+        }
+        n => Err(VmError::InvalidTransaction(format!(
+            "EVM address must be 20 bytes or a canonical 32-byte slot, got {} bytes",
+            n
+        ))),
+    }
+}
+
 /// EVM executor backed by revm
 ///
 /// All execution paths (VmExecutor trait, direct StateAdapter calls, read-only calls)
@@ -125,6 +160,14 @@ impl EvmExecutor {
         // Get nonce before borrowing state mutably
         let tx_nonce = expected_nonce;
 
+        // Normalize addresses before entering the infallible closure below —
+        // RevmAddress::from_slice panics on non-20-byte input.
+        let caller = evm_address(&tx.from)?;
+        let transact_to = match tx.to {
+            Some(ref to_addr) => TransactTo::Call(evm_address(to_addr)?),
+            None => TransactTo::Create,
+        };
+
         // Execute transaction in a scope to release state borrow
         let (result_state, success, gas_used, gas_refund, output, contract_address, logs) = {
             let mut db = RevmStateAdapter::new(state);
@@ -132,19 +175,14 @@ impl EvmExecutor {
             let mut evm = Evm::builder()
                 .with_db(&mut db)
                 .modify_tx_env(|tx_env| {
-                    tx_env.caller = RevmAddress::from_slice(&tx.from);
+                    tx_env.caller = caller;
                     tx_env.gas_limit = tx.gas_limit;
                     tx_env.gas_price = U256::from(tx.gas_price);
                     tx_env.value = U256::from(tx.value);
                     tx_env.data = Bytes::from(tx.data.clone());
                     tx_env.nonce = Some(tx_nonce);
                     tx_env.chain_id = Some(tx.chain_id);
-
-                    if let Some(ref to_addr) = tx.to {
-                        tx_env.transact_to = TransactTo::Call(RevmAddress::from_slice(to_addr));
-                    } else {
-                        tx_env.transact_to = TransactTo::Create;
-                    }
+                    tx_env.transact_to = transact_to;
                 })
                 .modify_cfg_env(|cfg_env| {
                     cfg_env.chain_id = tx.chain_id;
@@ -320,20 +358,25 @@ impl EvmExecutor {
     ) -> Result<CallResult> {
         let tx_nonce = state.get_nonce(from);
 
+        // Normalize before the infallible closure — from_slice panics on
+        // non-20-byte input.
+        let caller = evm_address(from)?;
+        let callee = evm_address(to)?;
+
         let (success, gas_used, output, revert_reason) = {
             let mut db = RevmStateAdapter::new(state);
 
             let mut evm = Evm::builder()
                 .with_db(&mut db)
                 .modify_tx_env(|tx_env| {
-                    tx_env.caller = RevmAddress::from_slice(from);
+                    tx_env.caller = caller;
                     tx_env.gas_limit = gas_limit;
                     tx_env.gas_price = U256::ZERO; // Free for read-only calls
                     tx_env.value = U256::ZERO;
                     tx_env.data = Bytes::from(data.to_vec());
                     tx_env.nonce = Some(tx_nonce);
                     tx_env.chain_id = Some(self.config.chain_id);
-                    tx_env.transact_to = TransactTo::Call(RevmAddress::from_slice(to));
+                    tx_env.transact_to = TransactTo::Call(callee);
                 })
                 .modify_cfg_env(|cfg_env| {
                     cfg_env.chain_id = self.config.chain_id;
@@ -614,6 +657,42 @@ mod tests {
         let precompiles = Arc::new(PrecompileRegistry::new());
 
         EvmExecutor::new(config, gas_oracle, precompiles).unwrap()
+    }
+
+    #[test]
+    fn evm_address_accepts_20_bytes() {
+        let addr = vec![0xABu8; 20];
+        assert_eq!(evm_address(&addr).unwrap().as_slice(), addr.as_slice());
+    }
+
+    #[test]
+    fn evm_address_accepts_canonical_32_byte_slot() {
+        let mut slot = vec![0u8; 32];
+        slot[..20].copy_from_slice(&[0xABu8; 20]);
+        assert_eq!(evm_address(&slot).unwrap().as_slice(), &slot[..20]);
+    }
+
+    #[test]
+    fn evm_address_rejects_32_byte_nonzero_tail() {
+        // Full 32-byte native address (non-zero tail) has no EVM
+        // representation — must error, never silently truncate.
+        let slot = vec![0xABu8; 32];
+        assert!(matches!(
+            evm_address(&slot),
+            Err(VmError::InvalidTransaction(_))
+        ));
+    }
+
+    #[test]
+    fn evm_address_rejects_other_lengths() {
+        for len in [0usize, 1, 19, 21, 31, 33, 64] {
+            let bytes = vec![0x01u8; len];
+            assert!(
+                matches!(evm_address(&bytes), Err(VmError::InvalidTransaction(_))),
+                "len {} must be rejected",
+                len
+            );
+        }
     }
 
     #[test]

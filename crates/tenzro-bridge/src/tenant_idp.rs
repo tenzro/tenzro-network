@@ -4,22 +4,34 @@
 //! `canton_user_id` and the node is configured with
 //! `canton.identity_providers.enabled = true`, the node atomically:
 //!
-//! 1. Mints a per-tenant OAuth2 client on the upstream IdP (Auth0 or
-//!    equivalent) via the IdP's Management API.
-//! 2. Registers a dedicated Canton `IdentityProviderConfig` for that
-//!    client (`POST /v2/idps`).
-//! 3. Creates the Canton user under that IDP.
-//! 4. Allocates a tenant party under that IDP.
-//! 5. Grants `CanActAs` on the party to the user.
-//! 6. Returns the client_id + client_secret to the tenant exactly once
-//!    alongside the API key.
+//! 1. Mints a per-tenant OAuth2 client (plus its client-grant for the
+//!    Canton audience) on the upstream IdP (Auth0 or equivalent) via
+//!    the IdP's Management API.
+//! 2. Creates the Canton user `<client_id>@clients` in the DEFAULT
+//!    identity provider (matching the `sub` claim Auth0 puts on
+//!    client_credentials tokens). Canton consults its static
+//!    config-file auth services before any dynamic
+//!    `IdentityProviderConfig` and short-circuits at the first
+//!    non-Unauthenticated claim; since tenant clients share the
+//!    operator's upstream issuer, tenant JWTs are always claimed by
+//!    the static auth service and scoped to the default IDP — a
+//!    dynamic IDP with the same issuer is unreachable. Isolation
+//!    comes from per-tenant OAuth clients (distinct `sub` → distinct
+//!    Canton user) + per-user CanActAs rights, not IDP scoping.
+//! 3. Allocates a tenant party in the default IDP.
+//! 4. Grants `CanActAs` on the party to the user.
+//! 5. Stores the client credentials on the `ApiKeyRecord` — the tenant
+//!    never sees them. The Tenzro API key is the single credential a
+//!    tenant holds.
 //!
-//! From this point the tenant runs their own token-acquisition loop
-//! (OAuth2 client_credentials) and presents their own Canton JWT via
-//! `X-Canton-Auth: Bearer <jwt>` on subsequent canton-scoped calls.
-//! The operator JWT never enters the wire path for tenant requests —
-//! a leaked operator credential gives an attacker access to the
-//! operator's own surface but not to any tenant's parties.
+//! On every canton-scoped call the node mints (and caches) the tenant
+//! JWT itself via the stored client credentials and forwards it to
+//! Canton. The operator JWT never enters the wire path for tenant
+//! requests, and the tenant never touches OAuth at all — a leaked
+//! tenant API key is revocable in one `tenzro_revokeApiKey` call
+//! without any upstream IdP coordination. `X-Canton-Auth: Bearer
+//! <jwt>` remains supported only as a BYO-issuer escape hatch for
+//! keys provisioned without stored credentials.
 //!
 //! `TenantIdpProvisioner` is the chain-/transport-agnostic interface
 //! the node uses. `Auth0ManagementClient` is the production
@@ -32,15 +44,16 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// Credentials returned by the upstream IdP after a successful client
-/// mint. The `client_secret` is returned to the tenant exactly once;
-/// the node does not persist it. If the tenant loses it they have to
-/// revoke + re-issue.
+/// mint. Persisted on the tenant's `ApiKeyRecord` by the node; never
+/// returned to the tenant — the Tenzro API key is the tenant's only
+/// credential.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TenantIdpClient {
     /// OAuth2 client_id minted upstream.
     pub client_id: String,
-    /// OAuth2 client_secret minted upstream. Sent on-wire exactly
-    /// once; not persisted by the node.
+    /// OAuth2 client_secret minted upstream. Stored on the
+    /// `ApiKeyRecord` so the node can mint tenant JWTs server-side.
+    /// Never logged, never returned over RPC.
     pub client_secret: String,
     /// Token endpoint URL the tenant uses to acquire JWTs
     /// (e.g. `https://<tenant>.<idp-domain>/oauth/token`).
@@ -68,6 +81,11 @@ pub struct TenantIdpRequest {
     /// Audience Canton expects on the tenant's JWTs. Comes from
     /// `canton.identity_providers.canton_audience`.
     pub audience: String,
+    /// Scopes granted to the tenant client for `audience` (e.g.
+    /// `["daml_ledger_api"]`). Bound at the client-grant level on
+    /// Auth0 — without the grant, the tenant's client_credentials
+    /// token request is refused by the IdP.
+    pub scopes: Vec<String>,
 }
 
 /// Abstract per-tenant identity-provider provisioner.
@@ -95,31 +113,76 @@ pub trait TenantIdpProvisioner: Send + Sync {
     /// from `tenzro_revokeApiKey` to tear down a tenant's upstream
     /// credentials in lockstep with revoking the Tenzro key.
     async fn delete_tenant_client(&self, client_id: &str) -> Result<()>;
+
+    /// Mint a JWT for the given tenant client via the OAuth2
+    /// client_credentials grant. Called by the node on every
+    /// canton-scoped request from a key with stored credentials; the
+    /// implementation MUST cache tokens per client_id and refresh
+    /// before expiry so this is cheap on the hot path.
+    async fn mint_tenant_jwt(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+        audience: &str,
+        scopes: &[String],
+    ) -> Result<String>;
+}
+
+/// Cached OAuth2 access token (Management API or tenant JWT). Tokens
+/// are refreshed 60s before expiry so a long-running node never
+/// presents a stale token.
+struct CachedToken {
+    token: String,
+    expires_at: std::time::Instant,
+}
+
+/// OAuth2 token endpoint response (client_credentials grant).
+#[derive(Deserialize)]
+struct OauthTokenResponse {
+    access_token: String,
+    expires_in: u64,
 }
 
 /// Auth0 Management API implementation.
 ///
-/// Talks to `https://<auth0_domain>/api/v2/clients`. The `mgmt_token`
-/// is an Auth0 management API token (machine-to-machine) with the
-/// `create:clients` + `delete:clients` scopes. Loaded from
-/// `CANTON_IDP_MGMT_TOKEN` at node startup.
+/// Talks to `https://<auth0_domain>/api/v2/clients` +
+/// `/api/v2/client-grants`. Authenticates by minting its own
+/// Management API token via the OAuth2 `client_credentials` grant
+/// against the `https://<auth0_domain>/api/v2/` audience — the
+/// configured M2M client must hold the `create:clients` +
+/// `delete:clients` + `create:client_grants` scopes. Credentials are
+/// loaded from `CANTON_IDP_MGMT_CLIENT_ID` /
+/// `CANTON_IDP_MGMT_CLIENT_SECRET` at node startup. Tokens are cached
+/// in-memory and refreshed 60s before their 24h expiry, so the
+/// provisioner stays valid for the life of the process (a static
+/// boot-minted token would silently break tenant provisioning a day
+/// after every boot).
 pub struct Auth0ManagementClient {
     /// `auth0_domain` without scheme — e.g. `tenzro.us.auth0.com`.
     /// Used to construct the Management API URL + the canonical
     /// issuer URL for the tenant.
     auth0_domain: String,
-    /// Management API JWT.
-    mgmt_token: String,
+    /// M2M client id authorized for the Management API audience.
+    mgmt_client_id: String,
+    /// M2M client secret. Never logged.
+    mgmt_client_secret: String,
+    /// Cached Management API token.
+    mgmt_token_cache: parking_lot::RwLock<Option<CachedToken>>,
+    /// Per-tenant-client JWT cache keyed by client_id. Tenant JWTs
+    /// are minted server-side on canton-scoped requests; caching
+    /// keeps the hot path to one map read instead of an Auth0
+    /// round-trip per call.
+    tenant_token_cache: dashmap::DashMap<String, CachedToken>,
     /// HTTP client for outbound requests.
     http: reqwest::Client,
 }
 
 impl Auth0ManagementClient {
-    /// Build a client from the operator-supplied mgmt URL + token.
-    /// `mgmt_url` is the management base URL (e.g.
-    /// `https://tenzro.us.auth0.com/api/v2`); we derive the bare
-    /// `auth0_domain` from it.
-    pub fn new(mgmt_url: &str, mgmt_token: &str) -> Result<Self> {
+    /// Build a client from the operator-supplied mgmt URL + M2M
+    /// client credentials. `mgmt_url` is the management base URL
+    /// (e.g. `https://tenzro.us.auth0.com/api/v2`); we derive the
+    /// bare `auth0_domain` from it.
+    pub fn new(mgmt_url: &str, mgmt_client_id: &str, mgmt_client_secret: &str) -> Result<Self> {
         let url = reqwest::Url::parse(mgmt_url).map_err(|e| {
             BridgeError::ConfigurationError(format!(
                 "Auth0 mgmt URL parse failed: {}",
@@ -142,9 +205,64 @@ impl Auth0ManagementClient {
             })?;
         Ok(Self {
             auth0_domain: host.to_string(),
-            mgmt_token: mgmt_token.to_string(),
+            mgmt_client_id: mgmt_client_id.to_string(),
+            mgmt_client_secret: mgmt_client_secret.to_string(),
+            mgmt_token_cache: parking_lot::RwLock::new(None),
+            tenant_token_cache: dashmap::DashMap::new(),
             http,
         })
+    }
+
+    /// Auth0 Management API audience — always `https://<domain>/api/v2/`
+    /// (trailing slash significant; Auth0 registers it that way).
+    fn mgmt_audience(&self) -> String {
+        format!("https://{}/api/v2/", self.auth0_domain)
+    }
+
+    /// Returns a currently-valid Management API bearer token, minting
+    /// via client_credentials when the cache is empty or within 60s
+    /// of expiry. Concurrent refreshes are harmless — Auth0 issues
+    /// independent tokens; last writer wins.
+    async fn mgmt_bearer(&self) -> Result<String> {
+        if let Some(t) = self.mgmt_token_cache.read().as_ref()
+            && t.expires_at > std::time::Instant::now() + std::time::Duration::from_secs(60)
+        {
+            return Ok(t.token.clone());
+        }
+
+        let body = serde_json::json!({
+            "client_id": self.mgmt_client_id,
+            "client_secret": self.mgmt_client_secret,
+            "audience": self.mgmt_audience(),
+            "grant_type": "client_credentials",
+        });
+        let resp = self
+            .http
+            .post(self.token_url())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                BridgeError::AdapterError(format!("Auth0 mgmt token request failed: {}", e))
+            })?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(BridgeError::AdapterError(format!(
+                "Auth0 mgmt token endpoint HTTP {}: {}",
+                status,
+                text.chars().take(256).collect::<String>()
+            )));
+        }
+        let tok: OauthTokenResponse = serde_json::from_str(&text).map_err(|e| {
+            BridgeError::AdapterError(format!("Auth0 mgmt token response not JSON: {}", e))
+        })?;
+        *self.mgmt_token_cache.write() = Some(CachedToken {
+            token: tok.access_token.clone(),
+            expires_at: std::time::Instant::now()
+                + std::time::Duration::from_secs(tok.expires_in),
+        });
+        Ok(tok.access_token)
     }
 
     fn issuer_url(&self) -> String {
@@ -162,6 +280,20 @@ impl Auth0ManagementClient {
     fn clients_url(&self) -> String {
         format!("https://{}/api/v2/clients", self.auth0_domain)
     }
+
+    fn client_grants_url(&self) -> String {
+        format!("https://{}/api/v2/client-grants", self.auth0_domain)
+    }
+
+    /// Body for `POST /api/v2/client-grants` — binds the freshly
+    /// minted client to the Canton audience with the tenant scopes.
+    fn client_grant_body(client_id: &str, req: &TenantIdpRequest) -> serde_json::Value {
+        serde_json::json!({
+            "client_id": client_id,
+            "audience": req.audience,
+            "scope": req.scopes,
+        })
+    }
 }
 
 #[async_trait]
@@ -172,10 +304,12 @@ impl TenantIdpProvisioner for Auth0ManagementClient {
     ) -> Result<TenantIdpClient> {
         // Build the Auth0 client create body. We use the
         // `non_interactive` app type because tenants will run the
-        // client_credentials grant against this client. `grant_types`
-        // and `audience` are bound at the *grant* level (Auth0
-        // requires a Client Grant in addition to the Client itself
-        // for the audience binding); we issue both here.
+        // client_credentials grant against this client. The audience
+        // binding lives at the *grant* level (Auth0 requires a Client
+        // Grant in addition to the Client itself), so we issue both:
+        // POST /api/v2/clients then POST /api/v2/client-grants. If
+        // the grant fails we best-effort delete the freshly-minted
+        // client so retries don't accumulate orphans.
         //
         // Idempotent semantics are best-effort: Auth0's API doesn't
         // support "create-if-not-exists" natively, so the operator
@@ -196,10 +330,11 @@ impl TenantIdpProvisioner for Auth0ManagementClient {
             "grant_types": ["client_credentials"],
             "is_first_party": true,
         });
+        let mgmt_bearer = self.mgmt_bearer().await?;
         let resp = self
             .http
             .post(self.clients_url())
-            .bearer_auth(&self.mgmt_token)
+            .bearer_auth(&mgmt_bearer)
             .json(&create_body)
             .send()
             .await
@@ -242,6 +377,47 @@ impl TenantIdpProvisioner for Auth0ManagementClient {
                 )
             })?
             .to_string();
+
+        // Client Grant: authorize the new client for the Canton
+        // audience with the requested scopes. Without this, Auth0
+        // refuses the tenant's client_credentials token request with
+        // "access_denied: Client is not authorized to access ...".
+        let grant_body = Self::client_grant_body(&client_id, req);
+        let grant_resp = self
+            .http
+            .post(self.client_grants_url())
+            .bearer_auth(&mgmt_bearer)
+            .json(&grant_body)
+            .send()
+            .await;
+        let grant_err = match grant_resp {
+            Ok(r) => {
+                let status = r.status();
+                if status.is_success() {
+                    None
+                } else {
+                    let body = r.text().await.unwrap_or_default();
+                    Some(format!(
+                        "Auth0 create-client-grant HTTP {}: {}",
+                        status,
+                        body.chars().take(256).collect::<String>()
+                    ))
+                }
+            }
+            Err(e) => Some(format!("Auth0 create-client-grant failed: {}", e)),
+        };
+        if let Some(err) = grant_err {
+            // Roll back the orphaned client so a retry starts clean.
+            if let Err(del_err) = self.delete_tenant_client(&client_id).await {
+                tracing::warn!(
+                    client_id = %client_id,
+                    error = %del_err,
+                    "Auth0 rollback delete-client failed after grant failure"
+                );
+            }
+            return Err(BridgeError::AdapterError(err));
+        }
+
         Ok(TenantIdpClient {
             client_id,
             client_secret,
@@ -254,10 +430,11 @@ impl TenantIdpProvisioner for Auth0ManagementClient {
 
     async fn delete_tenant_client(&self, client_id: &str) -> Result<()> {
         let url = format!("{}/{}", self.clients_url(), client_id);
+        let mgmt_bearer = self.mgmt_bearer().await?;
         let resp = self
             .http
             .delete(&url)
-            .bearer_auth(&self.mgmt_token)
+            .bearer_auth(&mgmt_bearer)
             .send()
             .await
             .map_err(|e| {
@@ -275,7 +452,67 @@ impl TenantIdpProvisioner for Auth0ManagementClient {
                 body_text.chars().take(256).collect::<String>()
             )));
         }
+        // Drop any cached JWT for the revoked client.
+        self.tenant_token_cache.remove(client_id);
         Ok(())
+    }
+
+    async fn mint_tenant_jwt(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+        audience: &str,
+        scopes: &[String],
+    ) -> Result<String> {
+        if let Some(t) = self.tenant_token_cache.get(client_id)
+            && t.expires_at > std::time::Instant::now() + std::time::Duration::from_secs(60)
+        {
+            return Ok(t.token.clone());
+        }
+
+        let body = serde_json::json!({
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "audience": audience,
+            "scope": scopes.join(" "),
+        });
+        let resp = self
+            .http
+            .post(self.token_url())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Auth0 tenant token request failed: {}",
+                    e
+                ))
+            })?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(BridgeError::AdapterError(format!(
+                "Auth0 tenant token endpoint HTTP {}: {}",
+                status,
+                text.chars().take(256).collect::<String>()
+            )));
+        }
+        let tok: OauthTokenResponse = serde_json::from_str(&text).map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Auth0 tenant token response not JSON: {}",
+                e
+            ))
+        })?;
+        self.tenant_token_cache.insert(
+            client_id.to_string(),
+            CachedToken {
+                token: tok.access_token.clone(),
+                expires_at: std::time::Instant::now()
+                    + std::time::Duration::from_secs(tok.expires_in),
+            },
+        );
+        Ok(tok.access_token)
     }
 }
 
@@ -289,10 +526,12 @@ mod tests {
     fn auth0_url_derivation() {
         let c = Auth0ManagementClient::new(
             "https://tenzro.us.auth0.com/api/v2",
-            "fake-token",
+            "fake-client-id",
+            "fake-client-secret",
         )
         .unwrap();
         assert_eq!(c.auth0_domain, "tenzro.us.auth0.com");
+        assert_eq!(c.mgmt_audience(), "https://tenzro.us.auth0.com/api/v2/");
         assert_eq!(c.issuer_url(), "https://tenzro.us.auth0.com/");
         assert_eq!(
             c.jwks_url(),
@@ -302,6 +541,31 @@ mod tests {
         assert_eq!(
             c.clients_url(),
             "https://tenzro.us.auth0.com/api/v2/clients"
+        );
+        assert_eq!(
+            c.client_grants_url(),
+            "https://tenzro.us.auth0.com/api/v2/client-grants"
+        );
+    }
+
+    /// The client-grant body must bind client_id + audience + scope —
+    /// the exact shape Auth0's `POST /api/v2/client-grants` expects.
+    #[test]
+    fn client_grant_body_shape() {
+        let req = TenantIdpRequest {
+            tenant_label: "tenzro-labs".to_string(),
+            tenant_user_id: "abc123@clients".to_string(),
+            audience: "https://canton.network.global".to_string(),
+            scopes: vec!["daml_ledger_api".to_string()],
+        };
+        let body = Auth0ManagementClient::client_grant_body("abc123", &req);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "client_id": "abc123",
+                "audience": "https://canton.network.global",
+                "scope": ["daml_ledger_api"],
+            })
         );
     }
 }

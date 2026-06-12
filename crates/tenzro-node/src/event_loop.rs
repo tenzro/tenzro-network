@@ -1670,6 +1670,7 @@ impl EventLoop {
                                                 format_version: timeout_msg.format_version,
                                                 view: timeout_msg.view,
                                                 high_qc_view: timeout_msg.high_qc_view,
+                                                finalized_height: timeout_msg.finalized_height,
                                                 voter: timeout_msg.voter,
                                                 signature: sig_bytes,
                                                 public_key: pk_bytes,
@@ -2450,6 +2451,40 @@ impl EventLoop {
             )));
         }
 
+        // Forward epoch catch-up: a sync-imported block at an epoch boundary
+        // must cross the boundary exactly like the live path did. Live nodes
+        // transition at `end_height` (transition fires at finalized+1, which
+        // equals `end_height` exactly), so the boundary block itself is signed
+        // by the *new* epoch's validator set — without transitioning first,
+        // `validator_set_for_height(end_height)` finds no covering epoch and
+        // the import stalls (the June 2026 testnet halt on v1). The loop walks
+        // across *every* due boundary (a node rejoining after >1 epoch offline
+        // needs more than one transition), staging the registry plan before
+        // each. Gated by `should_transition`, so this is strictly forward
+        // catch-up, never historical replay.
+        while consensus
+            .epoch_manager()
+            .should_transition(block.height())
+        {
+            if let Some(registry) = self.validator_registry.as_ref() {
+                Self::stage_registry_epoch_plan(&consensus.epoch_manager(), registry);
+            }
+            let transitioned = consensus
+                .transition_epoch_if_due(block.height())
+                .map_err(|e| {
+                    crate::error::NodeError::Other(format!(
+                        "block-sync epoch transition at height {} failed: {}",
+                        block.height(),
+                        e
+                    ))
+                })?;
+            if !transitioned {
+                // Lost a benign race with the engine's own finalize path —
+                // the boundary is already crossed.
+                break;
+            }
+        }
+
         // (2) Verify QC: every vote's signature, validator membership, key binding,
         // no duplicates, voting power meets quorum threshold.
         //
@@ -2491,6 +2526,65 @@ impl EventLoop {
         );
 
         self.handle_block_finalized_inner(block, true).await
+    }
+
+    /// Stages the validator-registry transition plan for the next epoch onto
+    /// the `EpochManager` pending queues (`add_pending_validator` /
+    /// `remove_pending_validator`). The HotStuff-2 engine drains those queues
+    /// inside `transition_epoch`. Idempotent within an epoch window. Called
+    /// from the live finalize hook (one block before the boundary) and the
+    /// block-sync import path (at the boundary block itself).
+    fn stage_registry_epoch_plan(
+        em: &Arc<tenzro_consensus::EpochManager>,
+        registry: &Arc<tenzro_token::ValidatorRegistry>,
+    ) {
+        let next_epoch = em.current_epoch().number + 1;
+        let plan = registry.compute_epoch_transition(next_epoch);
+        debug!(
+            next_epoch = next_epoch,
+            activations = plan.effective_activations.len(),
+            exits = plan.effective_exits.len(),
+            "Computed registry epoch transition plan"
+        );
+
+        // Effective activations → ValidatorInfo upsert into pending.
+        for addr in &plan.effective_activations {
+            let entry = match registry.get(addr) {
+                Some(e) => e,
+                None => {
+                    warn!(
+                        address = %addr,
+                        "Registry returned activation for unknown entry; skipping"
+                    );
+                    continue;
+                }
+            };
+            if entry.consensus_pubkey.len() != 32 {
+                warn!(
+                    address = %addr,
+                    len = entry.consensus_pubkey.len(),
+                    "Skipping activation: consensus pubkey not 32 bytes"
+                );
+                continue;
+            }
+            let pk = tenzro_crypto::PublicKey::new(
+                tenzro_crypto::KeyType::Ed25519,
+                entry.consensus_pubkey.clone(),
+            );
+            let info = tenzro_consensus::validator::ValidatorInfo::new(
+                entry.address,
+                pk,
+                entry.pq_pubkey.clone(),
+                entry.bls_pubkey.clone(),
+                entry.self_stake,
+            );
+            em.add_pending_validator(info);
+        }
+
+        // Effective exits → drop from active set in next epoch.
+        for addr in &plan.effective_exits {
+            em.remove_pending_validator(addr);
+        }
     }
 
     async fn handle_block_finalized_inner(
@@ -2981,13 +3075,11 @@ impl EventLoop {
         // both paths observing the same height threshold; queueing pending
         // entries is idempotent within an epoch.
         //
-        // Skip for sync-imported blocks. Replaying historical epoch
-        // transitions would mutate live `EpochManager` state with obsolete
-        // plans (pending_validators / pending_removals from old epochs)
-        // and corrupt the active validator set the live consensus engine
-        // is operating against. The caller (BlockSyncEngine) catches the
-        // engine up to the network's current epoch via
-        // `resume_from_synced_height` once sync completes.
+        // Skip for sync-imported blocks: the import path
+        // (`handle_block_imported_from_sync`) stages the plan and crosses
+        // the boundary itself, at the moment it imports the boundary block —
+        // a forward catch-up that mirrors this live hook one boundary at a
+        // time, in order.
         if !from_sync
             && let (Some(consensus), Some(registry)) =
             (self.consensus.as_ref(), self.validator_registry.as_ref())
@@ -2998,52 +3090,39 @@ impl EventLoop {
             let next_height =
                 tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
             if em.should_transition(next_height) {
-                let next_epoch = em.current_epoch().number + 1;
-                let plan = registry.compute_epoch_transition(next_epoch);
-                debug!(
-                    next_epoch = next_epoch,
-                    activations = plan.effective_activations.len(),
-                    exits = plan.effective_exits.len(),
-                    "Computed registry epoch transition plan"
-                );
+                Self::stage_registry_epoch_plan(&em, registry);
+            }
+        }
 
-                // Effective activations → ValidatorInfo upsert into pending.
-                for addr in &plan.effective_activations {
-                    let entry = match registry.get(addr) {
-                        Some(e) => e,
-                        None => {
-                            warn!(
-                                address = %addr,
-                                "Registry returned activation for unknown entry; skipping"
-                            );
-                            continue;
-                        }
-                    };
-                    if entry.consensus_pubkey.len() != 32 {
-                        warn!(
-                            address = %addr,
-                            len = entry.consensus_pubkey.len(),
-                            "Skipping activation: consensus pubkey not 32 bytes"
-                        );
-                        continue;
-                    }
-                    let pk = tenzro_crypto::PublicKey::new(
-                        tenzro_crypto::KeyType::Ed25519,
-                        entry.consensus_pubkey.clone(),
-                    );
-                    let info = tenzro_consensus::validator::ValidatorInfo::new(
-                        entry.address,
-                        pk,
-                        entry.pq_pubkey.clone(),
-                        entry.bls_pubkey.clone(),
-                        entry.self_stake,
-                    );
-                    em.add_pending_validator(info);
+        // Follower epoch catch-up: on a node whose engine is not running the
+        // finalize path (gossip-imported blocks advance storage without the
+        // engine voting — the June 2026 v1 stall), nothing else crosses the
+        // epoch boundary. The EpochManager goes stale, `validator_set_for_height`
+        // stops resolving for new blocks, and the stage-early hook above floods
+        // logs every block. Walk forward across every due boundary here. On a
+        // healthy validator the engine's own finalize handler has already
+        // transitioned before this runs, so `should_transition(block_height)`
+        // is false and this is a no-op; a benign race resolves inside
+        // `transition_epoch` under the epoch write lock (loser sees `false`).
+        // Live path never fails finalization on a transition error — warn and
+        // retry on the next block.
+        if !from_sync && let Some(consensus) = self.consensus.as_ref() {
+            let em = consensus.epoch_manager();
+            while em.should_transition(block_height) {
+                if let Some(registry) = self.validator_registry.as_ref() {
+                    Self::stage_registry_epoch_plan(&em, registry);
                 }
-
-                // Effective exits → drop from active set in next epoch.
-                for addr in &plan.effective_exits {
-                    em.remove_pending_validator(addr);
+                match consensus.transition_epoch_if_due(block_height) {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(e) => {
+                        warn!(
+                            height = %block_height,
+                            error = %e,
+                            "Follower epoch catch-up transition failed; retrying next block"
+                        );
+                        break;
+                    }
                 }
             }
         }
@@ -4771,11 +4850,15 @@ fn verify_transaction_signature(signed_tx: &SignedTransaction) -> Result<()> {
     //    victim on every node that admits the tx via gossip.
     //    `PublicKey::to_address()` already implements the deterministic
     //    derivation (SHA-256 first-20 for Ed25519, Keccak-256 last-20 for
-    //    Secp256k1). Address is a 32-byte canonical slot; compare in
-    //    constant time to avoid an oracle on partial-match length.
+    //    Secp256k1) and returns the 20-byte address. `tenzro_types::Address`
+    //    is the canonical 32-byte slot with the address left-aligned
+    //    (addr20 || 12 zero bytes). Expand before comparing in constant
+    //    time: ct_eq on slices of unequal length is always false.
     let public_key = PublicKey::new(KeyType::Ed25519, signed_tx.signature.public_key.clone());
     let derived = public_key.to_address();
-    if !bool::from(derived.as_bytes().ct_eq(signed_tx.transaction.from.as_bytes())) {
+    let mut expected_from = [0u8; 32];
+    expected_from[..20].copy_from_slice(derived.as_bytes());
+    if !bool::from(expected_from.ct_eq(signed_tx.transaction.from.as_bytes())) {
         return Err(NodeError::InvalidTransaction(
             "Signature public_key does not derive the declared 'from' address".to_string(),
         ));

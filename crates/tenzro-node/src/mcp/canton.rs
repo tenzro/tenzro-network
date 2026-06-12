@@ -185,6 +185,11 @@ pub struct CantonGrantUserRightsParams {
     #[schemars(description = "Grant CanReadAs (default: false)")]
     #[serde(default)]
     pub can_read_as: bool,
+    #[schemars(
+        description = "Canton IdentityProviderConfig id the user lives under. Required for IDP-scoped users (Stage 2 tenants); omit for users in the participant's default IDP."
+    )]
+    #[serde(default)]
+    pub identity_provider_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -248,7 +253,8 @@ fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthrou
 /// Canton MCP Server providing 14 tools for Canton Network / DAML interaction.
 ///
 /// Communicates with a Canton participant node via:
-/// - JSON Ledger API v2 (e.g. `https://json.devnet.tenzro.network/v2`)
+/// - JSON Ledger API v2 — `ledger_api_url` is the BASE url (e.g.
+///   `https://json.devnet.tenzro.network`); request paths append `/v2/...`
 /// - Admin API (e.g. `https://admin.devnet.tenzro.network`)
 ///
 /// Authentication precedence:
@@ -804,10 +810,15 @@ impl CantonMcpServer {
             }));
         }
         // Canton 3.5: userId MUST also be in the body, not just URL.
-        let body = serde_json::json!({
+        // IDP-scoped users additionally need identityProviderId in the
+        // body or Canton resolves them in the default IDP and 403s.
+        let mut body = serde_json::json!({
             "userId": user_id,
             "rights": rights,
         });
+        if let Some(idp) = params.identity_provider_id.as_deref() {
+            body["identityProviderId"] = serde_json::Value::String(idp.to_string());
+        }
         let path = format!("/users/{}/rights", urlencoding::encode(&user_id));
         let response = self.ledger_post(&path, &body).await?;
         json_result(response)

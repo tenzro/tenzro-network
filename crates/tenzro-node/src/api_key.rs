@@ -302,10 +302,18 @@ pub struct ApiKeyRecord {
 
     /// Stage 2.b: the upstream OAuth client_id minted for this
     /// tenant. Used by `tenzro_revokeApiKey` to delete the upstream
-    /// client. The `client_secret` is NOT stored — the tenant holds
-    /// it exclusively.
+    /// client and, together with `tenant_oauth_client_secret`, by the
+    /// canton dispatch path to mint tenant JWTs server-side.
     #[serde(default)]
     pub tenant_oauth_client_id: Option<String>,
+
+    /// Stage 2.b: the upstream OAuth client_secret minted for this
+    /// tenant. Stored so the node can mint + cache the tenant's
+    /// Canton JWT itself — the tenant's only credential is the
+    /// `tnz_...` API key and it never sees OAuth material. Never
+    /// logged, never returned over RPC.
+    #[serde(default)]
+    pub tenant_oauth_client_secret: Option<String>,
 
     /// Agent delegation: fully-qualified party ids the key is allowed
     /// to act for. Empty = no per-party restriction (legacy keys before
@@ -668,6 +676,7 @@ impl ApiKeyManager {
         canton_user_id: Option<String>,
         canton_identity_provider_id: Option<String>,
         tenant_oauth_client_id: Option<String>,
+        tenant_oauth_client_secret: Option<String>,
     ) -> Result<IssuedApiKey> {
         self.issue_with_delegation(
             subject,
@@ -677,6 +686,7 @@ impl ApiKeyManager {
             canton_user_id,
             canton_identity_provider_id,
             tenant_oauth_client_id,
+            tenant_oauth_client_secret,
             AgentDelegation::default(),
         )
     }
@@ -697,6 +707,7 @@ impl ApiKeyManager {
         canton_user_id: Option<String>,
         canton_identity_provider_id: Option<String>,
         tenant_oauth_client_id: Option<String>,
+        tenant_oauth_client_secret: Option<String>,
         delegation: AgentDelegation,
     ) -> Result<IssuedApiKey> {
         if scopes.is_empty() {
@@ -727,6 +738,7 @@ impl ApiKeyManager {
             canton_user_id,
             canton_identity_provider_id,
             tenant_oauth_client_id,
+            tenant_oauth_client_secret,
             can_act_as_parties: delegation.can_act_as_parties,
             can_read_as_parties: delegation.can_read_as_parties,
             allowed_templates: delegation.allowed_templates,
@@ -1004,6 +1016,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
         assert!(issued.key.starts_with("tnz_"));
@@ -1017,7 +1030,7 @@ mod tests {
     fn admin_revoke_makes_key_unusable() {
         let mgr = ApiKeyManager::new(mem_store()).unwrap();
         let issued = mgr
-            .issue(None, "to revoke", vec![ApiKeyScope::Canton], KeyClass::Subject, None, None, None)
+            .issue(None, "to revoke", vec![ApiKeyScope::Canton], KeyClass::Subject, None, None, None, None)
             .unwrap();
         let outcome = mgr.revoke_by_id_admin(&issued.record.key_id).unwrap();
         assert_eq!(outcome, AdminRevokeOutcome::Revoked);
@@ -1033,6 +1046,7 @@ mod tests {
                 "locked",
                 vec![ApiKeyScope::Canton],
                 KeyClass::OperatorProtected,
+                None,
                 None,
                 None,
                 None,
@@ -1063,6 +1077,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
         let bob = mgr
@@ -1071,6 +1086,7 @@ mod tests {
                 "bob",
                 vec![ApiKeyScope::Canton],
                 KeyClass::Subject,
+                None,
                 None,
                 None,
                 None,
@@ -1105,6 +1121,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .unwrap();
             let outcome = mgr
@@ -1130,6 +1147,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         mgr.issue(
@@ -1140,6 +1158,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         mgr.issue(
@@ -1147,6 +1166,7 @@ mod tests {
             "bob-1",
             vec![ApiKeyScope::Canton],
             KeyClass::Subject,
+            None,
             None,
             None,
             None,
@@ -1198,7 +1218,7 @@ mod tests {
     fn authorize_rejects_revoked_key() {
         let mgr = ApiKeyManager::new(mem_store()).unwrap();
         let issued = mgr
-            .issue(None, "tmp", vec![ApiKeyScope::Canton], KeyClass::Subject, None, None, None)
+            .issue(None, "tmp", vec![ApiKeyScope::Canton], KeyClass::Subject, None, None, None, None)
             .unwrap();
         mgr.revoke_by_id_admin(&issued.record.key_id).unwrap();
         let outcome = mgr.authorize(Some(&issued.key), "tenzro_listCantonDomains");
@@ -1215,6 +1235,7 @@ mod tests {
                 "persisted",
                 vec![ApiKeyScope::Canton],
                 KeyClass::Subject,
+                None,
                 None,
                 None,
                 None,

@@ -229,6 +229,24 @@ impl EpochManager {
                 "Hydrated EpochManager from persistent store"
             );
 
+            // Surface drifted records persisted by pre-canonical-schedule
+            // builds. The walk in `transition_epoch` heals this as soon as
+            // the node observes a height whose canonical epoch index is
+            // ahead of the hydrated number.
+            let canonical_start = current.number * epoch_duration;
+            if current.start_height.as_u64() != canonical_start
+                || current.end_height.as_u64() != canonical_start + epoch_duration
+            {
+                tracing::warn!(
+                    epoch = current.number,
+                    start_height = %current.start_height,
+                    end_height = %current.end_height,
+                    canonical_start,
+                    canonical_end = canonical_start + epoch_duration,
+                    "Hydrated epoch is off the canonical schedule; will re-anchor on next due transition"
+                );
+            }
+
             (current, history)
         };
 
@@ -259,9 +277,20 @@ impl EpochManager {
         self.current_epoch.read().validator_set.clone()
     }
 
-    /// Checks if it's time to transition to the next epoch
+    /// Checks if it's time to transition to the next epoch.
+    ///
+    /// The epoch schedule is canonical and derived purely from height:
+    /// the epoch covering height `h` is `h / epoch_duration`. A transition
+    /// is due whenever the canonical epoch index for `height` is ahead of
+    /// the current epoch number — including when the current epoch carries
+    /// drifted boundaries persisted by an earlier buggy transition (whose
+    /// `end_height` could be arbitrarily far in the future). Deriving the
+    /// due-check from the canonical schedule instead of `end_height` lets
+    /// such a node walk back onto the fleet-wide schedule, which matters
+    /// because the epoch number seeds reputation-based leader election —
+    /// divergent epoch numbers mean divergent leaders per view.
     pub fn should_transition(&self, height: BlockHeight) -> bool {
-        height >= self.current_epoch.read().end_height
+        height.as_u64() / self.epoch_duration > self.current_epoch.read().number
     }
 
     /// Transitions to the next epoch
@@ -270,16 +299,25 @@ impl EpochManager {
     /// no other thread can read or modify the epoch during transition.
     /// History and pending validators are updated atomically within the same
     /// critical section to prevent split-brain scenarios.
-    pub fn transition_epoch(&self, height: BlockHeight) -> Result<ValidatorSet> {
+    ///
+    /// Returns `Ok(None)` when the canonical epoch index for `height`
+    /// (`height / epoch_duration`) is not ahead of the current epoch
+    /// number — including the case where a concurrent caller won the
+    /// race and already transitioned. The due-check runs under the same
+    /// write lock as the transition itself, so two racing callers (the
+    /// engine's finalize path and the node's follower path) resolve to
+    /// exactly one transition.
+    pub fn transition_epoch(&self, height: BlockHeight) -> Result<Option<ValidatorSet>> {
         // Acquire write lock for atomic transition
         // This prevents any concurrent reads or writes to the current epoch
         let mut current = self.current_epoch.write();
 
-        if height < current.end_height {
-            return Err(ConsensusError::EpochTransition(format!(
-                "Too early to transition: current height {}, epoch ends at {}",
-                height, current.end_height
-            )));
+        // Canonical due-check: derived from the height-based schedule, NOT
+        // from `current.end_height`. A current epoch carrying drifted
+        // boundaries (persisted by an earlier buggy transition) must not be
+        // able to pin the node off-schedule — see `should_transition`.
+        if height.as_u64() / self.epoch_duration <= current.number {
+            return Ok(None);
         }
 
         let next_epoch_number = current.number + 1;
@@ -313,9 +351,15 @@ impl EpochManager {
         // Create new validator set - this can fail, so we do it before modifying state
         let validator_set = ValidatorSet::new(next_epoch_number, next_validators)?;
 
-        // Calculate next epoch boundaries
-        let start_height = height;
-        let end_height = height + self.epoch_duration;
+        // Calculate next epoch boundaries canonically from the epoch number —
+        // NOT from the height the caller happened to transition at, and NOT
+        // from the outgoing epoch's end_height (which may carry persisted
+        // drift). Epoch N covers exactly [N * duration, (N+1) * duration),
+        // fleet-wide, unconditionally. A node that transitions late (after
+        // catching up from a stall) or that hydrated a drifted epoch record
+        // walks back onto the same schedule as everyone else.
+        let start_height = BlockHeight::from(next_epoch_number * self.epoch_duration);
+        let end_height = start_height + self.epoch_duration;
 
         // Create new epoch
         let new_epoch = Epoch::new(
@@ -421,7 +465,7 @@ impl EpochManager {
             "Epoch transition completed atomically"
         );
 
-        Ok(validator_set)
+        Ok(Some(validator_set))
     }
 
     /// Queues a validator add/update for the next epoch. If `validator.address`
@@ -478,16 +522,24 @@ impl EpochManager {
 
     /// Returns an epoch from history
     pub fn get_epoch(&self, epoch_number: u64) -> Option<Epoch> {
-        let current = self.current_epoch.read();
-        if current.number == epoch_number {
-            return Some(current.clone());
+        {
+            let current = self.current_epoch.read();
+            if current.number == epoch_number {
+                return Some(current.clone());
+            }
         }
 
-        self.epoch_history
+        if let Some(epoch) = self
+            .epoch_history
             .read()
             .iter()
             .find(|e| e.number == epoch_number)
             .cloned()
+        {
+            return Some(epoch);
+        }
+
+        self.find_in_store(|e| e.number == epoch_number)
     }
 
     /// Returns the validator set for a specific epoch
@@ -498,16 +550,53 @@ impl EpochManager {
 
     /// Returns the epoch for a given block height
     pub fn get_epoch_for_height(&self, height: BlockHeight) -> Option<Epoch> {
-        let current = self.current_epoch.read();
-        if current.contains(height) {
-            return Some(current.clone());
+        {
+            let current = self.current_epoch.read();
+            if current.contains(height) {
+                return Some(current.clone());
+            }
         }
 
-        self.epoch_history
+        if let Some(epoch) = self
+            .epoch_history
             .read()
             .iter()
             .find(|e| e.contains(height))
             .cloned()
+        {
+            return Some(epoch);
+        }
+
+        self.find_in_store(|e| e.contains(height))
+    }
+
+    /// Scans the persistent store for an epoch matching `pred`.
+    ///
+    /// Fallback for lookups that miss the in-memory working set (current +
+    /// bounded history). Scans newest-first because callers overwhelmingly
+    /// ask about recent heights (block-sync import across a boundary just
+    /// outside the in-memory window). Returns `None` when no store is
+    /// attached or nothing matches.
+    fn find_in_store(&self, pred: impl Fn(&Epoch) -> bool) -> Option<Epoch> {
+        let store = self.store.as_ref()?;
+        let records = match store.load_all_epochs() {
+            Ok(records) => records,
+            Err(e) => {
+                tracing::warn!(error = %e, "Epoch store scan failed");
+                return None;
+            }
+        };
+
+        records.iter().rev().find_map(|bytes| {
+            match bincode::deserialize::<Epoch>(bytes) {
+                Ok(epoch) if pred(&epoch) => Some(epoch),
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Skipping undecodable epoch record in store");
+                    None
+                }
+            }
+        })
     }
 
     /// Returns epoch statistics
@@ -595,13 +684,53 @@ mod tests {
         assert!(!manager.should_transition(BlockHeight::from(50)));
         assert!(manager.should_transition(BlockHeight::from(100)));
 
+        // Not yet due → Ok(None), state unchanged
+        assert!(manager
+            .transition_epoch(BlockHeight::from(50))
+            .unwrap()
+            .is_none());
+        assert_eq!(manager.current_epoch().number, 0);
+
         // Transition to next epoch
-        let _new_validators = manager.transition_epoch(BlockHeight::from(100)).unwrap();
+        let new_validators = manager.transition_epoch(BlockHeight::from(100)).unwrap();
+        assert!(new_validators.is_some());
 
         let epoch = manager.current_epoch();
         assert_eq!(epoch.number, 1);
         assert_eq!(epoch.start_height, BlockHeight::from(100));
         assert_eq!(epoch.end_height, BlockHeight::from(200));
+    }
+
+    #[test]
+    fn test_late_epoch_transition_keeps_fleet_schedule() {
+        // A node that transitions LATE (caught up after a stall) must land on
+        // the same epoch boundaries as nodes that transitioned exactly at
+        // end_height — boundaries anchor to the outgoing epoch's end_height,
+        // not the height the caller happened to pass.
+        let validators = vec![create_test_validator(1000)];
+        let manager = EpochManager::new(validators, 100).unwrap();
+
+        // Transition fires late, at height 789 instead of 100.
+        let next = manager.transition_epoch(BlockHeight::from(789)).unwrap();
+        assert!(next.is_some());
+
+        let epoch = manager.current_epoch();
+        assert_eq!(epoch.number, 1);
+        assert_eq!(epoch.start_height, BlockHeight::from(100));
+        assert_eq!(epoch.end_height, BlockHeight::from(200));
+
+        // Walking forward (multi-epoch catch-up) keeps converging on the
+        // canonical schedule.
+        while manager.should_transition(BlockHeight::from(789)) {
+            manager
+                .transition_epoch(BlockHeight::from(789))
+                .unwrap()
+                .expect("due transition must produce a set");
+        }
+        let epoch = manager.current_epoch();
+        assert_eq!(epoch.number, 7);
+        assert_eq!(epoch.start_height, BlockHeight::from(700));
+        assert_eq!(epoch.end_height, BlockHeight::from(800));
     }
 
     #[test]
@@ -617,7 +746,10 @@ mod tests {
         manager.add_pending_validator(v3.clone());
         assert_eq!(manager.pending_validators().len(), 1);
 
-        let next = manager.transition_epoch(BlockHeight::from(100)).unwrap();
+        let next = manager
+            .transition_epoch(BlockHeight::from(100))
+            .unwrap()
+            .expect("transition due");
 
         assert_eq!(next.len(), 4, "next epoch must MERGE pending into current");
         assert!(next.iter().any(|v| v.address == v0.address));
@@ -642,7 +774,10 @@ mod tests {
         manager.remove_pending_validator(&v1.address);
         assert_eq!(manager.pending_removals().len(), 1);
 
-        let next = manager.transition_epoch(BlockHeight::from(100)).unwrap();
+        let next = manager
+            .transition_epoch(BlockHeight::from(100))
+            .unwrap()
+            .expect("transition due");
 
         assert_eq!(next.len(), 2);
         assert!(next.iter().any(|v| v.address == v0.address));
@@ -666,7 +801,10 @@ mod tests {
         let v0_updated = ValidatorInfo::new(v0_addr, v0_pk, v0_pq, v0_bls, 5000);
         manager.add_pending_validator(v0_updated);
 
-        let next = manager.transition_epoch(BlockHeight::from(100)).unwrap();
+        let next = manager
+            .transition_epoch(BlockHeight::from(100))
+            .unwrap()
+            .expect("transition due");
 
         assert_eq!(next.len(), 1, "upsert must not duplicate");
         let only = next.get(0).unwrap();
@@ -695,7 +833,10 @@ mod tests {
             "add must be dropped when subsequent remove targets same address"
         );
 
-        let next = manager.transition_epoch(BlockHeight::from(100)).unwrap();
+        let next = manager
+            .transition_epoch(BlockHeight::from(100))
+            .unwrap()
+            .expect("transition due");
 
         // Only original v0 remains; v_new was added then removed
         assert_eq!(next.len(), 1);
@@ -726,9 +867,82 @@ mod tests {
             "subsequent add for same address must clear pending removal"
         );
 
-        let next = manager.transition_epoch(BlockHeight::from(100)).unwrap();
+        let next = manager
+            .transition_epoch(BlockHeight::from(100))
+            .unwrap()
+            .expect("transition due");
         assert_eq!(next.len(), 1);
         assert_eq!(next.get(0).unwrap().stake, 7777);
+    }
+
+    #[test]
+    fn test_drifted_persisted_epoch_heals_onto_canonical_schedule() {
+        // Fleet condition observed 2026-06-12: a node hydrates an epoch
+        // record whose number AND boundaries drifted (pre-canonical builds
+        // anchored boundaries to caller heights). Epoch number seeds
+        // reputation-based leader election, so divergent numbers across
+        // the fleet break leader agreement. The canonical due-check must
+        // fire even though the drifted end_height is far in the future,
+        // and walking must land exactly on the canonical schedule.
+        struct MemStore(parking_lot::Mutex<std::collections::BTreeMap<u64, Vec<u8>>>);
+        impl EpochStateStore for MemStore {
+            fn put_epoch(&self, epoch_number: u64, bytes: Vec<u8>) -> Result<()> {
+                self.0.lock().insert(epoch_number, bytes);
+                Ok(())
+            }
+            fn load_all_epochs(&self) -> Result<Vec<Vec<u8>>> {
+                Ok(self.0.lock().values().cloned().collect())
+            }
+        }
+
+        let validators = vec![create_test_validator(1000)];
+        let validator_set = ValidatorSet::new(3, validators.clone()).unwrap();
+
+        // Drifted record: epoch 3 claiming to cover [95_000, 195_000) —
+        // number says 3, canonical epoch 3 is [30_000, 40_000).
+        let drifted = Epoch::new(
+            3,
+            BlockHeight::from(95_000),
+            BlockHeight::from(195_000),
+            validator_set,
+        );
+        let store = Arc::new(MemStore(parking_lot::Mutex::new(
+            std::collections::BTreeMap::new(),
+        )));
+        store
+            .put_epoch(3, bincode::serialize(&drifted).unwrap())
+            .unwrap();
+
+        let manager = EpochManager::with_store(validators, 10_000, store).unwrap();
+        assert_eq!(manager.current_epoch().number, 3);
+
+        // Chain tip at 106_000 → canonical epoch 10. The drifted
+        // end_height (195_000) must NOT suppress the transition.
+        let tip = BlockHeight::from(106_000);
+        assert!(manager.should_transition(tip));
+
+        while manager.should_transition(tip) {
+            manager
+                .transition_epoch(tip)
+                .unwrap()
+                .expect("due transition must produce a set");
+        }
+
+        let epoch = manager.current_epoch();
+        assert_eq!(epoch.number, 10);
+        assert_eq!(epoch.start_height, BlockHeight::from(100_000));
+        assert_eq!(epoch.end_height, BlockHeight::from(110_000));
+
+        // Every walked epoch landed canonically.
+        for n in 4..=9u64 {
+            let e = manager.get_epoch(n).expect("walked epoch persisted");
+            assert_eq!(e.start_height.as_u64(), n * 10_000);
+            assert_eq!(e.end_height.as_u64(), (n + 1) * 10_000);
+        }
+
+        // Heights inside the current canonical window must NOT be due.
+        assert!(!manager.should_transition(BlockHeight::from(109_999)));
+        assert!(manager.should_transition(BlockHeight::from(110_000)));
     }
 
     #[test]
