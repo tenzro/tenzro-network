@@ -1105,31 +1105,58 @@ def quote_task(task_id: str, provider: str, price_wei: int,
 # ── Agent Template Marketplace ───────────────────────────────────
 
 
-def list_agent_templates(agent_type: str = None) -> dict:
+def list_agent_templates(tag: str = None, creator: str = None,
+                         free_only: bool = False, limit: int = 50) -> dict:
     """List available agent templates.
 
-    agent_type: autonomous | tool_agent | orchestrator | specialist | multi_modal
+    tag: filter by tag
+    creator: filter by hex creator address
+    free_only: only return free-pricing templates
     """
-    params = {}
-    if agent_type:
-        params["agent_type"] = agent_type
+    params = {"limit": limit}
+    if tag:
+        params["tag"] = tag
+    if creator:
+        params["creator"] = creator
+    if free_only:
+        params["free_only"] = True
     return _rpc("tenzro_listAgentTemplates", params)
 
 
 def register_agent_template(name: str, description: str,
-                            agent_type: str,
-                            system_prompt: str = None,
-                            capabilities: list = None) -> dict:
-    """Register a new agent template on the marketplace."""
+                            template_type: str,
+                            creator: str,
+                            system_prompt: str = "",
+                            tags: list = None,
+                            template_id: str = None,
+                            pricing: str = "free",
+                            creator_did: str = None,
+                            creator_wallet: str = None) -> dict:
+    """Register a new agent template on the marketplace.
+
+    template_type: autonomous | tool_agent | orchestrator | specialist | multi_modal
+    creator: hex-encoded (0x-prefixed) creator address — required by the node
+    template_id: optional stable id (e.g. "ref-..."); registration fails if it
+        already exists. When omitted the node mints a UUID.
+    pricing: "free", "per_execution:<wei>", "per_token:<wei>",
+        "subscription:<wei>", or "revenue_share:<bps>". Non-free pricing
+        requires creator_wallet.
+    """
     params = {
         "name": name,
         "description": description,
-        "agent_type": agent_type,
+        "template_type": template_type,
+        "creator": creator,
+        "system_prompt": system_prompt,
+        "tags": tags or [],
+        "pricing": pricing,
     }
-    if system_prompt:
-        params["system_prompt"] = system_prompt
-    if capabilities:
-        params["capabilities"] = capabilities
+    if template_id:
+        params["template_id"] = template_id
+    if creator_did:
+        params["creator_did"] = creator_did
+    if creator_wallet:
+        params["creator_wallet"] = creator_wallet
     return _rpc("tenzro_registerAgentTemplate", params)
 
 

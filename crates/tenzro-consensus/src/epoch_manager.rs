@@ -5,7 +5,7 @@ use crate::validator::{ValidatorInfo, ValidatorSet};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tenzro_types::primitives::{BlockHeight, Timestamp};
+use tenzro_types::primitives::{BlockHeight, Hash, Timestamp};
 
 /// Persistence backend for epoch state.
 ///
@@ -52,6 +52,16 @@ pub struct Epoch {
 
     /// Epoch start timestamp
     pub start_time: Timestamp,
+
+    /// Deterministic leader-election seed anchor for this epoch.
+    ///
+    /// Fixed at transition time to the finalized block hash at the
+    /// canonical epoch boundary height (`number * epoch_duration`), so
+    /// every node derives the identical reputation seed for every view in
+    /// the epoch regardless of where its local finalized tip currently
+    /// sits. Epoch 0 uses `Hash::default()` (genesis has no prior
+    /// finalized block).
+    pub seed_anchor: Hash,
 }
 
 impl Epoch {
@@ -61,6 +71,7 @@ impl Epoch {
         start_height: BlockHeight,
         end_height: BlockHeight,
         validator_set: ValidatorSet,
+        seed_anchor: Hash,
     ) -> Self {
         Self {
             number,
@@ -68,6 +79,7 @@ impl Epoch {
             end_height,
             validator_set,
             start_time: Timestamp::now(),
+            seed_anchor,
         }
     }
 
@@ -151,6 +163,7 @@ impl EpochManager {
             BlockHeight::from(0),
             BlockHeight::from(epoch_duration),
             validator_set,
+            Hash::default(),
         );
 
         Ok(Self {
@@ -194,6 +207,7 @@ impl EpochManager {
                 BlockHeight::from(0),
                 BlockHeight::from(epoch_duration),
                 validator_set,
+                Hash::default(),
             );
             let bytes = bincode::serialize(&epoch).map_err(|e| {
                 ConsensusError::Internal(format!("bootstrap epoch 0 encode: {e}"))
@@ -204,19 +218,48 @@ impl EpochManager {
             (epoch, Vec::new())
         } else {
             // Decode all, sort by epoch number (defensive — store may not order).
+            // Records persisted under an older Epoch schema fail to decode;
+            // drop them (logged) — the canonical-schedule walk in
+            // `transition_epoch` re-derives the live epoch from observed
+            // heights, so losing stale records only costs history depth.
             let mut decoded: Vec<Epoch> = persisted
                 .into_iter()
-                .map(|bytes| {
-                    bincode::deserialize::<Epoch>(&bytes).map_err(|e| {
-                        ConsensusError::Internal(format!("epoch decode: {e}"))
-                    })
+                .filter_map(|bytes| match bincode::deserialize::<Epoch>(&bytes) {
+                    Ok(epoch) => Some(epoch),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Dropping undecodable persisted epoch record (schema change); canonical walk will re-derive");
+                        None
+                    }
                 })
-                .collect::<Result<Vec<_>>>()?;
+                .collect();
             decoded.sort_by_key(|e| e.number);
 
-            let current = decoded
-                .pop()
-                .expect("non-empty after is_empty check");
+            let Some(current) = decoded.pop() else {
+                // Every persisted record was undecodable — bootstrap fresh.
+                let validator_set = ValidatorSet::new(0, initial_validators)?;
+                let epoch = Epoch::new(
+                    0,
+                    BlockHeight::from(0),
+                    BlockHeight::from(epoch_duration),
+                    validator_set,
+                    Hash::default(),
+                );
+                let bytes = bincode::serialize(&epoch).map_err(|e| {
+                    ConsensusError::Internal(format!("bootstrap epoch 0 encode: {e}"))
+                })?;
+                if let Err(e) = store.put_epoch(0, bytes) {
+                    tracing::warn!(error = %e, "Failed to persist bootstrap epoch 0; continuing in-memory");
+                }
+                return Ok(Self {
+                    current_epoch: Arc::new(RwLock::new(epoch)),
+                    epoch_duration,
+                    pending_validators: Arc::new(RwLock::new(Vec::new())),
+                    pending_removals: Arc::new(RwLock::new(Vec::new())),
+                    epoch_history: Arc::new(RwLock::new(Vec::new())),
+                    max_history: 10,
+                    store: Some(store),
+                });
+            };
 
             // Tail is history; cap to max_history (oldest first).
             let max_history = 10usize;
@@ -307,7 +350,23 @@ impl EpochManager {
     /// write lock as the transition itself, so two racing callers (the
     /// engine's finalize path and the node's follower path) resolve to
     /// exactly one transition.
-    pub fn transition_epoch(&self, height: BlockHeight) -> Result<Option<ValidatorSet>> {
+    ///
+    /// `anchor_of` resolves the finalized block hash at the new epoch's
+    /// canonical boundary height — it is invoked inside the critical
+    /// section with the exact boundary of the epoch being created, so a
+    /// caller racing another transition can never pair an anchor with the
+    /// wrong epoch number. Returning `None` falls back to
+    /// `Hash::default()` (logged), which only happens when neither the
+    /// in-memory finality tracker nor durable block storage has the
+    /// boundary block.
+    pub fn transition_epoch<F>(
+        &self,
+        height: BlockHeight,
+        anchor_of: F,
+    ) -> Result<Option<ValidatorSet>>
+    where
+        F: FnOnce(BlockHeight) -> Option<Hash>,
+    {
         // Acquire write lock for atomic transition
         // This prevents any concurrent reads or writes to the current epoch
         let mut current = self.current_epoch.write();
@@ -361,12 +420,26 @@ impl EpochManager {
         let start_height = BlockHeight::from(next_epoch_number * self.epoch_duration);
         let end_height = start_height + self.epoch_duration;
 
+        // Resolve the deterministic leader-election seed anchor: the
+        // finalized block hash at the canonical boundary. Every node
+        // resolves the same hash for the same epoch, so reputation seeds
+        // (and therefore elected leaders) are identical fleet-wide.
+        let seed_anchor = anchor_of(start_height).unwrap_or_else(|| {
+            tracing::warn!(
+                epoch = next_epoch_number,
+                boundary = %start_height,
+                "Boundary block hash unavailable at epoch transition; using default seed anchor"
+            );
+            Hash::default()
+        });
+
         // Create new epoch
         let new_epoch = Epoch::new(
             next_epoch_number,
             start_height,
             end_height,
             validator_set.clone(),
+            seed_anchor,
         );
 
         // Now perform all state updates atomically within this critical section
@@ -686,13 +759,13 @@ mod tests {
 
         // Not yet due → Ok(None), state unchanged
         assert!(manager
-            .transition_epoch(BlockHeight::from(50))
+            .transition_epoch(BlockHeight::from(50), |_| None)
             .unwrap()
             .is_none());
         assert_eq!(manager.current_epoch().number, 0);
 
         // Transition to next epoch
-        let new_validators = manager.transition_epoch(BlockHeight::from(100)).unwrap();
+        let new_validators = manager.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
         assert!(new_validators.is_some());
 
         let epoch = manager.current_epoch();
@@ -711,7 +784,7 @@ mod tests {
         let manager = EpochManager::new(validators, 100).unwrap();
 
         // Transition fires late, at height 789 instead of 100.
-        let next = manager.transition_epoch(BlockHeight::from(789)).unwrap();
+        let next = manager.transition_epoch(BlockHeight::from(789), |_| None).unwrap();
         assert!(next.is_some());
 
         let epoch = manager.current_epoch();
@@ -723,7 +796,7 @@ mod tests {
         // canonical schedule.
         while manager.should_transition(BlockHeight::from(789)) {
             manager
-                .transition_epoch(BlockHeight::from(789))
+                .transition_epoch(BlockHeight::from(789), |_| None)
                 .unwrap()
                 .expect("due transition must produce a set");
         }
@@ -747,7 +820,7 @@ mod tests {
         assert_eq!(manager.pending_validators().len(), 1);
 
         let next = manager
-            .transition_epoch(BlockHeight::from(100))
+            .transition_epoch(BlockHeight::from(100), |_| None)
             .unwrap()
             .expect("transition due");
 
@@ -775,7 +848,7 @@ mod tests {
         assert_eq!(manager.pending_removals().len(), 1);
 
         let next = manager
-            .transition_epoch(BlockHeight::from(100))
+            .transition_epoch(BlockHeight::from(100), |_| None)
             .unwrap()
             .expect("transition due");
 
@@ -802,7 +875,7 @@ mod tests {
         manager.add_pending_validator(v0_updated);
 
         let next = manager
-            .transition_epoch(BlockHeight::from(100))
+            .transition_epoch(BlockHeight::from(100), |_| None)
             .unwrap()
             .expect("transition due");
 
@@ -834,7 +907,7 @@ mod tests {
         );
 
         let next = manager
-            .transition_epoch(BlockHeight::from(100))
+            .transition_epoch(BlockHeight::from(100), |_| None)
             .unwrap()
             .expect("transition due");
 
@@ -868,7 +941,7 @@ mod tests {
         );
 
         let next = manager
-            .transition_epoch(BlockHeight::from(100))
+            .transition_epoch(BlockHeight::from(100), |_| None)
             .unwrap()
             .expect("transition due");
         assert_eq!(next.len(), 1);
@@ -905,6 +978,7 @@ mod tests {
             BlockHeight::from(95_000),
             BlockHeight::from(195_000),
             validator_set,
+            Hash::default(),
         );
         let store = Arc::new(MemStore(parking_lot::Mutex::new(
             std::collections::BTreeMap::new(),
@@ -923,7 +997,7 @@ mod tests {
 
         while manager.should_transition(tip) {
             manager
-                .transition_epoch(tip)
+                .transition_epoch(tip, |_| None)
                 .unwrap()
                 .expect("due transition must produce a set");
         }
@@ -950,8 +1024,8 @@ mod tests {
         let validators = vec![create_test_validator(1000)];
         let manager = EpochManager::new(validators, 100).unwrap();
 
-        manager.transition_epoch(BlockHeight::from(100)).unwrap();
-        manager.transition_epoch(BlockHeight::from(200)).unwrap();
+        manager.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
+        manager.transition_epoch(BlockHeight::from(200), |_| None).unwrap();
 
         // Should have epoch 0 in history
         let epoch0 = manager.get_epoch(0);
@@ -967,7 +1041,7 @@ mod tests {
         let validators = vec![create_test_validator(1000)];
         let manager = EpochManager::new(validators, 100).unwrap();
 
-        manager.transition_epoch(BlockHeight::from(100)).unwrap();
+        manager.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
 
         // Height 50 should be in epoch 0
         let epoch = manager.get_epoch_for_height(BlockHeight::from(50));

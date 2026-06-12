@@ -655,10 +655,34 @@ impl EquivocationDetector {
         self.evidence.get(&(*validator, view)).map(|e| e.clone())
     }
 
-    /// Clears votes for views below the given minimum (cleanup)
+    /// Clears votes for views below the given minimum (cleanup).
+    ///
+    /// Prunes both the in-memory vote map AND the persisted
+    /// `equivocation/votes/*` rows — without the persisted delete, every
+    /// restart re-hydrated an unbounded backlog of stale votes that the
+    /// in-memory prune had already discarded (unbounded CF_AUDIT growth
+    /// plus stale-vote mis-fires after view-state resets).
+    ///
+    /// Evidence is deliberately KEPT — in memory and on disk. Evidence is
+    /// the slashing record; pruning it by view would let an equivocator
+    /// outlast the cleanup window and escape the penalty.
     pub fn cleanup_old_votes(&self, min_view: u64) {
-        self.votes.retain(|key, _| key.view >= min_view);
-        self.evidence.retain(|(_, view), _| *view >= min_view);
+        let mut pruned: Vec<ValidatorViewKey> = Vec::new();
+        self.votes.retain(|key, _| {
+            let keep = key.view >= min_view;
+            if !keep {
+                pruned.push(key.clone());
+            }
+            keep
+        });
+        if let Some(ref storage) = self.storage {
+            for key in &pruned {
+                let _ = storage.delete(
+                    tenzro_storage::CF_AUDIT,
+                    &Self::vote_key(&key.validator, key.view),
+                );
+            }
+        }
     }
 
     /// Returns the number of tracked votes

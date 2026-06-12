@@ -113,8 +113,8 @@ fn transition_persists_each_new_epoch() {
     let validators = vec![test_validator(1000)];
 
     let mgr = EpochManager::with_store(validators, 100, store.clone()).unwrap();
-    mgr.transition_epoch(BlockHeight::from(100)).unwrap();
-    mgr.transition_epoch(BlockHeight::from(200)).unwrap();
+    mgr.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
+    mgr.transition_epoch(BlockHeight::from(200), |_| None).unwrap();
 
     let persisted = store.load_all_epochs().unwrap();
     assert_eq!(
@@ -136,8 +136,8 @@ fn restart_hydrates_to_latest_persisted_epoch() {
     {
         let mgr =
             EpochManager::with_store(validators.clone(), 100, store.clone()).unwrap();
-        mgr.transition_epoch(BlockHeight::from(100)).unwrap();
-        mgr.transition_epoch(BlockHeight::from(200)).unwrap();
+        mgr.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
+        mgr.transition_epoch(BlockHeight::from(200), |_| None).unwrap();
         assert_eq!(mgr.current_epoch().number, 2);
     }
 
@@ -179,13 +179,13 @@ fn cross_epoch_validator_set_lookup_survives_restart() {
         .unwrap();
 
         mgr.add_pending_validator(test_validator(3000));
-        mgr.transition_epoch(BlockHeight::from(100)).unwrap();
+        mgr.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
 
         mgr.add_pending_validator(test_validator(4000));
-        mgr.transition_epoch(BlockHeight::from(200)).unwrap();
+        mgr.transition_epoch(BlockHeight::from(200), |_| None).unwrap();
 
         mgr.add_pending_validator(test_validator(5000));
-        mgr.transition_epoch(BlockHeight::from(300)).unwrap();
+        mgr.transition_epoch(BlockHeight::from(300), |_| None).unwrap();
 
         final_size = mgr.current_validator_set().len();
         assert_eq!(final_size, 5, "set grew by 1 per epoch (2 → 3 → 4 → 5)");
@@ -231,7 +231,7 @@ fn cross_epoch_validator_set_lookup_survives_restart() {
 #[test]
 fn ephemeral_new_works_without_store() {
     let mgr = EpochManager::new(vec![test_validator(1000)], 100).unwrap();
-    mgr.transition_epoch(BlockHeight::from(100)).unwrap();
+    mgr.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
     assert_eq!(mgr.current_epoch().number, 1);
 }
 
@@ -253,6 +253,6 @@ fn failing_store_does_not_abort_transition() {
     .unwrap();
 
     // Transition should also succeed in-memory despite the store failing.
-    let _ = mgr.transition_epoch(BlockHeight::from(100)).unwrap();
+    let _ = mgr.transition_epoch(BlockHeight::from(100), |_| None).unwrap();
     assert_eq!(mgr.current_epoch().number, 1);
 }

@@ -297,6 +297,20 @@ pub struct BridgeConfig {
     #[serde(default = "BridgeConfig::default_adapter_enabled")]
     pub wormhole: Option<BridgeAdapterConfig>,
 
+    /// Hyperlane V3 adapter configuration (optional). The adapter itself
+    /// is always constructed (it serves the `tenzro_hyperlane*` RPC
+    /// namespace); this entry supplies the per-origin-domain validator
+    /// sets consumed by inbound ISM verification.
+    #[serde(default = "BridgeConfig::default_adapter_enabled")]
+    pub hyperlane: Option<BridgeAdapterConfig>,
+
+    /// Axelar GMP adapter configuration (optional). The adapter itself
+    /// is always constructed (it serves the `tenzro_axelar*` RPC
+    /// namespace); this entry supplies the validator set consumed by
+    /// inbound GMP signature verification.
+    #[serde(default = "BridgeConfig::default_adapter_enabled")]
+    pub axelar: Option<BridgeAdapterConfig>,
+
     /// Chainlink Data Feeds configuration for the fee-in-TNZO oracle.
     /// When set + `enabled = true`, the bridge router's fee surface uses
     /// `ChainlinkFeedFeeOracle` (with live `eth_call` to AggregatorV3Interface)
@@ -388,6 +402,8 @@ impl Default for BridgeConfig {
             debridge: Self::default_adapter_enabled(),
             lifi: Self::default_adapter_enabled(),
             wormhole: Self::default_adapter_enabled(),
+            hyperlane: Self::default_adapter_enabled(),
+            axelar: Self::default_adapter_enabled(),
             chainlink_feeds: None,
         }
     }
@@ -466,13 +482,19 @@ pub struct BridgeAdapterConfig {
     ///     `kind = "ccip_commit"` and `kind = "ccip_rmn"`; both must
     ///     verify for delivery.
     ///   - deBridge DLN: one entry per source chain id, `kind = "dln"`.
-    ///   - Hyperlane: one entry per origin domain, `kind = "hyperlane"`.
-    ///   - Axelar: one entry per source chain, `kind = "axelar"`.
-    ///   - Wormhole: install the GuardianSet directly via the
-    ///     Wormhole-specific Guardian wire format (not via this list).
+    ///   - Hyperlane: one entry per origin domain, `kind = "hyperlane"`
+    ///     (`source_id` = Hyperlane origin domain id).
+    ///   - Axelar: one entry, `kind = "axelar"` (single global set;
+    ///     `source_id` ignored).
+    ///   - Wormhole: optional override, `kind = "wormhole_guardian"`
+    ///     (`source_id` = guardian set index; `threshold` ignored —
+    ///     Wormhole quorum is always `floor(2n/3) + 1`). When absent,
+    ///     the pinned mainnet Guardian set (`GuardianSet::mainnet()`)
+    ///     is installed.
     ///
     /// Absent entry = adapter refuses inbound traffic at startup
-    /// (fail-closed). This is the required production posture.
+    /// (fail-closed; Wormhole falls back to the pinned mainnet set).
+    /// This is the required production posture.
     #[serde(default)]
     pub inbound_verifier_sets: Vec<InboundVerifierSet>,
 }
@@ -484,7 +506,8 @@ pub struct BridgeAdapterConfig {
 pub struct InboundVerifierSet {
     /// Verifier kind. Recognized values:
     /// `"dvn"`, `"ccip_commit"`, `"ccip_rmn"`, `"dln"`, `"hyperlane"`,
-    /// `"axelar"`. Unknown kinds are logged and skipped at startup.
+    /// `"axelar"`, `"wormhole_guardian"`. Unknown kinds are logged and
+    /// skipped at startup.
     pub kind: String,
     /// Source-chain identifier. Interpretation depends on `kind`:
     /// LayerZero EID (u32), CCIP selector (u64), Hyperlane domain (u32),

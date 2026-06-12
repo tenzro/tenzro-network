@@ -1440,18 +1440,39 @@ async def register_agent_template(
     name: str,
     description: str,
     template_type: str,
-    capabilities: list[str],
+    creator: str,
+    system_prompt: str = "",
+    tags: list[str] | None = None,
+    template_id: str | None = None,
+    pricing: str = "free",
+    creator_did: str | None = None,
+    creator_wallet: str | None = None,
 ) -> dict:
-    """Register a reusable agent template in the marketplace."""
-    result = await rpc_call(
-        "tenzro_registerAgentTemplate",
-        {
-            "name": name,
-            "description": description,
-            "template_type": template_type,
-            "capabilities": capabilities,
-        },
-    )
+    """Register a reusable agent template in the marketplace.
+
+    creator: hex-encoded (0x-prefixed) creator address — required by the node.
+    template_id: optional stable id (e.g. "ref-..."); registration fails if it
+        already exists. When omitted the node mints a UUID.
+    pricing: "free", "per_execution:<wei>", "per_token:<wei>",
+        "subscription:<wei>", or "revenue_share:<bps>". Non-free pricing
+        requires creator_wallet (receives the creator share of each invocation).
+    """
+    params: dict = {
+        "name": name,
+        "description": description,
+        "template_type": template_type,
+        "creator": creator,
+        "system_prompt": system_prompt,
+        "tags": tags or [],
+        "pricing": pricing,
+    }
+    if template_id:
+        params["template_id"] = template_id
+    if creator_did:
+        params["creator_did"] = creator_did
+    if creator_wallet:
+        params["creator_wallet"] = creator_wallet
+    result = await rpc_call("tenzro_registerAgentTemplate", params)
     return result
 
 
@@ -2999,18 +3020,6 @@ async def canton_submit_command(
     if choice_argument is not None:
         params["choice_argument"] = choice_argument
     return await rpc_call("tenzro_submitDamlCommand", params)
-
-
-@mcp.tool
-async def canton_allocate_party(
-    party_id_hint: str, display_name: str | None = None
-) -> dict:
-    """Allocate a new party on the participant. Returns the fully-qualified
-    party id `<hint>::<participant-hash>`."""
-    params: dict = {"party_id_hint": party_id_hint}
-    if display_name:
-        params["display_name"] = display_name
-    return await rpc_call("tenzro_allocateParty", params)
 
 
 @mcp.tool

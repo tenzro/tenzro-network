@@ -4848,17 +4848,22 @@ fn verify_transaction_signature(signed_tx: &SignedTransaction) -> Result<()> {
     //    with their own key while placing a victim's address in `from`; the
     //    pubkey-bound signature check below would then pass, debiting the
     //    victim on every node that admits the tx via gossip.
-    //    `PublicKey::to_address()` already implements the deterministic
-    //    derivation (SHA-256 first-20 for Ed25519, Keccak-256 last-20 for
-    //    Secp256k1) and returns the 20-byte address. `tenzro_types::Address`
-    //    is the canonical 32-byte slot with the address left-aligned
-    //    (addr20 || 12 zero bytes). Expand before comparing in constant
-    //    time: ct_eq on slices of unequal length is always false.
+    //    Two key-bound `from` conventions exist on this chain and both must
+    //    be accepted: (a) the raw 32-byte Ed25519 public key itself (native
+    //    convention — faucet system account, participate-provisioned
+    //    wallets), and (b) the 20-byte derived address left-aligned in the
+    //    canonical 32-byte `tenzro_types::Address` slot (addr20 || 12 zero
+    //    bytes, EVM convention). Both bind to the same keypair, so either
+    //    match proves control. ct_eq on slices of unequal length is always
+    //    false, hence the expansion before comparing.
     let public_key = PublicKey::new(KeyType::Ed25519, signed_tx.signature.public_key.clone());
     let derived = public_key.to_address();
     let mut expected_from = [0u8; 32];
     expected_from[..20].copy_from_slice(derived.as_bytes());
-    if !bool::from(expected_from.ct_eq(signed_tx.transaction.from.as_bytes())) {
+    let from_bytes = signed_tx.transaction.from.as_bytes();
+    let matches_derived = expected_from.ct_eq(from_bytes);
+    let matches_pubkey = signed_tx.signature.public_key.as_slice().ct_eq(from_bytes);
+    if !bool::from(matches_derived | matches_pubkey) {
         return Err(NodeError::InvalidTransaction(
             "Signature public_key does not derive the declared 'from' address".to_string(),
         ));

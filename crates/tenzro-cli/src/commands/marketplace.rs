@@ -161,9 +161,16 @@ impl GetTemplateCmd {
 
 #[derive(Debug, Parser)]
 pub struct RegisterTemplateCmd {
+    /// Optional stable template id (e.g. "ref-..."). When omitted the node
+    /// mints a UUID. Registration fails if the id already exists.
+    #[arg(long)]
+    template_id: Option<String>,
     /// Template name
     #[arg(long)]
     name: String,
+    /// Hex-encoded creator address (0x...). Required by the node.
+    #[arg(long)]
+    creator: String,
     /// Template description
     #[arg(long)]
     description: String,
@@ -214,12 +221,16 @@ impl RegisterTemplateCmd {
 
         let mut params = serde_json::json!({
             "name": self.name,
+            "creator": self.creator,
             "description": self.description,
             "template_type": self.template_type,
             "system_prompt": self.system_prompt,
             "tags": tags,
             "pricing": self.pricing,
         });
+        if let Some(ref id) = self.template_id {
+            params["template_id"] = serde_json::json!(id);
+        }
         if let Some(ref did) = self.creator_did {
             params["creator_did"] = serde_json::json!(did);
         }

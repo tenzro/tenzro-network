@@ -4358,10 +4358,12 @@ impl TenzroMcpServer {
         identity.metadata.insert("origin".to_string(), origin.clone());
         identity.metadata.insert("participant_type".to_string(), participant_type_str.clone());
 
-        // Persist to RocksDB
+        // Persist to RocksDB. bincode is the canonical CF_IDENTITIES format —
+        // the registry's write-through and startup hydration both use it; a
+        // serde_json record here would be silently dropped at hydration.
         if let Some(storage) = self.node.storage() {
             use tenzro_storage::{KvStore, CF_IDENTITIES};
-            if let Ok(bytes) = identity.to_bytes() {
+            if let Ok(bytes) = bincode::serialize(&identity) {
                 let _ = storage.put(CF_IDENTITIES, identity.did_string().as_bytes(), &bytes);
             }
         }

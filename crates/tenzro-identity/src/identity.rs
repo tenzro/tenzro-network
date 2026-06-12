@@ -243,19 +243,16 @@ impl TenzroIdentity {
         self.did.to_string()
     }
 
-    /// Serializes the identity to bytes using JSON
-    ///
-    /// This method is used for persistence to storage backends.
-    /// JSON is used for human readability and schema evolution.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(self)
+    /// Serializes the identity to bytes using bincode — the canonical
+    /// CF_IDENTITIES persistence format shared with the registry's
+    /// write-through and startup hydration paths.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
     }
 
-    /// Deserializes an identity from bytes
-    ///
-    /// This method is used for loading identities from storage backends.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
+    /// Deserializes an identity from canonical bincode bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        bincode::deserialize(bytes)
     }
 
     /// Returns the display name (for humans) or the DID (for machines)

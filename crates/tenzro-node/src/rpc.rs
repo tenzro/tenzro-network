@@ -11981,7 +11981,10 @@ async fn handle_register_identity(
     // Persist identity to RocksDB.
     if let Some(storage) = node.storage() {
         let did_key = identity.did_string();
-        let identity_bytes = identity.to_bytes().map_err(|e| JsonRpcError {
+        // bincode is the canonical CF_IDENTITIES format — the registry's
+        // write-through and startup hydration both use it; a serde_json
+        // record here would be silently dropped at hydration.
+        let identity_bytes = bincode::serialize(&identity).map_err(|e| JsonRpcError {
             code: -32000,
             message: format!("Identity serialization failed: {}", e),
             data: None,
@@ -12213,7 +12216,10 @@ async fn handle_register_machine_identity(
     // Persist identity to RocksDB
     if let Some(storage) = node.storage() {
         let did_key = identity.did_string();
-        let identity_bytes = identity.to_bytes().map_err(|e| JsonRpcError {
+        // bincode is the canonical CF_IDENTITIES format — the registry's
+        // write-through and startup hydration both use it; a serde_json
+        // record here would be silently dropped at hydration.
+        let identity_bytes = bincode::serialize(&identity).map_err(|e| JsonRpcError {
             code: -32000,
             message: format!("Identity serialization failed: {}", e),
             data: None,
@@ -12329,7 +12335,10 @@ async fn handle_import_identity(
     // Persist identity to RocksDB
     if let Some(storage) = node.storage() {
         let did_key = identity.did_string();
-        let identity_bytes = identity.to_bytes().map_err(|e| JsonRpcError {
+        // bincode is the canonical CF_IDENTITIES format — the registry's
+        // write-through and startup hydration both use it; a serde_json
+        // record here would be silently dropped at hydration.
+        let identity_bytes = bincode::serialize(&identity).map_err(|e| JsonRpcError {
             code: -32000,
             message: format!("Identity serialization failed: {}", e),
             data: None,
@@ -12445,7 +12454,7 @@ async fn handle_resolve_identity(
     let identity = match bytes {
         Some(data) if !data.is_empty() => {
             use tenzro_identity::TenzroIdentity;
-            TenzroIdentity::from_bytes(&data).map_err(|e| {
+            bincode::deserialize::<TenzroIdentity>(&data).map_err(|e| {
                 let preview: String = data
                     .iter()
                     .take(16)
@@ -12863,15 +12872,21 @@ async fn handle_send_raw_transaction(
         //    `from` address. Without this bind, any caller can sign a tx with
         //    their own key, place a victim's address in `from`, and the
         //    hybrid signature checks below would pass — debiting the victim.
-        //    `PublicKey::to_address()` returns the 20-byte derived address;
-        //    `tenzro_types::Address` is the canonical 32-byte slot with the
-        //    address left-aligned (addr20 || 12 zero bytes — same layout as
-        //    `parse_address`). Expand before comparing: ct_eq on slices of
-        //    unequal length is always false.
+        //    Two key-bound `from` conventions exist on this chain and both
+        //    must be accepted: (a) the raw 32-byte Ed25519 public key itself
+        //    (native convention — faucet system account, participate-
+        //    provisioned wallets), and (b) the 20-byte derived address
+        //    left-aligned in the canonical 32-byte slot (addr20 || 12 zero
+        //    bytes — same layout as `parse_address`). Both bind to the same
+        //    keypair, so either match proves control. ct_eq on slices of
+        //    unequal length is always false, hence the expansion.
         let derived = public_key.to_address();
         let mut expected_from = [0u8; 32];
         expected_from[..20].copy_from_slice(derived.as_bytes());
-        if !bool::from(expected_from.ct_eq(signed_tx.transaction.from.as_bytes())) {
+        let from_bytes = signed_tx.transaction.from.as_bytes();
+        let matches_derived = expected_from.ct_eq(from_bytes);
+        let matches_pubkey = public_key.as_bytes().ct_eq(from_bytes);
+        if !bool::from(matches_derived | matches_pubkey) {
             warn!(
                 target: "rpc",
                 tx_hash = %tx_hash,
@@ -13483,7 +13498,10 @@ async fn handle_participate(
     // Persist identity to RocksDB (on-chain storage on the Tenzro Ledger)
     if let Some(storage) = node.storage() {
         let did_key = identity.did_string();
-        let identity_bytes = identity.to_bytes().map_err(|e| JsonRpcError {
+        // bincode is the canonical CF_IDENTITIES format — the registry's
+        // write-through and startup hydration both use it; a serde_json
+        // record here would be silently dropped at hydration.
+        let identity_bytes = bincode::serialize(&identity).map_err(|e| JsonRpcError {
             code: -32000,
             message: format!("Identity serialization failed: {}", e),
             data: None,
@@ -14152,7 +14170,10 @@ fn persist_identity(
 ) -> std::result::Result<(), JsonRpcError> {
     if let Some(storage) = node.storage() {
         let did_key = identity.did_string();
-        let identity_bytes = identity.to_bytes().map_err(|e| JsonRpcError {
+        // bincode is the canonical CF_IDENTITIES format — the registry's
+        // write-through and startup hydration both use it; a serde_json
+        // record here would be silently dropped at hydration.
+        let identity_bytes = bincode::serialize(&identity).map_err(|e| JsonRpcError {
             code: -32000,
             message: format!("Identity serialization failed: {}", e),
             data: None,
@@ -14963,7 +14984,10 @@ async fn handle_join_as_micro_node(
     // Persist to RocksDB
     if let Some(storage) = node.storage() {
         let did_key = identity.did_string();
-        let identity_bytes = identity.to_bytes().map_err(|e| JsonRpcError {
+        // bincode is the canonical CF_IDENTITIES format — the registry's
+        // write-through and startup hydration both use it; a serde_json
+        // record here would be silently dropped at hydration.
+        let identity_bytes = bincode::serialize(&identity).map_err(|e| JsonRpcError {
             code: -32000,
             message: format!("Identity serialization failed: {}", e),
             data: None,
@@ -26625,6 +26649,15 @@ async fn handle_register_agent_template(
 
     let mut template = AgentTemplate::new(name, description, template_type, creator, system_prompt);
 
+    // Caller-supplied stable id (e.g. bundled reference templates use
+    // `ref-*` ids that spawn/resolve paths reference by name). Without it
+    // the template is addressable only by the minted UUID.
+    if let Some(id) = params.get("template_id").and_then(|v| v.as_str())
+        && !id.is_empty()
+    {
+        template.template_id = id.to_string();
+    }
+
     // Optional fields
     if let Some(tags) = params.get("tags").and_then(|v| v.as_array()) {
         template.tags = tags.iter()
@@ -26728,6 +26761,17 @@ async fn handle_register_agent_template(
         message: "Storage not available".to_string(),
         data: None,
     })?;
+
+    // Caller-supplied ids must not silently overwrite an existing template
+    // (id squatting / execution_spec replacement). Updates flow through
+    // `tenzro_updateAgentTemplate`, not re-registration.
+    if let Ok(Some(_)) = storage.get(CF_AGENT_TEMPLATES, template.template_id.as_bytes()) {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("Agent template already exists: {}", template.template_id),
+            data: None,
+        });
+    }
 
     let template_bytes = serde_json::to_vec(&template).map_err(|e| JsonRpcError {
         code: -32000,
