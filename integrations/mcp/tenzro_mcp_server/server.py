@@ -73,7 +73,9 @@ async def send_transaction(
         {
             "from": from_addr,
             "to": to_addr,
-            "value": value_int,
+            # Decimal string carries the full u128 range — JSON numbers
+            # clamp to u64 in the handler's numeric path.
+            "value": str(value_int),
             "gas_limit": gas_limit,
             "gas_price": gas_price,
             "nonce": nonce,

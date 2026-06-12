@@ -769,6 +769,42 @@ impl CantonAdapter {
         )))
     }
 
+    /// Extracts the `sub` claim from a JWT payload without verifying
+    /// the signature. Canton is the verifier — we only need the
+    /// subject to construct user-management path parameters, and
+    /// Canton independently authorizes every request against the
+    /// verified token, so a forged `sub` here buys nothing.
+    fn jwt_sub_claim(jwt: &str) -> Option<String> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let payload = jwt.split('.').nth(1)?;
+        let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+        let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+        claims.get("sub")?.as_str().map(|s| s.to_string())
+    }
+
+    /// Derives the Canton user id of the credential this adapter
+    /// authenticates with. Operator path: `<client_id>@clients` from
+    /// the OAuth2 token provider. Tenant path (`with_tenant_jwt`): the
+    /// JWT's `sub` claim verbatim — Auth0 client-credentials tokens
+    /// carry `sub = <client_id>@clients`, which is exactly the Canton
+    /// user id Stage 2 provisioning binds.
+    fn derived_self_user_id(&self) -> Result<String> {
+        if let Some(p) = self.token_provider.as_ref() {
+            return Ok(format!("{}@clients", p.client_id()));
+        }
+        if let Some(jwt) = self.config.jwt_token.as_deref() {
+            if let Some(sub) = Self::jwt_sub_claim(jwt) {
+                return Ok(sub);
+            }
+            return Err(BridgeError::AdapterError(
+                "cannot derive Canton user id: configured JWT has no decodable `sub` claim".to_string(),
+            ));
+        }
+        Err(BridgeError::AdapterError(
+            "cannot derive Canton user id: adapter has neither an OAuth2 token provider nor a JWT".to_string(),
+        ))
+    }
+
     /// Returns the OAuth principal's user record via
     /// `GET /v2/users/{userId}` where `userId = <client_id>@clients`
     /// (Canton 3.5+ User Management Service / CIP-26).
@@ -776,14 +812,10 @@ impl CantonAdapter {
     /// Returns `id`, `primaryParty`, `isDeactivated`,
     /// `identityProviderId`, plus metadata. The participant has no
     /// `/v2/users/me` alias — it returns 404 `USER_NOT_FOUND` — so we
-    /// construct the explicit id from the token provider's client id.
+    /// construct the explicit id from the token provider's client id
+    /// (operator path) or the JWT `sub` claim (tenant path).
     pub async fn get_my_user(&self) -> Result<serde_json::Value> {
-        let user_id = match self.token_provider.as_ref() {
-            Some(p) => format!("{}@clients", p.client_id()),
-            None => return Err(BridgeError::AdapterError(
-                "Canton get-my-user requires an OAuth2 token provider to derive the user id; this adapter was constructed without one".to_string()
-            )),
-        };
+        let user_id = self.derived_self_user_id()?;
         let path = format!("/users/{}", urlencoding::encode(&user_id));
         let response = self
             .build_request(reqwest::Method::GET, &path)
@@ -813,8 +845,24 @@ impl CantonAdapter {
     /// "given a tenant's bound `<client_id>@clients` user id, what's
     /// their `primaryParty`?" so the node can forward DAML
     /// submissions with the tenant's allocated party as `actAs`.
-    pub async fn get_user(&self, user_id: &str) -> Result<serde_json::Value> {
-        let path = format!("/users/{}", urlencoding::encode(user_id));
+    ///
+    /// `identity_provider_id` must be set when the user is managed by
+    /// a non-default Canton IDP — Canton's User Management Service
+    /// otherwise looks the user up in the default IDP and returns a
+    /// security-sensitive error. Stage 2.b tenants live in the
+    /// default IDP, so pass `None` for them.
+    pub async fn get_user(
+        &self,
+        user_id: &str,
+        identity_provider_id: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let mut path = format!("/users/{}", urlencoding::encode(user_id));
+        if let Some(idp) = identity_provider_id {
+            path.push_str(&format!(
+                "?identity-provider-id={}",
+                urlencoding::encode(idp)
+            ));
+        }
         let response = self
             .build_request(reqwest::Method::GET, &path)
             .await?
@@ -1011,8 +1059,15 @@ impl CantonAdapter {
     /// allocated yet — operator needs to call
     /// [`Self::allocate_party`] + [`Self::grant_user_rights`] +
     /// [`Self::set_user_primary_party`] first.
-    pub async fn primary_party_for_user(&self, user_id: &str) -> Result<String> {
-        let resp = self.get_user(user_id).await?;
+    ///
+    /// Pass `identity_provider_id` for users managed by a non-default
+    /// Canton IDP (Stage 2 tenants).
+    pub async fn primary_party_for_user(
+        &self,
+        user_id: &str,
+        identity_provider_id: Option<&str>,
+    ) -> Result<String> {
+        let resp = self.get_user(user_id, identity_provider_id).await?;
         let primary = resp
             .get("user")
             .and_then(|u| u.get("primaryParty"))
@@ -1045,6 +1100,13 @@ impl CantonAdapter {
     /// user id (`<client_id>@clients`). At least one of `can_act_as`
     /// or `can_read_as` must be `true`.
     ///
+    /// `identity_provider_id` must be set when the target user is
+    /// managed by a non-default Canton IDP — per the Canton OpenAPI,
+    /// `GrantUserRightsRequest.identityProviderId` "if not set,
+    /// assume the user is managed by the default identity provider",
+    /// so omitting it for an IDP-scoped user yields a 403
+    /// security-sensitive error.
+    ///
     /// Returns Canton's `{ newlyGrantedRights: [...] }` response.
     pub async fn grant_user_rights(
         &self,
@@ -1052,6 +1114,7 @@ impl CantonAdapter {
         party: &str,
         can_act_as: bool,
         can_read_as: bool,
+        identity_provider_id: Option<&str>,
     ) -> Result<serde_json::Value> {
         if !can_act_as && !can_read_as {
             return Err(BridgeError::AdapterError(
@@ -1062,12 +1125,7 @@ impl CantonAdapter {
         // Resolve user_id to the OAuth principal when omitted.
         let resolved_user_id = match user_id {
             Some(u) => u.to_string(),
-            None => match self.token_provider.as_ref() {
-                Some(p) => format!("{}@clients", p.client_id()),
-                None => return Err(BridgeError::AdapterError(
-                    "grant_user_rights with user_id=None requires an OAuth2 token provider to derive the user id; this adapter was constructed without one".to_string()
-                )),
-            },
+            None => self.derived_self_user_id()?,
         };
 
         let mut rights: Vec<serde_json::Value> = Vec::new();
@@ -1082,10 +1140,13 @@ impl CantonAdapter {
             }));
         }
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "userId": resolved_user_id,
             "rights": rights,
         });
+        if let Some(idp) = identity_provider_id {
+            body["identityProviderId"] = serde_json::Value::String(idp.to_string());
+        }
 
         let path = format!(
             "/users/{}/rights",
@@ -1123,6 +1184,9 @@ impl CantonAdapter {
     /// `grant_user_rights`: `{ userId, rights: [{ kind: { CanActAs|CanReadAs:
     /// { value: { party } } } }, ...] }`. Pass `user_id = None` to revoke
     /// rights from the OAuth principal's own user (`<client_id>@clients`).
+    /// `identity_provider_id` must name the IDP the user lives under when it
+    /// is not the participant's default IDP (Canton resolves the user inside
+    /// that IDP scope; omitting it for an IDP-scoped user yields 403).
     /// Returns the server response which lists the rights actually revoked
     /// (rights that were not held are silently ignored by Canton).
     pub async fn revoke_user_rights(
@@ -1131,6 +1195,7 @@ impl CantonAdapter {
         party: &str,
         can_act_as: bool,
         can_read_as: bool,
+        identity_provider_id: Option<&str>,
     ) -> Result<serde_json::Value> {
         if !can_act_as && !can_read_as {
             return Err(BridgeError::AdapterError(
@@ -1140,12 +1205,7 @@ impl CantonAdapter {
 
         let resolved_user_id = match user_id {
             Some(u) => u.to_string(),
-            None => match self.token_provider.as_ref() {
-                Some(p) => format!("{}@clients", p.client_id()),
-                None => return Err(BridgeError::AdapterError(
-                    "revoke_user_rights with user_id=None requires an OAuth2 token provider to derive the user id; this adapter was constructed without one".to_string()
-                )),
-            },
+            None => self.derived_self_user_id()?,
         };
 
         let mut rights: Vec<serde_json::Value> = Vec::new();
@@ -1160,10 +1220,13 @@ impl CantonAdapter {
             }));
         }
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "userId": resolved_user_id,
             "rights": rights,
         });
+        if let Some(idp) = identity_provider_id {
+            body["identityProviderId"] = serde_json::Value::String(idp.to_string());
+        }
 
         let path = format!(
             "/users/{}/rights/revoke",
@@ -1207,12 +1270,7 @@ impl CantonAdapter {
     ) -> Result<serde_json::Value> {
         let resolved_user_id = match user_id {
             Some(u) => u.to_string(),
-            None => match self.token_provider.as_ref() {
-                Some(p) => format!("{}@clients", p.client_id()),
-                None => return Err(BridgeError::AdapterError(
-                    "list_user_rights with user_id=None requires an OAuth2 token provider".to_string()
-                )),
-            },
+            None => self.derived_self_user_id()?,
         };
 
         let path = format!(
@@ -1259,6 +1317,16 @@ impl CantonAdapter {
     }
 
     /// Generates a unique command ID for Canton command deduplication.
+    /// Canton user id placed in `JsCommands.userId`. With user tokens Canton
+    /// requires the payload `userId` to match the token's user — a mismatch is
+    /// PERMISSION_DENIED (HTTP 403) — so this must be the authenticated
+    /// credential's user (`<client_id>@clients`), not a free-form app label.
+    /// Auth-less local setups fall back to `application_id`.
+    fn submit_user_id(&self) -> String {
+        self.derived_self_user_id()
+            .unwrap_or_else(|_| self.config.application_id.clone())
+    }
+
     /// Canton uses (application_id, command_id, act_as_parties) as the deduplication key.
     fn generate_command_id(&self) -> String {
         format!("{}-{}", self.config.application_id, Uuid::new_v4())
@@ -1425,7 +1493,7 @@ impl CantonAdapter {
                     create_arguments: payload,
                 }],
                 command_id: command_id.clone(),
-                user_id: self.config.application_id.clone(),
+                user_id: self.submit_user_id(),
                 act_as: vec![act_as_party],
                 read_as: Vec::new(),
                 workflow_id: None,
@@ -1545,7 +1613,7 @@ impl CantonAdapter {
                     choice_argument: argument,
                 }],
                 command_id: command_id.clone(),
-                user_id: self.config.application_id.clone(),
+                user_id: self.submit_user_id(),
                 act_as: vec![act_as_party],
                 read_as: Vec::new(),
                 workflow_id: None,
@@ -3436,11 +3504,16 @@ impl JsonApiQueryResponse {
         raw_entries
             .into_iter()
             .filter_map(|entry| {
-                // Try the modern wrapper first.
-                let active = entry
+                // Live Canton 3.5 shape nests the variant under a
+                // `contractEntry` key: `{ "workflowId": "", "contractEntry":
+                // { "JsActiveContract": { "createdEvent": {...} } } }`.
+                // Descend into it when present, then try the variant
+                // wrappers on whichever level we landed on.
+                let entry_inner = entry.get("contractEntry").unwrap_or(&entry);
+                let active = entry_inner
                     .get("JsActiveContract")
-                    .or_else(|| entry.get("activeContract"))
-                    .unwrap_or(&entry);
+                    .or_else(|| entry_inner.get("activeContract"))
+                    .unwrap_or(entry_inner);
 
                 let created = active
                     .get("createdEvent")
@@ -3732,5 +3805,102 @@ mod tests {
         assert_eq!(config.admin_api_port, 8081);
         assert!(config.tls_enabled);
         assert_eq!(config.jwt_token, Some("test-token-123".to_string()));
+    }
+
+    fn make_unsigned_jwt(claims: serde_json::Value) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes());
+        format!("{}.{}.sig", header, payload)
+    }
+
+    #[test]
+    fn test_jwt_sub_claim_extraction() {
+        let jwt = make_unsigned_jwt(serde_json::json!({
+            "iss": "https://example.auth0.com/",
+            "sub": "WCtBReAbCdEf123@clients",
+            "aud": "https://canton.network.global",
+        }));
+        assert_eq!(
+            CantonAdapter::jwt_sub_claim(&jwt).as_deref(),
+            Some("WCtBReAbCdEf123@clients")
+        );
+        assert!(CantonAdapter::jwt_sub_claim("not-a-jwt").is_none());
+        assert!(CantonAdapter::jwt_sub_claim("a.!!!.c").is_none());
+        let no_sub = make_unsigned_jwt(serde_json::json!({"iss": "x"}));
+        assert!(CantonAdapter::jwt_sub_claim(&no_sub).is_none());
+    }
+
+    #[test]
+    fn test_derived_self_user_id_tenant_jwt_path() {
+        let base = CantonAdapter::new(CantonConfig::default());
+        // No token provider, no JWT → error.
+        assert!(base.derived_self_user_id().is_err());
+
+        // Tenant view: user id comes from the JWT sub claim.
+        let jwt = make_unsigned_jwt(serde_json::json!({
+            "sub": "tenantclient42@clients",
+        }));
+        let tenant_view = base.with_tenant_jwt(jwt);
+        assert_eq!(
+            tenant_view.derived_self_user_id().unwrap(),
+            "tenantclient42@clients"
+        );
+
+        // JWT without a sub claim → error, not a bogus user id.
+        let bad = base.with_tenant_jwt(make_unsigned_jwt(serde_json::json!({"iss": "x"})));
+        assert!(bad.derived_self_user_id().is_err());
+    }
+
+    /// Pins `JsCommands.userId` to the authenticated credential's user.
+    /// With a tenant JWT the payload userId MUST be the JWT `sub`
+    /// (`<client_id>@clients`) — Canton returns PERMISSION_DENIED
+    /// (HTTP 403) on a mismatch. Auth-less configs fall back to
+    /// `application_id`.
+    #[test]
+    fn test_submit_user_id_matches_tenant_jwt_sub() {
+        let base = CantonAdapter::new(CantonConfig::default());
+        // Auth-less: fall back to application_id.
+        assert_eq!(base.submit_user_id(), base.config.application_id);
+
+        let jwt = make_unsigned_jwt(serde_json::json!({
+            "sub": "tenantclient42@clients",
+        }));
+        let tenant_view = base.with_tenant_jwt(jwt);
+        assert_eq!(tenant_view.submit_user_id(), "tenantclient42@clients");
+    }
+
+    /// Pins active-contracts response parsing to the live Canton 3.5
+    /// wire shape: a top-level array whose entries nest the variant
+    /// under `contractEntry` → `JsActiveContract` → `createdEvent`.
+    /// A regression here silently returns an empty contract list.
+    #[test]
+    fn test_into_contracts_parses_live_contract_entry_shape() {
+        let live_entry = serde_json::json!({
+            "workflowId": "",
+            "contractEntry": {
+                "JsActiveContract": {
+                    "createdEvent": {
+                        "offset": 1336435,
+                        "contractId": "00a450badf16",
+                        "templateId": "7df52e35:TenzroE2E:Ping",
+                        "createArgument": { "owner": "manexus-s4::1220ed", "note": "hello" },
+                        "packageName": "tenzro-e2e"
+                    },
+                    "synchronizerId": "global-domain::1220be",
+                    "reassignmentCounter": 0
+                }
+            },
+            "streamContinuationToken": "CgQI"
+        });
+        let resp = JsonApiQueryResponse {
+            contract_entries: vec![live_entry],
+            results: Vec::new(),
+        };
+        let contracts = resp.into_contracts();
+        assert_eq!(contracts.len(), 1);
+        assert_eq!(contracts[0].contract_id, "00a450badf16");
+        assert_eq!(contracts[0].template_id, "7df52e35:TenzroE2E:Ping");
+        assert_eq!(contracts[0].payload["note"], "hello");
     }
 }

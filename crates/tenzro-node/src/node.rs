@@ -15,6 +15,9 @@ use tenzro_bridge::debridge::{DeBridgeAdapter, DeBridgeConfig};
 use tenzro_bridge::layerzero::{LayerZeroAdapter, LayerZeroConfig};
 use tenzro_bridge::lifi::{LiFiAdapter, LiFiConfig};
 use tenzro_bridge::wormhole::{WormholeAdapter, WormholeConfig};
+use tenzro_bridge::hyperlane::{HyperlaneAdapter, HyperlaneConfig};
+use tenzro_bridge::axelar::{AxelarAdapter, AxelarConfig};
+use tenzro_bridge::babylon::{BabylonAdapter, BabylonConfig};
 use tenzro_bridge::tnzo_cct::{TnzoCctBridge, TnzoCctRegistry};
 use tenzro_bridge::evm_signer::{EvmSignerConfig, EvmTransactionSigner};
 use tenzro_consensus::{
@@ -1316,7 +1319,7 @@ pub struct TenzroNode {
 
     /// Stage 2.b: per-tenant upstream OAuth client provisioner. When
     /// `canton.identity_providers.enabled` is true and
-    /// `mgmt_url`/`mgmt_token` are configured, this is an
+    /// `mgmt_url` + M2M client credentials are configured, this is an
     /// `Auth0ManagementClient`; `handle_create_api_key` uses it to
     /// mint a per-tenant client and return the secret to the tenant
     /// once. `None` when Stage 2.b is disabled — devnet flow.
@@ -1444,6 +1447,21 @@ pub struct TenzroNode {
     /// Used by `tenzro_cctTransfer` RPCs to build CCT-formatted CCIP messages
     /// for native-TNZO cross-chain delivery without bridge custody risk.
     cct_bridge: Option<Arc<TnzoCctBridge>>,
+
+    /// Hyperlane V3 adapter — local Mailbox-encoding message registry serving
+    /// the `tenzro_hyperlane*` RPC namespace. Constructed unconditionally
+    /// (pure local state, no network I/O at rest) so dispatch and getMessage
+    /// share one outbound map.
+    hyperlane_adapter: Arc<HyperlaneAdapter>,
+
+    /// Axelar GMP adapter — local call-contract registry serving the
+    /// `tenzro_axelar*` RPC namespace. Constructed unconditionally.
+    axelar_adapter: Arc<AxelarAdapter>,
+
+    /// Babylon Bitcoin-staking adapter — finality-provider registry serving
+    /// the `tenzro_babylon*` RPC namespace. Constructed unconditionally
+    /// against the Babylon testnet LCD endpoints.
+    babylon_adapter: Arc<BabylonAdapter>,
 
     // TEE (optional). The local hardware provider is retained so attestation
     // requests routed to this node (RPC `tenzro_attest`, MCP `attest`, agent
@@ -1763,6 +1781,19 @@ impl TenzroNode {
             bridge_router: None,
             canton_adapter: None,
             cct_bridge: None,
+            hyperlane_adapter: Arc::new(HyperlaneAdapter::new(HyperlaneConfig::new(
+                10_000,
+                "0x0000000000000000000000000000000000000000",
+                "0x0000000000000000000000000000000000000000",
+            ))),
+            axelar_adapter: Arc::new(AxelarAdapter::new(AxelarConfig::new(
+                "tenzro",
+                "0x0000000000000000000000000000000000000000",
+                "0x0000000000000000000000000000000000000000",
+            ))),
+            babylon_adapter: Arc::new(BabylonAdapter::new(BabylonConfig::testnet(
+                "tenzro-testnet",
+            ))),
             tee_provider: None,
             tee_registry: None,
             zk_commitment_registry: Arc::new(tenzro_vm::precompiles::ZkCommitmentRegistry::new()),
@@ -2450,21 +2481,28 @@ impl TenzroNode {
 
         // Stage 2.b: per-tenant upstream IdP provisioner. Built only
         // when `canton.identity_providers.enabled` + `mgmt_url` +
-        // `mgmt_token` are all set. Devnet leaves all three unset so
-        // `handle_create_api_key` falls through to the Stage 1
-        // shared-principal flow. Production testnet/mainnet flips
+        // M2M client credentials are all set. The provisioner mints
+        // and caches its own Auth0 Management API token from the
+        // client credentials (24h expiry, refreshed 60s before),
+        // so no static token ever sits in the env. Devnet leaves
+        // everything unset so `handle_create_api_key` falls through
+        // to the Stage 1 shared-principal flow. Production flips
         // `CANTON_IDP_ENABLED=true` + sets `CANTON_IDP_MGMT_URL` +
-        // `CANTON_IDP_MGMT_TOKEN` so each tenant gets a dedicated
-        // OAuth client.
+        // `CANTON_IDP_MGMT_CLIENT_ID` + `CANTON_IDP_MGMT_CLIENT_SECRET`
+        // so each tenant gets a dedicated OAuth client.
         {
             let idp_cfg = &self.config.canton.identity_providers;
             if idp_cfg.enabled
-                && let (Some(mgmt_url), Some(mgmt_token)) =
-                    (idp_cfg.mgmt_url.as_deref(), idp_cfg.mgmt_token.as_deref())
+                && let (Some(mgmt_url), Some(mgmt_client_id), Some(mgmt_client_secret)) = (
+                    idp_cfg.mgmt_url.as_deref(),
+                    idp_cfg.mgmt_client_id.as_deref(),
+                    idp_cfg.mgmt_client_secret.as_deref(),
+                )
             {
                 match tenzro_bridge::tenant_idp::Auth0ManagementClient::new(
                     mgmt_url,
-                    mgmt_token,
+                    mgmt_client_id,
+                    mgmt_client_secret,
                 ) {
                     Ok(client) => {
                         self.tenant_idp_provisioner =
@@ -7269,6 +7307,7 @@ impl TenzroNode {
                                 format_version,
                                 view,
                                 high_qc_view,
+                                finalized_height,
                                 voter,
                                 signature,
                                 public_key,
@@ -7305,6 +7344,7 @@ impl TenzroNode {
                                     format_version,
                                     view,
                                     high_qc_view,
+                                    finalized_height,
                                     voter,
                                     signature: sig,
                                     public_key: pk,
@@ -8245,6 +8285,21 @@ impl TenzroNode {
     /// CCIP messages against the canonical TNZO pool registry.
     pub fn cct_bridge(&self) -> Option<&Arc<TnzoCctBridge>> {
         self.cct_bridge.as_ref()
+    }
+
+    /// Returns the Hyperlane V3 adapter. Used by `tenzro_hyperlane*` RPCs.
+    pub fn hyperlane_adapter(&self) -> &Arc<HyperlaneAdapter> {
+        &self.hyperlane_adapter
+    }
+
+    /// Returns the Axelar GMP adapter. Used by `tenzro_axelar*` RPCs.
+    pub fn axelar_adapter(&self) -> &Arc<AxelarAdapter> {
+        &self.axelar_adapter
+    }
+
+    /// Returns the Babylon BTC-staking adapter. Used by `tenzro_babylon*` RPCs.
+    pub fn babylon_adapter(&self) -> &Arc<BabylonAdapter> {
+        &self.babylon_adapter
     }
 
     /// Returns the node config

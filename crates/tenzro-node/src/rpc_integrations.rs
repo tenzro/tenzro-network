@@ -2454,6 +2454,491 @@ pub(crate) async fn handle_cct_build_message(
 }
 
 // ============================================================
+// Hyperlane V3 — sovereign-ISM messaging
+// ============================================================
+
+/// `tenzro_hyperlaneListChains` — list the Hyperlane chains this
+/// adapter can address, with their canonical domain ids.
+pub(crate) async fn handle_hyperlane_list_chains(
+    node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let adapter = node.hyperlane_adapter();
+    let chains: Vec<Value> =
+        tenzro_bridge::BridgeAdapter::supported_chains(adapter.as_ref())
+            .into_iter()
+            .map(|c| {
+                json!({
+                    "chain": c.chain_id,
+                    "name": c.name,
+                    "native_token": c.native_token,
+                    "finality_time_secs": c.finality_time_secs,
+                    "domain": adapter.config().chain_id(&c.chain_id),
+                })
+            })
+            .collect();
+    Ok(json!({
+        "source_domain": adapter.config().source_domain,
+        "chains": chains.clone(),
+        "count": chains.len(),
+    }))
+}
+
+/// `tenzro_hyperlaneQuoteDispatch` — local interchain-gas estimate for
+/// a dispatch: canonical message size plus the default Hyperlane IGP
+/// overhead model (50k base + 16 gas per body byte).
+pub(crate) async fn handle_hyperlane_quote_dispatch(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let destination_domain = params
+        .get("destination_domain")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or_else(|| missing("Missing destination_domain"))?;
+    let body_hex = params
+        .get("body_hex")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing body_hex"))?;
+    let body = hex::decode(body_hex.trim_start_matches("0x"))
+        .map_err(|e| invalid_params(format!("invalid body_hex: {e}")))?;
+
+    let adapter = node.hyperlane_adapter();
+    let message_bytes = tenzro_bridge::hyperlane::HYPERLANE_HEADER_LEN + body.len();
+    let estimated_destination_gas = 50_000u64 + 16 * body.len() as u64;
+    Ok(json!({
+        "origin_domain": adapter.config().source_domain,
+        "destination_domain": destination_domain,
+        "ism": adapter.resolve_ism(destination_domain),
+        "body_bytes": body.len(),
+        "message_bytes": message_bytes,
+        "estimated_destination_gas": estimated_destination_gas,
+        "quote_source": "local-estimate",
+    }))
+}
+
+/// `tenzro_hyperlaneDispatch` — dispatch a Hyperlane message: allocate
+/// a per-destination nonce, encode the canonical Mailbox envelope, and
+/// return the canonical message id.
+pub(crate) async fn handle_hyperlane_dispatch(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let adapter = node.hyperlane_adapter();
+
+    if let Some(origin) = params
+        .get("origin_domain")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok())
+        && origin != adapter.config().source_domain
+    {
+        return Err(invalid_params(format!(
+            "origin_domain {origin} does not match this node's Hyperlane domain {}",
+            adapter.config().source_domain
+        )));
+    }
+    let destination_domain = params
+        .get("destination_domain")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or_else(|| missing("Missing destination_domain"))?;
+    let recipient = params
+        .get("recipient")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing recipient"))?;
+    let body_hex = params
+        .get("body_hex")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing body_hex"))?;
+    let body = hex::decode(body_hex.trim_start_matches("0x"))
+        .map_err(|e| invalid_params(format!("invalid body_hex: {e}")))?;
+    let mailbox = adapter.config().mailbox.clone();
+    let sender = params
+        .get("sender")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&mailbox);
+
+    let id = adapter
+        .dispatch_message(destination_domain, sender, recipient, body)
+        .map_err(|e| invalid_params(format!("{e}")))?;
+    let id_hex = format!("0x{}", hex::encode(id.as_bytes()));
+    let nonce = adapter
+        .lookup_message(&id_hex)
+        .map(|(m, _)| m.nonce);
+    Ok(json!({
+        "message_id": id_hex,
+        "origin_domain": adapter.config().source_domain,
+        "destination_domain": destination_domain,
+        "nonce": nonce,
+        "status": "pending",
+    }))
+}
+
+/// `tenzro_hyperlaneGetMessage` — look up a dispatched message and its
+/// transfer status by canonical message id.
+pub(crate) async fn handle_hyperlane_get_message(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let message_id = params
+        .get("message_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing message_id"))?;
+
+    match node.hyperlane_adapter().lookup_message(message_id) {
+        Some((m, status)) => Ok(json!({
+            "message_id": message_id,
+            "version": m.version,
+            "nonce": m.nonce,
+            "origin_domain": m.origin_domain,
+            "sender": format!("0x{}", hex::encode(m.sender)),
+            "destination_domain": m.destination_domain,
+            "recipient": format!("0x{}", hex::encode(m.recipient)),
+            "body": format!("0x{}", hex::encode(&m.body)),
+            "status": format!("{status:?}").to_lowercase(),
+        })),
+        None => Err(invalid_params(format!(
+            "unknown Hyperlane message id: {message_id}"
+        ))),
+    }
+}
+
+// ============================================================
+// Axelar GMP — Cosmos / Move / Stellar / XRPL reach
+// ============================================================
+
+/// `tenzro_axelarListChains` — list the canonical Axelar chain
+/// identifiers this adapter knows.
+pub(crate) async fn handle_axelar_list_chains(
+    node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let adapter = node.axelar_adapter();
+    let chains: Vec<Value> = adapter
+        .config()
+        .known_chains()
+        .into_iter()
+        .map(|c| {
+            json!({
+                "chain": c.chain_id,
+                "name": c.name,
+                "native_token": c.native_token,
+                "finality_time_secs": c.finality_time_secs,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "source_chain": adapter.config().source_chain,
+        "chains": chains.clone(),
+        "count": chains.len(),
+    }))
+}
+
+/// `tenzro_axelarCallContract` — register an Axelar GMP `callContract`
+/// dispatch. Returns the payload hash that correlates the call across
+/// the Axelar validator network.
+pub(crate) async fn handle_axelar_call_contract(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let destination_chain = params
+        .get("destination_chain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing destination_chain"))?;
+    let destination_address = params
+        .get("destination_address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing destination_address"))?;
+    let payload_hex = params
+        .get("payload_hex")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing payload_hex"))?;
+    let payload = hex::decode(payload_hex.trim_start_matches("0x"))
+        .map_err(|e| invalid_params(format!("invalid payload_hex: {e}")))?;
+    let gas_prepaid = parse_u128(params.get("gas_amount")).unwrap_or(0);
+
+    let adapter = node.axelar_adapter();
+    let hash = adapter
+        .call_contract(destination_chain, destination_address, payload, gas_prepaid)
+        .map_err(|e| invalid_params(format!("{e}")))?;
+    Ok(json!({
+        "payload_hash": format!("0x{}", hex::encode(hash.as_bytes())),
+        "source_chain": adapter.config().source_chain,
+        "destination_chain": adapter.config().canonical_chain(destination_chain),
+        "destination_address": destination_address,
+        "gas_prepaid": gas_prepaid.to_string(),
+        "status": "pending",
+    }))
+}
+
+/// `tenzro_axelarPayGas` — add prepaid gas to a registered GMP call
+/// (AxelarGasService `addNativeGas` semantics).
+pub(crate) async fn handle_axelar_pay_gas(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let payload_hash = params
+        .get("payload_hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing payload_hash"))?;
+    let gas_amount = parse_u128(params.get("gas_amount"))
+        .ok_or_else(|| invalid_params("Missing or invalid gas_amount"))?;
+
+    let total = node
+        .axelar_adapter()
+        .pay_gas(payload_hash, gas_amount)
+        .map_err(|e| invalid_params(format!("{e}")))?;
+    Ok(json!({
+        "payload_hash": payload_hash,
+        "gas_added": gas_amount.to_string(),
+        "gas_prepaid_total": total.to_string(),
+    }))
+}
+
+/// `tenzro_axelarGetMessage` — look up a registered GMP call by its
+/// payload hash.
+pub(crate) async fn handle_axelar_get_message(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let payload_hash = params
+        .get("payload_hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing payload_hash"))?;
+
+    match node.axelar_adapter().lookup_call(payload_hash) {
+        Some(call) => Ok(json!({
+            "payload_hash": format!("0x{}", hex::encode(call.payload_hash.as_bytes())),
+            "source_chain": call.source_chain,
+            "destination_chain": call.destination_chain,
+            "destination_address": call.destination_address,
+            "payload": format!("0x{}", hex::encode(&call.payload)),
+            "gas_prepaid": call.gas_prepaid.to_string(),
+        })),
+        None => Err(invalid_params(format!(
+            "unknown Axelar payload hash: {payload_hash}"
+        ))),
+    }
+}
+
+// ============================================================
+// Babylon — Bitcoin staking / finality providers
+// ============================================================
+
+fn babylon_provider_json(p: &tenzro_bridge::babylon::FinalityProvider) -> Value {
+    json!({
+        "validator": format!("0x{}", hex::encode(p.validator_address.as_bytes())),
+        "btc_pk": format!("0x{}", hex::encode(p.btc_pk)),
+        "registration_tx": p.registration_tx,
+        "commission_bps": p.commission_bps,
+        "active": p.active,
+    })
+}
+
+fn parse_babylon_validator(
+    params: &Value,
+) -> std::result::Result<tenzro_types::primitives::Address, JsonRpcError> {
+    let validator = params
+        .get("validator")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing validator"))?;
+    tenzro_types::primitives::Address::from_hex(validator)
+        .map_err(|e| invalid_params(format!("invalid validator address: {e}")))
+}
+
+fn parse_hex_32(
+    params: &Value,
+    key: &str,
+) -> std::result::Result<[u8; 32], JsonRpcError> {
+    let raw = params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing(&format!("Missing {key}")))?;
+    let bytes = hex::decode(raw.trim_start_matches("0x"))
+        .map_err(|e| invalid_params(format!("invalid {key}: {e}")))?;
+    <[u8; 32]>::try_from(bytes.as_slice())
+        .map_err(|_| invalid_params(format!("{key} must be 32 bytes")))
+}
+
+/// `tenzro_babylonRegisterFinalityProvider` — register a Tenzro
+/// validator as a Babylon finality provider.
+pub(crate) async fn handle_babylon_register_finality_provider(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let validator = parse_babylon_validator(&params)?;
+    let btc_pk = parse_hex_32(&params, "btc_pk")?;
+    let commission_bps = params
+        .get("commission_bps")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok())
+        .ok_or_else(|| invalid_params("Missing or invalid commission_bps"))?;
+
+    let provider = node
+        .babylon_adapter()
+        .register_finality_provider(validator, btc_pk, commission_bps)
+        .map_err(|e| invalid_params(format!("{e}")))?;
+    Ok(babylon_provider_json(&provider))
+}
+
+/// `tenzro_babylonGetFinalityProvider` — read the registration record
+/// for a validator.
+pub(crate) async fn handle_babylon_get_finality_provider(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let validator = parse_babylon_validator(&params)?;
+
+    match node.babylon_adapter().finality_provider(&validator) {
+        Some(p) => Ok(json!({
+            "registered": true,
+            "provider": babylon_provider_json(&p),
+        })),
+        None => Ok(json!({ "registered": false })),
+    }
+}
+
+/// `tenzro_babylonListFinalityProviders` — list every registered
+/// finality provider.
+pub(crate) async fn handle_babylon_list_finality_providers(
+    node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let providers: Vec<Value> = node
+        .babylon_adapter()
+        .list_finality_providers()
+        .iter()
+        .map(babylon_provider_json)
+        .collect();
+    Ok(json!({
+        "providers": providers.clone(),
+        "count": providers.len(),
+    }))
+}
+
+/// `tenzro_babylonTotalStakeForProvider` — sum finalized BTC
+/// delegations (in satoshis) routed to a validator's finality provider.
+pub(crate) async fn handle_babylon_total_stake_for_provider(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let validator = parse_babylon_validator(&params)?;
+
+    let adapter = node.babylon_adapter();
+    let provider = adapter.finality_provider(&validator).ok_or_else(|| {
+        invalid_params("finality provider not registered for validator")
+    })?;
+    let total = adapter.total_stake_for_provider(&provider.btc_pk);
+    Ok(json!({
+        "validator": format!("0x{}", hex::encode(validator.as_bytes())),
+        "btc_pk": format!("0x{}", hex::encode(provider.btc_pk)),
+        "total_stake_satoshis": total,
+    }))
+}
+
+/// `tenzro_babylonListDelegations` — list the BTC delegations routed to
+/// a validator's finality provider.
+pub(crate) async fn handle_babylon_list_delegations(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let validator = parse_babylon_validator(&params)?;
+
+    let adapter = node.babylon_adapter();
+    let provider = adapter.finality_provider(&validator).ok_or_else(|| {
+        invalid_params("finality provider not registered for validator")
+    })?;
+    let delegations: Vec<Value> = adapter
+        .delegations_for_provider(&provider.btc_pk)
+        .into_iter()
+        .map(|d| {
+            json!({
+                "staker_btc_pk": format!("0x{}", hex::encode(d.staker_btc_pk)),
+                "finality_provider_btc_pk":
+                    format!("0x{}", hex::encode(d.finality_provider_btc_pk)),
+                "btc_satoshis": d.btc_satoshis,
+                "start_height": d.start_height,
+                "timelock_blocks": d.timelock_blocks,
+                "finalized": d.finalized,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "validator": format!("0x{}", hex::encode(validator.as_bytes())),
+        "delegations": delegations.clone(),
+        "count": delegations.len(),
+    }))
+}
+
+/// `tenzro_babylonSubmitFinalitySignature` — submit an EOTS finality
+/// signature over a Tenzro block hash for a registered provider.
+pub(crate) async fn handle_babylon_submit_finality_signature(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let validator = parse_babylon_validator(&params)?;
+    let block_hash = parse_hex_32(&params, "block_hash")?;
+    let sig_hex = params
+        .get("eots_signature")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing eots_signature"))?;
+    let signature = hex::decode(sig_hex.trim_start_matches("0x"))
+        .map_err(|e| invalid_params(format!("invalid eots_signature: {e}")))?;
+    if signature.len() != 64 {
+        return Err(invalid_params("eots_signature must be 64 bytes"));
+    }
+    let babylon_height = params
+        .get("babylon_height")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let randomness_commitment = if params.get("randomness_commitment").is_some() {
+        parse_hex_32(&params, "randomness_commitment")?
+    } else {
+        [0u8; 32]
+    };
+
+    let validator_hex = format!("0x{}", hex::encode(validator.as_bytes()));
+    let sig = tenzro_bridge::babylon::FinalitySignature {
+        validator_address: validator,
+        babylon_height,
+        tenzro_block_hash: tenzro_types::primitives::Hash::new(block_hash),
+        signature,
+        randomness_commitment,
+    };
+    node.babylon_adapter()
+        .submit_finality_signature(sig)
+        .map_err(|e| invalid_params(format!("{e}")))?;
+    Ok(json!({
+        "accepted": true,
+        "validator": validator_hex,
+        "babylon_height": babylon_height,
+        "block_hash": format!("0x{}", hex::encode(block_hash)),
+    }))
+}
+
+// ============================================================
 // EIP-7702 — EOA Code Delegation (stateless helpers)
 // ============================================================
 

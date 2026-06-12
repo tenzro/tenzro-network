@@ -360,6 +360,22 @@ impl HyperlaneAdapter {
         Ok(id)
     }
 
+    /// Look up a previously-dispatched outbound message and its transfer
+    /// status by canonical message id (hex, `0x`-prefixed or bare).
+    pub fn lookup_message(
+        &self,
+        message_id_hex: &str,
+    ) -> Option<(HyperlaneMessage, TransferStatus)> {
+        let key = message_id_hex.trim_start_matches("0x").to_lowercase();
+        let message = self.outbound.get(&key)?.clone();
+        let status = self
+            .transfers
+            .get(&key)
+            .map(|s| *s)
+            .unwrap_or(TransferStatus::Pending);
+        Some((message, status))
+    }
+
     /// Resolve the ISM for a destination domain.
     pub fn resolve_ism(&self, destination: u32) -> String {
         self.config

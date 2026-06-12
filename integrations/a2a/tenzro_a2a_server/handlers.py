@@ -86,7 +86,9 @@ async def handle_wallet(text: str, metadata: dict = None) -> str:
             result = await rpc_call("tenzro_signAndSendTransaction", {
                 "from": from_addr,
                 "to": to_addr,
-                "value": wei,
+                # Decimal string carries the full u128 range — JSON numbers
+                # clamp to u64 in the handler's numeric path.
+                "value": str(wei),
                 "gas_limit": 21000,
                 "gas_price": 10**9,
                 "nonce": nonce,
@@ -1156,8 +1158,9 @@ async def handle_canton(text: str, metadata: dict = None) -> str:
     if "grant" in t and ("right" in t or "rights" in t):
         return (
             "Grant CanActAs / CanReadAs rights on a Canton party (Canton 3.5+ CIP-26):\n"
-            "  tenzro_canton_grantUserRights { party, user_id?, can_act_as?, can_read_as? }\n"
-            "Pass `user_id` omitted to grant to the OAuth principal's own user."
+            "  tenzro_canton_grantUserRights { party, user_id?, can_act_as?, can_read_as?, identity_provider_id? }\n"
+            "Pass `user_id` omitted to grant to the OAuth principal's own user. "
+            "IDP-scoped users (Stage 2 tenants) require `identity_provider_id`."
         )
 
     if "list" in t and ("right" in t or "rights" in t):

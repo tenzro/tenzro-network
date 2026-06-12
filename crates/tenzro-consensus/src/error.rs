@@ -138,3 +138,9 @@ impl From<tenzro_crypto::CryptoError> for ConsensusError {
         ConsensusError::Crypto(err.to_string())
     }
 }
+
+impl From<tenzro_crypto::bls::BlsError> for ConsensusError {
+    fn from(err: tenzro_crypto::bls::BlsError) -> Self {
+        ConsensusError::Crypto(err.to_string())
+    }
+}

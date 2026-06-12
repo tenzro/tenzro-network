@@ -100,8 +100,10 @@ async fn rpc_call(client: &reqwest::Client, url: &str, body: Value) -> Value {
 /// Build a hybrid-signed JSON payload for `eth_sendRawTransaction`. Returns
 /// the JSON params object the RPC handler expects, plus the canonical
 /// `Transaction::hash()` so callers can correlate tx_hash if needed.
+/// `from` is derived from the generated Ed25519 keypair (20-byte derived
+/// address left-aligned in the canonical 32-byte slot) — the admission-time
+/// sender-impersonation guard requires the signing pubkey to derive `from`.
 fn build_signed_eth_send_params(
-    from: Address,
     to: Address,
     nonce: u64,
     tx_type: TransactionType,
@@ -114,6 +116,11 @@ fn build_signed_eth_send_params(
     let pq_key = MlDsaSigningKey::generate();
     let pq_vk = pq_key.verifying_key_bytes().to_vec();
     assert_eq!(pq_vk.len(), 1952);
+
+    let derived = classical_pk.to_address();
+    let mut from_bytes = [0u8; 32];
+    from_bytes[..20].copy_from_slice(derived.as_bytes());
+    let from = Address::new(from_bytes);
 
     let tx = Transaction::new(
         ChainId::from(1337),
@@ -202,7 +209,6 @@ async fn eth_send_raw_admits_create_escrow_typed_tx() {
     };
 
     let params = build_signed_eth_send_params(
-        Address::new([0x11; 32]),
         Address::zero(),
         0,
         tx_type,
@@ -235,7 +241,6 @@ async fn eth_send_raw_admits_release_escrow_typed_tx() {
     let tx_type = TransactionType::ReleaseEscrow { escrow_id, proof };
 
     let params = build_signed_eth_send_params(
-        Address::new([0x11; 32]),
         Address::zero(),
         1,
         tx_type,
@@ -265,7 +270,6 @@ async fn eth_send_raw_admits_refund_escrow_typed_tx() {
     let tx_type = TransactionType::RefundEscrow { escrow_id };
 
     let params = build_signed_eth_send_params(
-        Address::new([0x11; 32]),
         Address::zero(),
         2,
         tx_type,
@@ -305,7 +309,6 @@ async fn eth_send_raw_rejects_escrow_tx_with_tampered_amount() {
     };
 
     let mut params = build_signed_eth_send_params(
-        Address::new([0x11; 32]),
         Address::zero(),
         0,
         original_tx_type,

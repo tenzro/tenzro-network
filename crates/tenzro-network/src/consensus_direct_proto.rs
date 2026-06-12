@@ -197,6 +197,7 @@ mod tests {
             format_version: 1,
             view: 42,
             high_qc_view: 41,
+            finalized_height: 40,
             voter: Address::from_bytes(&[0u8; 32]).unwrap(),
             signature: vec![0xab; 64],
             public_key: vec![0xcd; 32],

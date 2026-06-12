@@ -598,6 +598,11 @@ pub struct CantonGrantRightsCmd {
     #[arg(long, default_value = "false")]
     can_read_as: bool,
 
+    /// Canton IdentityProviderConfig id the user lives under (required
+    /// for IDP-scoped users; omit for the participant's default IDP)
+    #[arg(long)]
+    identity_provider_id: Option<String>,
+
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 
@@ -632,6 +637,12 @@ impl CantonGrantRightsCmd {
         params.insert("party".into(), serde_json::Value::String(self.party.clone()));
         params.insert("can_act_as".into(), serde_json::Value::Bool(self.can_act_as));
         params.insert("can_read_as".into(), serde_json::Value::Bool(self.can_read_as));
+        if let Some(idp) = &self.identity_provider_id {
+            params.insert(
+                "identity_provider_id".into(),
+                serde_json::Value::String(idp.clone()),
+            );
+        }
 
         let spinner = output::create_spinner("Granting rights…");
         let result: serde_json::Value = rpc

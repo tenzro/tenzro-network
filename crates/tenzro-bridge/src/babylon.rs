@@ -214,6 +214,21 @@ impl BabylonAdapter {
             .cloned()
     }
 
+    /// List every registered finality provider.
+    pub fn list_finality_providers(&self) -> Vec<FinalityProvider> {
+        self.finality_providers.read().values().cloned().collect()
+    }
+
+    /// List the BTC delegations routed to a given finality provider.
+    pub fn delegations_for_provider(&self, btc_pk: &[u8; 32]) -> Vec<BtcDelegation> {
+        self.delegations
+            .read()
+            .values()
+            .filter(|d| d.finality_provider_btc_pk == *btc_pk)
+            .cloned()
+            .collect()
+    }
+
     /// Record an observed BTC delegation. Production deployments fill
     /// the cache from Babylon's `/delegations` endpoint; the recorder
     /// here is the seam for tests + replays.

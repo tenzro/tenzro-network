@@ -538,6 +538,18 @@ pub struct HotStuff2Engine {
     /// after each round closes so the proposer-election strategy reflects
     /// observed behaviour.
     reputation: Option<Arc<LeaderReputation>>,
+
+    /// Behind-tip hint published to the block-sync engine.
+    ///
+    /// When a peer proposal arrives at a height strictly above our local
+    /// height (`on_proposal` rejects it with `InvalidHeight`), the rejected
+    /// height is sent here. Block-sync subscribes via
+    /// [`subscribe_behind_hint`](Self::subscribe_behind_hint) and temporarily
+    /// drops its engage tolerance to zero, closing the 1..=SLOT_IMPORT_TOLERANCE
+    /// dead zone where catchup-on-proposal (exactly +1, in-memory parent only)
+    /// can't help but block-sync wouldn't normally engage. `watch` notifies on
+    /// every send, so repeated proposals keep re-arming the hint.
+    behind_hint_tx: tokio::sync::watch::Sender<u64>,
 }
 
 impl HotStuff2Engine {
@@ -635,6 +647,7 @@ impl HotStuff2Engine {
             proposal_dedup: Arc::new(DashMap::new()),
             proposer_election,
             reputation,
+            behind_hint_tx: tokio::sync::watch::Sender::new(0),
         }
     }
 
@@ -720,6 +733,14 @@ impl HotStuff2Engine {
     /// (the view advances asynchronously as messages arrive).
     pub fn current_view(&self) -> u64 {
         self.view_state.read().view
+    }
+
+    /// Snapshot of the engine's working height — the NEXT height it will
+    /// vote on or propose (storage tip + 1 on a healthy node). Used by
+    /// block-sync to detect an engine that has fallen behind local storage
+    /// (gossip imports advance storage without touching the engine).
+    pub fn current_height(&self) -> BlockHeight {
+        self.view_state.read().height
     }
 
     /// Sets the operator drain flag. While draining, this replica does not
@@ -1106,6 +1127,18 @@ impl HotStuff2Engine {
         self.mempool.add_transaction(tx)
     }
 
+    /// Subscribe to behind-tip hints.
+    ///
+    /// The receiver fires whenever `on_proposal` rejects a peer proposal at a
+    /// height above ours — i.e. the network has finalized blocks we don't
+    /// have and the in-band catchup path couldn't recover them. The carried
+    /// value is the rejected proposal height. Block-sync uses this to drop
+    /// its engage tolerance to zero so small gaps (1..=SLOT_IMPORT_TOLERANCE)
+    /// don't strand a restarted replica one block behind the tip.
+    pub fn subscribe_behind_hint(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.behind_hint_tx.subscribe()
+    }
+
     /// Subscribe to finality notifications.
     ///
     /// Returns a broadcast receiver that emits `FinalityNotification` each time
@@ -1431,11 +1464,17 @@ impl HotStuff2Engine {
             raw_high_qc.min(view - 1)
         };
 
+        // Advertise our finalized height so peers stuck behind a
+        // finalization skew (one replica finalized via a Commit QC the
+        // others never received) can engage block-sync off our timeout.
+        let finalized_height = self.finality_tracker.finalized_height().0;
+
         let placeholder_sig =
             tenzro_crypto::composite::CompositeSignature::new(Vec::new(), Vec::new());
         let unsigned = crate::timeout::TimeoutMsg::new(
             view,
             high_qc_view,
+            finalized_height,
             self.address,
             placeholder_sig,
             self.composite_public_key.clone(),
@@ -1457,6 +1496,7 @@ impl HotStuff2Engine {
         Ok(crate::timeout::TimeoutMsg::new(
             view,
             high_qc_view,
+            finalized_height,
             self.address,
             signature,
             self.composite_public_key.clone(),
@@ -1505,6 +1545,26 @@ impl HotStuff2Engine {
         // relevant authentication needed to do so safely.
         let validator_set = self.validator_set();
         msg.verify(&validator_set)?;
+
+        // Finalization-skew heal: if the (signature-verified) sender
+        // advertises a finalized height above ours, we may have missed a
+        // Commit QC broadcast — the sender finalized a block we never did,
+        // and the proposer keeps re-proposing a conflicting block at that
+        // height which the sender rejects, deadlocking the view forever.
+        // Fire the behind-hint so block-sync fetches the block (its Commit
+        // QC is embedded in `consensus_proof.proof_data` and verified
+        // cryptographically on import — a Byzantine lie here just triggers
+        // a futile, bounded sync probe).
+        let local_finalized = self.finality_tracker.finalized_height().0;
+        if msg.finalized_height > local_finalized {
+            tracing::info!(
+                voter = %msg.voter,
+                peer_finalized = msg.finalized_height,
+                local_finalized = local_finalized,
+                "TimeoutMsg advertises higher finalized height — engaging block-sync hint"
+            );
+            self.behind_hint_tx.send_replace(msg.finalized_height);
+        }
 
         let local_view = self.view_state.read().view;
 
@@ -2074,25 +2134,50 @@ impl HotStuff2Engine {
             drop(state);
 
             // Check for epoch transition — SAFE: no vote_collector read lock held here
-            if self.epoch_manager.should_transition(transition_height) {
-                tracing::info!(height = %transition_height, "Epoch transition triggered");
-                let _ = self.epoch_manager.transition_epoch(transition_height)?;
-
-                // Update vote collector with new validator set
-                let new_validator_set = Arc::new(self.validator_set());
-                *self.vote_collector.write() = Some(Arc::new(VoteCollector::new(
-                    new_validator_set.clone(),
-                )));
-                *self.timeout_collector.write() = Some(Arc::new(
-                    crate::timeout::TimeoutCollector::new(new_validator_set.clone()),
-                ));
-                *self.nec_collector.write() = Some(Arc::new(
-                    crate::timeout::NoEndorsementCollector::new(new_validator_set),
-                ));
-            }
+            self.transition_epoch_if_due(transition_height)?;
         }
 
         Ok(qc)
+    }
+
+    /// Transitions the epoch at `height` when due and rebuilds the per-epoch
+    /// collectors against the new validator set. Returns `Ok(true)` when a
+    /// transition fired, `Ok(false)` when the height is not a boundary.
+    ///
+    /// Called from both live paths (DECIDE finalization, finalize-on-commit-QC)
+    /// and the block-sync import path — a node importing finalized blocks
+    /// across an epoch boundary must cross it exactly like a live node did, so
+    /// that `validator_set_for_height` resolves for post-boundary blocks and
+    /// QC verification runs against the same set.
+    ///
+    /// Callers must NOT hold the `vote_collector` / `timeout_collector` /
+    /// `nec_collector` locks.
+    pub fn transition_epoch_if_due(&self, height: BlockHeight) -> Result<bool> {
+        if !self.epoch_manager.should_transition(height) {
+            return Ok(false);
+        }
+
+        // The due-check inside transition_epoch runs under the epoch write
+        // lock — if a concurrent caller (engine finalize path vs. node
+        // follower path) won the race, we get Ok(None) and report no-op.
+        if self.epoch_manager.transition_epoch(height)?.is_none() {
+            return Ok(false);
+        }
+        tracing::info!(height = %height, "Epoch transition triggered");
+
+        // Update collectors with the new validator set
+        let new_validator_set = Arc::new(self.validator_set());
+        *self.vote_collector.write() = Some(Arc::new(VoteCollector::new(
+            new_validator_set.clone(),
+        )));
+        *self.timeout_collector.write() = Some(Arc::new(
+            crate::timeout::TimeoutCollector::new(new_validator_set.clone()),
+        ));
+        *self.nec_collector.write() = Some(Arc::new(
+            crate::timeout::NoEndorsementCollector::new(new_validator_set),
+        ));
+
+        Ok(true)
     }
 
     /// Main consensus loop
@@ -2521,20 +2606,7 @@ impl HotStuff2Engine {
         self.mempool.remove_transactions(&tx_hashes);
 
         // Epoch transition (vote_collector.write() — must not hold view_state lock here)
-        if self.epoch_manager.should_transition(transition_height) {
-            tracing::info!(height = %transition_height, "Epoch transition triggered");
-            let _ = self.epoch_manager.transition_epoch(transition_height)?;
-
-            let new_validator_set = Arc::new(self.validator_set());
-            *self.vote_collector.write() =
-                Some(Arc::new(VoteCollector::new(new_validator_set.clone())));
-            *self.timeout_collector.write() = Some(Arc::new(
-                crate::timeout::TimeoutCollector::new(new_validator_set.clone()),
-            ));
-            *self.nec_collector.write() = Some(Arc::new(
-                crate::timeout::NoEndorsementCollector::new(new_validator_set),
-            ));
-        }
+        self.transition_epoch_if_due(transition_height)?;
 
         Ok(())
     }
@@ -2788,6 +2860,12 @@ impl ConsensusEngine for HotStuff2Engine {
         // Reject proposals for the wrong height outright — `validate_proposal`
         // will catch this too, but failing fast avoids an unnecessary view jump.
         if proposal_height != local_height {
+            // We're behind the network and catchup-on-proposal couldn't bridge
+            // the gap (parent not in cache, gap > 1, or finalize failed). Hint
+            // block-sync so it engages even inside its normal tolerance window.
+            if proposal_height > local_height {
+                self.behind_hint_tx.send_replace(proposal_height.as_u64());
+            }
             return Err(ConsensusError::InvalidHeight {
                 expected: local_height,
                 actual: proposal_height,
@@ -3343,6 +3421,7 @@ impl Clone for HotStuff2Engine {
             proposal_dedup: self.proposal_dedup.clone(),
             proposer_election: self.proposer_election.clone(),
             reputation: self.reputation.clone(),
+            behind_hint_tx: self.behind_hint_tx.clone(),
         }
     }
 }
@@ -3986,6 +4065,19 @@ mod tests {
         peer_keypair: &KeyPair,
         peer_pq: &MlDsaSigningKey,
     ) -> crate::timeout::TimeoutMsg {
+        peer_sign_timeout_full(view, high_qc_view, 0, peer_address, peer_keypair, peer_pq)
+    }
+
+    /// Hybrid-sign a TimeoutMsg with explicit `high_qc_view` and
+    /// `finalized_height`.
+    fn peer_sign_timeout_full(
+        view: u64,
+        high_qc_view: u64,
+        finalized_height: u64,
+        peer_address: tenzro_types::primitives::Address,
+        peer_keypair: &KeyPair,
+        peer_pq: &MlDsaSigningKey,
+    ) -> crate::timeout::TimeoutMsg {
         use tenzro_crypto::composite::{
             CompositePublicKey, CompositeSignature, HybridSigner, InMemoryHybridSigner,
         };
@@ -3999,6 +4091,7 @@ mod tests {
         let unsigned = crate::timeout::TimeoutMsg::new(
             view,
             high_qc_view,
+            finalized_height,
             peer_address,
             placeholder,
             composite_pk.clone(),
@@ -4012,7 +4105,14 @@ mod tests {
         let signer = InMemoryHybridSigner::new(Box::new(classical), pq_copy);
 
         let signature = signer.sign(&payload).unwrap();
-        crate::timeout::TimeoutMsg::new(view, high_qc_view, peer_address, signature, composite_pk)
+        crate::timeout::TimeoutMsg::new(
+            view,
+            high_qc_view,
+            finalized_height,
+            peer_address,
+            signature,
+            composite_pk,
+        )
     }
 
     /// Hybrid-sign a NoEndorsementMsg "from" the given peer for the given view.
@@ -4095,6 +4195,33 @@ mod tests {
         engine.on_timeout_msg(&msg).await.expect("verified timeout silently ignored");
 
         assert_eq!(engine.view_state.read().view, 50, "local view unchanged");
+    }
+
+    /// A verified TimeoutMsg advertising a finalized height above ours must
+    /// fire the behind-hint watch channel — this is the finalization-skew
+    /// heal: the sender finalized a block (via a Commit QC we missed) and
+    /// block-sync must fetch it, or the view deadlocks forever on the
+    /// proposer re-proposing a conflicting block at that height.
+    #[tokio::test]
+    async fn test_on_timeout_msg_fires_behind_hint_on_higher_finalized_height() {
+        let (engine, peer_kp, peer_pq, peer_addr) =
+            build_test_engine_with_peer_signer().await;
+
+        let mut hint_rx = engine.subscribe_behind_hint();
+        assert_eq!(*hint_rx.borrow_and_update(), 0, "no hint before any timeout");
+
+        // Peer claims finalized height 7; our fresh tracker is at 0.
+        let msg = peer_sign_timeout_full(17, 16, 7, peer_addr, &peer_kp, &peer_pq);
+        engine.on_timeout_msg(&msg).await.expect("valid timeout accepted");
+
+        assert!(hint_rx.has_changed().unwrap(), "behind-hint fired");
+        assert_eq!(*hint_rx.borrow_and_update(), 7, "hint carries peer finalized height");
+
+        // A second timeout advertising a height we already match must NOT
+        // re-fire (peer height 0 == local 0 is not strictly greater).
+        let msg2 = peer_sign_timeout_full(18, 17, 0, peer_addr, &peer_kp, &peer_pq);
+        engine.on_timeout_msg(&msg2).await.expect("valid timeout accepted");
+        assert!(!hint_rx.has_changed().unwrap(), "no hint when not behind");
     }
 
     /// A TimeoutMsg with a tampered view (signature won't bind) must be
@@ -4264,6 +4391,7 @@ mod tests {
             signers.push(crate::timeout::TcSigner {
                 voter: msg.voter,
                 high_qc_view: msg.high_qc_view,
+                finalized_height: msg.finalized_height,
                 signature: msg.signature,
                 public_key: msg.public_key,
             });
@@ -4339,6 +4467,7 @@ mod tests {
             signers.push(crate::timeout::TcSigner {
                 voter: msg.voter,
                 high_qc_view: msg.high_qc_view,
+                finalized_height: msg.finalized_height,
                 signature: msg.signature,
                 public_key: msg.public_key,
             });
@@ -4393,6 +4522,7 @@ mod tests {
         let signers = vec![crate::timeout::TcSigner {
             voter: msg.voter,
             high_qc_view: msg.high_qc_view,
+            finalized_height: msg.finalized_height,
             signature: msg.signature,
             public_key: msg.public_key,
         }];

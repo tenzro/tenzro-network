@@ -308,12 +308,14 @@ async fn handle_rpc_post(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Stage 2: optional tenant-supplied Canton JWT. When present, the
-    // canton dispatch path uses this JWT instead of the operator's
-    // configured credential, so Canton routes the call to the
-    // tenant's IDP and the operator credential never appears on the
-    // wire. Accepts either raw JWT or `Bearer <jwt>` for ergonomic
-    // parity with `Authorization` headers.
+    // Optional BYO-issuer Canton JWT. Tenants normally never send
+    // this — the node mints their Canton JWT server-side from the
+    // OAuth credentials stored on their API key record (the tnz_ key
+    // is the tenant's only credential). The header exists solely for
+    // tenants provisioned against their own upstream issuer; stored
+    // credentials take priority over the header. Accepts either raw
+    // JWT or `Bearer <jwt>` for ergonomic parity with `Authorization`
+    // headers.
     let canton_auth = headers
         .get("x-canton-auth")
         .and_then(|v| v.to_str().ok())
@@ -818,19 +820,126 @@ fn normalize_params(params: Option<Value>) -> Option<Value> {
     }
 }
 
+/// Resolve the Canton JWT to forward for a canton-scoped request.
+///
+/// Priority order:
+/// 1. Stored tenant OAuth credentials on the `ApiKeyRecord` — the node
+///    mints (and the provisioner caches) the tenant JWT itself. This is
+///    the API-key-only model: the `tnz_...` key is the single
+///    credential a tenant holds; OAuth material never leaves the node.
+/// 2. Caller-supplied `X-Canton-Auth` header — BYO-issuer escape hatch
+///    for tenants provisioned against their own upstream IdP (no
+///    stored credentials on the record).
+/// 3. Neither → `Ok(None)`: the request rides the operator's own token
+///    provider (operator/admin keys without a bound tenant client).
+///
+/// Keys that carry a `tenant_oauth_client_id` but no stored secret and
+/// no header JWT fail closed with a reissue directive — silently
+/// falling back to the operator credential would let one tenant act
+/// with the operator's authority.
+async fn resolve_canton_jwt(
+    node: &Arc<TenzroNode>,
+    api_key: Option<&str>,
+    canton_auth: Option<&str>,
+) -> std::result::Result<Option<String>, JsonRpcError> {
+    let record = match (api_key, node.api_key_manager()) {
+        (Some(key), Some(mgr)) => mgr.lookup(key),
+        // Missing/unknown keys are rejected by gate_api_key right
+        // after dispatch; don't duplicate that error here.
+        _ => None,
+    };
+    let Some(record) = record else {
+        return Ok(canton_auth.map(|s| s.to_string()));
+    };
+
+    match (
+        record.tenant_oauth_client_id.as_deref(),
+        record.tenant_oauth_client_secret.as_deref(),
+    ) {
+        (Some(client_id), Some(client_secret)) => {
+            let Some(prov) = node.tenant_idp_provisioner() else {
+                return Err(JsonRpcError {
+                    code: -32000,
+                    message: "API key has stored tenant OAuth credentials but this node has no IdP provisioner configured (CANTON_IDP_MGMT_URL / CANTON_IDP_MGMT_CLIENT_ID / CANTON_IDP_MGMT_CLIENT_SECRET)".to_string(),
+                    data: None,
+                });
+            };
+            let audience = node
+                .config()
+                .canton
+                .identity_providers
+                .canton_audience
+                .clone()
+                .ok_or_else(|| JsonRpcError {
+                    code: -32000,
+                    message: "canton.identity_providers.canton_audience not configured".to_string(),
+                    data: None,
+                })?;
+            let scopes = vec!["daml_ledger_api".to_string()];
+            let jwt = prov
+                .mint_tenant_jwt(client_id, client_secret, &audience, &scopes)
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("tenant JWT mint failed: {}", e),
+                    data: None,
+                })?;
+            Ok(Some(jwt))
+        }
+        (Some(_), None) => match canton_auth {
+            Some(jwt) => Ok(Some(jwt.to_string())),
+            None => Err(JsonRpcError {
+                code: -32000,
+                message: "this API key has a tenant OAuth client but no stored credentials; ask the operator to reissue it (tenzro_revokeApiKey + tenzro_createApiKey) so the node can mint Canton JWTs server-side".to_string(),
+                data: None,
+            }),
+        },
+        _ => Ok(canton_auth.map(|s| s.to_string())),
+    }
+}
+
 pub(crate) async fn handle_request(
     node: &Arc<TenzroNode>,
-    mut request: JsonRpcRequest,
+    request: JsonRpcRequest,
     auth_ctx: &AuthContext,
     api_key: Option<&str>,
     canton_auth: Option<&str>,
 ) -> JsonRpcResponse {
-    // Install the tenant Canton JWT into a task-local slot so canton
-    // handlers further down the call tree can pick it up without
-    // every handler taking the parameter explicitly.
-    let _canton_auth_guard = canton_auth.map(|jwt| {
-        crate::canton_jwt::set_for_current_task(jwt.to_string())
-    });
+    // Resolve the Canton JWT for canton-scoped methods (server-minted
+    // from stored tenant credentials when available, header otherwise)
+    // and scope it task-locally around the dispatch so canton handlers
+    // further down the call tree pick it up without every handler
+    // taking the parameter explicitly.
+    let resolved_canton_jwt = if crate::api_key::required_scope_for_method(&request.method)
+        == Some(crate::api_key::ApiKeyScope::Canton)
+    {
+        match resolve_canton_jwt(node, api_key, canton_auth).await {
+            Ok(jwt) => jwt,
+            Err(error) => {
+                return JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: None,
+                    error: Some(error),
+                };
+            }
+        }
+    } else {
+        canton_auth.map(|s| s.to_string())
+    };
+    crate::canton_jwt::scope(
+        resolved_canton_jwt,
+        dispatch_request(node, request, auth_ctx, api_key),
+    )
+    .await
+}
+
+async fn dispatch_request(
+    node: &Arc<TenzroNode>,
+    mut request: JsonRpcRequest,
+    auth_ctx: &AuthContext,
+    api_key: Option<&str>,
+) -> JsonRpcResponse {
     // Per JSON-RPC 2.0 §4: the `jsonrpc` member MUST be exactly the string "2.0".
     // Reject anything else with -32600 Invalid Request before dispatching the
     // method — this protects downstream handlers from speaking against a 1.0
@@ -1886,6 +1995,26 @@ pub(crate) async fn handle_request(
         "tenzro_cctListPools" => crate::rpc_integrations::handle_cct_list_pools(node, request.params).await,
         "tenzro_cctGetPool" => crate::rpc_integrations::handle_cct_get_pool(node, request.params).await,
         "tenzro_cctBuildMessage" => crate::rpc_integrations::handle_cct_build_message(node, request.params).await,
+
+        // Hyperlane — sovereign-ISM messaging
+        "tenzro_hyperlaneListChains" => crate::rpc_integrations::handle_hyperlane_list_chains(node, request.params).await,
+        "tenzro_hyperlaneQuoteDispatch" => crate::rpc_integrations::handle_hyperlane_quote_dispatch(node, request.params).await,
+        "tenzro_hyperlaneDispatch" => crate::rpc_integrations::handle_hyperlane_dispatch(node, request.params).await,
+        "tenzro_hyperlaneGetMessage" => crate::rpc_integrations::handle_hyperlane_get_message(node, request.params).await,
+
+        // Axelar — General Message Passing
+        "tenzro_axelarListChains" => crate::rpc_integrations::handle_axelar_list_chains(node, request.params).await,
+        "tenzro_axelarCallContract" => crate::rpc_integrations::handle_axelar_call_contract(node, request.params).await,
+        "tenzro_axelarPayGas" => crate::rpc_integrations::handle_axelar_pay_gas(node, request.params).await,
+        "tenzro_axelarGetMessage" => crate::rpc_integrations::handle_axelar_get_message(node, request.params).await,
+
+        // Babylon — Bitcoin staking / finality providers
+        "tenzro_babylonRegisterFinalityProvider" => crate::rpc_integrations::handle_babylon_register_finality_provider(node, request.params).await,
+        "tenzro_babylonGetFinalityProvider" => crate::rpc_integrations::handle_babylon_get_finality_provider(node, request.params).await,
+        "tenzro_babylonListFinalityProviders" => crate::rpc_integrations::handle_babylon_list_finality_providers(node, request.params).await,
+        "tenzro_babylonTotalStakeForProvider" => crate::rpc_integrations::handle_babylon_total_stake_for_provider(node, request.params).await,
+        "tenzro_babylonSubmitFinalitySignature" => crate::rpc_integrations::handle_babylon_submit_finality_signature(node, request.params).await,
+        "tenzro_babylonListDelegations" => crate::rpc_integrations::handle_babylon_list_delegations(node, request.params).await,
 
         // EIP-7702 — EOA Code Delegation (stateless helpers)
         "tenzro_eip7702SigningHash" => crate::rpc_integrations::handle_eip7702_signing_hash(node, request.params).await,
@@ -6437,10 +6566,10 @@ fn canton_adapter_or_err(
         message: "Canton adapter not initialized (set [canton].enabled = true)".to_string(),
         data: None,
     })?;
-    // Stage 2: when the tenant presented their own Canton JWT via
-    // `X-Canton-Auth`, swap to a per-request adapter view that uses
-    // the tenant's JWT. The operator credential is never sent on
-    // these requests — Canton routes via the tenant's IDP.
+    // When a tenant JWT is in the task-local slot (server-minted from
+    // the API key's stored OAuth credentials, or BYO via
+    // `X-Canton-Auth`), swap to a per-request adapter view that uses
+    // it. The operator credential is never sent on these requests.
     if let Some(jwt) = crate::canton_jwt::current() {
         Ok(Arc::new(base.with_tenant_jwt(jwt)))
     } else {
@@ -12734,12 +12863,15 @@ async fn handle_send_raw_transaction(
         //    `from` address. Without this bind, any caller can sign a tx with
         //    their own key, place a victim's address in `from`, and the
         //    hybrid signature checks below would pass — debiting the victim.
-        //    `PublicKey::to_address()` returns a 32-byte canonical slot with
-        //    the 20-byte derived address at [0..20] (zero-padded tail);
-        //    `Address` storage shares the same shape, so constant-time
-        //    compare the raw bytes.
+        //    `PublicKey::to_address()` returns the 20-byte derived address;
+        //    `tenzro_types::Address` is the canonical 32-byte slot with the
+        //    address left-aligned (addr20 || 12 zero bytes — same layout as
+        //    `parse_address`). Expand before comparing: ct_eq on slices of
+        //    unequal length is always false.
         let derived = public_key.to_address();
-        if !bool::from(derived.as_bytes().ct_eq(signed_tx.transaction.from.as_bytes())) {
+        let mut expected_from = [0u8; 32];
+        expected_from[..20].copy_from_slice(derived.as_bytes());
+        if !bool::from(expected_from.ct_eq(signed_tx.transaction.from.as_bytes())) {
             warn!(
                 target: "rpc",
                 tx_hash = %tx_hash,
@@ -19986,7 +20118,7 @@ async fn handle_list_daml_contracts(
             Some(record) => match record.canton_user_id.as_deref() {
                 Some(uid) => Some(
                     adapter
-                        .primary_party_for_user(uid)
+                        .primary_party_for_user(uid, record.canton_identity_provider_id.as_deref())
                         .await
                         .map_err(|e| JsonRpcError {
                             code: -32000,
@@ -20143,7 +20275,10 @@ async fn handle_submit_daml_command(
                     if let Some(uid) = record.canton_user_id.as_deref() {
                         Some(
                             adapter
-                                .primary_party_for_user(uid)
+                                .primary_party_for_user(
+                                    uid,
+                                    record.canton_identity_provider_id.as_deref(),
+                                )
                                 .await
                                 .map_err(|e| JsonRpcError {
                                     code: -32000,
@@ -20685,9 +20820,10 @@ async fn handle_canton_grant_user_rights(
         .get("can_read_as")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let identity_provider_id = params.get("identity_provider_id").and_then(|v| v.as_str());
     let adapter = canton_adapter_or_err(node)?;
     adapter
-        .grant_user_rights(user_id, party, can_act_as, can_read_as)
+        .grant_user_rights(user_id, party, can_act_as, can_read_as, identity_provider_id)
         .await
         .map_err(|e| JsonRpcError {
             code: -32000,
@@ -21395,7 +21531,11 @@ async fn handle_create_api_key(
     // forwards canton-scoped requests `actAs` this user's primary
     // party so Canton's AuthService enforces per-user CanActAs.
     // See docs/operators/CANTON_MULTITENANT.md.
-    let canton_user_id = params
+    // Mutable: Stage 2.b rebinds this to `<minted_client_id>@clients`
+    // so the persisted record matches the `sub` claim on the tenant's
+    // client_credentials JWTs (the operator-supplied value is only the
+    // party-hint source in that flow).
+    let mut canton_user_id = params
         .get("canton_user_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
@@ -21470,8 +21610,21 @@ async fn handle_create_api_key(
 
         let adapter = canton_adapter_or_err(node)?;
 
-        // 1. Check if user already exists (idempotency).
-        let existing = adapter.get_user(user_id).await.ok();
+        // 1. Check if user already exists (idempotency). The original
+        // `<team>@clients` hint lives in the participant default IDP.
+        //
+        // Stage 2.b exception: when a tenant-IdP provisioner is wired, the
+        // Canton user this flow creates is `<minted_client_id>@clients` —
+        // always fresh — so a default-IDP user matching the raw hint must
+        // NOT short-circuit provisioning. The raw hint only seeds the
+        // party hint; collisions there surface as a clean allocate_party
+        // error and the operator retries with a fresh hint.
+        let stage2b_active = stage2_enabled && node.tenant_idp_provisioner().is_some();
+        let existing = if stage2b_active {
+            None
+        } else {
+            adapter.get_user(user_id, None).await.ok()
+        };
         if let Some(record) = existing {
             // User exists — extract its primary party for analytics summary,
             // but don't attempt to re-create / re-grant. Operator can manage
@@ -21498,6 +21651,12 @@ async fn handle_create_api_key(
             // operator-supplied issuer/jwks/audience: the operator
             // doesn't need to know the upstream config when the
             // provisioner can mint it.
+            //
+            // The Canton user id in this flow is `<client_id>@clients`
+            // — the `sub` claim Auth0 stamps on client_credentials
+            // tokens — NOT the operator-supplied canton_user_id,
+            // which only seeds the party hint.
+            let mut effective_user_id = user_id.to_string();
             let (canton_idp_id_resolved, canton_issuer_resolved, canton_jwks_resolved, canton_audience_resolved) = {
                 let provisioner = if stage2_enabled {
                     node.tenant_idp_provisioner()
@@ -21523,6 +21682,10 @@ async fn handle_create_api_key(
                         tenant_label: label.clone(),
                         tenant_user_id: user_id.to_string(),
                         audience: configured_audience,
+                        // Canton's standard Ledger API scope. The
+                        // client-grant binds it so the tenant's
+                        // client_credentials token request succeeds.
+                        scopes: vec!["daml_ledger_api".to_string()],
                     };
                     let client = prov.mint_tenant_client(&req).await.map_err(|e| JsonRpcError {
                         code: -32000,
@@ -21532,17 +21695,25 @@ async fn handle_create_api_key(
                         ),
                         data: None,
                     })?;
-                    // The tenant's Canton IDP id matches their OAuth
-                    // client_id so Canton routes their JWTs to their
-                    // own IDP and downstream audit identifies them.
-                    let idp_id = format!("tenant-{}", client.client_id);
-                    stage2b_idp_client = Some(client.clone());
-                    (
-                        Some(idp_id),
-                        Some(client.issuer_url.clone()),
-                        Some(client.jwks_url.clone()),
-                        Some(client.audience.clone()),
-                    )
+                    // Default-IDP provisioning. Canton consults its
+                    // static config-file auth services BEFORE dynamic
+                    // IdentityProviderConfigs and short-circuits at
+                    // the first non-Unauthenticated claim. Stage 2.b
+                    // mints tenant clients on the operator's own
+                    // upstream issuer, so tenant JWTs are always
+                    // claimed by the static auth service and scoped to
+                    // the DEFAULT IDP — a dynamic IDP sharing that
+                    // issuer is unreachable dead config. Tenant
+                    // isolation comes from per-tenant OAuth clients
+                    // (distinct `sub` → distinct Canton user) +
+                    // per-user CanActAs rights, not IDP scoping.
+                    //
+                    // Auth0 client_credentials tokens carry
+                    // `sub = <client_id>@clients`; Canton matches the
+                    // user by that sub, so that string IS the user id.
+                    effective_user_id = format!("{}@clients", client.client_id);
+                    stage2b_idp_client = Some(client);
+                    (None, None, None, None)
                 } else {
                     (
                         canton_idp_id.clone(),
@@ -21616,33 +21787,45 @@ async fn handle_create_api_key(
                     data: None,
                 })?;
             // 3. Create the Canton user with primaryParty = FQ party
-            //    (under the tenant's IDP when set).
+            //    (under the tenant's IDP when set). In Stage 2.b the
+            //    user id is `<minted_client_id>@clients` so Canton's
+            //    AuthService matches the tenant JWT's `sub` claim.
             adapter
-                .create_user(user_id, Some(&fq_party), idp_for_provision.as_deref())
+                .create_user(&effective_user_id, Some(&fq_party), idp_for_provision.as_deref())
                 .await
                 .map_err(|e| JsonRpcError {
                     code: -32000,
                     message: format!(
                         "Canton auto-provision: create_user({}, primary={}) failed: {}",
-                        user_id, fq_party, e
+                        effective_user_id, fq_party, e
                     ),
                     data: None,
                 })?;
-            // 4. Grant CanActAs to the user on its primary party.
+            // 4. Grant CanActAs to the user on its primary party. The IDP
+            //    id must be forwarded — Canton resolves the user inside the
+            //    IDP scope and returns 403 for IDP-scoped users otherwise.
             adapter
-                .grant_user_rights(Some(user_id), &fq_party, true, false)
+                .grant_user_rights(
+                    Some(effective_user_id.as_str()),
+                    &fq_party,
+                    true,
+                    false,
+                    idp_for_provision.as_deref(),
+                )
                 .await
                 .map_err(|e| JsonRpcError {
                     code: -32000,
                     message: format!(
                         "Canton auto-provision: grant_user_rights({}, {}) failed: {}",
-                        user_id, fq_party, e
+                        effective_user_id, fq_party, e
                     ),
                     data: None,
                 })?;
 
             provisioned_party = Some(fq_party.clone());
-            let stage = if idp_for_provision.is_some() {
+            let stage = if stage2b_idp_client.is_some() {
+                "stage2b"
+            } else if idp_for_provision.is_some() {
                 "stage2"
             } else {
                 "stage1"
@@ -21650,12 +21833,17 @@ async fn handle_create_api_key(
             provision_summary = Some(serde_json::json!({
                 "status": "provisioned",
                 "stage": stage,
-                "user_id": user_id,
+                "user_id": effective_user_id.clone(),
                 "primary_party": fq_party,
                 "party_hint": party_hint,
                 "identity_provider_id": idp_for_provision,
                 "rights_granted": ["CanActAs"],
             }));
+            // Persist the effective user id on the API-key record so
+            // the actAs-forwarding path (resolve canton_user_id →
+            // primaryParty) and revoke teardown both target the user
+            // Canton actually knows about.
+            canton_user_id = Some(effective_user_id);
         }
     }
 
@@ -21744,6 +21932,7 @@ async fn handle_create_api_key(
             canton_user_id,
             provisioned_idp.clone(),
             stage2b_idp_client.as_ref().map(|c| c.client_id.clone()),
+            stage2b_idp_client.as_ref().map(|c| c.client_secret.clone()),
             delegation,
         )
         .map_err(|e| JsonRpcError {
@@ -21782,9 +21971,10 @@ async fn handle_create_api_key(
                 let mut grants: Vec<(String, bool, bool)> = Vec::new();
                 let mut failure: Option<String> = None;
 
+                let rights_idp = issued.record.canton_identity_provider_id.clone();
                 'grants: for party in issued.record.can_act_as_parties.iter() {
                     match adapter
-                        .grant_user_rights(Some(user_id), party, true, false)
+                        .grant_user_rights(Some(user_id), party, true, false, rights_idp.as_deref())
                         .await
                     {
                         Ok(_) => {
@@ -21807,7 +21997,13 @@ async fn handle_create_api_key(
                 if failure.is_none() {
                     'reads: for party in issued.record.can_read_as_parties.iter() {
                         match adapter
-                            .grant_user_rights(Some(user_id), party, false, true)
+                            .grant_user_rights(
+                                Some(user_id),
+                                party,
+                                false,
+                                true,
+                                rights_idp.as_deref(),
+                            )
                             .await
                         {
                             Ok(_) => {
@@ -21841,6 +22037,7 @@ async fn handle_create_api_key(
                                 party,
                                 *can_act_as,
                                 *can_read_as,
+                                rights_idp.as_deref(),
                             )
                             .await
                         {
@@ -21910,13 +22107,14 @@ async fn handle_create_api_key(
         }
     }
 
+    // Stage 2.b: the per-tenant OAuth client credentials are stored on
+    // the ApiKeyRecord and used by the node to mint tenant JWTs
+    // server-side. The tenant never sees OAuth material — only the
+    // non-secret client_id is echoed for operator bookkeeping.
     let tenant_oauth = stage2b_idp_client.as_ref().map(|c| {
         serde_json::json!({
             "client_id": c.client_id,
-            "client_secret": c.client_secret,
-            "token_url": c.token_url,
             "issuer_url": c.issuer_url,
-            "jwks_url": c.jwks_url,
             "audience": c.audience,
         })
     });
@@ -21978,13 +22176,10 @@ async fn handle_create_api_key(
         "canton_primary_party": provisioned_party,
         "canton_identity_provider_id": provisioned_idp,
         "canton_provisioning": provision_summary,
-        // Stage 2.b: per-tenant OAuth client minted upstream. The
-        // `client_secret` is returned exactly once — the tenant must
-        // persist it. Their token-acquisition loop is:
-        //   POST {token_url} { grant_type: client_credentials,
-        //     client_id, client_secret, audience }
-        // and they present the resulting JWT on canton-scoped Tenzro
-        // calls via `X-Canton-Auth: Bearer <jwt>`.
+        // Stage 2.b: non-secret metadata about the per-tenant OAuth
+        // client minted upstream. The credentials stay on the node —
+        // the tenant authenticates with the API key alone and the
+        // node mints + forwards the Canton JWT internally.
         "tenant_oauth_client": tenant_oauth,
         // Agent-delegation parameters applied to this key (or null
         // when none were supplied). When non-null, every canton-scoped
@@ -22066,27 +22261,11 @@ async fn handle_revoke_api_key(
             }
         }
 
-        // Delete Canton IDP (Stage 2.b).
-        if let Some(idp_id) = record.canton_identity_provider_id.as_deref()
-            && let Some(adapter) = node.canton_adapter()
-        {
-            match adapter.delete_identity_provider(idp_id).await {
-                Ok(()) => {
-                    tenant_cleanup
-                        .insert("canton_idp_deleted".to_string(), Value::Bool(true));
-                    tenant_cleanup.insert(
-                        "canton_identity_provider_id".to_string(),
-                        Value::String(idp_id.to_string()),
-                    );
-                }
-                Err(e) => {
-                    tenant_cleanup.insert(
-                        "canton_idp_delete_error".to_string(),
-                        Value::String(format!("{}", e)),
-                    );
-                }
-            }
-        }
+        // No Canton IDP teardown here: Stage 2.b tenants live in the
+        // default IDP. Per-tenant teardown is the OAuth client
+        // deletion above + the rights revocation below. Dynamic IDPs
+        // (distinct-issuer tenants) are removed only via
+        // tenzro_canton_deleteIdp.
 
         // Revoke Canton-side CanActAs / CanReadAs rights granted at
         // key issuance. Best-effort — errors are surfaced in
@@ -22103,10 +22282,11 @@ async fn handle_revoke_api_key(
         {
             let mut revoked: Vec<Value> = Vec::new();
             let mut errors: Vec<Value> = Vec::new();
+            let rights_idp = record.canton_identity_provider_id.clone();
 
             for party in record.can_act_as_parties.iter() {
                 match adapter
-                    .revoke_user_rights(Some(user_id), party, true, false)
+                    .revoke_user_rights(Some(user_id), party, true, false, rights_idp.as_deref())
                     .await
                 {
                     Ok(_) => revoked.push(serde_json::json!({
@@ -22122,7 +22302,7 @@ async fn handle_revoke_api_key(
             }
             for party in record.can_read_as_parties.iter() {
                 match adapter
-                    .revoke_user_rights(Some(user_id), party, false, true)
+                    .revoke_user_rights(Some(user_id), party, false, true, rights_idp.as_deref())
                     .await
                 {
                     Ok(_) => revoked.push(serde_json::json!({
@@ -23628,19 +23808,113 @@ async fn handle_get_storage_at(
 }
 
 async fn handle_eth_call(
-    _node: &Arc<TenzroNode>,
+    node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    // Static call execution — currently returns empty result
-    // Full implementation would route through EVM executor
-    let _params = params.ok_or_else(|| JsonRpcError {
+    let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
         message: "Missing params".to_string(),
         data: None,
     })?;
 
-    // Return empty bytes for now — no contract execution without full EVM state
-    Ok(serde_json::json!("0x"))
+    // Standard shape: [{from?, to, gas?, value?, data?|input?}, blockTag?].
+    // Only the latest state is served; the block tag is accepted and ignored.
+    let call_obj = if let Some(arr) = params.as_array() {
+        arr.first().cloned().ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing call object".to_string(),
+            data: None,
+        })?
+    } else {
+        params.clone()
+    };
+
+    let to_str = call_obj.get("to").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing to".to_string(),
+        data: None,
+    })?;
+    let to = hex::decode(to_str.strip_prefix("0x").unwrap_or(to_str)).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid to address: {}", e),
+        data: None,
+    })?;
+
+    let from = match call_obj.get("from").and_then(|v| v.as_str()) {
+        Some(s) => hex::decode(s.strip_prefix("0x").unwrap_or(s)).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid from address: {}", e),
+            data: None,
+        })?,
+        None => vec![0u8; 20],
+    };
+
+    let data = match call_obj.get("data").or_else(|| call_obj.get("input")).and_then(|v| v.as_str()) {
+        Some(s) => hex::decode(s.strip_prefix("0x").unwrap_or(s)).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid call data: {}", e),
+            data: None,
+        })?,
+        None => Vec::new(),
+    };
+
+    let value = match call_obj.get("value").and_then(|v| v.as_str()) {
+        Some(s) => u128::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid value: {}", e),
+            data: None,
+        })?,
+        None => 0,
+    };
+
+    let gas_limit = match call_obj.get("gas").and_then(|v| v.as_str()) {
+        Some(s) => u64::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid gas: {}", e),
+            data: None,
+        })?,
+        None => 30_000_000,
+    };
+
+    let vm = node.vm_runtime().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "VM runtime not initialized".to_string(),
+        data: None,
+    })?;
+
+    let state = if let Some(storage) = node.storage() {
+        tenzro_vm::StateAdapter::with_storage(storage.clone() as std::sync::Arc<dyn tenzro_storage::KvStore>)
+    } else {
+        tenzro_vm::StateAdapter::new()
+    };
+
+    let call = tenzro_vm::ContractCall {
+        caller: from,
+        contract: to,
+        data,
+        value,
+        gas_limit,
+        vm_type: tenzro_vm::VmType::Evm,
+    };
+
+    let result = vm.call(&call, &state).await.map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Call failed: {}", e),
+        data: None,
+    })?;
+
+    if !result.success {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: match &result.revert_reason {
+                Some(reason) => format!("execution reverted: {}", reason),
+                None => "execution reverted".to_string(),
+            },
+            data: Some(serde_json::json!(format!("0x{}", hex::encode(&result.output)))),
+        });
+    }
+
+    Ok(serde_json::json!(format!("0x{}", hex::encode(&result.output))))
 }
 
 async fn handle_get_logs(
@@ -31222,7 +31496,9 @@ async fn handle_create_token(
     })?;
     let mut creator = [0u8; 32];
     if creator_bytes.len() == 20 {
-        creator[12..32].copy_from_slice(&creator_bytes);
+        // Canonical left-aligned slot (addr20 || 12 zero bytes), matching
+        // `parse_address` and the native ledger's balance keyspace.
+        creator[..20].copy_from_slice(&creator_bytes);
     } else if creator_bytes.len() == 32 {
         creator.copy_from_slice(&creator_bytes);
     } else {
@@ -31607,14 +31883,15 @@ async fn handle_deploy_contract(
     //   "tenzro:deploy_contract:{vm_type}:{deployer}"
     // produced with the Ed25519 or Secp256k1 key that derives to `deployer`.
     // Note: `deployer` here is the parsed bytes from params (variable-length:
-    // 20 bytes for EVM-style addresses), so we pad to a 32-byte slot to match
-    // the verifier's expectation.
+    // 20 bytes for EVM-style addresses). Pad to the canonical left-aligned
+    // 32-byte slot (addr20 || 12 zero bytes) — the same layout as
+    // `parse_address` and the native ledger's balance keyspace.
     let signature = params.get("signature").and_then(|v| v.as_str());
     let public_key = params.get("public_key").and_then(|v| v.as_str());
     let sign_message = format!("tenzro:deploy_contract:{}:{}", vm_type_str, deployer_str);
     let mut deployer_32 = [0u8; 32];
     if deployer.len() == 20 {
-        deployer_32[12..32].copy_from_slice(&deployer);
+        deployer_32[..20].copy_from_slice(&deployer);
     } else if deployer.len() == 32 {
         deployer_32.copy_from_slice(&deployer);
     } else {
@@ -35559,13 +35836,13 @@ async fn handle_list_subscriptions(
 /// Verification steps:
 ///   1. Decode `public_key` hex (33 bytes for Secp256k1 compressed, 32 bytes
 ///      for Ed25519). Auto-detect key type by length.
-///   2. Derive the address from the public key via `PublicKey::to_address()`
-///      (Ed25519: SHA-256 of pubkey, first 20 bytes; Secp256k1: Keccak-256 of
-///      pubkey, last 20 bytes — Ethereum-style). The returned `Address` is
-///      a 32-byte canonical slot with the 20-byte derived address at
-///      positions `[0..20]` and the tail zero-padded.
-///   3. Constant-time compare the derived 32-byte slot against the caller's
-///      `creator` (same canonical shape).
+///   2. Derive the 20-byte address from the public key via
+///      `PublicKey::to_address()` (Ed25519: SHA-256 of pubkey, first 20
+///      bytes; Secp256k1: Keccak-256 of pubkey, last 20 bytes —
+///      Ethereum-style), then expand it into the canonical 32-byte slot
+///      (addr20 left-aligned at `[0..20]`, tail zero-padded).
+///   3. Constant-time compare that expanded slot against the caller's
+///      `creator` (same canonical left-aligned shape).
 ///   4. Decode `signature` hex and verify against the domain-separated
 ///      `message` using `tenzro_crypto::signatures::verify()`.
 ///
@@ -35615,14 +35892,18 @@ fn verify_creator_signature(
     let pk = PublicKey::new(key_type, pk_bytes.clone());
     let derived_addr = pk.to_address();
 
-    // `PublicKey::to_address()` returns a 32-byte slot with the 20-byte
-    // derived address at positions [0..20] (zero-padded tail). `creator`
-    // is the same canonical shape, matching how `create_token` and
-    // `deploy_contract` parse 20-byte hex into a 32-byte buffer.
+    // `PublicKey::to_address()` returns the 20-byte derived address.
+    // `creator` is the canonical 32-byte slot with the address left-aligned
+    // (addr20 || 12 zero bytes) — the same layout `parse_address` and the
+    // native ledger's `tnzo_balance_key` use. Expand the derived address
+    // into that slot before the constant-time comparison (ct_eq on slices
+    // of unequal length is always false).
     if creator.len() != 32 {
         return Err(invalid("Internal: creator slot must be 32 bytes"));
     }
-    if !bool::from(derived_addr.as_bytes().ct_eq(creator)) {
+    let mut expected = [0u8; 32];
+    expected[..20].copy_from_slice(derived_addr.as_bytes());
+    if !bool::from(expected.ct_eq(creator)) {
         return Err(invalid(
             "Signature public_key does not match claimed creator address",
         ));
@@ -36552,8 +36833,15 @@ async fn handle_sign_transaction(
         })?;
         // `Transaction::gas_price` is u64; the fee market's effective_price is u128.
         // At pre-launch testnet base fees the value is well under u64::MAX —
-        // saturate on the unlikely overflow rather than panicking.
-        let live = vm_runtime.gas_oracle().current_price().await.effective_price();
+        // saturate on the unlikely overflow rather than panicking. Clamp up to
+        // the wallet validator's 1 Gwei floor: the EIP-1559 base fee can drift
+        // down to 0.1 Gwei, which the signer would then refuse.
+        let live = vm_runtime
+            .gas_oracle()
+            .current_price()
+            .await
+            .effective_price()
+            .max(u128::from(tenzro_wallet::ValidationConfig::default().min_gas_price));
         u64::try_from(live).unwrap_or(u64::MAX)
     };
 
@@ -36758,8 +37046,15 @@ async fn handle_sign_and_send_transaction(
         })?;
         // `Transaction::gas_price` is u64; the fee market's effective_price is u128.
         // At pre-launch testnet base fees the value is well under u64::MAX —
-        // saturate on the unlikely overflow rather than panicking.
-        let live = vm_runtime.gas_oracle().current_price().await.effective_price();
+        // saturate on the unlikely overflow rather than panicking. Clamp up to
+        // the wallet validator's 1 Gwei floor: the EIP-1559 base fee can drift
+        // down to 0.1 Gwei, which the signer would then refuse.
+        let live = vm_runtime
+            .gas_oracle()
+            .current_price()
+            .await
+            .effective_price()
+            .max(u128::from(tenzro_wallet::ValidationConfig::default().min_gas_price));
         u64::try_from(live).unwrap_or(u64::MAX)
     };
     let nonce = if let Some(n) = params_inner.get("nonce").and_then(|v| v.as_u64()) {
@@ -37003,8 +37298,15 @@ async fn handle_svm_dispatch(
         data: None,
     })?;
 
-    // Resolve gas_price + nonce live.
-    let gas_price = vm_runtime.gas_oracle().current_price().await.effective_price();
+    // Resolve gas_price + nonce live. The wallet validator refuses to sign
+    // below its 1 Gwei floor while the EIP-1559 base fee can drift down to
+    // 0.1 Gwei — clamp up so wallet-signed dispatches always validate.
+    let gas_price = vm_runtime
+        .gas_oracle()
+        .current_price()
+        .await
+        .effective_price()
+        .max(u128::from(tenzro_wallet::ValidationConfig::default().min_gas_price));
 
     let mut state = if let Some(storage) = node.storage() {
         tenzro_vm::StateAdapter::with_storage(
@@ -37068,11 +37370,12 @@ async fn handle_svm_dispatch(
         to: to_addr,
         nonce: Nonce::from(nonce),
         // SVM dispatch carries the instruction payload as a ContractCall with
-        // empty function and `args = instruction_data`. The runtime path for
-        // SVM doesn't read `tx_type` (it routes by VmType), but we still need
-        // a typed payload for canonical hashing.
+        // `args = instruction_data`. The runtime path for SVM doesn't read
+        // `tx_type` (it routes by VmType), but the typed payload is needed for
+        // canonical hashing and must pass the wallet validator, which rejects
+        // empty function names.
         tx_type: TransactionType::ContractCall {
-            function: String::new(),
+            function: "svm_dispatch".to_string(),
             args: instruction_data_bytes.clone(),
         },
         gas_limit,
@@ -40215,5 +40518,148 @@ mod aa_pre_sign_tests {
             result.is_failure(),
             "out-of-allowlist selector must be rejected"
         );
+    }
+}
+
+#[cfg(test)]
+mod creator_signature_tests {
+    use super::verify_creator_signature;
+    use tenzro_crypto::signatures::{Ed25519SignerImpl, Secp256k1SignerImpl, Signer};
+
+    /// Expand a 20-byte derived address into the canonical 32-byte slot:
+    /// addr20 left-aligned at [0..20], zero tail — the same layout
+    /// `parse_address` and `tnzo_balance_key` use.
+    fn left_aligned_slot(addr20: &[u8]) -> [u8; 32] {
+        let mut slot = [0u8; 32];
+        slot[..20].copy_from_slice(addr20);
+        slot
+    }
+
+    #[test]
+    fn ed25519_accepts_left_aligned_creator_slot() {
+        let signer = Ed25519SignerImpl::generate().expect("keygen");
+        let msg = b"tenzro:deploy_contract:evm:0xdeadbeef";
+        let sig = signer.sign(msg).expect("sign");
+        let creator = left_aligned_slot(signer.public_key().to_address().as_bytes());
+
+        verify_creator_signature(
+            &creator,
+            Some(&hex::encode(sig.as_bytes())),
+            Some(&hex::encode(signer.public_key().as_bytes())),
+            msg,
+        )
+        .expect("left-aligned 32-byte creator slot must verify");
+    }
+
+    #[test]
+    fn secp256k1_accepts_left_aligned_creator_slot() {
+        use tenzro_crypto::keys::{KeyType, PublicKey};
+
+        let signer = Secp256k1SignerImpl::generate().expect("keygen");
+        let msg = b"tenzro:create_token:TNZT";
+        let sig = signer.sign(msg).expect("sign");
+
+        // verify_creator_signature requires the 33-byte compressed SEC1 form
+        // and derives the address from the bytes it receives, so the claimed
+        // creator must be derived from the compressed encoding too.
+        let vk = ::k256::ecdsa::VerifyingKey::from_sec1_bytes(signer.public_key().as_bytes())
+            .expect("sec1 decode");
+        let compressed = vk.to_sec1_point(true).as_bytes().to_vec();
+        assert_eq!(compressed.len(), 33);
+        let derived = PublicKey::new(KeyType::Secp256k1, compressed.clone()).to_address();
+        let creator = left_aligned_slot(derived.as_bytes());
+
+        verify_creator_signature(
+            &creator,
+            Some(&hex::encode(sig.as_bytes())),
+            Some(&hex::encode(&compressed)),
+            msg,
+        )
+        .expect("left-aligned 32-byte creator slot must verify");
+    }
+
+    #[test]
+    fn rejects_right_aligned_creator_slot() {
+        // The legacy [12..32] right-aligned padding must NOT verify — only
+        // the canonical left-aligned layout is accepted.
+        let signer = Ed25519SignerImpl::generate().expect("keygen");
+        let msg = b"tenzro:deploy_contract:evm:0xdeadbeef";
+        let sig = signer.sign(msg).expect("sign");
+        let addr20 = signer.public_key().to_address();
+        let mut right_aligned = [0u8; 32];
+        right_aligned[12..32].copy_from_slice(addr20.as_bytes());
+
+        let err = verify_creator_signature(
+            &right_aligned,
+            Some(&hex::encode(sig.as_bytes())),
+            Some(&hex::encode(signer.public_key().as_bytes())),
+            msg,
+        )
+        .expect_err("right-aligned slot must be rejected");
+        assert_eq!(err.code, -32602);
+    }
+
+    #[test]
+    fn rejects_mismatched_creator_address() {
+        let signer = Ed25519SignerImpl::generate().expect("keygen");
+        let other = Ed25519SignerImpl::generate().expect("keygen");
+        let msg = b"tenzro:deploy_contract:evm:0xdeadbeef";
+        let sig = signer.sign(msg).expect("sign");
+        let creator = left_aligned_slot(other.public_key().to_address().as_bytes());
+
+        let err = verify_creator_signature(
+            &creator,
+            Some(&hex::encode(sig.as_bytes())),
+            Some(&hex::encode(signer.public_key().as_bytes())),
+            msg,
+        )
+        .expect_err("someone else's address must be rejected");
+        assert_eq!(err.code, -32602);
+    }
+
+    #[test]
+    fn rejects_non_32_byte_creator_slot() {
+        let signer = Ed25519SignerImpl::generate().expect("keygen");
+        let msg = b"tenzro:deploy_contract:evm:0xdeadbeef";
+        let sig = signer.sign(msg).expect("sign");
+        let addr20 = signer.public_key().to_address();
+
+        // Raw 20-byte creator (un-expanded) must be rejected — handlers are
+        // required to expand into the canonical slot before calling.
+        let err = verify_creator_signature(
+            addr20.as_bytes(),
+            Some(&hex::encode(sig.as_bytes())),
+            Some(&hex::encode(signer.public_key().as_bytes())),
+            msg,
+        )
+        .expect_err("non-32-byte creator slot must be rejected");
+        assert_eq!(err.code, -32602);
+    }
+
+    #[test]
+    fn rejects_bad_signature() {
+        let signer = Ed25519SignerImpl::generate().expect("keygen");
+        let msg = b"tenzro:deploy_contract:evm:0xdeadbeef";
+        let sig = signer.sign(b"some other message").expect("sign");
+        let creator = left_aligned_slot(signer.public_key().to_address().as_bytes());
+
+        let err = verify_creator_signature(
+            &creator,
+            Some(&hex::encode(sig.as_bytes())),
+            Some(&hex::encode(signer.public_key().as_bytes())),
+            msg,
+        )
+        .expect_err("signature over a different message must be rejected");
+        assert_eq!(err.code, -32602);
+    }
+
+    #[test]
+    fn rejects_missing_signature_or_key() {
+        let signer = Ed25519SignerImpl::generate().expect("keygen");
+        let creator = left_aligned_slot(signer.public_key().to_address().as_bytes());
+        let msg = b"m";
+
+        assert!(verify_creator_signature(&creator, None, Some("00"), msg).is_err());
+        assert!(verify_creator_signature(&creator, Some("00"), None, msg).is_err());
     }
 }

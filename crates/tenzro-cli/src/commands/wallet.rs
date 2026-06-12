@@ -341,7 +341,7 @@ impl WalletSendCmd {
         // Parse amount
         let amount_float: f64 = self.amount.parse()?;
         let decimals = 18;
-        let amount_wei = (amount_float * 10f64.powi(decimals)) as u64;
+        let amount_wei = (amount_float * 10f64.powi(decimals)) as u128;
 
         // Resolve sender address (from --from or stored config)
         let cfg = crate::config::load_config();
@@ -412,7 +412,9 @@ impl WalletSendCmd {
             serde_json::json!({
                 "from": from_address,
                 "to": self.to,
-                "value": amount_wei,
+                // Decimal string carries the full u128 range — JSON numbers
+                // clamp to u64 in the handler's numeric path.
+                "value": amount_wei.to_string(),
                 "gas_limit": 21000u64,
                 "gas_price": 1_000_000_000u64,
                 "nonce": nonce,

@@ -65,16 +65,16 @@ impl SymmetricKey {
 
     /// Encrypt data using AES-256-GCM
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.key));
+        let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(self.key));
 
         // Generate random nonce
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
         // Encrypt
         let ciphertext = cipher
-            .encrypt(nonce, plaintext)
+            .encrypt(&nonce, plaintext)
             .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
 
         // Prepend nonce to ciphertext
@@ -92,15 +92,17 @@ impl SymmetricKey {
             ));
         }
 
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.key));
+        let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(self.key));
 
         // Extract nonce and ciphertext
-        let nonce = Nonce::from_slice(&ciphertext[..NONCE_SIZE]);
+        let mut nonce_bytes = [0u8; NONCE_SIZE];
+        nonce_bytes.copy_from_slice(&ciphertext[..NONCE_SIZE]);
+        let nonce = Nonce::from(nonce_bytes);
         let ct = &ciphertext[NONCE_SIZE..];
 
         // Decrypt
         let plaintext = cipher
-            .decrypt(nonce, ct)
+            .decrypt(&nonce, ct)
             .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))?;
 
         Ok(plaintext)

@@ -40,8 +40,9 @@ use tenzro_consensus::HotStuff2Engine;
 use tenzro_consensus::QuorumCertificate;
 use tenzro_network::{
     BlockSyncError, BlockSyncRequest, BlockSyncResponse,
-    InboundBlockSync, InboundRequestId, OutboundBlockSyncResult, OutboundRequestId,
-    PeerEvent, TenzroNetworkService, MAX_BLOCKS_PER_RANGE, MAX_INFLIGHT_REQUESTS_PER_PEER,
+    InboundBlockSync, InboundRequestId, NetworkService, OutboundBlockSyncResult,
+    OutboundRequestId, PeerEvent, TenzroNetworkService, MAX_BLOCKS_PER_RANGE,
+    MAX_INFLIGHT_REQUESTS_PER_PEER,
 };
 use tenzro_storage::traits::BlockStore;
 use tenzro_storage::{BlockStoreImpl, RocksDbStore};
@@ -154,6 +155,14 @@ pub struct BlockSyncEngine {
 
     /// Interval ticker for the idle tip-probe loop.
     probe_tick: Interval,
+
+    /// While set and in the future, the engine syncs on ANY positive gap
+    /// (tolerance 0) instead of requiring `> SLOT_IMPORT_TOLERANCE`.
+    /// Armed by consensus rejecting an ahead-of-us proposal (the
+    /// behind-hint watch channel) — that rejection is proof a quorum is
+    /// building blocks past our tip, so even a gap of 1..=8 must be
+    /// closed or this replica is stranded forever.
+    hinted_until: Option<std::time::Instant>,
 }
 
 /// Sent from the engine to the event loop to import a block. The event loop
@@ -199,17 +208,51 @@ impl BlockSyncEngine {
             state: SyncState::Synced,
             peers: HashMap::new(),
             probe_tick: interval(TIP_PROBE_INTERVAL),
+            hinted_until: None,
+        }
+    }
+
+    /// Effective gap tolerance for engaging sync: zero while a behind-hint
+    /// is active (consensus saw a proposal ahead of our tip), otherwise the
+    /// steady-state `SLOT_IMPORT_TOLERANCE` that absorbs ordinary
+    /// propagation jitter without flapping into sync mode.
+    fn sync_tolerance(&self) -> u64 {
+        match self.hinted_until {
+            Some(t) if std::time::Instant::now() < t => 0,
+            _ => SLOT_IMPORT_TOLERANCE,
         }
     }
 
     /// Drives the engine forever. Returns only on shutdown signal.
     pub async fn run(mut self, mut shutdown: tokio::sync::broadcast::Receiver<()>) {
         info!("Block-sync engine started");
+        let mut behind_rx = self.consensus.as_ref().map(|c| c.subscribe_behind_hint());
         loop {
             tokio::select! {
                 _ = shutdown.recv() => {
                     info!("Block-sync engine shutting down");
                     return;
+                }
+                changed = async { behind_rx.as_mut().unwrap().changed().await }, if behind_rx.is_some() => {
+                    match changed {
+                        Ok(()) => {
+                            let hinted_height = *behind_rx.as_ref().unwrap().borrow();
+                            self.hinted_until = Some(
+                                std::time::Instant::now() + Duration::from_secs(60),
+                            );
+                            info!(
+                                hinted_height,
+                                "Behind-hint from consensus — engaging sync at zero tolerance"
+                            );
+                            if let Err(e) = self.on_probe_tick().await {
+                                warn!(error = %e, "Block-sync hinted probe failed");
+                            }
+                        }
+                        Err(_) => {
+                            // Sender dropped (consensus gone) — stop polling.
+                            behind_rx = None;
+                        }
+                    }
                 }
                 _ = self.probe_tick.tick() => {
                     if let Err(e) = self.on_probe_tick().await {
@@ -288,6 +331,53 @@ impl BlockSyncEngine {
 
         let our_height = self.local_tip().await?;
 
+        // Heal an engine that has fallen behind local storage. Gossip imports
+        // (`handle_network_block`) advance storage without touching the
+        // engine, and `local_tip()` reads storage — so neither the behind-hint
+        // nor tip probing ever sees a gap, while the engine keeps rejecting
+        // every live proposal ("expected N, got N+700"). The June 2026 v1
+        // stall. On a healthy validator the engine advances its height at
+        // finalization *before* the event loop persists the block, so
+        // `engine_next` is at least `tip + 1` and this is a no-op; height
+        // only ever moves forward inside `resume_from_synced_height`.
+        if let Some(consensus) = &self.consensus {
+            let engine_next = consensus.current_height();
+            if engine_next <= our_height && our_height.0 > 0 {
+                let commit_qc_view = self.commit_qc_view_at(our_height).await.unwrap_or(0);
+                consensus.resume_from_synced_height(our_height, commit_qc_view);
+                info!(
+                    engine_next = %engine_next,
+                    our_height = %our_height,
+                    commit_qc_view,
+                    "Block-sync: engine behind local storage — resumed from stored tip"
+                );
+            }
+        }
+
+        // Heal the subscription race: connections established before this
+        // engine spawned never produced a `PeerEvent::Connected`, so the
+        // candidate set can be empty even though the swarm is fully
+        // connected. Seed from the network's live connection snapshot —
+        // subsequent lifecycle events keep it current.
+        if self.peers.is_empty() {
+            match self.network.connected_peers().await {
+                Ok(connected) => {
+                    for peer in connected {
+                        self.note_peer(peer);
+                    }
+                    if !self.peers.is_empty() {
+                        info!(
+                            count = self.peers.len(),
+                            "Block-sync: seeded peer set from live connections"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Block-sync: connected-peers snapshot failed");
+                }
+            }
+        }
+
         // Snapshot peer ids before issuing requests (we mutate self in the loop).
         let peer_ids: Vec<PeerId> = self.peers.keys().copied().collect();
         for peer in peer_ids {
@@ -331,8 +421,10 @@ impl BlockSyncEngine {
     }
 
     /// Returns the best peer (highest tip) whose tip exceeds our local head
-    /// by more than `SLOT_IMPORT_TOLERANCE`. Returns `None` if we're synced.
+    /// by more than the effective tolerance (`sync_tolerance()` — zero
+    /// while a behind-hint is active). Returns `None` if we're synced.
     fn best_peer_tip(&self, our_height: BlockHeight) -> Option<(PeerId, BlockHeight, Hash)> {
+        let tolerance = self.sync_tolerance();
         self.peers
             .iter()
             .filter_map(|(peer, score)| {
@@ -340,7 +432,7 @@ impl BlockSyncEngine {
                     return None;
                 }
                 let (tip_h, tip_hash) = score.advertised_tip?;
-                if tip_h.0 > our_height.0 + SLOT_IMPORT_TOLERANCE {
+                if tip_h.0 > our_height.0 + tolerance {
                     Some((*peer, tip_h, tip_hash))
                 } else {
                     None
@@ -522,7 +614,7 @@ impl BlockSyncEngine {
 
                 let our_height = self.local_tip().await?;
                 if matches!(self.state, SyncState::Synced | SyncState::Stalled)
-                    && tip_height.0 > our_height.0 + SLOT_IMPORT_TOLERANCE
+                    && tip_height.0 > our_height.0 + self.sync_tolerance()
                 {
                     self.start_sync_against(peer, tip_height, tip_hash).await?;
                 }
@@ -691,6 +783,7 @@ impl BlockSyncEngine {
             );
         }
         self.state = SyncState::Synced;
+        self.hinted_until = None;
         Ok(())
     }
 

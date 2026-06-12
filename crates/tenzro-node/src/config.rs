@@ -769,7 +769,7 @@ pub struct CantonConfig {
 /// Per-tenant IDP (Stage 2) configuration. Disabled by default —
 /// devnet keeps the Stage 1 shared-principal flow until the operator
 /// explicitly enables this block.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct CantonIdentityProvidersConfig {
     /// Master switch. Off in devnet, on for testnet/mainnet.
     #[serde(default)]
@@ -782,34 +782,50 @@ pub struct CantonIdentityProvidersConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mgmt_url: Option<String>,
 
-    /// Bearer token for the IdP Management API. Loaded from
-    /// `CANTON_IDP_MGMT_TOKEN` and never serialized.
-    #[serde(skip_serializing, default)]
-    pub mgmt_token: Option<String>,
+    /// M2M client id authorized for the IdP Management API audience
+    /// (needs `create:clients` + `delete:clients` +
+    /// `create:client_grants`). Loaded from
+    /// `CANTON_IDP_MGMT_CLIENT_ID`. The provisioner mints + refreshes
+    /// its own short-lived Management API tokens from this pair, so
+    /// no static token ever needs rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mgmt_client_id: Option<String>,
 
-    /// Audience to use when registering Canton IdentityProviderConfig
-    /// entries for tenant clients. Typically the Canton participant's
-    /// API audience. Loaded from `CANTON_IDP_AUDIENCE`.
+    /// M2M client secret. Loaded from `CANTON_IDP_MGMT_CLIENT_SECRET`
+    /// and never serialized.
+    #[serde(skip_serializing, default)]
+    pub mgmt_client_secret: Option<String>,
+
+    /// Audience to use when registering the shared Canton
+    /// IdentityProviderConfig and when minting tenant client-grants.
+    /// Typically the Canton participant's API audience. Loaded from
+    /// `CANTON_IDP_AUDIENCE`. The issuer + JWKS URLs are derived from
+    /// `mgmt_url` by the provisioner — they are not configured
+    /// separately.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canton_audience: Option<String>,
+}
 
-    /// Default issuer URL the upstream IdP mints tokens under. The
-    /// node registers each tenant's Canton IDP with this issuer.
-    /// Loaded from `CANTON_IDP_ISSUER_URL`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub issuer_url: Option<String>,
-
-    /// JWKS URL for the upstream IdP. Canton uses this to verify
-    /// tenant-presented JWTs. Loaded from `CANTON_IDP_JWKS_URL`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jwks_url: Option<String>,
+impl std::fmt::Debug for CantonIdentityProvidersConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CantonIdentityProvidersConfig")
+            .field("enabled", &self.enabled)
+            .field("mgmt_url", &self.mgmt_url)
+            .field("mgmt_client_id", &self.mgmt_client_id)
+            .field(
+                "mgmt_client_secret",
+                &self.mgmt_client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("canton_audience", &self.canton_audience)
+            .finish()
+    }
 }
 
 /// Operator-supplied OAuth2 client-credentials configuration for talking
 /// to a self-hosted Canton validator. Mirrors the fields of
 /// `tenzro_bridge::canton_auth::CantonAuthConfig` so the node can build
 /// the upstream provider without leaking that type into config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CantonOAuthConfig {
     pub token_url: String,
     pub client_id: String,
@@ -818,6 +834,18 @@ pub struct CantonOAuthConfig {
     pub audience: String,
     #[serde(default = "default_oauth_scope")]
     pub scope: String,
+}
+
+impl std::fmt::Debug for CantonOAuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CantonOAuthConfig")
+            .field("token_url", &self.token_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("audience", &self.audience)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 fn default_oauth_scope() -> String {
@@ -949,8 +977,8 @@ impl CantonIdentityProvidersConfig {
     /// All fields are optional; the master switch `enabled` defaults
     /// to `false`, keeping the Stage 1 shared-principal flow active
     /// in devnet. Flip `CANTON_IDP_ENABLED=true` in testnet/mainnet
-    /// configs after also supplying the management/audience/issuer/
-    /// jwks endpoints.
+    /// configs after also supplying the management URL + M2M client
+    /// credentials + audience.
     pub fn from_env() -> Self {
         let enabled = std::env::var("CANTON_IDP_ENABLED")
             .ok()
@@ -959,16 +987,13 @@ impl CantonIdentityProvidersConfig {
         Self {
             enabled,
             mgmt_url: std::env::var("CANTON_IDP_MGMT_URL").ok().filter(|v| !v.is_empty()),
-            mgmt_token: std::env::var("CANTON_IDP_MGMT_TOKEN")
+            mgmt_client_id: std::env::var("CANTON_IDP_MGMT_CLIENT_ID")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            mgmt_client_secret: std::env::var("CANTON_IDP_MGMT_CLIENT_SECRET")
                 .ok()
                 .filter(|v| !v.is_empty()),
             canton_audience: std::env::var("CANTON_IDP_AUDIENCE")
-                .ok()
-                .filter(|v| !v.is_empty()),
-            issuer_url: std::env::var("CANTON_IDP_ISSUER_URL")
-                .ok()
-                .filter(|v| !v.is_empty()),
-            jwks_url: std::env::var("CANTON_IDP_JWKS_URL")
                 .ok()
                 .filter(|v| !v.is_empty()),
         }

@@ -325,6 +325,17 @@ impl AxelarAdapter {
         let key = payload_hash_hex.trim_start_matches("0x").to_lowercase();
         self.outbound.get(&key).map(|c| c.clone())
     }
+
+    /// Add prepaid gas to a previously-registered call — AxelarGasService
+    /// `addNativeGas` semantics. Returns the new prepaid total.
+    pub fn pay_gas(&self, payload_hash_hex: &str, additional_gas: u128) -> Result<u128> {
+        let key = payload_hash_hex.trim_start_matches("0x").to_lowercase();
+        let mut call = self.outbound.get_mut(&key).ok_or_else(|| {
+            BridgeError::AdapterError(format!("axelar: unknown payload hash 0x{key}"))
+        })?;
+        call.gas_prepaid = call.gas_prepaid.saturating_add(additional_gas);
+        Ok(call.gas_prepaid)
+    }
 }
 
 #[async_trait]
