@@ -4269,7 +4269,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "web-search".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "Search the web and return relevant results".to_string(), 0,
                     );
                     s.tags = vec!["search".to_string(), "web".to_string(), "retrieval".to_string()];
@@ -4279,7 +4279,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "code-review".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "Review code and suggest improvements".to_string(), 0,
                     );
                     s.tags = vec!["code".to_string(), "review".to_string(), "quality".to_string()];
@@ -4289,7 +4289,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "data-analysis".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "Analyze datasets and generate insights".to_string(), 0,
                     );
                     s.tags = vec!["data".to_string(), "analysis".to_string(), "insights".to_string()];
@@ -4299,7 +4299,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "text-summarization".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "Summarize long documents into concise summaries".to_string(), 0,
                     );
                     s.tags = vec!["text".to_string(), "summarization".to_string(), "nlp".to_string()];
@@ -4309,7 +4309,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "blockchain-query".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "Query blockchain state, balances, and transactions".to_string(), 0,
                     );
                     s.tags = vec!["blockchain".to_string(), "query".to_string(), "ledger".to_string()];
@@ -4319,7 +4319,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "solana-defi".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "Solana DeFi operations: Jupiter swaps, SPL tokens, Metaplex NFTs, SNS domains, staking and yield".to_string(), 0,
                     );
                     s.tags = vec![
@@ -4332,7 +4332,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "ethereum-defi".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "Ethereum DeFi operations: balances, ENS resolution, ERC-8004 agent registry, EAS attestations, gas and contract calls".to_string(), 0,
                     );
                     s.tags = vec![
@@ -4346,7 +4346,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "canton-enterprise".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "Canton enterprise operations: DAML contracts, CIP-56 tokens, DvP settlement, RWA tokenization, trade finance".to_string(), 0,
                     );
                     s.tags = vec![
@@ -4362,7 +4362,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "layerzero-bridge".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "LayerZero V2 cross-chain operations: omnichain messaging, OFT transfers, Stargate bridging, DVN queries".to_string(), 0,
                     );
                     s.tags = vec![
@@ -4376,7 +4376,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "chainlink-oracle".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "Chainlink operations: CCIP cross-chain messaging, data feeds, data streams, VRF randomness, proof of reserve, automation".to_string(), 0,
                     );
                     s.tags = vec![
@@ -4389,7 +4389,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "debridge-cross-chain".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "deBridge DLN intent-based cross-chain swaps and order tracking".to_string(), 0,
                     );
                     s.tags = vec![
@@ -4403,7 +4403,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "oneinch-aggregator".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "1inch DEX aggregation: best-execution swap routing, Fusion+ cross-chain, portfolio rebalancing".to_string(), 0,
                     );
                     s.tags = vec![
@@ -4417,7 +4417,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "openclaw-tenzro".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "Full Tenzro Network surface: wallet, identity, payments, inference, staking, marketplace, verification".to_string(), 0,
                     );
                     s.tags = vec![
@@ -4431,7 +4431,7 @@ impl TenzroNode {
                 {
                     let mut s = SkillDefinition::new(
                         "tenzro-trainer".to_string(), "1.0.0".to_string(),
-                        "did:tenzro:system:tenzro-network".to_string(),
+                        tenzro_types::SYSTEM_CREATOR_DID.to_string(),
                         "Tenzro Train reference trainer: decentralized training rounds for timeseries, language, and vision modalities".to_string(), 0,
                     );
                     s.tags = vec![
@@ -4444,28 +4444,56 @@ impl TenzroNode {
                 },
             ];
 
+            // Reconcile system-creator rows in CF_SKILLS to exactly the
+            // builtin set: refresh matching rows in place (preserving id,
+            // creation time, and usage counters), insert missing ones, and
+            // delete strays from prior builds. Builtins never heartbeat —
+            // boot-time reconciliation owns their lifecycle and the
+            // liveness sweeper exempts system-creator rows.
+            let existing_system_skills: Vec<(Vec<u8>, SkillDefinition)> = storage
+                .get_keys_with_prefix(CF_SKILLS, b"")
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|k| {
+                    let v = storage.get(CF_SKILLS, &k).ok().flatten()?;
+                    let s: SkillDefinition = serde_json::from_slice(&v).ok()?;
+                    (s.creator_did == tenzro_types::SYSTEM_CREATOR_DID).then_some((k, s))
+                })
+                .collect();
             let mut skills_registered = 0usize;
+            let mut skill_keys_kept: Vec<Vec<u8>> = Vec::new();
             for skill in &builtin_skills {
-                // Use the UUID skill_id as the storage key so that
-                // list_skills → get_skill lookups (by skill_id) resolve correctly.
-                let key = skill.skill_id.as_bytes();
-                // Idempotency: skip only if a builtin with this exact name already exists.
-                let already_present = storage
-                    .get_keys_with_prefix(CF_SKILLS, b"")
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|k| storage.get(CF_SKILLS, &k).ok().flatten())
-                    .filter_map(|v| serde_json::from_slice::<SkillDefinition>(&v).ok())
-                    .any(|s| s.name == skill.name && s.creator_did == skill.creator_did);
-                if !already_present
-                    && let Ok(value) = serde_json::to_vec(skill)
-                        && storage.put(CF_SKILLS, key, &value).is_ok() {
-                            skills_registered += 1;
-                        }
+                if let Some((key, old)) = existing_system_skills
+                    .iter()
+                    .find(|(_, s)| s.name == skill.name)
+                {
+                    let mut updated = skill.clone();
+                    updated.skill_id = old.skill_id.clone();
+                    updated.created_at = old.created_at;
+                    updated.invocation_count = old.invocation_count;
+                    updated.rating = old.rating;
+                    if let Ok(value) = serde_json::to_vec(&updated) {
+                        let _ = storage.put(CF_SKILLS, key, &value);
+                    }
+                    skill_keys_kept.push(key.clone());
+                } else if let Ok(value) = serde_json::to_vec(skill)
+                    && storage.put(CF_SKILLS, skill.skill_id.as_bytes(), &value).is_ok()
+                {
+                    skills_registered += 1;
+                }
             }
-            if skills_registered > 0 {
-                info!("Auto-registered {} built-in skill(s) in CF_SKILLS", skills_registered);
+            let mut skills_removed = 0usize;
+            for (key, _) in &existing_system_skills {
+                if !skill_keys_kept.contains(key) && storage.delete(CF_SKILLS, key).is_ok() {
+                    skills_removed += 1;
+                }
             }
+            info!(
+                refreshed = skill_keys_kept.len(),
+                inserted = skills_registered,
+                removed = skills_removed,
+                "Reconciled built-in skills in CF_SKILLS"
+            );
 
             // --- Built-in Tools (MCP servers and native capabilities) ---
             let builtin_tools: Vec<ToolDefinition> = vec![
@@ -4481,7 +4509,7 @@ impl TenzroNode {
                         "models".to_string(), "bridge".to_string(), "staking".to_string(),
                         "verification".to_string(), "network".to_string(),
                     ];
-                    t.creator_did = Some("did:tenzro:system:tenzro-network".to_string());
+                    t.creator_did = Some(tenzro_types::SYSTEM_CREATOR_DID.to_string());
                     t
                 },
                 {
@@ -4492,7 +4520,7 @@ impl TenzroNode {
                         "search".to_string(),
                     );
                     t.capabilities = vec!["web-search".to_string(), "url-fetch".to_string()];
-                    t.creator_did = Some("did:tenzro:system:tenzro-network".to_string());
+                    t.creator_did = Some(tenzro_types::SYSTEM_CREATOR_DID.to_string());
                     t
                 },
                 {
@@ -4503,7 +4531,7 @@ impl TenzroNode {
                         "code".to_string(),
                     );
                     t.capabilities = vec!["python".to_string(), "javascript".to_string(), "rust".to_string()];
-                    t.creator_did = Some("did:tenzro:system:tenzro-network".to_string());
+                    t.creator_did = Some(tenzro_types::SYSTEM_CREATOR_DID.to_string());
                     t
                 },
                 {
@@ -4514,7 +4542,7 @@ impl TenzroNode {
                         "storage".to_string(),
                     );
                     t.capabilities = vec!["read".to_string(), "write".to_string(), "list".to_string()];
-                    t.creator_did = Some("did:tenzro:system:tenzro-network".to_string());
+                    t.creator_did = Some(tenzro_types::SYSTEM_CREATOR_DID.to_string());
                     t
                 },
                 {
@@ -4525,32 +4553,56 @@ impl TenzroNode {
                         "communication".to_string(),
                     );
                     t.capabilities = vec!["agent-messaging".to_string(), "task-delegation".to_string(), "sse-streaming".to_string()];
-                    t.creator_did = Some("did:tenzro:system:tenzro-network".to_string());
+                    t.creator_did = Some(tenzro_types::SYSTEM_CREATOR_DID.to_string());
                     t
                 },
             ];
 
+            // Same reconciliation discipline as the builtin skills above.
+            let existing_system_tools: Vec<(Vec<u8>, ToolDefinition)> = storage
+                .get_keys_with_prefix(CF_TOOLS, b"")
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|k| {
+                    let v = storage.get(CF_TOOLS, &k).ok().flatten()?;
+                    let t: ToolDefinition = serde_json::from_slice(&v).ok()?;
+                    (t.creator_did.as_deref() == Some(tenzro_types::SYSTEM_CREATOR_DID))
+                        .then_some((k, t))
+                })
+                .collect();
             let mut tools_registered = 0usize;
+            let mut tool_keys_kept: Vec<Vec<u8>> = Vec::new();
             for tool in &builtin_tools {
-                // Use the UUID tool_id as the storage key so that
-                // list_tools → get_tool / use_tool lookups (by tool_id) resolve correctly.
-                let key = tool.tool_id.as_bytes();
-                let already_present = storage
-                    .get_keys_with_prefix(CF_TOOLS, b"")
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|k| storage.get(CF_TOOLS, &k).ok().flatten())
-                    .filter_map(|v| serde_json::from_slice::<ToolDefinition>(&v).ok())
-                    .any(|t| t.name == tool.name && t.creator_did == tool.creator_did);
-                if !already_present
-                    && let Ok(value) = serde_json::to_vec(tool)
-                        && storage.put(CF_TOOLS, key, &value).is_ok() {
-                            tools_registered += 1;
-                        }
+                if let Some((key, old)) = existing_system_tools
+                    .iter()
+                    .find(|(_, t)| t.name == tool.name)
+                {
+                    let mut updated = tool.clone();
+                    updated.tool_id = old.tool_id.clone();
+                    updated.created_at = old.created_at;
+                    updated.invocation_count = old.invocation_count;
+                    if let Ok(value) = serde_json::to_vec(&updated) {
+                        let _ = storage.put(CF_TOOLS, key, &value);
+                    }
+                    tool_keys_kept.push(key.clone());
+                } else if let Ok(value) = serde_json::to_vec(tool)
+                    && storage.put(CF_TOOLS, tool.tool_id.as_bytes(), &value).is_ok()
+                {
+                    tools_registered += 1;
+                }
             }
-            if tools_registered > 0 {
-                info!("Auto-registered {} built-in tool(s) in CF_TOOLS", tools_registered);
+            let mut tools_removed = 0usize;
+            for (key, _) in &existing_system_tools {
+                if !tool_keys_kept.contains(key) && storage.delete(CF_TOOLS, key).is_ok() {
+                    tools_removed += 1;
+                }
             }
+            info!(
+                refreshed = tool_keys_kept.len(),
+                inserted = tools_registered,
+                removed = tools_removed,
+                "Reconciled built-in tools in CF_TOOLS"
+            );
 
             // --- Built-in Agent Templates ---
             let system_addr = Address::zero();

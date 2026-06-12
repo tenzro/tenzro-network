@@ -98,7 +98,7 @@ pub use capital_intent::{
 };
 pub use reserve::{ReserveAttestation, ReserveSource};
 pub use agent_template::{AgentTemplate, AgentTemplateStatus, AgentTemplateType, AgentCapability, AgentRuntimeRequirements, AgentPricingModel, AgentExample, AgentTemplateFilter, AgentTemplateInstance};
-pub use skill::{SkillDefinition, SkillStatus, SkillFilter, SkillInvocationResult};
+pub use skill::{SkillDefinition, SkillStatus, SkillFilter, SkillInvocationResult, SYSTEM_CREATOR_DID};
 pub use tool::{
     StdioSpawnSpec, ToolDefinition, ToolFilter, ToolInvocationResult, ToolStatus,
     ToolTransportMode, UpstreamAuth,

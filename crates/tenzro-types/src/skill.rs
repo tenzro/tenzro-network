@@ -7,6 +7,13 @@
 use crate::primitives::Address;
 use serde::{Deserialize, Serialize};
 
+/// Creator DID reserved for node-provided builtin skills and tools.
+/// Rows with this creator are registered by the node itself at boot:
+/// their liveness is the node's liveness, so the staleness sweeper
+/// exempts them, and the registration RPCs refuse third-party rows
+/// claiming this DID.
+pub const SYSTEM_CREATOR_DID: &str = "did:tenzro:system:tenzro-network";
+
 /// Status of a skill in the registry
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

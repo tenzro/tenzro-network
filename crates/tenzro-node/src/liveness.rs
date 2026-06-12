@@ -277,6 +277,11 @@ fn sweep_skills(
             Ok(s) => s,
             Err(_) => continue,
         };
+        // Node-provided builtins never heartbeat — their liveness is the
+        // node's liveness. Boot-time reconciliation owns their lifecycle.
+        if skill.creator_did == tenzro_types::SYSTEM_CREATOR_DID {
+            continue;
+        }
         let age = now.saturating_sub(skill.last_seen_at);
         if matches!(skill.status, SkillStatus::Inactive)
             && age >= cfg.skill_purge_after_secs
@@ -320,6 +325,11 @@ fn sweep_tools(
             Ok(s) => s,
             Err(_) => continue,
         };
+        // Node-provided builtins never heartbeat — their liveness is the
+        // node's liveness. Boot-time reconciliation owns their lifecycle.
+        if tool.creator_did.as_deref() == Some(tenzro_types::SYSTEM_CREATOR_DID) {
+            continue;
+        }
         let age = now.saturating_sub(tool.last_seen_at);
         if matches!(tool.status, ToolStatus::Inactive)
             && age >= cfg.tool_purge_after_secs
@@ -670,6 +680,55 @@ mod tests {
 
         let stats = run_sweep(&store, &cfg, None).unwrap();
         assert_eq!(stats.total_changes(), 0);
+    }
+
+    #[test]
+    fn sweeper_exempts_system_builtin_skills_and_tools() {
+        let store = fresh_store();
+        let cfg = fast_config();
+
+        let mut skill = SkillDefinition::new(
+            "web-search".to_string(),
+            "1.0.0".to_string(),
+            tenzro_types::SYSTEM_CREATOR_DID.to_string(),
+            "builtin".to_string(),
+            0,
+        );
+        skill.last_seen_at = now_secs().saturating_sub(500); // way past purge
+        store
+            .put(CF_SKILLS, skill.skill_id.as_bytes(), &serde_json::to_vec(&skill).unwrap())
+            .unwrap();
+
+        let mut tool = ToolDefinition::new(
+            "code-executor".to_string(),
+            "1.0.0".to_string(),
+            "mcp".to_string(),
+            "builtin://code-executor".to_string(),
+            "builtin".to_string(),
+            "code".to_string(),
+        );
+        tool.creator_did = Some(tenzro_types::SYSTEM_CREATOR_DID.to_string());
+        tool.last_seen_at = now_secs().saturating_sub(500);
+        store
+            .put(CF_TOOLS, tool.tool_id.as_bytes(), &serde_json::to_vec(&tool).unwrap())
+            .unwrap();
+
+        let stats = run_sweep(&store, &cfg, None).unwrap();
+        assert_eq!(stats.skills_marked_inactive, 0);
+        assert_eq!(stats.skills_purged, 0);
+        assert_eq!(stats.tools_marked_inactive, 0);
+        assert_eq!(stats.tools_purged, 0);
+
+        let after: SkillDefinition = serde_json::from_slice(
+            &store.get(CF_SKILLS, skill.skill_id.as_bytes()).unwrap().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after.status, SkillStatus::Active);
+        let after_tool: ToolDefinition = serde_json::from_slice(
+            &store.get(CF_TOOLS, tool.tool_id.as_bytes()).unwrap().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after_tool.status, ToolStatus::Active);
     }
 
     #[test]

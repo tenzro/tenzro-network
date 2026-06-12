@@ -27400,6 +27400,13 @@ async fn handle_register_skill(
         .and_then(|v| v.as_str())
         .ok_or_else(|| JsonRpcError { code: -32602, message: "Missing 'creator_did'".to_string(), data: None })?
         .to_string();
+    if creator_did == tenzro_types::SYSTEM_CREATOR_DID {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "creator_did is reserved for node builtins".to_string(),
+            data: None,
+        });
+    }
     let description = params.get("description")
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -27462,9 +27469,6 @@ async fn handle_register_skill(
     })?;
 
     info!(skill_id = %skill.skill_id, name = %skill.name, price = %skill.price_per_call, "Skill registered");
-
-    // Skill registration broadcasted via storage persistence; no direct broadcast needed
-    let _ = serde_json::to_vec(&skill).unwrap_or_default();
 
     Ok(serde_json::to_value(&skill).unwrap_or_else(|_| serde_json::json!({})))
 }
@@ -27848,6 +27852,13 @@ async fn handle_register_tool(
         tool.capabilities = caps.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
     }
     if let Some(did) = params.get("creator_did").and_then(|v| v.as_str()) {
+        if did == tenzro_types::SYSTEM_CREATOR_DID {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "creator_did is reserved for node builtins".to_string(),
+                data: None,
+            });
+        }
         tool.creator_did = Some(did.to_string());
     }
     // Monetization: per-call price + creator payout wallet. Accept the
