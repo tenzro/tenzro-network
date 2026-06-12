@@ -370,7 +370,9 @@ class TestAgentTemplates(unittest.TestCase):
             "name": "Code Reviewer",
         })
         result = tenzro_rpc.register_agent_template(
-            "Code Reviewer", "Reviews code", "specialist", "You are a code reviewer"
+            "Code Reviewer", "Reviews code", "specialist",
+            "0x0000000000000000000000000000000000000001",
+            system_prompt="You are a code reviewer",
         )
         self.assertEqual(result["name"], "Code Reviewer")
 

@@ -14,9 +14,9 @@ use tenzro_bridge::chainlink_ccip::{ChainlinkCcipAdapter, CcipConfig, FeeToken};
 use tenzro_bridge::debridge::{DeBridgeAdapter, DeBridgeConfig};
 use tenzro_bridge::layerzero::{LayerZeroAdapter, LayerZeroConfig};
 use tenzro_bridge::lifi::{LiFiAdapter, LiFiConfig};
-use tenzro_bridge::wormhole::{WormholeAdapter, WormholeConfig};
-use tenzro_bridge::hyperlane::{HyperlaneAdapter, HyperlaneConfig};
-use tenzro_bridge::axelar::{AxelarAdapter, AxelarConfig};
+use tenzro_bridge::wormhole::{GuardianSet, WormholeAdapter, WormholeConfig};
+use tenzro_bridge::hyperlane::{HyperlaneAdapter, HyperlaneConfig, HyperlaneValidatorSet};
+use tenzro_bridge::axelar::{AxelarAdapter, AxelarConfig, AxelarValidatorSet};
 use tenzro_bridge::babylon::{BabylonAdapter, BabylonConfig};
 use tenzro_bridge::tnzo_cct::{TnzoCctBridge, TnzoCctRegistry};
 use tenzro_bridge::evm_signer::{EvmSignerConfig, EvmTransactionSigner};
@@ -4316,6 +4316,132 @@ impl TenzroNode {
                     s.endpoint = Some("builtin://blockchain-query".to_string());
                     s
                 },
+                {
+                    let mut s = SkillDefinition::new(
+                        "solana-defi".to_string(), "1.0.0".to_string(),
+                        "did:tenzro:system:tenzro-network".to_string(),
+                        "Solana DeFi operations: Jupiter swaps, SPL tokens, Metaplex NFTs, SNS domains, staking and yield".to_string(), 0,
+                    );
+                    s.tags = vec![
+                        "solana-defi".to_string(), "solana".to_string(), "defi".to_string(),
+                        "jupiter".to_string(), "swap".to_string(),
+                    ];
+                    s.endpoint = Some("https://solana-mcp.tenzro.network/mcp".to_string());
+                    s
+                },
+                {
+                    let mut s = SkillDefinition::new(
+                        "ethereum-defi".to_string(), "1.0.0".to_string(),
+                        "did:tenzro:system:tenzro-network".to_string(),
+                        "Ethereum DeFi operations: balances, ENS resolution, ERC-8004 agent registry, EAS attestations, gas and contract calls".to_string(), 0,
+                    );
+                    s.tags = vec![
+                        "ethereum-defi".to_string(), "ethereum".to_string(), "defi".to_string(),
+                        "ens".to_string(), "erc8004".to_string(),
+                        "margin-call".to_string(), "liquidation".to_string(),
+                    ];
+                    s.endpoint = Some("https://ethereum-mcp.tenzro.network/mcp".to_string());
+                    s
+                },
+                {
+                    let mut s = SkillDefinition::new(
+                        "canton-enterprise".to_string(), "1.0.0".to_string(),
+                        "did:tenzro:system:tenzro-network".to_string(),
+                        "Canton enterprise operations: DAML contracts, CIP-56 tokens, DvP settlement, RWA tokenization, trade finance".to_string(), 0,
+                    );
+                    s.tags = vec![
+                        "canton-enterprise".to_string(), "canton".to_string(), "daml".to_string(),
+                        "tokenization".to_string(), "dvp".to_string(), "atomic-swap".to_string(),
+                        "trade-finance".to_string(), "letter-of-credit".to_string(),
+                        "rwa".to_string(), "nav".to_string(), "treasury".to_string(),
+                        "fixed-income".to_string(), "rfq".to_string(),
+                    ];
+                    s.endpoint = Some("https://canton-mcp.tenzro.network/mcp".to_string());
+                    s
+                },
+                {
+                    let mut s = SkillDefinition::new(
+                        "layerzero-bridge".to_string(), "1.0.0".to_string(),
+                        "did:tenzro:system:tenzro-network".to_string(),
+                        "LayerZero V2 cross-chain operations: omnichain messaging, OFT transfers, Stargate bridging, DVN queries".to_string(), 0,
+                    );
+                    s.tags = vec![
+                        "layerzero-bridge".to_string(), "layerzero".to_string(),
+                        "cross-chain".to_string(), "bridge".to_string(),
+                        "oft".to_string(), "messaging".to_string(),
+                    ];
+                    s.endpoint = Some("https://layerzero-mcp.tenzro.network/mcp".to_string());
+                    s
+                },
+                {
+                    let mut s = SkillDefinition::new(
+                        "chainlink-oracle".to_string(), "1.0.0".to_string(),
+                        "did:tenzro:system:tenzro-network".to_string(),
+                        "Chainlink operations: CCIP cross-chain messaging, data feeds, data streams, VRF randomness, proof of reserve, automation".to_string(), 0,
+                    );
+                    s.tags = vec![
+                        "chainlink-oracle".to_string(), "chainlink".to_string(), "ccip".to_string(),
+                        "oracle".to_string(), "data-feeds".to_string(), "proof-of-reserve".to_string(),
+                    ];
+                    s.endpoint = Some("https://chainlink-mcp.tenzro.network/mcp".to_string());
+                    s
+                },
+                {
+                    let mut s = SkillDefinition::new(
+                        "debridge-cross-chain".to_string(), "1.0.0".to_string(),
+                        "did:tenzro:system:tenzro-network".to_string(),
+                        "deBridge DLN intent-based cross-chain swaps and order tracking".to_string(), 0,
+                    );
+                    s.tags = vec![
+                        "debridge-cross-chain".to_string(), "debridge".to_string(),
+                        "cross-chain".to_string(), "bridge".to_string(),
+                        "dln".to_string(), "intent".to_string(),
+                    ];
+                    s.endpoint = Some("https://agents.debridge.com/mcp".to_string());
+                    s
+                },
+                {
+                    let mut s = SkillDefinition::new(
+                        "oneinch-aggregator".to_string(), "1.0.0".to_string(),
+                        "did:tenzro:system:tenzro-network".to_string(),
+                        "1inch DEX aggregation: best-execution swap routing, Fusion+ cross-chain, portfolio rebalancing".to_string(), 0,
+                    );
+                    s.tags = vec![
+                        "oneinch-aggregator".to_string(), "1inch".to_string(), "dex".to_string(),
+                        "aggregator".to_string(), "swap".to_string(), "best-execution".to_string(),
+                        "router".to_string(), "rebalance".to_string(),
+                    ];
+                    s.endpoint = Some("builtin://oneinch-aggregator".to_string());
+                    s
+                },
+                {
+                    let mut s = SkillDefinition::new(
+                        "openclaw-tenzro".to_string(), "1.0.0".to_string(),
+                        "did:tenzro:system:tenzro-network".to_string(),
+                        "Full Tenzro Network surface: wallet, identity, payments, inference, staking, marketplace, verification".to_string(), 0,
+                    );
+                    s.tags = vec![
+                        "openclaw-tenzro".to_string(), "tenzro".to_string(), "blockchain".to_string(),
+                        "ai".to_string(), "identity".to_string(), "payments".to_string(),
+                        "inference".to_string(),
+                    ];
+                    s.endpoint = Some("https://mcp.tenzro.network/mcp".to_string());
+                    s
+                },
+                {
+                    let mut s = SkillDefinition::new(
+                        "tenzro-trainer".to_string(), "1.0.0".to_string(),
+                        "did:tenzro:system:tenzro-network".to_string(),
+                        "Tenzro Train reference trainer: decentralized training rounds for timeseries, language, and vision modalities".to_string(), 0,
+                    );
+                    s.tags = vec![
+                        "tenzro-trainer".to_string(), "training".to_string(),
+                        "language-training".to_string(), "timeseries-training".to_string(),
+                        "vision-training".to_string(),
+                    ];
+                    s.endpoint = Some("builtin://tenzro-trainer".to_string());
+                    s
+                },
             ];
 
             let mut skills_registered = 0usize;
@@ -5653,8 +5779,120 @@ impl TenzroNode {
                     adapter = adapter.with_signer(signer);
                 }
 
+                // Install the Guardian set used to quorum-verify inbound
+                // VAAs. Config override (`kind = "wormhole_guardian"`,
+                // `source_id` = guardian set index) wins; otherwise the
+                // pinned mainnet set keeps the adapter fail-closed.
+                let mut guardian_set_installed = false;
+                for entry in &wh_cfg.inbound_verifier_sets {
+                    if entry.kind != "wormhole_guardian" {
+                        warn!(
+                            kind = %entry.kind,
+                            "Skipping non-'wormhole_guardian' inbound_verifier_set entry on Wormhole adapter"
+                        );
+                        continue;
+                    }
+                    match decode_verifier_addresses(&entry.addresses) {
+                        Ok(addrs) => {
+                            let set = GuardianSet {
+                                index: entry.source_id as u32,
+                                guardians: addrs,
+                                expiration_time: 0,
+                            };
+                            let quorum = set.quorum();
+                            adapter.set_guardian_set(set);
+                            guardian_set_installed = true;
+                            info!(
+                                guardian_set_index = entry.source_id,
+                                quorum,
+                                "Wormhole Guardian set installed from config"
+                            );
+                        }
+                        Err(e) => warn!(
+                            error = %e,
+                            "Failed to decode Wormhole guardian addresses"
+                        ),
+                    }
+                }
+                if !guardian_set_installed {
+                    let set = GuardianSet::mainnet();
+                    info!(
+                        guardian_set_index = set.index,
+                        guardians = set.guardians.len(),
+                        quorum = set.quorum(),
+                        "Wormhole Guardian set defaulted to pinned mainnet set"
+                    );
+                    adapter.set_guardian_set(set);
+                }
+
                 bridge_router.register_adapter("wormhole", Box::new(adapter)).await;
                 info!("Registered Wormhole bridge adapter");
+            }
+
+        // Hyperlane V3 inbound ISM validator sets. The adapter itself is
+        // constructed unconditionally (it serves the `tenzro_hyperlane*`
+        // RPC namespace); without at least one installed set per origin
+        // domain it refuses inbound traffic (fail-closed).
+        if let Some(hl_cfg) = &bridge_cfg.hyperlane
+            && hl_cfg.enabled {
+                for entry in &hl_cfg.inbound_verifier_sets {
+                    if entry.kind != "hyperlane" {
+                        warn!(
+                            kind = %entry.kind,
+                            "Skipping non-'hyperlane' inbound_verifier_set entry on Hyperlane adapter"
+                        );
+                        continue;
+                    }
+                    match decode_verifier_addresses(&entry.addresses) {
+                        Ok(addrs) => {
+                            self.hyperlane_adapter.install_validator_set(HyperlaneValidatorSet {
+                                origin_domain: entry.source_id as u32,
+                                validators: addrs,
+                                threshold: entry.threshold,
+                            });
+                            info!(
+                                origin_domain = entry.source_id,
+                                threshold = entry.threshold,
+                                "Hyperlane ISM validator set installed"
+                            );
+                        }
+                        Err(e) => warn!(
+                            error = %e,
+                            "Failed to decode Hyperlane validator addresses"
+                        ),
+                    }
+                }
+            }
+
+        // Axelar GMP inbound validator set (single global set). Without an
+        // installed set the adapter refuses inbound traffic (fail-closed).
+        if let Some(ax_cfg) = &bridge_cfg.axelar
+            && ax_cfg.enabled {
+                for entry in &ax_cfg.inbound_verifier_sets {
+                    if entry.kind != "axelar" {
+                        warn!(
+                            kind = %entry.kind,
+                            "Skipping non-'axelar' inbound_verifier_set entry on Axelar adapter"
+                        );
+                        continue;
+                    }
+                    match decode_verifier_addresses(&entry.addresses) {
+                        Ok(addrs) => {
+                            self.axelar_adapter.install_validator_set(AxelarValidatorSet {
+                                validators: addrs,
+                                threshold: entry.threshold,
+                            });
+                            info!(
+                                threshold = entry.threshold,
+                                "Axelar GMP validator set installed"
+                            );
+                        }
+                        Err(e) => warn!(
+                            error = %e,
+                            "Failed to decode Axelar validator addresses"
+                        ),
+                    }
+                }
             }
 
         // TNZO CCT bridge — only useful when CCIP is also enabled, since the

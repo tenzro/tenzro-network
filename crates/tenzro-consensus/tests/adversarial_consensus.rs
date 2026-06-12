@@ -582,7 +582,7 @@ fn test_epoch_transition_updates_validator_set() {
     // Trigger transition at the boundary.
     assert!(epoch_manager.should_transition(BlockHeight::from(100)));
     let new_vs = epoch_manager
-        .transition_epoch(BlockHeight::from(100))
+        .transition_epoch(BlockHeight::from(100), |_| None)
         .unwrap()
         .expect("transition due");
 

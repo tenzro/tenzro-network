@@ -265,6 +265,10 @@ impl RegistryClient {
     /// minted `template_id`.
     pub async fn register_template(&self, template: &AgentTemplate) -> Result<String, AgentKitError> {
         let mut params = serde_json::Map::new();
+        // Stable manifest id — without it the node mints a UUID and the
+        // bundled `ref-*` ids become unresolvable (and bootstrap loses
+        // its idempotency check).
+        params.insert("template_id".to_string(), json!(template.template_id));
         params.insert("name".to_string(), json!(template.name));
         params.insert("description".to_string(), json!(template.description));
         params.insert("system_prompt".to_string(), json!(template.system_prompt));

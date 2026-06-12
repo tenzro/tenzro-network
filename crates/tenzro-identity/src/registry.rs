@@ -148,12 +148,10 @@ pub struct RegistrationResult {
 ///
 /// # Persistence
 ///
-/// Identities are stored in-memory using DashMap. For persistence, use
-/// `TenzroIdentity::to_bytes()` and `TenzroIdentity::from_bytes()` to
-/// serialize/deserialize identities to/from a storage backend (e.g., RocksDB).
-///
-/// Future versions may add an optional `StorageBackend` trait for automatic
-/// persistence without breaking existing in-memory-only usage.
+/// Identities live in-memory in a DashMap. Construct via
+/// [`Self::with_storage`] for RocksDB write-through persistence and
+/// startup hydration; the canonical on-disk format is bincode
+/// (`TenzroIdentity::to_bytes` / `from_bytes`).
 ///
 /// # Registration Fees
 ///

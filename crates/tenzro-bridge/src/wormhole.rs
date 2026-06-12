@@ -122,6 +122,52 @@ impl GuardianSet {
     pub fn quorum(&self) -> usize {
         (self.guardians.len() * 2) / 3 + 1
     }
+
+    /// The pinned Wormhole mainnet Guardian set.
+    ///
+    /// Source: `https://api.wormholescan.io/v1/guardianset/current`
+    /// (official Wormhole Foundation explorer API querying the live
+    /// guardian network), snapshotted 2026-06-12: index 6, 19 guardians,
+    /// quorum 13. The set rotates only via on-chain governance VAAs;
+    /// operators on a newer set override via `inbound_verifier_sets`
+    /// (`kind = "wormhole_guardian"`).
+    pub fn mainnet() -> Self {
+        const MAINNET_GUARDIANS: [&str; 19] = [
+            "5893B5A76c3f739645648885bDCcC06cd70a3Cd3",
+            "fF6CB952589BDE862c25Ef4392132fb9D4A42157",
+            "114De8460193bdf3A2fCf81f86a09765F4762fD1",
+            "107A0086b32d7A0977926A205131d8731D39cbEB",
+            "8C82B2fd82FaeD2711d59AF0F2499D16e726f6b2",
+            "42579bFFbCF4276E290aB8E4C162bd4052b97970",
+            "938f104AEb5581293216ce97d771e0CB721221B1",
+            "18e41674CcF26329cD111406C1D05C6c80b23EdC",
+            "9D16870160e703324D057c3361c34C5beFBa2c34",
+            "000aC0076727b35FBea2dAc28fEE5cCB0fEA768e",
+            "AF45Ced136b9D9e24903464AE889F5C8a723FC14",
+            "f93124b7c738843CBB89E864c862c38cddCccF95",
+            "D2CC37A4dc036a8D232b48f62cDD4731412f4890",
+            "DA798F6896A3331F64b48c12D1D57Fd9cbe70811",
+            "D1F64e26238811de5553C40f64af41eE1B6057Cc",
+            "3F851Ad586A47ceF8d04748f33ab0D71395f06b4",
+            "178e21ad2E77AE06711549CFBB1f9c7a9d8096e8",
+            "7899cEAB1DC961Dae9defDB7A4f521269a5448FC",
+            "6FbEBc898F403E4773E95feB15E80C9A99c8348d",
+        ];
+        let guardians = MAINNET_GUARDIANS
+            .iter()
+            .map(|h| {
+                let bytes = hex::decode(h).expect("pinned guardian address is valid hex");
+                let mut addr = [0u8; 20];
+                addr.copy_from_slice(&bytes);
+                addr
+            })
+            .collect();
+        Self {
+            index: 6,
+            guardians,
+            expiration_time: 0,
+        }
+    }
 }
 
 impl Vaa {

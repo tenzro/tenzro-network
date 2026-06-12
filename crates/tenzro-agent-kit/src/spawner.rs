@@ -18,9 +18,9 @@
 //!   6. Generate a fresh Ed25519 keypair for the machine identity
 //!   7. Build a [`DelegationScope`] from the template's `DelegationSpec`
 //!   8. Register the machine via `IdentityRegistry::register_machine_with_fee`
-//!   9. Register the agent with [`AgentRuntime::register_agent`]
-//!  10. Activate it via [`AgentRuntime::activate_agent`]
-//!  11. Return a [`SpawnedAgent`] handle the executor can use
+//!   9. Register the agent with [`AgentRuntime::register_agent`] (which
+//!      drives the lifecycle to Active)
+//!  10. Return a [`SpawnedAgent`] handle the executor can use
 //!
 //! Every step is fail-fast — any error returns immediately and the agent
 //! is not registered. There is no partial state to clean up, so this is
@@ -406,12 +406,8 @@ impl AgentSpawner {
             .await
             .map_err(|e| AgentKitError::Other(format!("agent runtime register: {e}")))?;
 
-        // 5. Activate it.
-        self.agent_runtime
-            .activate_agent(&registered.identity.agent_id)
-            .await
-            .map_err(|e| AgentKitError::Other(format!("agent runtime activate: {e}")))?;
-
+        // `register_agent` drives the lifecycle Created -> Initializing ->
+        // Active atomically, so the agent is ready for messaging here.
         tracing::info!(
             target: "tenzro_agent_kit::spawner",
             agent_id = %registered.identity.agent_id,

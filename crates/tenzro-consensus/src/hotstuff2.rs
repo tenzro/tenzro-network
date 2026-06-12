@@ -52,6 +52,15 @@ use tenzro_types::transaction::{Transaction, SignedTransaction};
 /// 8-second ceiling on top of this exponent cap.
 const MAX_BACKOFF_EXPONENT: u32 = 3;
 
+/// Upper bound on failed rounds derived from a single committed view gap.
+///
+/// After a long stall the view gap between a block and its parent can be
+/// large; deriving a failure for every view would be O(gap) work for data
+/// that mostly falls outside the reputation window anyway. The cap keeps
+/// derivation bounded while staying deterministic — it is computed purely
+/// from committed metadata, so every node truncates identically.
+const MAX_DERIVED_GAP_FAILURES: u64 = 128;
+
 /// Trait for providing the current state root to the block proposer.
 ///
 /// This provides clean dependency inversion: consensus calls this trait
@@ -766,13 +775,12 @@ impl HotStuff2Engine {
     pub fn is_leader_in_next_views(&self, lookahead_views: u64) -> bool {
         let base_view = self.view_state.read().view;
         let validator_set = self.validator_set();
-        let epoch = self.epoch_manager.current_epoch().number;
-        let finalized_height = self.finality_tracker.finalized_height();
-        let prev_block_id = self
-            .finality_tracker
-            .get_finalized_hash(finalized_height)
-            .map(|h| h.0)
-            .unwrap_or([0u8; 32]);
+        let current_epoch = self.epoch_manager.current_epoch();
+        let epoch = current_epoch.number;
+        // Per-epoch fixed seed anchor — identical on every node for the
+        // whole epoch, unlike the local finalized tip which differs by a
+        // block or two across the fleet at any instant.
+        let prev_block_id = current_epoch.seed_anchor.0;
 
         for offset in 0..lookahead_views {
             let view = base_view.saturating_add(offset);
@@ -1198,23 +1206,38 @@ impl HotStuff2Engine {
     /// Gets the leader for the current view via the configured
     /// [`ProposerElection`] strategy.
     ///
-    /// `prev_block_id` for the reputation seed is the most recently
-    /// finalized block's hash. Using a finalized hash (rather than a
-    /// tentative parent the current proposer could grind on) is the
-    /// anti-grinding invariant Aptos LeaderReputation relies on — see
+    /// `prev_block_id` for the reputation seed is the epoch's fixed
+    /// `seed_anchor` — the finalized block hash at the epoch's canonical
+    /// boundary. Anchoring per-epoch (rather than on the local finalized
+    /// tip, which differs by a block or two across nodes at any instant)
+    /// makes leader election deterministic fleet-wide while preserving
+    /// the anti-grinding invariant: the anchor is a finalized hash no
+    /// proposer can grind on — see
     /// [`crate::leader_reputation::reputation_seed`].
     fn get_leader(&self) -> Result<Address> {
         let view = self.view_state.read().view;
         let validator_set = self.validator_set();
-        let epoch = self.epoch_manager.current_epoch().number;
-        let finalized_height = self.finality_tracker.finalized_height();
-        let prev_block_id = self
-            .finality_tracker
-            .get_finalized_hash(finalized_height)
-            .map(|h| h.0)
-            .unwrap_or([0u8; 32]);
-        self.proposer_election
-            .select_leader(view, epoch, prev_block_id, &validator_set)
+        let current_epoch = self.epoch_manager.current_epoch();
+        self.proposer_election.select_leader(
+            view,
+            current_epoch.number,
+            current_epoch.seed_anchor.0,
+            &validator_set,
+        )
+    }
+
+    /// Resolves the elected leader for an arbitrary `view` under the
+    /// current epoch's fixed seed anchor. Used by proposal-side proposer
+    /// enforcement and committed-metadata reputation derivation.
+    fn leader_for_view(&self, view: u64) -> Result<Address> {
+        let validator_set = self.validator_set();
+        let current_epoch = self.epoch_manager.current_epoch();
+        self.proposer_election.select_leader(
+            view,
+            current_epoch.number,
+            current_epoch.seed_anchor.0,
+            &validator_set,
+        )
     }
 
     /// Advances to the next view
@@ -1358,13 +1381,32 @@ impl HotStuff2Engine {
     /// higher view, which it cannot do (#164).
     async fn on_view_timeout(&self) -> Result<()> {
         let current_view = self.view_state.read().view;
-        let timeout_ms = self.view_timer.read().current_timeout().as_millis();
+        let (timeout_ms, prior_consecutive) = {
+            let timer = self.view_timer.read();
+            (
+                timer.current_timeout().as_millis(),
+                timer.consecutive_timeouts,
+            )
+        };
 
-        tracing::warn!(
-            view = current_view,
-            timeout_ms = timeout_ms,
-            "View timeout, broadcasting TimeoutMsg and advancing to next view"
-        );
+        // Tiered logging: an isolated timeout is normal pacemaker behaviour
+        // (leader rotation under jitter) and logs at info; repeated
+        // consecutive timeouts indicate the cluster is failing to make
+        // progress and escalate to warn.
+        if prior_consecutive >= 1 {
+            tracing::warn!(
+                view = current_view,
+                timeout_ms = timeout_ms,
+                consecutive = prior_consecutive + 1,
+                "Repeated view timeout, broadcasting TimeoutMsg and advancing to next view"
+            );
+        } else {
+            tracing::info!(
+                view = current_view,
+                timeout_ms = timeout_ms,
+                "View timeout, broadcasting TimeoutMsg and advancing to next view"
+            );
+        }
 
         // Build & sign a TimeoutMsg for the timing-out view. Best-effort:
         // if signing fails (e.g. crypto subsystem error) we still advance
@@ -1408,34 +1450,14 @@ impl HotStuff2Engine {
         // Apply capped exponential backoff
         self.view_timer.write().on_timeout();
 
-        // Feed the failure into LeaderReputation: the proposer at the
-        // timing-out view did not produce a finalized block. A `false`
-        // outcome flags this round in the trailing window so the next
-        // leader selection penalises this validator (`FAILED_WEIGHT = 1`
-        // vs `ACTIVE_WEIGHT = 1000`, gated by `FAILURE_THRESHOLD_PERCENT`).
-        if let Some(reputation) = self.reputation.as_ref() {
-            let validator_set = self.validator_set();
-            let prev_block_id = {
-                let h = self.finality_tracker.finalized_height();
-                self.finality_tracker
-                    .get_finalized_hash(h)
-                    .map(|hash| hash.0)
-                    .unwrap_or([0u8; 32])
-            };
-            let epoch = self.epoch_manager.current_epoch().number;
-            // Resolve proposer by replaying the same election the leader
-            // would have run for the timing-out view. If selection fails
-            // (e.g. empty validator set) we skip the recording rather
-            // than crash the timeout path.
-            if let Ok(proposer) = self.proposer_election.select_leader(
-                current_view,
-                epoch,
-                prev_block_id,
-                &validator_set,
-            ) {
-                reputation.record_round_outcome(current_view, proposer, false);
-            }
-        }
+        // NOTE: reputation is deliberately NOT recorded here. Local view
+        // timeouts are node-local observations (two nodes can disagree on
+        // whether view V timed out), so feeding them into LeaderReputation
+        // would diverge the histories — and therefore the elected leaders —
+        // across the fleet. Failed rounds are instead derived
+        // deterministically from committed metadata: every view in the gap
+        // between a finalized block and its parent is recorded as a failure
+        // in `record_committed_round_metadata`.
 
         // Advance to next view (which will select a new leader via round-robin)
         self.advance_view().await?;
@@ -2133,6 +2155,11 @@ impl HotStuff2Engine {
             let transition_height = state.height;
             drop(state);
 
+            // Feed LeaderReputation from committed metadata only — same
+            // helper as finalize_with_commit_qc, so leader and followers
+            // record identical histories.
+            self.record_committed_round_metadata(block, &qc);
+
             // Check for epoch transition — SAFE: no vote_collector read lock held here
             self.transition_epoch_if_due(transition_height)?;
         }
@@ -2160,7 +2187,22 @@ impl HotStuff2Engine {
         // The due-check inside transition_epoch runs under the epoch write
         // lock — if a concurrent caller (engine finalize path vs. node
         // follower path) won the race, we get Ok(None) and report no-op.
-        if self.epoch_manager.transition_epoch(height)?.is_none() {
+        //
+        // The anchor closure resolves the finalized hash at the new epoch's
+        // canonical boundary (in-memory tracker first, durable BlockProvider
+        // fallback for post-restart / catch-up walks) so every node seeds
+        // leader election identically for the whole epoch.
+        let anchor_of = |boundary: BlockHeight| -> Option<Hash> {
+            self.finality_tracker
+                .get_finalized_hash(boundary)
+                .or_else(|| {
+                    self.block_provider
+                        .as_ref()
+                        .and_then(|p| p.get_block(boundary))
+                        .map(|b| b.hash())
+                })
+        };
+        if self.epoch_manager.transition_epoch(height, anchor_of)?.is_none() {
             return Ok(false);
         }
         tracing::info!(height = %height, "Epoch transition triggered");
@@ -2574,21 +2616,6 @@ impl HotStuff2Engine {
                 .write()
                 .on_success(Some(observed_view_latency));
 
-            // Feed the success into LeaderReputation: the proposer at the
-            // finalized view produced a finalized block (`success = true`)
-            // and the QC voters participated in finalization. Both signals
-            // boost the trailing-window weights for selection at future
-            // rounds. The captured `success_view` is the view that just
-            // finalized — recorded before we bump `state.view`.
-            let success_view = state.view;
-            let success_proposer = block.header.proposer;
-            if let Some(reputation) = self.reputation.as_ref() {
-                reputation.record_round_outcome(success_view, success_proposer, true);
-                let voters: Vec<Address> =
-                    commit_qc.votes.iter().map(|v| v.voter).collect();
-                reputation.record_round_voters(success_view, voters);
-            }
-
             // Advance height + view, reset phase
             state.height = state.height + 1u64;
             state.view += 1;
@@ -2600,6 +2627,10 @@ impl HotStuff2Engine {
             state.height
         };
 
+        // Feed LeaderReputation from committed metadata only — identical
+        // inputs on every node (see record_committed_round_metadata).
+        self.record_committed_round_metadata(block, &commit_qc);
+
         // Remove finalized transactions from mempool
         let tx_hashes: Vec<Hash> =
             block.transactions.iter().map(|tx| tx.transaction.hash()).collect();
@@ -2609,6 +2640,69 @@ impl HotStuff2Engine {
         self.transition_epoch_if_due(transition_height)?;
 
         Ok(())
+    }
+
+    /// Records leader-reputation metadata for a freshly-finalized block,
+    /// derived exclusively from committed data so every node feeds its
+    /// reputation history identical inputs (determinism by induction):
+    ///
+    /// - **Success** for `(block.header.view, block.header.proposer)` —
+    ///   the header binds the view at which the block was built, covering
+    ///   TC-justified reproposals too (a reproposed high-tip is
+    ///   byte-identical, so view/proposer remain the original leader's).
+    /// - **Voters** from the finalizing Commit QC.
+    /// - **Failures** for every view in the gap between the parent
+    ///   block's view and this block's view — those views demonstrably
+    ///   produced no finalized block; the elected leader for each is
+    ///   re-derived under the epoch's fixed seed anchor.
+    ///
+    /// Local view timeouts are deliberately NOT recorded — they are
+    /// node-local observations that diverge across the fleet, which would
+    /// diverge the reputation histories and therefore the elected
+    /// leaders. See `on_view_timeout`.
+    fn record_committed_round_metadata(
+        &self,
+        block: &Block,
+        commit_qc: &QuorumCertificate,
+    ) {
+        let Some(reputation) = self.reputation.as_ref() else {
+            return;
+        };
+
+        let view = block.header.view;
+        reputation.record_round_outcome(view, block.header.proposer, true);
+        let voters: Vec<Address> = commit_qc.votes.iter().map(|v| v.voter).collect();
+        reputation.record_round_voters(view, voters);
+
+        // Derive failed rounds from the committed view gap. The parent
+        // block comes from the wired BlockProvider (in-memory tracker
+        // first, durable storage fallback); when unavailable (genesis,
+        // test harnesses without a provider) gap derivation is skipped.
+        let height = block.header.height.as_u64();
+        if height == 0 {
+            return;
+        }
+        let parent_height = BlockHeight::from(height - 1);
+        let Some(parent_view) = self
+            .block_provider
+            .as_ref()
+            .and_then(|bp| bp.get_block(parent_height))
+            .map(|parent| parent.header.view)
+        else {
+            return;
+        };
+        if parent_view + 1 >= view {
+            return;
+        }
+        let gap_start = (parent_view + 1).max(view.saturating_sub(MAX_DERIVED_GAP_FAILURES));
+        for failed_view in gap_start..view {
+            // Skip silently when election cannot resolve (e.g. validator
+            // unknown for the view) — better to drop one failure record
+            // than to crash the finalize path.
+            if let Ok(leader) = self.leader_for_view(failed_view) {
+                reputation.record_round_outcome(failed_view, leader, false);
+            }
+        }
     }
 }
 
@@ -2885,6 +2979,33 @@ impl ConsensusEngine for HotStuff2Engine {
                 "stale proposal: view {} < local view {}",
                 proposal_view, local_view
             )));
+        }
+
+        // Proposer enforcement: the block's header must carry the leader
+        // elected for the view it was built at. `header.view` binds the
+        // original construction view, so this single rule covers both the
+        // happy path and TC-justified reproposals (a reproposed high-tip
+        // is byte-identical — header.view/proposer are the original
+        // leader's, and the election re-derives the same answer). With
+        // the per-epoch seed anchor the election is deterministic
+        // fleet-wide, so an honest proposer can never be falsely
+        // rejected. If election itself fails (validator set unknown for
+        // the view) we fall through rather than reject — the QC quorum
+        // still gates finalization.
+        if let Ok(expected_leader) = self.leader_for_view(block.header.view) {
+            if block.header.proposer != expected_leader {
+                tracing::warn!(
+                    proposal_view = block.header.view,
+                    proposer = %block.header.proposer,
+                    expected = %expected_leader,
+                    height = %proposal_height,
+                    "Rejecting proposal: proposer is not the elected leader for its view"
+                );
+                return Err(ConsensusError::InvalidProposal(format!(
+                    "proposer {} is not the elected leader {} for view {}",
+                    block.header.proposer, expected_leader, block.header.view
+                )));
+            }
         }
 
         // safe_to_extend (Jolteon §3.5 / DiemBFT v4 §3.5):
@@ -4371,7 +4492,9 @@ mod tests {
         use tenzro_types::primitives::{BlockHeight, Hash};
 
         let (engine, peers) = build_test_engine_with_all_signers().await;
-        let proposer_addr = peers[0].3;
+        // Proposer enforcement: the block must come from the elected leader
+        // for its view, so derive the leader rather than hardcoding a peer.
+        let proposer_addr = engine.leader_for_view(5).unwrap();
 
         // Local view 0; proposer jumps to view 5 with a TC at view 4 signed
         // by 3 of 4 validators (2f+1 with f=1).
