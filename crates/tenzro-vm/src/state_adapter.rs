@@ -203,15 +203,37 @@ impl StateAdapter {
                 }
             }
 
-            // Write dirty nonce entries
+            // Write dirty nonce entries.
+            //
+            // Like balance, the account nonce has a single canonical home in
+            // CF_ACCOUNTS under `b"nonce:" + <address bytes>` — byte-identical
+            // to `AccountStoreImpl`'s key + value layout (raw u64 LE == bincode
+            // default u64). The VM is the only writer of execution nonces, so
+            // mirroring here makes `eth_getTransactionCount` / faucet / signing
+            // (which read through `AccountStore` over CF_ACCOUNTS) observe the
+            // exact nonce the VM enforced on the last applied transaction. The
+            // legacy CF_STATE `nonce:<hex>` key is also kept so VM-internal
+            // reads and historical snapshots stay valid.
             for entry in self.dirty_nonce.iter() {
                 let addr = entry.key();
                 if let Some(nonce) = self.nonce_cache.get(addr) {
-                    let key = format!("nonce:{}", hex::encode(addr));
+                    let nonce_bytes = nonce.value().to_le_bytes().to_vec();
+
+                    // Canonical: account ledger (CF_ACCOUNTS), AccountStore layout.
+                    let mut canonical_key = b"nonce:".to_vec();
+                    canonical_key.extend_from_slice(addr);
+                    ops.push(WriteOp::Put {
+                        cf: CF_ACCOUNTS.to_string(),
+                        key: canonical_key,
+                        value: nonce_bytes.clone(),
+                    });
+
+                    // Mirror: VM state key (CF_STATE) for VM-internal reads.
+                    let legacy_key = format!("nonce:{}", hex::encode(addr));
                     ops.push(WriteOp::Put {
                         cf: CF_STATE.to_string(),
-                        key: key.into_bytes(),
-                        value: nonce.value().to_le_bytes().to_vec(),
+                        key: legacy_key.into_bytes(),
+                        value: nonce_bytes,
                     });
                 }
             }
@@ -573,10 +595,23 @@ impl VmState for StateAdapter {
             return *entry.value();
         }
 
-        // Fall back to RocksDB
+        // Fall back to RocksDB, canonical store first (same order as balance).
         if let Some(store) = &self.storage {
-            let key = format!("nonce:{}", hex::encode(address));
-            if let Ok(Some(bytes)) = store.get(CF_STATE, key.as_bytes())
+            // 1. Canonical: account ledger (CF_ACCOUNTS, AccountStore layout).
+            let mut canonical_key = b"nonce:".to_vec();
+            canonical_key.extend_from_slice(address);
+            if let Ok(Some(bytes)) = store.get(CF_ACCOUNTS, &canonical_key)
+                && bytes.len() == 8
+                && let Ok(arr) = bytes.as_slice().try_into()
+            {
+                let nonce = u64::from_le_bytes(arr);
+                self.nonce_cache.insert(address.to_vec(), nonce);
+                return nonce;
+            }
+
+            // 2. Legacy fallback: VM state key (CF_STATE) for old snapshots.
+            let legacy_key = format!("nonce:{}", hex::encode(address));
+            if let Ok(Some(bytes)) = store.get(CF_STATE, legacy_key.as_bytes())
                 && bytes.len() == 8
                 && let Ok(arr) = bytes.as_slice().try_into()
             {
