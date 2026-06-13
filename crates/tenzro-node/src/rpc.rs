@@ -2615,12 +2615,19 @@ async fn handle_get_nonce(
         code: -32000, message: "Storage not initialized".to_string(), data: None,
     })?;
 
-    let account_store = AccountStoreImpl::new(storage.clone());
-    let nonce = account_store.get_nonce(&address).await.map_err(|e| JsonRpcError {
-        code: -32000, message: format!("Failed to get nonce: {}", e), data: None,
-    })?;
+    // The authoritative nonce for building a transaction is the VM execution
+    // state nonce (CF_STATE, `nonce:<hex(addr)>`), which `MultiVmRuntime`
+    // validates `tx.nonce` against and increments on every successful tx.
+    // The `AccountStore` nonce (CF_ACCOUNTS, raw-byte key) is a separate index
+    // the VM never writes, so reading it returns a stale value (typically 0)
+    // and any client building a tx from it reverts with `Invalid nonce`.
+    let state = tenzro_vm::StateAdapter::with_storage(
+        storage.clone() as std::sync::Arc<dyn tenzro_storage::KvStore>,
+    );
+    use tenzro_vm::traits::VmState as _;
+    let nonce = state.get_nonce(address.as_bytes());
 
-    Ok(serde_json::json!(format!("0x{:x}", nonce.0)))
+    Ok(serde_json::json!(format!("0x{:x}", nonce)))
 }
 
 /// Create a simple account (keypair) — like EVM/Solana wallet creation.
@@ -5039,18 +5046,29 @@ async fn handle_faucet(
     })?;
     let pubkey_bytes = keypair.public_key().as_bytes().to_vec();
 
-    // Nonce tracking for the faucet: derive from the wallet service if it's
-    // aware of the faucet, else from the account store. For simplicity,
-    // peek-and-bump a node-local counter. Two concurrent faucet requests can
-    // race here; the event loop / consensus will reject the loser with a
-    // nonce-mismatch error and the caller can retry.
+    // Nonce tracking for the faucet. The authoritative source is the VM
+    // execution-state nonce (CF_STATE, `nonce:<hex(addr)>`) — the same value
+    // `MultiVmRuntime` validates `tx.nonce` against. The in-memory `peek_nonce`
+    // counter resets to 0 on every node restart, so relying on it alone makes
+    // the first post-restart faucet tx revert with `Invalid nonce: expected N,
+    // got 0`. We read the VM-state nonce as the floor and take the max with the
+    // wallet's atomically-reserved counter so concurrent same-block requests
+    // still receive distinct nonces.
+    let chain_nonce = {
+        let state = tenzro_vm::StateAdapter::with_storage(
+            storage.clone() as std::sync::Arc<dyn tenzro_storage::KvStore>,
+        );
+        use tenzro_vm::traits::VmState as _;
+        state.get_nonce(faucet_addr.as_bytes())
+    };
     let wallet_service = node.wallet_service();
     let nonce = match &wallet_service {
         Some(ws) => {
             use tenzro_wallet::WalletService;
-            ws.peek_nonce(&faucet_addr)
+            let reserved = ws.next_nonce(&faucet_addr);
+            if reserved.0 >= chain_nonce { reserved } else { Nonce::from(chain_nonce) }
         }
-        None => Nonce::from(0u64),
+        None => Nonce::from(chain_nonce),
     };
 
     let chain_id = node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337);
@@ -36900,7 +36918,8 @@ async fn handle_sign_transaction(
         u64::try_from(live).unwrap_or(u64::MAX)
     };
 
-    // Default `nonce` to the next available value from the account store so
+    // Default `nonce` to the next available value from the VM execution state
+    // (the authoritative count `MultiVmRuntime` validates `tx.nonce` against) so
     // callers that don't track local nonce (web wallets, agent runtimes,
     // one-shot scripts) don't collide on `0` and silently fail at admission.
     let nonce = if let Some(n) = params.get("nonce").and_then(|v| v.as_u64()) {
@@ -36911,12 +36930,11 @@ async fn handle_sign_transaction(
             message: "Storage not initialized".to_string(),
             data: None,
         })?;
-        let account_store = AccountStoreImpl::new(storage.clone());
-        account_store.get_nonce(&from_addr).await.map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Failed to read account nonce: {}", e),
-            data: None,
-        })?.0
+        let state = tenzro_vm::StateAdapter::with_storage(
+            storage.clone() as std::sync::Arc<dyn tenzro_storage::KvStore>,
+        );
+        use tenzro_vm::traits::VmState as _;
+        state.get_nonce(from_addr.as_bytes())
     };
 
     // Allow callers to pass a typed `tx_type` JSON object (the same shape produced
@@ -37120,12 +37138,11 @@ async fn handle_sign_and_send_transaction(
             message: "Storage not initialized".to_string(),
             data: None,
         })?;
-        let account_store = AccountStoreImpl::new(storage.clone());
-        account_store.get_nonce(&from_addr).await.map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Failed to read account nonce: {}", e),
-            data: None,
-        })?.0
+        let state = tenzro_vm::StateAdapter::with_storage(
+            storage.clone() as std::sync::Arc<dyn tenzro_storage::KvStore>,
+        );
+        use tenzro_vm::traits::VmState as _;
+        state.get_nonce(from_addr.as_bytes())
     };
 
     // Pin resolved values into params so the inner sign call uses them verbatim
