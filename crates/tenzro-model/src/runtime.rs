@@ -123,6 +123,15 @@ pub struct GenerationConfig {
     pub repeat_penalty: f32,
     pub repeat_last_n: usize,
     pub seed: u64,
+    /// Optional speculative-decoding draft count (1..=6). When `Some(n)`,
+    /// the runtime is asked to use the target model's paired drafter
+    /// (`HfModelEntry.drafter_id` + `mtp_kind`) and propose `n` tokens
+    /// per verification round (llama.cpp `--spec-draft-n-max`). When
+    /// `None`, the runtime falls back to single-token autoregressive
+    /// sampling. The drafter must be loaded alongside the target;
+    /// otherwise the runtime returns `ModelError::MtpUnavailable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_n: Option<u8>,
 }
 
 impl Default for GenerationConfig {
@@ -134,6 +143,7 @@ impl Default for GenerationConfig {
             repeat_penalty: 1.1,
             repeat_last_n: 64,
             seed: 42,
+            draft_n: None,
         }
     }
 }
@@ -685,6 +695,32 @@ impl ModelRuntime {
         config: &GenerationConfig,
         token_tx: Option<&tokio::sync::mpsc::Sender<String>>,
     ) -> Result<InferenceResult> {
+        // MTP / speculative-decoding seam. When the caller passes
+        // `draft_n: Some(n)`, they want the runtime to run the target
+        // model's paired drafter for speculative decoding. The
+        // in-process `llama-cpp-2 = "0.1.143"` crate does not yet
+        // expose llama.cpp's `common_speculative` API surface
+        // (`--spec-type draft` / `--spec-type draft-mtp` and the
+        // accompanying `--spec-draft-n-max <n>` knob). Until the
+        // binding lands — either upstream in `llama-cpp-rs` or via a
+        // local vendor of the crate — every speculative request is
+        // failed cleanly here so callers can degrade gracefully or
+        // fall back to a raw `llama-cli` invocation outside the
+        // in-process runtime. This is the single call site to flip
+        // when the binding ships.
+        if let Some(n) = config.draft_n {
+            return Err(ModelError::MtpUnavailable {
+                reason: format!(
+                    "draft_n={} requested but llama-cpp-2 v0.1.143 does not yet \
+                     expose common_speculative bindings; pair the target with \
+                     `--model-draft <drafter.gguf> --spec-type draft-mtp \
+                     --spec-draft-n-max {}` in a raw llama-cli invocation or \
+                     unset draft_n to use single-token sampling",
+                    n, n,
+                ),
+            });
+        }
+
         let start = Instant::now();
 
         // Tokenize input
