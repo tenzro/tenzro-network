@@ -2326,13 +2326,14 @@ pub(crate) async fn handle_wormhole_bridge(
 }
 
 // ============================================================
-// Chainlink CCIP — first-class RPC namespace
+// Chainlink CCIP — node JSON-RPC namespace
 // ------------------------------------------------------------
-// These RPCs make CCIP a load-bearing rail at the node level, not
-// just a string in `tenzro_listBridgeAdapters`. They mirror the
-// 8 CCIP tools shipped on the standalone Chainlink MCP server,
-// plus a router-mediated `ccipBridge` that selects CCIP as the
-// regulated rail via `RoutingStrategy::Regulated`.
+// Mirror of the 8 CCIP tools exposed by the standalone Chainlink
+// MCP server, available at the node JSON-RPC level so SDKs and
+// CLIs don't need to know about the separate MCP port. Adds a
+// 9th method (`ccipBridge`) that dispatches through the
+// BridgeRouter with the CCIP adapter pinned via
+// `PreferAdapter("chainlink_ccip")`.
 // ============================================================
 
 const CCIP_API_BASE: &str = "https://docs.chain.link/api/ccip/v1";

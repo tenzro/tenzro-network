@@ -745,11 +745,11 @@ pub enum RoutingStrategy {
     /// Falls back to direct adapters if LI.FI is unavailable or doesn't support
     /// the requested chain (e.g., Canton enterprise flows).
     LiFiAggregator,
-    /// Prefer regulated / institutional rails (Chainlink CCIP, Wormhole NTT)
-    /// for compliance-sensitive legs. Filters routes to adapters that
-    /// declare [`BridgeAdapterClass::RegulatedRail`] then picks the
-    /// cheapest. Falls back to lowest-fee across all routes when no
-    /// regulated rail is available for the lane.
+    /// Filter routes to adapters that declare
+    /// [`BridgeAdapterClass::RegulatedRail`] (currently Chainlink CCIP
+    /// and Wormhole NTT) then pick the cheapest among them. Falls back
+    /// to lowest-fee across all routes when no `RegulatedRail` adapter
+    /// covers the lane.
     Regulated,
 }
 

@@ -1991,11 +1991,10 @@ async fn dispatch_request(
         "tenzro_wormholeParseVaaId" => crate::rpc_integrations::handle_wormhole_parse_vaa_id(node, request.params).await,
         "tenzro_wormholeBridge" => crate::rpc_integrations::handle_wormhole_bridge(node, request.params).await,
 
-        // Chainlink CCIP — first-class regulated-rail namespace.
-        // Mirrors the 8 chainlink-mcp tools at the node JSON-RPC level
-        // so the SDKs and CLI can target CCIP without going through the
-        // generic bridge router. `ccipBridge` routes through the
-        // BridgeRouter with PreferAdapter("chainlink_ccip").
+        // Chainlink CCIP — node JSON-RPC namespace mirroring the 8
+        // chainlink-mcp tools so SDKs and CLI can target CCIP without
+        // going through the generic bridge router. `ccipBridge` routes
+        // through the BridgeRouter with PreferAdapter("chainlink_ccip").
         "tenzro_ccipGetFee" => crate::rpc_integrations::handle_ccip_get_fee(node, request.params).await,
         "tenzro_ccipSend" => crate::rpc_integrations::handle_ccip_send(node, request.params).await,
         "tenzro_ccipTrack" => crate::rpc_integrations::handle_ccip_track(node, request.params).await,
