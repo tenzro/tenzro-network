@@ -414,20 +414,18 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
             },
             {
                 "id": "ccip",
-                "name": "Chainlink CCIP Regulated Rail",
+                "name": "Chainlink CCIP",
                 "description": (
-                    "Chainlink CCIP cross-chain messaging — Tenzro's regulated "
-                    "institutional rail. OCR commit-store committee + RMN ARM "
-                    "blessing co-attest every inbound message. Quote fees via "
-                    "Router.getFee(), prepare ccipSend() envelopes, track "
-                    "OffRamp execution state, inspect CCT v1.6+ token pools "
-                    "and their inbound/outbound rate-limiter state, and bridge "
-                    "tokens through the BridgeRouter pinned to the CCIP "
-                    "adapter (refuses fallback to generic rails)."
+                    "Chainlink CCIP cross-chain messaging. OCR commit-store "
+                    "committee + RMN ARM co-attest every inbound message. "
+                    "Quote fees via Router.getFee(), prepare ccipSend() "
+                    "envelopes, track OffRamp execution state, inspect "
+                    "CCT v1.6+ token pools and their inbound/outbound "
+                    "rate-limiter state, and bridge tokens through the "
+                    "BridgeRouter with the CCIP adapter pinned."
                 ),
                 "tags": [
-                    "ccip", "chainlink", "regulated", "institutional",
-                    "bridge", "cross-chain", "cct", "rmn",
+                    "ccip", "chainlink", "bridge", "cross-chain", "cct", "rmn",
                     "ethereum", "arbitrum", "base", "polygon",
                 ],
                 "examples": [

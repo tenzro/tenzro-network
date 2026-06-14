@@ -1,9 +1,8 @@
-//! Chainlink CCIP cross-chain commands — the regulated-rail CLI surface.
+//! Chainlink CCIP cross-chain commands.
 //!
-//! Wraps the `tenzro_ccip*` JSON-RPC namespace. CCIP is the
-//! institutional rail: OCR commit-store committee + RMN ARM blessing,
-//! the route Tenzro picks when a leg must be regulated and attested
-//! rather than generic permissionless.
+//! Wraps the `tenzro_ccip*` JSON-RPC namespace. CCIP uses an OCR
+//! commit-store committee plus an independent RMN ARM (Risk
+//! Management Network) that co-attest every inbound message.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -12,7 +11,7 @@ use serde_json::{json, Value};
 use crate::output;
 use crate::rpc::RpcClient;
 
-/// Chainlink CCIP regulated-rail operations
+/// Chainlink CCIP cross-chain operations
 #[derive(Debug, Subcommand)]
 pub enum CcipCommand {
     /// Quote a CCIP fee via Router.getFee() eth_call
@@ -31,7 +30,7 @@ pub enum CcipCommand {
     TokenPool(CcipTokenPoolCmd),
     /// Read pool rate-limiter state for a (pool, remote-chain) pair
     RateLimits(CcipRateLimitsCmd),
-    /// Bridge tokens through the CCIP regulated rail
+    /// Bridge tokens through the CCIP adapter
     Bridge(CcipBridgeCmd),
 }
 
@@ -369,7 +368,7 @@ pub struct CcipBridgeCmd {
 
 impl CcipBridgeCmd {
     pub async fn execute(&self) -> Result<()> {
-        output::print_header("CCIP Bridge Transfer (Regulated Rail)");
+        output::print_header("CCIP Bridge Transfer");
         let spinner = output::create_spinner("Submitting CCIP transfer...");
         let rpc = RpcClient::new(&self.rpc);
         let result: Value = rpc

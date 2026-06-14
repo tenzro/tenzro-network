@@ -12,16 +12,15 @@ use tenzro_types::primitives::Hash;
 ///
 /// Adapters declare one or more classes via [`BridgeAdapter::classes`].
 /// [`RoutingStrategy::Regulated`] filters available routes to adapters
-/// that include [`BridgeAdapterClass::RegulatedRail`], so the router
-/// can prefer institutional-grade rails (Chainlink CCIP, Wormhole NTT)
-/// for compliance-sensitive legs.
+/// that include [`BridgeAdapterClass::RegulatedRail`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BridgeAdapterClass {
-    /// Generic permissionless rail (LayerZero, deBridge, LI.FI, …).
+    /// Generic adapter (LayerZero, deBridge, LI.FI, etc.).
     Generic,
-    /// Regulated / institutional rail with on-chain attested
-    /// verification (Chainlink CCIP commit + RMN ARM, Wormhole NTT
-    /// Guardian quorum, etc.).
+    /// Adapter that verifies inbound messages against an attested
+    /// committee or quorum on top of the underlying transport
+    /// (Chainlink CCIP commit-store + RMN ARM, Wormhole NTT Guardian
+    /// quorum, etc.).
     RegulatedRail,
 }
 

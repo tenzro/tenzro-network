@@ -11943,12 +11943,12 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    // ─── Chainlink CCIP — first-class regulated-rail tools ──────────────────
-    // Mirrors the standalone chainlink-mcp server's 8 CCIP tools on the
-    // main mcp.tenzro.network surface, plus a 9th regulated-rail
-    // `ccip_bridge` that routes through the BridgeRouter with CCIP
-    // pinned as the adapter. Each method is a thin forward to the
-    // `tenzro_ccip*` JSON-RPC handler — no logic duplication.
+    // ─── Chainlink CCIP MCP tools ────────────────────────────────────────────
+    // Mirror of the standalone chainlink-mcp server's 8 CCIP tools on the
+    // main mcp.tenzro.network surface, plus a 9th `ccip_bridge` that
+    // routes through the BridgeRouter with the CCIP adapter pinned.
+    // Each method is a thin forward to the `tenzro_ccip*` JSON-RPC
+    // handler — no logic duplication.
 
     #[tool(description = "Quote a Chainlink CCIP fee via Router.getFee() eth_call. CCIP is Tenzro's regulated rail: OCR commit-store committee + RMN ARM blessing. Returns native fee in wei on the source chain.")]
     async fn ccip_get_fee(
