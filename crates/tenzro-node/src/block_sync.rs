@@ -75,8 +75,22 @@ pub const MAX_INFLIGHT_PER_PEER: usize = MAX_INFLIGHT_REQUESTS_PER_PEER;
 /// (bad QC, malformed range, transport error).
 pub const PEER_SCORE_PENALTY: i32 = -10;
 
-/// Score below which a peer is dropped from the candidate set entirely.
+/// Score below which a peer is dropped from the steady-state candidate set.
+/// This is a DoS dampener for *normal* operation — it stops the engine from
+/// repeatedly probing a flaky peer while the local head is already current.
 pub const PEER_SCORE_DROP_THRESHOLD: i32 = -50;
+
+/// Score below which a peer is excluded even while we are actively behind
+/// (a consensus behind-hint is engaged). Catchup peer-eligibility must be
+/// SEPARATE from steady-state reputation: the node that is behind is exactly
+/// the one whose sync requests have been failing (its only candidates are
+/// OOM-flapping peers serving the missing block), so its peer scores are
+/// degraded *by being behind*. Gating catchup on the same threshold starves
+/// the requester and deadlocks sync — the chain can then lose quorum and
+/// halt (cf. CometBFT GHSA-22qq-3xwm-r5x4 / issue #5801). While behind we
+/// only exclude peers that are hard-banned (egregious, sustained
+/// misbehavior), never peers merely below the steady-state drop line.
+pub const PEER_SCORE_HARD_BAN_THRESHOLD: i32 = -500;
 
 /// Block-sync engine state machine.
 #[derive(Debug, Clone)]
@@ -122,6 +136,34 @@ impl PeerScore {
     /// True iff this peer has spare capacity for another outbound request.
     fn has_capacity(&self) -> bool {
         self.in_flight.len() < MAX_INFLIGHT_PER_PEER
+    }
+}
+
+/// Pure sync-eligibility predicate, extracted from `best_peer_tip` so it can
+/// be unit-tested without standing up a live engine (the constructor needs a
+/// network service, store, and consensus handle). A peer is an eligible sync
+/// target iff its score is at or above `exclusion_threshold` AND it has
+/// advertised a tip more than `tolerance` blocks above our local head.
+///
+/// `exclusion_threshold` is supplied by the caller's `peer_exclusion_threshold()`
+/// — the steady-state drop line when current, the hard-ban floor while behind —
+/// so catchup is never starved by scores that degraded *because* we fell behind
+/// (cf. CometBFT GHSA-22qq-3xwm-r5x4 / issue #5801).
+fn peer_is_sync_eligible(
+    score: i32,
+    advertised_tip: Option<(BlockHeight, Hash)>,
+    our_height: BlockHeight,
+    tolerance: u64,
+    exclusion_threshold: i32,
+) -> Option<(BlockHeight, Hash)> {
+    if score < exclusion_threshold {
+        return None;
+    }
+    let (tip_h, tip_hash) = advertised_tip?;
+    if tip_h.0 > our_height.0 + tolerance {
+        Some((tip_h, tip_hash))
+    } else {
+        None
     }
 }
 
@@ -220,6 +262,25 @@ impl BlockSyncEngine {
         match self.hinted_until {
             Some(t) if std::time::Instant::now() < t => 0,
             _ => SLOT_IMPORT_TOLERANCE,
+        }
+    }
+
+    /// True iff a consensus behind-hint is currently engaged (we observed a
+    /// quorum-advertised finalized height above our own). While behind, the
+    /// peer-eligibility gate relaxes from the steady-state drop threshold to
+    /// the hard-ban floor so catchup cannot be starved by degraded scores.
+    fn is_behind_hinted(&self) -> bool {
+        matches!(self.hinted_until, Some(t) if std::time::Instant::now() < t)
+    }
+
+    /// Effective score below which a peer is excluded from the sync candidate
+    /// set. Steady state uses the drop threshold; while behind-hinted it
+    /// relaxes to the hard-ban floor (see `PEER_SCORE_HARD_BAN_THRESHOLD`).
+    fn peer_exclusion_threshold(&self) -> i32 {
+        if self.is_behind_hinted() {
+            PEER_SCORE_HARD_BAN_THRESHOLD
+        } else {
+            PEER_SCORE_DROP_THRESHOLD
         }
     }
 
@@ -379,13 +440,16 @@ impl BlockSyncEngine {
         }
 
         // Snapshot peer ids before issuing requests (we mutate self in the loop).
+        let exclusion_threshold = self.peer_exclusion_threshold();
         let peer_ids: Vec<PeerId> = self.peers.keys().copied().collect();
         for peer in peer_ids {
-            // Score-gate: don't probe peers we've already evicted.
+            // Score-gate: don't probe peers we've already evicted. While
+            // behind-hinted this relaxes to the hard-ban floor so catchup
+            // is never starved by degraded steady-state scores.
             if self
                 .peers
                 .get(&peer)
-                .map(|p| p.score < PEER_SCORE_DROP_THRESHOLD)
+                .map(|p| p.score < exclusion_threshold)
                 .unwrap_or(false)
             {
                 continue;
@@ -422,21 +486,24 @@ impl BlockSyncEngine {
 
     /// Returns the best peer (highest tip) whose tip exceeds our local head
     /// by more than the effective tolerance (`sync_tolerance()` — zero
-    /// while a behind-hint is active). Returns `None` if we're synced.
+    /// while a behind-hint is active). Eligibility uses
+    /// `peer_exclusion_threshold()`, which relaxes from the steady-state
+    /// drop line to the hard-ban floor while behind so catchup is never
+    /// starved by degraded scores. Returns `None` if we're synced.
     fn best_peer_tip(&self, our_height: BlockHeight) -> Option<(PeerId, BlockHeight, Hash)> {
         let tolerance = self.sync_tolerance();
+        let exclusion_threshold = self.peer_exclusion_threshold();
         self.peers
             .iter()
             .filter_map(|(peer, score)| {
-                if score.score < PEER_SCORE_DROP_THRESHOLD {
-                    return None;
-                }
-                let (tip_h, tip_hash) = score.advertised_tip?;
-                if tip_h.0 > our_height.0 + tolerance {
-                    Some((*peer, tip_h, tip_hash))
-                } else {
-                    None
-                }
+                peer_is_sync_eligible(
+                    score.score,
+                    score.advertised_tip,
+                    our_height,
+                    tolerance,
+                    exclusion_threshold,
+                )
+                .map(|(tip_h, tip_hash)| (*peer, tip_h, tip_hash))
             })
             .max_by_key(|(_, h, _)| h.0)
     }
@@ -812,3 +879,100 @@ impl BlockSyncEngine {
 /// rather than in `tenzro-network` because the engine's own consumers know
 /// what kind of request id type to expect.
 pub type ServerRequestId = InboundRequestId;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tip(h: u64) -> Option<(BlockHeight, Hash)> {
+        Some((BlockHeight(h), Hash::default()))
+    }
+
+    /// A peer one block ahead is eligible when behind-hinted (tolerance 0)
+    /// even with a score below the steady-state drop line, because the
+    /// exclusion threshold relaxes to the hard-ban floor.
+    #[test]
+    fn behind_hinted_peer_below_drop_line_is_eligible() {
+        // score -60: below the -50 drop line, above the -500 hard-ban floor.
+        let r = peer_is_sync_eligible(
+            -60,
+            tip(192_745),
+            BlockHeight(192_744),
+            0, // behind-hinted tolerance
+            PEER_SCORE_HARD_BAN_THRESHOLD,
+        );
+        assert_eq!(r, Some((BlockHeight(192_745), Hash::default())));
+    }
+
+    /// The same peer is NOT eligible in steady state: the drop-line threshold
+    /// excludes it. This is the deadlock the relaxed threshold breaks — under
+    /// the old single-threshold gate, a node one block behind could never
+    /// catch up because the only peers serving the missing block had degraded
+    /// scores.
+    #[test]
+    fn same_peer_excluded_at_steady_state_drop_line() {
+        let r = peer_is_sync_eligible(
+            -60,
+            tip(192_745),
+            BlockHeight(192_744),
+            SLOT_IMPORT_TOLERANCE, // steady-state tolerance
+            PEER_SCORE_DROP_THRESHOLD,
+        );
+        assert_eq!(r, None);
+    }
+
+    /// A hard-banned peer (below the floor) is excluded even while behind.
+    #[test]
+    fn hard_banned_peer_excluded_even_when_behind() {
+        let r = peer_is_sync_eligible(
+            -600,
+            tip(192_745),
+            BlockHeight(192_744),
+            0,
+            PEER_SCORE_HARD_BAN_THRESHOLD,
+        );
+        assert_eq!(r, None);
+    }
+
+    /// A peer at or above our head (no gap beyond tolerance) is not a sync
+    /// target regardless of score.
+    #[test]
+    fn peer_at_our_head_is_not_a_sync_target() {
+        let r = peer_is_sync_eligible(
+            0,
+            tip(192_744),
+            BlockHeight(192_744),
+            0,
+            PEER_SCORE_HARD_BAN_THRESHOLD,
+        );
+        assert_eq!(r, None);
+    }
+
+    /// A peer that has never advertised a tip is not eligible.
+    #[test]
+    fn peer_without_advertised_tip_is_not_eligible() {
+        let r = peer_is_sync_eligible(
+            100,
+            None,
+            BlockHeight(192_744),
+            0,
+            PEER_SCORE_HARD_BAN_THRESHOLD,
+        );
+        assert_eq!(r, None);
+    }
+
+    /// Steady-state tolerance suppresses single-block flapping: a peer one
+    /// block ahead is not a sync target until the gap exceeds the tolerance.
+    #[test]
+    fn single_block_gap_within_steady_tolerance_is_ignored() {
+        assert!(SLOT_IMPORT_TOLERANCE >= 1);
+        let r = peer_is_sync_eligible(
+            0,
+            tip(192_745),
+            BlockHeight(192_744),
+            SLOT_IMPORT_TOLERANCE,
+            PEER_SCORE_DROP_THRESHOLD,
+        );
+        assert_eq!(r, None);
+    }
+}

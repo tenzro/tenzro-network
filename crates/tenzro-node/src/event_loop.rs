@@ -449,10 +449,10 @@ pub struct EventLoop {
     /// `None` on a node with no network service (e.g. light-client mode).
     block_import_rx: Option<mpsc::Receiver<crate::block_sync::BlockImport>>,
 
-    /// Cosmos-style snapshot ABCI store. The post-finality hook calls
-    /// `produce_at(height, state_root)` every
-    /// [`crate::snapshot::SNAPSHOT_INTERVAL_BLOCKS`] finalized blocks
-    /// (currently 10,000). `None` until wired by the node.
+    /// Cosmos-style snapshot ABCI store. On producer nodes, the
+    /// post-finality hook calls `produce_at(height, state_root)` at the
+    /// configured [`crate::snapshot::SnapshotConfig::interval_blocks`]
+    /// cadence. `None` until wired by the node.
     snapshot_store: Option<Arc<crate::snapshot::SnapshotStore>>,
 }
 
@@ -532,7 +532,8 @@ impl EventLoop {
     }
 
     /// Wires the snapshot ABCI store. Once set, `process_finality_notification`
-    /// triggers `produce_at` every `SNAPSHOT_INTERVAL_BLOCKS` finalized blocks.
+    /// triggers `produce_at` at the store's configured interval on producer
+    /// nodes (a no-op when the producer is disabled).
     pub fn with_snapshot_store(
         mut self,
         snapshot_store: Arc<crate::snapshot::SnapshotStore>,
@@ -835,12 +836,13 @@ impl EventLoop {
         let state_root_bytes = notification.block.header.state_root;
         let res = self.handle_block_finalized(notification.block).await;
 
-        // Snapshot ABCI: produce a state-sync snapshot every
-        // SNAPSHOT_INTERVAL_BLOCKS finalized blocks. We only attempt this
-        // after `handle_block_finalized` has run so the live KV store
-        // reflects the block we're snapshotting at.
+        // Snapshot ABCI: produce a state-sync snapshot at the configured
+        // block interval, but only on nodes that opt in as producers
+        // (dedicated RPC / archival). We only attempt this after
+        // `handle_block_finalized` has run so the live KV store reflects the
+        // block we're snapshotting at.
         if let Some(store) = self.snapshot_store.as_ref() {
-            if height > 0 && height % crate::snapshot::SNAPSHOT_INTERVAL_BLOCKS == 0 {
+            if store.should_produce_at(height) {
                 let mut sr = [0u8; 32];
                 let bytes = state_root_bytes.as_bytes();
                 let n = bytes.len().min(32);

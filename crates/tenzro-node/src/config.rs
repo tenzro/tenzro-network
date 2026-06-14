@@ -1176,6 +1176,14 @@ pub struct NodeConfig {
     /// the EVM + SVM mirrors are unaffected.
     #[serde(default)]
     pub erc8004_daml: Option<Erc8004DamlConfig>,
+
+    /// State-sync snapshot producer cadence + retention. Disabled by
+    /// default — only dedicated RPC / archival operators should produce
+    /// snapshots, since every snapshot is a multi-GB copy of the full
+    /// state. Validators run with the default (disabled) so they never
+    /// accumulate snapshot directories on their data volume.
+    #[serde(default)]
+    pub snapshot: crate::snapshot::SnapshotConfig,
 }
 
 /// Operator-supplied Canton/DAML mirror config for the ERC-8004
@@ -1290,6 +1298,7 @@ impl NodeConfig {
             geography: None,
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
             erc8004_daml: None,
+            snapshot: crate::snapshot::SnapshotConfig::default(),
         }
     }
 
@@ -1327,6 +1336,7 @@ impl NodeConfig {
             geography: None,
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
             erc8004_daml: None,
+            snapshot: crate::snapshot::SnapshotConfig::default(),
         }
     }
 
@@ -1364,6 +1374,7 @@ impl NodeConfig {
             geography: None,
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
             erc8004_daml: None,
+            snapshot: crate::snapshot::SnapshotConfig::default(),
         }
     }
 
@@ -1401,6 +1412,7 @@ impl NodeConfig {
             geography: None,
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
             erc8004_daml: None,
+            snapshot: crate::snapshot::SnapshotConfig::default(),
         }
     }
 
