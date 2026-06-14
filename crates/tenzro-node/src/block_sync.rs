@@ -75,6 +75,19 @@ pub const MAX_INFLIGHT_PER_PEER: usize = MAX_INFLIGHT_REQUESTS_PER_PEER;
 /// (bad QC, malformed range, transport error).
 pub const PEER_SCORE_PENALTY: i32 = -10;
 
+/// Score adjustment applied to a peer when it serves a valid response.
+/// Without a recovery path a peer that flaps a few times during a transient
+/// network blip (or while a neighbour is mid-restart) is driven below the drop
+/// line and never re-probed — its score can only ever fall. Rewarding success
+/// lets a recovered peer climb back into the candidate set. Smaller in
+/// magnitude than the penalty so misbehaviour still dominates.
+pub const PEER_SCORE_SUCCESS: i32 = 5;
+
+/// Upper bound on a peer's reputation score. Caps how much credit a peer can
+/// bank so a long-good peer can't absorb an unbounded run of later failures
+/// before being evicted.
+pub const PEER_SCORE_CEILING: i32 = 50;
+
 /// Score below which a peer is dropped from the steady-state candidate set.
 /// This is a DoS dampener for *normal* operation — it stops the engine from
 /// repeatedly probing a flaky peer while the local head is already current.
@@ -101,12 +114,18 @@ pub enum SyncState {
 
     /// Catching up to `target`. Active outbound `GetBlockRange` is tracked by
     /// `in_flight`; on response, more requests are issued until the target is
-    /// reached.
+    /// reached. `deadline` is the watchdog: libp2p does not always deliver an
+    /// `OutboundFailure` for a request lost to a connection-drop race (cf. the
+    /// `handle_peer_event` doc comment), so a sync run can hang in `Syncing`
+    /// forever with no response and no failure event — every probe tick and
+    /// behind-hint then early-returns and the engine deadlocks. Once `deadline`
+    /// passes the next probe tick force-drops to `Stalled` and re-elects a peer.
     Syncing {
         target_height: BlockHeight,
         target_hash: Hash,
         peer: PeerId,
         in_flight: Option<OutboundRequestId>,
+        deadline: std::time::Instant,
     },
 
     /// Last sync attempt failed (peer disconnected, invalid data, timeout).
@@ -321,9 +340,25 @@ impl BlockSyncEngine {
                     }
                 }
                 Some(inbound) = self.inbound_rx.recv() => {
-                    if let Err(e) = self.handle_inbound(inbound).await {
-                        warn!(error = %e, "Block-sync inbound handler failed");
-                    }
+                    // Serve inbound requests on a detached task. Serving is a
+                    // pure read (`Arc<RocksDbStore>` + `Arc<TenzroNetworkService>`,
+                    // both clonable, `send_block_sync_response` takes `&self`),
+                    // so it must NOT run inline: `handle_outbound` →
+                    // `import_one` awaits a oneshot reply from the EventLoop,
+                    // which holds `&mut self` and is busy applying consensus
+                    // blocks. Inline, a single slow import head-of-line-blocks
+                    // every parked inbound serve until libp2p's inbound
+                    // substream times out (`InboundFailure: Timeout`), which
+                    // drops the parked response channel — the requester then
+                    // sees an EOF mid-decode and scores us down. Detaching the
+                    // serve keeps the read path independent of import latency.
+                    let network = self.network.clone();
+                    let storage = self.storage.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::serve_inbound(network, storage, inbound).await {
+                            warn!(error = %e, "Block-sync inbound handler failed");
+                        }
+                    });
                 }
                 Some(outbound) = self.outbound_rx.recv() => {
                     if let Err(e) = self.handle_outbound(outbound).await {
@@ -385,9 +420,22 @@ impl BlockSyncEngine {
     /// re-enter `Syncing`.
     async fn on_probe_tick(&mut self) -> Result<()> {
         // If actively syncing, don't probe — the active peer is already
-        // streaming us blocks.
-        if matches!(self.state, SyncState::Syncing { .. }) {
-            return Ok(());
+        // streaming us blocks. But a sync run can hang past its deadline when
+        // libp2p silently loses the request to a connection-drop race and never
+        // delivers an `OutboundFailure` — without this watchdog the engine
+        // early-returns here forever and deadlocks (the June 2026 192745 stall:
+        // v0 latched `Syncing` against a peer on the old broken-serve image and
+        // never re-probed, even after a fixed-serve peer rejoined). Force-drop
+        // to `Stalled` so the rest of this tick re-elects a peer.
+        if let SyncState::Syncing { peer, deadline, .. } = self.state {
+            if std::time::Instant::now() < deadline {
+                return Ok(());
+            }
+            warn!(
+                ?peer,
+                "Block-sync: sync run exceeded watchdog deadline with no response — stalling to re-elect"
+            );
+            self.state = SyncState::Stalled;
         }
 
         let our_height = self.local_tip().await?;
@@ -557,17 +605,25 @@ impl BlockSyncEngine {
             target_hash,
             peer,
             in_flight: Some(req_id),
+            deadline: std::time::Instant::now() + RANGE_REQUEST_TIMEOUT,
         };
         Ok(())
     }
 
     /// Inbound (server role): peer asked us for blocks.
-    async fn handle_inbound(&mut self, inbound: InboundBlockSync) -> Result<()> {
-        let response = self.serve_request(&inbound.request).await;
+    ///
+    /// Associated function (not `&self`) so it can run on a detached task,
+    /// keeping serve latency independent of the outbound import path. Takes
+    /// clones of the two `Arc`s it needs.
+    async fn serve_inbound(
+        network: Arc<TenzroNetworkService>,
+        storage: Arc<RocksDbStore>,
+        inbound: InboundBlockSync,
+    ) -> Result<()> {
+        let response = Self::serve_request(&storage, &inbound.request).await;
         // Always answer — silent drops cause the requester to time out and
         // score us down (Lighthouse SyncManager contract).
-        if let Err(e) = self
-            .network
+        if let Err(e) = network
             .send_block_sync_response(inbound.request_id, response)
             .await
         {
@@ -581,8 +637,11 @@ impl BlockSyncEngine {
         Ok(())
     }
 
-    async fn serve_request(&self, req: &BlockSyncRequest) -> BlockSyncResponse {
-        let block_store = match BlockStoreImpl::new(self.storage.clone()) {
+    async fn serve_request(
+        storage: &Arc<RocksDbStore>,
+        req: &BlockSyncRequest,
+    ) -> BlockSyncResponse {
+        let block_store = match BlockStoreImpl::new(storage.clone()) {
             Ok(s) => s,
             Err(e) => {
                 return BlockSyncResponse::Error(BlockSyncError::Storage(format!(
@@ -672,6 +731,13 @@ impl BlockSyncEngine {
             }
         };
 
+        // A transport-level success heals the peer's reputation (a remote-side
+        // `Error` payload is penalised below, not here). This is the only path
+        // by which a score climbs back up after transient failures.
+        if !matches!(response, BlockSyncResponse::Error(_)) {
+            self.score_peer(&peer, PEER_SCORE_SUCCESS);
+        }
+
         match response {
             BlockSyncResponse::TipInfo { tip_height, tip_hash, .. } => {
                 self.peers
@@ -711,7 +777,10 @@ impl BlockSyncEngine {
 
     fn score_peer(&mut self, peer: &PeerId, delta: i32) {
         let entry = self.peers.entry(*peer).or_default();
-        entry.score = entry.score.saturating_add(delta);
+        entry.score = entry
+            .score
+            .saturating_add(delta)
+            .min(PEER_SCORE_CEILING);
         if entry.score < PEER_SCORE_DROP_THRESHOLD {
             warn!(?peer, score = entry.score, "Block-sync: dropping peer below threshold");
         }
@@ -809,6 +878,7 @@ impl BlockSyncEngine {
                 target_hash,
                 peer,
                 in_flight: Some(req_id),
+                deadline: std::time::Instant::now() + RANGE_REQUEST_TIMEOUT,
             };
         }
         Ok(())
