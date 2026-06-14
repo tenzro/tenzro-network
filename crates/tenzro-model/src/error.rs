@@ -89,6 +89,16 @@ pub enum ModelError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Multi-Token Prediction was requested via `GenerationConfig.draft_n`
+    /// but the running language runtime cannot satisfy it. The most common
+    /// reason today is that the in-process `llama-cpp-2` binding doesn't
+    /// yet expose llama.cpp's speculative-decoding API (`--spec-type
+    /// draft-mtp`). Operators can still serve MTP GGUFs through a raw
+    /// `llama-cli` / `llama-server` invocation outside the in-process
+    /// runtime until the binding lands.
+    #[error("Multi-Token Prediction unavailable: {reason}")]
+    MtpUnavailable { reason: String },
+
     /// Runtime / catch-all error
     #[error("{0}")]
     Other(String),

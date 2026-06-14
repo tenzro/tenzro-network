@@ -33,7 +33,7 @@ pub enum LicenseTier {
 
 
 /// A model entry in the curated catalog with HuggingFace metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HfModelEntry {
     /// Internal model ID (e.g. "qwen3.5-4b-q4km")
     pub id: String,
@@ -71,6 +71,54 @@ pub struct HfModelEntry {
     /// benchmarks show speculative decoding is net-negative for this
     /// architecture (e.g. small-active-path MoE on consumer GPUs).
     pub drafter_id: Option<String>,
+    /// Speculative-decoding flavour this target uses when paired with its
+    /// `drafter_id`. Drives the `--spec-type` argument on the llama.cpp
+    /// invocation. Defaults to `MtpKind::None` when no drafter is wired.
+    /// See [`MtpKind`] for the semantic difference between `Generic` and
+    /// `DraftMtp`.
+    #[serde(default)]
+    pub mtp_kind: MtpKind,
+    /// Recommended starting `--spec-draft-n-max` (1..=6) for this target
+    /// when speculative decoding is enabled. `None` means use the
+    /// runtime's global default (Unsloth recommends 2 as a starting
+    /// point; optimal value is hardware-dependent — try 1..=6).
+    #[serde(default)]
+    pub mtp_default_draft_n: Option<u8>,
+}
+
+/// Flavour of speculative decoding declared by a catalog entry's
+/// drafter pairing.
+///
+/// llama.cpp distinguishes two speculative-decoding regimes via the
+/// `--spec-type` flag:
+///
+/// - `Generic` (`--spec-type draft`): classical two-model speculative
+///   decoding where the drafter is an independent smaller LLM with the
+///   same tokenizer (e.g. Qwen 3 32B target + Qwen 3 0.6B drafter).
+///   Draft tokens are sampled freely; the target verifies them in a
+///   single batch and accepts the longest matching prefix.
+///
+/// - `DraftMtp` (`--spec-type draft-mtp`): Multi-Token Prediction —
+///   the drafter is an auxiliary head jointly trained with the target
+///   (Gemma 4, DeepSeek V3, others). The MTP head shares hidden state
+///   with the target and produces tokens consistent with the target's
+///   distribution, which means higher accept rates and a real net
+///   throughput gain (Unsloth measured 1.5–2.2× on Gemma 4). The
+///   drafter GGUF is shipped as a sibling file in the target's repo
+///   (e.g. `mtp-gemma-4-12B-it.gguf`).
+///
+/// `None` means no drafter is paired and the target runs single-token
+/// autoregressive sampling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MtpKind {
+    /// No drafter paired; standard autoregressive decoding only.
+    #[default]
+    None,
+    /// Classical two-model speculative decoding (`--spec-type draft`).
+    Generic,
+    /// Jointly-trained Multi-Token-Prediction head (`--spec-type draft-mtp`).
+    DraftMtp,
 }
 
 /// Model architecture — informational only.
@@ -78,9 +126,10 @@ pub struct HfModelEntry {
 /// llama.cpp auto-detects the architecture from GGUF metadata, so this enum
 /// is used for UI display, catalog filtering, and documentation purposes.
 /// All listed architectures are fully supported by llama.cpp.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelArchitecture {
+    #[default]
     Llama,
     Qwen2,
     Qwen3,
@@ -92,6 +141,12 @@ pub enum ModelArchitecture {
     Gemma3,
     Gemma4,
     Gemma4Moe,
+    /// Gemma 4-family diffusion variant (DiffusionGemma) — generates
+    /// blocks of tokens via parallel denoising over a fixed canvas
+    /// rather than autoregressive next-token sampling. Speculative
+    /// decoding / MTP do not apply. Serving requires a diffusion-
+    /// aware runtime (Unsloth Studio or llama.cpp PR #24423+).
+    Gemma4Diffusion,
     Mistral,
     MistralMoe,
     Phi3,
@@ -118,6 +173,7 @@ impl std::fmt::Display for ModelArchitecture {
             Self::Gemma3 => write!(f, "gemma3"),
             Self::Gemma4 => write!(f, "gemma4"),
             Self::Gemma4Moe => write!(f, "gemma4moe"),
+            Self::Gemma4Diffusion => write!(f, "gemma4diffusion"),
             Self::Mistral => write!(f, "mistral"),
             Self::MistralMoe => write!(f, "mistralmoe"),
             Self::Phi3 => write!(f, "phi3"),
@@ -1334,6 +1390,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Compact model optimized for edge deployment".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     }];
     catalog.push(HfModelEntry {
         id: "qwen3-1.7b".into(),
@@ -1350,6 +1408,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Versatile model for various language tasks".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-4b".into(),
@@ -1366,6 +1426,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Well-balanced model for production use".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-8b".into(),
@@ -1382,6 +1444,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Extended context model for long-form tasks".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-14b".into(),
@@ -1398,6 +1462,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Premium model with extended context support".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-32b".into(),
@@ -1414,6 +1480,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Top-tier model with 128K context window".into(),
         drafter_id: Some("qwen3-0.6b".into()),
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-30b-a3b".into(),
@@ -1430,6 +1498,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Mixture-of-Experts with 3B active params for efficient scaling".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── Qwen 3.5 (Apache 2.0, ungated, unsloth GGUF) ──────────────────
@@ -1448,6 +1518,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Compact multilingual model for efficient on-device inference".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-2b".into(),
@@ -1464,6 +1536,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Efficient small model for chat and text generation".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-4b".into(),
@@ -1480,6 +1554,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Mid-size model with strong reasoning and coding performance".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-9b".into(),
@@ -1496,6 +1572,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "High-performance model for complex language understanding".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-27b".into(),
@@ -1512,6 +1590,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Flagship Qwen 3.5 model with state-of-the-art performance".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-35b-a3b".into(),
@@ -1528,6 +1608,44 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Mixture-of-Experts with only 3B active params — fast inference at 35B quality".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+    });
+    catalog.push(HfModelEntry {
+        id: "qwen3.5-122b-a10b".into(),
+        name: "Qwen 3.5 122B-A10B (MoE)".into(),
+        family: "qwen3.5".into(),
+        hf_repo: "unsloth/Qwen3.5-122B-A10B-GGUF".into(),
+        hf_filename: "Qwen3.5-122B-A10B-Q4_K_M.gguf".into(),
+        parameters: "122B (MoE, 10B active)".into(),
+        architecture: ModelArchitecture::Qwen35Moe,
+        context_length: 131072,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 75_000_000_000,
+        min_ram_gb: 80,
+        license: "Apache 2.0".into(),
+        description: "Qwen 3.5 large MoE — 122B total, 10B active per token. Replica-routed on high-VRAM provider tiers only; Unsloth ships an MTP variant in `unsloth/Qwen3.5-122B-A10B-MTP-GGUF` for compatible runtimes.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+    });
+    catalog.push(HfModelEntry {
+        id: "qwen3.5-397b-a17b".into(),
+        name: "Qwen 3.5 397B-A17B (MoE)".into(),
+        family: "qwen3.5".into(),
+        hf_repo: "unsloth/Qwen3.5-397B-A17B-GGUF".into(),
+        hf_filename: "Qwen3.5-397B-A17B-Q4_K_M.gguf".into(),
+        parameters: "397B (MoE, 17B active)".into(),
+        architecture: ModelArchitecture::Qwen35Moe,
+        context_length: 131072,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 240_000_000_000,
+        min_ram_gb: 256,
+        license: "Apache 2.0".into(),
+        description: "Qwen 3.5 frontier MoE — 397B total, 17B active per token. Multi-GPU replicas only; Unsloth ships an MTP variant in `unsloth/Qwen3.5-397B-A17B-MTP-GGUF` for compatible runtimes.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── Gemma 3 (Google, ungated via unsloth GGUF) ─────────────────────
@@ -1546,6 +1664,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Gemma License".into(),
         description: "Tiny Gemma model for ultra-lightweight on-device inference".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-1b".into(),
@@ -1562,6 +1682,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Gemma License".into(),
         description: "Google's compact instruction-tuned model".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-4b".into(),
@@ -1578,6 +1700,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Gemma License".into(),
         description: "Extended context Gemma model for chat applications".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-12b".into(),
@@ -1594,6 +1718,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Gemma License".into(),
         description: "High-performance instruction-tuned model from Google".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-27b".into(),
@@ -1610,45 +1736,107 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Gemma License".into(),
         description: "Google's largest Gemma model with exceptional capabilities".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── Gemma 4 (Gemma License, via unsloth GGUF) ──────────────────────
-    // Drafters: Google's official MTP "assistant" 0.5B-class drafters live at
-    // `google/gemma-4-*-it-assistant` (safetensors, Apache-2.0, published
-    // 2026-05-05). Community GGUF conversions ship Q8_0/F16 only — no
-    // Q4_K_M yet. As of 2026-05-06 only the E2B and 31B sizes have GGUF
-    // mirrors; E4B and 26B-A4B drafters are safetensors-only upstream.
+    // MTP drafters: Unsloth ships Google's jointly-trained Multi-Token-
+    // Prediction head as a sibling GGUF inside each target repo under the
+    // `MTP/` subdirectory (e.g. `unsloth/gemma-4-12B-it-GGUF` carries
+    // `MTP/mtp-gemma-4-12B-it.gguf` alongside the main GGUF files). The
+    // drafter file is ~1–2 GB depending on target size and ~2 GB extra
+    // VRAM at load. Pair with the target via `--spec-type draft-mtp` +
+    // `--spec-draft-n-max 2..6` (Unsloth recommends 2 as a default).
     catalog.push(HfModelEntry {
-        id: "gemma4-e2b-it-assistant".into(),
-        name: "Gemma 4 E2B Assistant (Drafter)".into(),
+        id: "gemma4-e2b-mtp-draft".into(),
+        name: "Gemma 4 E2B MTP Drafter".into(),
         family: "gemma4".into(),
-        hf_repo: "Radamanthys11/Gemma-4-E2B-it-assistant-GGUF".into(),
-        hf_filename: "Gemma-4-E2B-it-assistant.Q8_0.gguf".into(),
-        parameters: "0.5B".into(),
+        hf_repo: "unsloth/gemma-4-E2B-it-GGUF".into(),
+        hf_filename: "MTP/mtp-gemma-4-E2B-it.gguf".into(),
+        parameters: "MTP head".into(),
         architecture: ModelArchitecture::Gemma4,
         context_length: 131072,
-        quantization: "Q8_0".into(),
-        size_bytes: 170_000_000,
+        quantization: "BF16".into(),
+        size_bytes: 200_000_000,
         min_ram_gb: 1,
-        license: "Apache 2.0".into(),
-        description: "Google's official MTP drafter for Gemma 4 E2B — speculative decoding pair.".into(),
+        license: "Gemma License".into(),
+        description: "Google's jointly-trained Multi-Token Prediction head for Gemma 4 E2B. Pair with the E2B target via `--spec-type draft-mtp`.".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
-        id: "gemma4-31b-it-assistant".into(),
-        name: "Gemma 4 31B Assistant (Drafter)".into(),
+        id: "gemma4-12b-mtp-draft".into(),
+        name: "Gemma 4 12B MTP Drafter".into(),
         family: "gemma4".into(),
-        hf_repo: "Radamanthys11/Gemma-4-31B-it-assistant-GGUF".into(),
-        hf_filename: "Gemma-4-31B-it-assistant.Q8_0.gguf".into(),
-        parameters: "0.5B".into(),
+        hf_repo: "unsloth/gemma-4-12b-it-GGUF".into(),
+        hf_filename: "MTP/mtp-gemma-4-12B-it.gguf".into(),
+        parameters: "MTP head".into(),
         architecture: ModelArchitecture::Gemma4,
         context_length: 131072,
-        quantization: "Q8_0".into(),
-        size_bytes: 1_000_000_000,
+        quantization: "BF16".into(),
+        size_bytes: 600_000_000,
         min_ram_gb: 2,
-        license: "Apache 2.0".into(),
-        description: "Google's official MTP drafter for Gemma 4 31B — speculative decoding pair.".into(),
+        license: "Gemma License".into(),
+        description: "Google's jointly-trained Multi-Token Prediction head for Gemma 4 12B. Pair with the 12B target via `--spec-type draft-mtp`.".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+    });
+    catalog.push(HfModelEntry {
+        id: "gemma4-e4b-mtp-draft".into(),
+        name: "Gemma 4 E4B MTP Drafter".into(),
+        family: "gemma4".into(),
+        hf_repo: "unsloth/gemma-4-E4B-it-GGUF".into(),
+        hf_filename: "MTP/mtp-gemma-4-E4B-it.gguf".into(),
+        parameters: "MTP head".into(),
+        architecture: ModelArchitecture::Gemma4,
+        context_length: 131072,
+        quantization: "BF16".into(),
+        size_bytes: 300_000_000,
+        min_ram_gb: 1,
+        license: "Gemma License".into(),
+        description: "Google's jointly-trained Multi-Token Prediction head for Gemma 4 E4B. Pair with the E4B target via `--spec-type draft-mtp`.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+    });
+    catalog.push(HfModelEntry {
+        id: "gemma4-26b-a4b-mtp-draft".into(),
+        name: "Gemma 4 26B-A4B MTP Drafter (MoE)".into(),
+        family: "gemma4".into(),
+        hf_repo: "unsloth/gemma-4-26B-A4B-it-GGUF".into(),
+        hf_filename: "MTP/mtp-gemma-4-26B-A4B-it.gguf".into(),
+        parameters: "MTP head".into(),
+        architecture: ModelArchitecture::Gemma4Moe,
+        context_length: 131072,
+        quantization: "BF16".into(),
+        size_bytes: 1_200_000_000,
+        min_ram_gb: 2,
+        license: "Gemma License".into(),
+        description: "Google's jointly-trained Multi-Token Prediction head for the Gemma 4 26B-A4B Mixture-of-Experts target. Pair via `--spec-type draft-mtp`; Unsloth measures ~1.15–1.2× speedup on MoE targets vs ~1.4–2.2× on dense.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+    });
+    catalog.push(HfModelEntry {
+        id: "gemma4-31b-mtp-draft".into(),
+        name: "Gemma 4 31B MTP Drafter".into(),
+        family: "gemma4".into(),
+        hf_repo: "unsloth/gemma-4-31B-it-GGUF".into(),
+        hf_filename: "MTP/mtp-gemma-4-31B-it.gguf".into(),
+        parameters: "MTP head".into(),
+        architecture: ModelArchitecture::Gemma4,
+        context_length: 131072,
+        quantization: "BF16".into(),
+        size_bytes: 1_500_000_000,
+        min_ram_gb: 2,
+        license: "Gemma License".into(),
+        description: "Google's jointly-trained Multi-Token Prediction head for Gemma 4 31B. Pair with the 31B target via `--spec-type draft-mtp`.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e2b".into(),
@@ -1663,8 +1851,10 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         size_bytes: 3_339_569_152,
         min_ram_gb: 4,
         license: "Gemma License".into(),
-        description: "Google's compact Gemma 4 multimodal model (text + image, 128K context)".into(),
-        drafter_id: Some("gemma4-e2b-it-assistant".into()),
+        description: "Google's compact Gemma 4 multimodal model (text + image, 128K context). MTP-enabled — pairs with `gemma4-e2b-mtp-draft` for 1.5–2.2× throughput.".into(),
+        drafter_id: Some("gemma4-e2b-mtp-draft".into()),
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e4b".into(),
@@ -1679,10 +1869,10 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         size_bytes: 5_347_737_600,
         min_ram_gb: 8,
         license: "Gemma License".into(),
-        description: "Google's efficient Gemma 4 multimodal model (text + image, 128K context)".into(),
-        // No drafter wired: `google/gemma-4-E4B-it-assistant` is safetensors-only
-        // upstream; community GGUF conversion not yet published. Wire when one lands.
-        drafter_id: None,
+        description: "Google's efficient Gemma 4 multimodal model (text + image, 128K context). MTP-enabled — pairs with `gemma4-e4b-mtp-draft` for 1.5–2.2× throughput.".into(),
+        drafter_id: Some("gemma4-e4b-mtp-draft".into()),
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-26b-a4b".into(),
@@ -1697,11 +1887,28 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         size_bytes: 18_146_000_000,
         min_ram_gb: 20,
         license: "Gemma License".into(),
-        description: "Gemma 4 Mixture-of-Experts: 26B total params, 4B active per token (128K context)".into(),
-        // No drafter wired: same situation as E4B — safetensors-only at
-        // `google/gemma-4-26B-A4B-it-assistant`. MoE 4B-active also risks
-        // the same net-negative speculative profile as Qwen3.6-35B-A3B.
-        drafter_id: None,
+        description: "Gemma 4 Mixture-of-Experts: 26B total params, 4B active per token (128K context). MTP-enabled — pairs with `gemma4-26b-a4b-mtp-draft`; expect ~1.15–1.2× speedup on MoE targets per Unsloth.".into(),
+        drafter_id: Some("gemma4-26b-a4b-mtp-draft".into()),
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
+    });
+    catalog.push(HfModelEntry {
+        id: "gemma4-12b".into(),
+        name: "Gemma 4 12B".into(),
+        family: "gemma4".into(),
+        hf_repo: "unsloth/gemma-4-12b-it-GGUF".into(),
+        hf_filename: "gemma-4-12b-it-Q4_K_M.gguf".into(),
+        parameters: "12B".into(),
+        architecture: ModelArchitecture::Gemma4,
+        context_length: 131072,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 7_637_385_216,
+        min_ram_gb: 10,
+        license: "Gemma License".into(),
+        description: "Google's mid-tier dense Gemma 4 model (128K context). MTP-enabled — pairs with `gemma4-12b-mtp-draft` for 1.5–2.2× throughput on the same hardware (Unsloth: 52 → 162 t/s at Q4 on a 4090).".into(),
+        drafter_id: Some("gemma4-12b-mtp-draft".into()),
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-31b".into(),
@@ -1716,8 +1923,137 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         size_bytes: 19_650_142_208,
         min_ram_gb: 24,
         license: "Gemma License".into(),
-        description: "Google's largest dense Gemma 4 model with exceptional capabilities (128K context)".into(),
-        drafter_id: Some("gemma4-31b-it-assistant".into()),
+        description: "Google's largest dense Gemma 4 model (128K context). MTP-enabled — pairs with `gemma4-31b-mtp-draft` for ~2× throughput at 101 t/s on consumer GPUs (Unsloth benchmark).".into(),
+        drafter_id: Some("gemma4-31b-mtp-draft".into()),
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
+    });
+
+    // ── Gemma 4 QAT (Quantization-Aware Training) ──────────────────────
+    // Parallel-listed alongside the standard Q4_K_M targets. QAT
+    // recovers ~15 MMLU points over naive 4-bit quantization on the
+    // 26B-A4B target per Unsloth's measurements (85.6% vs 70.2% top-1).
+    // Same drafter pairings as the non-QAT entries — MTP works
+    // identically on QAT GGUFs since the MTP head ships in a
+    // separate file regardless of the target's quantization regime.
+    catalog.push(HfModelEntry {
+        id: "gemma4-e2b-qat".into(),
+        name: "Gemma 4 E2B (QAT)".into(),
+        family: "gemma4".into(),
+        hf_repo: "unsloth/gemma-4-E2B-it-qat-GGUF".into(),
+        hf_filename: "gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf".into(),
+        parameters: "E2B".into(),
+        architecture: ModelArchitecture::Gemma4,
+        context_length: 131072,
+        quantization: "UD-Q4_K_XL (QAT)".into(),
+        size_bytes: 3_500_000_000,
+        min_ram_gb: 4,
+        license: "Gemma License".into(),
+        description: "Quantization-Aware-Trained Gemma 4 E2B. Higher quality than naive Q4 at the same size. MTP-enabled via `gemma4-e2b-mtp-draft`.".into(),
+        drafter_id: Some("gemma4-e2b-mtp-draft".into()),
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
+    });
+    catalog.push(HfModelEntry {
+        id: "gemma4-e4b-qat".into(),
+        name: "Gemma 4 E4B (QAT)".into(),
+        family: "gemma4".into(),
+        hf_repo: "unsloth/gemma-4-E4B-it-qat-GGUF".into(),
+        hf_filename: "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf".into(),
+        parameters: "E4B".into(),
+        architecture: ModelArchitecture::Gemma4,
+        context_length: 131072,
+        quantization: "UD-Q4_K_XL (QAT)".into(),
+        size_bytes: 5_500_000_000,
+        min_ram_gb: 8,
+        license: "Gemma License".into(),
+        description: "Quantization-Aware-Trained Gemma 4 E4B. Higher quality than naive Q4 at the same size. MTP-enabled via `gemma4-e4b-mtp-draft`.".into(),
+        drafter_id: Some("gemma4-e4b-mtp-draft".into()),
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
+    });
+    catalog.push(HfModelEntry {
+        id: "gemma4-12b-qat".into(),
+        name: "Gemma 4 12B (QAT)".into(),
+        family: "gemma4".into(),
+        hf_repo: "unsloth/gemma-4-12B-it-qat-GGUF".into(),
+        hf_filename: "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf".into(),
+        parameters: "12B".into(),
+        architecture: ModelArchitecture::Gemma4,
+        context_length: 131072,
+        quantization: "UD-Q4_K_XL (QAT)".into(),
+        size_bytes: 7_900_000_000,
+        min_ram_gb: 10,
+        license: "Gemma License".into(),
+        description: "Quantization-Aware-Trained Gemma 4 12B. Higher quality than naive Q4 at the same size. MTP-enabled via `gemma4-12b-mtp-draft`.".into(),
+        drafter_id: Some("gemma4-12b-mtp-draft".into()),
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
+    });
+    catalog.push(HfModelEntry {
+        id: "gemma4-26b-a4b-qat".into(),
+        name: "Gemma 4 26B-A4B (QAT, MoE)".into(),
+        family: "gemma4".into(),
+        hf_repo: "unsloth/gemma-4-26B-A4B-it-qat-GGUF".into(),
+        hf_filename: "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf".into(),
+        parameters: "26B (4B active)".into(),
+        architecture: ModelArchitecture::Gemma4Moe,
+        context_length: 131072,
+        quantization: "UD-Q4_K_XL (QAT)".into(),
+        size_bytes: 18_300_000_000,
+        min_ram_gb: 20,
+        license: "Gemma License".into(),
+        description: "Quantization-Aware-Trained Gemma 4 26B-A4B MoE. Unsloth measures 85.6% MMLU top-1 vs 70.2% on naive Q4 (+15.4 points). MTP-enabled via `gemma4-26b-a4b-mtp-draft`.".into(),
+        drafter_id: Some("gemma4-26b-a4b-mtp-draft".into()),
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
+    });
+    catalog.push(HfModelEntry {
+        id: "gemma4-31b-qat".into(),
+        name: "Gemma 4 31B (QAT)".into(),
+        family: "gemma4".into(),
+        hf_repo: "unsloth/gemma-4-31B-it-qat-GGUF".into(),
+        hf_filename: "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf".into(),
+        parameters: "31B".into(),
+        architecture: ModelArchitecture::Gemma4,
+        context_length: 131072,
+        quantization: "UD-Q4_K_XL (QAT)".into(),
+        size_bytes: 19_800_000_000,
+        min_ram_gb: 24,
+        license: "Gemma License".into(),
+        description: "Quantization-Aware-Trained Gemma 4 31B. Higher quality than naive Q4 at the same size. MTP-enabled via `gemma4-31b-mtp-draft`.".into(),
+        drafter_id: Some("gemma4-31b-mtp-draft".into()),
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
+    });
+
+    // ── DiffusionGemma (Gemma License, via unsloth GGUF) ───────────────
+    // Block-parallel diffusion generation over a 256-token canvas
+    // rather than autoregressive sampling. Speculative decoding does
+    // not apply (MtpKind::None). Serving requires a diffusion-aware
+    // runtime: the in-process `llama-cpp-2` binding does not yet
+    // accept these GGUFs — operators run Unsloth Studio or build
+    // llama.cpp from PR #24423 to serve them. Catalog entry exists so
+    // model discovery / pricing / provider registration work; the
+    // runtime returns a structured error if the in-process path is
+    // attempted on this architecture.
+    catalog.push(HfModelEntry {
+        id: "diffusiongemma-26b-a4b".into(),
+        name: "DiffusionGemma 26B-A4B".into(),
+        family: "diffusiongemma".into(),
+        hf_repo: "unsloth/diffusiongemma-26B-A4B-it-GGUF".into(),
+        hf_filename: "diffusiongemma-26B-A4B-it-Q4_K_M.gguf".into(),
+        parameters: "26B (4B active)".into(),
+        architecture: ModelArchitecture::Gemma4Diffusion,
+        context_length: 32768,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 18_000_000_000,
+        min_ram_gb: 20,
+        license: "Gemma License".into(),
+        description: "Diffusion-generation Gemma 4 26B-A4B. Generates 256-token canvases by parallel denoising rather than autoregressive sampling. Unsloth: 2000+ t/s on RTX 6000. Requires Unsloth Studio or llama.cpp PR #24423+.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── Mistral (Apache 2.0, ungated) ──────────────────────────────────
@@ -1736,6 +2072,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Mistral AI's classic 7B instruction model".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-nemo-12b".into(),
@@ -1752,6 +2090,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Extended-context Mistral model built with NVIDIA".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-24b".into(),
@@ -1768,6 +2108,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Mistral's latest Small 3.2 model for demanding workloads".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── Ministral 3 (Mistral AI, Apache 2.0, ungated) ──────────────────
@@ -1786,6 +2128,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Compact Ministral 3 for lightweight tasks".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "ministral3-8b".into(),
@@ -1802,6 +2146,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Versatile Ministral 3 for general-purpose tasks".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "ministral3-14b".into(),
@@ -1818,6 +2164,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "High-performance Ministral 3 for complex reasoning".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── Phi 4 (Microsoft, MIT, ungated) ─────────────────────────────
@@ -1836,6 +2184,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "MIT".into(),
         description: "Compact Phi-4 Mini with 128K context".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "phi4".into(),
@@ -1852,6 +2202,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "MIT".into(),
         description: "Microsoft Phi-4 — strong reasoning at 14B".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "phi4-reasoning".into(),
@@ -1868,6 +2220,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "MIT".into(),
         description: "Phi-4 fine-tuned for chain-of-thought reasoning".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "phi4-mini-reasoning".into(),
@@ -1884,6 +2238,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "MIT".into(),
         description: "Compact Phi-4 Mini fine-tuned for reasoning tasks".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── SmolLM (HuggingFace, Apache 2.0, ungated) ───────────────────
@@ -1902,6 +2258,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache-2.0".into(),
         description: "Compact SmolLM2 for on-device AI".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "smollm3-3b".into(),
@@ -1918,6 +2276,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache-2.0".into(),
         description: "SmolLM3 — 11T tokens, dual-mode reasoning".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── Qwen 3 Coder (Apache 2.0, ungated, unsloth GGUF) ───────────────
@@ -1936,6 +2296,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Code-focused MoE — 30B total, 3B active, 256K context".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── Nemotron (NVIDIA Open, ungated, unsloth GGUF) ────────────────
@@ -1954,6 +2316,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "NVIDIA Open".into(),
         description: "Hybrid Mamba-2 + Attention edge model, 256K context".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "nemotron-nano-30b-a3b".into(),
@@ -1970,6 +2334,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "NVIDIA Open".into(),
         description: "Hybrid Mamba-2 MoE — 30B total, 3.5B active, 128K context".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── GLM-4 (Apache 2.0, via bartowski GGUF) ─────────────────────────
@@ -1988,6 +2354,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Zhipu AI GLM-4 9B instruction-tuned, 128K context".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── Kimi K2 (MIT, via unsloth GGUF) ──────────────────────────────
@@ -2006,6 +2374,26 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "MIT".into(),
         description: "Moonshot AI Kimi K2 MoE — 1T total, 32B active, 128K context".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+    });
+    catalog.push(HfModelEntry {
+        id: "kimi-k2.6".into(),
+        name: "Kimi K2.6 (Hybrid Thinking, MoE)".into(),
+        family: "kimi".into(),
+        hf_repo: "unsloth/Kimi-K2.6-GGUF".into(),
+        hf_filename: "Kimi-K2.6-UD-Q4_K_XL.gguf".into(),
+        parameters: "1T (MoE, hybrid thinking)".into(),
+        architecture: ModelArchitecture::Kimi,
+        context_length: 262144,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 600_000_000_000,
+        min_ram_gb: 400,
+        license: "MIT".into(),
+        description: "Moonshot AI Kimi K2.6 hybrid-thinking MoE — 1T total params, 256K context. Replica-routed on B200-class infrastructure; Unsloth measures >40 t/s on B200. Recommended `UD-Q2_K_XL` (350GB) for size/quality balance.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── MiniMax M1 (MiniMax Open, via unsloth GGUF) ──────────────────
@@ -2024,6 +2412,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "MiniMax Open".into(),
         description: "MiniMax M1 40B with Lightning Attention, 1M context".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── DeepSeek V3 (MIT, via unsloth GGUF) ──────────────────────────
@@ -2042,6 +2432,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "MIT".into(),
         description: "DeepSeek V3 MoE — 685B total, 37B active, 128K context".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // NOTE: Llama models removed — not supported on Tenzro Network.
@@ -2066,6 +2458,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         description: "Qwen 3.6 27B — flagship dense model with 128K context".into(),
         // Vocab-matched (248320) per llama.cpp PR #19493; community-validated pairing.
         drafter_id: Some("qwen3.5-0.8b".into()),
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.6-35b-a3b".into(),
@@ -2086,6 +2480,50 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         // savings on consumer GPUs (RTX 3090: net-negative throughput). Re-evaluate
         // when a smaller MoE-aware drafter or llama.cpp PR #22673 (native MTP) lands.
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+    });
+    // ── Qwen 3.6 MTP variants ─────────────────────────────────────────
+    // Unsloth ships dedicated `-MTP-GGUF` repos for Qwen 3.6 where the
+    // MTP head is built into the model file rather than shipped as a
+    // sibling drafter — `drafter_id` stays None and the runtime drives
+    // MTP off the `mtp_kind` field alone. Unsloth measures 160 t/s on
+    // a 27B + RTX 6000 and 240 t/s on the 35B-A3B MoE with MTP enabled.
+    catalog.push(HfModelEntry {
+        id: "qwen3.6-27b-mtp".into(),
+        name: "Qwen 3.6 27B (MTP)".into(),
+        family: "qwen3.6".into(),
+        hf_repo: "unsloth/Qwen3.6-27B-MTP-GGUF".into(),
+        hf_filename: "Qwen3.6-27B-MTP-UD-Q4_K_XL.gguf".into(),
+        parameters: "27B".into(),
+        architecture: ModelArchitecture::Qwen36,
+        context_length: 131072,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 17_900_000_000,
+        min_ram_gb: 22,
+        license: "Apache 2.0".into(),
+        description: "Qwen 3.6 27B with built-in Multi-Token-Prediction head. Single-file MTP GGUF — no separate drafter needed. Unsloth: 160 t/s on RTX 6000.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
+    });
+    catalog.push(HfModelEntry {
+        id: "qwen3.6-35b-a3b-mtp".into(),
+        name: "Qwen 3.6 35B-A3B MTP (MoE)".into(),
+        family: "qwen3.6".into(),
+        hf_repo: "unsloth/Qwen3.6-35B-A3B-MTP-GGUF".into(),
+        hf_filename: "Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf".into(),
+        parameters: "35B (MoE, 3B active)".into(),
+        architecture: ModelArchitecture::Qwen36Moe,
+        context_length: 131072,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 22_000_000_000,
+        min_ram_gb: 28,
+        license: "Apache 2.0".into(),
+        description: "Qwen 3.6 35B-A3B MoE with built-in Multi-Token-Prediction head. Single-file MTP GGUF — no separate drafter needed. Unsloth: 240 t/s on RTX 6000.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
     });
 
     // ── Mistral Small 3.1 / 3.2 (Apache 2.0, via unsloth GGUF) ───────
@@ -2108,6 +2546,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Speculative drafter for Mistral Small 3.1/3.2 — vocab-matched, 6-language fine-tune.".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-3.1-24b".into(),
@@ -2124,6 +2564,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Mistral Small 3.1 — improved reasoning over 3.0 baseline".into(),
         drafter_id: Some("mistral-small-3.1-draft-0.5b".into()),
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-3.2-24b".into(),
@@ -2140,6 +2582,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "Mistral Small 3.2 — latest 3-series point release".into(),
         drafter_id: Some("mistral-small-3.1-draft-0.5b".into()),
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── GPT-OSS (Apache 2.0, OpenAI's open-weights release) ──────────
@@ -2158,6 +2602,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "OpenAI GPT-OSS 20B — open-weights release, native MXFP4".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "gpt-oss-120b".into(),
@@ -2174,6 +2620,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "OpenAI GPT-OSS 120B — open-weights release, native MXFP4".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     // ── IBM Granite 4.0 (Apache 2.0) ─────────────────────────────────
@@ -2192,6 +2640,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "IBM Granite 4.0 350M — ultra-compact for edge deployment".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "granite4-1b".into(),
@@ -2208,6 +2658,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "IBM Granite 4.0 1B — compact enterprise model".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "granite4-h-tiny".into(),
@@ -2224,6 +2676,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "IBM Granite 4.0 H-Tiny — hybrid Mamba/Transformer architecture".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
     catalog.push(HfModelEntry {
         id: "granite4-h-small".into(),
@@ -2240,6 +2694,8 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         license: "Apache 2.0".into(),
         description: "IBM Granite 4.0 H-Small — 32B hybrid for long-context enterprise".into(),
         drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
     });
 
     catalog
@@ -2335,8 +2791,17 @@ mod tests {
             ("qwen3.6-27b", "qwen3.5-0.8b"),
             ("mistral-small-3.1-24b", "mistral-small-3.1-draft-0.5b"),
             ("mistral-small-3.2-24b", "mistral-small-3.1-draft-0.5b"),
-            ("gemma4-e2b", "gemma4-e2b-it-assistant"),
-            ("gemma4-31b", "gemma4-31b-it-assistant"),
+            // Gemma 4 drafter pairings switched to Unsloth's MTP heads
+            // (`mtp-gemma-4-*-it.gguf` shipped as siblings of the
+            // target GGUFs). MtpKind::DraftMtp + draft_n=2 are the
+            // production defaults; older `*-it-assistant` references
+            // were community-converted safetensors and are no longer
+            // in the catalog.
+            ("gemma4-e2b", "gemma4-e2b-mtp-draft"),
+            ("gemma4-e4b", "gemma4-e4b-mtp-draft"),
+            ("gemma4-12b", "gemma4-12b-mtp-draft"),
+            ("gemma4-26b-a4b", "gemma4-26b-a4b-mtp-draft"),
+            ("gemma4-31b", "gemma4-31b-mtp-draft"),
         ];
         for (target, expected_drafter) in pairs {
             let entry = get_model_by_id(target)

@@ -739,7 +739,7 @@ pub struct InferenceMetadata {
 }
 
 /// Information about a model inference provider
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InferenceProvider {
     /// Provider address
     pub address: Address,
@@ -800,7 +800,7 @@ impl InferenceProvider {
 }
 
 /// Provider capacity information
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderCapacity {
     /// Maximum concurrent requests
     pub max_concurrent_requests: u32,
@@ -810,6 +810,21 @@ pub struct ProviderCapacity {
     pub requests_per_second: u32,
     /// Maximum batch size
     pub max_batch_size: u32,
+    /// Multi-Token Prediction availability. Set by the provider at
+    /// `tenzro_registerProvider` time when their serving runtime has
+    /// the target's paired drafter co-loaded (`HfModelEntry.drafter_id`
+    /// + `mtp_kind == DraftMtp` or `Generic`). When true, the
+    /// `InferenceRouter` may route MTP-eligible requests preferentially
+    /// to this provider; when false, it falls back to standard
+    /// autoregressive providers.
+    #[serde(default)]
+    pub mtp_enabled: bool,
+    /// VRAM headroom (GB) the provider has reserved for the speculative
+    /// drafter alongside the target. Unsloth measures ~2 GB extra for
+    /// Gemma 4 MTP heads. `None` means the provider hasn't declared a
+    /// drafter footprint, which is fine when `mtp_enabled = false`.
+    #[serde(default)]
+    pub drafter_vram_gb: Option<f32>,
 }
 
 impl Default for ProviderCapacity {
@@ -819,6 +834,8 @@ impl Default for ProviderCapacity {
             active_requests: 0,
             requests_per_second: 100,
             max_batch_size: 1,
+            mtp_enabled: false,
+            drafter_vram_gb: None,
         }
     }
 }

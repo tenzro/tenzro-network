@@ -451,6 +451,14 @@ struct ChatCmd {
     #[arg(long, default_value = "0.7")]
     temperature: f32,
 
+    /// Enable Multi-Token Prediction with this draft count (1..=6).
+    /// Only meaningful on models whose catalog entry declares a
+    /// paired drafter (e.g. Gemma 4 12B / 31B via `gemma4-*-mtp-draft`).
+    /// Unsloth recommends 2 as a starting point; optimal value is
+    /// hardware-dependent.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=6))]
+    draft_n: Option<u8>,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -726,6 +734,7 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
         repeat_penalty: 1.1,
         repeat_last_n: 64,
         seed: 42,
+        draft_n: cmd.draft_n,
     };
 
     loop {
@@ -920,13 +929,16 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                 load: Option<serde_json::Value>,
             }
 
-            let request = serde_json::json!({
+            let mut request = serde_json::json!({
                 "model_id": cmd.model_id,
                 "message": input,
                 "history": history,
                 "max_tokens": cmd.max_tokens,
                 "temperature": cmd.temperature,
             });
+            if let Some(n) = cmd.draft_n {
+                request["draft_n"] = serde_json::json!(n);
+            }
 
             let response: Result<ChatResponse> = rpc.call("tenzro_chat", request).await;
 

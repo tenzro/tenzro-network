@@ -17359,6 +17359,15 @@ async fn handle_chat_simple(
         top_p: params.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.9),
         max_tokens: params.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(512) as u32,
         repeat_penalty: params.get("repeat_penalty").and_then(|v| v.as_f64()).unwrap_or(1.1) as f32,
+        // Optional Multi-Token-Prediction draft count (1..=6). When set
+        // and the target's catalog entry pairs a drafter, the runtime
+        // attempts speculative decoding; otherwise returns a structured
+        // `MtpUnavailable` error.
+        draft_n: params
+            .get("draft_n")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u8::try_from(n).ok())
+            .filter(|n| (1..=6).contains(n)),
         ..GenerationConfig::default()
     };
 
@@ -17706,6 +17715,11 @@ async fn handle_chat_rich(
             .get("repeat_penalty")
             .and_then(|v| v.as_f64())
             .unwrap_or(1.1) as f32,
+        draft_n: params
+            .get("draft_n")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u8::try_from(n).ok())
+            .filter(|n| (1..=6).contains(n)),
         ..GenerationConfig::default()
     };
 
@@ -18312,6 +18326,12 @@ struct OpenAIChatRequest {
     top_p: Option<f64>,
     #[serde(default)]
     stream: Option<bool>,
+    /// Tenzro extension: Multi-Token-Prediction draft count (1..=6).
+    /// Out-of-band on the OpenAI schema but tolerated by every client
+    /// since it's an unknown field. Tenzro-aware clients can opt in
+    /// to MTP throughput on supported models.
+    #[serde(default)]
+    draft_n: Option<u8>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -18488,6 +18508,7 @@ async fn handle_openai_chat_completions(
             top_p: request.top_p.unwrap_or(0.9),
             max_tokens: request.max_tokens.unwrap_or(512),
             repeat_penalty: 1.1,
+            draft_n: request.draft_n.filter(|n| (1..=6).contains(n)),
             ..GenerationConfig::default()
         };
 
@@ -19265,6 +19286,11 @@ pub async fn handle_chat_stream_rich(
             .get("repeat_penalty")
             .and_then(|v| v.as_f64())
             .unwrap_or(1.1) as f32,
+        draft_n: params
+            .get("draft_n")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u8::try_from(n).ok())
+            .filter(|n| (1..=6).contains(n)),
         ..GenerationConfig::default()
     };
 
