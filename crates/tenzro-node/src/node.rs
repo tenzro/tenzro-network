@@ -1548,8 +1548,9 @@ pub struct TenzroNode {
     // Event loop
     event_loop_tx: Option<mpsc::Sender<NodeEvent>>,
 
-    /// Cosmos-style snapshot ABCI store. Persists every
-    /// [`crate::snapshot::SNAPSHOT_INTERVAL_BLOCKS`] finalized blocks under
+    /// Cosmos-style snapshot ABCI store. On producer nodes, persists a
+    /// snapshot every [`crate::snapshot::SnapshotConfig::interval_blocks`]
+    /// finalized blocks under
     /// `<data_dir>/snapshots/<height>/`. Serves the four
     /// `tenzro_listSnapshots` / `tenzro_getSnapshotChunk` /
     /// `tenzro_offerSnapshot` / `tenzro_applySnapshotChunk` RPCs and the
@@ -2581,7 +2582,13 @@ impl TenzroNode {
         let snapshot_store = Arc::new(crate::snapshot::SnapshotStore::new(
             &self.config.data_dir,
             kv,
+            self.config.snapshot.clone(),
         )?);
+        // Reclaim any orphaned snapshot directories left by a prior run —
+        // including husks from a crashed/ENOSPC-killed produce_at, which the
+        // retention pass alone never collects. Runs on every node regardless
+        // of whether this node produces snapshots.
+        snapshot_store.sweep_on_startup();
         self.snapshot_store = Some(snapshot_store);
 
         // Provision the per-node ERC-8004 system signer. Loads the
@@ -7013,7 +7020,7 @@ impl TenzroNode {
         }
 
         // Wire the snapshot ABCI store so the finality hook produces a
-        // state-sync snapshot every SNAPSHOT_INTERVAL_BLOCKS blocks.
+        // state-sync snapshot at the configured interval on producer nodes.
         let event_loop = if let Some(ref s) = self.snapshot_store {
             event_loop.with_snapshot_store(s.clone())
         } else {

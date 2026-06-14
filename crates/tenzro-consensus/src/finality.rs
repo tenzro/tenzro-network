@@ -186,6 +186,12 @@ pub struct ForkChoice {
 }
 
 impl ForkChoice {
+    /// Hard ceiling on the number of indexed blocks. Matches the consensus
+    /// engine's `BLOCK_CACHE_MAX_ENTRIES`: the height window alone cannot bound
+    /// growth under single-height view churn, so this count cap is the
+    /// backstop against OOM. Comfortably above any legitimate working set.
+    const MAX_ENTRIES: usize = 4096;
+
     /// Creates a new fork choice instance
     pub fn new(finality_tracker: Arc<FinalityTracker>) -> Self {
         Self {
@@ -236,6 +242,13 @@ impl ForkChoice {
         self.blocks.len()
     }
 
+    /// Returns the number of QCs tracked by fork choice. Test-only
+    /// observability hook.
+    #[cfg(test)]
+    pub fn qc_count(&self) -> usize {
+        self.qcs.len()
+    }
+
     /// Selects the best block at the given height
     ///
     /// Uses the "follow highest QC" rule - select the block with the
@@ -280,12 +293,29 @@ impl ForkChoice {
         let finalized_height = self.finality_tracker.finalized_height();
 
         self.blocks.retain(|_, block| block.height() >= finalized_height);
-        self.qcs.retain(|hash, _| {
-            self.blocks
-                .get(hash)
-                .map(|b| b.height() >= finalized_height)
-                .unwrap_or(false)
-        });
+
+        // Count-bounded backstop. The height retain above cannot bound growth
+        // when consensus is wedged at a single height: every failed view there
+        // proposes a *distinct* block hash, all `>= finalized_height`, so the
+        // retain reclaims none of them and the index grows one full `Block` per
+        // view until the process OOMs. Cap by count and evict the lowest-`view`
+        // entries (stalest competing proposals) first — a future winning
+        // proposal extends the QC'd chain, never a stale same-height sibling,
+        // so the evicted blocks can never be a future proposal's parent.
+        if self.blocks.len() > Self::MAX_ENTRIES {
+            let mut by_view: Vec<(Hash, u64)> = self
+                .blocks
+                .iter()
+                .map(|e| (*e.key(), e.value().header.view))
+                .collect();
+            by_view.sort_unstable_by_key(|(_, view)| *view);
+            let excess = self.blocks.len().saturating_sub(Self::MAX_ENTRIES);
+            for (hash, _) in by_view.into_iter().take(excess) {
+                self.blocks.remove(&hash);
+            }
+        }
+
+        self.qcs.retain(|hash, _| self.blocks.contains_key(hash));
 
         tracing::debug!(
             finalized_height = %finalized_height,
@@ -329,6 +359,48 @@ mod tests {
             [0u8; 96],
             Vec::new(),
         )
+    }
+
+    fn create_test_block_at_view(height: u64, view: u64) -> Block {
+        Block::new(
+            BlockHeader::new_at_view(
+                BlockHeight::from(height),
+                view,
+                Hash::default(),
+                Hash::default(),
+                Hash::default(),
+                Address::default(),
+                ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
+            ),
+            vec![],
+        )
+    }
+
+    #[test]
+    fn prune_count_caps_single_height_view_churn() {
+        // Simulate consensus wedged at one height: many competing proposals,
+        // all at the same height, distinct views/hashes. finalized_height
+        // stays 0, so the height retain reclaims none — the count cap must.
+        let tracker = Arc::new(FinalityTracker::new());
+        let fork_choice = ForkChoice::new(tracker);
+
+        let total = ForkChoice::MAX_ENTRIES + 500;
+        for view in 0..total as u64 {
+            let block = create_test_block_at_view(192_745, view);
+            let qc = create_test_qc(view, 192_745);
+            let qc = QuorumCertificate {
+                block_hash: block.hash(),
+                ..qc
+            };
+            fork_choice.add_block(block, Some(qc));
+        }
+        assert_eq!(fork_choice.block_count(), total);
+
+        fork_choice.prune_below_finalized();
+        assert_eq!(fork_choice.block_count(), ForkChoice::MAX_ENTRIES);
+
+        // QCs for evicted blocks are dropped alongside them.
+        assert!(fork_choice.qc_count() <= ForkChoice::MAX_ENTRIES);
     }
 
     #[test]

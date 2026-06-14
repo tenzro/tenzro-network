@@ -561,6 +561,36 @@ pub struct HotStuff2Engine {
     behind_hint_tx: tokio::sync::watch::Sender<u64>,
 }
 
+/// Evicts the lowest-`view` cached blocks until the map holds at most
+/// `max_entries`. Returns the number evicted.
+///
+/// The height-keyed `retain` that runs before this cannot bound growth when
+/// consensus is wedged at a single height: every failed view there proposes a
+/// *distinct* block hash all sharing the stuck height, so the height window
+/// reclaims none of them. This count cap is the backstop. Evicting the
+/// lowest-`view` entries is safe — those are stale competing proposals from
+/// old failed views; a future winning proposal extends the QC'd chain, never a
+/// stale same-height sibling, so none of the evicted blocks can be a future
+/// proposal's parent.
+fn evict_excess_blocks_by_view(blocks: &DashMap<Hash, Block>, max_entries: usize) -> usize {
+    if blocks.len() <= max_entries {
+        return 0;
+    }
+    let mut by_view: Vec<(Hash, u64)> = blocks
+        .iter()
+        .map(|e| (*e.key(), e.value().header.view))
+        .collect();
+    by_view.sort_unstable_by_key(|(_, view)| *view);
+    let excess = blocks.len().saturating_sub(max_entries);
+    let mut evicted = 0;
+    for (hash, _) in by_view.into_iter().take(excess) {
+        if blocks.remove(&hash).is_some() {
+            evicted += 1;
+        }
+    }
+    evicted
+}
+
 impl HotStuff2Engine {
     /// Creates a new HotStuff-2 consensus engine.
     ///
@@ -1278,12 +1308,32 @@ impl HotStuff2Engine {
         // without wedging consensus.
         const BLOCK_CACHE_HEIGHT_WINDOW: u64 = 256;
         const VOTE_CACHE_VIEW_WINDOW: u64 = 256;
+        // Hard ceiling on the number of cached blocks. The height window alone
+        // cannot bound growth when consensus is wedged at a single height: every
+        // failed view at that height proposes a *distinct* block hash, all
+        // sharing the stuck height, so `retain(height >= min_height)` reclaims
+        // none of them. A chain stuck for tens of thousands of views then
+        // accumulates one full Block per view until the process OOMs — which in
+        // turn starves the block-sync serving path that peers need to catch up,
+        // wedging the whole fleet. We cap the cache by count and, on overflow,
+        // evict the lowest-`view` entries (the stalest competing proposals)
+        // first. The cap is comfortably above any legitimate working set:
+        // BLOCK_CACHE_HEIGHT_WINDOW distinct heights plus generous slack for
+        // concurrent same-height forks during a partition.
+        const BLOCK_CACHE_MAX_ENTRIES: usize = 4096;
 
         let finalized_height = self.finality_tracker.finalized_height();
         let min_height = BlockHeight(finalized_height.0.saturating_sub(BLOCK_CACHE_HEIGHT_WINDOW));
 
         let blocks_before = self.blocks.len();
         self.blocks.retain(|_, block| block.height() >= min_height);
+
+        // Count-bounded backstop: if the height window left more than the cap
+        // (single-height view churn), drop the lowest-view entries until under
+        // it. We never evict the freshest views — sorting by view ascending
+        // evicts the stale competing proposals first.
+        evict_excess_blocks_by_view(&self.blocks, BLOCK_CACHE_MAX_ENTRIES);
+
         let blocks_after = self.blocks.len();
 
         if blocks_before != blocks_after {
@@ -3644,6 +3694,60 @@ mod tests {
             base_fee_per_gas: Some(FeeMarketParams::default().initial_base_fee),
         };
         Block::new(header, vec![])
+    }
+
+    /// Build a synthetic competing proposal at a fixed `height` and given
+    /// `view`. Distinct views produce distinct block hashes, mirroring the
+    /// single-height view churn that drives the OOM the count cap guards.
+    fn build_test_block_at_view(height: u64, view: u64) -> Block {
+        use tenzro_types::block::{
+            BlockHeader, ConsensusAlgorithm, ConsensusProof,
+        };
+        use tenzro_types::primitives::Address;
+        let header = BlockHeader::new_at_view(
+            BlockHeight::from(height),
+            view,
+            Hash::default(),
+            Hash::default(),
+            Hash::default(),
+            Address::new([0u8; 32]),
+            ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
+        );
+        Block::new(header, vec![])
+    }
+
+    #[test]
+    fn evict_excess_blocks_keeps_highest_views() {
+        // 100 competing proposals at one stuck height, views 0..100.
+        let blocks: DashMap<Hash, Block> = DashMap::new();
+        for view in 0..100u64 {
+            let b = build_test_block_at_view(192_745, view);
+            blocks.insert(b.hash(), b);
+        }
+        assert_eq!(blocks.len(), 100);
+
+        let evicted = evict_excess_blocks_by_view(&blocks, 10);
+        assert_eq!(evicted, 90);
+        assert_eq!(blocks.len(), 10);
+
+        // The 10 survivors must be the highest views (90..100): eviction
+        // drops the stalest competing proposals first.
+        let mut surviving_views: Vec<u64> =
+            blocks.iter().map(|e| e.value().header.view).collect();
+        surviving_views.sort_unstable();
+        assert_eq!(surviving_views, (90..100).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn evict_excess_blocks_noop_under_cap() {
+        let blocks: DashMap<Hash, Block> = DashMap::new();
+        for view in 0..50u64 {
+            let b = build_test_block_at_view(192_745, view);
+            blocks.insert(b.hash(), b);
+        }
+        let evicted = evict_excess_blocks_by_view(&blocks, 4096);
+        assert_eq!(evicted, 0);
+        assert_eq!(blocks.len(), 50);
     }
 
     /// Regression test for the height=0 testnet wedge surfaced 2026-04-28.

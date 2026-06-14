@@ -16,9 +16,9 @@
 //! These are wired to JSON-RPC as `tenzro_listSnapshots`,
 //! `tenzro_getSnapshotChunk`, `tenzro_offerSnapshot`, `tenzro_applySnapshotChunk`.
 //!
-//! The producer ([`SnapshotProducer`]) subscribes to the consensus
-//! finality channel and snapshots every `SNAPSHOT_INTERVAL_BLOCKS`
-//! finalized heights. Snapshots are written to
+//! The producer subscribes to the consensus finality channel and
+//! snapshots every `SnapshotConfig::interval_blocks` finalized heights
+//! when `SnapshotConfig::enabled` is true. Snapshots are written to
 //! `<data_dir>/snapshots/<height>/{manifest.json, chunk_<idx>.bin}`.
 //!
 //! # On-wire format (v1)
@@ -54,6 +54,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use tenzro_storage::{
     KvStore, CF_ACCOUNTS, CF_AGENTS, CF_AGENT_TEMPLATES, CF_APPROVALS, CF_AUDIT, CF_BLOCKS,
     CF_CHANNELS, CF_COMPLIANCE, CF_CREDENTIALS, CF_DELEGATIONS, CF_EVENTS, CF_IDENTITIES,
@@ -66,11 +67,90 @@ use tokio::sync::RwLock;
 /// Cap on raw KV bytes per chunk. 10 MiB matches CometBFT's default.
 pub const CHUNK_MAX_BYTES: usize = 10 * 1024 * 1024;
 
-/// Snapshot every N finalized blocks. Matches the CometBFT default.
-pub const SNAPSHOT_INTERVAL_BLOCKS: u64 = 10_000;
+/// Default interval between state-sync snapshots, in finalized blocks.
+///
+/// Mirrors Solana's `full-snapshot-interval-slots` default of 100_000.
+/// At ~6s blocks this is one full snapshot every ~7 days. The previous
+/// default of 10_000 (~16 hours) generated 19–21 GB on disk every cycle
+/// and overflowed 100 GB validator volumes within a couple of days when
+/// combined with the persistent RocksDB working set.
+pub const DEFAULT_SNAPSHOT_INTERVAL_BLOCKS: u64 = 100_000;
 
-/// Keep this many recent snapshots; older ones are pruned.
-pub const SNAPSHOT_RETAIN_COUNT: usize = 3;
+/// Default number of full snapshots to retain on disk. Matches Solana's
+/// `maximum-snapshots-to-retain` default of 2 — high enough that a peer
+/// can still finish a state-sync against the previous snapshot while the
+/// next one is being produced, low enough to fit comfortably in a 100 GB
+/// volume alongside the live RocksDB working set.
+pub const DEFAULT_SNAPSHOT_RETAIN_COUNT: usize = 2;
+
+/// Skip removing snapshot directories younger than this when sweeping
+/// orphans without a manifest, so we don't race an in-flight
+/// `produce_at` that hasn't finished writing `manifest.json` yet.
+const ORPHAN_GRACE: Duration = Duration::from_secs(10 * 60);
+
+/// Runtime knobs for the snapshot ABCI.
+///
+/// Defaults match Solana production practice: snapshots **disabled** unless
+/// the operator explicitly opts in via config. This matters because the
+/// vast majority of validators on a chain never serve state-sync — the
+/// dedicated RPC / archival operators do. Producing a 19 GB snapshot every
+/// few hours on every validator wastes disk for no benefit and creates the
+/// fleet-wide ENOSPC failure mode the testnet hit on 2026-06-14.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotConfig {
+    /// Master switch. When `false`, no snapshots are produced and pruning
+    /// only sweeps orphaned directories left behind by prior runs.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Block interval between snapshots. Ignored when `enabled = false`.
+    #[serde(default = "default_snapshot_interval_blocks")]
+    pub interval_blocks: u64,
+
+    /// Recent snapshots to retain. Older snapshots are deleted before the
+    /// next one is produced so steady-state disk = retain × snapshot_size.
+    #[serde(default = "default_snapshot_retain_count")]
+    pub retain_count: usize,
+}
+
+fn default_snapshot_interval_blocks() -> u64 {
+    DEFAULT_SNAPSHOT_INTERVAL_BLOCKS
+}
+
+fn default_snapshot_retain_count() -> usize {
+    DEFAULT_SNAPSHOT_RETAIN_COUNT
+}
+
+impl Default for SnapshotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_blocks: DEFAULT_SNAPSHOT_INTERVAL_BLOCKS,
+            retain_count: DEFAULT_SNAPSHOT_RETAIN_COUNT,
+        }
+    }
+}
+
+impl SnapshotConfig {
+    /// Build a config that runs the producer at the default cadence with
+    /// the default retention window. Intended for dedicated RPC /
+    /// archival nodes that serve state-sync to fresh peers.
+    pub fn producer_default() -> Self {
+        Self {
+            enabled: true,
+            interval_blocks: DEFAULT_SNAPSHOT_INTERVAL_BLOCKS,
+            retain_count: DEFAULT_SNAPSHOT_RETAIN_COUNT,
+        }
+    }
+
+    fn effective_retain(&self) -> usize {
+        self.retain_count.max(1)
+    }
+
+    fn effective_interval(&self) -> u64 {
+        self.interval_blocks.max(1)
+    }
+}
 
 /// All column families included in a snapshot. Held as a const slice so
 /// producer and consumer agree on the ordering, which is required for
@@ -165,10 +245,13 @@ pub struct SnapshotStore {
     /// The live key-value store. Inbound chunks are written here on
     /// `commit()`.
     store: Arc<dyn KvStore>,
+    /// Producer cadence + retention policy. Inbound (consumer) paths are
+    /// always live regardless of `config.enabled`; only production is gated.
+    config: SnapshotConfig,
 }
 
 impl SnapshotStore {
-    pub fn new(data_dir: &Path, store: Arc<dyn KvStore>) -> Result<Self> {
+    pub fn new(data_dir: &Path, store: Arc<dyn KvStore>, config: SnapshotConfig) -> Result<Self> {
         let snapshots_dir = data_dir.join("snapshots");
         std::fs::create_dir_all(&snapshots_dir)
             .map_err(|e| NodeError::Other(format!("create snapshots dir: {}", e)))?;
@@ -176,7 +259,30 @@ impl SnapshotStore {
             snapshots_dir,
             inbound: RwLock::new(None),
             store,
+            config,
         })
+    }
+
+    /// Whether the producer is enabled for this node. Consumer (inbound)
+    /// paths are always live regardless.
+    pub fn producer_enabled(&self) -> bool {
+        self.config.enabled
+    }
+
+    /// True if a finalized `height` is a snapshot boundary for this node's
+    /// configured cadence. Always `false` when the producer is disabled.
+    pub fn should_produce_at(&self, height: u64) -> bool {
+        self.config.enabled && height > 0 && height % self.config.effective_interval() == 0
+    }
+
+    /// Reclaim orphaned snapshot directories on startup. Producers and
+    /// non-producers alike call this once at boot so husks left by a
+    /// crashed `produce_at` (the ENOSPC failure mode) are reclaimed even on
+    /// nodes that no longer produce snapshots.
+    pub fn sweep_on_startup(&self) {
+        if let Err(e) = self.prune_keeping(self.config.effective_retain()) {
+            tracing::warn!(error = %e, "snapshot startup sweep failed");
+        }
     }
 
     /// Lists snapshots available locally. Sorted by height descending.
@@ -378,10 +484,20 @@ impl SnapshotStore {
     /// Streaming matters: the previous implementation used `scan_prefix`,
     /// which materializes an entire column family as one `Vec` — for
     /// CF_BLOCKS on a long-running chain that was a multi-gigabyte
-    /// allocation every `SNAPSHOT_INTERVAL_BLOCKS`, OOM-killing every
-    /// validator on the same height boundary. Peak memory here is now one
-    /// chunk buffer plus one KV row.
+    /// allocation every snapshot interval, OOM-killing every validator on
+    /// the same height boundary. Peak memory here is now one chunk buffer
+    /// plus one KV row.
     pub fn produce_at(&self, height: u64, state_root: [u8; 32]) -> Result<SnapshotManifest> {
+        // Prune BEFORE producing so peak disk = retain × snapshot_size, not
+        // (retain + 1). Producing first then pruning means a 100 GB volume
+        // sized for `retain` snapshots transiently needs room for one more,
+        // which is exactly what overflowed the testnet on 2026-06-14. We
+        // keep `retain - 1` existing snapshots here, because the one we're
+        // about to write takes the last slot — so at rest the total is
+        // exactly `retain`.
+        let keep = self.config.effective_retain().saturating_sub(1);
+        self.prune_keeping(keep)?;
+
         let dir = self.snapshots_dir.join(height.to_string());
         std::fs::create_dir_all(&dir)
             .map_err(|e| NodeError::Other(format!("create snapshot dir: {}", e)))?;
@@ -437,17 +553,87 @@ impl SnapshotStore {
         std::fs::write(dir.join("manifest.json"), manifest_bytes)
             .map_err(|e| NodeError::Other(format!("write manifest: {}", e)))?;
 
-        self.prune_old()?;
         Ok(manifest)
     }
 
-    /// Drop snapshots beyond the retention window.
-    fn prune_old(&self) -> Result<()> {
-        let mut all = self.list_snapshots()?;
-        all.sort_by(|a, b| b.height.cmp(&a.height));
-        for stale in all.into_iter().skip(SNAPSHOT_RETAIN_COUNT) {
+    /// Reclaim snapshot disk. Two passes:
+    ///
+    /// 1. **Retention** — keep the `keep_complete` most-recent *complete*
+    ///    snapshots (those with a parseable `manifest.json`), delete the
+    ///    rest. Callers pass `retain` at startup and `retain - 1` before
+    ///    producing (the new snapshot fills the final slot).
+    /// 2. **Orphan sweep** — delete `<height>/` directories that have no
+    ///    parseable `manifest.json` at all. These are the 4 KB husks a
+    ///    crashed or ENOSPC-killed `produce_at` leaves behind:
+    ///    `list_snapshots` skips them, so the retention pass alone never
+    ///    reclaims them and they accumulate forever. A mtime grace window
+    ///    (`ORPHAN_GRACE`) protects an in-flight producer that hasn't
+    ///    written its manifest yet. `inbound_*` consumer spool dirs are
+    ///    excluded — they're managed by the apply/commit path, not here.
+    fn prune_keeping(&self, keep_complete: usize) -> Result<()> {
+        // Pass 1: retention over complete snapshots.
+        let mut complete = self.list_snapshots()?;
+        complete.sort_by(|a, b| b.height.cmp(&a.height));
+        let retain: std::collections::HashSet<u64> = complete
+            .iter()
+            .take(keep_complete)
+            .map(|s| s.height)
+            .collect();
+        for stale in complete.iter().skip(keep_complete) {
             let path = self.snapshots_dir.join(stale.height.to_string());
-            let _ = std::fs::remove_dir_all(path);
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                tracing::warn!(height = stale.height, error = %e, "prune: remove complete snapshot failed");
+            }
+        }
+
+        // Pass 2: orphan sweep over manifest-less height dirs.
+        let now = SystemTime::now();
+        let read = std::fs::read_dir(&self.snapshots_dir)
+            .map_err(|e| NodeError::Other(format!("read snapshots dir: {}", e)))?;
+        for entry in read.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            // Skip consumer spool dirs — owned by the apply/commit path.
+            if name.starts_with("inbound_") {
+                continue;
+            }
+            // Only height-named dirs are ours to sweep.
+            let height: u64 = match name.parse() {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+            // Complete + retained: leave it.
+            if retain.contains(&height) {
+                continue;
+            }
+            // Complete snapshots are handled by pass 1; if a manifest is
+            // present here it was already deleted above (or is retained).
+            if path.join("manifest.json").exists() {
+                continue;
+            }
+            // Manifest-less orphan. Guard against racing an in-flight
+            // producer by skipping anything modified within ORPHAN_GRACE.
+            let young = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+                .map(|age| age < ORPHAN_GRACE)
+                .unwrap_or(false);
+            if young {
+                continue;
+            }
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                tracing::warn!(height, error = %e, "prune: remove orphan snapshot dir failed");
+            } else {
+                tracing::info!(height, "prune: swept orphaned snapshot dir");
+            }
         }
         Ok(())
     }
@@ -736,13 +922,17 @@ mod tests {
         let producer_dir = tempfile::tempdir().unwrap();
         let consumer_dir = tempfile::tempdir().unwrap();
         let producer_store = make_store_with_data();
-        let producer = SnapshotStore::new(producer_dir.path(), producer_store).unwrap();
+        let producer =
+            SnapshotStore::new(producer_dir.path(), producer_store, SnapshotConfig::producer_default())
+                .unwrap();
 
         let manifest = producer.produce_at(42, [7u8; 32]).unwrap();
         assert!(manifest.num_chunks >= 1);
 
         let consumer_store = Arc::new(MemoryStore::new()) as Arc<dyn KvStore>;
-        let consumer = SnapshotStore::new(consumer_dir.path(), consumer_store.clone()).unwrap();
+        let consumer =
+            SnapshotStore::new(consumer_dir.path(), consumer_store.clone(), SnapshotConfig::default())
+                .unwrap();
         consumer.offer(manifest.clone()).await.unwrap();
 
         for i in 0..manifest.num_chunks {
@@ -765,18 +955,91 @@ mod tests {
     async fn rejects_corrupted_chunk() {
         let dir = tempfile::tempdir().unwrap();
         let store = make_store_with_data();
-        let producer = SnapshotStore::new(dir.path(), store).unwrap();
+        let producer =
+            SnapshotStore::new(dir.path(), store, SnapshotConfig::producer_default()).unwrap();
         let manifest = producer.produce_at(1, [0u8; 32]).unwrap();
 
         let consumer_store = Arc::new(MemoryStore::new()) as Arc<dyn KvStore>;
         let consumer_dir = tempfile::tempdir().unwrap();
         let consumer =
-            SnapshotStore::new(consumer_dir.path(), consumer_store).unwrap();
+            SnapshotStore::new(consumer_dir.path(), consumer_store, SnapshotConfig::default())
+                .unwrap();
         consumer.offer(manifest.clone()).await.unwrap();
 
         let mut chunk = producer.get_chunk(1, 0).unwrap();
         chunk[0] ^= 0xFF;
         let err = consumer.apply_chunk(1, 0, chunk).await;
         assert!(err.is_err(), "corrupted chunk must be rejected");
+    }
+
+    #[tokio::test]
+    async fn retains_only_configured_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store_with_data();
+        let cfg = SnapshotConfig {
+            enabled: true,
+            interval_blocks: 1,
+            retain_count: 2,
+        };
+        let producer = SnapshotStore::new(dir.path(), store, cfg).unwrap();
+
+        // Produce four snapshots; only the two most recent should survive.
+        for h in [10u64, 20, 30, 40] {
+            producer.produce_at(h, [h as u8; 32]).unwrap();
+        }
+        let heights: Vec<u64> = producer
+            .list_snapshots()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.height)
+            .collect();
+        assert_eq!(heights, vec![40, 30], "must retain only the 2 newest");
+        assert!(!dir.path().join("snapshots/10").exists());
+        assert!(!dir.path().join("snapshots/20").exists());
+    }
+
+    #[tokio::test]
+    async fn sweeps_manifestless_orphan_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store_with_data();
+        let producer =
+            SnapshotStore::new(dir.path(), store, SnapshotConfig::producer_default()).unwrap();
+
+        // A husk left by a crashed produce_at: a height dir with chunk data
+        // but no manifest.json. list_snapshots skips it, so retention never
+        // reclaims it — the orphan sweep must.
+        let orphan = dir.path().join("snapshots/99999");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("chunk_00000000.bin"), b"partial").unwrap();
+        // Backdate past ORPHAN_GRACE so the sweep doesn't treat it as
+        // an in-flight producer.
+        let old = std::time::SystemTime::now() - Duration::from_secs(20 * 60);
+        filetime::set_file_mtime(&orphan, filetime::FileTime::from_system_time(old)).unwrap();
+
+        // A consumer spool dir must NOT be swept.
+        let spool = dir.path().join("snapshots/inbound_123");
+        std::fs::create_dir_all(&spool).unwrap();
+        filetime::set_file_mtime(&spool, filetime::FileTime::from_system_time(old)).unwrap();
+
+        producer.sweep_on_startup();
+
+        assert!(!orphan.exists(), "manifest-less orphan must be swept");
+        assert!(spool.exists(), "inbound spool dir must be preserved");
+    }
+
+    #[tokio::test]
+    async fn keeps_recent_orphan_within_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store_with_data();
+        let producer =
+            SnapshotStore::new(dir.path(), store, SnapshotConfig::producer_default()).unwrap();
+
+        // A fresh manifest-less dir (just-created mtime) models an
+        // in-flight produce_at that hasn't written its manifest yet. The
+        // grace window must protect it.
+        let inflight = dir.path().join("snapshots/77777");
+        std::fs::create_dir_all(&inflight).unwrap();
+        producer.sweep_on_startup();
+        assert!(inflight.exists(), "in-grace orphan must be preserved");
     }
 }
