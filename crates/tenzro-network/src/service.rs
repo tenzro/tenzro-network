@@ -1493,21 +1493,42 @@ async fn run_event_loop(
     kademlia_bootstrap_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     // Main event loop
-    loop {
+    'event_loop: loop {
         tokio::select! {
+            // Bias the select toward commands: the swarm stream is almost
+            // always ready under load (gossip + identify + consensus-direct
+            // churn), so a fair (random) poll lets it starve `command_rx`.
+            // Time-critical commands — notably `SendBlockSyncResponse`, which
+            // must reach `send_response` before libp2p's inbound substream
+            // hits `REQUEST_TIMEOUT_BODIES` and drops the parked channel —
+            // would then queue behind a swarm-event backlog and miss their
+            // deadline (observed as `no parked inbound block-sync request`
+            // on the serve side + `Eof`/`request timed out` on the requester).
+            // `biased` polls branches top-to-bottom, so commands win.
+            biased;
+
+            // Handle commands first, and drain the rest of the queue before
+            // returning to the swarm stream. Draining bounds head-of-line
+            // latency for every parked response to a single loop turn.
+            Some(command) = command_rx.recv() => {
+                let mut command = command;
+                loop {
+                    if matches!(command, NetworkCommand::Shutdown { .. }) {
+                        handle_command(&mut state, command).await;
+                        tracing::info!("Network event loop shutting down gracefully");
+                        break 'event_loop;
+                    }
+                    handle_command(&mut state, command).await;
+                    match command_rx.try_recv() {
+                        Ok(next) => command = next,
+                        Err(_) => break,
+                    }
+                }
+            }
+
             // Handle swarm events
             event = state.swarm.select_next_some() => {
                 handle_swarm_event(&mut state, event).await;
-            }
-
-            // Handle commands
-            Some(command) = command_rx.recv() => {
-                if matches!(command, NetworkCommand::Shutdown { .. }) {
-                    handle_command(&mut state, command).await;
-                    tracing::info!("Network event loop shutting down gracefully");
-                    break;
-                }
-                handle_command(&mut state, command).await;
             }
 
             // Periodic cleanup
