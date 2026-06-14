@@ -44,6 +44,7 @@ pub mod cortex;
 pub mod ap2;
 pub mod erc8004;
 pub mod wormhole;
+pub mod ccip;
 pub mod cct;
 pub mod train;
 pub mod multimodal;
@@ -123,6 +124,7 @@ pub use cortex::CortexCommand;
 pub use ap2::Ap2Command;
 pub use erc8004::Erc8004Command;
 pub use wormhole::WormholeCommand;
+pub use ccip::CcipCommand;
 pub use cct::CctCommand;
 pub use train::TrainCommand;
 pub use multimodal::{

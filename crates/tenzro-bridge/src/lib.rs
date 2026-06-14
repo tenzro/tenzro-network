@@ -129,7 +129,10 @@ pub use fee_sponsor::{
 };
 pub use router::{BridgeRouter, ChainCoverage};
 pub use tnzo_cct::{CctPoolType, TnzoCctBridge, TnzoCctPool, TnzoCctRegistry};
-pub use traits::{BridgeAdapter, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo, TransferStatus};
+pub use traits::{
+    BridgeAdapter, BridgeAdapterClass, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo,
+    TransferStatus,
+};
 pub use wormhole::{TokenBridgePayload, Vaa, WormholeAdapter, WormholeConfig};
 
 /// Bridge crate version
@@ -154,7 +157,8 @@ pub mod prelude {
         router::{BridgeRouter, FeeComparison, RouteInfo, RoutingPreferences, RoutingStrategy},
         tnzo_cct::{CctPoolType, TnzoCctBridge, TnzoCctPool, TnzoCctRegistry},
         traits::{
-            BridgeAdapter, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo, TransferStatus,
+            BridgeAdapter, BridgeAdapterClass, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo,
+            TransferStatus,
         },
     };
 }

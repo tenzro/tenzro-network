@@ -1991,6 +1991,21 @@ async fn dispatch_request(
         "tenzro_wormholeParseVaaId" => crate::rpc_integrations::handle_wormhole_parse_vaa_id(node, request.params).await,
         "tenzro_wormholeBridge" => crate::rpc_integrations::handle_wormhole_bridge(node, request.params).await,
 
+        // Chainlink CCIP — first-class regulated-rail namespace.
+        // Mirrors the 8 chainlink-mcp tools at the node JSON-RPC level
+        // so the SDKs and CLI can target CCIP without going through the
+        // generic bridge router. `ccipBridge` routes through the
+        // BridgeRouter with PreferAdapter("chainlink_ccip").
+        "tenzro_ccipGetFee" => crate::rpc_integrations::handle_ccip_get_fee(node, request.params).await,
+        "tenzro_ccipSend" => crate::rpc_integrations::handle_ccip_send(node, request.params).await,
+        "tenzro_ccipTrack" => crate::rpc_integrations::handle_ccip_track(node, request.params).await,
+        "tenzro_ccipSupportedChains" => crate::rpc_integrations::handle_ccip_supported_chains(node, request.params).await,
+        "tenzro_ccipSupportedTokens" => crate::rpc_integrations::handle_ccip_supported_tokens(node, request.params).await,
+        "tenzro_ccipLanes" => crate::rpc_integrations::handle_ccip_lanes(node, request.params).await,
+        "tenzro_ccipTokenPool" => crate::rpc_integrations::handle_ccip_token_pool(node, request.params).await,
+        "tenzro_ccipRateLimits" => crate::rpc_integrations::handle_ccip_rate_limits(node, request.params).await,
+        "tenzro_ccipBridge" => crate::rpc_integrations::handle_ccip_bridge(node, request.params).await,
+
         // TNZO CCT — Chainlink Cross-Chain Token
         "tenzro_cctListPools" => crate::rpc_integrations::handle_cct_list_pools(node, request.params).await,
         "tenzro_cctGetPool" => crate::rpc_integrations::handle_cct_get_pool(node, request.params).await,
@@ -11520,9 +11535,10 @@ async fn handle_list_snapshots(
 }
 
 /// `tenzro_produceSnapshot` — operator-triggered state-sync snapshot at the
-/// current chain tip. Mirrors the automatic snapshot the event loop emits
-/// every `SNAPSHOT_INTERVAL_BLOCKS` finalized blocks, but on demand. Backs
-/// `tenzro node snapshot`. Admin-token-gated. No params.
+/// current chain tip. Mirrors the automatic snapshot a producer node's event
+/// loop emits at its configured interval, but on demand and regardless of
+/// whether the automatic producer is enabled. Backs `tenzro node snapshot`.
+/// Admin-token-gated. No params.
 async fn handle_produce_snapshot(
     node: &Arc<TenzroNode>,
 ) -> std::result::Result<Value, JsonRpcError> {

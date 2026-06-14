@@ -8,7 +8,10 @@ use crate::{
     error::{BridgeError, Result},
     fee_oracle::{BridgeAdapterId, BridgeFeeQuote},
     fee_sponsor::{BridgeSponsorshipReceipt, SponsorshipPool, WiredBridgeFeeSurface},
-    traits::{BridgeAdapter, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo, TransferStatus},
+    traits::{
+        BridgeAdapter, BridgeAdapterClass, BridgeTokenReceipt, BridgeTokenRequest, ChainInfo,
+        TransferStatus,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
@@ -376,6 +379,7 @@ impl BridgeRouter {
                     dest_chain: dest_chain.to_string(),
                     estimated_fee,
                     estimated_time_secs: dest_info.finality_time_secs,
+                    classes: adapter.classes(),
                 });
             }
         }
@@ -557,6 +561,23 @@ impl BridgeRouter {
                     routes.iter().min_by_key(|r| r.estimated_fee)
                 }
             }
+            RoutingStrategy::Regulated => {
+                // Restrict to adapters that declare RegulatedRail (Chainlink
+                // CCIP, Wormhole). Pick the cheapest among those. If no
+                // regulated rail is available for this lane, fall back to
+                // lowest-fee across all routes — the caller asked for
+                // regulated-preferred, not regulated-required.
+                let regulated: Vec<&RouteInfo> = routes
+                    .iter()
+                    .filter(|r| r.classes.contains(&BridgeAdapterClass::RegulatedRail))
+                    .collect();
+                if regulated.is_empty() {
+                    debug!("No regulated rails available, falling back to lowest fee");
+                    routes.iter().min_by_key(|r| r.estimated_fee)
+                } else {
+                    regulated.into_iter().min_by_key(|r| r.estimated_fee)
+                }
+            }
         };
 
         best.cloned().ok_or_else(|| BridgeError::AdapterError("No suitable route found".to_string()))
@@ -657,6 +678,14 @@ pub struct RouteInfo {
     pub estimated_fee: u128,
     /// Estimated time in seconds
     pub estimated_time_secs: u64,
+    /// Classes this adapter declares (see [`BridgeAdapterClass`]).
+    /// Drives [`RoutingStrategy::Regulated`] route filtering.
+    #[serde(default = "default_classes")]
+    pub classes: Vec<BridgeAdapterClass>,
+}
+
+fn default_classes() -> Vec<BridgeAdapterClass> {
+    vec![BridgeAdapterClass::Generic]
 }
 
 /// One row of `BridgeRouter::list_chains()`: a chain plus the set of
@@ -716,6 +745,12 @@ pub enum RoutingStrategy {
     /// Falls back to direct adapters if LI.FI is unavailable or doesn't support
     /// the requested chain (e.g., Canton enterprise flows).
     LiFiAggregator,
+    /// Prefer regulated / institutional rails (Chainlink CCIP, Wormhole NTT)
+    /// for compliance-sensitive legs. Filters routes to adapters that
+    /// declare [`BridgeAdapterClass::RegulatedRail`] then picks the
+    /// cheapest. Falls back to lowest-fee across all routes when no
+    /// regulated rail is available for the lane.
+    Regulated,
 }
 
 #[cfg(test)]
@@ -1075,6 +1110,81 @@ mod tests {
         assert_ne!(wormhole.vault_address, lz.vault_address);
         assert_ne!(lz.vault_address, axelar.vault_address);
         assert_ne!(wormhole.vault_address, axelar.vault_address);
+    }
+
+    #[tokio::test]
+    async fn regulated_strategy_prefers_ccip_when_available() {
+        use crate::chainlink_ccip::{CcipConfig, ChainlinkCcipAdapter, FeeToken};
+
+        let router = BridgeRouter::new();
+
+        // Register a regulated rail (CCIP) and a generic rail (LayerZero)
+        // on the same lane. CCIP supports Ethereum + Arbitrum out of the
+        // box; LayerZero supports the same two via its config.
+        let ccip = ChainlinkCcipAdapter::new(CcipConfig::ethereum_mainnet(FeeToken::Native));
+        router.register_adapter("chainlink_ccip", Box::new(ccip)).await;
+
+        let lz_config = LayerZeroConfig::new(
+            "0x1a44076050125825900e736c501f859c50fE728c",
+            30101,
+            "0x0000000000000000000000000000000000000001",
+            "0x0000000000000000000000000000000000000002",
+        );
+        router
+            .register_adapter("layerzero", Box::new(LayerZeroAdapter::new(lz_config)))
+            .await;
+
+        router
+            .set_preferences(RoutingPreferences {
+                strategy: RoutingStrategy::Regulated,
+                max_fee: None,
+                max_time_secs: None,
+            })
+            .await;
+
+        let routes = router
+            .get_available_routes("ethereum", "arbitrum")
+            .await
+            .unwrap();
+        assert!(routes.len() >= 2, "expected both adapters to be discovered");
+
+        // Both adapters expose this lane; Regulated must pick CCIP.
+        let chosen = router.select_best_route(&routes).await.unwrap();
+        assert_eq!(chosen.adapter_name, "chainlink_ccip");
+        assert!(chosen.classes.contains(&BridgeAdapterClass::RegulatedRail));
+    }
+
+    #[tokio::test]
+    async fn regulated_strategy_falls_back_when_no_regulated_rail() {
+        let router = BridgeRouter::new();
+
+        // Only register a generic rail. Regulated must fall back to it
+        // rather than fail — caller asked for "regulated-preferred",
+        // not "regulated-required".
+        let lz_config = LayerZeroConfig::new(
+            "0x1a44076050125825900e736c501f859c50fE728c",
+            30101,
+            "0x0000000000000000000000000000000000000001",
+            "0x0000000000000000000000000000000000000002",
+        );
+        router
+            .register_adapter("layerzero", Box::new(LayerZeroAdapter::new(lz_config)))
+            .await;
+
+        router
+            .set_preferences(RoutingPreferences {
+                strategy: RoutingStrategy::Regulated,
+                max_fee: None,
+                max_time_secs: None,
+            })
+            .await;
+
+        let routes = router
+            .get_available_routes("ethereum", "arbitrum")
+            .await
+            .unwrap();
+        let chosen = router.select_best_route(&routes).await.unwrap();
+        assert_eq!(chosen.adapter_name, "layerzero");
     }
 
     #[tokio::test]

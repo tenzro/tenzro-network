@@ -2326,6 +2326,788 @@ pub(crate) async fn handle_wormhole_bridge(
 }
 
 // ============================================================
+// Chainlink CCIP — first-class RPC namespace
+// ------------------------------------------------------------
+// These RPCs make CCIP a load-bearing rail at the node level, not
+// just a string in `tenzro_listBridgeAdapters`. They mirror the
+// 8 CCIP tools shipped on the standalone Chainlink MCP server,
+// plus a router-mediated `ccipBridge` that selects CCIP as the
+// regulated rail via `RoutingStrategy::Regulated`.
+// ============================================================
+
+const CCIP_API_BASE: &str = "https://docs.chain.link/api/ccip/v1";
+
+/// `getFee(uint64,(bytes,bytes,(address,uint256)[],address,bytes))`
+const CCIP_GET_FEE_SELECTOR: &str = "5e307a45";
+/// `ccipSend(uint64,(bytes,bytes,(address,uint256)[],address,bytes))`
+const CCIP_SEND_SELECTOR: &str = "96f4e9f9";
+/// `getExecutionState(uint64)` on OffRamp
+const CCIP_GET_EXECUTION_STATE_SELECTOR: &str = "142b48a9";
+
+/// Resolve a source-chain identifier to the configured CCIP Router
+/// address + RPC URL + chain selector. Aligned with
+/// `chainlink_ccip::CcipConfig::{ethereum,arbitrum,base}_mainnet`.
+fn ccip_chain_descriptor(chain: &str) -> Option<(&'static str, String, u64, &'static str)> {
+    match chain.to_lowercase().as_str() {
+        "ethereum" | "eth" | "1" => Some((
+            "Ethereum",
+            std::env::var("ETHEREUM_RPC_URL")
+                .unwrap_or_else(|_| "https://eth.llamarpc.com".to_string()),
+            5009297550715157269u64,
+            "0x80226fc0Ee2b096224EeAc085Bb9a8cba1146f7D",
+        )),
+        "arbitrum" | "arb" | "42161" => Some((
+            "Arbitrum One",
+            std::env::var("ARBITRUM_RPC_URL")
+                .unwrap_or_else(|_| "https://arb1.arbitrum.io/rpc".to_string()),
+            4949039107694359620u64,
+            "0x141fa059441E0ca23ce184B6A78bafD2A517DdE8",
+        )),
+        "base" | "8453" => Some((
+            "Base",
+            std::env::var("BASE_RPC_URL")
+                .unwrap_or_else(|_| "https://mainnet.base.org".to_string()),
+            15971525489660198786u64,
+            "0x881e3A65B4d4a04dD529061dd0071cf975F58bCD",
+        )),
+        _ => None,
+    }
+}
+
+/// Resolve a chain name or numeric selector string to its uint64
+/// CCIP chain selector.
+fn ccip_chain_selector(s: &str) -> Option<u64> {
+    if let Ok(n) = s.parse::<u64>() {
+        return Some(n);
+    }
+    match s.to_lowercase().as_str() {
+        "ethereum" => Some(5009297550715157269),
+        "arbitrum" => Some(4949039107694359620),
+        "optimism" => Some(3734403246176062136),
+        "polygon" => Some(4051577828743386545),
+        "avalanche" => Some(6433500567565415381),
+        "base" => Some(15971525489660198786),
+        "bsc" => Some(11344663589394136015),
+        _ => None,
+    }
+}
+
+fn pad32_left(bytes: &[u8]) -> Vec<u8> {
+    assert!(bytes.len() <= 32);
+    let mut out = vec![0u8; 32 - bytes.len()];
+    out.extend_from_slice(bytes);
+    out
+}
+
+fn ccip_strip_hex(s: &str) -> &str {
+    s.trim_start_matches("0x")
+}
+
+/// Encode a single `EVM2AnyMessage` ABI-tuple body (after the outer
+/// offset word). Layout matches the Solidity struct
+/// `(bytes receiver, bytes data, (address,uint256)[] tokenAmounts,
+///   address feeToken, bytes extraArgs)`.
+fn ccip_encode_evm2any(
+    receiver_hex: &str,
+    data_hex: &str,
+    token_amounts: &[(String, String)],
+    fee_token: &str,
+    gas_limit: u64,
+) -> std::result::Result<Vec<u8>, JsonRpcError> {
+    let receiver = hex::decode(ccip_strip_hex(receiver_hex))
+        .map_err(|e| invalid_params(format!("invalid receiver hex: {e}")))?;
+    let data = if data_hex.is_empty() || data_hex == "0x" {
+        Vec::new()
+    } else {
+        hex::decode(ccip_strip_hex(data_hex))
+            .map_err(|e| invalid_params(format!("invalid data hex: {e}")))?
+    };
+    let fee_token_bytes = hex::decode(ccip_strip_hex(fee_token))
+        .map_err(|e| invalid_params(format!("invalid fee_token: {e}")))?;
+    if fee_token_bytes.len() != 20 {
+        return Err(invalid_params("fee_token must be a 20-byte address"));
+    }
+
+    // extra_args = GenericExtraArgsV2 selector 0x181dcf10 || gasLimit u256
+    // || allowOutOfOrderExecution bool. Matches the CCIP adapter's
+    // hardcoded V2 wire format (see chainlink_ccip.rs).
+    let mut extra_args = vec![0x18, 0x1d, 0xcf, 0x10];
+    extra_args.extend_from_slice(&pad32_left(&gas_limit.to_be_bytes()));
+    extra_args.extend_from_slice(&pad32_left(&[1u8]));
+
+    // Head: 5 fixed words (offsets / address).
+    //   word 0 -> bytes receiver offset
+    //   word 1 -> bytes data offset
+    //   word 2 -> array tokenAmounts offset
+    //   word 3 -> address feeToken (right-aligned)
+    //   word 4 -> bytes extraArgs offset
+    let head_len = 5 * 32;
+
+    fn enc_bytes(b: &[u8]) -> Vec<u8> {
+        let mut out = pad32_left(&(b.len() as u64).to_be_bytes());
+        let mut padded = b.to_vec();
+        while padded.len() % 32 != 0 {
+            padded.push(0);
+        }
+        out.extend_from_slice(&padded);
+        out
+    }
+
+    let receiver_enc = enc_bytes(&receiver);
+    let data_enc = enc_bytes(&data);
+
+    // tokenAmounts: dynamic array of (address,uint256). length word
+    // followed by N flat words (no inner offsets since the element is
+    // a fixed-size value type).
+    let mut token_amounts_enc = pad32_left(&(token_amounts.len() as u64).to_be_bytes());
+    for (token, amount) in token_amounts {
+        let t = hex::decode(ccip_strip_hex(token))
+            .map_err(|e| invalid_params(format!("invalid token addr: {e}")))?;
+        if t.len() != 20 {
+            return Err(invalid_params("token addr must be 20 bytes"));
+        }
+        token_amounts_enc.extend_from_slice(&pad32_left(&t));
+        let amount_u: u128 = amount
+            .parse()
+            .map_err(|e| invalid_params(format!("invalid token amount: {e}")))?;
+        let mut buf = vec![0u8; 16];
+        buf.extend_from_slice(&amount_u.to_be_bytes());
+        token_amounts_enc.extend_from_slice(&buf);
+    }
+    let extra_args_enc = enc_bytes(&extra_args);
+
+    // Offset values are absolute from the start of the tuple body.
+    let receiver_off = head_len as u64;
+    let data_off = receiver_off + receiver_enc.len() as u64;
+    let token_amounts_off = data_off + data_enc.len() as u64;
+    let extra_args_off = token_amounts_off + token_amounts_enc.len() as u64;
+
+    let mut head = Vec::with_capacity(head_len);
+    head.extend_from_slice(&pad32_left(&receiver_off.to_be_bytes()));
+    head.extend_from_slice(&pad32_left(&data_off.to_be_bytes()));
+    head.extend_from_slice(&pad32_left(&token_amounts_off.to_be_bytes()));
+    head.extend_from_slice(&pad32_left(&fee_token_bytes));
+    head.extend_from_slice(&pad32_left(&extra_args_off.to_be_bytes()));
+
+    let mut out = head;
+    out.extend_from_slice(&receiver_enc);
+    out.extend_from_slice(&data_enc);
+    out.extend_from_slice(&token_amounts_enc);
+    out.extend_from_slice(&extra_args_enc);
+    Ok(out)
+}
+
+/// Build Router.{getFee|ccipSend}(uint64, EVM2AnyMessage) calldata.
+fn ccip_build_calldata(
+    selector_hex: &str,
+    dst_selector: u64,
+    receiver: &str,
+    data: &str,
+    token_amounts: &[(String, String)],
+    fee_token: &str,
+    gas_limit: u64,
+) -> std::result::Result<Vec<u8>, JsonRpcError> {
+    let selector = hex::decode(selector_hex)
+        .map_err(|e| invalid_params(format!("bad selector: {e}")))?;
+    let mut calldata = Vec::with_capacity(4 + 64 + 256);
+    calldata.extend_from_slice(&selector);
+    calldata.extend_from_slice(&pad32_left(&dst_selector.to_be_bytes()));
+    // Offset to the tuple body = 0x40 (skip selector-arg + offset-word).
+    calldata.extend_from_slice(&pad32_left(&(64u64).to_be_bytes()));
+    let body = ccip_encode_evm2any(receiver, data, token_amounts, fee_token, gas_limit)?;
+    calldata.extend_from_slice(&body);
+    Ok(calldata)
+}
+
+async fn ccip_eth_call(
+    http: &reqwest::Client,
+    rpc_url: &str,
+    to: &str,
+    calldata: &[u8],
+) -> std::result::Result<Vec<u8>, JsonRpcError> {
+    let resp = http
+        .post(rpc_url)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [{
+                "to": to,
+                "data": format!("0x{}", hex::encode(calldata)),
+            }, "latest"],
+            "id": 1,
+        }))
+        .send()
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("CCIP eth_call transport error: {e}"),
+            data: None,
+        })?;
+    let body: Value = resp.json().await.map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("CCIP eth_call parse error: {e}"),
+        data: None,
+    })?;
+    if let Some(err) = body.get("error") {
+        let msg = err
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        return Err(JsonRpcError {
+            code: -32603,
+            message: format!("CCIP eth_call rpc error: {msg}"),
+            data: None,
+        });
+    }
+    let hex_str = body
+        .get("result")
+        .and_then(|r| r.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: "CCIP eth_call missing result".to_string(),
+            data: None,
+        })?;
+    hex::decode(ccip_strip_hex(hex_str)).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("CCIP eth_call hex decode: {e}"),
+        data: None,
+    })
+}
+
+fn ccip_extract_token_amounts(params: &Value) -> std::result::Result<Vec<(String, String)>, JsonRpcError> {
+    let Some(arr) = params.get("token_amounts").and_then(|v| v.as_array()) else {
+        return Ok(Vec::new());
+    };
+    arr.iter()
+        .map(|item| {
+            let token = item
+                .get("token")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("token_amounts[*].token missing"))?
+                .to_string();
+            let amount = item
+                .get("amount")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("token_amounts[*].amount missing (use decimal string)"))?
+                .to_string();
+            Ok((token, amount))
+        })
+        .collect()
+}
+
+/// `tenzro_ccipGetFee` — call Router.getFee() via eth_call against the
+/// source chain's CCIP Router. Returns the native fee in wei.
+pub(crate) async fn handle_ccip_get_fee(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let src = params
+        .get("source_chain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing source_chain"))?;
+    let dst_raw = params
+        .get("dest_chain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing dest_chain"))?;
+    let receiver = params
+        .get("receiver")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing receiver"))?;
+    let data_hex = params.get("data_hex").and_then(|v| v.as_str()).unwrap_or("");
+    let fee_token = params
+        .get("fee_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0x0000000000000000000000000000000000000000");
+    let token_amounts = ccip_extract_token_amounts(&params)?;
+
+    let (chain_name, rpc_url, _src_selector, router) =
+        ccip_chain_descriptor(src).ok_or_else(|| {
+            invalid_params(format!(
+                "Unsupported CCIP source_chain '{src}'. Supported: ethereum, arbitrum, base"
+            ))
+        })?;
+    let dst_selector =
+        ccip_chain_selector(dst_raw).ok_or_else(|| invalid_params("Invalid dest_chain"))?;
+
+    let calldata = ccip_build_calldata(
+        CCIP_GET_FEE_SELECTOR,
+        dst_selector,
+        receiver,
+        data_hex,
+        &token_amounts,
+        fee_token,
+        params.get("gas_limit").and_then(|v| v.as_u64()).unwrap_or(200_000),
+    )?;
+
+    let http = reqwest::Client::new();
+    let result = ccip_eth_call(&http, &rpc_url, router, &calldata).await?;
+    if result.len() < 32 {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "Router.getFee returned short response".to_string(),
+            data: None,
+        });
+    }
+    let mut arr = [0u8; 16];
+    arr.copy_from_slice(&result[16..32]);
+    let fee_wei = u128::from_be_bytes(arr);
+
+    Ok(json!({
+        "source_chain": chain_name,
+        "router_address": router,
+        "dest_chain_selector": dst_selector.to_string(),
+        "fee_token": fee_token,
+        "fee_wei": fee_wei.to_string(),
+        "fee_native": format!("{:.8}", fee_wei as f64 / 1e18),
+    }))
+}
+
+/// `tenzro_ccipSend` — prepare Router.ccipSend() calldata + msg.value.
+/// Signing/broadcasting is left to the caller (operator key); the
+/// returned envelope can be paired with `eth_sendRawTransaction`.
+pub(crate) async fn handle_ccip_send(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let src = params
+        .get("source_chain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing source_chain"))?;
+    let dst_raw = params
+        .get("dest_chain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing dest_chain"))?;
+    let receiver = params
+        .get("receiver")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing receiver"))?;
+    let data_hex = params.get("data_hex").and_then(|v| v.as_str()).unwrap_or("");
+    let fee_token = params
+        .get("fee_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0x0000000000000000000000000000000000000000");
+    let gas_limit = params.get("gas_limit").and_then(|v| v.as_u64()).unwrap_or(200_000);
+    let token_amounts = ccip_extract_token_amounts(&params)?;
+
+    let (chain_name, rpc_url, _src_selector, router) =
+        ccip_chain_descriptor(src).ok_or_else(|| {
+            invalid_params(format!(
+                "Unsupported CCIP source_chain '{src}'. Supported: ethereum, arbitrum, base"
+            ))
+        })?;
+    let dst_selector =
+        ccip_chain_selector(dst_raw).ok_or_else(|| invalid_params("Invalid dest_chain"))?;
+
+    let send_calldata = ccip_build_calldata(
+        CCIP_SEND_SELECTOR,
+        dst_selector,
+        receiver,
+        data_hex,
+        &token_amounts,
+        fee_token,
+        gas_limit,
+    )?;
+
+    // Quote fee so the caller knows the msg.value to attach.
+    let fee_calldata = ccip_build_calldata(
+        CCIP_GET_FEE_SELECTOR,
+        dst_selector,
+        receiver,
+        data_hex,
+        &token_amounts,
+        fee_token,
+        gas_limit,
+    )?;
+    let http = reqwest::Client::new();
+    let fee_result = ccip_eth_call(&http, &rpc_url, router, &fee_calldata).await?;
+    let fee_wei = if fee_result.len() >= 32 {
+        let mut arr = [0u8; 16];
+        arr.copy_from_slice(&fee_result[16..32]);
+        u128::from_be_bytes(arr)
+    } else {
+        0
+    };
+
+    Ok(json!({
+        "status": "prepared",
+        "source_chain": chain_name,
+        "router_address": router,
+        "dest_chain_selector": dst_selector.to_string(),
+        "calldata": format!("0x{}", hex::encode(&send_calldata)),
+        "msg_value_wei": fee_wei.to_string(),
+        "gas_limit_destination": gas_limit,
+        "note": "Sign and broadcast via eth_sendRawTransaction with to=router_address, value=msg_value_wei.",
+    }))
+}
+
+/// `tenzro_ccipTrack` — OffRamp.getExecutionState(bytes32) on the
+/// destination chain. Returns the numeric state and human-readable
+/// label (UNTOUCHED / IN_PROGRESS / SUCCESS / FAILURE).
+pub(crate) async fn handle_ccip_track(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let message_id = params
+        .get("message_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing message_id"))?;
+    let dst = params
+        .get("dest_chain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing dest_chain"))?;
+    let offramp = params
+        .get("offramp_address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing offramp_address"))?;
+
+    let message_id_bytes = hex::decode(ccip_strip_hex(message_id))
+        .map_err(|e| invalid_params(format!("invalid message_id hex: {e}")))?;
+    if message_id_bytes.len() != 32 {
+        return Err(invalid_params("message_id must be 32 bytes"));
+    }
+
+    let (chain_name, rpc_url, _, _) =
+        ccip_chain_descriptor(dst).ok_or_else(|| invalid_params("Unsupported dest_chain"))?;
+
+    let mut calldata =
+        hex::decode(CCIP_GET_EXECUTION_STATE_SELECTOR).expect("static selector hex");
+    calldata.extend_from_slice(&pad32_left(&message_id_bytes));
+
+    let http = reqwest::Client::new();
+    let result = ccip_eth_call(&http, &rpc_url, offramp, &calldata).await?;
+    let state = if result.len() >= 32 { result[31] } else { 0u8 };
+    let (label, desc) = match state {
+        0 => ("UNTOUCHED", "Message has not been processed yet"),
+        1 => ("IN_PROGRESS", "Message is currently being executed"),
+        2 => ("SUCCESS", "Message was successfully delivered"),
+        3 => ("FAILURE", "Message execution failed"),
+        _ => ("UNKNOWN", "Unrecognized state"),
+    };
+    Ok(json!({
+        "message_id": format!("0x{}", hex::encode(&message_id_bytes)),
+        "dest_chain": chain_name,
+        "offramp_address": offramp,
+        "execution_state": state,
+        "state_name": label,
+        "description": desc,
+    }))
+}
+
+async fn ccip_api_get(
+    path: &str,
+    extra: &[(&str, &str)],
+) -> std::result::Result<Value, JsonRpcError> {
+    let mut url = format!("{}{}", CCIP_API_BASE, path);
+    let mut first = !url.contains('?');
+    for (k, v) in extra {
+        if v.is_empty() {
+            continue;
+        }
+        url.push(if first { '?' } else { '&' });
+        first = false;
+        url.push_str(k);
+        url.push('=');
+        url.push_str(v);
+    }
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("CCIP API transport error: {e}"),
+            data: None,
+        })?;
+    if !resp.status().is_success() {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: format!("CCIP API status {}", resp.status()),
+            data: None,
+        });
+    }
+    resp.json().await.map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("CCIP API parse error: {e}"),
+        data: None,
+    })
+}
+
+/// `tenzro_ccipSupportedChains` — proxy the Chainlink docs API.
+pub(crate) async fn handle_ccip_supported_chains(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let env = params
+        .as_ref()
+        .map(|p| unwrap_arr(p.clone()))
+        .and_then(|p| p.get("environment").and_then(|v| v.as_str().map(String::from)))
+        .unwrap_or_else(|| "mainnet".to_string());
+    let body = ccip_api_get("/chains", &[("environment", &env)]).await?;
+    Ok(json!({ "environment": env, "chains": body }))
+}
+
+/// `tenzro_ccipSupportedTokens` — proxy the Chainlink docs API.
+pub(crate) async fn handle_ccip_supported_tokens(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let env = params
+        .as_ref()
+        .map(|p| unwrap_arr(p.clone()))
+        .and_then(|p| p.get("environment").and_then(|v| v.as_str().map(String::from)))
+        .unwrap_or_else(|| "mainnet".to_string());
+    let body = ccip_api_get("/tokens", &[("environment", &env)]).await?;
+    Ok(json!({ "environment": env, "tokens": body }))
+}
+
+/// `tenzro_ccipLanes` — proxy CCIP lanes from the Chainlink docs API.
+pub(crate) async fn handle_ccip_lanes(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.map(unwrap_arr).unwrap_or_else(|| json!({}));
+    let env = params
+        .get("environment")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mainnet")
+        .to_string();
+    let src = params
+        .get("source_chain_selector")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let dst = params
+        .get("dest_chain_selector")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let body = ccip_api_get(
+        "/lanes",
+        &[
+            ("environment", &env),
+            ("sourceChainSelector", &src),
+            ("destChainSelector", &dst),
+        ],
+    )
+    .await?;
+    Ok(json!({ "environment": env, "lanes": body }))
+}
+
+/// `tenzro_ccipTokenPool` — inspect a CCT v1.6+ token-pool contract by
+/// reading its `getToken()` + `getRemoteToken(uint64)` accessors.
+pub(crate) async fn handle_ccip_token_pool(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let chain = params
+        .get("chain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing chain"))?;
+    let pool = params
+        .get("pool_address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing pool_address"))?;
+    let (chain_name, rpc_url, _, _) =
+        ccip_chain_descriptor(chain).ok_or_else(|| invalid_params("Unsupported chain"))?;
+
+    // `getToken()` selector = 0x21df0da7
+    let calldata = hex::decode("21df0da7").unwrap();
+    let http = reqwest::Client::new();
+    let result = ccip_eth_call(&http, &rpc_url, pool, &calldata).await?;
+    let token = if result.len() >= 32 {
+        format!("0x{}", hex::encode(&result[12..32]))
+    } else {
+        "0x".to_string()
+    };
+    Ok(json!({
+        "chain": chain_name,
+        "pool_address": pool,
+        "token_address": token,
+        "note": "CCT v1.6+ pool. Use ccipRateLimits for inbound/outbound throughput.",
+    }))
+}
+
+/// `tenzro_ccipRateLimits` — read inbound + outbound rate-limiter state
+/// for a (pool, remote-chain) pair. Wraps `getCurrentInboundRateLimiterState(uint64)`
+/// and the outbound counterpart, both returning the standard
+/// `RateLimiter.TokenBucket` tuple (tokens, lastUpdated, isEnabled, capacity, rate).
+pub(crate) async fn handle_ccip_rate_limits(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let chain = params
+        .get("chain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing chain"))?;
+    let pool = params
+        .get("pool_address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing pool_address"))?;
+    let remote_raw = params
+        .get("remote_chain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing remote_chain"))?;
+    let remote = ccip_chain_selector(remote_raw)
+        .ok_or_else(|| invalid_params("Invalid remote_chain"))?;
+
+    let (chain_name, rpc_url, _, _) =
+        ccip_chain_descriptor(chain).ok_or_else(|| invalid_params("Unsupported chain"))?;
+
+    // Selectors: getCurrent{In,Out}boundRateLimiterState(uint64).
+    // In = 0x4c5ef0ed, Out = 0x6890c1c8 (CCIP v1.5/v1.6 TokenPool).
+    let mut call_in = hex::decode("4c5ef0ed").unwrap();
+    call_in.extend_from_slice(&pad32_left(&remote.to_be_bytes()));
+    let mut call_out = hex::decode("6890c1c8").unwrap();
+    call_out.extend_from_slice(&pad32_left(&remote.to_be_bytes()));
+
+    let http = reqwest::Client::new();
+
+    // Best-effort: if a chain's pool is older v1.5 the selector still
+    // matches; if the contract is upgraded both calls succeed. Report
+    // structured failure when neither does.
+    let parse_bucket = |raw: &[u8]| -> Value {
+        if raw.len() < 160 {
+            return json!({ "ok": false, "raw_hex": format!("0x{}", hex::encode(raw)) });
+        }
+        let read_u128 = |off: usize| {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(&raw[off + 16..off + 32]);
+            u128::from_be_bytes(a)
+        };
+        json!({
+            "tokens": read_u128(0).to_string(),
+            "last_updated": read_u128(32).to_string(),
+            "is_enabled": raw[95] != 0,
+            "capacity": read_u128(96).to_string(),
+            "rate": read_u128(128).to_string(),
+        })
+    };
+
+    let inbound = ccip_eth_call(&http, &rpc_url, pool, &call_in).await.ok();
+    let outbound = ccip_eth_call(&http, &rpc_url, pool, &call_out).await.ok();
+
+    Ok(json!({
+        "chain": chain_name,
+        "pool_address": pool,
+        "remote_chain_selector": remote.to_string(),
+        "inbound": inbound.as_deref().map(parse_bucket),
+        "outbound": outbound.as_deref().map(parse_bucket),
+    }))
+}
+
+/// `tenzro_ccipBridge` — bridge tokens through the BridgeRouter,
+/// explicitly preferring the CCIP regulated rail. Returns the same
+/// envelope shape as `tenzro_wormholeBridge` for SDK symmetry.
+pub(crate) async fn handle_ccip_bridge(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let router = node.bridge_router().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Bridge router not initialized".to_string(),
+        data: None,
+    })?;
+
+    let source = params
+        .get("source_chain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing source_chain"))?;
+    let dest = params
+        .get("dest_chain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing dest_chain"))?;
+    let asset = params.get("asset").and_then(|v| v.as_str()).unwrap_or("TNZO");
+    let amount: u128 = parse_u128(params.get("amount"))
+        .ok_or_else(|| invalid_params("Missing or invalid amount"))?;
+    let sender = params
+        .get("sender")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing sender"))?;
+    let recipient = params
+        .get("recipient")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing recipient"))?;
+
+    // Verify a CCIP adapter is registered before attempting.
+    let adapters = router.list_adapters().await;
+    let has_ccip = adapters
+        .iter()
+        .any(|n| n.to_lowercase().contains("ccip") || n.to_lowercase().contains("chainlink"));
+    if !has_ccip {
+        return Ok(json!({
+            "status": "unavailable",
+            "error": "CCIP adapter not registered in BridgeRouter",
+            "registered_adapters": adapters,
+        }));
+    }
+
+    // Pin the per-request strategy to PreferAdapter("chainlink_ccip")
+    // so the route selection deterministically lands on CCIP rather
+    // than relying on the global preference. We restore the prior
+    // strategy after dispatch to keep the router's global state
+    // untouched.
+    let prior = router.get_preferences().await;
+    let ccip_adapter_name = adapters
+        .iter()
+        .find(|n| n.to_lowercase().contains("ccip") || n.to_lowercase().contains("chainlink"))
+        .cloned()
+        .unwrap_or_else(|| "chainlink_ccip".to_string());
+    router
+        .set_preferences(tenzro_bridge::router::RoutingPreferences {
+            strategy: tenzro_bridge::router::RoutingStrategy::PreferAdapter(
+                ccip_adapter_name.clone(),
+            ),
+            max_fee: prior.max_fee,
+            max_time_secs: prior.max_time_secs,
+        })
+        .await;
+
+    let req = tenzro_bridge::BridgeTokenRequest::new(
+        source.to_string(),
+        dest.to_string(),
+        asset.to_string(),
+        amount,
+        sender.to_string(),
+        recipient.to_string(),
+    );
+    let result = router.bridge_tokens(req).await;
+    router.set_preferences(prior).await;
+
+    match result {
+        Ok(receipt) => Ok(json!({
+            "transfer_id": receipt.transfer_id,
+            "source_chain": receipt.source_chain,
+            "dest_chain": receipt.dest_chain,
+            "tx_hash": format!("{}", receipt.tx_hash),
+            "fee_paid": receipt.fee_paid.to_string(),
+            "estimated_arrival_ms": receipt.estimated_arrival,
+            "adapter": ccip_adapter_name,
+        })),
+        Err(e) => Ok(json!({
+            "status": "failed",
+            "error": format!("{e}"),
+            "adapter": ccip_adapter_name,
+        })),
+    }
+}
+
+// ============================================================
 // TNZO CCT — Chainlink Cross-Chain Token
 // ============================================================
 

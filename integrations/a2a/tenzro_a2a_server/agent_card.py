@@ -2,7 +2,7 @@
 
 
 def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
-    """Build the A2A Agent Card with all 40 skills."""
+    """Build the A2A Agent Card with the full skill catalog."""
     return {
         "name": "Tenzro Network Agent",
         "description": (
@@ -408,6 +408,34 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "Submit feedback (agent_id, score, feedback_auth_id, feedback_uri)",
                     "Request validation (agent_id, validator_id, request_uri, data_hash)",
                     "Submit validation (data_hash, response, response_uri, tag)",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "ccip",
+                "name": "Chainlink CCIP Regulated Rail",
+                "description": (
+                    "Chainlink CCIP cross-chain messaging — Tenzro's regulated "
+                    "institutional rail. OCR commit-store committee + RMN ARM "
+                    "blessing co-attest every inbound message. Quote fees via "
+                    "Router.getFee(), prepare ccipSend() envelopes, track "
+                    "OffRamp execution state, inspect CCT v1.6+ token pools "
+                    "and their inbound/outbound rate-limiter state, and bridge "
+                    "tokens through the BridgeRouter pinned to the CCIP "
+                    "adapter (refuses fallback to generic rails)."
+                ),
+                "tags": [
+                    "ccip", "chainlink", "regulated", "institutional",
+                    "bridge", "cross-chain", "cct", "rmn",
+                    "ethereum", "arbitrum", "base", "polygon",
+                ],
+                "examples": [
+                    "Quote CCIP fee from ethereum to arbitrum",
+                    "Track CCIP message 0xabc... on arbitrum",
+                    "List CCIP lanes for mainnet",
+                    "Get CCT pool rate limits on base for arbitrum",
+                    "Bridge 100 TNZO from ethereum to arbitrum via CCIP",
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],
