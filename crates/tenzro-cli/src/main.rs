@@ -20,7 +20,7 @@ use commands::{
     DebridgeCommand, LifiCommand, NftCommand, ComplianceCommand,
     CrosschainCommand, EventsCommand, CryptoCommand, TeeCommand,
     ZkCommand, VrfCommand, CustodyCommand, AppCommand,
-    CortexCommand, Ap2Command, Erc8004Command, WormholeCommand, CctCommand,
+    CortexCommand, Ap2Command, Erc8004Command, WormholeCommand, CcipCommand, CctCommand,
     TrainCommand,
     DetectCommand, EmbedTextCommand, EmbedVideoCommand, SegmentCommand, TextSegmentCommand,
     TranscribeCommand,
@@ -215,6 +215,10 @@ enum Command {
     /// Wormhole cross-chain: chain-id, parse-vaa, bridge
     #[command(subcommand)]
     Wormhole(WormholeCommand),
+
+    /// Chainlink CCIP regulated rail: get-fee, send, track, lanes, token-pool, rate-limits, bridge
+    #[command(subcommand)]
+    Ccip(CcipCommand),
 
     /// TNZO CCT (Chainlink Cross-Chain Token) pool inspection: list-pools, get-pool
     #[command(subcommand)]
@@ -531,6 +535,7 @@ async fn main() -> Result<()> {
         Command::Ap2(cmd) => cmd.execute().await?,
         Command::Erc8004(cmd) => cmd.execute().await?,
         Command::Wormhole(cmd) => cmd.execute().await?,
+        Command::Ccip(cmd) => cmd.execute().await?,
         Command::Cct(cmd) => cmd.execute().await?,
         Command::Train(cmd) => cmd.execute().await?,
         Command::EmbedText(cmd) => cmd.execute().await?,

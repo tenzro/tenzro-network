@@ -889,6 +889,11 @@ impl BridgeAdapter for WormholeAdapter {
         "wormhole"
     }
 
+    fn classes(&self) -> Vec<crate::traits::BridgeAdapterClass> {
+        use crate::traits::BridgeAdapterClass;
+        vec![BridgeAdapterClass::RegulatedRail, BridgeAdapterClass::Generic]
+    }
+
     fn supported_chains(&self) -> Vec<ChainInfo> {
         self.config
             .chain_id_map

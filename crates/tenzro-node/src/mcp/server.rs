@@ -2397,6 +2397,110 @@ pub struct WormholeBridgeParams {
     pub recipient: String,
 }
 
+// ─── Chainlink CCIP regulated-rail params ───
+
+#[derive(Debug, Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct CcipTokenAmountInput {
+    #[schemars(description = "ERC-20 token address on the source chain (hex with 0x)")]
+    pub token: String,
+    #[schemars(description = "Amount in token base units as a decimal string")]
+    pub amount: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CcipGetFeeMcpParams {
+    #[schemars(description = "Source chain (ethereum, arbitrum, base)")]
+    pub source_chain: String,
+    #[schemars(description = "Destination chain name or numeric CCIP selector")]
+    pub dest_chain: String,
+    #[schemars(description = "Receiver address on the destination chain (hex)")]
+    pub receiver: String,
+    #[schemars(description = "Hex-encoded data payload (optional, default empty)")]
+    pub data_hex: Option<String>,
+    #[schemars(description = "Token amounts to transfer (optional, default none)")]
+    pub token_amounts: Option<Vec<CcipTokenAmountInput>>,
+    #[schemars(description = "Fee token address (optional, default native 0x000…000)")]
+    pub fee_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CcipSendMcpParams {
+    #[schemars(description = "Source chain (ethereum, arbitrum, base)")]
+    pub source_chain: String,
+    #[schemars(description = "Destination chain name or selector")]
+    pub dest_chain: String,
+    #[schemars(description = "Receiver address on the destination chain (hex)")]
+    pub receiver: String,
+    #[schemars(description = "Hex-encoded data payload (optional)")]
+    pub data_hex: Option<String>,
+    #[schemars(description = "Token amounts to transfer (optional)")]
+    pub token_amounts: Option<Vec<CcipTokenAmountInput>>,
+    #[schemars(description = "Fee token address (optional, default native)")]
+    pub fee_token: Option<String>,
+    #[schemars(description = "Destination-chain execution gas limit (default 200000)")]
+    pub gas_limit: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CcipTrackMcpParams {
+    #[schemars(description = "32-byte CCIP message id (hex with or without 0x)")]
+    pub message_id: String,
+    #[schemars(description = "Destination chain")]
+    pub dest_chain: String,
+    #[schemars(description = "OffRamp contract address on the destination chain")]
+    pub offramp_address: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CcipEnvParams {
+    #[schemars(description = "Environment: mainnet or testnet (default mainnet)")]
+    pub environment: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CcipLanesMcpParams {
+    #[schemars(description = "Environment: mainnet or testnet (default mainnet)")]
+    pub environment: Option<String>,
+    #[schemars(description = "Optional source-chain selector filter")]
+    pub source_chain_selector: Option<String>,
+    #[schemars(description = "Optional destination-chain selector filter")]
+    pub dest_chain_selector: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CcipTokenPoolMcpParams {
+    #[schemars(description = "Chain (ethereum, arbitrum, base)")]
+    pub chain: String,
+    #[schemars(description = "Token-pool contract address (hex)")]
+    pub pool_address: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CcipRateLimitsMcpParams {
+    #[schemars(description = "Chain hosting the pool")]
+    pub chain: String,
+    #[schemars(description = "Token-pool contract address (hex)")]
+    pub pool_address: String,
+    #[schemars(description = "Remote chain name or numeric selector")]
+    pub remote_chain: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CcipBridgeMcpParams {
+    #[schemars(description = "Source chain name")]
+    pub source_chain: String,
+    #[schemars(description = "Destination chain name")]
+    pub dest_chain: String,
+    #[schemars(description = "Asset symbol (e.g. TNZO, USDC)")]
+    pub asset: String,
+    #[schemars(description = "Amount in smallest units as a u128 decimal string")]
+    pub amount: String,
+    #[schemars(description = "Sender address on source chain")]
+    pub sender: String,
+    #[schemars(description = "Recipient address on destination chain")]
+    pub recipient: String,
+}
+
 // ─── TNZO CCT (Chainlink Cross-Chain Token) params ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -11836,6 +11940,135 @@ impl TenzroMcpServer {
             "sender": params.sender,
             "recipient": params.recipient,
         })).await.map_err(|e| err_internal(format!("wormholeBridge failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Chainlink CCIP — first-class regulated-rail tools ──────────────────
+    // Mirrors the standalone chainlink-mcp server's 8 CCIP tools on the
+    // main mcp.tenzro.network surface, plus a 9th regulated-rail
+    // `ccip_bridge` that routes through the BridgeRouter with CCIP
+    // pinned as the adapter. Each method is a thin forward to the
+    // `tenzro_ccip*` JSON-RPC handler — no logic duplication.
+
+    #[tool(description = "Quote a Chainlink CCIP fee via Router.getFee() eth_call. CCIP is Tenzro's regulated rail: OCR commit-store committee + RMN ARM blessing. Returns native fee in wei on the source chain.")]
+    async fn ccip_get_fee(
+        &self,
+        Parameters(params): Parameters<CcipGetFeeMcpParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_ccipGetFee", serde_json::json!({
+            "source_chain": params.source_chain,
+            "dest_chain": params.dest_chain,
+            "receiver": params.receiver,
+            "data_hex": params.data_hex.unwrap_or_default(),
+            "token_amounts": params.token_amounts.unwrap_or_default(),
+            "fee_token": params.fee_token,
+        })).await.map_err(|e| err_internal(format!("ccipGetFee failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Prepare a Router.ccipSend() envelope — returns calldata + msg.value ready for the caller to sign and broadcast via eth_sendRawTransaction.")]
+    async fn ccip_send(
+        &self,
+        Parameters(params): Parameters<CcipSendMcpParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_ccipSend", serde_json::json!({
+            "source_chain": params.source_chain,
+            "dest_chain": params.dest_chain,
+            "receiver": params.receiver,
+            "data_hex": params.data_hex.unwrap_or_default(),
+            "token_amounts": params.token_amounts.unwrap_or_default(),
+            "fee_token": params.fee_token,
+            "gas_limit": params.gas_limit,
+        })).await.map_err(|e| err_internal(format!("ccipSend failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Track CCIP message execution via OffRamp.getExecutionState(bytes32). States: 0=UNTOUCHED, 1=IN_PROGRESS, 2=SUCCESS, 3=FAILURE.")]
+    async fn ccip_track(
+        &self,
+        Parameters(params): Parameters<CcipTrackMcpParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_ccipTrack", serde_json::json!({
+            "message_id": params.message_id,
+            "dest_chain": params.dest_chain,
+            "offramp_address": params.offramp_address,
+        })).await.map_err(|e| err_internal(format!("ccipTrack failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List CCIP-supported chains from the Chainlink docs API.")]
+    async fn ccip_supported_chains(
+        &self,
+        Parameters(params): Parameters<CcipEnvParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_ccipSupportedChains", serde_json::json!({
+            "environment": params.environment.unwrap_or_else(|| "mainnet".to_string()),
+        })).await.map_err(|e| err_internal(format!("ccipSupportedChains failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List CCIP-supported tokens from the Chainlink docs API.")]
+    async fn ccip_supported_tokens(
+        &self,
+        Parameters(params): Parameters<CcipEnvParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_ccipSupportedTokens", serde_json::json!({
+            "environment": params.environment.unwrap_or_else(|| "mainnet".to_string()),
+        })).await.map_err(|e| err_internal(format!("ccipSupportedTokens failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List CCIP lanes (source-destination chain pairs). Optionally filter by source or destination chain selector.")]
+    async fn ccip_lanes(
+        &self,
+        Parameters(params): Parameters<CcipLanesMcpParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_ccipLanes", serde_json::json!({
+            "environment": params.environment.unwrap_or_else(|| "mainnet".to_string()),
+            "source_chain_selector": params.source_chain_selector,
+            "dest_chain_selector": params.dest_chain_selector,
+        })).await.map_err(|e| err_internal(format!("ccipLanes failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Inspect a CCIP CCT v1.6+ token-pool contract. Returns chain, pool address, and the bound ERC-20 token address read from the pool's getToken().")]
+    async fn ccip_token_pool(
+        &self,
+        Parameters(params): Parameters<CcipTokenPoolMcpParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_ccipTokenPool", serde_json::json!({
+            "chain": params.chain,
+            "pool_address": params.pool_address,
+        })).await.map_err(|e| err_internal(format!("ccipTokenPool failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read inbound + outbound rate-limiter state for a (pool, remote-chain) pair. Returns the RateLimiter.TokenBucket tuple (tokens, lastUpdated, isEnabled, capacity, rate).")]
+    async fn ccip_rate_limits(
+        &self,
+        Parameters(params): Parameters<CcipRateLimitsMcpParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_ccipRateLimits", serde_json::json!({
+            "chain": params.chain,
+            "pool_address": params.pool_address,
+            "remote_chain": params.remote_chain,
+        })).await.map_err(|e| err_internal(format!("ccipRateLimits failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Bridge tokens through the BridgeRouter pinned to the Chainlink CCIP regulated rail. Refuses the call if no CCIP adapter is registered rather than silently falling back to a generic adapter. Returns transfer_id, tx_hash, fee_paid, estimated_arrival_ms.")]
+    async fn ccip_bridge(
+        &self,
+        Parameters(params): Parameters<CcipBridgeMcpParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_ccipBridge", serde_json::json!({
+            "source_chain": params.source_chain,
+            "dest_chain": params.dest_chain,
+            "asset": params.asset,
+            "amount": params.amount,
+            "sender": params.sender,
+            "recipient": params.recipient,
+        })).await.map_err(|e| err_internal(format!("ccipBridge failed: {}", e)))?;
         json_result(result)
     }
 

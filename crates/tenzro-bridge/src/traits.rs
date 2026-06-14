@@ -8,11 +8,36 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tenzro_types::primitives::Hash;
 
+/// Classification of a bridge adapter for routing purposes.
+///
+/// Adapters declare one or more classes via [`BridgeAdapter::classes`].
+/// [`RoutingStrategy::Regulated`] filters available routes to adapters
+/// that include [`BridgeAdapterClass::RegulatedRail`], so the router
+/// can prefer institutional-grade rails (Chainlink CCIP, Wormhole NTT)
+/// for compliance-sensitive legs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BridgeAdapterClass {
+    /// Generic permissionless rail (LayerZero, deBridge, LI.FI, …).
+    Generic,
+    /// Regulated / institutional rail with on-chain attested
+    /// verification (Chainlink CCIP commit + RMN ARM, Wormhole NTT
+    /// Guardian quorum, etc.).
+    RegulatedRail,
+}
+
 /// Core bridge adapter trait that all bridge protocols must implement
 #[async_trait]
 pub trait BridgeAdapter: Send + Sync {
     /// Returns the name of this bridge protocol
     fn protocol_name(&self) -> &str;
+
+    /// Returns the classes this adapter belongs to. Default is
+    /// [`BridgeAdapterClass::Generic`]. Regulated rails (CCIP,
+    /// Wormhole NTT) override to include
+    /// [`BridgeAdapterClass::RegulatedRail`].
+    fn classes(&self) -> Vec<BridgeAdapterClass> {
+        vec![BridgeAdapterClass::Generic]
+    }
 
     /// Returns the list of chains supported by this adapter
     fn supported_chains(&self) -> Vec<ChainInfo>;
