@@ -46,7 +46,7 @@ large_enum_variant = "allow"
 
 [workspace.dependencies]
 # Workspace crates
-tenzro-types = { path = "crates/tenzro-types" }
+tenzro-types = { path = "crates/tenzro-types", version = "0.1.0" }
 tenzro-crypto = { path = "crates/tenzro-crypto" }
 tenzro-tee = { path = "crates/tenzro-tee" }
 tenzro-zk = { path = "crates/tenzro-zk" }
