@@ -200,8 +200,16 @@ impl StepDispatcher for NodeStepDispatcher {
         });
 
         // The receipt template id can be operator-configured; default
-        // to the canonical Tenzro workflow receipt template.
-        let template_id_canton = "#Tenzro.Workflow:Receipt";
+        // to the canonical Tenzro workflow receipt template. Format is
+        // `#<package-name>:<Module>:<Template>` so the participant
+        // resolves the latest installed version of the package.
+        let template_id_canton = self
+            .node
+            .config()
+            .canton
+            .workflow_receipt_template
+            .as_deref()
+            .unwrap_or("#tenzro-workflow:Tenzro.Workflow:Receipt");
 
         match adapter
             .submit_create_command(template_id_canton, create_arguments)

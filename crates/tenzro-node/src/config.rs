@@ -787,6 +787,16 @@ pub struct CantonConfig {
     /// model. Flip on for testnet/mainnet.
     #[serde(default)]
     pub identity_providers: CantonIdentityProvidersConfig,
+
+    /// Override the DAML template id the workflow dispatcher uses
+    /// when mirroring saga completions to Canton via the
+    /// `submitCreateCommand` path. When `None`, the node uses the
+    /// canonical Tenzro workflow receipt template
+    /// (`#tenzro-workflow:Tenzro.Workflow:Receipt`). Format must be
+    /// `#<package-name>:<Module>:<Template>` so the participant
+    /// resolves the latest installed version of the package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_receipt_template: Option<String>,
 }
 
 /// Per-tenant IDP (Stage 2) configuration. Disabled by default —
@@ -887,6 +897,7 @@ impl Default for CantonConfig {
             oauth: None,
             static_jwt: None,
             identity_providers: CantonIdentityProvidersConfig::default(),
+            workflow_receipt_template: None,
         }
     }
 }
@@ -928,6 +939,7 @@ impl CantonConfig {
                 oauth: None,
                 static_jwt: None,
                 identity_providers: CantonIdentityProvidersConfig::from_env(),
+                workflow_receipt_template: std::env::var("CANTON_WORKFLOW_RECEIPT_TEMPLATE").ok(),
             };
         }
 
@@ -990,6 +1002,7 @@ impl CantonConfig {
             oauth,
             static_jwt,
             identity_providers: CantonIdentityProvidersConfig::from_env(),
+            workflow_receipt_template: std::env::var("CANTON_WORKFLOW_RECEIPT_TEMPLATE").ok(),
         }
     }
 }

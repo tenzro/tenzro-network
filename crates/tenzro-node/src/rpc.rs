@@ -20339,48 +20339,87 @@ async fn handle_submit_daml_command(
     //      party, not the operator's).
     //   2. The API key's bound `canton_user_id` resolved to its
     //      `primaryParty` — the multi-tenant path. Canton's
-    //      AuthService enforces per-user CanActAs rights, so the
-    //      tenzro-labs team can only submit on behalf of parties their
-    //      user is granted on.
-    //   3. None — falls through to the adapter's participant-default
-    //      `act_as_party` (legacy shared-operator path).
+    //      AuthService enforces per-user CanActAs rights, so a tenant
+    //      can only submit on behalf of parties their user is granted
+    //      on.
+    //
+    // Security: previously a third fallback existed that let the
+    // submission proceed against the adapter's participant-default
+    // `act_as_party` (the operator's own party) when neither (1) nor
+    // (2) yielded a party. That was the legacy single-tenant path and
+    // it leaks the operator's party to any caller whose Canton-scoped
+    // API key happens to be missing a `canton_user_id` binding —
+    // every tenant key would write contracts as the operator. The
+    // fallback is gone: a Canton-scoped key without `canton_user_id`
+    // is rejected here before the adapter is called.
     let explicit_act_as = params
         .get("act_as")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let resolved_act_as = if explicit_act_as.is_some() {
-        explicit_act_as
-    } else {
-        match (api_key, node.api_key_manager()) {
-            (Some(plaintext), Some(mgr)) => {
-                if let Some(record) = mgr.lookup(plaintext) {
-                    if let Some(uid) = record.canton_user_id.as_deref() {
-                        Some(
-                            adapter
-                                .primary_party_for_user(
-                                    uid,
-                                    record.canton_identity_provider_id.as_deref(),
-                                )
-                                .await
-                                .map_err(|e| JsonRpcError {
-                                    code: -32000,
-                                    message: format!(
-                                        "Canton actAs resolve failed for user {}: {}",
-                                        uid, e
-                                    ),
-                                    data: None,
-                                })?,
-                        )
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            _ => None,
+    // Resolve the caller's own bound party from their API key, then
+    // authorize the explicit `act_as` against it. Reused below for the
+    // empty-act_as path so we never call Canton without a verified
+    // target party.
+    let plaintext = api_key.ok_or_else(|| JsonRpcError {
+        code: -32001,
+        message: "Canton submit requires an api key (canton scope)".to_string(),
+        data: None,
+    })?;
+    let mgr = node.api_key_manager().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Api key manager unavailable on this node".to_string(),
+        data: None,
+    })?;
+    let record = mgr.lookup(plaintext).ok_or_else(|| JsonRpcError {
+        code: -32001,
+        message: "Unknown or revoked api key".to_string(),
+        data: None,
+    })?;
+    let uid = record.canton_user_id.as_deref().ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Api key has no canton_user_id binding — cannot resolve actAs party. \
+                 Reissue the key with `canton_user_id` so the node can route the \
+                 submission under the tenant's own Canton user."
+            .to_string(),
+        data: None,
+    })?;
+    let key_primary_party = adapter
+        .primary_party_for_user(uid, record.canton_identity_provider_id.as_deref())
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Canton actAs resolve failed for user {}: {}", uid, e),
+            data: None,
+        })?;
+
+    let resolved_act_as: Option<String> = if let Some(party) = explicit_act_as {
+        // The caller specified an explicit party. Authorize it against
+        // their key:
+        //   (a) the party matches the key's resolved `primaryParty`
+        //       (the normal case — caller is being explicit about the
+        //       party they already own), OR
+        //   (b) the party is on the key's `can_act_as_parties`
+        //       agent-delegation whitelist (the per-agent spawning
+        //       case where one key intentionally controls multiple
+        //       allocated parties).
+        // Anything else is rejected here so the operator's party can
+        // never be impersonated by a tenant key that happened to know
+        // its name.
+        if party != key_primary_party && !record.can_act_as(&party) {
+            return Err(JsonRpcError {
+                code: -32004,
+                message: format!(
+                    "Api key not authorized to act as party `{}` \
+                     (primary party `{}`, allowed: {:?})",
+                    party, key_primary_party, record.can_act_as_parties
+                ),
+                data: None,
+            });
         }
+        Some(party)
+    } else {
+        Some(key_primary_party)
     };
     let act_as_party = resolved_act_as.as_deref();
 
@@ -20399,25 +20438,11 @@ async fn handle_submit_daml_command(
     // case) skip this gate entirely; Canton's AuthService remains the
     // sole authority. This preserves backward compatibility with the
     // Stage-1 single-tenant key path.
-    if let (Some(plaintext), Some(mgr)) = (api_key, node.api_key_manager())
-        && let Some(record) = mgr.lookup(plaintext)
+    // `record` was resolved above when we authorized the actAs party,
+    // so it is in scope here. The party check is now upstream — this
+    // block only enforces the per-key template / command / mandate /
+    // amount caps.
     {
-        // Party check — only when an act_as party was resolved.
-        if let Some(target_party) = act_as_party
-            && !record.can_act_as_parties.is_empty()
-            && !record.can_act_as(target_party)
-        {
-            return Err(JsonRpcError {
-                code: -32004,
-                message: format!(
-                    "Agent delegation: api key not authorized to act as party `{}`. \
-                     Allowed parties: {:?}",
-                    target_party, record.can_act_as_parties
-                ),
-                data: None,
-            });
-        }
-
         // Template check — every submitDamlCommand carries a template_id.
         if !record.allowed_templates.is_empty() && !record.allows_template(&template_id) {
             return Err(JsonRpcError {
