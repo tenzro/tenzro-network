@@ -1190,7 +1190,52 @@ async def handle_canton(text: str, metadata: dict = None) -> str:
         return (
             "Submit a DAML command:\n"
             "  tenzro_submitDamlCommand { command_type: 'create'|'exercise', template_id, ... }\n"
-            "Use the canton-mcp.tenzro.network/mcp `canton_submit_command` tool for full access."
+            "Required: the presenting API key must carry a `canton_user_id` "
+            "binding. The node resolves the user's `primaryParty` and uses it "
+            "as `actAs`. Pass `act_as: <party>` to pin a specific party — the "
+            "node verifies the caller is authorized on that party (either it "
+            "matches `primaryParty` or is on `can_act_as_parties`)."
+        )
+
+    if "watch" in t and "party" in t:
+        return (
+            "Watch active contracts for an explicit party:\n"
+            "  tenzro_canton_watchParty { party, template_ids: ['<tid>', ...] }\n"
+            "Authorization: the presenting key must be authorized for `party` "
+            "— either it matches the key's `primaryParty`, or the party is on "
+            "the key's `can_read_as_parties` / `can_act_as_parties` whitelist. "
+            "Anything else returns -32004."
+        )
+
+    if "mirror" in t and ("workflow" in t or "obligation" in t):
+        return (
+            "Mirror a Tenzro workflow (or obligation) into Canton:\n"
+            "  tenzro_mirrorWorkflowToCanton { workflow_id, synchronizer_id }\n"
+            "  tenzro_mirrorObligationToCanton { obligation_id, parent_contract_id }\n"
+            "These write operator-signed `Tenzro.Workflow:WorkflowAnchor` and "
+            "`Tenzro.Workflow:ObligationAnchor` contracts under the operator's "
+            "participant-default party. Admin-token-gated — tenant API keys "
+            "cannot produce these contracts."
+        )
+
+    if "idp" in t or "identity provider" in t:
+        return (
+            "Per-tenant Canton IdentityProviderConfig (Stage 2.b):\n"
+            "  tenzro_canton_createIdp { identity_provider_id, issuer_url, "
+            "jwks_url, audience }\n"
+            "  tenzro_canton_listIdps {}\n"
+            "  tenzro_canton_deleteIdp { identity_provider_id }\n"
+            "Operator-only — admin-token-gated. Tenants minted against their "
+            "own IDP route their JWTs through their own upstream issuer, "
+            "staying isolated from the operator's IDP."
+        )
+
+    if "list analytics" in t or "all tenants" in t or "every tenant" in t:
+        return (
+            "Operator admin-read of every tenant's Canton call analytics:\n"
+            "  tenzro_canton_listApiKeyAnalytics { key_id? }\n"
+            "Admin-token-gated; non-admin callers see -32001. Pass `key_id` "
+            "to narrow to a single tenant."
         )
 
     return (
@@ -1200,14 +1245,21 @@ async def handle_canton(text: str, metadata: dict = None) -> str:
         "    - 'Canton list parties' / 'list packages' / 'connected synchronizers'\n"
         "    - 'Canton coin balance' / 'Canton fee schedule' / 'List domains'\n"
         "    - 'List Canton user rights'\n"
+        "    - 'Canton analytics' (self-read)\n"
         "  Reads (with args):\n"
         "    - 'List DAML contracts for template <tid>'\n"
         "    - 'Get Canton transaction <hex-update-id>'\n"
-        "  Writes:\n"
+        "    - 'Watch party <party-fq> for template <tid>'\n"
+        "  Tenant writes (require canton_user_id binding):\n"
         "    - 'Allocate Canton party'\n"
         "    - 'Grant Canton user rights for party <fq-party-id>'\n"
         "    - 'Submit DAML command'\n"
-        "    - 'Upload DAR'"
+        "    - 'Upload DAR'\n"
+        "  Operator writes (admin-token-gated):\n"
+        "    - 'Mirror workflow to Canton'\n"
+        "    - 'Mirror obligation to Canton'\n"
+        "    - 'Create / list / delete IDP'\n"
+        "    - 'List analytics (every tenant)'"
     )
 
 
