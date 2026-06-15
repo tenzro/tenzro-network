@@ -114,6 +114,15 @@ write_files:
 
       docker pull "$IMAGE"
 
+      # Clear any container still holding the name before we claim it. systemd's
+      # Main PID is this bash wrapper (which execs the docker *client*), not the
+      # container, so a SIGTERM that kills the client without reaping the
+      # `--rm` container leaves an orphan holding `tenzro-node`. The next
+      # respawn's `docker run --name tenzro-node` then fails on the name
+      # collision and the unit wedges in auto-restart. This guard is idempotent
+      # (no-op when nothing is named tenzro-node).
+      docker rm -f tenzro-node 2>/dev/null || true
+
       # Bind RPC to all interfaces only on the RPC-public node; everywhere
       # else bind to localhost.
       if [[ "$RPC_PUBLIC" == "true" ]]; then
@@ -280,6 +289,13 @@ write_files:
       TimeoutStopSec=60
       KillSignal=SIGTERM
       ExecStart=/bin/bash /var/lib/tenzro-bin/tenzro-run
+      # Stop the container directly. Main PID here is the bash wrapper / docker
+      # client, so a bare systemd stop can exit the client while leaving the
+      # `--rm` container running and holding the `tenzro-node` name. ExecStop
+      # sends SIGTERM to the container (matching the in-node graceful drain);
+      # ExecStopPost force-removes it so a restart never collides on the name.
+      ExecStop=/usr/bin/docker stop -t 60 tenzro-node
+      ExecStopPost=/usr/bin/docker rm -f tenzro-node
 
       [Install]
       WantedBy=multi-user.target
