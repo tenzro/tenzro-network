@@ -216,6 +216,34 @@ pub struct CantonListApiKeyAnalyticsParams {
     pub key_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CantonWatchPartyParams {
+    #[schemars(
+        description = "Fully-qualified party id (`<hint>::<participant-hash>`) to watch. The MCP server is operator-scoped, so any party reachable from the operator's participant credential is accessible."
+    )]
+    pub party: String,
+    #[schemars(description = "DAML template ids to filter the active-contract set by. At least one is required.")]
+    pub template_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CantonCreateIdpParams {
+    #[schemars(description = "Per-Canton-unique IdentityProviderConfig id")]
+    pub identity_provider_id: String,
+    #[schemars(description = "OAuth issuer URL")]
+    pub issuer_url: String,
+    #[schemars(description = "OAuth JWKS URL")]
+    pub jwks_url: String,
+    #[schemars(description = "OAuth audience claim Canton expects on tenant JWTs")]
+    pub audience: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CantonDeleteIdpParams {
+    #[schemars(description = "IdentityProviderConfig id to delete")]
+    pub identity_provider_id: String,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -461,6 +489,40 @@ impl CantonMcpServer {
                 "Canton JSON Ledger API returned {}: {}",
                 status, body_text
             )));
+        }
+
+        serde_json::from_str(&body_text)
+            .map_err(|e| err_internal(format!("Failed to parse Canton response: {}", e)))
+    }
+
+    /// Execute a JSON Ledger API v2 DELETE and return the response
+    /// body as JSON. Empty response bodies return `Value::Null`.
+    async fn ledger_delete(
+        &self,
+        endpoint: &str,
+    ) -> std::result::Result<serde_json::Value, ErrorData> {
+        let resp = self
+            .ledger_request(reqwest::Method::DELETE, endpoint)
+            .await?
+            .send()
+            .await
+            .map_err(|e| err_internal(format!("Canton JSON Ledger API request failed: {}", e)))?;
+
+        let status = resp.status();
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|e| err_internal(format!("Failed to read Canton response: {}", e)))?;
+
+        if !status.is_success() {
+            return Err(err_internal(format!(
+                "Canton JSON Ledger API returned {}: {}",
+                status, body_text
+            )));
+        }
+
+        if body_text.trim().is_empty() {
+            return Ok(serde_json::Value::Null);
         }
 
         serde_json::from_str(&body_text)
@@ -1352,6 +1414,83 @@ impl CantonMcpServer {
                 }))
             }
         }
+    }
+
+    #[tool(description = "Watch active DAML contracts for a specific party. Queries `POST /v2/state/active-contracts` with the party as the sole `filtersByParty` key. The MCP server is operator-scoped, so any party reachable from the operator's participant credential is accessible.")]
+    async fn canton_watch_party(
+        &self,
+        Parameters(params): Parameters<CantonWatchPartyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        if params.template_ids.is_empty() {
+            return Err(err_invalid_params(
+                "template_ids required (at least one DAML template id)",
+            ));
+        }
+        let offset = self.fetch_ledger_end_offset().await?;
+        let mut filters_by_party = serde_json::Map::new();
+        let cumulative: Vec<serde_json::Value> = params
+            .template_ids
+            .iter()
+            .map(|tid| {
+                serde_json::json!({
+                    "identifierFilter": {
+                        "TemplateFilter": {
+                            "value": { "templateId": tid }
+                        }
+                    }
+                })
+            })
+            .collect();
+        filters_by_party.insert(
+            params.party.clone(),
+            serde_json::json!({ "cumulative": cumulative }),
+        );
+        let body = serde_json::json!({
+            "eventFormat": {
+                "filtersByParty": filters_by_party,
+                "filtersForAnyParty": serde_json::Value::Null,
+                "verbose": true,
+            },
+            "activeAtOffset": offset,
+        });
+        let response = self.ledger_post("/state/active-contracts", &body).await?;
+        json_result(response)
+    }
+
+    #[tool(description = "Operator-only: register a per-tenant Canton IdentityProviderConfig (Stage 2.b). Submits POST /v2/idps with the tenant's OAuth issuer / JWKS / audience. Subsequent user provisioning under this IDP is scoped to it, so the tenant's JWTs are isolated from the operator's IDP.")]
+    async fn canton_create_idp(
+        &self,
+        Parameters(params): Parameters<CantonCreateIdpParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let body = serde_json::json!({
+            "identityProviderConfig": {
+                "identityProviderId": params.identity_provider_id,
+                "isDeactivated": false,
+                "issuer": params.issuer_url,
+                "jwksUrl": params.jwks_url,
+                "audience": params.audience,
+            }
+        });
+        let response = self.ledger_post("/idps", &body).await?;
+        json_result(response)
+    }
+
+    #[tool(description = "Operator-only: list every Canton IdentityProviderConfig the participant is configured against (Stage 2.b roster). Returns the full IDP roster including the default IDP entry.")]
+    async fn canton_list_idps(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let response = self.ledger_get("/idps").await?;
+        json_result(response)
+    }
+
+    #[tool(description = "Operator-only: delete a Canton IdentityProviderConfig. Canton refuses to delete an IDP that has live users — revoke or migrate the tenants under that IDP first.")]
+    async fn canton_delete_idp(
+        &self,
+        Parameters(params): Parameters<CantonDeleteIdpParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let path = format!("/idps/{}", urlencoding::encode(&params.identity_provider_id));
+        let response = self.ledger_delete(&path).await?;
+        json_result(response)
     }
 }
 

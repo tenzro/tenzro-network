@@ -53,6 +53,18 @@ pub enum CantonCommand {
     MyAnalytics(CantonSimpleCmd),
     /// Operator admin-read: every per-tenant analytics record
     ListAnalytics(CantonListAnalyticsCmd),
+    /// Watch active contracts for an explicit party (key must be authorized for it)
+    WatchParty(CantonWatchPartyCmd),
+    /// Operator-only: register a per-tenant Canton IdentityProviderConfig (Stage 2.b)
+    IdpCreate(CantonIdpCreateCmd),
+    /// Operator-only: list every Canton IdentityProviderConfig
+    IdpList(CantonSimpleCmd),
+    /// Operator-only: delete a Canton IdentityProviderConfig
+    IdpDelete(CantonIdpDeleteCmd),
+    /// Operator-only: mirror a Tenzro workflow into a Canton synchronizer as a WorkflowAnchor
+    MirrorWorkflow(CantonMirrorWorkflowCmd),
+    /// Operator-only: mirror an Obligation under an already-mirrored workflow
+    MirrorObligation(CantonMirrorObligationCmd),
 }
 
 impl CantonCommand {
@@ -89,6 +101,12 @@ impl CantonCommand {
                     .await
             }
             Self::ListAnalytics(cmd) => cmd.execute().await,
+            Self::WatchParty(cmd) => cmd.execute().await,
+            Self::IdpCreate(cmd) => cmd.execute().await,
+            Self::IdpList(cmd) => cmd.execute("Canton IDPs", "tenzro_canton_listIdps").await,
+            Self::IdpDelete(cmd) => cmd.execute().await,
+            Self::MirrorWorkflow(cmd) => cmd.execute().await,
+            Self::MirrorObligation(cmd) => cmd.execute().await,
         }
     }
 }
@@ -749,6 +767,274 @@ impl CantonListAnalyticsCmd {
         let spinner = output::create_spinner("Listing analytics…");
         let result: serde_json::Value =
             rpc.call("tenzro_canton_listApiKeyAnalytics", params).await?;
+        spinner.finish_and_clear();
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| "?".into())
+        );
+        Ok(())
+    }
+}
+
+/// Watch active contracts for an explicit party. The presenting key
+/// must (a) carry a `canton_user_id` binding and (b) be authorized
+/// for `party` (either the party matches the key's `primaryParty`
+/// or is on `can_read_as_parties` / `can_act_as_parties`). Anything
+/// else returns `-32004`.
+#[derive(Debug, Parser)]
+pub struct CantonWatchPartyCmd {
+    /// Fully-qualified party id (`<hint>::<participant-hash>`) to watch
+    #[arg(long)]
+    party: String,
+
+    /// Template ids to filter on (repeatable, at least one required)
+    #[arg(long = "template-id", required = true)]
+    template_ids: Vec<String>,
+
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    #[arg(long, env = "TENZRO_API_KEY", hide_env_values = true)]
+    api_key: Option<String>,
+}
+
+impl CantonWatchPartyCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Canton Watch Party");
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(key) = &self.api_key {
+            rpc = rpc.with_api_key(key);
+        }
+
+        let params = serde_json::json!({
+            "party": self.party,
+            "template_ids": self.template_ids,
+        });
+
+        let spinner = output::create_spinner("Watching party…");
+        let result: serde_json::Value =
+            rpc.call("tenzro_canton_watchParty", params).await?;
+        spinner.finish_and_clear();
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| "?".into())
+        );
+        Ok(())
+    }
+}
+
+/// Operator-only: register a per-tenant Canton IdentityProviderConfig
+/// (Stage 2.b). Admin-token-gated at the node.
+#[derive(Debug, Parser)]
+pub struct CantonIdpCreateCmd {
+    /// IDP identifier (per Canton, unique per participant)
+    #[arg(long)]
+    identity_provider_id: String,
+
+    /// OAuth issuer URL
+    #[arg(long)]
+    issuer_url: String,
+
+    /// OAuth JWKS URL
+    #[arg(long)]
+    jwks_url: String,
+
+    /// OAuth audience claim Canton expects on the tenant's JWT
+    #[arg(long)]
+    audience: String,
+
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+}
+
+impl CantonIdpCreateCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Canton Create IDP");
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        } else {
+            return Err(anyhow!(
+                "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
+            ));
+        }
+
+        let params = serde_json::json!({
+            "identity_provider_id": self.identity_provider_id,
+            "issuer_url": self.issuer_url,
+            "jwks_url": self.jwks_url,
+            "audience": self.audience,
+        });
+
+        let spinner = output::create_spinner("Creating IDP…");
+        let result: serde_json::Value =
+            rpc.call("tenzro_canton_createIdp", params).await?;
+        spinner.finish_and_clear();
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| "?".into())
+        );
+        Ok(())
+    }
+}
+
+/// Operator-only: delete a Canton IdentityProviderConfig. The tenant
+/// whose IDP is being deleted must already be revoked or migrated —
+/// Canton refuses to delete an IDP that has live users.
+#[derive(Debug, Parser)]
+pub struct CantonIdpDeleteCmd {
+    /// IDP identifier to delete
+    #[arg(long)]
+    identity_provider_id: String,
+
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+}
+
+impl CantonIdpDeleteCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Canton Delete IDP");
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        } else {
+            return Err(anyhow!(
+                "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
+            ));
+        }
+
+        let params = serde_json::json!({
+            "identity_provider_id": self.identity_provider_id,
+        });
+
+        let spinner = output::create_spinner("Deleting IDP…");
+        let result: serde_json::Value =
+            rpc.call("tenzro_canton_deleteIdp", params).await?;
+        spinner.finish_and_clear();
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| "?".into())
+        );
+        Ok(())
+    }
+}
+
+/// Operator-only: mirror a Tenzro workflow into a Canton synchronizer
+/// as a `Tenzro.Workflow:WorkflowAnchor` contract. Contract owner is
+/// the operator's participant-default party — admin-token-gated.
+#[derive(Debug, Parser)]
+pub struct CantonMirrorWorkflowCmd {
+    /// Workflow id (32-byte hex, with or without 0x prefix)
+    #[arg(long)]
+    workflow_id: String,
+
+    /// Synchronizer id to mirror the workflow into
+    #[arg(long)]
+    synchronizer_id: String,
+
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+}
+
+impl CantonMirrorWorkflowCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Canton Mirror Workflow");
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        } else {
+            return Err(anyhow!(
+                "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
+            ));
+        }
+
+        let params = serde_json::json!({
+            "workflow_id": self.workflow_id,
+            "synchronizer_id": self.synchronizer_id,
+        });
+
+        let spinner = output::create_spinner("Mirroring workflow…");
+        let result: serde_json::Value =
+            rpc.call("tenzro_mirrorWorkflowToCanton", params).await?;
+        spinner.finish_and_clear();
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| "?".into())
+        );
+        Ok(())
+    }
+}
+
+/// Operator-only: mirror an Obligation under an already-mirrored
+/// workflow as a `Tenzro.Workflow:ObligationAnchor` contract.
+/// `parent_contract_id` is the WorkflowAnchor created by the
+/// matching `mirror-workflow` call. Admin-token-gated.
+#[derive(Debug, Parser)]
+pub struct CantonMirrorObligationCmd {
+    /// Obligation id (32-byte hex)
+    #[arg(long)]
+    obligation_id: String,
+
+    /// Parent WorkflowAnchor contract id
+    #[arg(long)]
+    parent_contract_id: String,
+
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+}
+
+impl CantonMirrorObligationCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Canton Mirror Obligation");
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        } else {
+            return Err(anyhow!(
+                "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
+            ));
+        }
+
+        let params = serde_json::json!({
+            "obligation_id": self.obligation_id,
+            "parent_contract_id": self.parent_contract_id,
+        });
+
+        let spinner = output::create_spinner("Mirroring obligation…");
+        let result: serde_json::Value =
+            rpc.call("tenzro_mirrorObligationToCanton", params).await?;
         spinner.finish_and_clear();
 
         println!(
