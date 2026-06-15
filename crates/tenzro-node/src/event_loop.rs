@@ -927,6 +927,61 @@ impl EventLoop {
         // Sync block height from persistent storage
         self.sync_height_from_storage().await?;
 
+        // Spawn the block-sync engine BEFORE the consensus warm-up gate.
+        //
+        // Block-sync serving (answering peers' `GetBlockRange` / `GetTipInfo`)
+        // and requesting (catching up our own height) must never be gated
+        // behind consensus liveness. The warm-up gate below waits for ≥ 2f+1
+        // admitted validator peers before starting consensus; on a wedged or
+        // freshly-restarted fleet a node can sit in that gate indefinitely.
+        // If the block-sync subscriber only attaches after the gate, a node
+        // stuck in warm-up rejects every inbound block-sync request with
+        // "subscriber not yet attached" — so the one mechanism that would let
+        // a behind-by-one node catch up and let the fleet re-form quorum is
+        // disabled exactly when it is needed. Serving is a pure storage read
+        // and requesting only advances local height via the verified
+        // commit-QC import path, so neither depends on our consensus being
+        // live. Attaching here breaks the deadlock: every node can serve the
+        // blocks it already has, and a behind node catches up while its own
+        // pacemaker is still warming, after which `resume_from_synced_height`
+        // reconciles consensus to the synced tip.
+        //
+        // Light-client / no-network nodes have no engine — the channel stays
+        // `None` and the corresponding select arm in the main loop is a noop.
+        if let Some(network) = self.network.clone() {
+            match (
+                network.subscribe_block_sync_requests().await,
+                network.subscribe_block_sync_results().await,
+                network.subscribe_peer_events().await,
+            ) {
+                (Ok(inbound_rx), Ok(outbound_rx), Ok(peer_events_rx)) => {
+                    let (importer_tx, importer_rx) =
+                        mpsc::channel::<crate::block_sync::BlockImport>(64);
+                    self.block_import_rx = Some(importer_rx);
+
+                    let engine = crate::block_sync::BlockSyncEngine::new(
+                        network,
+                        self.storage.clone(),
+                        self.consensus.clone(),
+                        inbound_rx,
+                        outbound_rx,
+                        peer_events_rx,
+                        importer_tx,
+                    );
+                    let engine_shutdown = self.shutdown_tx.subscribe();
+                    tokio::spawn(engine.run(engine_shutdown));
+                    info!("Block-sync engine spawned");
+                }
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                    warn!(
+                        error = %e,
+                        "Block-sync engine NOT spawned — network subscribe failed; \
+                         node will not catch up if it falls behind"
+                    );
+                }
+            }
+        }
+
         // Validator-connectivity warm-up gate: before draining outbound
         // consensus messages, wait for at least one peer to be (a) connected
         // at the libp2p layer AND (b) admitted to the local validator
@@ -1041,52 +1096,6 @@ impl EventLoop {
                         return Ok(());
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
-                }
-            }
-        }
-
-        // Spawn the block-sync engine.
-        //
-        // Light-client / no-network nodes have no engine — the channel stays
-        // `None` and the corresponding select arm in the main loop is a noop.
-        //
-        // Why here (after mesh warm-up, before finality)? The engine subscribes
-        // to network channels (`subscribe_block_sync_requests` /
-        // `subscribe_block_sync_results`), so the network must be running.
-        // Starting it before consensus finality means an out-of-sync node can
-        // already start fetching blocks while the local consensus engine is
-        // still pinned at the obsolete view it booted with — which is exactly
-        // the wedge `resume_from_synced_height()` was added to unblock.
-        if let Some(network) = self.network.clone() {
-            match (
-                network.subscribe_block_sync_requests().await,
-                network.subscribe_block_sync_results().await,
-                network.subscribe_peer_events().await,
-            ) {
-                (Ok(inbound_rx), Ok(outbound_rx), Ok(peer_events_rx)) => {
-                    let (importer_tx, importer_rx) =
-                        mpsc::channel::<crate::block_sync::BlockImport>(64);
-                    self.block_import_rx = Some(importer_rx);
-
-                    let engine = crate::block_sync::BlockSyncEngine::new(
-                        network,
-                        self.storage.clone(),
-                        self.consensus.clone(),
-                        inbound_rx,
-                        outbound_rx,
-                        peer_events_rx,
-                        importer_tx,
-                    );
-                    let engine_shutdown = self.shutdown_tx.subscribe();
-                    tokio::spawn(engine.run(engine_shutdown));
-                    info!("Block-sync engine spawned");
-                }
-                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-                    warn!(
-                        error = %e,
-                        "Block-sync engine NOT spawned — network subscribe failed; \
-                         node will not catch up if it falls behind"
-                    );
                 }
             }
         }

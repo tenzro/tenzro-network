@@ -1495,35 +1495,29 @@ async fn run_event_loop(
     // Main event loop
     'event_loop: loop {
         tokio::select! {
-            // Bias the select toward commands: the swarm stream is almost
-            // always ready under load (gossip + identify + consensus-direct
-            // churn), so a fair (random) poll lets it starve `command_rx`.
-            // Time-critical commands — notably `SendBlockSyncResponse`, which
-            // must reach `send_response` before libp2p's inbound substream
-            // hits `REQUEST_TIMEOUT_BODIES` and drops the parked channel —
-            // would then queue behind a swarm-event backlog and miss their
-            // deadline (observed as `no parked inbound block-sync request`
-            // on the serve side + `Eof`/`request timed out` on the requester).
-            // `biased` polls branches top-to-bottom, so commands win.
-            biased;
-
-            // Handle commands first, and drain the rest of the queue before
-            // returning to the swarm stream. Draining bounds head-of-line
-            // latency for every parked response to a single loop turn.
+            // Fair poll across commands and swarm events. An earlier revision
+            // biased toward `command_rx` and drained a bounded batch per turn,
+            // on the theory that `SendBlockSyncResponse` had to reach
+            // `send_response` quickly. That was the wrong lever: `handle_command`
+            // only *enqueues* the response into the behaviour's send queue, and
+            // the bytes do not egress until the swarm's connection handlers are
+            // polled repeatedly as the socket becomes writable. Prioritising the
+            // enqueue while throttling the swarm poll therefore did the opposite
+            // of the intent — the response sat queued and the requester's inbound
+            // substream hit `REQUEST_TIMEOUT_BODIES` (seen as `InboundFailure:
+            // Timeout` on the serve side, `Eof`/`request timed out` on the
+            // requester, and the same timeout on the consensus-direct overlay,
+            // which shares the request_response machinery). Fair scheduling gives
+            // the swarm continuous poll time so writes drain to completion; one
+            // command per turn is sufficient because the command channel is not
+            // the bottleneck — the wire is.
             Some(command) = command_rx.recv() => {
-                let mut command = command;
-                loop {
-                    if matches!(command, NetworkCommand::Shutdown { .. }) {
-                        handle_command(&mut state, command).await;
-                        tracing::info!("Network event loop shutting down gracefully");
-                        break 'event_loop;
-                    }
+                if matches!(command, NetworkCommand::Shutdown { .. }) {
                     handle_command(&mut state, command).await;
-                    match command_rx.try_recv() {
-                        Ok(next) => command = next,
-                        Err(_) => break,
-                    }
+                    tracing::info!("Network event loop shutting down gracefully");
+                    break 'event_loop;
                 }
+                handle_command(&mut state, command).await;
             }
 
             // Handle swarm events
