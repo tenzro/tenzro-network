@@ -40,6 +40,7 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::speculative::{MtpSpeculative, MtpSpeculativeParams};
 
 /// Hardware backend information detected at runtime
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +227,27 @@ struct LoadedModel {
 unsafe impl Send for LoadedModel {}
 unsafe impl Sync for LoadedModel {}
 
+/// A loaded Multi-Token-Prediction drafter, keyed under the target's
+/// `model_id` (not the drafter's own id). The drafter is a same-
+/// architecture sidecar GGUF (e.g.
+/// `unsloth/gemma-4-12b-it-GGUF/MTP/mtp-gemma-4-12B-it.gguf`) loaded
+/// once per target and reused across every speculative generation
+/// against that target. Held in a separate map so the existing
+/// `load_model` / `unload_model` API surface for targets stays the
+/// same; drafters are loaded by [`ModelRuntime::load_drafter`].
+struct LoadedDrafter {
+    model: LlamaModel,
+    /// Echo of [`LoadedModel::backend`] so we can construct a draft
+    /// context without re-resolving the backend.
+    backend: Arc<LlamaBackend>,
+    /// Context length to use for the draft model's context. Same
+    /// catalog-aware cap as the target.
+    context_length: u32,
+}
+
+unsafe impl Send for LoadedDrafter {}
+unsafe impl Sync for LoadedDrafter {}
+
 /// Model runtime -- loads and runs GGUF models for inference via llama.cpp.
 ///
 /// Adapts to the provider's hardware automatically:
@@ -236,6 +258,13 @@ unsafe impl Sync for LoadedModel {}
 /// - CPU fallback (always available)
 pub struct ModelRuntime {
     loaded_models: Arc<DashMap<String, Arc<tokio::sync::Mutex<LoadedModel>>>>,
+    /// Per-target Multi-Token-Prediction drafter. Key is the TARGET's
+    /// `model_id` (not the drafter's). When a target is paired with a
+    /// drafter in the catalog (`HfModelEntry.drafter_id` +
+    /// `mtp_kind: DraftMtp`), call [`Self::load_drafter`] alongside
+    /// [`Self::load_model`] to make speculative decoding available
+    /// for that target.
+    loaded_drafters: Arc<DashMap<String, Arc<tokio::sync::Mutex<LoadedDrafter>>>>,
     backend: Arc<LlamaBackend>,
     hardware: HardwareInfo,
 }
@@ -267,6 +296,7 @@ impl ModelRuntime {
 
         Self {
             loaded_models: Arc::new(DashMap::new()),
+            loaded_drafters: Arc::new(DashMap::new()),
             backend,
             hardware,
         }
@@ -412,6 +442,106 @@ impl ModelRuntime {
             .iter()
             .map(|entry| entry.key().clone())
             .collect()
+    }
+
+    /// Load a Multi-Token-Prediction drafter GGUF and bind it to an
+    /// already-loaded target.
+    ///
+    /// The drafter is a same-architecture sidecar (e.g.
+    /// `unsloth/gemma-4-12b-it-GGUF/MTP/mtp-gemma-4-12B-it.gguf`).
+    /// `target_model_id` must already be in the runtime via
+    /// [`Self::load_model`]; the drafter is then keyed under the
+    /// target's id so subsequent generations against that target with
+    /// `GenerationConfig.draft_n = Some(n)` will use the speculative
+    /// path.
+    ///
+    /// `context_length` matches the target's effective context window
+    /// when `None` (recommended). The catalog-driven loader in
+    /// `tenzro-node` reads `HfModelEntry.context_length` for both
+    /// target and drafter and passes them through here.
+    pub async fn load_drafter(
+        &self,
+        target_model_id: &str,
+        drafter_gguf_path: &Path,
+        context_length: Option<u32>,
+    ) -> Result<()> {
+        if !self.is_loaded(target_model_id) {
+            return Err(ModelError::Other(format!(
+                "Cannot load drafter for `{}`: target model is not loaded",
+                target_model_id
+            )));
+        }
+        if self.loaded_drafters.contains_key(target_model_id) {
+            info!("Drafter for {} already loaded", target_model_id);
+            return Ok(());
+        }
+
+        info!(
+            "Loading MTP drafter for {} from {}",
+            target_model_id,
+            drafter_gguf_path.display()
+        );
+        let start = Instant::now();
+
+        let gguf_path_owned = drafter_gguf_path.to_path_buf();
+        let target_id_owned = target_model_id.to_string();
+        let backend = self.backend.clone();
+
+        let loaded = tokio::task::spawn_blocking(move || {
+            let model_params = LlamaModelParams::default().with_n_gpu_layers(1000);
+            let model =
+                LlamaModel::load_from_file(&backend, &gguf_path_owned, &model_params).map_err(
+                    |e| {
+                        ModelError::Other(format!(
+                            "Failed to load MTP drafter for target '{}': {}",
+                            target_id_owned, e
+                        ))
+                    },
+                )?;
+            let trained_ctx = model.n_ctx_train();
+            let effective_ctx = match context_length {
+                Some(requested) => trained_ctx.min(requested).min(MAX_CONTEXT_LENGTH),
+                None => trained_ctx.min(DEFAULT_CONTEXT_LENGTH),
+            };
+            Ok::<LoadedDrafter, ModelError>(LoadedDrafter {
+                model,
+                backend,
+                context_length: effective_ctx,
+            })
+        })
+        .await
+        .map_err(|e| ModelError::Other(format!("Task join error: {}", e)))??;
+
+        let elapsed = start.elapsed();
+        info!(
+            "MTP drafter for {} loaded in {:.2}s",
+            target_model_id,
+            elapsed.as_secs_f64(),
+        );
+
+        self.loaded_drafters.insert(
+            target_model_id.to_string(),
+            Arc::new(tokio::sync::Mutex::new(loaded)),
+        );
+        Ok(())
+    }
+
+    /// Unload the MTP drafter paired with `target_model_id`.
+    pub async fn unload_drafter(&self, target_model_id: &str) -> Result<()> {
+        if let Some((_, drafter_arc)) = self.loaded_drafters.remove(target_model_id) {
+            let _lock = drafter_arc.lock().await;
+            drop(_lock);
+            drop(drafter_arc);
+            info!("Unloaded MTP drafter for {}", target_model_id);
+        }
+        Ok(())
+    }
+
+    /// Whether a Multi-Token-Prediction drafter is currently loaded for
+    /// the given target. Drives the speculative seam in the generation
+    /// loop and the inference router's mtp_enabled filter.
+    pub fn has_drafter(&self, target_model_id: &str) -> bool {
+        self.loaded_drafters.contains_key(target_model_id)
     }
 
     /// Generate text from a raw prompt string.
@@ -616,11 +746,22 @@ impl ModelRuntime {
             .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?;
 
         let model_mutex = model_entry.value().clone();
+        // Look up the drafter only when the caller asked for
+        // speculative decoding. Avoids holding an extra lock on the
+        // happy path.
+        let drafter_mutex = if config.draft_n.is_some() {
+            self.loaded_drafters
+                .get(model_id)
+                .map(|d| d.value().clone())
+        } else {
+            None
+        };
         let messages = messages.to_vec();
         let config = config.clone();
 
         tokio::task::spawn_blocking(move || {
             let loaded = model_mutex.blocking_lock();
+            let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
 
             // Convert ChatMessage to LlamaChatMessage
             let llama_messages: Vec<LlamaChatMessage> = messages
@@ -644,7 +785,13 @@ impl ModelRuntime {
                     ModelError::Other(format!("Failed to apply chat template: {}", e))
                 })?;
 
-            Self::generate_sync_streaming(&loaded, &prompt, &config, Some(&token_tx))
+            Self::generate_sync_streaming(
+                &loaded,
+                drafter_guard.as_deref(),
+                &prompt,
+                &config,
+                Some(&token_tx),
+            )
         })
         .await
         .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?
@@ -668,57 +815,79 @@ impl ModelRuntime {
             .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?;
 
         let model_mutex = model_entry.value().clone();
+        let drafter_mutex = if config.draft_n.is_some() {
+            self.loaded_drafters
+                .get(model_id)
+                .map(|d| d.value().clone())
+        } else {
+            None
+        };
         let prompt = prompt.to_string();
         let config = config.clone();
 
         tokio::task::spawn_blocking(move || {
             let loaded = model_mutex.blocking_lock();
-            Self::generate_sync_streaming(&loaded, &prompt, &config, Some(&token_tx))
+            let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
+            Self::generate_sync_streaming(
+                &loaded,
+                drafter_guard.as_deref(),
+                &prompt,
+                &config,
+                Some(&token_tx),
+            )
         })
         .await
         .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?
     }
 
-    /// Synchronous text generation using llama.cpp
+    /// Synchronous text generation using llama.cpp.
+    ///
+    /// Convenience wrapper for callers that don't have a drafter ref
+    /// in scope. Falls through to `generate_sync_streaming` with
+    /// `drafter = None` and `token_tx = None`.
     fn generate_sync(
         loaded: &LoadedModel,
         prompt: &str,
         config: &GenerationConfig,
     ) -> Result<InferenceResult> {
-        Self::generate_sync_streaming(loaded, prompt, config, None)
+        Self::generate_sync_streaming(loaded, None, prompt, config, None)
     }
 
-    /// Core synchronous generation loop, optionally streaming each token.
+    /// Core synchronous generation loop, optionally streaming each
+    /// token and optionally running speculative decoding when an MTP
+    /// drafter is provided.
     fn generate_sync_streaming(
         loaded: &LoadedModel,
+        drafter: Option<&LoadedDrafter>,
         prompt: &str,
         config: &GenerationConfig,
         token_tx: Option<&tokio::sync::mpsc::Sender<String>>,
     ) -> Result<InferenceResult> {
         // MTP / speculative-decoding seam. When the caller passes
-        // `draft_n: Some(n)`, they want the runtime to run the target
-        // model's paired drafter for speculative decoding. The
-        // in-process `llama-cpp-2 = "0.1.143"` crate does not yet
-        // expose llama.cpp's `common_speculative` API surface
-        // (`--spec-type draft` / `--spec-type draft-mtp` and the
-        // accompanying `--spec-draft-n-max <n>` knob). Until the
-        // binding lands — either upstream in `llama-cpp-rs` or via a
-        // local vendor of the crate — every speculative request is
-        // failed cleanly here so callers can degrade gracefully or
-        // fall back to a raw `llama-cli` invocation outside the
-        // in-process runtime. This is the single call site to flip
-        // when the binding ships.
+        // `draft_n: Some(n)`:
+        //   - If a drafter is loaded for this target, run the
+        //     speculative path via `MtpSpeculative`.
+        //   - If no drafter is loaded, return `MtpUnavailable` with a
+        //     reason that tells the caller to load the drafter first
+        //     (or unset draft_n for single-token sampling).
+        //
+        // The binding comes from the vendored `llama-cpp-rs` branch
+        // `mtp-speculative-decoding` (DINOZYAVIER/llama-cpp-rs PR
+        // #1027). When upstream merges, drop the [patch.crates-io]
+        // block at the workspace root and this seam stays unchanged.
         if let Some(n) = config.draft_n {
-            return Err(ModelError::MtpUnavailable {
-                reason: format!(
-                    "draft_n={} requested but llama-cpp-2 v0.1.143 does not yet \
-                     expose common_speculative bindings; pair the target with \
-                     `--model-draft <drafter.gguf> --spec-type draft-mtp \
-                     --spec-draft-n-max {}` in a raw llama-cli invocation or \
-                     unset draft_n to use single-token sampling",
-                    n, n,
-                ),
-            });
+            let Some(drafter) = drafter else {
+                return Err(ModelError::MtpUnavailable {
+                    reason: format!(
+                        "draft_n={} requested but no MTP drafter is loaded for this target. \
+                         Call ModelRuntime::load_drafter(target_id, drafter.gguf) before \
+                         submitting speculative requests, or unset draft_n to use \
+                         single-token sampling.",
+                        n,
+                    ),
+                });
+            };
+            return Self::generate_speculative(loaded, drafter, prompt, config, token_tx, n);
         }
 
         let start = Instant::now();
@@ -840,6 +1009,344 @@ impl ModelRuntime {
             0.0
         };
 
+        Ok(InferenceResult {
+            text: output_text,
+            input_tokens,
+            output_tokens,
+            generation_time_ms,
+            tokens_per_second,
+        })
+    }
+
+    /// Speculative-decoding generation loop using llama.cpp's MTP
+    /// helper. The target's catalog entry must declare
+    /// `mtp_kind: MtpKind::DraftMtp`; the drafter is the
+    /// jointly-trained MTP head sidecar GGUF (e.g. Gemma 4's
+    /// `mtp-gemma-4-12B-it.gguf`).
+    ///
+    /// Loop shape per llama.cpp `common_speculative` semantics:
+    ///   1. Tokenize prompt and prefill the target context.
+    ///   2. Initialize `MtpSpeculative::begin(prompt)`.
+    ///   3. Sample one token from the target to seed `id_last`.
+    ///   4. Loop:
+    ///        a. Ask the drafter for up to `n_max` candidate tokens
+    ///           after `id_last`.
+    ///        b. Batch-decode the candidates on the target.
+    ///        c. Compare each candidate against the target's sample
+    ///           and accept the longest matching prefix.
+    ///        d. Notify the drafter how many were accepted.
+    ///        e. Emit accepted tokens (+ the next target token) and
+    ///           update `n_past` / `id_last`.
+    ///
+    /// Generation stops on EOG or `max_tokens`. Errors surface as
+    /// `ModelError::MtpUnavailable` so the caller can degrade to
+    /// single-token sampling by unsetting `draft_n`.
+    fn generate_speculative(
+        loaded: &LoadedModel,
+        drafter: &LoadedDrafter,
+        prompt: &str,
+        config: &GenerationConfig,
+        token_tx: Option<&tokio::sync::mpsc::Sender<String>>,
+        draft_n: u8,
+    ) -> Result<InferenceResult> {
+        let start = Instant::now();
+
+        // Tokenize prompt
+        let tokens_list = loaded
+            .model
+            .str_to_token(prompt, AddBos::Always)
+            .map_err(|e| ModelError::Other(format!("Tokenization failed: {}", e)))?;
+        let input_tokens = tokens_list.len() as u32;
+
+        let n_ctx_target = NonZeroU32::new(loaded.context_length)
+            .unwrap_or(NonZeroU32::new(DEFAULT_CONTEXT_LENGTH).unwrap());
+        let n_ctx_draft = NonZeroU32::new(drafter.context_length)
+            .unwrap_or(NonZeroU32::new(DEFAULT_CONTEXT_LENGTH).unwrap());
+
+        // Build target + draft contexts.
+        let target_ctx = loaded
+            .model
+            .new_context(
+                &loaded.backend,
+                LlamaContextParams::default().with_n_ctx(Some(n_ctx_target)),
+            )
+            .map_err(|e| {
+                ModelError::Other(format!(
+                    "Failed to create target context for speculative decoding: {}",
+                    e
+                ))
+            })?;
+        let draft_ctx = drafter
+            .model
+            .new_context(
+                &drafter.backend,
+                LlamaContextParams::default().with_n_ctx(Some(n_ctx_draft)),
+            )
+            .map_err(|e| {
+                ModelError::Other(format!(
+                    "Failed to create draft context for speculative decoding: {}",
+                    e
+                ))
+            })?;
+
+        // Build the MTP speculative helper. `n_max` caps draft length;
+        // Unsloth's recommendation is 2 to start, callers may pass
+        // 1..=6.
+        let mut spec = MtpSpeculative::new(
+            target_ctx,
+            draft_ctx,
+            MtpSpeculativeParams {
+                n_max: draft_n as i32,
+                n_min: 0,
+                p_min: 0.0,
+            },
+        )
+        .map_err(|e| ModelError::MtpUnavailable {
+            reason: format!("MtpSpeculative init failed: {}", e),
+        })?;
+
+        // Begin a new generation with the prompt tokens.
+        spec.begin(&tokens_list)
+            .map_err(|e| ModelError::MtpUnavailable {
+                reason: format!("MtpSpeculative begin failed: {}", e),
+            })?;
+
+        // Prefill the target context with the prompt.
+        let batch_size = std::cmp::max(tokens_list.len(), 512);
+        let mut batch = LlamaBatch::new(batch_size, 1);
+        let last_index = (tokens_list.len() - 1) as i32;
+        for (i, token) in tokens_list.iter().enumerate() {
+            let is_last = i as i32 == last_index;
+            batch
+                .add(*token, i as i32, &[0], is_last)
+                .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
+        }
+        spec.target_context_mut()
+            .decode(&mut batch)
+            .map_err(|e| ModelError::Other(format!("Prompt decode failed: {}", e)))?;
+
+        // Sampler chain — identical to the single-token path so
+        // temperature/top_p/repetition penalty behave the same. The
+        // drafter only PROPOSES tokens; the target's sampler decides
+        // which are kept.
+        let mut sampler = LlamaSampler::chain_simple([
+            LlamaSampler::penalties(
+                config.repeat_last_n as i32,
+                config.repeat_penalty,
+                0.0,
+                0.0,
+            ),
+            LlamaSampler::temp(config.temperature as f32),
+            LlamaSampler::top_p(config.top_p as f32, 1),
+            LlamaSampler::dist(config.seed as u32),
+        ]);
+
+        let mut n_cur = batch.n_tokens();
+        let mut output_tokens: u32 = 0;
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
+        let mut output_text = String::new();
+        let max_pos = (n_ctx_target.get() as i32)
+            .min(input_tokens as i32 + config.max_tokens as i32);
+
+        // Seed `id_last` by sampling one token from the target. The
+        // drafter conditions its draft on this token.
+        let mut id_last = sampler.sample(spec.target_context_mut(), batch.n_tokens() - 1);
+        sampler.accept(id_last);
+
+        // Emit the seed token.
+        if loaded.model.is_eog_token(id_last) {
+            return Ok(InferenceResult {
+                text: output_text,
+                input_tokens,
+                output_tokens,
+                generation_time_ms: start.elapsed().as_millis() as u64,
+                tokens_per_second: 0.0,
+            });
+        }
+        match loaded
+            .model
+            .token_to_piece(id_last, &mut decoder, true, None)
+        {
+            Ok(piece) => {
+                if let Some(tx) = token_tx
+                    && tx.blocking_send(piece.clone()).is_err()
+                {
+                    // Receiver dropped — finish what we have.
+                    return Ok(InferenceResult {
+                        text: output_text,
+                        input_tokens,
+                        output_tokens,
+                        generation_time_ms: start.elapsed().as_millis() as u64,
+                        tokens_per_second: 0.0,
+                    });
+                }
+                output_text.push_str(&piece);
+            }
+            Err(e) => warn!("Failed to decode seed token {}: {}", id_last.0, e),
+        }
+        output_tokens += 1;
+        n_cur += 1;
+
+        // Speculative loop.
+        let mut prompt_so_far: Vec<llama_cpp_2::token::LlamaToken> = tokens_list.clone();
+        prompt_so_far.push(id_last);
+
+        while n_cur < max_pos && !loaded.model.is_eog_token(id_last) {
+            // 1. Ask the drafter for candidates.
+            let drafts = match spec.draft(n_cur, id_last, &prompt_so_far) {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!(
+                        "Speculative draft failed at n_past={}: {} — falling back to single-token sample",
+                        n_cur, e
+                    );
+                    Vec::new()
+                }
+            };
+
+            if drafts.is_empty() {
+                // No draft produced — fall back to a single-token
+                // sample on the target. This keeps the loop making
+                // progress when the drafter refuses (low confidence,
+                // edge of context, etc.).
+                batch.clear();
+                batch
+                    .add(id_last, n_cur, &[0], true)
+                    .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
+                spec.target_context_mut()
+                    .decode(&mut batch)
+                    .map_err(|e| ModelError::Other(format!("Decode failed: {}", e)))?;
+                let next = sampler.sample(spec.target_context_mut(), batch.n_tokens() - 1);
+                sampler.accept(next);
+                if loaded.model.is_eog_token(next) {
+                    break;
+                }
+                if let Ok(piece) = loaded.model.token_to_piece(next, &mut decoder, true, None) {
+                    if let Some(tx) = token_tx
+                        && tx.blocking_send(piece.clone()).is_err()
+                    {
+                        break;
+                    }
+                    output_text.push_str(&piece);
+                }
+                output_tokens += 1;
+                n_cur += 1;
+                prompt_so_far.push(next);
+                id_last = next;
+                continue;
+            }
+
+            // 2. Batch-decode the draft candidates on the target.
+            //    We add `id_last` first at position n_cur-1 so the
+            //    target has a logit slot for the FIRST draft slot.
+            //    Actually llama.cpp's pattern: we decoded id_last in
+            //    the previous turn, so its logits sit at the last
+            //    slot. For each draft token we add it to the batch
+            //    and ask the target to produce logits at THAT slot
+            //    so we can decide accept/reject by comparing the
+            //    target's sample with the draft.
+            batch.clear();
+            for (i, draft_tok) in drafts.iter().enumerate() {
+                let pos = n_cur + i as i32;
+                batch
+                    .add(*draft_tok, pos, &[0], true)
+                    .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
+            }
+            spec.target_context_mut()
+                .decode(&mut batch)
+                .map_err(|e| ModelError::Other(format!("Target speculative decode failed: {}", e)))?;
+
+            // 3. Accept / reject by comparing target samples to drafts.
+            let mut n_accepted: u16 = 0;
+            for (i, draft_tok) in drafts.iter().enumerate() {
+                let logit_idx = i as i32;
+                let target_sample =
+                    sampler.sample(spec.target_context_mut(), logit_idx);
+                sampler.accept(target_sample);
+                if target_sample == *draft_tok {
+                    n_accepted += 1;
+                    id_last = target_sample;
+                    prompt_so_far.push(target_sample);
+                    if loaded.model.is_eog_token(target_sample) {
+                        break;
+                    }
+                    if let Ok(piece) =
+                        loaded.model.token_to_piece(target_sample, &mut decoder, true, None)
+                    {
+                        if let Some(tx) = token_tx
+                            && tx.blocking_send(piece.clone()).is_err()
+                        {
+                            // Receiver dropped.
+                            spec.accept(n_accepted)
+                                .map_err(|e| ModelError::MtpUnavailable {
+                                    reason: format!("MtpSpeculative accept failed: {}", e),
+                                })?;
+                            return Ok(InferenceResult {
+                                text: output_text,
+                                input_tokens,
+                                output_tokens,
+                                generation_time_ms: start.elapsed().as_millis() as u64,
+                                tokens_per_second: 0.0,
+                            });
+                        }
+                        output_text.push_str(&piece);
+                    }
+                    output_tokens += 1;
+                } else {
+                    // First rejection — keep the target's sample as
+                    // the next id_last and stop accepting drafts.
+                    id_last = target_sample;
+                    prompt_so_far.push(target_sample);
+                    if loaded.model.is_eog_token(target_sample) {
+                        break;
+                    }
+                    if let Ok(piece) =
+                        loaded.model.token_to_piece(target_sample, &mut decoder, true, None)
+                    {
+                        if let Some(tx) = token_tx
+                            && tx.blocking_send(piece.clone()).is_err()
+                        {
+                            spec.accept(n_accepted)
+                                .map_err(|e| ModelError::MtpUnavailable {
+                                    reason: format!("MtpSpeculative accept failed: {}", e),
+                                })?;
+                            return Ok(InferenceResult {
+                                text: output_text,
+                                input_tokens,
+                                output_tokens,
+                                generation_time_ms: start.elapsed().as_millis() as u64,
+                                tokens_per_second: 0.0,
+                            });
+                        }
+                        output_text.push_str(&piece);
+                    }
+                    output_tokens += 1;
+                    break;
+                }
+            }
+
+            // 4. Tell the drafter how many were accepted so it can
+            //    advance its own KV cache.
+            spec.accept(n_accepted)
+                .map_err(|e| ModelError::MtpUnavailable {
+                    reason: format!("MtpSpeculative accept failed: {}", e),
+                })?;
+
+            // 5. Advance n_cur by accepted + 1 (the extra sampled token).
+            n_cur += n_accepted as i32 + 1;
+
+            if loaded.model.is_eog_token(id_last) {
+                break;
+            }
+        }
+
+        let elapsed = start.elapsed();
+        let generation_time_ms = elapsed.as_millis() as u64;
+        let tokens_per_second = if generation_time_ms > 0 {
+            (output_tokens as f64) / (generation_time_ms as f64 / 1000.0)
+        } else {
+            0.0
+        };
         Ok(InferenceResult {
             text: output_text,
             input_tokens,

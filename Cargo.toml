@@ -29,6 +29,17 @@ members = [
     "crates/tenzro-cli",
     "tools/genkeys",
 ]
+exclude = [
+    # Vendored llama-cpp-rs has its own workspace (members: llama-cpp-2,
+    # llama-cpp-sys-2, plus examples/embeddings/server/etc). Exclude the
+    # whole directory so cargo doesn't fold its workspace into ours when
+    # we patch.crates-io against it. The [patch.crates-io] block at the
+    # end of this file is what actually wires the two vendored crates
+    # into our build graph as path overrides.
+    "vendor/llama-cpp-rs",
+    "vendor/llama-cpp-rs/llama-cpp-2",
+    "vendor/llama-cpp-rs/llama-cpp-sys-2",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -286,7 +297,7 @@ ciborium = "0.2"
 hf-hub = { version = "0.4", features = ["tokio"] }
 
 # llama.cpp bindings (replaces candle — proper Metal/CUDA GPU support)
-llama-cpp-2 = "0.1"
+llama-cpp-2 = "0.1.147"
 
 # ONNX Runtime — for non-LLM modalities (timeseries forecasting, vision encoders).
 # 2.0 line is the active 2026 standard; auto-downloads the ONNX Runtime binary on
@@ -351,4 +362,15 @@ strip = "symbols"
 [profile.dev]
 opt-level = 0
 debug = true
+
+# Vendored llama-cpp-rs branch with Multi-Token-Prediction speculative
+# decoding (`MtpSpeculative` + `LlamaContextType::Mtp`). Upstream PR
+# utilityai/llama-cpp-rs#1027 is open and conflicting against main; we
+# vendor the fork's branch so the workspace can drive `--spec-type
+# draft-mtp` GGUFs in-process via the new safe wrapper. Once upstream
+# merges (or ships an equivalent API), drop the patch and bump the
+# `llama-cpp-2` constraint above.
+[patch.crates-io]
+llama-cpp-2 = { path = "vendor/llama-cpp-rs/llama-cpp-2" }
+llama-cpp-sys-2 = { path = "vendor/llama-cpp-rs/llama-cpp-sys-2" }
 

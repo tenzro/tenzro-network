@@ -536,6 +536,37 @@ impl InferenceRouter {
             )));
         }
 
+        // MTP filter — when the caller asked for speculative decoding
+        // (Multi-Token Prediction), prefer providers that advertise an
+        // MTP-capable runtime (`ProviderCapacity.mtp_enabled = true`).
+        //
+        // The `draft_n` hint rides on `InferenceParameters.custom` so
+        // we don't churn the serialized request shape. Tenzro chat
+        // RPC + SDKs already mirror their own `draft_n` field into
+        // this slot.
+        //
+        // Strategy: hard-filter when at least one MTP-capable provider
+        // exists; if none do, fall back to the existing pool rather
+        // than failing the request — the runtime will return a clean
+        // MtpUnavailable error so the caller can degrade.
+        let wants_mtp = request
+            .parameters
+            .custom
+            .get("draft_n")
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|n| (1..=6).contains(n))
+            .is_some();
+        if wants_mtp {
+            let mtp_providers: Vec<_> = providers
+                .iter()
+                .filter(|p| p.provider.capacity.mtp_enabled)
+                .cloned()
+                .collect();
+            if !mtp_providers.is_empty() {
+                providers = mtp_providers;
+            }
+        }
+
         // Select provider based on strategy
         let selected = self.select_provider(providers, config)?;
 
