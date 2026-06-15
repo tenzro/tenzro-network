@@ -1,0 +1,4 @@
+[submodule "vendor/llama-cpp-rs"]
+	path = vendor/llama-cpp-rs
+	url = https://github.com/DINOZYAVIER/llama-cpp-rs
+	branch = mtp-speculative-decoding
