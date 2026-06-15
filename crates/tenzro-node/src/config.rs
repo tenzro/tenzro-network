@@ -1654,6 +1654,7 @@ mod tests {
             oauth: None,
             static_jwt: None,
             identity_providers: CantonIdentityProvidersConfig::default(),
+            workflow_receipt_template: None,
         };
 
         // Save: the serializer must drop the secret. This is the half of the

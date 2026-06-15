@@ -649,6 +649,15 @@ fn requires_admin_token(method: &str) -> bool {
             | "tenzro_canton_createIdp"
             | "tenzro_canton_listIdps"
             | "tenzro_canton_deleteIdp"
+            // Workflow / obligation mirror: writes operator-signed DAML
+            // contracts (Tenzro.Workflow:WorkflowAnchor /
+            // Tenzro.Workflow:ObligationAnchor) using the operator's
+            // participant-default party as the contract owner. The
+            // mirrored payloads are internal node state, so the writes
+            // are operator-only.
+            | "tenzro_mirrorWorkflowToCanton"
+            | "tenzro_canton_mirrorReceipt"
+            | "tenzro_mirrorObligationToCanton"
             // Cross-chain mint/burn: bridge ack writes that move
             // settlement supply. Production drive should be signed
             // gossip from validators; the RPC path is operator-only.
@@ -20191,41 +20200,56 @@ async fn handle_list_daml_contracts(
 
     let adapter = canton_adapter_or_err(node)?;
 
-    // Per-tenant `requestingParties` scope. Same resolution as the
-    // submit path: the bound `canton_user_id` on the API key maps to
-    // that tenant's `primaryParty`; the tenzro-labs team only sees rows
-    // their party is a stakeholder on. `None` here falls through to
-    // the adapter's participant default (legacy shared path).
-    let requesting_party_fq = match (api_key, node.api_key_manager()) {
-        (Some(plaintext), Some(mgr)) => match mgr.lookup(plaintext) {
-            Some(record) => match record.canton_user_id.as_deref() {
-                Some(uid) => Some(
-                    adapter
-                        .primary_party_for_user(uid, record.canton_identity_provider_id.as_deref())
-                        .await
-                        .map_err(|e| JsonRpcError {
-                            code: -32000,
-                            message: format!(
-                                "Canton requestingParties resolve failed for user {}: {}",
-                                uid, e
-                            ),
-                            data: None,
-                        })?,
-                ),
-                None => None,
-            },
-            None => None,
-        },
-        _ => None,
-    };
+    // Per-tenant `requestingParties` scope.
+    //
+    // Security: previously this fell through to the adapter's
+    // participant-default `act_as_party` when the API key had no
+    // `canton_user_id` binding, which let any Canton-scoped tenant key
+    // read contracts under the operator's party. That fallback is gone:
+    // a Canton-scoped key without `canton_user_id` is rejected here
+    // before the adapter is called. Mirrors the write-side fix in
+    // `handle_submit_daml_command`.
+    let plaintext = api_key.ok_or_else(|| JsonRpcError {
+        code: -32001,
+        message: "Canton list requires an api key (canton scope)".to_string(),
+        data: None,
+    })?;
+    let mgr = node.api_key_manager().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Api key manager unavailable on this node".to_string(),
+        data: None,
+    })?;
+    let record = mgr.lookup(plaintext).ok_or_else(|| JsonRpcError {
+        code: -32001,
+        message: "Unknown or revoked api key".to_string(),
+        data: None,
+    })?;
+    let uid = record.canton_user_id.as_deref().ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Api key has no canton_user_id binding — cannot resolve requestingParties. \
+                 Reissue the key with `canton_user_id` so the node can route the \
+                 read under the tenant's own Canton user."
+            .to_string(),
+        data: None,
+    })?;
+    let key_primary_party = adapter
+        .primary_party_for_user(uid, record.canton_identity_provider_id.as_deref())
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!(
+                "Canton requestingParties resolve failed for user {}: {}",
+                uid, e
+            ),
+            data: None,
+        })?;
+    let requesting_party_fq: Option<String> = Some(key_primary_party.clone());
 
     // ── Agent-delegation read-side enforcement ──
     //
     // Refuse the query when the calling key's `allowed_templates` or
     // `can_read_as_parties` restrict it out of the requested scope.
-    // Mirrors the write-side enforcement in handle_submit_daml_command.
-    if let (Some(plaintext), Some(mgr)) = (api_key, node.api_key_manager())
-        && let Some(record) = mgr.lookup(plaintext)
+    // `record` was resolved above when we authorized the requestingParties.
     {
         if !record.allowed_templates.is_empty() {
             for tid in &template_ids {
@@ -21262,39 +21286,66 @@ async fn handle_canton_watch_party(
         })?
         .to_string();
 
-    // Per-tenant authorization: the presenting key must allow reading
-    // for this party. `can_act_as` implies `can_read_as`. When no
-    // allow-list is set (legacy key), any party the operator's
-    // participant can read is accessible — the operator still has
-    // upstream Canton's AuthService as the second gate.
-    //
-    // Also enforce `allowed_templates` when set — captured below after
-    // the template_ids parse so we can check every requested template.
-    let key_record = if let Some(plaintext) = api_key
-        && let Some(mgr) = node.api_key_manager()
-        && let Some(record) = mgr.lookup(plaintext)
-    {
-        if !record.is_active() {
-            return Err(JsonRpcError {
-                code: -32004,
-                message: "Unauthorized: API key inactive".to_string(),
-                data: None,
-            });
-        }
-        if !record.can_read_as(&party) {
-            return Err(JsonRpcError {
-                code: -32004,
-                message: format!(
-                    "Unauthorized: key not allowed to read for party {}",
-                    party
-                ),
-                data: None,
-            });
-        }
-        Some(record)
-    } else {
-        None
-    };
+    // Per-tenant authorization for `watchParty`: the presenting key
+    // must (a) carry a `canton_user_id` binding and (b) be authorized
+    // for the explicit `party` it is asking to watch. Either the party
+    // matches the key's resolved `primaryParty`, or the party is on
+    // `can_read_as_parties` / `can_act_as_parties` (agent-delegation
+    // whitelist). Anything else is rejected. Previously, a key with no
+    // `can_read_as_parties` whitelist could watch any party — the
+    // operator's party included.
+    let plaintext = api_key.ok_or_else(|| JsonRpcError {
+        code: -32001,
+        message: "Canton watchParty requires an api key (canton scope)".to_string(),
+        data: None,
+    })?;
+    let mgr = node.api_key_manager().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Api key manager unavailable on this node".to_string(),
+        data: None,
+    })?;
+    let record = mgr.lookup(plaintext).ok_or_else(|| JsonRpcError {
+        code: -32001,
+        message: "Unknown or revoked api key".to_string(),
+        data: None,
+    })?;
+    if !record.is_active() {
+        return Err(JsonRpcError {
+            code: -32004,
+            message: "Unauthorized: API key inactive".to_string(),
+            data: None,
+        });
+    }
+    let adapter_for_resolve = canton_adapter_or_err(node)?;
+    let uid = record.canton_user_id.as_deref().ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "Api key has no canton_user_id binding — cannot authorize watchParty"
+            .to_string(),
+        data: None,
+    })?;
+    let key_primary_party = adapter_for_resolve
+        .primary_party_for_user(uid, record.canton_identity_provider_id.as_deref())
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Canton primary_party resolve failed for user {}: {}", uid, e),
+            data: None,
+        })?;
+    if party != key_primary_party && !record.can_read_as(&party) && !record.can_act_as(&party) {
+        return Err(JsonRpcError {
+            code: -32004,
+            message: format!(
+                "Api key not authorized to read as party `{}` \
+                 (primary party `{}`, allowed read: {:?}, allowed act: {:?})",
+                party,
+                key_primary_party,
+                record.can_read_as_parties,
+                record.can_act_as_parties,
+            ),
+            data: None,
+        });
+    }
+    let key_record = Some(record);
 
     let template_ids: Vec<String> = params
         .get("template_ids")
@@ -40799,5 +40850,78 @@ mod creator_signature_tests {
 
         assert!(verify_creator_signature(&creator, None, Some("00"), msg).is_err());
         assert!(verify_creator_signature(&creator, Some("00"), None, msg).is_err());
+    }
+}
+
+#[cfg(test)]
+mod canton_auth_gate_tests {
+    use super::requires_admin_token;
+
+    /// Workflow / obligation mirror writes are operator-only — the
+    /// payloads are internal node state, and the contracts are signed
+    /// under the operator's participant-default party. Anything that
+    /// can trigger them must come through the admin token.
+    #[test]
+    fn mirror_workflow_to_canton_is_admin_only() {
+        assert!(requires_admin_token("tenzro_mirrorWorkflowToCanton"));
+    }
+
+    #[test]
+    fn canton_mirror_receipt_is_admin_only() {
+        // Snake-case alias for the same handler.
+        assert!(requires_admin_token("tenzro_canton_mirrorReceipt"));
+    }
+
+    #[test]
+    fn mirror_obligation_to_canton_is_admin_only() {
+        assert!(requires_admin_token("tenzro_mirrorObligationToCanton"));
+    }
+
+    /// Per-tenant submit + read paths are NOT admin-gated — they run
+    /// under the calling key's bound Canton user. Catching a regression
+    /// here would mean operators have to use the admin token for every
+    /// tenant call, which collapses multi-tenant isolation.
+    #[test]
+    fn tenant_submit_is_not_admin_gated() {
+        assert!(!requires_admin_token("tenzro_submitDamlCommand"));
+    }
+
+    #[test]
+    fn tenant_list_is_not_admin_gated() {
+        assert!(!requires_admin_token("tenzro_listDamlContracts"));
+    }
+
+    #[test]
+    fn tenant_watch_party_is_not_admin_gated() {
+        assert!(!requires_admin_token("tenzro_canton_watchParty"));
+    }
+
+    #[test]
+    fn tenant_submit_with_mandate_is_not_admin_gated() {
+        assert!(!requires_admin_token("tenzro_canton_submitWithMandate"));
+    }
+
+    /// IDP management remains admin-only — this guards against
+    /// reordering or accidental removal in the requires_admin_token
+    /// match arm.
+    #[test]
+    fn canton_idp_management_is_admin_only() {
+        assert!(requires_admin_token("tenzro_canton_createIdp"));
+        assert!(requires_admin_token("tenzro_canton_listIdps"));
+        assert!(requires_admin_token("tenzro_canton_deleteIdp"));
+    }
+
+    /// Aggregate analytics is operator-scope: a tenant only sees their
+    /// own counters via `getMyAnalytics`, never the fleet rollup.
+    #[test]
+    fn canton_analytics_aggregate_is_admin_only() {
+        assert!(requires_admin_token("tenzro_canton_listApiKeyAnalytics"));
+        assert!(requires_admin_token("tenzro_canton_aggregateAnalytics"));
+    }
+
+    #[test]
+    fn canton_my_analytics_is_not_admin_gated() {
+        // Subject self-read.
+        assert!(!requires_admin_token("tenzro_canton_getMyAnalytics"));
     }
 }
