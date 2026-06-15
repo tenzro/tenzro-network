@@ -2942,6 +2942,57 @@ impl ConsensusEngine for HotStuff2Engine {
         // incoming proposal, never arbitrary jumps; (3) the parent block
         // must already be in `self.blocks` (every proposal forward-syncs
         // its block into the cache on `on_proposal`'s prelude).
+        // Downward self-heal: `view_state.height` must never exceed
+        // `finalized_height + 1`. Both finalize paths (on_vote and
+        // finalize_with_commit_qc) advance `state.height` by `+1` relative
+        // to its own in-memory value, gated on `finalize_block` SUCCESS.
+        // If `view_state.height` ever drifts ahead of the FinalityTracker
+        // (a transient finalize the tracker later rolled back, or a view
+        // advancement without a matching tracker finalize), the gate at
+        // line ~3006 then rejects every genuine `finalized_height + 1`
+        // proposal as `InvalidHeight { expected: local_height, actual:
+        // proposal_height }` because `proposal_height < local_height` — a
+        // self-sustaining wedge, since block-sync can't bridge a NEGATIVE
+        // gap either. The existing re-sync-down guards (the
+        // `finalize_block` error arms in both finalize paths) only fire on
+        // finalize FAILURE; they never catch a view_state that ran ahead
+        // while the tracker stayed put.
+        //
+        // Heal it here: when an incoming proposal is for exactly the next
+        // height the tracker expects (`finalized_height + 1`) yet our
+        // `view_state.height` sits strictly above that, the proposal is the
+        // real next block and we are the diverged node. Resync
+        // `view_state.height` down to `finalized_height + 1` and re-read
+        // `local_height` so the proposal passes the gate and we vote. This
+        // is the mirror of the catchup-on-proposal below (which only heals
+        // the proposer-AHEAD case); together they keep `view_state.height`
+        // pinned to `finalized_height + 1` from both directions.
+        let tracker_next_height = self.finality_tracker.finalized_height() + 1u64;
+        if proposal_height == tracker_next_height && local_height > tracker_next_height {
+            let mut state = self.view_state.write();
+            // Re-check under the write lock — a concurrent finalize may have
+            // already advanced the tracker.
+            if state.height > tracker_next_height {
+                tracing::warn!(
+                    stale_height = %state.height,
+                    corrected_height = %tracker_next_height,
+                    proposal_height = %proposal_height,
+                    "view_state.height ran ahead of finality tracker — \
+                     re-syncing down to finalized_height + 1 to accept the \
+                     genuine next proposal"
+                );
+                state.height = tracker_next_height;
+                state.phase = Phase::Prepare;
+                state.proposed_block = None;
+                state.prepare_qc = None;
+                state.commit_qc = None;
+                state.reset_timer();
+            }
+        }
+
+        // Re-read local_height after the downward heal.
+        let local_height = self.view_state.read().height;
+
         if proposal_height == local_height + 1u64 {
             let parent_hash = block.header.prev_hash;
             let parent_known = self.blocks.contains_key(&parent_hash);

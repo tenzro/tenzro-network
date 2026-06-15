@@ -777,10 +777,21 @@ impl BlockSyncEngine {
 
     fn score_peer(&mut self, peer: &PeerId, delta: i32) {
         let entry = self.peers.entry(*peer).or_default();
+        // Clamp into [PEER_SCORE_HARD_BAN_THRESHOLD, PEER_SCORE_CEILING]. The
+        // floor is load-bearing for recovery: without it, a peer that merely
+        // times out repeatedly (e.g. the only node serving the one block we
+        // need, while it is itself slow under load) sinks arbitrarily far
+        // below the hard-ban floor. The behind-hint eligibility gate
+        // (`peer_exclusion_threshold`) relaxes to exactly this floor, so a
+        // peer parked *below* it is excluded even while we are stranded —
+        // catch-up then latches off permanently and the chain halts. Flooring
+        // at the hard-ban line keeps transport-timeout peers eligible during
+        // behind-hinted catch-up indefinitely, which is the intended
+        // behavior: keep retrying the only candidate until it serves the block.
         entry.score = entry
             .score
             .saturating_add(delta)
-            .min(PEER_SCORE_CEILING);
+            .clamp(PEER_SCORE_HARD_BAN_THRESHOLD, PEER_SCORE_CEILING);
         if entry.score < PEER_SCORE_DROP_THRESHOLD {
             warn!(?peer, score = entry.score, "Block-sync: dropping peer below threshold");
         }
