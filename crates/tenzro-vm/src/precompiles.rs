@@ -67,6 +67,19 @@ pub const PRECOMPILE_VRF_VERIFY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 /// Phase 2: extends to verifying syncer signature + attestation chain.
 pub const PRECOMPILE_TRAINING_VERIFY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x08, 0];
 
+/// IBC-Eureka light-client commitment lookup precompile (0x1020). O(1)
+/// match against the on-chain commitment registry maintained by validators
+/// who run the SP1 verifier off-EVM.
+pub const PRECOMPILE_IBC_VERIFY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x20, 0];
+/// Global supply accounting precompile (0x1021). Records cross-rail
+/// mint/burn deltas and enforces the per-asset invariant
+/// `Σ mints − Σ burns ≤ max_supply`.
+pub const PRECOMPILE_GLOBAL_SUPPLY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x21, 0];
+/// ERC-7579 on-chain module registry precompile (0x1022). Tenzro mirror
+/// of Rhinestone's module registry — install / uninstall / lookup of
+/// validator modules with attestation records.
+pub const PRECOMPILE_MODULE_REGISTRY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x22, 0];
+
 // ERC-7579 modular validator precompiles. Re-exported from `crate::erc7579`
 // so that the registry-side wiring can reach them without an extra import.
 pub use crate::erc7579::{

@@ -1,0 +1,37 @@
+/// Tenzro A2A skill component interface.
+///
+/// An A2A skill is a component that exposes one Agent-to-Agent skill
+/// (Google A2A spec) under the Tenzro WASM host. The host translates
+/// incoming A2A JSON-RPC `tasks/send` / `message/send` envelopes into
+/// the WASM `handle-task` export.
+///
+/// Version 1.0 — pinned alongside the `tenzro-wasm` host.
+
+package tenzro:a2a-skill@1.0.0;
+
+interface a2a {
+  /// Stable id of this skill (e.g. `inference`, `wallet`).
+  skill-id: func() -> string;
+  /// Optional human-readable description.
+  description: func() -> string;
+  /// Handle an A2A task. JSON request → JSON response per the A2A spec.
+  handle-task: func(task-json: string) -> result<string, string>;
+  /// Stream incremental progress for long-running tasks. The host fans
+  /// each chunk into an SSE event on the A2A endpoint. Empty string
+  /// signals end-of-stream.
+  stream-task: func(task-json: string) -> result<list<string>, string>;
+}
+
+world tenzro-a2a-skill-world {
+  import tenzro:skill/ledger@1.0.0;
+  import tenzro:skill/signing@1.0.0;
+  import tenzro:skill/identity@1.0.0;
+  import wasi:io/streams@0.2.9;
+  import wasi:clocks/wall-clock@0.2.9;
+  import wasi:clocks/monotonic-clock@0.2.9;
+  import wasi:random/random@0.2.9;
+  import wasi:cli/stdout@0.2.9;
+  import wasi:cli/stderr@0.2.9;
+  import wasi:cli/environment@0.2.9;
+  export a2a;
+}

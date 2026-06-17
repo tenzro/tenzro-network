@@ -98,6 +98,9 @@ impl NodeLaneResolver {
                 IdentityData::Human { kyc_tier, .. } => {
                     return Some((identity.wallet_address, *kyc_tier));
                 }
+                IdentityData::Institution { kyb_tier, .. } => {
+                    return Some((identity.wallet_address, *kyb_tier));
+                }
                 IdentityData::Machine { controller_did: Some(c), .. } => {
                     current_did = c.clone();
                 }
@@ -145,6 +148,15 @@ impl LaneResolver for NodeLaneResolver {
         match &identity.identity_data {
             IdentityData::Human { kyc_tier, .. } => {
                 if *kyc_tier >= KycTier::Enhanced
+                    && self.bonded_stake(&identity.wallet_address) >= self.min_verified_stake
+                {
+                    Lane::Verified
+                } else {
+                    Lane::Open
+                }
+            }
+            IdentityData::Institution { kyb_tier, .. } => {
+                if *kyb_tier >= KycTier::Enhanced
                     && self.bonded_stake(&identity.wallet_address) >= self.min_verified_stake
                 {
                     Lane::Verified
@@ -205,7 +217,9 @@ impl LaneResolver for NodeLaneResolver {
         };
 
         match &identity.identity_data {
-            IdentityData::Human { .. } => identity.wallet_address,
+            IdentityData::Human { .. } | IdentityData::Institution { .. } => {
+                identity.wallet_address
+            }
             IdentityData::Machine { controller_did: Some(c), .. } => {
                 self.resolve_controller_address(c)
                     .map(|(addr, _)| addr)

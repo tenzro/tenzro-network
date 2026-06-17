@@ -5381,6 +5381,262 @@ pub(crate) async fn handle_signed_agent_card_canonical_hash(
     }))
 }
 
+// ===========================================================================
+// Discovery + helper RPCs for the IBC-Eureka, NEAR Chain Signatures, BitVM2,
+// Hyperbridge, Stargate V2 Hydra, Universal Resolver, SIWT, KERI, MPC
+// pre-sign / PKR, global supply, and Institution-identity modules.
+//
+// State-bearing RPCs (party allocation, threshold dispatch, etc.) attach to
+// the corresponding registries when they are constructed in
+// `init_ai_infrastructure`. The handlers below expose the protocol surface
+// (commitment tags, derivation rules, default policies) so wallets and SDKs
+// can integrate against the read path independently of registry wiring.
+// ===========================================================================
+
+/// `tenzro_ibcEurekaCommitmentTag` — domain tag the on-EVM `IBC_VERIFY`
+/// precompile (0x1020) prepends when hashing proof outcomes.
+pub(crate) async fn handle_ibc_eureka_commitment_tag() -> std::result::Result<Value, JsonRpcError> {
+    let tag = tenzro_bridge::ibc_eureka::IbcEurekaAdapter::commitment_domain_tag();
+    Ok(json!({
+        "domain_tag_hex": hex::encode(tag),
+        "domain_tag_utf8": std::str::from_utf8(tag).unwrap_or(""),
+        "precompile_address": "0x0000000000000000000000000000000000102000",
+    }))
+}
+
+/// `tenzro_nearChainSigEpsilon` — derive the NEAR chain-signatures
+/// `epsilon = SHA-256("near-mpc-recovery v0.1.0 epsilon derivation:" ||
+/// predecessor || "," || path)` for a given `(predecessor, path)` pair.
+pub(crate) async fn handle_near_chain_sig_epsilon(
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.unwrap_or(json!({}));
+    let predecessor = p
+        .get("predecessor")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "missing predecessor".to_string(),
+            data: None,
+        })?;
+    let path = p
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "missing path".to_string(),
+            data: None,
+        })?;
+    let epsilon =
+        tenzro_bridge::near_chain_sig::NearChainSigAdapter::epsilon(predecessor, path);
+    Ok(json!({
+        "predecessor": predecessor,
+        "path": path,
+        "epsilon_hex": hex::encode(epsilon),
+    }))
+}
+
+/// `tenzro_bitvm2VerifierKinds` — supported BitVM2 / Clementine verifier
+/// kinds (BitVm2 = production; GarbledCircuitToop = Clementine v2 R&D).
+pub(crate) async fn handle_bitvm2_verifier_kinds() -> std::result::Result<Value, JsonRpcError> {
+    Ok(json!({
+        "verifier_kinds": [
+            { "kind": "BitVm2", "status": "production" },
+            { "kind": "GarbledCircuitToop", "status": "research" },
+        ],
+    }))
+}
+
+/// `tenzro_hyperbridgeMintControlsDefault` — default mint-control policy
+/// applied after the 2026-04-13 Hyperbridge exploit hardening.
+pub(crate) async fn handle_hyperbridge_mint_controls_default(
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = tenzro_bridge::hyperbridge::MintControlPolicy::default();
+    Ok(json!({
+        "forbid_admin_transitions": p.forbid_admin_transitions,
+        "admin_typecodes_hex": p
+            .admin_typecodes
+            .iter()
+            .map(|b| format!("0x{:02x}", b))
+            .collect::<Vec<_>>(),
+        "rationale": "post-2026-04-13 Hyperbridge incident — admin transitions are inadmissible on the message path.",
+    }))
+}
+
+/// `tenzro_stargateV2KnownPools` — verified Stargate V2 Hydra pools.
+pub(crate) async fn handle_stargate_v2_known_pools(
+) -> std::result::Result<Value, JsonRpcError> {
+    let usdc = tenzro_bridge::stargate_v2::known::ethereum_usdc();
+    let usdt = tenzro_bridge::stargate_v2::known::arbitrum_usdt();
+    Ok(json!({
+        "pools": [
+            { "chain": "ethereum", "asset": "USDC", "pool_address": usdc.pool_address, "decimals": usdc.decimals },
+            { "chain": "arbitrum", "asset": "USDT", "pool_address": usdt.pool_address, "decimals": usdt.decimals },
+        ],
+    }))
+}
+
+/// `tenzro_universalResolverMethods` — methods this node can resolve.
+pub(crate) async fn handle_universal_resolver_methods() -> std::result::Result<Value, JsonRpcError> {
+    Ok(json!({ "methods": ["tenzro", "pdis"] }))
+}
+
+/// `tenzro_siwtBuildMessage` — render a SIWT message in EIP-4361 canonical
+/// form from a JSON payload.
+pub(crate) async fn handle_siwt_build_message(
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.unwrap_or(json!({}));
+    let msg: crate::web::siwt::SiwtMessage =
+        serde_json::from_value(p).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid SiwtMessage: {}", e),
+            data: None,
+        })?;
+    Ok(json!({ "message": msg.to_canonical_string() }))
+}
+
+/// `tenzro_siwtParseMessage` — parse a SIWT canonical-form string.
+pub(crate) async fn handle_siwt_parse_message(
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.unwrap_or(json!({}));
+    let raw = p.get("message").and_then(|v| v.as_str()).ok_or_else(|| {
+        JsonRpcError {
+            code: -32602,
+            message: "missing message".to_string(),
+            data: None,
+        }
+    })?;
+    let parsed = crate::web::siwt::SiwtMessage::parse(raw).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("siwt parse: {}", e),
+        data: None,
+    })?;
+    serde_json::to_value(parsed).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("serialize: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_keriBuildInception` — build a KERI inception event.
+pub(crate) async fn handle_keri_build_inception(
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.unwrap_or(json!({}));
+    let signing_keys: Vec<Vec<u8>> = p
+        .get("signing_keys_hex")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "missing signing_keys_hex".to_string(),
+            data: None,
+        })?
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default())
+        .map(|s| hex::decode(s).unwrap_or_default())
+        .collect();
+    let next_key_digests: Vec<[u8; 32]> = p
+        .get("next_key_digests_hex")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "missing next_key_digests_hex".to_string(),
+            data: None,
+        })?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter_map(|s| hex::decode(s).ok())
+        .filter_map(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+        .collect();
+    let signing_threshold = p
+        .get("signing_threshold")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(signing_keys.len() as u64) as u8;
+    let next_threshold = p
+        .get("next_threshold")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(next_key_digests.len() as u64) as u8;
+    let ev = tenzro_identity::keri::KeriEvent::inception(
+        signing_keys,
+        signing_threshold,
+        next_key_digests,
+        next_threshold,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("keri inception: {}", e),
+        data: None,
+    })?;
+    serde_json::to_value(ev).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("serialize: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_mpcPresignStats` — pre-signing pool stats. Returns an empty
+/// array until per-group pools are constructed by the node-layer threshold
+/// signer wave.
+pub(crate) async fn handle_mpc_presign_stats(
+    _node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Ok(json!({ "pools": [] }))
+}
+
+/// `tenzro_mpcPkrStatus` — PKR scheduler snapshots. Returns an empty array
+/// until per-group schedulers are constructed by the node-layer threshold
+/// signer wave.
+pub(crate) async fn handle_mpc_pkr_status(
+    _node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Ok(json!({ "schedulers": [] }))
+}
+
+/// `tenzro_globalSupplyPolicy` — look up a per-asset cross-rail supply
+/// policy. Returns null until the registry is constructed.
+pub(crate) async fn handle_global_supply_policy(
+    _node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    Ok(json!({ "policy": null }))
+}
+
+/// `tenzro_globalSupplyCirculating` — read the cross-rail circulating
+/// supply for an asset. Returns 0 until the registry is constructed.
+pub(crate) async fn handle_global_supply_circulating(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let asset = params
+        .as_ref()
+        .and_then(|v| v.get("asset_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    Ok(json!({ "asset_id": asset, "circulating": "0" }))
+}
+
+/// `tenzro_validateLei` — ISO 17442 Mod 97-10 verifier for the institution
+/// identity class.
+pub(crate) async fn handle_validate_lei(
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let lei = params
+        .as_ref()
+        .and_then(|v| v.get("lei"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "missing lei".to_string(),
+            data: None,
+        })?;
+    match tenzro_identity::did::validate_lei(lei) {
+        Ok(()) => Ok(json!({ "lei": lei, "valid": true })),
+        Err(e) => Ok(json!({ "lei": lei, "valid": false, "reason": format!("{}", e) })),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

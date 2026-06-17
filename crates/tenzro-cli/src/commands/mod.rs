@@ -82,6 +82,16 @@ pub mod hyperlane;
 pub mod axelar;
 pub mod babylon;
 pub mod caip;
+pub mod ibc_eureka;
+pub mod near_chain_sig;
+pub mod bitvm2;
+pub mod hyperbridge;
+pub mod stargate_v2;
+pub mod siwt;
+pub mod keri;
+pub mod institution;
+pub mod global_supply;
+pub mod presign;
 
 // Re-export command types
 pub use node::NodeCommand;

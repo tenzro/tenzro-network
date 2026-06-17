@@ -36,9 +36,16 @@ pub mod abort;
 pub mod committee;
 pub mod keygen;
 pub mod libp2p_relay;
+pub mod pkr_scheduler;
+pub mod presign;
 pub mod refresh;
 pub mod sealing;
 pub mod setup;
 pub mod sign;
 pub mod store;
 pub mod transport;
+
+pub use pkr_scheduler::{
+    PkrCadence, PkrScheduler, PkrSchedulerSnapshot, RotationReason, RotationTrigger,
+};
+pub use presign::{PresignPool, PresignPoolConfig, PresignPoolStats, PresignTuple, SharedPresignPool};

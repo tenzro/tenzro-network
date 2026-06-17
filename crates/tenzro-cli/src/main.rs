@@ -399,6 +399,46 @@ enum Command {
     #[command(subcommand)]
     Caip(CaipCommand),
 
+    /// IBC-Eureka light-client surface
+    #[command(subcommand, name = "ibc-eureka")]
+    IbcEureka(commands::ibc_eureka::IbcEurekaCommand),
+
+    /// NEAR Chain Signatures helpers
+    #[command(subcommand, name = "near-chain-sig")]
+    NearChainSig(commands::near_chain_sig::NearChainSigCommand),
+
+    /// BitVM2 / Clementine v2 peg surface
+    #[command(subcommand)]
+    Bitvm2(commands::bitvm2::BitVm2Command),
+
+    /// Hyperbridge ISMP surface
+    #[command(subcommand)]
+    Hyperbridge(commands::hyperbridge::HyperbridgeCommand),
+
+    /// Stargate V2 Hydra surface
+    #[command(subcommand, name = "stargate-v2")]
+    StargateV2(commands::stargate_v2::StargateV2Command),
+
+    /// Sign-In With Tenzro (EIP-4361-shaped)
+    #[command(subcommand)]
+    Siwt(commands::siwt::SiwtCommand),
+
+    /// KERI Key Event Log helpers
+    #[command(subcommand)]
+    Keri(commands::keri::KeriCommand),
+
+    /// Institution identity (`did:tenzro:institution:<lei>:<uuid>`)
+    #[command(subcommand)]
+    Institution(commands::institution::InstitutionCommand),
+
+    /// Global supply accounting (precompile 0x1021)
+    #[command(subcommand, name = "global-supply")]
+    GlobalSupply(commands::global_supply::GlobalSupplyCommand),
+
+    /// DKLS23 pre-signing pool + PKR scheduler observability
+    #[command(subcommand)]
+    Presign(commands::presign::PresignCommand),
+
     /// Interactive chat with AI models
     Chat(ChatCmd),
 
@@ -588,6 +628,16 @@ async fn main() -> Result<()> {
         Command::Axelar(cmd) => cmd.execute().await?,
         Command::Babylon(cmd) => cmd.execute().await?,
         Command::Caip(cmd) => cmd.execute().await?,
+        Command::IbcEureka(cmd) => cmd.execute().await?,
+        Command::NearChainSig(cmd) => cmd.execute().await?,
+        Command::Bitvm2(cmd) => cmd.execute().await?,
+        Command::Hyperbridge(cmd) => cmd.execute().await?,
+        Command::StargateV2(cmd) => cmd.execute().await?,
+        Command::Siwt(cmd) => cmd.execute().await?,
+        Command::Keri(cmd) => cmd.execute().await?,
+        Command::Institution(cmd) => cmd.execute().await?,
+        Command::GlobalSupply(cmd) => cmd.execute().await?,
+        Command::Presign(cmd) => cmd.execute().await?,
         Command::Faucet(cmd) => execute_faucet(cmd).await?,
         Command::Chat(cmd) => execute_chat(cmd).await?,
         Command::Hardware(cmd) => commands::hardware::execute(&cmd.format).await?,

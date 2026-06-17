@@ -227,7 +227,12 @@ impl Cip56TokenAdapter {
         Ok(())
     }
 
-    /// Builds a Canton Ledger API v2 create command for a TnzoHolding
+    /// Builds a Canton Ledger API v2 create command for a TnzoHolding.
+    ///
+    /// Returns the inner `commands` fragment; the caller wraps it inside
+    /// the JsCommands envelope (`{"commands": {"commandId": ..., "userId":
+    /// ..., "actAs": [...], "commands": [<this>]}}`). Canton 3.5+ requires
+    /// each command to be externally tagged as `CreateCommand`.
     pub fn build_create_holding_command(
         &self,
         owner: &str,
@@ -235,7 +240,7 @@ impl Cip56TokenAdapter {
     ) -> serde_json::Value {
         serde_json::json!({
             "commands": [{
-                "Create": {
+                "CreateCommand": {
                     "templateId": TNZO_HOLDING_TEMPLATE,
                     "createArguments": {
                         "owner": owner,
@@ -247,7 +252,9 @@ impl Cip56TokenAdapter {
         })
     }
 
-    /// Builds a Canton Ledger API v2 exercise command for Transfer choice
+    /// Builds a Canton Ledger API v2 exercise command for the Transfer
+    /// choice. See [`Self::build_create_holding_command`] for wrap rules;
+    /// Canton 3.5+ requires `ExerciseCommand` as the external tag.
     pub fn build_transfer_command(
         &self,
         holding_contract_id: &str,
@@ -256,7 +263,7 @@ impl Cip56TokenAdapter {
     ) -> serde_json::Value {
         serde_json::json!({
             "commands": [{
-                "Exercise": {
+                "ExerciseCommand": {
                     "templateId": TNZO_HOLDING_TEMPLATE,
                     "contractId": holding_contract_id,
                     "choice": "Transfer",
@@ -445,13 +452,13 @@ mod tests {
         let adapter = setup();
 
         let cmd = adapter.build_create_holding_command("Alice::1234", "100.0");
-        assert!(cmd["commands"][0]["Create"]["templateId"]
+        assert!(cmd["commands"][0]["CreateCommand"]["templateId"]
             .as_str()
             .unwrap()
             .contains("TnzoHolding"));
 
         let cmd = adapter.build_transfer_command("contract-123", "Bob::5678", "50.0");
-        assert!(cmd["commands"][0]["Exercise"]["choice"]
+        assert!(cmd["commands"][0]["ExerciseCommand"]["choice"]
             .as_str()
             .unwrap()
             == "Transfer");

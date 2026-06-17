@@ -28,6 +28,12 @@ pub enum DidType {
     /// Machine/agent identity — delegated (`did:tenzro:machine:{controller}:{uuid}`)
     /// or autonomous (`did:tenzro:machine:{uuid}`)
     Machine,
+    /// Institution identity (`did:tenzro:institution:{lei}:{uuid}`). The 20-
+    /// character LEI is the ISO 17442 Legal Entity Identifier and anchors
+    /// the institution to its GLEIF record. The trailing UUID lets one
+    /// legal entity hold multiple identities (e.g. one per desk / fund /
+    /// subsidiary) without re-issuing LEIs.
+    Institution,
 }
 
 impl fmt::Display for DidType {
@@ -35,8 +41,51 @@ impl fmt::Display for DidType {
         match self {
             DidType::Human => write!(f, "human"),
             DidType::Machine => write!(f, "machine"),
+            DidType::Institution => write!(f, "institution"),
         }
     }
+}
+
+/// ISO 17442 Legal Entity Identifier length (20 chars: 4 LOU + 2 reserved
+/// `00` + 12 entity-specific + 2 ISO 7064 Mod 97-10 check digits).
+pub const LEI_LEN: usize = 20;
+
+/// Validate an LEI's check digits using ISO 7064 Mod 97-10. Letters convert
+/// to digits via `A=10, B=11, ..., Z=35`, the resulting integer mod 97 must
+/// equal 1. Implemented in streaming mod-97 to avoid the multi-precision
+/// path.
+pub fn validate_lei(lei: &str) -> Result<()> {
+    if lei.len() != LEI_LEN {
+        return Err(IdentityError::InvalidDid(format!(
+            "LEI must be exactly {} characters, got {}",
+            LEI_LEN,
+            lei.len()
+        )));
+    }
+    let mut rem: u32 = 0;
+    for c in lei.chars() {
+        let value: u32 = match c {
+            '0'..='9' => c as u32 - '0' as u32,
+            'A'..='Z' => 10 + (c as u32 - 'A' as u32),
+            _ => {
+                return Err(IdentityError::InvalidDid(format!(
+                    "LEI contains illegal character: {}",
+                    c
+                )))
+            }
+        };
+        if value < 10 {
+            rem = (rem * 10 + value) % 97;
+        } else {
+            rem = (rem * 100 + value) % 97;
+        }
+    }
+    if rem != 1 {
+        return Err(IdentityError::InvalidDid(
+            "LEI check digits failed ISO 7064 Mod 97-10".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// A parsed Tenzro DID
@@ -80,6 +129,32 @@ impl TenzroDid {
             id: uuid::Uuid::new_v4().to_string(),
             controller_id: None,
         }
+    }
+
+    /// Creates a new institution DID anchored to a GLEIF Legal Entity
+    /// Identifier (ISO 17442). The LEI is validated with the Mod 97-10
+    /// algorithm; an invalid LEI returns an error rather than allowing the
+    /// caller to construct an unverifiable institution identity.
+    pub fn new_institution(lei: &str) -> Result<Self> {
+        validate_lei(lei)?;
+        Ok(Self {
+            did_type: DidType::Institution,
+            id: uuid::Uuid::new_v4().to_string(),
+            controller_id: Some(lei.to_string()),
+        })
+    }
+
+    /// LEI for institution DIDs (None for human/machine).
+    pub fn lei(&self) -> Option<&str> {
+        match self.did_type {
+            DidType::Institution => self.controller_id.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this is an institution DID.
+    pub fn is_institution(&self) -> bool {
+        self.did_type == DidType::Institution
     }
 
     /// Parses a DID string into a TenzroDid
@@ -133,6 +208,25 @@ impl TenzroDid {
                     rest
                 ))),
             }
+        } else if let Some(rest) = rest.strip_prefix("institution:") {
+            // institution:{lei}:{uuid} — both segments required, LEI Mod 97-10
+            // validated so a malformed LEI never lands in the identity registry.
+            let (lei, uuid) = rest.split_once(':').ok_or_else(|| {
+                IdentityError::InvalidDid(
+                    "institution DID requires `institution:{lei}:{uuid}`".to_string(),
+                )
+            })?;
+            validate_lei(lei)?;
+            if uuid.is_empty() {
+                return Err(IdentityError::InvalidDid(
+                    "institution DID missing uuid".to_string(),
+                ));
+            }
+            Ok(Self {
+                did_type: DidType::Institution,
+                id: uuid.to_string(),
+                controller_id: Some(lei.to_string()),
+            })
         } else {
             Err(IdentityError::InvalidDid(format!(
                 "unknown DID type in did:tenzro:{}",
@@ -151,6 +245,10 @@ impl TenzroDid {
                 } else {
                     format!("did:tenzro:machine:{}", self.id)
                 }
+            }
+            DidType::Institution => {
+                let lei = self.controller_id.as_deref().unwrap_or("");
+                format!("did:tenzro:institution:{}:{}", lei, self.id)
             }
         }
     }

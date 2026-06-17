@@ -1,0 +1,58 @@
+/// Tenzro skill component interface.
+///
+/// A Tenzro skill is a WASI 0.2 component that runs inside the
+/// `tenzro-wasm` host. The host imports a Tenzro-specific surface
+/// (signing, ledger reads, identity resolution) and the skill exports
+/// `init` + `invoke` + `shutdown`.
+///
+/// Version 1.0 — pinned alongside the `tenzro-wasm` host.
+
+package tenzro:skill@1.0.0;
+
+interface ledger {
+  /// Read an account balance (in base units) for the resolved DID.
+  read-balance: func(did: string, asset: string) -> result<u128, string>;
+  /// Submit a signed transaction. Returns the tx hash hex.
+  submit-tx: func(signed-tx: list<u8>) -> result<string, string>;
+  /// Read the latest finalised block height.
+  latest-height: func() -> u64;
+}
+
+interface signing {
+  /// Request the host to sign `payload` with the skill's bound wallet
+  /// (per its [DelegationScope]). Returns DER-encoded signature.
+  sign: func(payload: list<u8>) -> result<list<u8>, string>;
+  /// Return the public key associated with the skill's bound wallet.
+  public-key: func() -> list<u8>;
+}
+
+interface identity {
+  /// Resolve `did` to a JSON-encoded DID Document.
+  resolve: func(did: string) -> result<string, string>;
+  /// Return the skill's caller DID (the DID that invoked this skill).
+  caller-did: func() -> string;
+}
+
+interface skill {
+  /// One-shot init. Called exactly once before any `invoke`.
+  init: func(config: string) -> result<_, string>;
+  /// Invoke the skill with a JSON request, return a JSON response.
+  invoke: func(request: string) -> result<string, string>;
+  /// Graceful shutdown signal. The host calls this when unloading.
+  shutdown: func();
+}
+
+world tenzro-skill-world {
+  import ledger;
+  import signing;
+  import identity;
+  // WASI 0.2 base imports the skill needs at runtime.
+  import wasi:io/streams@0.2.9;
+  import wasi:clocks/wall-clock@0.2.9;
+  import wasi:clocks/monotonic-clock@0.2.9;
+  import wasi:random/random@0.2.9;
+  import wasi:cli/stdout@0.2.9;
+  import wasi:cli/stderr@0.2.9;
+  import wasi:cli/environment@0.2.9;
+  export skill;
+}

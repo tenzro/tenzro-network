@@ -1452,7 +1452,9 @@ impl IdentityRegistry {
         let controller_did_opt = actor.controller_did().map(|s| s.to_string());
         if controller_did_opt.is_none() {
             let kyc = match actor_type {
-                TenzroIdentityType::Human => actor.kyc_tier().map(|t| t.level()).unwrap_or(0),
+                TenzroIdentityType::Human | TenzroIdentityType::Institution => {
+                    actor.kyc_tier().map(|t| t.level()).unwrap_or(0)
+                }
                 TenzroIdentityType::Machine => 0,
             };
             let controller_aggregate = self
@@ -1531,7 +1533,10 @@ impl IdentityRegistry {
                     let next = parent.controller_did().map(|s| s.to_string());
                     if next.is_none() {
                         // Reached the top — snapshot KYC tier from this link.
-                        if let TenzroIdentityType::Human = parent_type {
+                        if matches!(
+                            parent_type,
+                            TenzroIdentityType::Human | TenzroIdentityType::Institution
+                        ) {
                             controller_kyc_tier =
                                 parent.kyc_tier().map(|t| t.level()).unwrap_or(0);
                         }
@@ -1822,6 +1827,10 @@ impl IdentityRegistry {
                     controlled_machines,
                     ..
                 } => controlled_machines.clone(),
+                IdentityData::Institution {
+                    controlled_machines,
+                    ..
+                } => controlled_machines.clone(),
                 IdentityData::Machine { .. } => Vec::new(),
             };
 
@@ -2070,8 +2079,8 @@ impl IdentityRegistry {
                 reputation,
                 ..
             } => (delegation_scope.clone(), controller_did.clone(), *reputation),
-            IdentityData::Human { .. } => {
-                // Humans bypass delegation enforcement entirely.
+            IdentityData::Human { .. } | IdentityData::Institution { .. } => {
+                // Humans and institutions bypass delegation enforcement entirely.
                 return Ok(());
             }
         };
@@ -2154,9 +2163,13 @@ impl IdentityRegistry {
                 controlled_machines,
                 ..
             } => controlled_machines.clone(),
+            IdentityData::Institution {
+                controlled_machines,
+                ..
+            } => controlled_machines.clone(),
             _ => {
                 return Err(IdentityError::PermissionDenied(
-                    "only human identities have controlled machines".to_string(),
+                    "only human / institution identities have controlled machines".to_string(),
                 ))
             }
         };
@@ -2176,6 +2189,10 @@ impl IdentityRegistry {
             match entry.value().identity_data {
                 IdentityData::Human { .. } => humans += 1,
                 IdentityData::Machine { .. } => machines += 1,
+                // Institutions are counted via `institution_count` so the
+                // (humans, machines) tuple stays compatible with existing
+                // callers.
+                IdentityData::Institution { .. } => {}
             }
         }
         (humans, machines)
@@ -2184,6 +2201,14 @@ impl IdentityRegistry {
     /// Returns the total number of registered identities
     pub fn total_count(&self) -> usize {
         self.identities.len()
+    }
+
+    /// Returns the count of registered institution identities.
+    pub fn institution_count(&self) -> usize {
+        self.identities
+            .iter()
+            .filter(|entry| matches!(entry.value().identity_data, IdentityData::Institution { .. }))
+            .count()
     }
 
     /// Returns all registered identities as (DID, TenzroIdentity) pairs
@@ -2446,6 +2471,7 @@ fn identity_type_of(identity: &TenzroIdentity) -> TenzroIdentityType {
     match identity.identity_data {
         IdentityData::Human { .. } => TenzroIdentityType::Human,
         IdentityData::Machine { .. } => TenzroIdentityType::Machine,
+        IdentityData::Institution { .. } => TenzroIdentityType::Institution,
     }
 }
 
