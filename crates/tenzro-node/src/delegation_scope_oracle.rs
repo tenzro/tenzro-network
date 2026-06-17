@@ -111,9 +111,9 @@ impl ScopeOracle for IdentityScopeOracle {
         }
 
         match &identity.identity_data {
-            IdentityData::Human { .. } => {
-                // Humans bypass delegation enforcement. Return an
-                // unrestricted scope; the validator's other axes
+            IdentityData::Human { .. } | IdentityData::Institution { .. } => {
+                // Humans and institutions bypass delegation enforcement.
+                // Return an unrestricted scope; the validator's other axes
                 // (signature check, time bound) still apply.
                 Some(EnforcedScope::unrestricted(now_ts))
             }

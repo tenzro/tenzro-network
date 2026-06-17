@@ -70,6 +70,7 @@ pub mod erc7943;
 pub mod eip7702;
 pub mod permit2;
 pub mod secure_mint;
+pub mod global_supply;
 pub mod cross_vm_bridge;
 
 // Re-export commonly used types

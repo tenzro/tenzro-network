@@ -164,6 +164,17 @@ impl KyaVerifier {
                 audit_trail.push(format!("→ KYA Level: Basic"));
                 (KyaLevel::Basic, None)
             }
+            IdentityData::Institution { legal_name, lei, .. } => {
+                // Institutions: treat as principal (not an agent), KYA Basic;
+                // delegated agents under the institution get the Full path
+                // via the Machine arm with `controller_did = institution DID`.
+                audit_trail.push(format!(
+                    "ℹ Identity is an institution: {} (LEI {})",
+                    legal_name, lei
+                ));
+                audit_trail.push(format!("→ KYA Level: Basic"));
+                (KyaLevel::Basic, None)
+            }
         };
 
         let verified = verification_level > KyaLevel::Unverified;

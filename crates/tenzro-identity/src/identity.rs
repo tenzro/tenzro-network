@@ -164,6 +164,26 @@ pub enum IdentityData {
         /// authoritative either way.
         erc8004_agent_id: Option<u64>,
     },
+    /// Institution identity data — anchored to a GLEIF Legal Entity
+    /// Identifier (ISO 17442). The institution can hold any KYC tier and
+    /// owns a set of delegated agent DIDs via `controlled_machines`.
+    Institution {
+        /// Legal name (matches the GLEIF record).
+        legal_name: String,
+        /// 20-character LEI (ISO 17442). The DID parser already validates
+        /// the Mod 97-10 check digits before this struct is constructed.
+        lei: String,
+        /// KYB verification tier (re-uses `KycTier` so downstream
+        /// rate-limit + privilege gates stay uniform).
+        kyb_tier: KycTier,
+        /// Optional vLEI ACDC credential id binding this identity to its
+        /// GLEIF vLEI Ecosystem Governance Framework record.
+        vlei_credential_id: Option<String>,
+        /// DIDs of agents controlled by this institution.
+        controlled_machines: Vec<String>,
+        /// Optional ISO 3166-1 alpha-2 country code (place of formation).
+        country_iso2: Option<String>,
+    },
 }
 
 /// A unified Tenzro identity
@@ -233,6 +253,19 @@ impl TenzroIdentity {
         matches!(self.identity_data, IdentityData::Machine { .. })
     }
 
+    /// Returns true if this identity is an institution identity.
+    pub fn is_institution(&self) -> bool {
+        matches!(self.identity_data, IdentityData::Institution { .. })
+    }
+
+    /// Returns the LEI for institution identities (None otherwise).
+    pub fn lei(&self) -> Option<&str> {
+        match &self.identity_data {
+            IdentityData::Institution { lei, .. } => Some(lei),
+            _ => None,
+        }
+    }
+
     /// Returns true if the identity is active
     pub fn is_active(&self) -> bool {
         self.status == IdentityStatus::Active
@@ -255,18 +288,22 @@ impl TenzroIdentity {
         bincode::deserialize(bytes)
     }
 
-    /// Returns the display name (for humans) or the DID (for machines)
+    /// Returns the display name (for humans / institutions) or the DID
+    /// (for machines).
     pub fn display_name(&self) -> String {
         match &self.identity_data {
             IdentityData::Human { display_name, .. } => display_name.clone(),
             IdentityData::Machine { .. } => self.did.to_string(),
+            IdentityData::Institution { legal_name, .. } => legal_name.clone(),
         }
     }
 
-    /// Returns the KYC tier if this is a human identity
+    /// Returns the KYC tier if this is a human identity, or the KYB tier
+    /// if this is an institution identity.
     pub fn kyc_tier(&self) -> Option<KycTier> {
         match &self.identity_data {
             IdentityData::Human { kyc_tier, .. } => Some(*kyc_tier),
+            IdentityData::Institution { kyb_tier, .. } => Some(*kyb_tier),
             IdentityData::Machine { .. } => None,
         }
     }
@@ -274,25 +311,30 @@ impl TenzroIdentity {
     /// Returns the delegation scope if this is a machine identity
     pub fn delegation_scope(&self) -> Option<&DelegationScope> {
         match &self.identity_data {
-            IdentityData::Human { .. } => None,
             IdentityData::Machine {
                 delegation_scope, ..
             } => Some(delegation_scope),
+            _ => None,
         }
     }
 
     /// Returns the controller DID if this is a controlled machine
     pub fn controller_did(&self) -> Option<&str> {
         match &self.identity_data {
-            IdentityData::Human { .. } => None,
             IdentityData::Machine { controller_did, .. } => controller_did.as_deref(),
+            _ => None,
         }
     }
 
-    /// Returns the list of machine DIDs controlled by this human
+    /// Returns the list of machine DIDs controlled by this human or
+    /// institution.
     pub fn controlled_machines(&self) -> Option<&[String]> {
         match &self.identity_data {
             IdentityData::Human {
+                controlled_machines,
+                ..
+            } => Some(controlled_machines),
+            IdentityData::Institution {
                 controlled_machines,
                 ..
             } => Some(controlled_machines),
@@ -306,19 +348,19 @@ impl TenzroIdentity {
     /// provisioned by the SeedAgent controller at registration time.
     pub fn is_seed_agent(&self) -> bool {
         match &self.identity_data {
-            IdentityData::Human { .. } => false,
             IdentityData::Machine { is_seed_agent, .. } => *is_seed_agent,
+            _ => false,
         }
     }
 
     /// Returns the sequential ERC-8004 `agentId` allocated for this
     /// machine identity by the on-chain IdentityRegistry mirror, if any.
-    /// `None` for humans, for machines registered without a mirror, and
-    /// for machines whose mirror call failed.
+    /// `None` for humans, institutions, for machines registered without a
+    /// mirror, and for machines whose mirror call failed.
     pub fn erc8004_agent_id(&self) -> Option<u64> {
         match &self.identity_data {
-            IdentityData::Human { .. } => None,
             IdentityData::Machine { erc8004_agent_id, .. } => *erc8004_agent_id,
+            _ => None,
         }
     }
 

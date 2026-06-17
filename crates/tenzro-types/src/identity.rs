@@ -89,6 +89,8 @@ pub enum IdentityType {
     Human,
     /// Machine/Agent identity (delegated or autonomous)
     Machine,
+    /// Institution identity (`did:tenzro:institution:<lei>:<uuid>`).
+    Institution,
 }
 
 impl IdentityType {
@@ -97,6 +99,7 @@ impl IdentityType {
         match self {
             IdentityType::Human => "human",
             IdentityType::Machine => "machine",
+            IdentityType::Institution => "institution",
         }
     }
 }

@@ -1,0 +1,40 @@
+/// Tenzro MCP tool component interface.
+///
+/// An MCP tool component implements the Model Context Protocol tools/list
+/// + tools/call shape under the Tenzro WASM host. The host imports the
+/// same ledger/signing/identity surface as `tenzro-skill@1.0` plus a
+/// network surface so tools can call upstream APIs.
+///
+/// Version 1.0 — pinned alongside the `tenzro-wasm` host.
+
+package tenzro:mcp-tool@1.0.0;
+
+interface network {
+  /// Make an HTTPS GET. Returns the body bytes.
+  http-get: func(url: string, headers: list<tuple<string, string>>) -> result<list<u8>, string>;
+  /// Make an HTTPS POST. Returns the body bytes.
+  http-post: func(url: string, headers: list<tuple<string, string>>, body: list<u8>) -> result<list<u8>, string>;
+}
+
+interface mcp-tool {
+  /// Return the JSON schema for this tool — used to populate tools/list.
+  schema: func() -> string;
+  /// Execute the tool with JSON-encoded arguments. Returns JSON-encoded
+  /// `Content` blocks per the MCP spec.
+  call: func(arguments: string) -> result<string, string>;
+}
+
+world tenzro-mcp-tool-world {
+  import tenzro:skill/ledger@1.0.0;
+  import tenzro:skill/signing@1.0.0;
+  import tenzro:skill/identity@1.0.0;
+  import network;
+  import wasi:io/streams@0.2.9;
+  import wasi:clocks/wall-clock@0.2.9;
+  import wasi:clocks/monotonic-clock@0.2.9;
+  import wasi:random/random@0.2.9;
+  import wasi:cli/stdout@0.2.9;
+  import wasi:cli/stderr@0.2.9;
+  import wasi:cli/environment@0.2.9;
+  export mcp-tool;
+}

@@ -2045,6 +2045,33 @@ async fn dispatch_request(
         "tenzro_eip7702ParseDesignator" => crate::rpc_integrations::handle_eip7702_parse_designator(node, request.params).await,
         "tenzro_eip7702ProtocolInfo" => crate::rpc_integrations::handle_eip7702_protocol_info(node, request.params).await,
 
+        // -------- New-module discovery surface --------
+        // IBC-Eureka light-client commitments (precompile 0x1020 backing surface).
+        "tenzro_ibcEurekaCommitmentTag" => crate::rpc_integrations::handle_ibc_eureka_commitment_tag().await,
+        // NEAR Chain Signatures epsilon derivation (stateless).
+        "tenzro_nearChainSigEpsilon" => crate::rpc_integrations::handle_near_chain_sig_epsilon(request.params).await,
+        // BitVM2 / Clementine v2 verifier-kind enum (read-only).
+        "tenzro_bitvm2VerifierKinds" => crate::rpc_integrations::handle_bitvm2_verifier_kinds().await,
+        // Hyperbridge mint-control policy snapshot (read-only).
+        "tenzro_hyperbridgeMintControlsDefault" => crate::rpc_integrations::handle_hyperbridge_mint_controls_default().await,
+        // Stargate V2 known pool addresses.
+        "tenzro_stargateV2KnownPools" => crate::rpc_integrations::handle_stargate_v2_known_pools().await,
+        // Universal Resolver method discovery — companion to the HTTP path.
+        "tenzro_universalResolverMethods" => crate::rpc_integrations::handle_universal_resolver_methods().await,
+        // SIWT (Sign-In With Tenzro) message-render helpers.
+        "tenzro_siwtBuildMessage" => crate::rpc_integrations::handle_siwt_build_message(request.params).await,
+        "tenzro_siwtParseMessage" => crate::rpc_integrations::handle_siwt_parse_message(request.params).await,
+        // KERI surface — stateless helpers (Key Event Log lives on the autonomous-machine record).
+        "tenzro_keriBuildInception" => crate::rpc_integrations::handle_keri_build_inception(request.params).await,
+        // DKLS23 pre-signing pool + PKR scheduler stats.
+        "tenzro_mpcPresignStats" => crate::rpc_integrations::handle_mpc_presign_stats(node).await,
+        "tenzro_mpcPkrStatus" => crate::rpc_integrations::handle_mpc_pkr_status(node).await,
+        // Global supply accounting (precompile 0x1021).
+        "tenzro_globalSupplyPolicy" => crate::rpc_integrations::handle_global_supply_policy(node, request.params).await,
+        "tenzro_globalSupplyCirculating" => crate::rpc_integrations::handle_global_supply_circulating(node, request.params).await,
+        // Institution identity — LEI validation + helper.
+        "tenzro_validateLei" => crate::rpc_integrations::handle_validate_lei(request.params).await,
+
         _ => Err(JsonRpcError {
             code: -32601,
             message: format!("Method not found: {}", request.method),
@@ -10109,6 +10136,17 @@ async fn handle_list_identities(
                     "controller_did": controller_did,
                     "reputation": reputation,
                     "tenzro_agent_id": tenzro_agent_id,
+                })
+            }
+            tenzro_identity::IdentityData::Institution { legal_name, lei, kyb_tier, vlei_credential_id, controlled_machines, country_iso2 } => {
+                serde_json::json!({
+                    "type": "institution",
+                    "legal_name": legal_name,
+                    "lei": lei,
+                    "kyb_tier": format!("{:?}", kyb_tier),
+                    "vlei_credential_id": vlei_credential_id,
+                    "controlled_machines": controlled_machines,
+                    "country_iso2": country_iso2,
                 })
             }
         };
@@ -23443,12 +23481,14 @@ async fn handle_list_accounts(
         .map(|(did, identity)| {
             let name = match &identity.identity_data {
                 tenzro_identity::IdentityData::Human { display_name, .. } => display_name.clone(),
+                tenzro_identity::IdentityData::Institution { legal_name, .. } => legal_name.clone(),
                 tenzro_identity::IdentityData::Machine { tenzro_agent_id, .. } => {
                     tenzro_agent_id.clone().unwrap_or_else(|| "Machine Wallet".to_string())
                 }
             };
             let wallet_type = match &identity.identity_data {
                 tenzro_identity::IdentityData::Human { .. } => "MPC (2-of-3)".to_string(),
+                tenzro_identity::IdentityData::Institution { .. } => "MPC (Institution)".to_string(),
                 tenzro_identity::IdentityData::Machine { .. } => "MPC (Machine)".to_string(),
             };
             let address = format!("0x{}", hex::encode(&identity.wallet_address.as_bytes()[..20]));
@@ -24369,11 +24409,12 @@ fn check_kill_switch_authorization(
             }
         };
         let scope = match &sender_id.identity_data {
-            IdentityData::Human { .. } => {
-                // Humans authorize via being the controller, not via
-                // delegation_scope (which lives on Machine identities).
+            IdentityData::Human { .. } | IdentityData::Institution { .. } => {
+                // Humans and institutions authorize via being the
+                // controller, not via delegation_scope (which lives on
+                // Machine identities).
                 return Some(format!(
-                    "sender {} is a human identity but is not the declared controller_did {}",
+                    "sender {} is a human/institution identity but is not the declared controller_did {}",
                     sender_did, controller_did
                 ));
             }
@@ -24415,8 +24456,8 @@ fn check_kill_switch_authorization(
                 )),
             }
         }
-        IdentityData::Human { .. } => Some(format!(
-            "agent_did {} resolves to a human identity; kill-switch only applies to machines",
+        IdentityData::Human { .. } | IdentityData::Institution { .. } => Some(format!(
+            "agent_did {} resolves to a non-machine identity; kill-switch only applies to machines",
             agent_did
         )),
     }

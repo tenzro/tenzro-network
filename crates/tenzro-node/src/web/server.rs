@@ -178,6 +178,17 @@ impl WebServer {
             // x402 settlement nodes) resolve `keyid` parameters here.
             .route("/.well-known/jwks.json", get(handlers::jwks))
             .route("/.well-known/jwks.json/:keyid", get(handlers::jwks_get))
+            // DIF Universal Resolver-compatible DID resolution. Path is
+            // exactly what `decentralized-identity/universal-resolver`
+            // serves so any compliant resolver driver can dispatch here.
+            .route(
+                "/1.0/identifiers/:did",
+                get(crate::web::universal_resolver::resolve_identifier),
+            )
+            .route(
+                "/1.0/methods",
+                get(crate::web::universal_resolver::list_methods),
+            )
             // ML-DSA-65 (FIPS 204) wallet signing surface — `tee-only`
             // mode for testnet. Threshold endpoints await NIST IR 8214B
             // and are intentionally unmounted (no dead routes).

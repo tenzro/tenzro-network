@@ -605,10 +605,15 @@ impl CantonMcpServer {
         let arguments: serde_json::Value = serde_json::from_str(&params.arguments)
             .map_err(|e| err_invalid_params(format!("Invalid JSON arguments: {}", e)))?;
 
+        // Canton 3.5+ JSON Ledger API v2 requires each command to be
+        // externally tagged (`CreateCommand` / `ExerciseCommand`) — circe
+        // rejects the un-tagged form with `JSON decoding to CNil should
+        // never happen at 'commands.commands[0]'`. The wire shape mirrors
+        // `tenzro_bridge::canton::JsonApiCommandV2`.
         let command = match params.command_type.to_lowercase().as_str() {
             "create" => {
                 serde_json::json!({
-                    "Create": {
+                    "CreateCommand": {
                         "templateId": params.template_id,
                         "createArguments": arguments,
                     }
@@ -622,7 +627,7 @@ impl CantonMcpServer {
                     err_invalid_params("choice is required for 'exercise' command type")
                 })?;
                 serde_json::json!({
-                    "Exercise": {
+                    "ExerciseCommand": {
                         "templateId": params.template_id,
                         "contractId": contract_id,
                         "choice": choice,
@@ -640,12 +645,18 @@ impl CantonMcpServer {
 
         let command_id = format!("tenzro-mcp-{}", uuid::Uuid::new_v4());
 
+        // Canton 3.5+ requires the JsCommands payload nested under a
+        // top-level `commands` key. A flat root body returns HTTP 400 /
+        // INVALID_ARGUMENT at the wire layer before the DAML payload is
+        // even reached.
         let body = serde_json::json!({
-            "commandId": command_id,
-            "userId": params.user_id,
-            "actAs": [params.act_as],
-            "readAs": [],
-            "commands": [command],
+            "commands": {
+                "commandId": command_id,
+                "userId": params.user_id,
+                "actAs": [params.act_as],
+                "readAs": [],
+                "commands": [command],
+            }
         });
 
         let response = self
@@ -1121,22 +1132,27 @@ impl CantonMcpServer {
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let command_id = format!("tenzro-mcp-transfer-{}", uuid::Uuid::new_v4());
 
-        // Create a transfer command using the Splice.Amulet transfer template
+        // Create a transfer command using the Splice.Amulet transfer
+        // template. Canton 3.5+ requires the JsCommands payload nested
+        // under a top-level `commands` key and the individual command to
+        // be externally tagged (`CreateCommand`).
         let body = serde_json::json!({
-            "commandId": command_id,
-            "userId": params.user_id,
-            "actAs": [params.from_party],
-            "readAs": [],
-            "commands": [{
-                "Create": {
-                    "templateId": "Splice.AmuletRules:Transfer",
-                    "createArguments": {
-                        "sender": params.from_party,
-                        "receiver": params.to_party,
-                        "amount": params.amount,
+            "commands": {
+                "commandId": command_id,
+                "userId": params.user_id,
+                "actAs": [params.from_party],
+                "readAs": [],
+                "commands": [{
+                    "CreateCommand": {
+                        "templateId": "Splice.AmuletRules:Transfer",
+                        "createArguments": {
+                            "sender": params.from_party,
+                            "receiver": params.to_party,
+                            "amount": params.amount,
+                        }
                     }
-                }
-            }],
+                }],
+            }
         });
 
         let response = self
@@ -1207,17 +1223,21 @@ impl CantonMcpServer {
                 .insert("maturityDate".to_string(), serde_json::json!(maturity));
         }
 
+        // Canton 3.5+ requires the JsCommands payload nested under a
+        // top-level `commands` key with externally-tagged commands.
         let body = serde_json::json!({
-            "commandId": command_id,
-            "userId": params.user_id,
-            "actAs": [params.issuer],
-            "readAs": [],
-            "commands": [{
-                "Create": {
-                    "templateId": template_id,
-                    "createArguments": create_arguments,
-                }
-            }],
+            "commands": {
+                "commandId": command_id,
+                "userId": params.user_id,
+                "actAs": [params.issuer],
+                "readAs": [],
+                "commands": [{
+                    "CreateCommand": {
+                        "templateId": template_id,
+                        "createArguments": create_arguments,
+                    }
+                }],
+            }
         });
 
         let response = self
@@ -1246,24 +1266,28 @@ impl CantonMcpServer {
         // Exercise the DvP Settle choice on the asset contract.
         // The DvP template atomically archives the asset leg and creates
         // new contracts with swapped ownership, while the payment leg
-        // is settled simultaneously.
+        // is settled simultaneously. Canton 3.5+ requires the JsCommands
+        // payload nested under a top-level `commands` key with
+        // externally-tagged commands.
         let body = serde_json::json!({
-            "commandId": command_id,
-            "userId": params.user_id,
-            "actAs": [params.buyer, params.seller],
-            "readAs": [],
-            "commands": [{
-                "Exercise": {
-                    "templateId": "Tenzro.Settlement:DvP",
-                    "contractId": params.asset_contract_id,
-                    "choice": "Settle",
-                    "choiceArgument": {
-                        "buyer": params.buyer,
-                        "seller": params.seller,
-                        "paymentAmount": params.payment_amount,
+            "commands": {
+                "commandId": command_id,
+                "userId": params.user_id,
+                "actAs": [params.buyer, params.seller],
+                "readAs": [],
+                "commands": [{
+                    "ExerciseCommand": {
+                        "templateId": "Tenzro.Settlement:DvP",
+                        "contractId": params.asset_contract_id,
+                        "choice": "Settle",
+                        "choiceArgument": {
+                            "buyer": params.buyer,
+                            "seller": params.seller,
+                            "paymentAmount": params.payment_amount,
+                        }
                     }
-                }
-            }],
+                }],
+            }
         });
 
         let response = self

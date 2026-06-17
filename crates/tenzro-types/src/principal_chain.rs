@@ -150,7 +150,7 @@ impl PrincipalChain {
     ) -> Self {
         let did = actor_did.into();
         let role = match identity_type {
-            IdentityType::Human => PrincipalRole::Controller,
+            IdentityType::Human | IdentityType::Institution => PrincipalRole::Controller,
             IdentityType::Machine => PrincipalRole::AutonomousAgent,
         };
         let controller = PrincipalLink::new(did.clone(), identity_type, None, role);

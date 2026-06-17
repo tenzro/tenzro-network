@@ -195,7 +195,9 @@ impl IdentityVerifier {
 
         // Machine-specific checks
         let (ctrl_did, ctrl_kyc) = match &identity.identity_data {
-            IdentityData::Human { .. } => (None, identity.kyc_tier()),
+            IdentityData::Human { .. } | IdentityData::Institution { .. } => {
+                (None, identity.kyc_tier())
+            }
             IdentityData::Machine { controller_did, .. } => {
                 if let Some(ctrl) = controller_did {
                     match self.registry.resolve(ctrl) {
@@ -437,11 +439,13 @@ impl IdentityVerifier {
 
         match &identity.identity_data {
             IdentityData::Human { kyc_tier, .. } => Ok(*kyc_tier >= required_tier),
+            IdentityData::Institution { kyb_tier, .. } => Ok(*kyb_tier >= required_tier),
             IdentityData::Machine { controller_did, .. } => {
                 if let Some(ctrl) = controller_did {
                     let controller = self.registry.resolve(ctrl)?;
                     match &controller.identity_data {
                         IdentityData::Human { kyc_tier, .. } => Ok(*kyc_tier >= required_tier),
+                        IdentityData::Institution { kyb_tier, .. } => Ok(*kyb_tier >= required_tier),
                         _ => Ok(false),
                     }
                 } else {
@@ -482,8 +486,9 @@ impl IdentityVerifier {
                 }
                 Ok(true)
             }
-            IdentityData::Human { .. } => {
-                // Humans can always perform operations
+            IdentityData::Human { .. } | IdentityData::Institution { .. } => {
+                // Humans and institutions act through their own wallet
+                // signature, not a delegation scope.
                 Ok(true)
             }
         }
