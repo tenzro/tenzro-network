@@ -2,7 +2,7 @@
 //!
 //! Aggregation operates over already-decoded `ndarray::ArrayView1<f32>` views
 //! of safetensors-decoded payloads — **no tensor library lives in this crate**
-//! (per the architectural decision in `TRAIN.md` §7.1).
+//! (per the architectural decision in `AI.md` §7.7.1).
 //!
 //! Phase 1 ships only [`MeanAggregator`]. The remaining rules light up in
 //! Phase 2 once Byzantine defense is required (Verified/Confidential tiers).

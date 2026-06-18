@@ -39325,7 +39325,7 @@ async fn handle_subscribe_events_stream(
 // Phase 1 scope: Open tier only, Mean aggregation, timeseries-first.
 // The Rust protocol layer owns coordination/aggregation/settlement; the
 // inner training loop is dispatched to the Python reference trainer at
-// `integrations/trainer/`. See TRAIN.md §7.1 for the full split rationale.
+// `integrations/trainer/`. See AI.md §7.7.1 for the full split rationale.
 
 /// Map a `TrainingError` to a JSON-RPC error.
 fn training_err(e: tenzro_training::TrainingError) -> JsonRpcError {

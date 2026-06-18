@@ -64,7 +64,7 @@ Tenzro does. Five things follow:
 4. **Confidential agent compute is a consensus primitive.** TEE-attested validators get a 1.5× multiplier on their reputation-weighted leader-selection draw in HotStuff-2; on-chain `TEE_VERIFY` covers Intel TDX, AMD SEV-SNP, AWS Nitro, and NVIDIA GPU CC.
 5. **The native asset uses a pointer model.** TNZO has one balance and three VM views — no bridge risk, no liquidity fragmentation. Registered upstream via CAIP-2, SLIP-44 (`1414421071` / `0xd44e5a4f`), and W3C DID (`did:tenzro`).
 
-The Foundation's role is to steward this stack into community ownership without trading away the architectural decisions that make it cohere. For the full ecosystem context with citations, see [docs/landscape-2026.md](landscape-2026.md).
+The Foundation's role is to steward this stack into community ownership without trading away the architectural decisions that make it cohere.
 
 ---
 

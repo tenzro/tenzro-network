@@ -5,8 +5,6 @@
 **Author:** Tenzro Network protocol team
 **Companion docs:**
 - `docs/architecture/stellar-xrpl-hyperliquid-integration.md` — financial-interop (destination-chain dispatch)
-- `docs/protocol-research-2026-05/ap2-v02.md` — mandate envelope
-- `docs/protocol-research-2026-05/stripe-spt.md` — closed-network primitive precedent
 
 ## Why
 
