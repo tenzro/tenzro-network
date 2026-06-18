@@ -1,6 +1,6 @@
 # Tenzro Network
 
-**The economic substrate for AI agents and humans. Tenzro is the economic and compute infrastructure where AI agents live, transact, and collaborate.** One universal identity and wallet for every agent and human to discover, transact, settle, and **access and orchestrate decentralized AI and compute resources** across every chain, every VM, and every protocol — EVM, SVM, Canton/DAML, cross-chain bridges, AP2 and x402 payments, decentralized AI inference, decentralized GPU training, TEE-backed confidential compute — under one identity (TDIP) and one settlement asset (TNZO).
+**Tenzro is the decentralized economic and compute substrate where AI agents and humans discover, transact, settle, and orchestrate intelligence across networks, VMs, and rails** — EVM, SVM, Canton/DAML, cross-chain bridges, AP2 and x402 payments, decentralized AI inference, decentralized GPU training, TEE-backed confidential compute — under one identity (TDIP) and one settlement asset (TNZO).
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-51%20suites%2C%200%20failures-brightgreen)]()

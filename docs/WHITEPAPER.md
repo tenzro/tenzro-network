@@ -8,7 +8,7 @@
 
 ## Abstract
 
-Tenzro Network is a coordination layer for the AI and agentic economy. It gives humans and autonomous agents a single identity, a single wallet, and one settlement substrate that span every chain, every model, every payment rail, and every execution environment a workflow may touch. Agents discover models and services, negotiate terms, conduct economic activity, and settle across ecosystems without juggling separate keys, gas tokens, or trust assumptions. Humans retain control through delegated authority, scoped credentials, and on-chain custody primitives.
+Tenzro Network is a coordination layer for the AI and agentic economy. It gives humans and autonomous agents a single identity, a single wallet, and one settlement substrate that spans networks, models, payment rails, and execution environments. Agents discover models and services, negotiate terms, conduct economic activity, and settle across ecosystems without juggling separate keys, gas tokens, or trust assumptions. Humans retain control through delegated authority, scoped credentials, and on-chain custody primitives.
 
 Tenzro Ledger is the settlement substrate underneath. It runs three execution environments in one runtime — EVM for liquidity and the broadest DeFi surface, SVM for high-throughput low-latency execution, and Canton DAML for institutional, privacy-preserving multi-party workflows. Consensus is HotStuff-2 BFT with reputation-weighted proposer election; every safety-critical message carries an Ed25519 + ML-DSA-65 + BLS12-381 hybrid signature so the protocol remains sound under both classical and post-quantum adversaries.
 
