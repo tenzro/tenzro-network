@@ -12,7 +12,9 @@ Tenzro Network is a coordination layer for the AI and agentic economy. It gives 
 
 Tenzro Ledger is the settlement substrate underneath. It runs three execution environments in one runtime — EVM for liquidity and the broadest DeFi surface, SVM for high-throughput low-latency execution, and Canton DAML for institutional, privacy-preserving multi-party workflows. Consensus is HotStuff-2 BFT with reputation-weighted proposer election; every safety-critical message carries an Ed25519 + ML-DSA-65 + BLS12-381 hybrid signature so the protocol remains sound under both classical and post-quantum adversaries.
 
-Verifiability is built in. Plonky3 STARKs over the KoalaBear field cover inference, settlement, and identity claims; TEE attestations (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU Confidential Computing, Intel Tiber) anchor confidential execution; the two combine through a hybrid ZK-in-TEE path. Cross-chain reach is native through LayerZero V2, Chainlink CCIP and CCT, deBridge DLN, LI.FI, Wormhole, Hyperlane, Axelar, Babylon Bitcoin staking, and Canton 3.5+. Payments span MPP, x402, Stripe Payment Intents, Tempo, Visa Tap, Mastercard Agent Pay, and AP2 mandates — all bound to a Tenzro Decentralized Identity (TDIP) and enforced at signing time through ERC-7579 modular validators.
+Verifiability is built in. Plonky3 STARKs over the KoalaBear field cover inference, settlement, and identity claims; TEE attestations (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU Confidential Computing, Intel Tiber) anchor confidential execution; the two combine through a hybrid ZK-in-TEE path. Cross-chain reach is native through LayerZero V2, Chainlink CCIP and CCT, deBridge DLN, LI.FI, Wormhole, Hyperlane V3, Axelar GMP, Babylon Bitcoin staking, IBC-Eureka light client, BitVM2 / Clementine Bitcoin two-way peg, Hyperbridge ISMP, NEAR Chain Signatures, Stargate V2 Hydra, and Canton 3.5+. Payments span MPP, x402, Stripe Payment Intents, Tempo, Visa Tap, Mastercard Agent Pay, and AP2 mandates — all bound to a Tenzro Decentralized Identity (TDIP) and enforced at signing time through ERC-7579 modular validators.
+
+AI infrastructure goes beyond model serving. The model catalog covers language, vision, audio, video, time-series, segmentation, detection, and text embeddings across permissively-licensed open-weight families (Qwen 3 / 3.5 / 3.6, Gemma 3 / 4, Mistral, DeepSeek V3 / V4, GLM 5 / 5.1 / 5.2, Kimi K2 / K2.6, MiniMax M1 / M3, Granite, Phi 3, gpt-oss, Nemotron). Mixture-of-Experts architectures serve in two modes: full-replica per provider (the default) and **decentralized expert-shard serving** in which providers declare the subset of experts they hold and a dispatch planner batches tokens per holder. Multi-Token Prediction is wired end-to-end — catalog metadata, provider capacity advertisement, router selection, and the llama.cpp `--spec-type draft-mtp` invocation — so models with a jointly-trained MTP head (Gemma 4, Qwen 3.5/3.6, DeepSeek V3/V4, GLM 5.2) generate at the higher speculative-decoding throughput automatically.
 
 TNZO is the governance, gas, staking, and settlement token. Fees flow to validators (consensus security), to model and TEE providers (intelligence and security services), and to the protocol treasury. Burn channels are demand-driven — base-fee burn under EIP-1559 plus a fraction of the network commission — so net supply tracks real usage rather than emission schedules.
 
@@ -193,19 +195,28 @@ Consensus, ML-DSA-65, and BLS12-381 key rotation is operator-driven via the `ten
 
 The Tenzro Decentralized Identity Protocol (TDIP) defines a single identity model that covers humans, delegated agents, and autonomous agents. Every action on the network resolves to a TDIP DID; every payment, every signature, every credential ties back to it.
 
-### Three identity classes
+### Four identity classes
 
 - **Human** — `did:tenzro:human:{uuid}`. Carries display name, KYC tier (Unverified / Basic / Enhanced / Full), and the set of machines the human controls. A human identity can issue verifiable credentials, can be the controller of any number of delegated agents, and signs with a passkey-bound MPC wallet.
 - **Delegated agent** — `did:tenzro:machine:{controller}:{uuid}`. An agent acting on a human's behalf. Carries a delegation scope inherited from the controller — per-transaction value cap, daily spend cap, allowed operations, allowed chains, allowed payment protocols, time bound, allowed counterparties. The controller can revoke at any time; revocation cascades.
 - **Autonomous agent** — `did:tenzro:machine:{uuid}`. An agent that owns itself. Same MPC wallet, same A2A surface, but no controller. Used for protocol-owned bootstrap agents and self-funded autonomous services. The `is_seed_agent` flag marks protocol-funded autonomous agents so organic-activity metrics can exclude bootstrap traffic.
+- **Institution** — `did:tenzro:institution:{lei}:{uuid}`. A legal entity anchored to its GLEIF Legal Entity Identifier (ISO 17442). The 20-character LEI is validated with ISO 7064 Mod 97-10 check digits at registration and at every transaction that consults the identity. One legal entity can hold many institution identities (one per desk, fund, or subsidiary) without re-issuing LEIs — the trailing UUID disambiguates. Institutions carry a KYB tier, an optional vLEI ACDC credential id binding to the GLEIF vLEI Ecosystem Governance Framework, an ISO 3166-1 alpha-2 country code, and the set of machines the institution controls. KYB-Full institutions act as trust roots for tokenized RWA flows, can serve as Canton tenants, and can attest reserve under Secure-Mint.
 
 DIDs resolve through standard W3C DID Documents. Verifiable Credentials carry KYC tier upgrades, attestations, and capability claims signed by trust roots. Trust chains traverse recursively with cycle detection, depth bound, and explicit anchoring to the configured trust roots.
+
+A Universal Resolver-compatible HTTP surface (`/1.0/identifiers/{did}` and `/1.0/methods`) at the web verification API serves `did:tenzro:` and `did:pdis:` to any standards-compliant resolver driver — Vidos, Godiddy, the Spruce SDKs, browser wallet extensions — without a Tenzro-specific adapter. KERI compatibility is shipped for long-lived autonomous machine identities — every machine identity can publish a hash-chained Key Event Log with pre-rotation commitments so persistent control survives key compromise. Inception, rotation, and interaction events use a SAID prefix `S` (SHA-256, CESR code) and validate through the standard KERI rules.
+
+### Sign-In With Tenzro
+
+Off-chain services authenticate Tenzro identities through SIWT — an EIP-4361-shaped message that the wallet signs and the relying party verifies against the registered identity. The canonical message carries the requesting domain, the Tenzro address, a nonce, the chain id, an issued-at timestamp, optional expiration and not-before bounds, and the resources the signer authorizes. Verification is non-stateful — the relying party stores the issued nonce, dispatches the signed message, and checks the signature against the resolved DID Document. Existing SIWE parsers consume SIWT messages byte-for-byte.
 
 ### Wallets — passkey-first, MPC, post-quantum hybrid
 
 The default Tenzro wallet is a passkey-bound MPC threshold wallet. Account creation is one tap (Touch ID / Face ID / Windows Hello / Android biometric) using FIDO2 / WebAuthn — no seed phrase to write down, no extension to install, no email to verify. Cross-device sign-in uses caBLE QR. The on-chain twin of the passkey is a P-256 WebAuthn validator module (ERC-7579) that verifies the assertion signature directly inside the account validation path.
 
 Under the hood the wallet is a FROST-Ed25519 (or FROST-Secp256k1) 2-of-3 threshold split — one share on the user device, one share on the user's recovery factor (passkey-protected cloud), one share held by the protocol's MPC nodes. ML-DSA-65 is layered on every safety-critical signature, producing a post-quantum hybrid that satisfies both the classical and PQ verification paths simultaneously. Threshold signing also drives the cross-chain bridge side — DKLS23 t-of-n threshold ECDSA produces secp256k1 signatures for EVM destination chains without any single share ever holding the full key.
+
+Two operational properties matter for production custody. **Pre-signing** caches DKLS23 round-1 output — which depends on the keyshare and a fresh randomness commitment but not on the message — so a signing request consumes a pre-computed tuple and immediately enters round 2, cutting the perceived signing latency by 30–40% for hot bridge flows. Each tuple is one-shot; re-use across two messages reveals the secret key, so the pool tracks per-tuple consumption and rotates on epoch change. **Proactive Key Refresh (PKR)** rotates shares on a governance-set cadence — default 24 hours of wall time or 100,000 signing instances per epoch, whichever comes first — so a long-running validator's keyshare exposure is bounded even if a single share holder is silently compromised. PKR preserves the group public key; clients see no change.
 
 ### Custody enforced at signing time
 
@@ -261,7 +272,7 @@ Both are surfaced through the same RPC namespace and consumed by reference agent
 
 ## 8. Cross-chain interoperability
 
-A coordination layer is only as good as its reach. Tenzro ships ten production bridge adapters that cover the major ecosystems:
+A coordination layer is only as good as its reach. Tenzro ships fifteen production bridge adapters plus three Chainlink data surfaces that cover the major ecosystems:
 
 | Adapter | Reach | Primary use |
 |---|---|---|
@@ -276,6 +287,11 @@ A coordination layer is only as good as its reach. Tenzro ships ten production b
 | Hyperlane V3 | 18+ chains incl. Tenzro | Sovereign Tenzro-validator-set ISM, generic messaging |
 | Axelar GMP | 30+ chains incl. Cosmos, Move, Stellar, XRPL | Generic messaging, Cosmos / Sui / Aptos reach |
 | Babylon | Bitcoin | BTC staking, finality providers for BTC-secured consensus |
+| IBC-Eureka | Every Cosmos SDK chain | Tendermint light client compressed into SP1 plonk proofs |
+| BitVM2 / Clementine | Bitcoin | Trust-minimised two-way peg with optimistic challenge protocol |
+| Hyperbridge | Polkadot + ISMP chains | HTTP-shaped POST/GET cross-chain messaging |
+| NEAR Chain Signatures | Bitcoin, Ethereum, Solana, TON, Stellar, Sui, Aptos, Dogecoin | NEAR MPC produces secp256k1 / Ed25519 signatures for the destination chain from a Tenzro account |
+| Stargate V2 Hydra | Every LayerZero-supported chain | Native USDC / USDT / WETH single-signature OFT bridging |
 | Canton 3.5+ | Canton Network synchronizers | Tokenized RWA, CIP-56 Canton Coin, DAML DvP |
 
 Every adapter is fail-closed on inbound message verification. Wormhole VAAs are checked against the configured Guardian set with secp256k1 ECDSA recovery and the canonical signing digest. Hyperlane carries a sovereign Tenzro-validator-set ISM that verifies a k-of-n multisig over the canonical Mailbox encoding. Axelar carries a threshold validator set. All three use the same trailing ISM-metadata wire format (`body || u8 sig_count || sig_count * (addr20 || sig65)`). Nonce trackers persist per-adapter so replays are dropped across restarts.
@@ -283,6 +299,12 @@ Every adapter is fail-closed on inbound message verification. Wormhole VAAs are 
 A unified `BridgeRouter` picks a route given a source, destination, asset, and amount — by cost, by speed, or by reliability. The router consults live fee quoting (LayerZero `EndpointV2.quote()`, Chainlink `Router.getFee()`, deBridge order-creation API, Canton fee schedule pulled from the live Splice AmuletRules contract) and returns a ranked set of options the caller picks from. Every quote is fresh, every route is signable, every settlement is checkpointed.
 
 ERC-7683 cross-chain intents close the loop. A user signs an open order on the source chain; a filler picks it up on the destination chain; the order ID is `SHA-256` over the canonical preimage and persisted in storage. Refund-eligible and force-refund states are tracked through the same lifecycle. ERC-7802 cross-chain token mint and burn extends the model to native cross-chain tokens.
+
+The IBC-Eureka adapter delegates Tendermint header verification to the SP1 zkVM and consumes the resulting plonk proof to advance a stored ICS-07 consensus state. The 32-byte commitment (`SHA-256(tenzro/ibc-eureka/proof || client_id || height || root)`) is recorded in the on-chain IBC commitment registry; the EVM `IBC_VERIFY` precompile at `0x1020` is then an O(1) lookup. The same pattern — off-EVM verification, on-chain commitment, O(1) precompile lookup — runs for every Plonky3 STARK in the system.
+
+Hyperbridge's adapter encodes the post-2026 hardening rules at the message-ingest path: admin transitions (governance-style payload typecodes) are inadmissible on the regular PostRequest path, and per-asset rolling-window mint ceilings reject any inbound transfer whose cumulative amount would exceed the configured per-window cap. Both rules fire before any payload is forwarded to the destination contract.
+
+A **global supply accounting registry** at precompile `0x1021` is the single integrity log for Tenzro-issued tokens that move across rails. Every cross-rail mint/burn submits a signed delta carrying `(asset_id, rail, sequence, kind, amount, source_chain)`. The registry enforces three invariants: monotone-per-(asset, rail) sequence (replay guard), `Σ mints − Σ burns ≤ max_supply` (cap), and no underflow on burn. A misbehaving relayer or compromised rail is locally contained — the next delta is rejected at the registry, not on the rail.
 
 ---
 
@@ -292,7 +314,7 @@ Tenzro is built for open-source intelligence at every modality and every size. T
 
 ### Modalities
 
-- **Language** — Qwen 2 / 3 / 3.5 / 3.6, Gemma 3 / 4, Mistral, Phi 3, DeepSeek V3, Granite, Granite-H. All run through the language runtime with full chat templates, streaming, and Anthropic-style SSE.
+- **Language** — Qwen 2 / 3 / 3.5 / 3.6 (dense and MoE), Gemma 3 / 4 (incl. Gemma 4 26B-A4B MoE), Mistral (incl. Mistral Small 3.2), Phi 3 / 4, DeepSeek V3 (native MTP) and V4 Pro / Flash, GLM 5 / 5.1 / 5.2 (5.2 with native MTP), Kimi K2 / K2.5 / K2.6 / K2.7-Code, MiniMax M1 / M3, Granite, Granite-H, gpt-oss, Nemotron Nano. All run through the language runtime with full chat templates, streaming, and Anthropic-style SSE.
 - **Vision embedding** — CLIP ViT-B/32 and L/14, SigLIP2 base/large/so400m, DINOv3 vits16/vitb16/vitl16. Used for image search, similarity, and embedding pipelines.
 - **Text embedding** — Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M (Matryoshka), BGE-M3, Snowflake Arctic Embed L v2.0.
 - **Segmentation** — point/box (SAM 2 base/large, EdgeSAM, MobileSAM) and text-promptable open-vocabulary (SAM 3 / 3.1).
@@ -322,6 +344,26 @@ The language runtime is exposed five ways simultaneously:
 - **MCP** `chat_completion` tool, **A2A** `inference` skill, **CLI** `tenzro chat`
 
 Agents pick whichever surface fits their framework; the model and provider are the same underneath.
+
+### Mixture-of-Experts serving
+
+MoE architectures activate a small subset of expert weights per token. The total parameter count can sit at 122B / 397B / 685B / 1T while the active path is only 10–37B — generation-time compute scales with the active path. Tenzro serves MoE in two modes that share the same provider population.
+
+The default mode is **full-replica per provider**: a provider whose hardware fits the entire model holds it and serves single-peer inference exactly like a dense model. This is the smaller-model path (Gemma 4 26B-A4B, Qwen 3.5 35B-A3B, Qwen 3.6 35B-A3B, Kimi K2.5, DeepSeek V3 on H200-class infrastructure).
+
+The second mode is **decentralized expert-shard serving**: providers whose hardware cannot fit the full model declare the subset of experts they hold via `ProviderCapacity.moe_holdings`, and the network's MoE routers aggregate per-token top-k routing decisions into per-holder batches. Each batch carries the tokens whose top-k landed on the same (expert, holder) tuple, dispatched directly over the holder's iroh QUIC endpoint (the data plane sits on the same content-addressed transport used for model weights, training gradients, and agent memory). The shard view is a derived view over the existing provider registry — the compute providers serving MoE shards are the same network providers that serve dense models, so the existing reputation, staking, billing, and TEE attestation primitives apply unchanged.
+
+MoE pipeline roles are typed: `Replica`, `Router`, `ExpertHolder`, `PrefillDecode`, `Prefill`, `Decode`. A provider can declare more than one role; the router picks the matching role per request. Replication of each expert is governance-tunable — a default policy requires every active expert to be held by at least two distinct providers (so a single holder failure does not pause inference), with up to eight holders allowed for popular experts whose committed TPS exceeds the hot threshold.
+
+The expert-shard view, the per-token-to-per-holder planner, and the replication policy are surfaced through four RPCs (`tenzro_moeShardMap`, `tenzro_moePlanDispatch`, `tenzro_moeReplicationPolicy`, `tenzro_moeCatalogShape`) and through the Rust and TypeScript SDKs.
+
+### Multi-Token Prediction
+
+Speculative decoding lets a target model generate multiple tokens per inference step using a smaller drafter. **Multi-Token Prediction (MTP)** is the jointly-trained variant — an auxiliary head that shares hidden state with the target and produces tokens consistent with the target's distribution. The accept rate is materially higher than classical two-model speculative decoding because the drafter is not an independent model but the target's own auxiliary head.
+
+Tenzro wires MTP end-to-end. The catalog declares which entries pair with which drafter (`drafter_id`), which flavour of speculation they expect (`mtp_kind: DraftMtp` or `Generic`), and the recommended starting `draft_n` (the `--spec-draft-n-max` parameter). Provider capacity advertises whether the provider has the paired drafter co-loaded (`mtp_enabled: true`). The inference router filters MTP-eligible requests to MTP-capable providers when the request carries a `draft_n` hint and falls back to standard autoregressive providers otherwise. At the runtime the MTP variant of llama.cpp consumes the joint head and accepts the longest matching prefix on each step.
+
+MTP is shipped for Gemma 4 (E2B / E4B / 12B / 26B-A4B / 31B), Qwen 3.5 (every size 0.8B–397B), Qwen 3.6 27B and 35B-A3B, DeepSeek V3 (native head, ~80% accept rate, ~1.8× decode throughput per upstream), DeepSeek V4 Pro / Flash, and GLM 5.2 (improved MTP layer). For models without a joint head, classical two-model speculative decoding (`MtpKind::Generic`) is wired through the same path.
 
 ---
 
@@ -425,7 +467,7 @@ Tenzro exposes its capabilities through three concurrent surfaces, each picked f
 
 ### JSON-RPC
 
-The full RPC surface (640+ methods) covers blockchain, EVM-compat, accounts, token, models and inference (every modality), settlement, escrow, agents, identity, network, governance, payments, AP2, staking, Canton (28 methods), marketplaces, bridges (36 methods covering all ten adapters plus the unified router), NFT, compliance, events, TEE, ZK, VRF, skills, tools, capital intent, workflow, ERC-7683, Permit2, EIP-7702, Secure-Mint, adaptive burn, SeedAgent, agent memory. Every method authorizes through TDIP and binds to the caller's identity. Body and concurrency limits cap DoS surface.
+The full RPC surface (680+ methods) covers blockchain, EVM-compat, accounts, token, models and inference (every modality), distributed MoE (`tenzro_moeShardMap`, `tenzro_moePlanDispatch`, `tenzro_moeReplicationPolicy`, `tenzro_moeCatalogShape`), settlement, escrow, agents, identity, network, governance, payments, AP2, staking, Canton (28 methods), marketplaces, bridges (40+ methods covering all fifteen adapters plus the unified router), NFT, compliance, events, TEE, ZK, VRF, skills, tools, capital intent, workflow, ERC-7683, Permit2, EIP-7702, Secure-Mint, adaptive burn, SeedAgent, agent memory, SIWT, KERI, Universal Resolver, Institution-LEI validation, IBC-Eureka, BitVM2, Hyperbridge, NEAR Chain Signatures, Stargate V2, MPC pre-sign and PKR observability, and global-supply registry. Every method authorizes through TDIP and binds to the caller's identity. Body and concurrency limits cap DoS surface.
 
 ### MCP (Model Context Protocol)
 
@@ -433,7 +475,7 @@ The MCP host serves 380+ tools to any MCP-compatible client. Beyond the main Ten
 
 ### A2A (Agent-to-Agent)
 
-The A2A host implements the Google A2A specification — `message/send`, `tasks/send`, `tasks/get`, `tasks/list`, `tasks/cancel` over JSON-RPC 2.0, with SSE streaming for long tasks. The Agent Card publishes 50+ skills covering wallet, identity, inference, settlement, verification, staking, marketplaces, agent spawning, swarm orchestration, lifecycle, bond / insurance, token, contract, AP2, ERC-8004, Wormhole, CCT, auth, NFT, bridge, compliance, cross-chain, events, every multi-modal AI modality, workflow, Canton, agent memory, adaptive burn, SeedAgent, ERC-7683, capital intent, EIP-7702, Permit2, Secure-Mint, Hyperlane, Axelar, Babylon, CAIP, and operability.
+The A2A host implements the Google A2A specification — `message/send`, `tasks/send`, `tasks/get`, `tasks/list`, `tasks/cancel` over JSON-RPC 2.0, with SSE streaming for long tasks. The Agent Card publishes 50+ skills covering wallet, identity, inference, distributed MoE, settlement, verification, staking, marketplaces, agent spawning, swarm orchestration, lifecycle, bond / insurance, token, contract, AP2, ERC-8004, Wormhole, CCT, auth, NFT, bridge, compliance, cross-chain, events, every multi-modal AI modality, workflow, Canton, agent memory, adaptive burn, SeedAgent, ERC-7683, capital intent, EIP-7702, Permit2, Secure-Mint, Hyperlane, Axelar, Babylon, IBC-Eureka, BitVM2, Hyperbridge, NEAR Chain Signatures, Stargate V2, CAIP, KERI, SIWT, Universal Resolver, Institution identity, MPC pre-sign / PKR, and operability.
 
 Both MCP and A2A can also be carried over iroh's QUIC-native transport via dedicated ALPNs (`tenzro/a2a` and `tenzro/mcp`), so agents that prefer content-addressed peer transport over HTTP can connect peer-to-peer with no router in the middle.
 
@@ -442,6 +484,10 @@ Both MCP and A2A can also be carried over iroh's QUIC-native transport via dedic
 `tenzro-agent-kit` is the agent template system. Reference templates — paid marketplace, intelligent payment router, MPP payment agent, autonomous RWA custodian, agentic inference marketplace, model inference proxy, bridge arbitrage scanner, multi-chain portfolio manager, yield rebalancer, cross-chain liquidity aggregator, Canton trade settler, agentic NAV calculator, agentic LC examiner, agentic treasury rebalancer, agentic margin call, agentic bond pricer RFQ, agentic best-execution router, DvP atomic-swap saga, and per-modality trainers — ship as ready-to-instantiate JSON manifests. Each manifest declares the execution backend, the delegation scope, the required tool tags, the required skill tags, and the ordered step set the agent walks at runtime.
 
 The spawner instantiates an agent: provisions its TDIP identity, mints its MPC wallet, installs the delegation scope, populates the runtime spending policy, discovers the matching tools and skills, and registers it with the runtime. The kit charges a 5% creator commission on paid invocations and routes the rest to the template's creator wallet.
+
+### WASM skill runtime and WIT registry
+
+Sandboxed third-party skills run inside the `tenzro-wasm` host on WASI 0.2.9. The host serves Tenzro-specific imports (`ledger`, `signing`, `identity`) plus the standard WASI base (`io/streams`, `clocks`, `random`, `cli`) to component-model guests. Three packages pin the host/guest contract — `tenzro:skill@1.0.0` for generic skills, `tenzro:mcp-tool@1.0.0` for MCP tools, and `tenzro:a2a-skill@1.0.0` for A2A skills — each shipped as WIT files in the agent-kit registry. The host rejects guests whose declared package version drifts from what it advertises, so a sandboxed skill never loads against an incompatible host contract.
 
 ---
 
@@ -552,26 +598,43 @@ These are not hypotheticals — every primitive named above is shipped in the cu
 - **A2A** — Agent-to-Agent protocol; the Google specification for inter-agent JSON-RPC with optional SSE.
 - **AP2** — Agent Protocol 2; intent / cart mandate validation for agent-initiated payments.
 - **BLS12-381** — Pairing-friendly elliptic curve used for signature aggregation.
+- **BitVM2 / Clementine** — Trust-minimised two-way Bitcoin peg with optimistic challenge protocol.
 - **Canton** — A privacy-preserving distributed ledger for institutional financial settlement, DAML-based.
 - **DiLoCo** — Distributed Local Compute; an outer/inner SGD scheme for cross-region model training.
+- **DKLS23** — Threshold ECDSA signing protocol (Doerner-Kondi-Lee-Shelat 2023).
 - **EIP-1559** — Ethereum fee-market upgrade with base-fee burn.
 - **EIP-2537** — BLS12-381 precompiles.
+- **EIP-4361** — Sign-In with Ethereum message format; the SIWT canonical form follows the same shape.
 - **EIP-7702** — Set-code transaction type that lets EOAs temporarily delegate to contract code.
 - **ERC-4337** — Account abstraction via the EntryPoint and UserOperation.
 - **ERC-7579** — Modular smart-account validator standard.
 - **ERC-7683** — Cross-chain intent settlement standard.
 - **ERC-7802** — Cross-chain native-token mint and burn.
 - **ERC-8004** — Trustless agent identity registry.
+- **GLEIF** — Global Legal Entity Identifier Foundation; issues LEIs under ISO 17442.
 - **HotStuff-2** — Three-phase BFT consensus algorithm with linear communication.
 - **HPKE** — Hybrid Public Key Encryption per RFC 9180.
+- **IBC-Eureka** — IBC over an SP1-compressed Tendermint light client.
+- **ISMP** — Interoperable State Machine Protocol; the HTTP-shaped cross-chain message surface Hyperbridge serves.
+- **KERI** — Key Event Receipt Infrastructure; self-certifying identifiers with hash-chained key event logs and pre-rotation.
 - **KoalaBear** — A 32-bit prime field optimized for STARK provers.
+- **LEI** — Legal Entity Identifier; 20-character ISO 17442 code anchored to a legal entity in the GLEIF registry.
 - **MCP** — Model Context Protocol; a JSON-RPC tool-discovery surface for agent runtimes.
 - **ML-DSA-65** — Module-Lattice Digital Signature Algorithm, FIPS 204; the post-quantum signature standard.
+- **MoE** — Mixture-of-Experts; a transformer architecture that activates a small subset of expert FFNs per token.
 - **MPP** — Machine Payments Protocol; session-based HTTP 402 payment with credential / receipt.
+- **MTP** — Multi-Token Prediction; speculative decoding using a jointly-trained head sharing hidden state with the target.
+- **PKR** — Proactive Key Refresh; periodic rotation of DKLS23 keyshares that preserves the group public key.
 - **Plonky3** — Recursive STARK prover over the KoalaBear field.
+- **SIWT** — Sign-In With Tenzro; an EIP-4361-shaped message that off-chain services use to authenticate Tenzro identities.
+- **SP1** — Succinct's general-purpose zkVM used by IBC-Eureka to compress Tendermint header verification into a plonk proof.
+- **Stargate V2 Hydra** — LayerZero V2 OFT-based native USDC / USDT / WETH bridging.
 - **TDIP** — Tenzro Decentralized Identity Protocol.
 - **TEE** — Trusted Execution Environment.
 - **TNZO** — The native token of Tenzro Network.
+- **Universal Resolver** — DIF's standard HTTP API for resolving DIDs of any method; Tenzro serves `did:tenzro:` and `did:pdis:` through it.
+- **vLEI** — Verifiable LEI; a GLEIF-issued ACDC credential cryptographically binding to an institution's LEI.
+- **WIT** — WebAssembly Interface Type; the IDL pinning the host/guest contract for `tenzro-wasm` skills.
 - **x402** — Stateless HTTP 402 payment protocol.
 
 ---
