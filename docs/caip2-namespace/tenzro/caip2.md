@@ -77,7 +77,7 @@ the canonical reference always uses the truncated genesis hash.
 
 ### Backwards Compatibility
 
-Not applicable. Tenzro is a fresh L1 with no prior CAIP-2 registration.
+Not applicable. Tenzro Ledger is a fresh network with no prior CAIP-2 registration.
 
 ## Test Cases
 

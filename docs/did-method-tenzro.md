@@ -9,7 +9,7 @@
 ## 1. Introduction
 
 The `did:tenzro` DID method provides decentralized identifiers anchored on the
-Tenzro Ledger, an L1 blockchain designed for AI-age identity, verification,
+Tenzro Ledger, the network underneath Tenzro Network, designed for AI-age identity, verification,
 and settlement. The method supports both **human** and **machine** identities,
 including autonomous agents and delegated-controller agents, with on-chain
 verification credentials and revocation.

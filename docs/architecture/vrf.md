@@ -166,7 +166,7 @@ mint nonces) this is fine.
 | Key source | Chainlink coordinator | Any Ed25519 keypair |
 | Verification latency | Cross-chain callback | Single-tx on Tenzro |
 | Cost (Ethereum L1) | ~0.25 LINK + gas | n/a |
-| Cost (Tenzro L1) | n/a | 50k + 3/byte gas |
+| Cost (Tenzro) | n/a | 50k + 3/byte gas |
 | Randomness source | Chainlink oracle network | Validator's own secret key |
 
 Tenzro VRF removes the oracle dependency and callback pattern for

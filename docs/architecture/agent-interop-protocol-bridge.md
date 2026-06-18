@@ -295,12 +295,12 @@ These are all **thin client adapters** that live in `integrations/` next to the 
 | | Tenzro | MolTrust Protocol (Base, March 2026) | Microsoft Agent Governance Toolkit (April 2026) | MCP/A2A/AP2/x402 standards alone |
 |---|---|---|---|---|
 | Layer | Substrate beneath frameworks | VC issuer + verifier on Base L2 | Runtime security middleware in each framework | Application protocols |
-| Identity | TDIP DID anchored on Tenzro L1 + ERC-8004 mirror | W3C VC anchored on Base L2 | Framework-native (callbacks/decorators/plugins) | Per-protocol (OAuth sub / AgentCard / x402 from) |
+| Identity | TDIP DID anchored on Tenzro Ledger + ERC-8004 mirror | W3C VC anchored on Base L2 | Framework-native (callbacks/decorators/plugins) | Per-protocol (OAuth sub / AgentCard / x402 from) |
 | Reputation | ERC-8004 ReputationRegistry, cross-protocol | Eight production verticals, VC-based | Goal-hijack / tool-misuse detection runtime | Not addressed (gap) |
 | Payments | AP2 + x402 + MPP + Stripe SPT + Tempo composable | Not in scope | Not in scope | AP2 + x402 separately |
 | Cross-chain | Yes (Stellar/XRPL/Hyperliquid/EVM/SVM/Canton/DAML via destination-chain adapters) | Base L2 only | Not in scope | Not in scope |
 | Cross-framework | Yes (six shims in `integrations/`) | Eight verticals, framework-agnostic VCs | Yes (the explicit pitch) | No |
-| Production status | Pre-alpha L1 + shipped A2A/MCP/AP2 on 10-VM testnet | Production on Base L2 since March 2026 | Production middleware | Production specs, varied implementation |
+| Production status | Pre-alpha network + A2A/MCP/AP2 on testnet | Production on Base L2 since March 2026 | Production middleware | Production specs, varied implementation |
 
 **The closest analogue is MolTrust** for the cross-platform VC pattern, but MolTrust doesn't do payments, cross-chain, or cross-framework runtime integration — those are the dimensions where Tenzro adds value.
 

@@ -62,7 +62,7 @@ process when authorized:
 
 3. **Open the PR** against `ChainAgnostic/namespaces:main` with title
    `Add tenzro namespace (CAIP-2/10/19/25)` and a body summarizing:
-   - Tenzro is an L1 with HotStuff-2 BFT consensus
+   - Tenzro Ledger is a HotStuff-2 BFT network
    - Multi-VM execution layer (EVM + SVM + Canton/DAML) over a single
      native balance (Sei-V2 pointer model)
    - One namespace + four CAIPs in this PR (2 / 10 / 19 / 25)
