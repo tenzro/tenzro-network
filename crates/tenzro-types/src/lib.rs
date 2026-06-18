@@ -74,7 +74,7 @@ pub use asset::{AssetId, AssetType, StablecoinType, AssetInfo};
 pub use network::{NetworkRole, PeerInfo, NodeInfo};
 pub use tee::{TeeVendor, AttestationReport, AttestationResult, TeeCapacity, TeeProviderInfo};
 pub use agent::{AgentIdentity, AgentConfig, AgentMessage, AgentMessageType, Capability};
-pub use model::{ModelInfo, ModelLoadInfo, ModelModality, MoeMetadata, MoeRoutingStrategy, InferenceRequest, InferenceResponse, InferenceParameters, InferenceProvider, ProvenanceManifest, ProviderCapacity, PricingConfig};
+pub use model::{ModelInfo, ModelLoadInfo, ModelModality, MoeMetadata, MoeRoutingStrategy, MoeExpertHolding, MoeExpertResidency, MoeProviderRole, InferenceRequest, InferenceResponse, InferenceParameters, InferenceProvider, ProvenanceManifest, ProviderCapacity, PricingConfig};
 pub use settlement::{SettlementRequest, SettlementReceipt, SettlementStatus, ReleaseConditions, ServiceType, PaymentIntent, ServiceProof, ProofType};
 pub use token::{TokenConfig, Treasury, StakingPool, ProviderStake, ProviderType, GovernanceProposal, ProposalStatus, ProposalType};
 pub use governance::{GovernanceVote, VoteType};

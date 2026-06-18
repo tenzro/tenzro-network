@@ -84,6 +84,36 @@ pub struct HfModelEntry {
     /// point; optimal value is hardware-dependent — try 1..=6).
     #[serde(default)]
     pub mtp_default_draft_n: Option<u8>,
+    /// MoE expert topology when the model is a Mixture-of-Experts
+    /// architecture. `None` for dense models. Drives the
+    /// [`tenzro_types::model::MoeMetadata`] block attached to
+    /// [`ModelInfo`] at registration time so routing, capacity
+    /// estimation, and the distributed expert-shard view all see the
+    /// correct expert count, active-experts-per-token, and shared
+    /// experts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moe: Option<MoeShape>,
+}
+
+/// MoE expert topology declared by a catalog entry. Mirrors the public
+/// fields of [`tenzro_types::model::MoeMetadata`] in the smallest
+/// possible form so catalog entries stay terse — the registry expands
+/// this into the full metadata block at registration time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoeShape {
+    /// Total routed experts in the model (e.g. 64 for Qwen 3.5 35B-A3B,
+    /// 256 for DeepSeek V3).
+    pub num_experts: u32,
+    /// Experts activated per token (top-k routing).
+    pub experts_per_token: u8,
+    /// Shared ("always-on") experts that process every token alongside
+    /// the routed experts. Zero for Mixtral / Qwen-style, 1 for
+    /// DeepSeek-V3.
+    pub shared_experts: u32,
+    /// Parameters per routed expert, in billions scaled x10 (e.g. 5 =
+    /// 0.5B, 37 = 3.7B). Optional when the upstream model card doesn't
+    /// publish a clean value.
+    pub params_per_expert_x10: Option<u32>,
 }
 
 /// Flavour of speculative decoding declared by a catalog entry's
@@ -1392,6 +1422,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     }];
     catalog.push(HfModelEntry {
         id: "qwen3-1.7b".into(),
@@ -1410,6 +1441,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-4b".into(),
@@ -1428,6 +1460,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-8b".into(),
@@ -1446,6 +1479,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-14b".into(),
@@ -1464,6 +1498,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-32b".into(),
@@ -1482,6 +1517,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("qwen3-0.6b".into()),
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-30b-a3b".into(),
@@ -1500,6 +1536,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 8,
+            shared_experts: 0,
+            params_per_expert_x10: Some(2),
+        }),
     });
 
     // ── Qwen 3.5 (Apache 2.0, ungated, unsloth GGUF) ──────────────────
@@ -1520,6 +1562,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-2b".into(),
@@ -1538,6 +1581,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-4b".into(),
@@ -1556,6 +1600,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-9b".into(),
@@ -1574,6 +1619,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-27b".into(),
@@ -1592,6 +1638,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-35b-a3b".into(),
@@ -1610,6 +1657,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 8,
+            shared_experts: 0,
+            params_per_expert_x10: Some(2),
+        }),
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-122b-a10b".into(),
@@ -1628,6 +1681,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 8,
+            shared_experts: 0,
+            params_per_expert_x10: Some(8),
+        }),
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-397b-a17b".into(),
@@ -1646,6 +1705,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 8,
+            shared_experts: 0,
+            params_per_expert_x10: Some(13),
+        }),
     });
 
     // ── Gemma 3 (Google, ungated via unsloth GGUF) ─────────────────────
@@ -1666,6 +1731,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-1b".into(),
@@ -1684,6 +1750,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-4b".into(),
@@ -1702,6 +1769,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-12b".into(),
@@ -1720,6 +1788,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-27b".into(),
@@ -1738,6 +1807,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
 
     // ── Gemma 4 (Gemma License, via unsloth GGUF) ──────────────────────
@@ -1765,6 +1835,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-12b-mtp-draft".into(),
@@ -1783,6 +1854,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e4b-mtp-draft".into(),
@@ -1801,6 +1873,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-26b-a4b-mtp-draft".into(),
@@ -1819,6 +1892,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 4,
+            shared_experts: 1,
+            params_per_expert_x10: Some(2),
+        }),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-31b-mtp-draft".into(),
@@ -1837,6 +1916,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e2b".into(),
@@ -1855,6 +1935,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("gemma4-e2b-mtp-draft".into()),
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e4b".into(),
@@ -1873,6 +1954,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("gemma4-e4b-mtp-draft".into()),
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-26b-a4b".into(),
@@ -1891,6 +1973,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("gemma4-26b-a4b-mtp-draft".into()),
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 4,
+            shared_experts: 1,
+            params_per_expert_x10: Some(2),
+        }),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-12b".into(),
@@ -1909,6 +1997,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("gemma4-12b-mtp-draft".into()),
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-31b".into(),
@@ -1927,6 +2016,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("gemma4-31b-mtp-draft".into()),
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
+        moe: None,
     });
 
     // ── Gemma 4 QAT (Quantization-Aware Training) ──────────────────────
@@ -1953,6 +2043,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("gemma4-e2b-mtp-draft".into()),
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e4b-qat".into(),
@@ -1971,6 +2062,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("gemma4-e4b-mtp-draft".into()),
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-12b-qat".into(),
@@ -1989,6 +2081,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("gemma4-12b-mtp-draft".into()),
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-26b-a4b-qat".into(),
@@ -2007,6 +2100,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("gemma4-26b-a4b-mtp-draft".into()),
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 4,
+            shared_experts: 1,
+            params_per_expert_x10: Some(2),
+        }),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-31b-qat".into(),
@@ -2025,6 +2124,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("gemma4-31b-mtp-draft".into()),
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
+        moe: None,
     });
 
     // ── DiffusionGemma (Gemma License, via unsloth GGUF) ───────────────
@@ -2054,6 +2154,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 4,
+            shared_experts: 1,
+            params_per_expert_x10: Some(2),
+        }),
     });
 
     // ── Mistral (Apache 2.0, ungated) ──────────────────────────────────
@@ -2074,6 +2180,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-nemo-12b".into(),
@@ -2092,6 +2199,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-24b".into(),
@@ -2110,6 +2218,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
 
     // ── Ministral 3 (Mistral AI, Apache 2.0, ungated) ──────────────────
@@ -2130,6 +2239,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "ministral3-8b".into(),
@@ -2148,6 +2258,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "ministral3-14b".into(),
@@ -2166,6 +2277,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
 
     // ── Phi 4 (Microsoft, MIT, ungated) ─────────────────────────────
@@ -2186,6 +2298,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "phi4".into(),
@@ -2204,6 +2317,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "phi4-reasoning".into(),
@@ -2222,6 +2336,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "phi4-mini-reasoning".into(),
@@ -2240,6 +2355,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
 
     // ── SmolLM (HuggingFace, Apache 2.0, ungated) ───────────────────
@@ -2260,6 +2376,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "smollm3-3b".into(),
@@ -2278,6 +2395,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
 
     // ── Qwen 3 Coder (Apache 2.0, ungated, unsloth GGUF) ───────────────
@@ -2298,6 +2416,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 8,
+            shared_experts: 0,
+            params_per_expert_x10: Some(2),
+        }),
     });
 
     // ── Nemotron (NVIDIA Open, ungated, unsloth GGUF) ────────────────
@@ -2318,6 +2442,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "nemotron-nano-30b-a3b".into(),
@@ -2336,6 +2461,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 16,
+            experts_per_token: 4,
+            shared_experts: 0,
+            params_per_expert_x10: Some(3),
+        }),
     });
 
     // ── GLM-4 (Apache 2.0, via bartowski GGUF) ─────────────────────────
@@ -2356,6 +2487,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
 
     // ── Kimi K2 (MIT, via unsloth GGUF) ──────────────────────────────
@@ -2376,6 +2508,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 384,
+            experts_per_token: 8,
+            shared_experts: 1,
+            params_per_expert_x10: Some(1),
+        }),
     });
     catalog.push(HfModelEntry {
         id: "kimi-k2.6".into(),
@@ -2394,6 +2532,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 384,
+            experts_per_token: 8,
+            shared_experts: 1,
+            params_per_expert_x10: Some(1),
+        }),
     });
 
     // ── MiniMax M1 (MiniMax Open, via unsloth GGUF) ──────────────────
@@ -2414,6 +2558,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 32,
+            experts_per_token: 2,
+            shared_experts: 0,
+            params_per_expert_x10: Some(13),
+        }),
     });
 
     // ── DeepSeek V3 (MIT, via unsloth GGUF) ──────────────────────────
@@ -2430,10 +2580,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         size_bytes: 377_801_089_024,
         min_ram_gb: 256,
         license: "MIT".into(),
-        description: "DeepSeek V3 MoE — 685B total, 37B active, 128K context".into(),
+        description: "DeepSeek V3 MoE — 685B total, 37B active, 128K context. Native Multi-Token-Prediction head (n=4, ~80% accept rate, ~1.8× decode speedup per DeepSeek tech report). Retired by upstream after 2026-07-24 in favor of DeepSeek V4.".into(),
         drafter_id: None,
-        mtp_kind: MtpKind::None,
-        mtp_default_draft_n: None,
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(4),
+        moe: Some(MoeShape {
+            num_experts: 256,
+            experts_per_token: 8,
+            shared_experts: 1,
+            params_per_expert_x10: Some(1),
+        }),
     });
 
     // NOTE: Llama models removed — not supported on Tenzro Network.
@@ -2460,6 +2616,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("qwen3.5-0.8b".into()),
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.6-35b-a3b".into(),
@@ -2482,6 +2639,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 8,
+            shared_experts: 0,
+            params_per_expert_x10: Some(2),
+        }),
     });
     // ── Qwen 3.6 MTP variants ─────────────────────────────────────────
     // Unsloth ships dedicated `-MTP-GGUF` repos for Qwen 3.6 where the
@@ -2506,6 +2669,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.6-35b-a3b-mtp".into(),
@@ -2524,6 +2688,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 8,
+            shared_experts: 0,
+            params_per_expert_x10: Some(2),
+        }),
     });
 
     // ── Mistral Small 3.1 / 3.2 (Apache 2.0, via unsloth GGUF) ───────
@@ -2548,6 +2718,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-3.1-24b".into(),
@@ -2566,6 +2737,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("mistral-small-3.1-draft-0.5b".into()),
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-3.2-24b".into(),
@@ -2584,6 +2756,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: Some("mistral-small-3.1-draft-0.5b".into()),
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
 
     // ── GPT-OSS (Apache 2.0, OpenAI's open-weights release) ──────────
@@ -2604,6 +2777,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "gpt-oss-120b".into(),
@@ -2622,6 +2796,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 128,
+            experts_per_token: 4,
+            shared_experts: 0,
+            params_per_expert_x10: Some(9),
+        }),
     });
 
     // ── IBM Granite 4.0 (Apache 2.0) ─────────────────────────────────
@@ -2642,6 +2822,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "granite4-1b".into(),
@@ -2660,6 +2841,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "granite4-h-tiny".into(),
@@ -2678,6 +2860,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
     catalog.push(HfModelEntry {
         id: "granite4-h-small".into(),
@@ -2696,9 +2879,303 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
+        moe: None,
     });
 
+    // ── GLM 5 / 5.1 / 5.2 (MIT, via unsloth + zai-org GGUF) ──────────
+    catalog.push(HfModelEntry {
+        id: "glm-5".into(),
+        name: "GLM-5 (MoE)".into(),
+        family: "glm".into(),
+        hf_repo: "zai-org/GLM-5".into(),
+        hf_filename: "GLM-5-Q4_K_M.gguf".into(),
+        parameters: "744B (MoE)".into(),
+        architecture: ModelArchitecture::Glm,
+        context_length: 131072,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 400_000_000_000,
+        min_ram_gb: 256,
+        license: "MIT".into(),
+        description: "Z.ai GLM-5 — 744B total parameter MoE trained on 28.5T tokens; best-in-class open-source performance on reasoning, coding, and agentic tasks (2026-04).".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 160,
+            experts_per_token: 8,
+            shared_experts: 1,
+            params_per_expert_x10: None,
+        }),
+    });
+    catalog.push(HfModelEntry {
+        id: "glm-5.1".into(),
+        name: "GLM-5.1 (MoE)".into(),
+        family: "glm".into(),
+        hf_repo: "unsloth/GLM-5.1-GGUF".into(),
+        hf_filename: "GLM-5.1-UD-Q4_K_M.gguf".into(),
+        parameters: "744B (MoE, 40B active)".into(),
+        architecture: ModelArchitecture::Glm,
+        context_length: 204800,
+        quantization: "UD-Q4_K_M".into(),
+        size_bytes: 400_000_000_000,
+        min_ram_gb: 256,
+        license: "MIT".into(),
+        description: "Z.ai GLM-5.1 — next-generation flagship for agentic engineering with SWE-Bench Pro SOTA; 744B total / 40B active; 200K context. `glm_moe_dsa` architecture with Dynamic Sparse Attention.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 160,
+            experts_per_token: 8,
+            shared_experts: 1,
+            params_per_expert_x10: None,
+        }),
+    });
+    catalog.push(HfModelEntry {
+        id: "glm-5.2".into(),
+        name: "GLM-5.2 (MoE, MTP)".into(),
+        family: "glm".into(),
+        hf_repo: "zai-org/GLM-5.2".into(),
+        hf_filename: "GLM-5.2-Q4_K_M.gguf".into(),
+        parameters: "753B (MoE)".into(),
+        architecture: ModelArchitecture::Glm,
+        context_length: 1048576,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 410_000_000_000,
+        min_ram_gb: 256,
+        license: "MIT".into(),
+        description: "Z.ai GLM-5.2 — 753B total parameter MoE flagship with solid 1M-token context and IndexShare sparse-attention (2.9× per-token FLOP reduction at 1M). Improved Multi-Token-Prediction layer increases speculative-decoding accept rate by ~20% over GLM-5.1.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(2),
+        moe: Some(MoeShape {
+            num_experts: 160,
+            experts_per_token: 8,
+            shared_experts: 1,
+            params_per_expert_x10: None,
+        }),
+    });
+
+    // ── MiniMax M3 (MIT, via unsloth GGUF) ───────────────────────────
+    catalog.push(HfModelEntry {
+        id: "minimax-m3".into(),
+        name: "MiniMax M3 (MoE, native multimodal)".into(),
+        family: "minimax".into(),
+        hf_repo: "unsloth/MiniMax-M3-GGUF".into(),
+        hf_filename: "MiniMax-M3-Q4_K_M.gguf".into(),
+        parameters: "428B (MoE, 23B active)".into(),
+        architecture: ModelArchitecture::MiniMax,
+        context_length: 1048576,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 230_000_000_000,
+        min_ram_gb: 192,
+        license: "MIT".into(),
+        description: "MiniMax M3 — ~428B total / ~23B active MoE with native multimodal training. MiniMax Sparse Attention (MSA) delivers 9× prefill and 15× decode speedups vs M2 at 1M context. Note: GGUF builds currently fall back to dense attention; sparse attention not yet supported in llama.cpp.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 32,
+            experts_per_token: 2,
+            shared_experts: 0,
+            params_per_expert_x10: None,
+        }),
+    });
+
+    // ── DeepSeek V4 (MIT, via unsloth — safetensors mirrors; GGUF community ports) ──
+    // V4 supersedes V3 from 2026-07-24. Two variants: Pro (1.6T / 49B
+    // active) and Flash (284B / 13B active). Both 1M context.
+    // Note: Instruct variants are QAT-trained at FP4 for experts — GGUF
+    // conversion is non-trivial; this entry pins the community
+    // `antirez/deepseek-v4-gguf` build pending an official Unsloth GGUF.
+    catalog.push(HfModelEntry {
+        id: "deepseek-v4-flash".into(),
+        name: "DeepSeek V4 Flash (MoE)".into(),
+        family: "deepseek".into(),
+        hf_repo: "antirez/deepseek-v4-gguf".into(),
+        hf_filename: "DeepSeek-V4-Flash-Q4_K_M.gguf".into(),
+        parameters: "284B (MoE, 13B active)".into(),
+        architecture: ModelArchitecture::DeepSeekV3,
+        context_length: 1048576,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 155_000_000_000,
+        min_ram_gb: 128,
+        license: "MIT".into(),
+        description: "DeepSeek V4 Flash — 284B total / 13B active MoE; 1M context. Hybrid Compressed Sparse Attention (CSA) + Heavily Compressed Attention (HCA). Cost-effective frontier variant. Pre-trained on 32T tokens. MTP head shipped natively.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(4),
+        moe: Some(MoeShape {
+            num_experts: 256,
+            experts_per_token: 8,
+            shared_experts: 1,
+            params_per_expert_x10: None,
+        }),
+    });
+    catalog.push(HfModelEntry {
+        id: "deepseek-v4-pro".into(),
+        name: "DeepSeek V4 Pro (MoE)".into(),
+        family: "deepseek".into(),
+        hf_repo: "antirez/deepseek-v4-gguf".into(),
+        hf_filename: "DeepSeek-V4-Pro-Q4_K_M.gguf".into(),
+        parameters: "1.6T (MoE, 49B active)".into(),
+        architecture: ModelArchitecture::DeepSeekV3,
+        context_length: 1048576,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 875_000_000_000,
+        min_ram_gb: 600,
+        license: "MIT".into(),
+        description: "DeepSeek V4 Pro — 1.6T total / 49B active MoE; 1M context. CSA+HCA hybrid attention reduces single-token inference to 27% of V3.2 FLOPs and 10% of KV cache at 1M. Frontier intelligence variant. MTP head shipped natively.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::DraftMtp,
+        mtp_default_draft_n: Some(4),
+        moe: Some(MoeShape {
+            num_experts: 512,
+            experts_per_token: 8,
+            shared_experts: 1,
+            params_per_expert_x10: None,
+        }),
+    });
+
+    // ── Kimi K2.5 + K2.7-Code (MIT, via moonshotai/unsloth) ──────────
+    catalog.push(HfModelEntry {
+        id: "kimi-k2.5".into(),
+        name: "Kimi K2.5 (MoE)".into(),
+        family: "kimi".into(),
+        hf_repo: "moonshotai/Kimi-K2.5".into(),
+        hf_filename: "Kimi-K2.5-Q4_K_M.gguf".into(),
+        parameters: "1T (MoE, 32B active)".into(),
+        architecture: ModelArchitecture::Kimi,
+        context_length: 262144,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 580_000_000_000,
+        min_ram_gb: 384,
+        license: "MIT".into(),
+        description: "Moonshot AI Kimi K2.5 — 1T total / 32B active MoE; image input support; 256K context. Predecessor to K2.6's hybrid-thinking variant.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 384,
+            experts_per_token: 8,
+            shared_experts: 1,
+            params_per_expert_x10: Some(1),
+        }),
+    });
+    catalog.push(HfModelEntry {
+        id: "kimi-k2.7-code".into(),
+        name: "Kimi K2.7 Code (MoE)".into(),
+        family: "kimi".into(),
+        hf_repo: "moonshotai/Kimi-K2.7-Code".into(),
+        hf_filename: "Kimi-K2.7-Code-Q4_K_M.gguf".into(),
+        parameters: "1T (MoE, 32B active, code-focused)".into(),
+        architecture: ModelArchitecture::Kimi,
+        context_length: 262144,
+        quantization: "Q4_K_M".into(),
+        size_bytes: 580_000_000_000,
+        min_ram_gb: 384,
+        license: "MIT".into(),
+        description: "Moonshot AI Kimi K2.7 Code — code-focused refresh of the K2 series. 1T total / 32B active; 256K context; recent updates target tool-call accuracy on long-horizon coding tasks.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 384,
+            experts_per_token: 8,
+            shared_experts: 1,
+            params_per_expert_x10: Some(1),
+        }),
+    });
+
+    // ── Qwen 3.5 MTP variants (Apache 2.0, via unsloth GGUF) ──────────
+    // Unsloth shipped MTP-paired GGUFs for every Qwen 3.5 size on
+    // 2026-05-13 (after the llama.cpp `--spec-type mtp` → `draft-mtp`
+    // rename). Each MTP target ships the joint MTP head as a sibling
+    // single-file GGUF — no separate drafter target needed at runtime.
+    for &(id, name_size, hf_size, gguf_size, params, ctx, sz, ram, is_moe, moe_shape) in &[
+        ("qwen3.5-0.8b-mtp", "0.8B", "0.8B", "0.8B", "0.8B", 131072_u32, 540_000_000_u64, 2_u32, false, None::<(u32, u8, u32, Option<u32>)>),
+        ("qwen3.5-2b-mtp", "2B", "2B", "2B", "2B", 131072, 1_300_000_000, 4, false, None),
+        ("qwen3.5-4b-mtp", "4B", "4B", "4B", "4B", 131072, 2_500_000_000, 6, false, None),
+        ("qwen3.5-9b-mtp", "9B", "9B", "9B", "9B", 131072, 5_500_000_000, 12, false, None),
+        ("qwen3.5-27b-mtp", "27B", "27B", "27B", "27B", 131072, 17_000_000_000, 24, false, None),
+        ("qwen3.5-35b-a3b-mtp", "35B-A3B (MoE)", "35B-A3B", "35B-A3B", "35B (MoE, 3B active)", 131072, 22_500_000_000, 28, true, Some((128, 8, 0, Some(2)))),
+        ("qwen3.5-122b-a10b-mtp", "122B-A10B (MoE)", "122B-A10B", "122B-A10B", "122B (MoE, 10B active)", 131072, 75_000_000_000, 96, true, Some((128, 8, 0, Some(8)))),
+        ("qwen3.5-397b-a17b-mtp", "397B-A17B (MoE)", "397B-A17B", "397B-A17B", "397B (MoE, 17B active)", 131072, 240_000_000_000, 256, true, Some((128, 8, 0, Some(13)))),
+    ] {
+        catalog.push(HfModelEntry {
+            id: id.into(),
+            name: format!("Qwen 3.5 {} (MTP)", name_size),
+            family: "qwen3.5".into(),
+            hf_repo: format!("unsloth/Qwen3.5-{}-MTP-GGUF", hf_size),
+            hf_filename: format!("Qwen3.5-{}-MTP-UD-Q4_K_XL.gguf", gguf_size),
+            parameters: params.into(),
+            architecture: if is_moe {
+                ModelArchitecture::Qwen35Moe
+            } else {
+                ModelArchitecture::Qwen35
+            },
+            context_length: ctx,
+            quantization: "UD-Q4_K_XL".into(),
+            size_bytes: sz,
+            min_ram_gb: ram,
+            license: "Apache 2.0".into(),
+            description: format!("Qwen 3.5 {} with built-in Multi-Token-Prediction head. Single-file MTP GGUF — no separate drafter needed. Unsloth measures ~1.5-2× speedup over the non-MTP baseline.", name_size),
+            drafter_id: None,
+            mtp_kind: MtpKind::DraftMtp,
+            mtp_default_draft_n: Some(2),
+            moe: moe_shape.map(|(num_experts, experts_per_token, shared_experts, params_per_expert_x10)| MoeShape {
+                num_experts,
+                experts_per_token,
+                shared_experts,
+                params_per_expert_x10,
+            }),
+        });
+    }
+
     catalog
+}
+
+impl MoeShape {
+    /// Expand the catalog-side shape into the full
+    /// [`tenzro_types::model::MoeMetadata`] block used by `ModelInfo`,
+    /// the inference router, and the [`crate::moe_shard::MoeShardView`].
+    pub fn to_metadata(self) -> tenzro_types::model::MoeMetadata {
+        let mut m = tenzro_types::model::MoeMetadata::new(
+            self.num_experts,
+            self.experts_per_token,
+            tenzro_types::model::MoeRoutingStrategy::TopK,
+        )
+        .with_shared_experts(self.shared_experts);
+        if let Some(p) = self.params_per_expert_x10 {
+            m = m.with_params_per_expert_x10(p);
+        }
+        m
+    }
+}
+
+impl HfModelEntry {
+    /// Convert this catalog entry into a [`tenzro_types::model::ModelInfo`]
+    /// bound to `provider`. Populates the MoE metadata block from the
+    /// catalog's `moe` shape, the architecture string from the enum
+    /// variant, and a description/parameters annotation.
+    pub fn to_model_info(
+        &self,
+        provider: tenzro_types::Address,
+    ) -> tenzro_types::ModelInfo {
+        let mut info = tenzro_types::ModelInfo::new(
+            self.id.clone(),
+            self.name.clone(),
+            self.quantization.clone(),
+            tenzro_types::model::ModelModality::Text,
+            provider,
+        );
+        info.architecture = self.architecture.to_string();
+        info.description = self.description.clone();
+        if let Some(shape) = self.moe {
+            info = info.with_moe(shape.to_metadata());
+        }
+        info
+    }
 }
 
 /// Look up a model by its internal ID.

@@ -5637,6 +5637,251 @@ pub(crate) async fn handle_validate_lei(
     }
 }
 
+// ===========================================================================
+// Decentralized MoE serving — shard view + dispatch planner over the
+// existing ProviderManager. The compute providers serving expert shards are
+// the same set already registered via tenzro_registerProvider; MoE-specific
+// state rides on ProviderCapacity.moe_holdings / moe_roles / iroh_endpoint_id.
+// ===========================================================================
+
+/// `tenzro_moeShardMap` — list every expert holder for `model_id` plus
+/// replication factor + under-replicated experts + role counts.
+pub(crate) async fn handle_moe_shard_map(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let model_id = params
+        .as_ref()
+        .and_then(|v| v.get("model_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "missing model_id".into(),
+            data: None,
+        })?;
+    let manager = node.provider_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Provider manager not initialized".into(),
+        data: None,
+    })?;
+    let providers = manager.list_providers();
+    let view = tenzro_model::MoeShardView::build(model_id, providers.iter());
+    let policy = tenzro_model::ReplicationPolicy::default();
+
+    let mut holders_by_expert: Vec<Value> = view
+        .covered_experts()
+        .into_iter()
+        .map(|eid| {
+            let holders = view.holders(eid);
+            json!({
+                "layer": eid.layer,
+                "expert": eid.expert,
+                "replication": holders.len(),
+                "holders": holders.iter().map(|h| json!({
+                    "provider": hex::encode(h.provider.0),
+                    "residency": format!("{:?}", h.residency),
+                    "committed_tps": h.committed_tps,
+                    "iroh_endpoint_id": h.iroh_endpoint_id,
+                    "http_endpoint": h.http_endpoint,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    holders_by_expert.sort_by_key(|v| {
+        (
+            v["layer"].as_u64().unwrap_or(0),
+            v["expert"].as_u64().unwrap_or(0),
+        )
+    });
+
+    let under_replicated: Vec<Value> = view
+        .under_replicated(policy)
+        .into_iter()
+        .map(|eid| json!({ "layer": eid.layer, "expert": eid.expert }))
+        .collect();
+    let hot_experts: Vec<Value> = view
+        .hot_experts(policy)
+        .into_iter()
+        .map(|eid| json!({ "layer": eid.layer, "expert": eid.expert }))
+        .collect();
+
+    Ok(json!({
+        "model_id": model_id,
+        "covered_experts": holders_by_expert.len(),
+        "distinct_providers": view.distinct_providers().len(),
+        "expert_holders_role_count": view.providers_for_role(tenzro_types::model::MoeProviderRole::ExpertHolder),
+        "router_role_count": view.providers_for_role(tenzro_types::model::MoeProviderRole::Router),
+        "prefill_role_count": view.providers_for_role(tenzro_types::model::MoeProviderRole::Prefill),
+        "decode_role_count": view.providers_for_role(tenzro_types::model::MoeProviderRole::Decode),
+        "replica_role_count": view.providers_for_role(tenzro_types::model::MoeProviderRole::Replica),
+        "policy": {
+            "min_replication": policy.min_replication,
+            "max_replication": policy.max_replication,
+            "hot_threshold_tps": policy.hot_threshold_tps,
+        },
+        "under_replicated_experts": under_replicated,
+        "hot_experts": hot_experts,
+        "holders": holders_by_expert,
+    }))
+}
+
+/// `tenzro_moePlanDispatch` — given a list of per-token top-k routing
+/// decisions, return the per-holder batch plan. Used by router peers and
+/// by clients that want to inspect the dispatch path before submitting.
+pub(crate) async fn handle_moe_plan_dispatch(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.unwrap_or(json!({}));
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "missing model_id".into(),
+            data: None,
+        })?;
+    let allow_cold = p
+        .get("allow_cold")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let routings_raw = p
+        .get("routings")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "missing routings array".into(),
+            data: None,
+        })?;
+    let mut routings: Vec<tenzro_model::TokenRouting> = Vec::with_capacity(routings_raw.len());
+    for r in routings_raw {
+        let token_index = r
+            .get("token_index")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "routing missing token_index".into(),
+                data: None,
+            })? as u32;
+        let experts_arr = r
+            .get("experts")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "routing missing experts array".into(),
+                data: None,
+            })?;
+        let mut experts: Vec<tenzro_model::ExpertId> = Vec::with_capacity(experts_arr.len());
+        for e in experts_arr {
+            let layer = e
+                .get("layer")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: "expert missing layer".into(),
+                    data: None,
+                })? as u32;
+            let expert = e
+                .get("expert")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: "expert missing expert".into(),
+                    data: None,
+                })? as u32;
+            experts.push(tenzro_model::ExpertId::new(layer, expert));
+        }
+        routings.push(tenzro_model::TokenRouting {
+            token_index,
+            experts,
+        });
+    }
+
+    let manager = node.provider_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Provider manager not initialized".into(),
+        data: None,
+    })?;
+    let providers = manager.list_providers();
+    let view = tenzro_model::MoeShardView::build(model_id, providers.iter());
+    let plan = tenzro_model::plan_dispatch(&view, &routings, allow_cold).map_err(|e| {
+        JsonRpcError {
+            code: -32000,
+            message: format!("moe dispatch planner: {}", e),
+            data: None,
+        }
+    })?;
+    Ok(json!({
+        "model_id": plan.model_id,
+        "batch_count": plan.batches.len(),
+        "batches": plan.batches.iter().map(|b| json!({
+            "layer": b.expert.layer,
+            "expert": b.expert.expert,
+            "provider": hex::encode(b.provider.0),
+            "iroh_endpoint_id": b.iroh_endpoint_id,
+            "http_endpoint": b.http_endpoint,
+            "token_indices": b.token_indices,
+        })).collect::<Vec<_>>(),
+        "token_assignments": plan.token_assignments.iter().map(|a| json!({
+            "token_index": a.token_index,
+            "slots": a.slots.iter().map(|s| json!({
+                "layer": s.expert.layer,
+                "expert": s.expert.expert,
+                "provider": s.provider.map(|p| hex::encode(p.0)),
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// `tenzro_moeReplicationPolicy` — current governance-tuned replication
+/// policy used by the network's shard-view consumers.
+pub(crate) async fn handle_moe_replication_policy() -> std::result::Result<Value, JsonRpcError> {
+    let p = tenzro_model::ReplicationPolicy::default();
+    Ok(json!({
+        "min_replication": p.min_replication,
+        "max_replication": p.max_replication,
+        "hot_threshold_tps": p.hot_threshold_tps,
+    }))
+}
+
+/// `tenzro_moeCatalogShape` — return the catalog-side MoE topology for
+/// `model_id` (num_experts, experts_per_token, shared_experts,
+/// params_per_expert_x10). `null` for dense models.
+pub(crate) async fn handle_moe_catalog_shape(
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let model_id = params
+        .as_ref()
+        .and_then(|v| v.get("model_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "missing model_id".into(),
+            data: None,
+        })?;
+    let entry = tenzro_model::catalog::get_model_by_id(model_id).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("unknown model_id: {}", model_id),
+        data: None,
+    })?;
+    let shape = entry.moe.map(|s| {
+        json!({
+            "num_experts": s.num_experts,
+            "experts_per_token": s.experts_per_token,
+            "shared_experts": s.shared_experts,
+            "params_per_expert_x10": s.params_per_expert_x10,
+        })
+    });
+    Ok(json!({
+        "model_id": model_id,
+        "is_moe": entry.moe.is_some(),
+        "moe": shape,
+        "architecture": entry.architecture.to_string(),
+        "mtp_kind": format!("{:?}", entry.mtp_kind),
+        "mtp_default_draft_n": entry.mtp_default_draft_n,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

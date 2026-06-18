@@ -2072,6 +2072,15 @@ async fn dispatch_request(
         // Institution identity — LEI validation + helper.
         "tenzro_validateLei" => crate::rpc_integrations::handle_validate_lei(request.params).await,
 
+        // Decentralized MoE serving — shard view + dispatch planner over the
+        // existing ProviderManager. Compute providers serving expert shards are
+        // the same set registered via tenzro_registerProvider; MoE-specific
+        // declarations ride on ProviderCapacity.moe_holdings / moe_roles.
+        "tenzro_moeShardMap" => crate::rpc_integrations::handle_moe_shard_map(node, request.params).await,
+        "tenzro_moePlanDispatch" => crate::rpc_integrations::handle_moe_plan_dispatch(node, request.params).await,
+        "tenzro_moeReplicationPolicy" => crate::rpc_integrations::handle_moe_replication_policy().await,
+        "tenzro_moeCatalogShape" => crate::rpc_integrations::handle_moe_catalog_shape(request.params).await,
+
         _ => Err(JsonRpcError {
             code: -32601,
             message: format!("Method not found: {}", request.method),
