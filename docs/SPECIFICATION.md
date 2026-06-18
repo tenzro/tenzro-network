@@ -2,7 +2,7 @@
 
 ## AI-Native, Agentic, Tokenized Settlement Layer
 
-### Tenzro Ledger: A TEE-Native Layer 1 for Verifiable AI and Autonomous Agents
+### Tenzro Ledger: A TEE-Native Network for Verifiable AI and Autonomous Agents
 
 **Version 0.1.0 — March 2026**
 
@@ -12,11 +12,11 @@
 
 **Tenzro Network** is an AI-Native, Agentic, Tokenized Settlement Layer — a decentralized protocol designed for the AI age, where agents and autonomous systems are first-class participants. The network provides two core capabilities: access to **intelligence** (AI models for inference) and access to **security** (TEE enclaves for key management, custody, and confidential computing). Providers, validators, and nodes earn by securing the network, providing intelligence (AI models), and providing security (TEE enclaves).
 
-**Tenzro Ledger** is the purpose-built Layer 1 settlement layer for humans and agents, providing verifiable, on-chain primitives for the AI age: **identity** (TDIP: Tenzro Decentralized Identity Protocol for humans and machines), **security** (TEE-weighted consensus with hardware attestations), **verification** (dual ZK + TEE proof systems), and **settlement** (micropayment channels, escrow, batch processing). All fees and settlements are denominated in **TNZO**, the governance token of the Tenzro Network protocol.
+**Tenzro Ledger** is the purpose-built network for humans and agents, providing verifiable, on-chain primitives for the AI age: **identity** (TDIP: Tenzro Decentralized Identity Protocol for humans and machines), **security** (TEE-weighted consensus with hardware attestations), **verification** (dual ZK + TEE proof systems), and **settlement** (micropayment channels, escrow, batch processing). All fees and settlements are denominated in **TNZO**, the governance token of the Tenzro Network protocol.
 
 Built from the ground up around Trusted Execution Environments (TEEs) and zero-knowledge proofs, the Ledger provides hardware-rooted trust at every layer — TEE-attested validators receive a 1.5× multiplier on their reputation-weighted leader-selection draw, smart contracts execute within hardware enclaves, and all on-chain claims can be independently verified through cryptographic proofs or hardware attestations. The Ledger supports a multi-VM execution environment (EVM, SVM, Daml/Canton), an autonomous agent framework with self-sovereign identity and MPC wallet ownership, a multi-modal AI model marketplace covering text, vision, audio, and timeseries inference with per-token settlement, decentralized verifiable training (Tenzro Train, Decoupled DiLoCo–style with on-chain run-root commitments), recurrent-depth reasoning workers (Tenzro Cortex) priced by loop depth and bound to signed receipts, swarm orchestration for parallel agent execution, and cross-chain interoperability through Wormhole NTT, LayerZero V2, Chainlink CCIP, deBridge DLN, Li.Fi, and Canton. Multi-protocol payment support (MPP, x402, Tempo, Stripe SPT, AP2) enables HTTP 402-based machine payments with identity-bound delegation enforcement. Consensus is a two-phase HotStuff-2 BFT engine with 400ms block times, reputation-weighted proposer election, no-endorsement certificates for tail-fork resistance, and Ed25519 + ML-DSA-65 hybrid post-quantum signatures on every safety-critical message.
 
-Tenzro is not solely an inference marketplace — it is a general-purpose L1 settlement layer where verifiable computation, confidential execution, and agent-to-agent economic coordination are first-class primitives.
+Tenzro is the economic substrate for AI agents and humans — the economic and compute infrastructure where AI agents live, transact, and collaborate. It is the coordination layer for the decentralized AI and agentic economy, the substrate where verifiable computation, confidential execution, and agent-to-agent economic coordination are protocol-level primitives.
 
 ---
 
@@ -69,7 +69,7 @@ Providers, validators, and nodes earn by:
 - **Providing intelligence** (per-inference fees from the AI marketplace)
 - **Providing security** (fees for TEE enclave services)
 
-**Tenzro Ledger** is the Layer 1 settlement layer that underpins the protocol. It treats hardware trust, verifiable computation, and autonomous agents as foundational primitives rather than application-layer add-ons:
+**Tenzro Ledger** is the network that underpins the protocol. It treats hardware trust, verifiable computation, and autonomous agents as foundational primitives rather than application-layer add-ons:
 
 - **TEE-native consensus.** Validators running inside Trusted Execution Environments receive a **1.5× multiplier** on their reputation-weighted leader-selection draw in the HotStuff-2 BFT consensus protocol. The multiplicative form (rather than a hard 2× boost) preserves the property that observed behaviour can fully overcome attestation: a TEE-attested but chronically-flaky validator is still dwarfed in draw probability by a non-TEE active validator. TEE attestations are verified on-chain and influence block validity.
 - **Dual verification: ZK + TEE.** Every computation claim can be backed by a zero-knowledge proof (Plonky3 STARK over the KoalaBear field with FRI commitments), a TEE attestation, or both simultaneously through hybrid ZK-in-TEE execution. This provides two independent trust anchors — cryptographic (ZK) and hardware (TEE) — giving applications flexibility to choose their security/performance tradeoff. Plonky3 STARKs require no trusted setup and are post-quantum sound.
@@ -84,7 +84,7 @@ All fees and settlements are denominated in **TNZO**, the governance token of th
 By the start of 2026, agentic finance runs across three separate ecosystems, each with its own protocols, settlement primitives, and execution model:
 
 - **EVM / agent-commerce surface.** ERC-8004 (Trustless Agents) reached mainnet on 2026-01-29. AP2 (Agent Payments Protocol) was donated by Google to the FIDO Alliance in April 2026 with 60+ partners (Adyen, AmEx, Mastercard, Stripe, OpenAI, Anthropic). x402 (Coinbase) reports ~$50M cumulative / ~$600M annualized micropayment volume. ERC-4337 v0.8 + EIP-7702 form the smart-account substrate. TEE-confidential agents ship as middleware via Phala and Oasis (Sapphire/ROFL); NEAR AI offers TEE-attested agents as a platform feature.
-- **SVM / Solana agent-trading surface.** Application-layer frameworks (ElizaOS, SendAI Solana Agent Kit, GOAT SDK) reach Jupiter, Drift, Mango, Metaplex, Bonfida, and SPL — but L1-level identity, settlement, and consensus primitives for agents are inherited from Solana proper, not designed for them.
+- **SVM / Solana agent-trading surface.** Application-layer frameworks (ElizaOS, SendAI Solana Agent Kit, GOAT SDK) reach Jupiter, Drift, Mango, Metaplex, Bonfida, and SPL — but protocol-level identity, settlement, and consensus primitives for agents are inherited from Solana proper, not designed for them.
 - **Canton / institutional-RWA surface.** Tokenized US Treasuries and several announced bank deposit tokens settle on Canton synchronizers under the CIP-56 token standard with first-class DvP. Production institutional volume from autonomous agents on Canton is effectively zero.
 
 A small set of L1s pursue multi-VM execution. **Fluent** (mainnet 2026-04-24) is the closest analog and ships EVM + SVM + WebAssembly — but does not include DAML, which is what the institutional RWA surface actually runs on. Sei v2 pioneered the EVM↔Wasm pointer-token model that Tenzro generalizes. Aptos and Sui ship Move-VM but are not multi-VM in the EVM/SVM sense.
@@ -106,7 +106,7 @@ For the full protocol-layer view, see [`WHITEPAPER.md`](WHITEPAPER.md).
 
 1. **Hardware trust at the foundation.** TEE integration is not a sidecar — it influences validator selection, consensus weight, proof generation, and execution confidentiality. The Ledger is designed so that the strongest security guarantees emerge from hardware-attested participation.
 2. **Cryptographic verifiability.** Claims about computation, identity, and payment are backed by mathematical proofs or hardware attestations, not economic penalties alone.
-3. **General-purpose L1.** Tenzro Ledger is a programmable blockchain, not an inference-specific subnet. AI model routing and settlement are built-in capabilities, but the Ledger supports arbitrary smart contract logic across three VM targets (EVM, SVM, Daml/Canton).
+3. **General-purpose programmable network.** Tenzro Ledger is a programmable network, not an inference-specific subnet. AI model routing and settlement are built-in capabilities, but the Ledger supports arbitrary smart contract logic across three VM targets (EVM, SVM, Daml/Canton).
 4. **Economic alignment.** Token economics incentivize honest behavior: validators earn block rewards and transaction fees (gas paid in TNZO) for securing the Ledger; providers earn per-inference fees and TEE service fees with the Network taking a commission that flows to the treasury; misbehavior is punished through stake slashing.
 5. **Interoperability.** Multi-VM execution and cross-chain bridges (LayerZero, CCIP, deBridge, Canton) ensure Tenzro connects to existing ecosystems rather than requiring migration.
 
@@ -120,7 +120,7 @@ For the full protocol-layer view, see [`WHITEPAPER.md`](WHITEPAPER.md).
 - Access to **intelligence** (decentralized AI model marketplace)
 - Access to **security** (TEE enclaves for custody, key management, confidential computing)
 
-**Tenzro Ledger** is the Layer 1 blockchain that provides the settlement layer for the Network. The Ledger offers purpose-built primitives for the AI age:
+**Tenzro Ledger** is the network that provides the economic substrate for Tenzro Network. The Ledger offers purpose-built primitives for the AI age:
 - **Identity:** TDIP (Tenzro Decentralized Identity Protocol) for unified human/machine identity
 - **Security:** TEE-weighted consensus with hardware attestations
 - **Verification:** Dual ZK + TEE proof systems
@@ -128,7 +128,7 @@ For the full protocol-layer view, see [`WHITEPAPER.md`](WHITEPAPER.md).
 
 **Revenue Model (Two-Tier Fee Structure):**
 
-1. **Ledger Transaction Fees (Gas):** All on-chain transactions pay gas fees in TNZO to validators, securing the L1 settlement layer. Uses EIP-1559 dynamic fee market.
+1. **Ledger Transaction Fees (Gas):** All on-chain transactions pay gas fees in TNZO to validators, securing the economic substrate. Uses EIP-1559 dynamic fee market.
 
 2. **Network Commission Fees:** The Tenzro Network collects a 0.5% commission on AI provider inference payments and TEE provider service fees. This commission is distributed: 40% to treasury, 30% burned, 30% to stakers.
 
@@ -281,7 +281,7 @@ JSON-RPC methods: `message/send`, `tasks/send`, `tasks/get`, `tasks/list`, `task
 
 ### 3.1 Overview
 
-The Tenzro Ledger employs HotStuff-2, a leader-based Byzantine Fault Tolerant consensus protocol with linear message complexity. HotStuff-2 achieves consensus in two phases (as opposed to the three phases of original HotStuff), reducing latency while maintaining safety under partial synchrony. This consensus mechanism secures the L1 settlement layer.
+The Tenzro Ledger employs HotStuff-2, a leader-based Byzantine Fault Tolerant consensus protocol with linear message complexity. HotStuff-2 achieves consensus in two phases (as opposed to the three phases of original HotStuff), reducing latency while maintaining safety under partial synchrony. This consensus mechanism secures Tenzro Ledger.
 
 ### 3.2 Protocol Parameters
 
@@ -779,7 +779,7 @@ Tenzro operates two distinct fee collection mechanisms:
 - Paid in TNZO for all on-chain transactions (transfers, smart contract execution, etc.)
 - Standard EIP-1559 fee market with dynamic base fee adjustment
 - Flows directly to validators who produce and finalize blocks
-- Provides economic security for the L1 settlement layer
+- Provides economic security for Tenzro Ledger
 
 **2. Network Commission Fees**
 - 0.5% commission (50 basis points) on AI provider inference payments and TEE provider service fees
@@ -1919,7 +1919,7 @@ Where threshold signing is required (multi-device wallets, treasury policies, sw
 - **Output is a standard 64-byte Ed25519 signature.** It verifies under the existing `Ed25519Validator` module with no protocol-specific verifier — every downstream consumer (RPC, MCP, A2A, EntryPoint) treats it as an ordinary signature.
 - **t-of-n is configurable per account.** Default for human multi-device wallets is `2-of-3` (phone + laptop + guardian). Default for swarm-MPC across TEE agents is `(2/3)·n`.
 
-The reference implementation is [`frost-ed25519`](https://github.com/ZcashFoundation/frost) maintained by the Zcash Foundation. Other production-grade FROST variants (`frost-secp256k1-tr` for Bitcoin Taproot) are available behind the same trait but out of scope for the L1.
+The reference implementation is [`frost-ed25519`](https://github.com/ZcashFoundation/frost) maintained by the Zcash Foundation. Other production-grade FROST variants (`frost-secp256k1-tr` for Bitcoin Taproot) are available behind the same trait but out of scope for Tenzro Ledger.
 
 PQ note: there is **no production threshold ML-DSA** in 2026 — Trilithium and similar constructions remain research (eprint 2025/675). For the PQ companion in a hybrid wallet, the `ML-DSA-65` key is held single-instance inside a TEE or HSM and signed alongside the FROST-Ed25519 aggregate. The hybrid signature thus verifies as `Ed25519(group) ∧ ML-DSA-65(tee)` — a downgrade attack on either layer fails.
 
@@ -1941,7 +1941,7 @@ The closest production reference for TEE-resident agent identity is [Phala dstac
 
 | Layer | Classical | PQ companion | Notes |
 |---|---|---|---|
-| Native L1 transaction signing | Ed25519 | ML-DSA-65 (FIPS 204) | Both signatures attached; verifier requires both. Tenzro is ahead of industry — no production wallet has shipped this end-to-end as of mid-2026. |
+| Native ledger transaction signing | Ed25519 | ML-DSA-65 (FIPS 204) | Both signatures attached; verifier requires both. Tenzro is ahead of industry — no production wallet has shipped this end-to-end as of mid-2026. |
 | Passkey / WebAuthn | P-256 | (none on device) | Single-curve by spec. PQ companion lives in the on-chain validator metadata rather than the platform authenticator. |
 | FROST threshold | Ed25519 (group sig) | ML-DSA-65 (single key in TEE/HSM) | No production threshold ML-DSA exists in 2026. Hybrid achieved by signing alongside the FROST aggregate, not over it. |
 | TLS / RPC transport | X25519 | ML-KEM-768 (FIPS 203) | Already deployed in Caddy on the testnet. Hybrid by default for RPC, MCP, A2A. |

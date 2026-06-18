@@ -1,6 +1,6 @@
 # Tenzro Network
 
-**The coordination layer for the AI and agentic economy.** One universal identity and wallet for every agent and human to discover, transact, settle, and **access and orchestrate decentralized AI and compute resources** across every chain, every VM, and every protocol — EVM, SVM, Canton/DAML, cross-chain bridges, AP2 and x402 payments, decentralized AI inference, decentralized GPU training, TEE-backed confidential compute — under one identity (TDIP) and one settlement asset (TNZO).
+**The economic substrate for AI agents and humans. Tenzro is the economic and compute infrastructure where AI agents live, transact, and collaborate.** One universal identity and wallet for every agent and human to discover, transact, settle, and **access and orchestrate decentralized AI and compute resources** across every chain, every VM, and every protocol — EVM, SVM, Canton/DAML, cross-chain bridges, AP2 and x402 payments, decentralized AI inference, decentralized GPU training, TEE-backed confidential compute — under one identity (TDIP) and one settlement asset (TNZO).
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-51%20suites%2C%200%20failures-brightgreen)]()
@@ -9,7 +9,7 @@
 
 ## What is Tenzro?
 
-Tenzro Network is a fully decentralized L1 designed as the **interoperability and coordination substrate** for the AI economy. The thesis is straightforward: agents and humans need a single self-sovereign identity, a single threshold-secured wallet, a single settlement asset, and **a single discovery and orchestration surface for decentralized AI and compute** that work uniformly across every VM and every external chain they touch. Today they don't — agents hold one wallet per chain, identity is rebound at every protocol boundary, AI inference and GPU compute live behind opaque centralized APIs, and value can't cross from EVM to Canton without giving up custody. Tenzro fixes this at the protocol layer.
+**The economic substrate for AI agents and humans. Tenzro is the economic and compute infrastructure where AI agents live, transact, and collaborate** — across every VM, every external chain, and every protocol. The thesis is straightforward: agents and humans need a single self-sovereign identity, a single threshold-secured wallet, a single settlement asset, and **a single discovery and orchestration surface for decentralized AI and compute** that work uniformly across every VM and every external chain they touch. Today they don't — agents hold one wallet per chain, identity is rebound at every protocol boundary, AI inference and GPU compute live behind opaque centralized APIs, and value can't cross from EVM to Canton without giving up custody. Tenzro fixes this at the protocol layer.
 
 - **Decentralized AI + compute orchestration**: agents and humans discover and access AI inference (chat, vision, audio, forecasting, embeddings, segmentation, detection — 7 ONNX runtimes), GPU training capacity (Tenzro Train), and TEE-backed confidential compute (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC) through a single protocol-level marketplace with per-token billing, reputation scoring, and on-chain verifiability. Providers are sovereign — anyone can run a model, expose an endpoint, or contribute compute, and earn TNZO directly. The inference router (price / latency / reputation / weighted strategies) and the agent-spawning + swarm-orchestration primitives let agents compose multi-model, multi-provider workflows without trusting any one party.
 - **Universal identity (TDIP)**: one DID for humans, delegated agents, and autonomous agents that works on EVM (via ERC-8004 mirror), SVM, Canton (CIP-26 user binding), AP2 mandates, x402 micropayments, and OAuth/DPoP — same identity, same delegation scope, same revocation surface.
@@ -32,11 +32,11 @@ Tenzro turns AI compute into a unit of economic exchange — denominated, settle
 
 Verifiability is not optional. Inference results, settlements, and identity claims can be proven via Plonky3 STARKs over the KoalaBear field (transparent setup, post-quantum-conjectured soundness) or attested by hardware enclaves — both anchored on-chain via the `ZK_VERIFY` and `TEE_VERIFY` precompiles. Where Render rents raw GPUs and Bittensor coordinates subnet intelligence, Tenzro unifies inference, training, agent settlement, identity, verification, and cross-chain reach under one tokenized substrate.
 
-## What Tenzro Does That No Other Chain Does
+## What Tenzro Does That No Other Network Does
 
-Tenzro is the only L1 in 2026 that combines **EVM + SVM + Canton/DAML** in a single chain. The closest analog (Fluent, mainnet 2026-04-24) ships EVM + SVM + Wasm but no DAML — and DAML is the execution environment the institutional RWA surface (regulated tokenized treasuries, bank deposit tokens, CIP-56 settlement) is converging on.
+Tenzro is the only protocol in 2026 that combines **EVM + SVM + Canton/DAML** in a single network. The closest analog (Fluent, mainnet 2026-04-24) ships EVM + SVM + Wasm but no DAML — and DAML is the execution environment the institutional RWA surface (regulated tokenized treasuries, bank deposit tokens, CIP-56 settlement) is converging on.
 
-That makes Tenzro the only chain that natively bridges **retail-agent rails** (AP2 mandates, x402 micropayments, ERC-8004 trustless agents, ERC-4337 v0.8 smart accounts) and **institutional-RWA rails** (Canton DAML, CIP-56 tokens, DvP settlement) under one identity (TDIP), one settlement asset (TNZO), and one consensus layer.
+That makes Tenzro the only network that natively bridges **retail-agent rails** (AP2 mandates, x402 micropayments, ERC-8004 trustless agents, ERC-4337 v0.8 smart accounts) and **institutional-RWA rails** (Canton DAML, CIP-56 tokens, DvP settlement) under one identity (TDIP), one settlement asset (TNZO), and one consensus layer.
 
 Two more architectural calls worth flagging:
 

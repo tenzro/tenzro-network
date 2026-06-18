@@ -8,7 +8,7 @@ open HTTPS protocol that the wider compliance ecosystem ingests.
 
 ## Scope
 
-Tenzro is the L1; the IVMS101 envelope is the typed payload binding
+Tenzro Ledger is the consensus network; the IVMS101 envelope is the typed payload binding
 payments and settlements to originator/beneficiary identity records.
 The actual VASP-to-VASP TRP wire transport sits a layer up — handled
 by integration partners or by the tenzro-payments HTTP middleware.

@@ -54,7 +54,7 @@ To steward, but not own, a decentralized protocol for the AI age, where humans a
 
 ### 1.3 What Tenzro Does in the 2026 Ecosystem
 
-The Foundation's stewardship is grounded in a specific architectural stance. By the start of 2026, agentic finance runs across three separate ecosystems — EVM-side agent commerce (ERC-8004 mainnet 2026-01-29, AP2 donated to FIDO in April 2026, x402 at ~$600M annualized), SVM-side agent trading (ElizaOS, SendAI, GOAT), and Canton-side institutional RWA (tokenized treasuries, bank deposit tokens, CIP-56 settlement) — each with its own protocols, settlement primitives, and execution model. No L1 in 2026 combines EVM + SVM + Canton/DAML in one chain.
+The Foundation's stewardship is grounded in a specific architectural stance. By the start of 2026, agentic finance runs across three separate ecosystems — EVM-side agent commerce (ERC-8004 mainnet 2026-01-29, AP2 donated to FIDO in April 2026, x402 at ~$600M annualized), SVM-side agent trading (ElizaOS, SendAI, GOAT), and Canton-side institutional RWA (tokenized treasuries, bank deposit tokens, CIP-56 settlement) — each with its own protocols, settlement primitives, and execution model. No protocol in 2026 combines EVM + SVM + Canton/DAML in one chain.
 
 Tenzro does. Five things follow:
 
@@ -83,9 +83,9 @@ The decentralized protocol enabling AI inference marketplace, TEE services, and 
 - Agent framework and A2A/MCP protocol standards
 - Multi-party workflow engine on Canton (privileged-VM selectors, hash-chained receipts, kill switch, fee routing, privacy domains)
 
-### 2.2 Tenzro Ledger (L1 Settlement Layer)
+### 2.2 Tenzro Ledger
 
-The purpose-built Layer 1 blockchain providing settlement infrastructure:
+The purpose-built network providing settlement infrastructure:
 
 - Consensus protocol (HotStuff-2 BFT)
 - Multi-VM execution environment (EVM, SVM, DAML/Canton)

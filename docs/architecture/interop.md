@@ -5,7 +5,7 @@
 
 ## Context
 
-Tenzro is a multi-VM L1 (EVM + SVM + Canton/DAML) where TNZO is **one native balance** with three VM views via the Sei-V2-style pointer model. This shape constrains what kinds of bridges can be the "canonical" path for TNZO:
+Tenzro Ledger is a multi-VM network (EVM + SVM + Canton/DAML) where TNZO is **one native balance** with three VM views via the Sei-V2-style pointer model. This shape constrains what kinds of bridges can be the "canonical" path for TNZO:
 
 - **Lock-and-mint with separate per-chain supply curves is incompatible.** TNZO supply lives on Tenzro; foreign chains must hold IOUs whose total never exceeds locked native balance.
 - **Multi-VM views complicate the "where does TNZO live" question.** External bridges talk to one chain at a time. A foreign user's "I want TNZO" request must resolve to the native layer regardless of which VM they entered through.

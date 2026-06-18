@@ -6,7 +6,7 @@
 **Authors:** Tenzro Network Contributors
 **Created:** March 19, 2026
 **Last Updated:** March 19, 2026
-**Platform:** Tenzro Network (Custom L1, HotStuff-2 Consensus)
+**Platform:** Tenzro Network (HotStuff-2 BFT, hybrid post-quantum signatures)
 
 ---
 

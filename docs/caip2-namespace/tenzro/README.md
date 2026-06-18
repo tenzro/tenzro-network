@@ -14,7 +14,7 @@ updated: 2026-05-02
 ## Introduction
 
 Blockchains in the "tenzro" namespace are validated by their genesis block hash.
-Tenzro is an L1 settlement layer designed for AI-age applications: each chain in
+Tenzro Ledger is a network designed for AI-age applications: each chain in
 the namespace runs HotStuff-2 BFT consensus over a multi-VM execution layer
 (EVM, SVM, and Canton/DAML) with a single shared native balance per asset (the
 Sei-V2-style pointer model). The namespace covers all networks operated under
