@@ -206,7 +206,7 @@ framework API only when that framework is present (`pytest.importorskip`).
 - Bridge design: [`docs/architecture/agent-interop-protocol-bridge.md`](../../docs/architecture/agent-interop-protocol-bridge.md)
 - Node RPC method names: `crates/tenzro-node/src/rpc.rs`
 - Rust DID envelope reference (authoritative): `crates/tenzro-identity/src/envelope.rs`
-- AP2 v0.2: <https://ap2-protocol.org/ap2/specification/> · `docs/protocol-research-2026-05/ap2-v02.md` · `crates/tenzro-payments/src/ap2/mod.rs`
+- AP2 v0.2: <https://ap2-protocol.org/ap2/specification/> · `crates/tenzro-payments/src/ap2/mod.rs`
 - ERC-8004 Trustless Agents: <https://eips.ethereum.org/EIPS/eip-8004>
 - LangChain `BaseCallbackHandler`: <https://reference.langchain.com/python/langchain-core/callbacks/base/BaseCallbackHandler>
 - CrewAI: <https://docs.crewai.com/en/concepts/crews>

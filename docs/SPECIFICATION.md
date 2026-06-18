@@ -100,7 +100,7 @@ A small set of L1s pursue multi-VM execution. **Fluent** (mainnet 2026-04-24) is
 
 What makes this work is the **combination**, not any single piece: AP2, x402, ERC-8004, ERC-4337, MCP, A2A, Plonky3, Poseidon2, FRI, KoalaBear, and TEE attestation are open standards adopted byte-for-byte rather than reinvented. The work is integrating them inside one consensus layer with one native asset and one identity surface.
 
-For the full ecosystem context with citations, see [docs/landscape-2026.md](docs/landscape-2026.md).
+For the full protocol-layer view, see [`WHITEPAPER.md`](WHITEPAPER.md).
 
 ### 1.4 Design Principles
 
@@ -2317,7 +2317,7 @@ Sponsors select a trust tier at task posting; the tier determines what the train
 | **Verified** | Trainer posts a per-round TEE attestation binding `{program_hash, shard_hash, model_hash, DID}` | Hardware attestation (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA CC) | Byzantine-robust (TrimmedMean / CoordinateMedian / Krum, Phase 2) |
 | **Confidential** | TEE-resident training; data sealed to the enclave; host OS never sees cleartext | Hardware attestation + sealed datasets | Byzantine-robust (Phase 2) |
 
-Per `TRAIN.md` §3.3: training compute is TEE-optional in the Open tier; key custody and verification (the syncer's signing keys, the receipt commitment) are TEE-mandatory in *every* tier. Phase 1 ships the Open tier only — Verified and Confidential are wire-format-supported but not yet enforced by the syncer.
+Per `AI.md` §7.3.3: training compute is TEE-optional in the Open tier; key custody and verification (the syncer's signing keys, the receipt commitment) are TEE-mandatory in *every* tier. Phase 1 ships the Open tier only — Verified and Confidential are wire-format-supported but not yet enforced by the syncer.
 
 ### 20.3 Architecture Split: Rust Protocol + Python Trainer
 
@@ -2340,7 +2340,7 @@ Tenzro Train is split across two layers, each owning what it does best:
 - Ed25519 signing of outer gradients (PyNaCl)
 - JSON-RPC client to the local node (`enrollTrainer`, `submitOuterGradient`, `finalizeRound`)
 
-The split lives in `TRAIN.md` §7.1 and `crates/tenzro-training/src/lib.rs`. The boundary is the **outer gradient**: Python emits one safetensors blob per fragment + a 32-byte SHA-256 + a signed `OuterGradient` JSON; Rust never holds the raw tensor in memory and never executes a `forward()`. This keeps the protocol layer free of CUDA, ABI churn, and PyTorch version pinning, while letting the Python adapters track frontier model architectures without protocol changes.
+The split lives in `AI.md` §7.1 and `crates/tenzro-training/src/lib.rs`. The boundary is the **outer gradient**: Python emits one safetensors blob per fragment + a 32-byte SHA-256 + a signed `OuterGradient` JSON; Rust never holds the raw tensor in memory and never executes a `forward()`. This keeps the protocol layer free of CUDA, ABI churn, and PyTorch version pinning, while letting the Python adapters track frontier model architectures without protocol changes.
 
 ### 20.4 Decoupled DiLoCo Protocol
 

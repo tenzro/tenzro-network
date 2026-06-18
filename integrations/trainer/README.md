@@ -96,5 +96,5 @@ Per-modality inner loops use the SOTA Python library for the modality:
 timeseries, `timm` for vision. Outer gradients are packaged as safetensors
 fragments with SHA-256 hashes and Ed25519 signatures.
 
-See `TRAIN.md` §7.1 and `crates/tenzro-training/src/lib.rs` for the full split
+See `AI.md` §7.7.1 and `crates/tenzro-training/src/lib.rs` for the full split
 rationale.

@@ -21,7 +21,7 @@ The inner training loop — forward/backward, optimizer step, FSDP sharding — 
 - `tenzro/training` — outer gradient submissions, fragment payloads
 - `tenzro/training/syncer` — syncer status, round transitions, finality
 
-This split mirrors how every production decentralized training run in 2026 (Prime Intellect's INTELLECT-1/2/3, Nous Research's Hermes 4.3 on Psyche/DisTrO, OpenDiLoCo) structures its stack: Python + PyTorch for the inner loop, a typed protocol crate for orchestration. See `TRAIN.md` §7.1 for the full rationale.
+This split mirrors how every production decentralized training run in 2026 (Prime Intellect's INTELLECT-1/2/3, Nous Research's Hermes 4.3 on Psyche/DisTrO, OpenDiLoCo) structures its stack: Python + PyTorch for the inner loop, a typed protocol crate for orchestration. See `AI.md` §7.7.1 for the full rationale.
 
 When the protocol layer needs to "train," it dispatches to the Python reference trainer over JSON-RPC and ingests the resulting `OuterGradient` / safetensors payload. Aggregation operates over already-decoded `ndarray` views of those payloads.
 
@@ -69,7 +69,7 @@ cargo test -p tenzro-training
 
 ## Further reading
 
-- [`TRAIN.md`](../../TRAIN.md) — full whitepaper
+- [`AI.md`](../../AI.md) — full whitepaper
 - [Tenzro Train docs](https://tenzro.com/docs/tenzro-train) — developer reference
 - [Tenzro Train whitepaper](https://tenzro.com/whitepapers/tenzro-train) — architecture and phasing
 

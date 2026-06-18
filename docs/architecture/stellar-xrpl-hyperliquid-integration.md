@@ -6,8 +6,6 @@
 **Companion docs:**
 - `docs/architecture/cross-vm-token-architecture.md` — TNZO pointer model
 - `docs/architecture/interop.md` — bridge router design + adapter contract
-- `docs/protocol-research-2026-05/ap2-v02.md` — mandate envelope
-- `docs/protocol-research-2026-05/stripe-spt.md` — closed-network primitive precedent
 
 ## Why
 
@@ -337,7 +335,7 @@ eip155:1440002              # XRPL EVM (standard CAIP-2 for EVM)
 
 ## Comparison to Stripe SPT pattern
 
-Stripe's Shared Payment Token (`docs/protocol-research-2026-05/stripe-spt.md`) is the closest analogue: a closed-network primitive (Visa/MC cards) wrapped in a Tenzro federation surface (TDIP DID + DelegationScope + ERC-8004). The Stellar/XRPL/Hyperliquid integration is the **on-chain version of the same pattern**:
+Stripe's Shared Payment Token is the closest analogue: a closed-network primitive (Visa/MC cards) wrapped in a Tenzro federation surface (TDIP DID + DelegationScope + ERC-8004). The Stellar/XRPL/Hyperliquid integration is the **on-chain version of the same pattern**:
 
 | | Stripe SPT | Stellar/XRPL/Hyperliquid |
 |---|---|---|

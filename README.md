@@ -17,7 +17,7 @@ Tenzro Network is a fully decentralized L1 designed as the **interoperability an
 - **Universal settlement (TNZO)**: bridge fees, inference fees, escrow, micropayment channels, training-run grants, and cross-chain destination-native fees (via the Chainlink-backed bridge fee oracle) all denominated and accounted in TNZO.
 - **Cross-chain reach as a wire primitive**: LayerZero V2, Chainlink CCIP, Chainlink CCT, Wormhole + NTT, deBridge DLN, LI.FI, Hyperlane V3, Axelar GMP, Babylon Bitcoin staking, and Canton — all behind one ERC-7683 envelope with `BridgeFeeHint`. Users sign once, solvers pick the bridge.
 - **Multi-VM execution**: EVM (revm + 9 standard precompiles + 7 BLS12-381 EIP-2537 + 13 Tenzro precompiles) + SVM (solana_rbpf with SPL Token Program dispatch) + Canton 3.5+ DAML — every contract, every instruction, every command runs against the same identity, same wallet, same TNZO balance.
-- **AI inference + training as first-class economic activity**: providers earn TNZO for serving models (chat, vision, audio, forecasting, embeddings, segmentation, detection), running TEE enclaves, and contributing GPU compute to verifiable training runs (Tenzro Train). Inference results, settlements, and identity claims are verifiable on-chain via Plonky3 STARKs over the KoalaBear field (transparent setup, post-quantum-conjectured soundness) or attested by hardware enclaves (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC) — both anchored via `ZK_VERIFY` and `TEE_VERIFY` precompiles.
+- **AI inference + training as protocol-level economic activity**: providers earn TNZO for serving models (chat, vision, audio, forecasting, embeddings, segmentation, detection), running TEE enclaves, and contributing GPU compute to verifiable training runs (Tenzro Train). Inference results, settlements, and identity claims are verifiable on-chain via Plonky3 STARKs over the KoalaBear field (transparent setup, post-quantum-conjectured soundness) or attested by hardware enclaves (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC) — both anchored via `ZK_VERIFY` and `TEE_VERIFY` precompiles.
 - **Humans as peer identity class**: HITL escalation, guardian-quorum recovery, AP2 cart/intent/payment mandates, and delegation scopes are wire primitives, not adapter-layer features.
 
 Tenzro Network is also the reference implementation of the [Open Agent Network (OAN)](https://github.com/tenzro/open-agent-network) — the standards family (TNIP-001..022) for a hybrid human + agent coexisting network. OAN provides the governance framework; Tenzro Network ships the working implementation. The wire stays open for other implementations.
@@ -43,7 +43,7 @@ Two more architectural calls worth flagging:
 - **Confidential agent compute is a consensus primitive, not a sidecar.** TEE-attested validators get a 1.5× multiplier on their reputation-weighted leader-selection draw; the `TEE_VERIFY` precompile verifies real Intel TDX, AMD SEV-SNP, AWS Nitro, and NVIDIA GPU CC quotes on-chain. Phala, Oasis Sapphire/ROFL, and NEAR AI all run TEE compute as middleware over a non-TEE chain. Tenzro consensus is two-phase HotStuff-2 with reputation-weighted proposer election, no-endorsement certificates for tail-fork resistance, and Ed25519 + ML-DSA-65 hybrid post-quantum signatures on every safety-critical message — full spec at [`docs/papers/tenzro-consensus.md`](docs/papers/tenzro-consensus.md).
 - **TNZO is a pointer-model native asset.** One balance, three VM views (wTNZO ERC-20 on EVM, SPL adapter on SVM, CIP-56 holding on Canton) — no bridge risk, no liquidity fragmentation. Registered upstream via CAIP-2 (`tenzro` namespace), SLIP-44 (`1414421071` / `0xd44e5a4f`), and W3C DID (`did:tenzro`).
 
-For the full ecosystem context — what AP2, x402, ERC-8004, and CIP-56 are doing on EVM, SVM, and Canton in 2026 — see [docs/landscape-2026.md](docs/landscape-2026.md).
+For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md).
 
 ## Architecture
 
@@ -208,29 +208,38 @@ The node exposes 4 protocol servers, plus 6 ecosystem MCP servers:
 
 ## Key Features
 
-### Multi-VM Execution
-- **EVM**: Full revm integration, all 9 standard precompiles + 7 BLS12-381 (EIP-2537), Tenzro-specific precompiles
-- **SVM**: Solana BPF programs via solana_rbpf
-- **DAML**: Canton 3.x JSON Ledger API v2 for enterprise smart contracts
-- **Cross-VM tokens**: Sei V2 pointer model — wTNZO on EVM, SPL adapter on SVM, CIP-56 on Canton, shared native balance
+### Multi-VM Execution — three VMs, one state machine
 
-### Multi-Modal AI Inference
-- **Forecast** (TimesFM 2.5 200M): `tenzro_forecast`, `tenzro_listForecastCatalog`, `tenzro_loadForecastModel`, CLI `tenzro forecast`
-- **Vision** embedding/similarity (CLIP ViT-B/32 + L/14, SigLIP2 base/large/so400m, DINOv3 vits16/vitb16/vitl16, DINOv2): `tenzro_visionEmbed`, `tenzro_visionSimilarity`, `tenzro_visionClassify`, CLI `tenzro embed-image`
-- **Text embeddings** (Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M Matryoshka, BGE-M3, Snowflake Arctic Embed L v2.0): `tenzro_textEmbed`, CLI `tenzro embed-text`
-- **Segmentation** (SAM 3 / 3.1, SAM 2 base/large, EdgeSAM, MobileSAM): `tenzro_segment`, CLI `tenzro segment`
-- **Detection** (RF-DETR n/s/m/b/l/2xl, D-FINE n/s/m/l/x): `tenzro_detect`, CLI `tenzro detect`
-- **Audio ASR** (Moonshine v2 tiny/base, Distil-Whisper small.en/medium.en/large-v3, Whisper-large-v3-turbo, Parakeet-TDT-0.6B-v3, Canary-1B-Flash): `tenzro_transcribe`, CLI `tenzro transcribe`
-- **Video** encoder scaffolding (catalog empty in wave 1, awaits permissive ONNX-shippable encoder): `tenzro_videoEmbed`, CLI `tenzro embed-video`
-- License-tier gating in `ModelRegistry::register_model()` — Permissive (Apache/MIT/BSD), Attribution (CC-BY-4.0), CommercialCustom (DINOv3, SAM, Gemma — require `--accept-license`), NonCommercial (refuse without `--accept-non-commercial`)
-- Modality-aware `InferenceRouter::route()` dispatches typed `InferencePayload` (Chat / Forecast / VisionEmbed / VisionSimilarity / TextEmbed / Segment / Detect / Transcribe / VideoEmbed) per registered model modality
+A chain that picks one VM forces every workload to fit that VM. Tenzro runs three and routes by transaction type. All three share the same state, the same gas token (TNZO), the same TDIP identity, and the same consensus.
 
-### Identity (TDIP)
-- Unified identity for humans and machines: `did:tenzro:human:{uuid}`, `did:tenzro:machine:{controller}:{uuid}`
-- W3C DID Documents and Verifiable Credentials
-- Fine-grained delegation scopes: max_transaction_value, allowed_operations, time bounds
-- KYC tiers with credential-gated upgrades
-- Recursive trust chain verification with cycle detection
+- **EVM — liquidity and composability.** The Ethereum surface targets the broadest pool of existing contracts and tooling. Tenzro ships full revm integration with every standard precompile (ecRecover, SHA-256, RIPEMD-160, Identity, ModExp, EC_ADD, EC_MUL, EC_PAIRING, BLAKE2F) per the canonical EIPs, plus all seven BLS12-381 precompiles (EIP-2537) for native consensus-grade signature aggregation. Block-STM gives parallel transaction execution with MVCC concurrency control and automatic sequential fallback under contention. EIP-1559 dynamic fee market burns the base fee. Native primitives extend the EVM with protocol-aware precompiles: `TEE_VERIFY` (real hardware attestation), `ZK_VERIFY` (O(1) commitment lookup against the on-chain Plonky3 registry), `VRF_VERIFY` (RFC 9381 ECVRF), `IBC_VERIFY` (IBC-Eureka light-client lookup), the Tenzro precompile slate (`TNZO_BRIDGE`, `TOKEN_FACTORY`, `CROSS_VM_BRIDGE`, `STAKING`, `GOVERNANCE`, `NFT_FACTORY`, `MODEL_INFERENCE`, `SETTLEMENT`, **global supply accounting** at `0x1021`, **module registry** at `0x1022`), ERC-4337 v0.8 account abstraction, EIP-7702 Type-4 delegation, Permit2 SignatureTransfer with witness binding, and ERC-7579 modular validator modules (social recovery / session keys / spending limits / WebAuthn passkey / TEE-bound).
+- **SVM — throughput and latency.** The Solana surface targets workloads that need sub-second finality and high throughput — DEX routing, agent-to-agent micropayments, real-time settlement on a path. Tenzro embeds the Solana BPF runtime (`solana_rbpf`) so Solana programs run unmodified. The SPL Token program maps onto the native unified token registry — a swap on SVM settles in the same balance space as a transfer on EVM. There is no bridging between the two VMs.
+- **Canton DAML — privacy and institutional settlement.** Canton is where the institutional financial system already settles tokenized cash, money-market funds, bonds, equities, treasuries, and OTC derivatives. Tenzro speaks Canton 3.5+ JSON Ledger API v2 directly. CIP-56 Canton Coin holdings round-trip with TNZO; CIP-26 user management binds each tenant to its own party with `CanActAs` rights enforced server-side; DAR upload, party allocation, command submission, and active-contract queries are all available through the same node API surface as EVM and SVM calls. Canton's privacy model means the transaction body is visible only to its signatories; Tenzro provides the cross-VM orchestration and the public commitment.
+- **Cross-VM token model — Sei V2 pointer.** TNZO has a single canonical native balance. The wTNZO ERC-20 pointer on the EVM side and the wTNZO SPL adapter on the SVM side share the same underlying balance — there is no bridge between them, no wrapped/unwrapped distinction, no liquidity fragmentation. Canton CIP-56 holdings round-trip through the Canton bridge adapter. From the application's perspective, a wallet has one TNZO balance regardless of which VM it last touched.
+- **What this composes into.** An agent settling a DvP between a tokenized treasury (Canton) and a stablecoin payment (EVM) executes the whole thing as one workflow through one identity. An agent paying for a Solana DEX swap and posting a receipt on Tenzro consensus does it with one TNZO balance. Cross-VM coordination is a workflow primitive, not application code.
+
+### Decentralized AI infrastructure
+
+The protocol layer treats AI compute as a coordinated resource, not a centralized service.
+
+- **Distributed Mixture-of-Experts serving.** MoE models (Qwen 3.5 122B-A10B / 397B-A17B, DeepSeek V3 / V4 Pro 1.6T-A49B / V4 Flash, GLM 5.1 / 5.2, Kimi K2 / K2.6, MiniMax M3, Gemma 4 26B-A4B) serve in two modes. **Full-replica** when one provider's hardware fits the model. **Decentralized expert shards** when it doesn't — providers declare which experts they hold via `ProviderCapacity.moe_holdings`, and the dispatch planner aggregates per-token top-k routing decisions into per-holder batches dispatched directly over the holder's iroh QUIC endpoint. The shard view is a derived view over the existing provider registry — MoE providers are the same network providers that serve dense models. Replication is governance-tunable (default ≥ 2 holders per expert, up to 8 for popular experts). Typed pipeline roles: `Replica`, `Router`, `ExpertHolder`, `PrefillDecode`, `Prefill`, `Decode`. RPCs: `tenzro_moeShardMap`, `tenzro_moePlanDispatch`, `tenzro_moeReplicationPolicy`, `tenzro_moeCatalogShape`.
+- **Multi-Token Prediction (MTP) — full path wired.** Speculative decoding wired through the catalog → provider capacity → router → llama.cpp `--spec-type draft-mtp` path. Wired for DeepSeek V3 (native, ~80% accept rate, ~1.8× decode), DeepSeek V4 Pro / Flash, GLM 5.2, Gemma 4 (all sizes), Qwen 3.5 (0.8B/2B/4B/9B/27B/35B-A3B/122B-A10B/397B-A17B), and Qwen 3.6 27B + 35B-A3B. Providers advertise drafter co-load via `ProviderCapacity.mtp_enabled`; the inference router filters MTP-eligible requests to MTP-capable providers when `draft_n` is set.
+- **Decentralized training — Tenzro Train (Decoupled DiLoCo).** Rust protocol layer (`tenzro-training`) owns the syncer state machine, four aggregation rules (Mean / TrimmedMean / CoordinateMedian / Krum), Nesterov outer optimizer, fragment commitment, training receipts, and on-chain run-root commitments. Python reference trainer wraps PyTorch FSDP2 + Hivemind + safetensors for per-modality inner loops (transformers, native PyTorch, gluonts, timm). k-of-N witness committee with idempotent finalization and no-endorsement certificates handles multi-syncer coordination across regions. Confidential tier uses HPKE RFC 9180 base-mode wrapping of per-shard data keys to enclave-resident trainers (data unsealed only inside the trainer's TEE). Three trust tiers: Open (Mean only), Verified, Confidential.
+- **Cortex.** Recurrent-depth-Transformer reasoning workers exposed as a separate compute lane — HTTP sidecar architecture, signed receipts, attestation suite, gossip-based worker discovery, depth-priced billing.
+- **Confidential inference.** Model providers can wrap inference inside an Intel TDX / AMD SEV-SNP / AWS Nitro / NVIDIA GPU CC enclave; the result hash is signed with an enclave-bound key and the attestation chain verifies through `TEE_VERIFY` on-chain.
+
+### Multi-modal inference
+
+The catalog spans seven ONNX runtimes plus the llama.cpp language path, all dispatched by the modality-aware `InferenceRouter::route()` against typed `InferencePayload` (Chat / Forecast / VisionEmbed / VisionSimilarity / TextEmbed / Segment / Detect / Transcribe / VideoEmbed). License tiers — Permissive (Apache/MIT/BSD), Attribution (CC-BY-4.0), CommercialCustom (DINOv3, SAM, Gemma — require `--accept-license`), NonCommercial (refuse without `--accept-non-commercial`) — gate registration. Forecast (TimesFM 2.5), Vision embedding (CLIP, SigLIP2, DINOv3, DINOv2), Text embedding (Qwen3-Embedding, EmbeddingGemma Matryoshka, BGE-M3, Snowflake Arctic), Segmentation (SAM 3 / 3.1, SAM 2, EdgeSAM, MobileSAM), Detection (RF-DETR, D-FINE), Audio ASR (Moonshine v2, Distil-Whisper, Whisper v3 turbo, Parakeet-TDT, Canary-1B-Flash), Video (vision-fallback encoder over uniformly-sampled frames). Each modality is exposed through JSON-RPC, MCP, A2A, and a CLI subcommand.
+
+### Identity (TDIP) — four classes
+
+- `did:tenzro:human:{uuid}` — KYC tier, controlled machines, controller of any number of delegated agents.
+- `did:tenzro:machine:{controller}:{uuid}` — delegated agent acting on behalf of a human, institution, or upstream machine. Carries a delegation scope (per-tx cap, daily cap, allowed operations / chains / payment protocols / counterparties, time bound).
+- `did:tenzro:machine:{uuid}` — autonomous agent. Same wallet and A2A surface, no controller. Marks `is_seed_agent` for protocol-funded bootstrap agents.
+- `did:tenzro:institution:{lei}:{uuid}` — legal entity anchored to its 20-character GLEIF Legal Entity Identifier (ISO 17442) with ISO 7064 Mod 97-10 check-digit validation at registration. Optional vLEI ACDC credential id binding, ISO 3166-1 alpha-2 country code, KYB tier. One legal entity can hold multiple institution identities (one per desk / fund / subsidiary) without re-issuing LEIs.
+
+W3C DID Documents. W3C Verifiable Credentials with recursive trust-chain verification (cycle detection, depth bound, anchored to configured trust roots). KYC/KYB tier upgrades via credential. Cascading revocation. **Universal Resolver** at `/1.0/identifiers/{did}` (DIF spec) for any standards-compliant client. **KERI** Key Event Log for long-lived autonomous machine identities (inception, rotation, interaction events with pre-rotation commitments; SAID prefix `S` for SHA-256). **Sign-In With Tenzro** (SIWT) — EIP-4361-shaped message for off-chain service authentication.
 
 ### Payments
 
@@ -255,8 +264,9 @@ This means a single agent identity can compose a card-rail TAP payment, an x402 
 - FROST-Ed25519 (RFC 9591) 2-of-3 threshold wallets with Argon2id key derivation, paired with mandatory ML-DSA-65 post-quantum signatures
 - VRF (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI) for provably-fair randomness — precompile `0x1007`, NFT `mintRandom` (`0x52517e21`)
 
-### Cross-Chain Bridge
-- **LayerZero V2**: EndpointV2 messaging, OFT with shared decimals, Stargate native bridging
+### Cross-Chain Bridge (15 production adapters)
+- **LayerZero V2**: EndpointV2 messaging, OFT with shared decimals
+- **Stargate V2 Hydra**: native USDC / USDT / WETH OFT bridging (separate adapter; LayerZero V2 underneath)
 - **Chainlink CCIP**: Router-based cross-chain messaging with token pools
 - **Chainlink CCT**: Cross-Chain Token v1.6+ self-serve pool registry (LockRelease + BurnMint)
 - **Wormhole**: 19-guardian VAA attestation, 30+ chains incl. Solana/Aptos/Sui
@@ -266,7 +276,13 @@ This means a single agent identity can compose a card-rail TAP payment, an x402 
 - **Hyperlane V3**: messaging with sovereign Tenzro-validator-set ISM (`list_chains`, `quote_dispatch`, `dispatch`)
 - **Axelar GMP**: Cosmos / Move / Stellar / XRPL reach
 - **Babylon**: Bitcoin staking finality-providers + EOTS delegations
+- **IBC-Eureka**: Tendermint light client compressed into SP1 plonk proofs for every Cosmos SDK chain. On-EVM `IBC_VERIFY` precompile at `0x1020` is an O(1) lookup against the off-EVM commitment registry.
+- **BitVM2 / Clementine**: trust-minimised Bitcoin two-way peg with optimistic challenge protocol. Peg-in / peg-out lifecycle tracked on-chain; default 7-day settlement window.
+- **Hyperbridge ISMP**: HTTP-shaped POST/GET messaging into Polkadot. Mint-control + per-asset rolling-window liquidity ceilings enforced at the message-ingest path.
+- **NEAR Chain Signatures**: NEAR MPC produces secp256k1 / Ed25519 signatures for Bitcoin, Ethereum, Solana, TON, Stellar, Sui, Aptos, Dogecoin from a Tenzro account.
 - **Canton**: Enterprise DAML interoperability
+
+A unified `BridgeRouter` consults live fee quoting and returns a ranked set of routes by cost, speed, or reliability. Every adapter is fail-closed on inbound message verification (Guardian quorum for Wormhole, threshold validator set for Hyperlane + Axelar, ISMP proof for Hyperbridge, BitVM2 challenge protocol for Clementine). Per-adapter nonce trackers persist so replays are dropped across restarts. A **global supply accounting registry** at precompile `0x1021` is the single integrity log for Tenzro-issued tokens that move across rails — enforces monotone per-(asset, rail) sequence (replay guard), `Σ mints − Σ burns ≤ max_supply`, and no underflow on burn.
 
 ### Bridge Fee in TNZO + Chainlink-backed Fee Oracle
 - **Single-token UX**: users pay one TNZO-denominated fee on the source chain; the destination-native fee is fronted by a per-adapter sponsorship pool.
@@ -286,14 +302,17 @@ This means a single agent identity can compose a card-rail TAP payment, an x402 
 - **AP2**: Agent Payments Protocol with intent/cart/payment VDC mandates, session lifecycle, and mandate-pair validation
 - **AAP** (Agent Access Protocol): OAuth 2.1 + DPoP + RAR layering for agent-issued bearer tokens. The CLI exposes both `tenzro auth` and the alias `tenzro aap` — both names hit the same `tenzro_*Token*` and wallet-link RPCs.
 
-### Multi-Party Workflows (Canton-native)
+### Multi-Party Workflows (VM-agnostic; Canton mirror optional)
+
+The workflow runtime is its own state machine. It runs alongside (not inside) the VMs and carries its own typed lifecycle, per-step `execute / verify / compensate` handlers, on-chain receipts under privileged-VM transaction selectors, fee routes, kill switch, and privacy domains. **Canton mirroring is an optional projection** — a workflow can declare `canton_mirror: Some(...)` and the workflow dispatcher will write a `Tenzro.Workflow.Receipt` row through the co-located Canton participant for every step; a workflow with `canton_mirror: None` runs without Canton interaction. EVM contracts subscribe to workflow events through the standard event surface. SVM programs observe receipts through the unified token registry's event log.
+
 - **Lifecycle**: typed state machine (`Draft → Active → AwaitingSignatures → Executing → Completed`, terminal `Cancelled / Disputed / Failed / Suspended`) with privileged-VM selectors `0x01000040`–`0x0100004B` for every state change.
 - **Receipts**: every transition produces a `WorkflowReceipt` linked into a per-workflow hash chain, persisted under `wf_receipt:<id>` and (optionally) mirrored to a `Tenzro.Workflow.Receipt` Daml template through the co-located Canton participant.
 - **Privacy domains**: named ACLs of TDIP DIDs gate AES-256-GCM-sealed payloads with auditor read-through and governance-driven freeze.
 - **Fee routes**: basis-point recipient tables with `tenzro_computeFeeRoutePayouts` for read-only previews; actual settlement runs through the consensus-mediated escrow primitive.
 - **Kill switch**: `KillSwitchSuspend` / `KillSwitchCancel` selectors give the initiator a defined emergency-stop path so an autonomous agent can never be trapped in a non-responsive multi-party flow it originated.
 - **Surfaces**: read-only access via JSON-RPC (`tenzro_*`), MCP (port 3001), and A2A (`workflow` skill on the Tenzro Agent Card). Operational-metrics snapshot at `/metrics` with bundled Grafana dashboard (UID `tenzro-workflow`).
-- **Reference templates**: 5 ship under `crates/tenzro-workflow/reference_workflows/` (autonomous procurement, autonomous treasury, DvP settlement, environmental MRV, supply-chain DPP), each paired with a `*_daml_map.json` describing the Canton DAML projection.
+- **Reference templates**: 5 live under `crates/tenzro-workflow/reference_workflows/` (autonomous procurement, autonomous treasury, DvP settlement, environmental MRV, supply-chain DPP), each paired with a `*`*_daml_map.json` describing the optional Canton DAML projection.
 
 ### Compliance & Disclosure (EU AI Act Article 50)
 - **§50(1)** chatbot disclosure: every CLI / MCP / A2A AI text response is prefixed with `[AI]`. Single source of truth in `tenzro_node::eu_ai_disclosure`.
@@ -418,10 +437,10 @@ kubectl apply -f deploy/kubernetes/
 | [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) | Protocol specification — architecture, consensus, multi-VM execution, identity, payments, settlement, agents, training, and the concrete Rust implementation |
 | [`docs/FOUNDATION.md`](docs/FOUNDATION.md) | Tenzro Foundation: governance structure, treasury, grant programs, ecosystem stewardship |
 | [`docs/TOKENOMICS.md`](docs/TOKENOMICS.md) | TNZO token economics: supply, fee model, staking, rewards (testnet phase) |
-| [`docs/TDIP.md`](docs/TDIP.md) | Tenzro Decentralized Identity Protocol — unified human/machine identity over W3C DID (three identity classes: human / delegated agent / autonomous agent) |
-| [`docs/TRAIN.md`](docs/TRAIN.md) | Tenzro Train — decentralized training protocol layer + Python reference trainer |
+| [`docs/TDIP.md`](docs/TDIP.md) | Tenzro Decentralized Identity Protocol — unified identity over W3C DID across four classes: human, delegated agent, autonomous agent, institution (LEI-anchored) |
+| [`docs/AI.md`](docs/AI.md) | Tenzro AI — decentralized inference (single-replica + sharded MoE + MTP + multi-modal), Cortex reasoning, confidential inference, and Tenzro Train (Decoupled DiLoCo) training |
+| [`docs/NETWORK.md`](docs/NETWORK.md) | Tenzro Network — decentralized networking: libp2p control plane (gossipsub topics, NAT traversal, validator-only topic authentication, request/response protocols) + iroh QUIC data plane (DA, model weights, gradients, sealed shards, agent memory, A2A + MCP ALPNs) |
 | [`docs/GUIDE.md`](docs/GUIDE.md) | Operator and developer guide: build, run, deploy, troubleshoot |
-| [`docs/landscape-2026.md`](docs/landscape-2026.md) | 2026 ecosystem context: AP2, x402, ERC-8004, CIP-56 across EVM/SVM/Canton |
 | [`docs/did-method-tenzro.md`](docs/did-method-tenzro.md) | `did:tenzro` DID method specification (W3C registration submission) |
 | [`docs/operators/`](docs/operators/) | Validator and node operator runbooks |
 | [`docs/security/`](docs/security/) | Security model, quantum-resistance plan, audit notes |

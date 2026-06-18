@@ -10,7 +10,7 @@
 //! `tenzro-training`) owns coordination, aggregation, settlement, and
 //! verification. The **Python reference trainer** (`integrations/trainer/`,
 //! PyTorch FSDP2 + Hivemind + safetensors) owns the inner training loop. See
-//! [`TRAIN.md`] §7.1 for the full split.
+//! [`AI.md`] §7.7.1 for the full split.
 //!
 //! # Lifecycle (Phase 1)
 //!
@@ -35,7 +35,7 @@ use std::fmt;
 /// Trust tier selected by the sponsor at task posting. Defines what the
 /// trainer hardware must provide and how rewards/penalties scale.
 ///
-/// Per `TRAIN.md` §3.3: training compute is TEE-optional (Open tier),
+/// Per `AI.md` §7.3.3: training compute is TEE-optional (Open tier),
 /// key custody and verification are TEE-mandatory in every tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum TrainingTier {

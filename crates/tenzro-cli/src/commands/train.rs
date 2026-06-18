@@ -4,7 +4,7 @@
 //! Phase 1: timeseries-first, Open trust tier, Mean aggregation.
 //!
 //! Subcommands wrap `tenzro_training_*` JSON-RPC methods exposed by the node.
-//! See `TRAIN.md` for the full architecture.
+//! See `AI.md` for the full architecture.
 
 use crate::output;
 use anyhow::{anyhow, Result};
@@ -56,7 +56,7 @@ impl TrainCommand {
 /// Post a new training task. The full task spec is loaded from a JSON file.
 ///
 /// Phase 1 example task spec is published at
-/// `crates/tenzro-training/examples/timesfm-task.json` (see TRAIN.md §A.1).
+/// `crates/tenzro-training/examples/timesfm-task.json` (see AI.md §7.A).
 #[derive(Debug, Parser)]
 pub struct TrainPostTaskCmd {
     /// Path to a JSON file containing a `TrainingTaskSpec`

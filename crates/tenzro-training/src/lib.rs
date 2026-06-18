@@ -18,7 +18,7 @@
 //! is dispatched to the Python reference trainer at
 //! `integrations/trainer/` (PyTorch FSDP2 + Hivemind + safetensors).
 //!
-//! See `TRAIN.md` §7.1 for the full split rationale.
+//! See `AI.md` §7.7.1 for the full split rationale.
 //!
 //! # Scope
 //!
