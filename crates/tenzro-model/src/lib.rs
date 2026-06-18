@@ -117,6 +117,8 @@ pub mod error;
 pub mod hf_download;
 pub mod library;
 pub mod load;
+pub mod moe_router;
+pub mod moe_shard;
 pub mod pricing;
 pub mod provenance;
 pub mod provider;
@@ -141,13 +143,20 @@ pub use routing::{
     CircuitBreaker, CircuitBreakerState, InferenceRouter, RoutingConfig, RoutingStrategy,
 };
 pub use pricing::{PriceEstimate, PricingEngine};
+pub use moe_shard::{
+    ExpertHolder, ExpertId, MoeShardView, ReplicationPolicy,
+};
+pub use moe_router::{
+    plan_dispatch, DispatchPlan, ExpertBatch, MoeDispatchError, TokenAssignment,
+    TokenRouting, TokenSlot,
+};
 pub use library::{
     CategoryType, CompatibilityRequirements, LibraryModelInfo, ModelCategory, ModelHighlight,
     ModelLibrary,
 };
 pub use download::{DownloadManager, DownloadStatus, DownloadTask};
 pub use catalog::{
-    HfModelEntry, LicenseTier, ModelArchitecture, OnnxAudioEntry, OnnxDetectionEntry,
+    HfModelEntry, LicenseTier, ModelArchitecture, MoeShape, MtpKind, OnnxAudioEntry, OnnxDetectionEntry,
     OnnxForecastEntry, OnnxSegmentationEntry, OnnxTextEmbeddingEntry, OnnxTextSegmentationEntry,
     OnnxVideoEntry, OnnxVisionEntry, get_audio_catalog, get_audio_model_by_id,
     get_detection_catalog, get_detection_model_by_id, get_forecast_catalog,

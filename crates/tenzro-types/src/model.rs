@@ -825,6 +825,79 @@ pub struct ProviderCapacity {
     /// drafter footprint, which is fine when `mtp_enabled = false`.
     #[serde(default)]
     pub drafter_vram_gb: Option<f32>,
+    /// MoE expert-shard declaration. When a provider can't fit an entire
+    /// MoE model (e.g. Qwen 3.5 397B-A17B) on its hardware, it can host
+    /// a subset of expert weights and serve as one peer in a
+    /// decentralized expert-parallel dispatch. Empty `holdings` means
+    /// the provider does not participate in MoE expert serving for any
+    /// model and is treated as a full-model replica only.
+    #[serde(default)]
+    pub moe_holdings: Vec<MoeExpertHolding>,
+    /// MoE-pipeline role this provider plays. `Replica` is the default —
+    /// the provider holds the full model and serves single-peer
+    /// inference. `Router` provides the gating-network step and fans
+    /// out batched expert calls. `ExpertHolder` participates in the
+    /// expert-shard pool. `PrefillDecode` runs both phases co-located
+    /// (the centralized SOTA default). Providers can declare more than
+    /// one role; the router picks the matching role per request.
+    #[serde(default)]
+    pub moe_roles: Vec<MoeProviderRole>,
+    /// Iroh endpoint id of this provider. Used by the MoE router to
+    /// dispatch batched expert calls over QUIC directly to the holder
+    /// peer without going through the OpenAI-compatible HTTP endpoint.
+    /// Required when `moe_roles` includes `Router` or `ExpertHolder`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iroh_endpoint_id: Option<String>,
+}
+
+/// Provider's holding declaration for one MoE expert in one model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoeExpertHolding {
+    /// Tenzro model id this holding covers.
+    pub model_id: String,
+    /// Transformer layer index.
+    pub layer: u32,
+    /// Expert index inside the layer's MoE block.
+    pub expert: u32,
+    /// Residency state — `Warm` (VRAM-resident), `Cold` (disk only),
+    /// or `Evicting` (being unloaded). Schedulers prefer warm holdings.
+    pub residency: MoeExpertResidency,
+    /// Maximum tokens per second this provider commits to for this
+    /// expert post-batch. `0` means "best effort" with no SLA.
+    pub committed_tps: u32,
+}
+
+/// MoE expert residency state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MoeExpertResidency {
+    /// In VRAM, ready to dispatch.
+    Warm,
+    /// On disk / CPU RAM, eviction-eligible.
+    Cold,
+    /// Currently being unloaded.
+    Evicting,
+}
+
+/// MoE pipeline roles a provider can play in distributed serving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MoeProviderRole {
+    /// Holds the full model; serves single-peer inference. The default.
+    Replica,
+    /// Runs the gating-network step and fans out batched expert calls
+    /// to the appropriate expert holders.
+    Router,
+    /// Holds one or more experts declared in `moe_holdings`.
+    ExpertHolder,
+    /// Runs both prefill and decode phases co-located (SOTA central
+    /// pattern; the Tenzro fallback when only one provider can fit the
+    /// model).
+    PrefillDecode,
+    /// Runs only the prefill phase; hands off KV cache to a decode
+    /// peer over iroh. Pairs with `Decode`.
+    Prefill,
+    /// Runs only the decode phase; accepts KV cache from a prefill
+    /// peer over iroh.
+    Decode,
 }
 
 impl Default for ProviderCapacity {
@@ -836,6 +909,9 @@ impl Default for ProviderCapacity {
             max_batch_size: 1,
             mtp_enabled: false,
             drafter_vram_gb: None,
+            moe_holdings: Vec::new(),
+            moe_roles: Vec::new(),
+            iroh_endpoint_id: None,
         }
     }
 }

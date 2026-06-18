@@ -439,6 +439,10 @@ enum Command {
     #[command(subcommand)]
     Presign(commands::presign::PresignCommand),
 
+    /// Decentralized Mixture-of-Experts serving
+    #[command(subcommand)]
+    Moe(commands::moe::MoeCommand),
+
     /// Interactive chat with AI models
     Chat(ChatCmd),
 
@@ -638,6 +642,7 @@ async fn main() -> Result<()> {
         Command::Institution(cmd) => cmd.execute().await?,
         Command::GlobalSupply(cmd) => cmd.execute().await?,
         Command::Presign(cmd) => cmd.execute().await?,
+        Command::Moe(cmd) => cmd.execute().await?,
         Command::Faucet(cmd) => execute_faucet(cmd).await?,
         Command::Chat(cmd) => execute_chat(cmd).await?,
         Command::Hardware(cmd) => commands::hardware::execute(&cmd.format).await?,

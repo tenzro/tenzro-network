@@ -92,6 +92,7 @@ pub mod keri;
 pub mod institution;
 pub mod global_supply;
 pub mod presign;
+pub mod moe;
 
 // Re-export command types
 pub use node::NodeCommand;
