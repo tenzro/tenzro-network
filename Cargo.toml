@@ -39,6 +39,10 @@ exclude = [
     "vendor/llama-cpp-rs",
     "vendor/llama-cpp-rs/llama-cpp-2",
     "vendor/llama-cpp-rs/llama-cpp-sys-2",
+    # Vendored DKLs23 (Set A RustCrypto pins). Wired via [patch.crates-io]
+    # at the end of this file.
+    "vendor/dkls23-core",
+    "vendor/dkls23-secp256k1",
 ]
 
 [workspace.package]
@@ -106,25 +110,34 @@ anyhow = "1"
 
 # Cryptography
 #
-# RustCrypto 0.14 line: pulled in as a workspace-wide upgrade because DKLS23
-# (Phase D wave 2 bridge signer, `dkls23-secp256k1 0.5.1`) requires
-# `k256 ^0.14-rc.7` and `elliptic-curve ^0.14-rc.4`. The 0.14 line is still
-# RC as of 2026-05 (k256 0.14.0-rc.9, elliptic-curve 0.14.0-rc.32). We pin
-# every elliptic-curve signing path (bridge EVM signer, Tempo EIP-155,
-# TDX/Nitro attestation cert verify, NFT VRF, ERC-4337 UserOp hashing, MPC
-# keygen+sign) on the 0.14-RC stack so the algebraic library version is
-# uniform across the workspace.
+# RustCrypto 0.14 line — Coherent Set A pinned to exact RC versions.
+# k256 0.14.0-rc.12 (2026-06-17) → elliptic-curve =0.14.0-rc.35,
+# ecdsa =0.17.0-rc.20, primeorder =0.14.0-rc.12, hash2curve =0.14.0-rc.12.
+# Pre-release semver in cargo treats `^0.14.0-rc.X` as matching only the
+# same `rc.X` tag, so every elliptic-curve / k256 consumer must agree on
+# the same point release. Use exact `=` pins to lock the resolver onto
+# the version k256 was built against.
+#
+# `ff` and `group` are pinned at the stable 0.14.0 release (2026-05-30
+# / 2026-06-01) — earlier RC versions were temporarily renamed to
+# `rustcrypto-ff` / `rustcrypto-group` on crates.io, then reverted. The
+# stable releases are the long-term name.
 #
 # `sha2 = "0.10"` and `sha3 = "0.10"` stay on the previous major because
 # `rsa = "0.9"`, `hkdf = "0.12"`, and a long tail of TLS/attestation/
 # integration dependencies bind to `digest = "0.10"` trait API. k256 0.14 /
 # p256 0.14 internally consume sha2 0.11 (via `digest = "0.11"`); cargo
 # resolves both, but the duplicate is contained in the RustCrypto 0.14-RC
-# subgraph and never crosses into application code. Our `Sha256::digest(...)`
-# call sites are source-compatible across the two minor versions.
+# subgraph and never crosses into application code.
 ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
-k256 = { version = "0.14.0-rc.9", features = ["ecdsa"] }
-elliptic-curve = { version = "0.14.0-rc.32", features = ["sec1"] }
+k256 = { version = "=0.14.0-rc.12", features = ["ecdsa"] }
+elliptic-curve = { version = "=0.14.0-rc.35", features = ["sec1"] }
+ecdsa = "=0.17.0-rc.20"
+primeorder = "=0.14.0-rc.12"
+hash2curve = "=0.14.0-rc.12"
+signature = "=3.0.0"
+ff = "=0.14.0"
+group = "=0.14.0"
 sha2 = "0.10"
 sha3 = "0.10"
 aes-gcm = "0.10"
@@ -287,13 +300,12 @@ flate2 = "1"
 
 # X.509 certificate parsing & signature verification
 x509-cert = "0.2"
-p256 = { version = "0.14.0-rc.9", features = ["ecdsa", "pkcs8", "pem"] }
-p384 = { version = "0.14.0-rc.9", features = ["ecdsa", "pkcs8", "pem"] }
+p256 = { version = "=0.14.0-rc.12", features = ["ecdsa", "pkcs8", "pem"] }
+p384 = { version = "=0.14.0-rc.12", features = ["ecdsa", "pkcs8", "pem"] }
 rsa = { version = "0.9", features = ["sha2"] }
 der = "0.7"
 spki = "0.8"
-signature = "3"
-ecdsa = "0.17.0-rc.18"
+# signature and ecdsa pinned above with Set A RustCrypto stack.
 ciborium = "0.2"
 
 # HuggingFace Hub
@@ -343,17 +355,6 @@ tempfile = "3"
 dkls23-secp256k1 = "0.5.1"
 dkls23-core = "0.5.1"
 
-# dkls23-core 0.5.1 was built against `rustcrypto-ff = "0.14.0-rc.0"`
-# (and `rustcrypto-group = "0.14.0-rc.0"`). Cargo's pre-release
-# resolution upgrades them to 0.14.0-rc.1 by default, which broke the
-# `PartialEq` impl on the field-element repr type and stops dkls23
-# compiling. Pin the two crates to `=0.14.0-rc.0` at the workspace
-# level so the resolver respects the upper bound dkls23 was tested
-# against. Drop the pin when dkls23 ships 0.5.2 with the updated
-# elliptic-curve / ff stack.
-rustcrypto-ff = "=0.14.0-rc.0"
-rustcrypto-group = "=0.14.0-rc.0"
-
 # Agent memory tier (Phase B): Lance-backed vector store + Tantivy BM25
 # full-text index, hybrid recall via Reciprocal Rank Fusion (k=60). Lives in
 # `crates/tenzro-agent/src/memory/`. Lance writes Apache Arrow RecordBatches
@@ -387,4 +388,13 @@ debug = true
 [patch.crates-io]
 llama-cpp-2 = { path = "vendor/llama-cpp-rs/llama-cpp-2" }
 llama-cpp-sys-2 = { path = "vendor/llama-cpp-rs/llama-cpp-sys-2" }
+
+# Vendored DKLs23 at 0.5.1 with deps bumped to the Set A RustCrypto
+# stack (k256 0.14.0-rc.12, elliptic-curve 0.14.0-rc.35, ff 0.14.0,
+# group 0.14.0). Source-level rename: `rustcrypto_ff` →  `ff`,
+# `rustcrypto_group` → `group` (the upstream RustCrypto crate-rename
+# was reverted after 2026-02-02). Drop these patches when DKLs23
+# ships 0.5.2 that catches up.
+dkls23-core = { path = "vendor/dkls23-core" }
+dkls23-secp256k1 = { path = "vendor/dkls23-secp256k1" }
 
