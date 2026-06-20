@@ -1613,6 +1613,7 @@ async fn dispatch_request(
         "tenzro_getProviderPricing" => handle_get_provider_pricing(node).await,
         "tenzro_downloadModel" => handle_download_model(node, request.params).await,
         "tenzro_getDownloadProgress" => handle_get_download_progress(node, request.params).await,
+        "tenzro_cancelDownload" => handle_cancel_download(node, request.params).await,
         "tenzro_serveModel" | "tenzro_serveModelMcp" => handle_serve_model(node, request.params).await,
         "tenzro_stopModel" => handle_stop_model(node, request.params).await,
         "tenzro_chat" | "tenzro_chatCompletion" => handle_chat(node, request.params).await,
@@ -15646,6 +15647,54 @@ async fn handle_get_download_progress(
         message: format!("Serialization failed: {}", e),
         data: None,
     })
+}
+
+/// Cancel an in-flight model download. Flips the per-model status to
+/// `cancelled` and unlinks any partial file in `~/.tenzro/models/`. The
+/// underlying HTTP stream isn't pre-empted (the `HfDownloader` has no
+/// cancellation token), but the next write will fail because the file
+/// is gone, and the UI sees `status == "cancelled"` on the next poll.
+async fn handle_cancel_download(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' parameter".to_string(),
+            data: None,
+        })?;
+
+    if let Some(mut entry) = node.model_downloads.get_mut(model_id) {
+        entry.status = "cancelled".to_string();
+        entry.error = Some("cancelled by user".to_string());
+    }
+
+    // Best-effort unlink of the in-progress file. Same pattern the CLI
+    // download path uses for cleanup on failure.
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let candidates = [
+        std::path::PathBuf::from(&home).join(".tenzro/models").join(format!("{}.gguf", model_id)),
+        std::path::PathBuf::from(&home).join(".tenzro/models").join(model_id),
+    ];
+    for path in &candidates {
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    Ok(serde_json::json!({
+        "model_id": model_id,
+        "status": "cancelled",
+    }))
 }
 
 async fn handle_serve_model(
