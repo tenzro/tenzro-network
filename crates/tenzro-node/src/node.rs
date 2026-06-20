@@ -8096,6 +8096,25 @@ impl TenzroNode {
         self.inference_router.as_ref()
     }
 
+    /// Owned clone of the inference router Arc, for library consumers that
+    /// need to keep a reference past the lifetime of the node borrow
+    /// (typical in embedded-node apps where the app's UI thread shares a
+    /// router with the node's RPC dispatcher).
+    pub fn inference_router_arc(&self) -> Option<Arc<InferenceRouter>> {
+        self.inference_router.clone()
+    }
+
+    /// Owned clone of the shared `ModelRuntime` Arc. The runtime is
+    /// process-global by design (one `llama.cpp` backend per node), so
+    /// every consumer — the RPC `tenzro_chat` handler, the embedded
+    /// `/v1/chat/completions` web surface, the desktop app's local chat
+    /// pane, and any provider-side serving wiring — must share this Arc
+    /// rather than instantiating their own. Returns `None` only when AI
+    /// infrastructure was disabled at startup.
+    pub fn model_runtime_arc(&self) -> Option<Arc<ModelRuntime>> {
+        self.model_runtime.clone()
+    }
+
     /// Returns the local TEE hardware provider if one was detected at
     /// startup. Used by the RPC `tenzro_getAttestation` handler and the
     /// MCP `attest` tool to generate attestations against the local

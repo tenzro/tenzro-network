@@ -36,9 +36,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use tenzro_types::model::{
-    InferenceProvider, MoeExpertHolding, MoeExpertResidency, MoeProviderRole,
-};
+use tenzro_types::model::{InferenceProvider, MoeExpertResidency, MoeProviderRole};
+#[cfg(test)]
+use tenzro_types::model::MoeExpertHolding;
 use tenzro_types::primitives::Address;
 
 /// Identifies one expert in an MoE model.

@@ -18,7 +18,6 @@
 //! parameterises the verifier so a future v2 swap is a config change.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};

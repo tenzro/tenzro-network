@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "MPC wallet system for Tenzro Network — auto-provisioned threshold wallets"
+homepage.workspace = true
+description = "MPC wallet for Tenzro Network — FROST-Ed25519 + ML-DSA-65 hybrid threshold wallets, Argon2id keystore, transaction history, contacts"
+documentation = "https://docs.rs/tenzro-wallet"
+readme = "README.md"
+keywords = ["tenzro", "wallet", "mpc", "frost", "threshold"]
+categories = ["cryptography", "authentication"]
 
 [dependencies]
 tenzro-types = { workspace = true }

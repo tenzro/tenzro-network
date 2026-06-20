@@ -25,7 +25,6 @@
 //! ceiling per asset.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;

@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "State storage layer for Tenzro Network — Merkle trees, RocksDB, block storage"
+homepage.workspace = true
+description = "State storage layer for Tenzro Network — Merkle trees, RocksDB, block storage, snapshots"
+documentation = "https://docs.rs/tenzro-storage"
+readme = "README.md"
+keywords = ["tenzro", "blockchain", "rocksdb", "merkle", "storage"]
+categories = ["database", "data-structures"]
 
 [dependencies]
 tenzro-types = { workspace = true }

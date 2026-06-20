@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "TEE abstraction layer for Tenzro Network — Intel TDX, AMD SEV-SNP, AWS Nitro"
+homepage.workspace = true
+description = "TEE abstraction layer for Tenzro Network — Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU, Intel Tiber Trust Authority"
+documentation = "https://docs.rs/tenzro-tee"
+readme = "README.md"
+keywords = ["tenzro", "tee", "intel-tdx", "sev-snp", "attestation"]
+categories = ["cryptography", "hardware-support"]
 
 [dependencies]
 tenzro-types = { workspace = true }

@@ -17,13 +17,11 @@
 //!   - Spec: `docs.near.org/chain-abstraction/chain-signatures`
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::error::{BridgeError, Result};
 use tenzro_types::primitives::Hash;
 
 /// Curves NEAR Chain Signatures supports.
