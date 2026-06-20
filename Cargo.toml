@@ -343,6 +343,17 @@ tempfile = "3"
 dkls23-secp256k1 = "0.5.1"
 dkls23-core = "0.5.1"
 
+# dkls23-core 0.5.1 was built against `rustcrypto-ff = "0.14.0-rc.0"`
+# (and `rustcrypto-group = "0.14.0-rc.0"`). Cargo's pre-release
+# resolution upgrades them to 0.14.0-rc.1 by default, which broke the
+# `PartialEq` impl on the field-element repr type and stops dkls23
+# compiling. Pin the two crates to `=0.14.0-rc.0` at the workspace
+# level so the resolver respects the upper bound dkls23 was tested
+# against. Drop the pin when dkls23 ships 0.5.2 with the updated
+# elliptic-curve / ff stack.
+rustcrypto-ff = "=0.14.0-rc.0"
+rustcrypto-group = "=0.14.0-rc.0"
+
 # Agent memory tier (Phase B): Lance-backed vector store + Tantivy BM25
 # full-text index, hybrid recall via Reciprocal Rank Fusion (k=60). Lives in
 # `crates/tenzro-agent/src/memory/`. Lance writes Apache Arrow RecordBatches
