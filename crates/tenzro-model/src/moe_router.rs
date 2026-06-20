@@ -26,7 +26,9 @@
 //! returns a [`MoeDispatchError::UnreachableExpert`] so the caller can
 //! pick a fallback strategy (round to a Replica provider, queue, etc.).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Tenzro Decentralized Identity Protocol (TDIP) — unified human and machine identity with W3C DID compatibility"
+homepage.workspace = true
+description = "Tenzro Decentralized Identity Protocol (TDIP) — unified human and machine identity, W3C DID, delegation scopes, cascading revocation"
+documentation = "https://docs.rs/tenzro-identity"
+readme = "README.md"
+keywords = ["tenzro", "identity", "did", "credentials", "delegation"]
+categories = ["cryptography", "authentication"]
 
 [dependencies]
 tenzro-types = { workspace = true }

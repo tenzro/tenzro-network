@@ -795,6 +795,126 @@ pub(crate) struct JsonRpcError {
     pub(crate) data: Option<Value>,
 }
 
+/// Optional auth context an embedded caller may attach to a JSON-RPC call.
+///
+/// The HTTP transport extracts these from incoming request headers; in
+/// process callers (the desktop app, embedded test harnesses, the SDK's
+/// `EmbeddedClient`) may pass them in directly. All fields are optional —
+/// unauthenticated read-only RPCs work with `EmbeddedAuth::default()`.
+#[derive(Debug, Clone, Default)]
+pub struct EmbeddedAuth {
+    /// `Authorization` header value, e.g. `"DPoP eyJ..."` (the `DPoP ` /
+    /// `Bearer ` prefix is preserved; gates strip it).
+    pub authorization: Option<String>,
+    /// `DPoP` proof header — a one-shot JWT bound to this request.
+    pub dpop: Option<String>,
+    /// Operator admin token for node-scoped mutation RPCs.
+    pub admin_token: Option<String>,
+    /// Tenant API key for scope-gated namespaces (Canton, Chainlink).
+    pub api_key: Option<String>,
+    /// Canton-scoped JWT for the BYO-issuer escape hatch (rarely used —
+    /// tenant credentials stored under the API key are the default path).
+    pub canton_auth: Option<String>,
+    /// HTTP method for DPoP `htm` verification. Defaults to `"POST"` to
+    /// match the JSON-RPC transport convention.
+    pub http_method: Option<String>,
+    /// HTTP URI for DPoP `htu` verification. Defaults to the embedded
+    /// sentinel `"embedded:///"` when not supplied — DPoP-gated handlers
+    /// reject this, which is the right behaviour for the embedded path
+    /// (the embedded caller has direct access to the node's key material
+    /// and should not need DPoP at all).
+    pub http_uri: Option<String>,
+}
+
+/// Public dispatcher for in-process JSON-RPC calls.
+///
+/// Mirrors the full HTTP pipeline: admin-token gate → API-key gate →
+/// Chainlink rate-limit gate → method dispatch → Canton / Chainlink
+/// analytics record. Returns the same JSON-RPC 2.0 response shape the
+/// HTTP endpoint emits, serialised to a `serde_json::Value` so the
+/// embedded caller can map back to whichever transport / SDK shape it
+/// uses.
+///
+/// This is the seam the SDK's `EmbeddedClient` backend calls when the
+/// caller has constructed its own [`TenzroNode`] in the same process.
+/// The function takes a `serde_json::Value` for the request payload so
+/// the internal `JsonRpcRequest` shape stays `pub(crate)` — no inner
+/// types leak to consumers.
+pub async fn dispatch_embedded(
+    node: &Arc<TenzroNode>,
+    payload: Value,
+    auth: EmbeddedAuth,
+) -> Value {
+    // Batch requests: the HTTP path supports a JSON array; mirror that.
+    if let Some(batch) = payload.as_array() {
+        let mut responses = Vec::with_capacity(batch.len());
+        for item in batch {
+            responses.push(dispatch_embedded_single(node, item.clone(), &auth).await);
+        }
+        return Value::Array(responses);
+    }
+    dispatch_embedded_single(node, payload, &auth).await
+}
+
+async fn dispatch_embedded_single(
+    node: &Arc<TenzroNode>,
+    payload: Value,
+    auth: &EmbeddedAuth,
+) -> Value {
+    let request = match serde_json::from_value::<JsonRpcRequest>(payload.clone()) {
+        Ok(r) => r,
+        Err(e) => {
+            return serde_json::to_value(JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: payload.get("id").cloned().unwrap_or(Value::Null),
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32600,
+                    message: format!("Invalid request: {}", e),
+                    data: None,
+                }),
+            })
+            .unwrap_or(Value::Null);
+        }
+    };
+
+    if let Some(err) = gate_admin_token(node, &request, auth.admin_token.as_deref()) {
+        return serde_json::to_value(err).unwrap_or(Value::Null);
+    }
+    if let Some(err) = gate_api_key(node, &request, auth.api_key.as_deref()) {
+        return serde_json::to_value(err).unwrap_or(Value::Null);
+    }
+    if let Some(err) = gate_chainlink_rate_limit(node, &request, auth.api_key.as_deref()) {
+        return serde_json::to_value(err).unwrap_or(Value::Null);
+    }
+
+    let auth_ctx = AuthContext {
+        authorization: auth.authorization.clone(),
+        dpop: auth.dpop.clone(),
+        http_method: auth
+            .http_method
+            .clone()
+            .unwrap_or_else(|| "POST".to_string()),
+        http_uri: auth
+            .http_uri
+            .clone()
+            .unwrap_or_else(|| "embedded:///".to_string()),
+    };
+
+    let method = request.method.clone();
+    let response = handle_request(
+        node,
+        request,
+        &auth_ctx,
+        auth.api_key.as_deref(),
+        auth.canton_auth.as_deref(),
+    )
+    .await;
+    record_canton_call(node, &method, auth.api_key.as_deref(), &response);
+    record_chainlink_call(node, &method, auth.api_key.as_deref(), &response);
+    serde_json::to_value(response).unwrap_or(Value::Null)
+}
+
 /// Handle an RPC request
 ///
 /// `auth_ctx` carries the per-request HTTP auth headers (Authorization,

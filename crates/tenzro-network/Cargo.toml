@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "P2P networking layer for Tenzro Network — gossip, DHT, message transport"
+homepage.workspace = true
+description = "P2P networking layer for Tenzro Network — libp2p gossipsub, Kademlia DHT, NAT traversal via AutoNAT v2 + Circuit-Relay v2 + DCUtR"
+documentation = "https://docs.rs/tenzro-network"
+readme = "README.md"
+keywords = ["tenzro", "libp2p", "p2p", "gossipsub", "nat-traversal"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 tenzro-types = { workspace = true }

@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Real-time event streaming, subscriptions, and webhook delivery for Tenzro Network"
+documentation = "https://docs.rs/tenzro-events"
+readme = "README.md"
+keywords = ["tenzro", "events", "streaming", "subscriptions", "webhooks"]
+categories = ["asynchronous", "web-programming"]
 
 [dependencies]
 tenzro-types = { workspace = true }

@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "TNZO token, treasury management, staking, and governance for Tenzro Network"
+homepage.workspace = true
+description = "TNZO token, treasury, staking, governance, liquid staking, and adaptive-burn governance dial for Tenzro Network"
+documentation = "https://docs.rs/tenzro-token"
+readme = "README.md"
+keywords = ["tenzro", "token", "staking", "governance", "treasury"]
+categories = ["cryptography"]
 
 [dependencies]
 tenzro-types = { workspace = true }

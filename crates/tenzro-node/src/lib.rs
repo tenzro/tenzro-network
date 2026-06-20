@@ -88,6 +88,7 @@ pub mod escrow_resolver_bridge;
 pub mod eu_ai_disclosure;
 pub mod event_loop;
 pub mod genesis;
+pub mod handle;
 pub mod health;
 pub mod keygen;
 pub mod lane_resolver;
@@ -122,10 +123,11 @@ pub mod workflow_runtime;
 // Re-export commonly used types
 pub use config::NodeConfig;
 pub use error::{NodeError, Result};
+pub use handle::{spawn_in_background, NodeHandle};
 pub use health::{HealthMonitor, HealthStatus, OverallHealth, SubsystemStatus};
 pub use metrics::{MetricsCollector, NodeMetrics};
 pub use node::{TenzroNode, NodeStatus};
-pub use rpc::RpcServer;
+pub use rpc::{dispatch_embedded, EmbeddedAuth, RpcServer};
 
 /// Node crate version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
