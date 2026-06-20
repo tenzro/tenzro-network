@@ -46,14 +46,6 @@ zeroize = { workspace = true }
 dkls23-secp256k1 = { workspace = true }
 dkls23-core = { workspace = true }
 
-# Transitive pin: dkls23-core 0.5.1 only compiles against
-# `rustcrypto-ff = "0.14.0-rc.0"`, but cargo's pre-release resolution
-# upgrades to rc.1 by default. Declaring these as direct deps with the
-# workspace-level `=0.14.0-rc.0` pin forces the resolver to honor the
-# upper bound dkls23 expects. Remove when dkls23 ships 0.5.2.
-rustcrypto-ff = { workspace = true }
-rustcrypto-group = { workspace = true }
-
 [features]
 default = []
 # TEE-rooted IKM extraction for `TeeKeyshareSealer::derive_auto`. When neither

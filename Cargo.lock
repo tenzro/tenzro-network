@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "addchain"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e33f6a175ec6a9e0aca777567f9ff7c3deefc255660df887e7fa3585e9801d8"
+checksum = "5665045de74fda906c0abfaec40cf2551f88c34dccea869f3fe950dde7209764"
 dependencies = [
- "num-bigint 0.3.3",
+ "num-bigint",
  "num-integer",
  "num-traits",
 ]
@@ -323,7 +323,7 @@ dependencies = [
  "ark-serialize 0.3.0",
  "ark-std 0.3.0",
  "derivative",
- "num-bigint 0.4.6",
+ "num-bigint",
  "num-traits",
  "paste",
  "rustc_version 0.3.3",
@@ -343,7 +343,7 @@ dependencies = [
  "derivative",
  "digest 0.10.7",
  "itertools 0.10.5",
- "num-bigint 0.4.6",
+ "num-bigint",
  "num-traits",
  "paste",
  "rustc_version 0.4.1",
@@ -364,7 +364,7 @@ dependencies = [
  "digest 0.10.7",
  "educe",
  "itertools 0.13.0",
- "num-bigint 0.4.6",
+ "num-bigint",
  "num-traits",
  "paste",
  "zeroize",
@@ -406,7 +406,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db2fd794a08ccb318058009eefdf15bcaaaaf6f8161eb3345f907222bac38b20"
 dependencies = [
- "num-bigint 0.4.6",
+ "num-bigint",
  "num-traits",
  "quote",
  "syn 1.0.109",
@@ -418,7 +418,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7abe79b0e4288889c4574159ab790824d0033b9fdcb2a112a3182fac2e514565"
 dependencies = [
- "num-bigint 0.4.6",
+ "num-bigint",
  "num-traits",
  "proc-macro2",
  "quote",
@@ -431,7 +431,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09be120733ee33f7693ceaa202ca41accd5653b779563608f1234f78ae07c4b3"
 dependencies = [
- "num-bigint 0.4.6",
+ "num-bigint",
  "num-traits",
  "proc-macro2",
  "quote",
@@ -470,7 +470,7 @@ dependencies = [
  "ark-serialize-derive",
  "ark-std 0.4.0",
  "digest 0.10.7",
- "num-bigint 0.4.6",
+ "num-bigint",
 ]
 
 [[package]]
@@ -482,7 +482,7 @@ dependencies = [
  "ark-std 0.5.0",
  "arrayvec",
  "digest 0.10.7",
- "num-bigint 0.4.6",
+ "num-bigint",
 ]
 
 [[package]]
@@ -600,7 +600,7 @@ checksum = "0c6cd424c2693bcdbc150d843dc9d4d137dd2de4782ce6df491ad11a3a0416c0"
 dependencies = [
  "bytes",
  "half",
- "num-bigint 0.4.6",
+ "num-bigint",
  "num-traits",
 ]
 
@@ -1217,7 +1217,7 @@ checksum = "4d6867f1565b3aad85681f1015055b087fcfd840d6aeee6eee7f2da317603695"
 dependencies = [
  "autocfg",
  "libm",
- "num-bigint 0.4.6",
+ "num-bigint",
  "num-integer",
  "num-traits",
 ]
@@ -2503,9 +2503,9 @@ dependencies = [
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.3"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42a0d26b245348befa0c121944541476763dcc46ede886c88f9d12e1697d27c3"
+checksum = "97bb4a855e3b10f84c4e7e895a7de01db7f9a7b7eb7f73ed9773fd52ac686451"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -3422,7 +3422,7 @@ dependencies = [
  "asn1-rs",
  "displaydoc",
  "nom 7.1.3",
- "num-bigint 0.4.6",
+ "num-bigint",
  "num-traits",
  "rusticata-macros",
 ]
@@ -3685,19 +3685,17 @@ dependencies = [
 [[package]]
 name = "dkls23-core"
 version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a098d1e8bd4aa18b8d8851e8468fc7a8b25496090ddceb28a0e70b683b429805"
 dependencies = [
  "bincode 1.3.3",
- "elliptic-curve 0.14.0-rc.34",
+ "elliptic-curve 0.14.0-rc.35",
+ "ff 0.14.0",
  "getrandom 0.4.2",
+ "group 0.14.0",
  "hex",
  "hmac 0.13.0",
- "k256 0.14.0-rc.9",
+ "k256 0.14.0-rc.12",
  "rand 0.10.1",
  "ripemd 0.2.0",
- "rustcrypto-ff",
- "rustcrypto-group",
  "serde",
  "serde_bytes",
  "sha2 0.11.0",
@@ -3708,18 +3706,16 @@ dependencies = [
 [[package]]
 name = "dkls23-secp256k1"
 version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba2810b77de5db66455278732802e7e21dd425e297eb338cc83b96574c60ac78"
 dependencies = [
  "bech32",
  "bs58",
  "dkls23-core",
- "elliptic-curve 0.14.0-rc.34",
+ "elliptic-curve 0.14.0-rc.35",
+ "group 0.14.0",
  "hex",
- "k256 0.14.0-rc.9",
+ "k256 0.14.0-rc.12",
  "keccak 0.2.0",
  "ripemd 0.2.0",
- "rustcrypto-group",
  "sha2 0.11.0",
  "sha3 0.11.0",
 ]
@@ -3784,14 +3780,14 @@ dependencies = [
 
 [[package]]
 name = "ecdsa"
-version = "0.17.0-rc.18"
+version = "0.17.0-rc.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54fb064faabbee66e1fc8e5c5a9458d4269dc2d8b638fe86a425adb2510d1a96"
+checksum = "0f7195c1205cec99025b3004e8034e1ddc12746333aa0a3945df7f9b80882ca2"
 dependencies = [
  "der 0.8.0",
  "digest 0.11.2",
- "elliptic-curve 0.14.0-rc.34",
- "rfc6979 0.5.0",
+ "elliptic-curve 0.14.0-rc.35",
+ "rfc6979 0.6.0-pre.0",
  "serdect 0.4.3",
  "signature 3.0.0",
  "spki 0.8.0",
@@ -3903,18 +3899,17 @@ dependencies = [
 
 [[package]]
 name = "elliptic-curve"
-version = "0.14.0-rc.34"
+version = "0.14.0-rc.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88a44d097c9f3e494ddc19f77af5aab89f0b3b2652cde370ec8c6064faca5bd2"
+checksum = "51c58d86e2f3cebbf2dfd94c4bf049585c7def71058ba506bfdafcb57652a34b"
 dependencies = [
  "base16ct 1.0.0",
- "crypto-bigint 0.7.3",
+ "crypto-bigint 0.7.4",
  "crypto-common 0.2.1",
  "digest 0.11.2",
  "ff 0.14.0",
  "group 0.14.0",
  "hybrid-array",
- "once_cell",
  "pem-rfc7468 1.0.0",
  "pkcs8 0.11.0",
  "rand_core 0.10.0",
@@ -4273,8 +4268,25 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1f686ab92a9fb0eaf188f6c6c87b89490baa6fdb0db4544ba4dc47f7942489f"
 dependencies = [
+ "bitvec",
+ "ff_derive",
  "rand_core 0.10.0",
  "subtle",
+]
+
+[[package]]
+name = "ff_derive"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "241afe8c15ffa21933eaefe8a563af36fd9fc98a3e8a044e8f7db52eb1fae3d8"
+dependencies = [
+ "addchain",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -5331,9 +5343,9 @@ checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
 
 [[package]]
 name = "hybrid-array"
-version = "0.4.11"
+version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08d46837a0ed51fe95bd3b05de33cd64a1ee88fc797477ca48446872504507c5"
+checksum = "9155a582abd142abc056962c29e3ce5ff2ad5469f4246b537ed42c5deba857da"
 dependencies = [
  "ctutils",
  "subtle",
@@ -6547,13 +6559,14 @@ dependencies = [
 
 [[package]]
 name = "k256"
-version = "0.14.0-rc.9"
+version = "0.14.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b382cbfd43caf55991a93850ce538aa1aa67bb264af367d22dfe7937c4e997d"
+checksum = "3b8687958774e6781d58e7177632a2c9eb4b59b9f3bc999a749d32585add0a8d"
 dependencies = [
  "cpubits",
- "ecdsa 0.17.0-rc.18",
- "elliptic-curve 0.14.0-rc.34",
+ "ecdsa 0.17.0-rc.20",
+ "elliptic-curve 0.14.0-rc.35",
+ "primeorder",
  "serdect 0.4.3",
  "sha2 0.11.0",
  "signature 3.0.0",
@@ -8967,22 +8980,11 @@ version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
 dependencies = [
- "num-bigint 0.4.6",
+ "num-bigint",
  "num-complex",
  "num-integer",
  "num-iter",
  "num-rational",
- "num-traits",
-]
-
-[[package]]
-name = "num-bigint"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f6f7833f2cbf2360a6cfd58cd41a53aa7a90bd4c202f5b1c7dd2ed73c57b2c3"
-dependencies = [
- "autocfg",
- "num-integer",
  "num-traits",
 ]
 
@@ -9053,7 +9055,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
 dependencies = [
- "num-bigint 0.4.6",
+ "num-bigint",
  "num-integer",
  "num-traits",
 ]
@@ -9436,12 +9438,12 @@ dependencies = [
 
 [[package]]
 name = "p256"
-version = "0.14.0-rc.9"
+version = "0.14.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b97e3bf0465157ae90975ff52dbeb1362ba618924878c9f74c25baa27a65f9a"
+checksum = "fc7d8ed70255af8fecea30f284e523066cb19918cb2b4c17f41f78cda3291d64"
 dependencies = [
- "ecdsa 0.17.0-rc.18",
- "elliptic-curve 0.14.0-rc.34",
+ "ecdsa 0.17.0-rc.20",
+ "elliptic-curve 0.14.0-rc.35",
  "primefield",
  "primeorder",
  "sha2 0.11.0",
@@ -9505,7 +9507,7 @@ version = "0.5.1"
 source = "git+https://github.com/Plonky3/Plonky3?rev=32079474b1d31d9221656ae774afb322d2597db0#32079474b1d31d9221656ae774afb322d2597db0"
 dependencies = [
  "itertools 0.14.0",
- "num-bigint 0.4.6",
+ "num-bigint",
  "p3-maybe-rayon",
  "p3-util",
  "paste",
@@ -9604,7 +9606,7 @@ version = "0.5.1"
 source = "git+https://github.com/Plonky3/Plonky3?rev=32079474b1d31d9221656ae774afb322d2597db0#32079474b1d31d9221656ae774afb322d2597db0"
 dependencies = [
  "itertools 0.14.0",
- "num-bigint 0.4.6",
+ "num-bigint",
  "p3-dft",
  "p3-field",
  "p3-matrix",
@@ -9712,12 +9714,12 @@ dependencies = [
 
 [[package]]
 name = "p384"
-version = "0.14.0-rc.9"
+version = "0.14.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "437f30ebcb1e16ff48acead5f08bd69fbcdbc82421687bb48af5c315a0bfab03"
+checksum = "563b53b275b129c6f070e538bf0845f8e6abd0b5ffeb3f53f1d6ea5f8dbb3b2c"
 dependencies = [
- "ecdsa 0.17.0-rc.18",
- "elliptic-curve 0.14.0-rc.34",
+ "ecdsa 0.17.0-rc.20",
+ "elliptic-curve 0.14.0-rc.35",
  "fiat-crypto 0.3.0",
  "primefield",
  "primeorder",
@@ -10252,11 +10254,11 @@ dependencies = [
 
 [[package]]
 name = "primefield"
-version = "0.14.0-rc.11"
+version = "0.14.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1d7e42f46a29abc16fb621a3466ee453358ebaae48a9e515f287e0af052ed8f"
+checksum = "8675564771a62f69a0af716b03e89b917b963c7b173b5855575e84fd4f605ca0"
 dependencies = [
- "crypto-bigint 0.7.3",
+ "crypto-bigint 0.7.4",
  "crypto-common 0.2.1",
  "ff 0.14.0",
  "rand_core 0.10.0",
@@ -10266,11 +10268,14 @@ dependencies = [
 
 [[package]]
 name = "primeorder"
-version = "0.14.0-rc.9"
+version = "0.14.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0556580e42c19833f5d232aca11a7687a503ee41f937b54f5ae1d50fc2a6a36a"
+checksum = "44545bd63647ac77eaed1589000a031632b0f7175e2c1cc48778787e9783baaf"
 dependencies = [
- "elliptic-curve 0.14.0-rc.34",
+ "elliptic-curve 0.14.0-rc.35",
+ "once_cell",
+ "primefield",
+ "serdect 0.4.3",
 ]
 
 [[package]]
@@ -11247,12 +11252,12 @@ dependencies = [
 
 [[package]]
 name = "rfc6979"
-version = "0.5.0"
+version = "0.6.0-pre.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5236ce872cac07e0fb3969b0cbf468c7d2f37d432f1b627dcb7b8d34563fb0c3"
+checksum = "9935425142ac6e252364413291d96c8bc9898d0876a801824c7af4eae397b689"
 dependencies = [
+ "ctutils",
  "hmac 0.13.0",
- "subtle",
 ]
 
 [[package]]
@@ -11435,7 +11440,7 @@ dependencies = [
  "bytes",
  "fastrlp 0.3.1",
  "fastrlp 0.4.0",
- "num-bigint 0.4.6",
+ "num-bigint",
  "num-integer",
  "num-traits",
  "parity-scale-codec",
@@ -11528,44 +11533,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver 1.0.28",
-]
-
-[[package]]
-name = "rustcrypto-ff"
-version = "0.14.0-rc.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5db129183b2c139d7d87d08be57cba626c715789db17aec65c8866bfd767d1f"
-dependencies = [
- "bitvec",
- "rand_core 0.10.0",
- "rustcrypto-ff_derive",
- "subtle",
-]
-
-[[package]]
-name = "rustcrypto-ff_derive"
-version = "0.14.0-rc.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cda22ea03582974ab5687fc131eba2dc78e258e7eef4d7e01bcd0522ed79f66"
-dependencies = [
- "addchain",
- "num-bigint 0.3.3",
- "num-integer",
- "num-traits",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "rustcrypto-group"
-version = "0.14.0-rc.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57c4b1463f274a3ff6fb2f44da43e576cb9424367bd96f185ead87b52fe00523"
-dependencies = [
- "rand_core 0.10.0",
- "rustcrypto-ff",
- "subtle",
 ]
 
 [[package]]
@@ -12349,7 +12316,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
 dependencies = [
- "num-bigint 0.4.6",
+ "num-bigint",
  "num-traits",
  "thiserror 2.0.18",
  "time",
@@ -13336,13 +13303,11 @@ dependencies = [
  "dkls23-secp256k1",
  "hex",
  "hkdf",
- "k256 0.14.0-rc.9",
+ "k256 0.14.0-rc.12",
  "parking_lot",
  "prost 0.13.5",
  "rand 0.8.5",
  "reqwest 0.12.28",
- "rustcrypto-ff",
- "rustcrypto-group",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -13456,7 +13421,7 @@ dependencies = [
  "getrandom 0.3.4",
  "getrandom 0.4.2",
  "hex",
- "k256 0.14.0-rc.9",
+ "k256 0.14.0-rc.12",
  "ml-dsa",
  "ml-kem",
  "p256",
@@ -13528,7 +13493,7 @@ dependencies = [
  "dashmap",
  "ed25519-dalek 2.2.0",
  "hex",
- "k256 0.14.0-rc.9",
+ "k256 0.14.0-rc.12",
  "multihash",
  "multihash-codetable",
  "parking_lot",
@@ -13673,7 +13638,7 @@ dependencies = [
  "hickory-resolver 0.26.1",
  "hkdf",
  "jsonwebtoken",
- "k256 0.14.0-rc.9",
+ "k256 0.14.0-rc.12",
  "libp2p",
  "parking_lot",
  "prometheus-client 0.24.1",
@@ -13736,11 +13701,11 @@ dependencies = [
  "chrono",
  "criterion",
  "dashmap",
- "ecdsa 0.17.0-rc.18",
+ "ecdsa 0.17.0-rc.20",
  "getrandom 0.4.2",
  "hex",
  "hmac 0.12.1",
- "k256 0.14.0-rc.9",
+ "k256 0.14.0-rc.12",
  "p256",
  "p384",
  "rand 0.8.5",
@@ -13839,12 +13804,12 @@ dependencies = [
  "criterion",
  "dashmap",
  "der 0.7.10",
- "ecdsa 0.17.0-rc.18",
+ "ecdsa 0.17.0-rc.20",
  "ed25519-dalek 2.2.0",
  "hex",
  "hkdf",
  "jsonwebtoken",
- "k256 0.14.0-rc.9",
+ "k256 0.14.0-rc.12",
  "libc",
  "p256",
  "p384",
@@ -13955,8 +13920,8 @@ dependencies = [
  "getrandom 0.4.2",
  "hex",
  "http-body-util",
- "k256 0.14.0-rc.9",
- "num-bigint 0.4.6",
+ "k256 0.14.0-rc.12",
+ "num-bigint",
  "num-integer",
  "num-traits",
  "p256",
