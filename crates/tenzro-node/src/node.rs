@@ -3248,7 +3248,20 @@ impl TenzroNode {
     async fn init_wallet(&mut self) -> Result<()> {
         info!("Initializing wallet service...");
 
-        let wallet_service = Arc::new(TenzroWalletService::new()?);
+        // Anchor wallet keystore + contacts under the configured data
+        // directory rather than the wallet crate's default relative
+        // `./data/wallets`. The relative default breaks any caller whose
+        // current working directory is read-only (e.g. a packaged macOS
+        // .app launched by Finder) and silently splatters writes into
+        // arbitrary cwd locations when it isn't.
+        let wallet_dir = self.config.data_dir.join("wallets");
+        let contacts_path = self.config.data_dir.join("contacts.json");
+        let wallet_config = tenzro_wallet::service::WalletServiceConfig {
+            keystore_path: wallet_dir,
+            contacts_path,
+            ..Default::default()
+        };
+        let wallet_service = Arc::new(TenzroWalletService::with_config(wallet_config)?);
         self.wallet_service = Some(wallet_service);
         self.health_monitor.mark_healthy("wallet");
 
