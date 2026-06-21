@@ -2201,6 +2201,7 @@ async fn dispatch_request(
         "tenzro_moePlanDispatch" => crate::rpc_integrations::handle_moe_plan_dispatch(node, request.params).await,
         "tenzro_moeReplicationPolicy" => crate::rpc_integrations::handle_moe_replication_policy().await,
         "tenzro_moeCatalogShape" => crate::rpc_integrations::handle_moe_catalog_shape(request.params).await,
+        "tenzro_modelMetadata" => crate::rpc_integrations::handle_model_metadata(request.params).await,
 
         _ => Err(JsonRpcError {
             code: -32601,
@@ -2944,7 +2945,13 @@ async fn handle_list_models(node: &Arc<TenzroNode>) -> std::result::Result<Value
     // Get provider pricing for network cost estimation
     let pricing = node.provider_pricing.read();
 
-    let models: Vec<Value> = catalog.iter().map(|entry| {
+    let models: Vec<Value> = catalog.iter()
+        // Gate non-promotable entries (gated/unreleased/non-downloadable
+        // GGUFs) out of the user-facing catalog. They stay in
+        // `get_model_catalog()` source so they can be re-enabled the
+        // moment the upstream GGUF lands, but never surface to clients.
+        .filter(|entry| entry.promotable)
+        .map(|entry| {
         // Check if downloaded
         let is_downloaded = hf_downloader
             .map(|dl| dl.is_downloaded(&entry.id))

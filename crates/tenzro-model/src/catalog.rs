@@ -93,6 +93,49 @@ pub struct HfModelEntry {
     /// experts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moe: Option<MoeShape>,
+    /// Whether this entry is currently promotable to users — i.e. its GGUF
+    /// is actually downloadable from `hf_repo`/`hf_filename` right now.
+    /// `false` gates the entry OUT of the user-facing catalog
+    /// (`tenzro_listModels` / `GET /v1/models`) while keeping it in source
+    /// so it can be re-enabled the moment the upstream GGUF lands (gated
+    /// repos, unreleased quants, etc.). Defaults to `true`; the committed
+    /// HF-verification test asserts every `promotable` entry resolves.
+    #[serde(default = "default_true")]
+    pub promotable: bool,
+    /// Per-model serving configuration (sampler defaults, `--jinja`,
+    /// reasoning default). Stamped by the catalog build pass from
+    /// [`ServingProfile::for_family`] so every entry carries the
+    /// model-author-recommended serving config. Required — the catalog is
+    /// the single source of truth for serving behaviour across all clients.
+    pub serving: ServingProfile,
+    /// Multimodal projector (mmproj) for vision-capable GGUFs. `Some` when
+    /// the model accepts image input and needs a separate projector file
+    /// loaded via llama.cpp `--mmproj`. The projector ships in the same
+    /// `hf_repo` as the model GGUF, so only the filename is carried here.
+    /// `None` for text-only models. When set, the downloader fetches the
+    /// projector alongside the model and the sidecar emits `mmproj = <path>`
+    /// so image input actually works instead of being silently dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mmproj: Option<MmprojSpec>,
+}
+
+/// Multimodal projector descriptor for a vision-capable GGUF.
+///
+/// llama.cpp loads the language GGUF and the projector (mmproj) as two
+/// files; the projector encodes images into the embedding space the model
+/// expects. Unsloth publishes the projector in the same repo as the model
+/// (e.g. `mmproj-F16.gguf`), so we only need its filename.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MmprojSpec {
+    /// Projector filename within the model's `hf_repo`
+    /// (e.g. `"mmproj-F16.gguf"`).
+    pub filename: String,
+}
+
+/// Serde default for [`HfModelEntry::promotable`] — entries are promotable
+/// unless explicitly gated out.
+fn default_true() -> bool {
+    true
 }
 
 /// MoE expert topology declared by a catalog entry. Mirrors the public
@@ -149,6 +192,187 @@ pub enum MtpKind {
     Generic,
     /// Jointly-trained Multi-Token-Prediction head (`--spec-type draft-mtp`).
     DraftMtp,
+}
+
+/// Per-model serving configuration — the sampler defaults, chat-template
+/// handling, and reasoning behaviour a runtime should apply when it loads
+/// this model. This is an **intrinsic property of the model** (sourced from
+/// the model author's recommendations, primarily Unsloth's per-family
+/// guidance), not of any one client. The catalog is the single source of
+/// truth: every consumer (Ipnops Edge's llama-server sidecar, any future
+/// client) reads the same profile so serving behaviour never drifts between
+/// products.
+///
+/// Sampler fields map directly onto llama.cpp / OpenAI-compatible request
+/// parameters (`temperature`, `top_p`, `top_k`, `min_p`). `jinja_required`
+/// drives the `--jinja` flag (mandatory for tool calling and for the models
+/// — Phi-4, DeepSeek — that emit no tokens without their embedded template).
+/// `reasoning_default` is the out-of-the-box thinking mode for hybrid
+/// reasoning models.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ServingProfile {
+    /// Sampling temperature. Unsloth per-family defaults, e.g. Gemma 1.0,
+    /// Qwen3.5 non-thinking 0.7, Mistral/Ministral instruct 0.1.
+    pub temperature: f32,
+    /// Nucleus sampling top-p.
+    pub top_p: f32,
+    /// Top-k cutoff. `0` disables top-k (e.g. gpt-oss Harmony).
+    pub top_k: u32,
+    /// Min-p sampling floor. `0.0` disables it. GLM/Kimi/DeepSeek use 0.01.
+    pub min_p: f32,
+    /// Whether `--jinja` must be passed (apply the GGUF's embedded chat
+    /// template). Required for tool calling and for templates that otherwise
+    /// emit empty/garbage output. Effectively always `true` for chat models;
+    /// kept explicit so non-chat entries can opt out.
+    pub jinja_required: bool,
+    /// Default reasoning/thinking mode when the model supports a hybrid
+    /// think/no-think toggle. `false` = reasoning off by default (Unsloth's
+    /// recommendation for small models and latency-sensitive chat).
+    pub reasoning_default: bool,
+}
+
+impl Default for ServingProfile {
+    /// Neutral, broadly-safe chat defaults (temp 0.7 / top_p 0.8 / top_k 20,
+    /// jinja on). Used as a placeholder before [`ServingProfile::for_family`]
+    /// fills in the model-author-recommended values, and for any family
+    /// without a specific profile.
+    fn default() -> Self {
+        Self {
+            temperature: 0.7,
+            top_p: 0.8,
+            top_k: 20,
+            min_p: 0.0,
+            jinja_required: true,
+            reasoning_default: false,
+        }
+    }
+}
+
+impl ServingProfile {
+    /// Recommended serving profile for a catalog `family` (+ architecture for
+    /// the diffusion special-case). Encodes the model author's published
+    /// sampler guidance — primarily Unsloth's per-family recommendations.
+    /// This is the single place per-family serving knowledge lives; the
+    /// catalog build pass stamps every entry with the result.
+    pub fn for_family(family: &str, architecture: ModelArchitecture) -> Self {
+        // DiffusionGemma is a parallel-denoising model — autoregressive
+        // samplers don't apply; keep jinja on for its template but use
+        // neutral values.
+        if matches!(architecture, ModelArchitecture::Gemma4Diffusion) {
+            return Self {
+                temperature: 0.9,
+                top_p: 0.95,
+                top_k: 0,
+                min_p: 0.0,
+                jinja_required: true,
+                reasoning_default: false,
+            };
+        }
+        match family {
+            // Gemma 3 / Gemma 4: temp 1.0, top_p 0.95, top_k 64.
+            "gemma3" | "gemma4" => Self {
+                temperature: 1.0,
+                top_p: 0.95,
+                top_k: 64,
+                min_p: 0.0,
+                jinja_required: true,
+                reasoning_default: false,
+            },
+            // Qwen 3 / 3.5 / 3.6: non-thinking 0.7 / 0.8 / 20 by default;
+            // reasoning off out of the box (Unsloth's small-model guidance).
+            "qwen3" | "qwen3.5" | "qwen3.6" => Self {
+                temperature: 0.7,
+                top_p: 0.8,
+                top_k: 20,
+                min_p: 0.0,
+                jinja_required: true,
+                reasoning_default: false,
+            },
+            // gpt-oss Harmony: temp 1.0, top_p 1.0, top_k disabled.
+            "gpt-oss" => Self {
+                temperature: 1.0,
+                top_p: 1.0,
+                top_k: 0,
+                min_p: 0.0,
+                jinja_required: true,
+                reasoning_default: false,
+            },
+            // Phi-4: temp 0.8 / top_p 0.95; needs --jinja to emit tokens.
+            "phi" | "phi3" | "phi4" => Self {
+                temperature: 0.8,
+                top_p: 0.95,
+                top_k: 0,
+                min_p: 0.0,
+                jinja_required: true,
+                reasoning_default: false,
+            },
+            // Mistral / Ministral / Nemo: low-temp instruct (0.15).
+            "mistral" | "ministral" | "mistral-nemo" => Self {
+                temperature: 0.15,
+                top_p: 1.0,
+                top_k: 0,
+                min_p: 0.0,
+                jinja_required: true,
+                reasoning_default: false,
+            },
+            // GLM 5.x: temp 1.0 / top_p 0.95 / min_p 0.01.
+            "glm" => Self {
+                temperature: 1.0,
+                top_p: 0.95,
+                top_k: 0,
+                min_p: 0.01,
+                jinja_required: true,
+                reasoning_default: false,
+            },
+            // Kimi: temp 0.6 / top_p 0.95 / min_p 0.01.
+            "kimi" => Self {
+                temperature: 0.6,
+                top_p: 0.95,
+                top_k: 0,
+                min_p: 0.01,
+                jinja_required: true,
+                reasoning_default: false,
+            },
+            // DeepSeek V3/V4: temp 0.6 / top_p 0.95 / min_p 0.01; needs --jinja.
+            "deepseek" | "deepseek-v3" | "deepseek-v4" => Self {
+                temperature: 0.6,
+                top_p: 0.95,
+                top_k: 0,
+                min_p: 0.01,
+                jinja_required: true,
+                reasoning_default: false,
+            },
+            // MiniMax: same low-temp reasoning family profile.
+            "minimax" => Self {
+                temperature: 0.6,
+                top_p: 0.95,
+                top_k: 0,
+                min_p: 0.01,
+                jinja_required: true,
+                reasoning_default: false,
+            },
+            // Granite 4: greedy instruct (temp 0.0).
+            "granite" | "granite4" => Self {
+                temperature: 0.0,
+                top_p: 1.0,
+                top_k: 0,
+                min_p: 0.0,
+                jinja_required: true,
+                reasoning_default: false,
+            },
+            // Nemotron: temp 1.0 / top_p 1.0 chat.
+            "nemotron" => Self {
+                temperature: 1.0,
+                top_p: 1.0,
+                top_k: 0,
+                min_p: 0.0,
+                jinja_required: true,
+                reasoning_default: false,
+            },
+            // SmolLM and anything unlisted: neutral chat defaults.
+            _ => Self::default(),
+        }
+    }
 }
 
 /// Model architecture — informational only.
@@ -1423,6 +1647,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     }];
     catalog.push(HfModelEntry {
         id: "qwen3-1.7b".into(),
@@ -1442,6 +1669,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-4b".into(),
@@ -1461,6 +1691,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-8b".into(),
@@ -1480,6 +1713,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-14b".into(),
@@ -1499,6 +1735,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-32b".into(),
@@ -1518,6 +1757,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3-30b-a3b".into(),
@@ -1542,6 +1784,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 0,
             params_per_expert_x10: Some(2),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── Qwen 3.5 (Apache 2.0, ungated, unsloth GGUF) ──────────────────
@@ -1563,6 +1808,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-2b".into(),
@@ -1582,6 +1830,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-4b".into(),
@@ -1601,6 +1852,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-9b".into(),
@@ -1620,6 +1874,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-27b".into(),
@@ -1639,6 +1896,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-35b-a3b".into(),
@@ -1663,13 +1923,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 0,
             params_per_expert_x10: Some(2),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-122b-a10b".into(),
         name: "Qwen 3.5 122B-A10B (MoE)".into(),
         family: "qwen3.5".into(),
         hf_repo: "unsloth/Qwen3.5-122B-A10B-GGUF".into(),
-        hf_filename: "Qwen3.5-122B-A10B-Q4_K_M.gguf".into(),
+        hf_filename: "Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf".into(),
         parameters: "122B (MoE, 10B active)".into(),
         architecture: ModelArchitecture::Qwen35Moe,
         context_length: 131072,
@@ -1687,13 +1950,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 0,
             params_per_expert_x10: Some(8),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-397b-a17b".into(),
         name: "Qwen 3.5 397B-A17B (MoE)".into(),
         family: "qwen3.5".into(),
         hf_repo: "unsloth/Qwen3.5-397B-A17B-GGUF".into(),
-        hf_filename: "Qwen3.5-397B-A17B-Q4_K_M.gguf".into(),
+        hf_filename: "Q4_K_M/Qwen3.5-397B-A17B-Q4_K_M-00001-of-00006.gguf".into(),
         parameters: "397B (MoE, 17B active)".into(),
         architecture: ModelArchitecture::Qwen35Moe,
         context_length: 131072,
@@ -1711,6 +1977,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 0,
             params_per_expert_x10: Some(13),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── Gemma 3 (Google, ungated via unsloth GGUF) ─────────────────────
@@ -1732,6 +2001,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-1b".into(),
@@ -1751,6 +2023,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-4b".into(),
@@ -1770,6 +2045,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-12b".into(),
@@ -1789,6 +2067,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma3-27b".into(),
@@ -1808,6 +2089,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── Gemma 4 (Gemma License, via unsloth GGUF) ──────────────────────
@@ -1823,7 +2107,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         name: "Gemma 4 E2B MTP Drafter".into(),
         family: "gemma4".into(),
         hf_repo: "unsloth/gemma-4-E2B-it-GGUF".into(),
-        hf_filename: "MTP/mtp-gemma-4-E2B-it.gguf".into(),
+        hf_filename: "mtp-gemma-4-E2B-it.gguf".into(),
         parameters: "MTP head".into(),
         architecture: ModelArchitecture::Gemma4,
         context_length: 131072,
@@ -1836,13 +2120,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-12b-mtp-draft".into(),
         name: "Gemma 4 12B MTP Drafter".into(),
         family: "gemma4".into(),
         hf_repo: "unsloth/gemma-4-12b-it-GGUF".into(),
-        hf_filename: "MTP/mtp-gemma-4-12B-it.gguf".into(),
+        hf_filename: "mtp-gemma-4-12b-it.gguf".into(),
         parameters: "MTP head".into(),
         architecture: ModelArchitecture::Gemma4,
         context_length: 131072,
@@ -1855,13 +2142,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e4b-mtp-draft".into(),
         name: "Gemma 4 E4B MTP Drafter".into(),
         family: "gemma4".into(),
         hf_repo: "unsloth/gemma-4-E4B-it-GGUF".into(),
-        hf_filename: "MTP/mtp-gemma-4-E4B-it.gguf".into(),
+        hf_filename: "mtp-gemma-4-E4B-it.gguf".into(),
         parameters: "MTP head".into(),
         architecture: ModelArchitecture::Gemma4,
         context_length: 131072,
@@ -1874,13 +2164,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-26b-a4b-mtp-draft".into(),
         name: "Gemma 4 26B-A4B MTP Drafter (MoE)".into(),
         family: "gemma4".into(),
         hf_repo: "unsloth/gemma-4-26B-A4B-it-GGUF".into(),
-        hf_filename: "MTP/mtp-gemma-4-26B-A4B-it.gguf".into(),
+        hf_filename: "mtp-gemma-4-26B-A4B-it.gguf".into(),
         parameters: "MTP head".into(),
         architecture: ModelArchitecture::Gemma4Moe,
         context_length: 131072,
@@ -1898,13 +2191,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: Some(2),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-31b-mtp-draft".into(),
         name: "Gemma 4 31B MTP Drafter".into(),
         family: "gemma4".into(),
         hf_repo: "unsloth/gemma-4-31B-it-GGUF".into(),
-        hf_filename: "MTP/mtp-gemma-4-31B-it.gguf".into(),
+        hf_filename: "mtp-gemma-4-31B-it.gguf".into(),
         parameters: "MTP head".into(),
         architecture: ModelArchitecture::Gemma4,
         context_length: 131072,
@@ -1917,6 +2213,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e2b".into(),
@@ -1936,6 +2235,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e4b".into(),
@@ -1955,6 +2257,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-26b-a4b".into(),
@@ -1979,6 +2284,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: Some(2),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-12b".into(),
@@ -1998,6 +2306,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-31b".into(),
@@ -2017,6 +2328,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── Gemma 4 QAT (Quantization-Aware Training) ──────────────────────
@@ -2044,6 +2358,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e4b-qat".into(),
@@ -2063,6 +2380,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-12b-qat".into(),
@@ -2082,6 +2402,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-26b-a4b-qat".into(),
@@ -2106,6 +2429,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: Some(2),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gemma4-31b-qat".into(),
@@ -2125,6 +2451,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── DiffusionGemma (Gemma License, via unsloth GGUF) ───────────────
@@ -2160,6 +2489,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: Some(2),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── Mistral (Apache 2.0, ungated) ──────────────────────────────────
@@ -2181,13 +2513,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-nemo-12b".into(),
         name: "Mistral Nemo 12B".into(),
         family: "mistral".into(),
         hf_repo: "unsloth/Mistral-Nemo-Instruct-2407-GGUF".into(),
-        hf_filename: "Mistral-Nemo-Instruct-2407-Q4_K_M.gguf".into(),
+        hf_filename: "Mistral-Nemo-Instruct-2407.Q4_K_M.gguf".into(),
         parameters: "12B".into(),
         architecture: ModelArchitecture::Mistral,
         context_length: 131072,
@@ -2200,6 +2535,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-24b".into(),
@@ -2219,6 +2557,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── Ministral 3 (Mistral AI, Apache 2.0, ungated) ──────────────────
@@ -2240,6 +2581,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "ministral3-8b".into(),
@@ -2259,6 +2603,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "ministral3-14b".into(),
@@ -2278,6 +2625,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── Phi 4 (Microsoft, MIT, ungated) ─────────────────────────────
@@ -2299,6 +2649,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "phi4".into(),
@@ -2318,6 +2671,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "phi4-reasoning".into(),
@@ -2337,6 +2693,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "phi4-mini-reasoning".into(),
@@ -2356,6 +2715,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── SmolLM (HuggingFace, Apache 2.0, ungated) ───────────────────
@@ -2377,6 +2739,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "smollm3-3b".into(),
@@ -2396,6 +2761,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── Qwen 3 Coder (Apache 2.0, ungated, unsloth GGUF) ───────────────
@@ -2422,6 +2790,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 0,
             params_per_expert_x10: Some(2),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── Nemotron (NVIDIA Open, ungated, unsloth GGUF) ────────────────
@@ -2443,6 +2814,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "nemotron-nano-30b-a3b".into(),
@@ -2467,6 +2841,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 0,
             params_per_expert_x10: Some(3),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── GLM-4 (Apache 2.0, via bartowski GGUF) ─────────────────────────
@@ -2488,6 +2865,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── Kimi K2 (MIT, via unsloth GGUF) ──────────────────────────────
@@ -2496,7 +2876,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         name: "Kimi K2 Instruct (MoE)".into(),
         family: "kimi".into(),
         hf_repo: "unsloth/Kimi-K2-Instruct-GGUF".into(),
-        hf_filename: "Kimi-K2-Instruct-Q4_K_M.gguf".into(),
+        hf_filename: "Q4_K_M/Kimi-K2-Instruct-Q4_K_M-00001-of-00013.gguf".into(),
         parameters: "1T (MoE, 32B active)".into(),
         architecture: ModelArchitecture::Kimi,
         context_length: 131072,
@@ -2514,13 +2894,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: Some(1),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "kimi-k2.6".into(),
         name: "Kimi K2.6 (Hybrid Thinking, MoE)".into(),
         family: "kimi".into(),
         hf_repo: "unsloth/Kimi-K2.6-GGUF".into(),
-        hf_filename: "Kimi-K2.6-UD-Q4_K_XL.gguf".into(),
+        hf_filename: "UD-Q4_K_XL/Kimi-K2.6-UD-Q4_K_XL-00001-of-00014.gguf".into(),
         parameters: "1T (MoE, hybrid thinking)".into(),
         architecture: ModelArchitecture::Kimi,
         context_length: 262144,
@@ -2538,9 +2921,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: Some(1),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
-    // ── MiniMax M1 (MiniMax Open, via unsloth GGUF) ──────────────────
+    // ── MiniMax M1 (superseded — Unsloth jumped to M2.x/M3) ──────────
     catalog.push(HfModelEntry {
         id: "minimax-m1-40b".into(),
         name: "MiniMax M1 40B".into(),
@@ -2564,6 +2950,40 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 0,
             params_per_expert_x10: Some(13),
         }),
+        // Gated out: `unsloth/MiniMax-M1-40B-GGUF` returns HTTP 401
+        // (gated repo, auth required) and is superseded by the M2.x/M3
+        // line. Promoted MiniMax frontier is `minimax-m2.7` below.
+        promotable: false,
+        serving: ServingProfile::default(),
+        mmproj: None,
+    });
+    // ── MiniMax M2.7 (current frontier MiniMax, via unsloth GGUF) ────
+    catalog.push(HfModelEntry {
+        id: "minimax-m2.7".into(),
+        name: "MiniMax M2.7 (MoE)".into(),
+        family: "minimax".into(),
+        hf_repo: "unsloth/MiniMax-M2.7-GGUF".into(),
+        hf_filename: "UD-Q4_K_XL/MiniMax-M2.7-UD-Q4_K_XL-00001-of-00004.gguf".into(),
+        parameters: "230B (MoE, 10B active)".into(),
+        architecture: ModelArchitecture::MiniMax,
+        context_length: 1048576,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 140_000_000_000,
+        min_ram_gb: 128,
+        license: "MiniMax Open".into(),
+        description: "MiniMax M2.7 — current frontier MiniMax MoE; Lightning Attention with 1M context. Unsloth dynamic UD-Q4_K_XL GGUF (sharded).".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 256,
+            experts_per_token: 8,
+            shared_experts: 0,
+            params_per_expert_x10: None,
+        }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── DeepSeek V3 (MIT, via unsloth GGUF) ──────────────────────────
@@ -2572,7 +2992,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         name: "DeepSeek V3 0324 (MoE)".into(),
         family: "deepseek".into(),
         hf_repo: "unsloth/DeepSeek-V3-0324-GGUF".into(),
-        hf_filename: "DeepSeek-V3-0324-Q4_K_M.gguf".into(),
+        hf_filename: "Q4_K_M/DeepSeek-V3-0324-Q4_K_M-00001-of-00009.gguf".into(),
         parameters: "685B (MoE, 37B active)".into(),
         architecture: ModelArchitecture::DeepSeekV3,
         context_length: 131072,
@@ -2590,6 +3010,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: Some(1),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // NOTE: Llama models removed — not supported on Tenzro Network.
@@ -2617,13 +3040,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.6-35b-a3b".into(),
         name: "Qwen 3.6 35B-A3B (MoE)".into(),
         family: "qwen3.6".into(),
         hf_repo: "unsloth/Qwen3.6-35B-A3B-GGUF".into(),
-        hf_filename: "Qwen3.6-35B-A3B-Q4_K_M.gguf".into(),
+        hf_filename: "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf".into(),
         parameters: "35B (MoE, 3B active)".into(),
         architecture: ModelArchitecture::Qwen36Moe,
         context_length: 131072,
@@ -2645,6 +3071,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 0,
             params_per_expert_x10: Some(2),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     // ── Qwen 3.6 MTP variants ─────────────────────────────────────────
     // Unsloth ships dedicated `-MTP-GGUF` repos for Qwen 3.6 where the
@@ -2657,7 +3086,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         name: "Qwen 3.6 27B (MTP)".into(),
         family: "qwen3.6".into(),
         hf_repo: "unsloth/Qwen3.6-27B-MTP-GGUF".into(),
-        hf_filename: "Qwen3.6-27B-MTP-UD-Q4_K_XL.gguf".into(),
+        hf_filename: "Qwen3.6-27B-UD-Q4_K_XL.gguf".into(),
         parameters: "27B".into(),
         architecture: ModelArchitecture::Qwen36,
         context_length: 131072,
@@ -2670,13 +3099,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "qwen3.6-35b-a3b-mtp".into(),
         name: "Qwen 3.6 35B-A3B MTP (MoE)".into(),
         family: "qwen3.6".into(),
         hf_repo: "unsloth/Qwen3.6-35B-A3B-MTP-GGUF".into(),
-        hf_filename: "Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf".into(),
+        hf_filename: "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf".into(),
         parameters: "35B (MoE, 3B active)".into(),
         architecture: ModelArchitecture::Qwen36Moe,
         context_length: 131072,
@@ -2694,6 +3126,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 0,
             params_per_expert_x10: Some(2),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── Mistral Small 3.1 / 3.2 (Apache 2.0, via unsloth GGUF) ───────
@@ -2705,7 +3140,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         name: "Mistral Small 3.1 DRAFT 0.5B".into(),
         family: "mistral".into(),
         hf_repo: "alamios/Mistral-Small-3.1-DRAFT-0.5B-GGUF".into(),
-        hf_filename: "Mistral-Small-3.1-DRAFT-0.5B.Q4_K_M.gguf".into(),
+        hf_filename: "Mistral-Small-3.1-DRAFT-0.5B-Q4_K_M.gguf".into(),
         parameters: "0.5B".into(),
         // GGUF is a Qwen2.5-0.5B fine-tune — llama.cpp loads it as Qwen2.
         architecture: ModelArchitecture::Qwen2,
@@ -2719,6 +3154,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-3.1-24b".into(),
@@ -2738,6 +3176,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-3.2-24b".into(),
@@ -2757,6 +3198,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── GPT-OSS (Apache 2.0, OpenAI's open-weights release) ──────────
@@ -2778,13 +3222,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "gpt-oss-120b".into(),
         name: "GPT-OSS 120B".into(),
         family: "gpt-oss".into(),
         hf_repo: "unsloth/gpt-oss-120b-GGUF".into(),
-        hf_filename: "gpt-oss-120b-Q4_K_M.gguf".into(),
+        hf_filename: "Q4_K_M/gpt-oss-120b-Q4_K_M-00001-of-00002.gguf".into(),
         parameters: "120B".into(),
         architecture: ModelArchitecture::GptOss,
         context_length: 131072,
@@ -2802,6 +3249,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 0,
             params_per_expert_x10: Some(9),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── IBM Granite 4.0 (Apache 2.0) ─────────────────────────────────
@@ -2823,6 +3273,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "granite4-1b".into(),
@@ -2842,6 +3295,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "granite4-h-tiny".into(),
@@ -2861,6 +3317,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "granite4-h-small".into(),
@@ -2880,6 +3339,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── GLM 5 / 5.1 / 5.2 (MIT, via unsloth + zai-org GGUF) ──────────
@@ -2887,16 +3349,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         id: "glm-5".into(),
         name: "GLM-5 (MoE)".into(),
         family: "glm".into(),
-        hf_repo: "zai-org/GLM-5".into(),
-        hf_filename: "GLM-5-Q4_K_M.gguf".into(),
+        hf_repo: "unsloth/GLM-5-GGUF".into(),
+        hf_filename: "UD-Q4_K_XL/GLM-5-UD-Q4_K_XL-00001-of-00010.gguf".into(),
         parameters: "744B (MoE)".into(),
         architecture: ModelArchitecture::Glm,
         context_length: 131072,
-        quantization: "Q4_K_M".into(),
+        quantization: "UD-Q4_K_XL".into(),
         size_bytes: 400_000_000_000,
         min_ram_gb: 256,
         license: "MIT".into(),
-        description: "Z.ai GLM-5 — 744B total parameter MoE trained on 28.5T tokens; best-in-class open-source performance on reasoning, coding, and agentic tasks (2026-04).".into(),
+        description: "Z.ai GLM-5 — 744B total parameter MoE trained on 28.5T tokens; best-in-class open-source performance on reasoning, coding, and agentic tasks (2026-04). Unsloth dynamic UD-Q4_K_XL GGUF (sharded).".into(),
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
@@ -2906,13 +3368,16 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: None,
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "glm-5.1".into(),
         name: "GLM-5.1 (MoE)".into(),
         family: "glm".into(),
         hf_repo: "unsloth/GLM-5.1-GGUF".into(),
-        hf_filename: "GLM-5.1-UD-Q4_K_M.gguf".into(),
+        hf_filename: "UD-Q4_K_M/GLM-5.1-UD-Q4_K_M-00001-of-00011.gguf".into(),
         parameters: "744B (MoE, 40B active)".into(),
         architecture: ModelArchitecture::Glm,
         context_length: 204800,
@@ -2930,17 +3395,20 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: None,
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "glm-5.2".into(),
         name: "GLM-5.2 (MoE, MTP)".into(),
         family: "glm".into(),
-        hf_repo: "zai-org/GLM-5.2".into(),
-        hf_filename: "GLM-5.2-Q4_K_M.gguf".into(),
+        hf_repo: "unsloth/GLM-5.2-GGUF".into(),
+        hf_filename: "UD-Q4_K_XL/GLM-5.2-UD-Q4_K_XL-00001-of-00011.gguf".into(),
         parameters: "753B (MoE)".into(),
         architecture: ModelArchitecture::Glm,
         context_length: 1048576,
-        quantization: "Q4_K_M".into(),
+        quantization: "UD-Q4_K_XL".into(),
         size_bytes: 410_000_000_000,
         min_ram_gb: 256,
         license: "MIT".into(),
@@ -2954,6 +3422,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: None,
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── MiniMax M3 (MIT, via unsloth GGUF) ───────────────────────────
@@ -2962,7 +3433,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         name: "MiniMax M3 (MoE, native multimodal)".into(),
         family: "minimax".into(),
         hf_repo: "unsloth/MiniMax-M3-GGUF".into(),
-        hf_filename: "MiniMax-M3-Q4_K_M.gguf".into(),
+        hf_filename: "MXFP4_MOE/MiniMax-M3-MXFP4_MOE-00001-of-00007.gguf".into(),
         parameters: "428B (MoE, 23B active)".into(),
         architecture: ModelArchitecture::MiniMax,
         context_length: 1048576,
@@ -2980,6 +3451,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 0,
             params_per_expert_x10: None,
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── DeepSeek V4 (MIT, via unsloth — safetensors mirrors; GGUF community ports) ──
@@ -2993,11 +3467,11 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         name: "DeepSeek V4 Flash (MoE)".into(),
         family: "deepseek".into(),
         hf_repo: "antirez/deepseek-v4-gguf".into(),
-        hf_filename: "DeepSeek-V4-Flash-Q4_K_M.gguf".into(),
+        hf_filename: "DeepSeek-V4-Flash-Q4KExperts-F16HC-F16Compressor-F16Indexer-Q8Attn-Q8Shared-Q8Out-chat-v2-imatrix.gguf".into(),
         parameters: "284B (MoE, 13B active)".into(),
         architecture: ModelArchitecture::DeepSeekV3,
         context_length: 1048576,
-        quantization: "Q4_K_M".into(),
+        quantization: "Q4K-imatrix".into(),
         size_bytes: 155_000_000_000,
         min_ram_gb: 128,
         license: "MIT".into(),
@@ -3011,6 +3485,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: None,
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "deepseek-v4-pro".into(),
@@ -3035,6 +3512,15 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: None,
         }),
+        // Gated out: the only DeepSeek-V4-Pro GGUF (antirez) is a
+        // non-standard manual 2-file layer split
+        // (`...Layers00-30.gguf` + `...Layers-31-output.gguf`), NOT
+        // gguf-split numbering, so llama.cpp won't auto-continue it.
+        // Flip to true once unsloth/DeepSeek-V4-Pro-GGUF ships a proper
+        // sharded quant.
+        promotable: false,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── Kimi K2.5 + K2.7-Code (MIT, via moonshotai/unsloth) ──────────
@@ -3042,12 +3528,12 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         id: "kimi-k2.5".into(),
         name: "Kimi K2.5 (MoE)".into(),
         family: "kimi".into(),
-        hf_repo: "moonshotai/Kimi-K2.5".into(),
-        hf_filename: "Kimi-K2.5-Q4_K_M.gguf".into(),
+        hf_repo: "unsloth/Kimi-K2.5-GGUF".into(),
+        hf_filename: "UD-Q4_K_XL/Kimi-K2.5-UD-Q4_K_XL-00001-of-00013.gguf".into(),
         parameters: "1T (MoE, 32B active)".into(),
         architecture: ModelArchitecture::Kimi,
         context_length: 262144,
-        quantization: "Q4_K_M".into(),
+        quantization: "UD-Q4_K_XL".into(),
         size_bytes: 580_000_000_000,
         min_ram_gb: 384,
         license: "MIT".into(),
@@ -3061,17 +3547,20 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: Some(1),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
     catalog.push(HfModelEntry {
         id: "kimi-k2.7-code".into(),
         name: "Kimi K2.7 Code (MoE)".into(),
         family: "kimi".into(),
-        hf_repo: "moonshotai/Kimi-K2.7-Code".into(),
-        hf_filename: "Kimi-K2.7-Code-Q4_K_M.gguf".into(),
+        hf_repo: "unsloth/Kimi-K2.7-Code-GGUF".into(),
+        hf_filename: "UD-Q4_K_XL/Kimi-K2.7-Code-UD-Q4_K_XL-00001-of-00014.gguf".into(),
         parameters: "1T (MoE, 32B active, code-focused)".into(),
         architecture: ModelArchitecture::Kimi,
         context_length: 262144,
-        quantization: "Q4_K_M".into(),
+        quantization: "UD-Q4_K_XL".into(),
         size_bytes: 580_000_000_000,
         min_ram_gb: 384,
         license: "MIT".into(),
@@ -3085,29 +3574,40 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 1,
             params_per_expert_x10: Some(1),
         }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
     });
 
     // ── Qwen 3.5 MTP variants (Apache 2.0, via unsloth GGUF) ──────────
-    // Unsloth shipped MTP-paired GGUFs for every Qwen 3.5 size on
-    // 2026-05-13 (after the llama.cpp `--spec-type mtp` → `draft-mtp`
-    // rename). Each MTP target ships the joint MTP head as a sibling
-    // single-file GGUF — no separate drafter target needed at runtime.
-    for &(id, name_size, hf_size, gguf_size, params, ctx, sz, ram, is_moe, moe_shape) in &[
-        ("qwen3.5-0.8b-mtp", "0.8B", "0.8B", "0.8B", "0.8B", 131072_u32, 540_000_000_u64, 2_u32, false, None::<(u32, u8, u32, Option<u32>)>),
-        ("qwen3.5-2b-mtp", "2B", "2B", "2B", "2B", 131072, 1_300_000_000, 4, false, None),
-        ("qwen3.5-4b-mtp", "4B", "4B", "4B", "4B", 131072, 2_500_000_000, 6, false, None),
-        ("qwen3.5-9b-mtp", "9B", "9B", "9B", "9B", 131072, 5_500_000_000, 12, false, None),
-        ("qwen3.5-27b-mtp", "27B", "27B", "27B", "27B", 131072, 17_000_000_000, 24, false, None),
-        ("qwen3.5-35b-a3b-mtp", "35B-A3B (MoE)", "35B-A3B", "35B-A3B", "35B (MoE, 3B active)", 131072, 22_500_000_000, 28, true, Some((128, 8, 0, Some(2)))),
-        ("qwen3.5-122b-a10b-mtp", "122B-A10B (MoE)", "122B-A10B", "122B-A10B", "122B (MoE, 10B active)", 131072, 75_000_000_000, 96, true, Some((128, 8, 0, Some(8)))),
-        ("qwen3.5-397b-a17b-mtp", "397B-A17B (MoE)", "397B-A17B", "397B-A17B", "397B (MoE, 17B active)", 131072, 240_000_000_000, 256, true, Some((128, 8, 0, Some(13)))),
+    // Unsloth shipped MTP-paired GGUFs for every Qwen 3.5 size in the
+    // dedicated `Qwen3.5-<size>-MTP-GGUF` repos (the MTP head is baked
+    // into the GGUF — the *repo* carries the MTP designation, the
+    // filename does NOT). Smaller sizes are single-file UD-Q4_K_XL;
+    // 122B/397B are gguf-split sharded (point at the first shard, the
+    // rest auto-load). No separate drafter target needed at runtime
+    // (`--spec-type draft-mtp`).
+    for &(id, name_size, hf_size, gguf_size, params, ctx, sz, ram, is_moe, shards, moe_shape) in &[
+        ("qwen3.5-0.8b-mtp", "0.8B", "0.8B", "0.8B", "0.8B", 131072_u32, 540_000_000_u64, 2_u32, false, 0_u32, None::<(u32, u8, u32, Option<u32>)>),
+        ("qwen3.5-2b-mtp", "2B", "2B", "2B", "2B", 131072, 1_300_000_000, 4, false, 0, None),
+        ("qwen3.5-4b-mtp", "4B", "4B", "4B", "4B", 131072, 2_500_000_000, 6, false, 0, None),
+        ("qwen3.5-9b-mtp", "9B", "9B", "9B", "9B", 131072, 5_500_000_000, 12, false, 0, None),
+        ("qwen3.5-27b-mtp", "27B", "27B", "27B", "27B", 131072, 17_000_000_000, 24, false, 0, None),
+        ("qwen3.5-35b-a3b-mtp", "35B-A3B (MoE)", "35B-A3B", "35B-A3B", "35B (MoE, 3B active)", 131072, 22_500_000_000, 28, true, 0, Some((128, 8, 0, Some(2)))),
+        ("qwen3.5-122b-a10b-mtp", "122B-A10B (MoE)", "122B-A10B", "122B-A10B", "122B (MoE, 10B active)", 131072, 75_000_000_000, 96, true, 3, Some((128, 8, 0, Some(8)))),
+        ("qwen3.5-397b-a17b-mtp", "397B-A17B (MoE)", "397B-A17B", "397B-A17B", "397B (MoE, 17B active)", 131072, 240_000_000_000, 256, true, 7, Some((128, 8, 0, Some(13)))),
     ] {
+        let hf_filename = if shards > 0 {
+            format!("UD-Q4_K_XL/Qwen3.5-{}-UD-Q4_K_XL-00001-of-{:05}.gguf", gguf_size, shards)
+        } else {
+            format!("Qwen3.5-{}-UD-Q4_K_XL.gguf", gguf_size)
+        };
         catalog.push(HfModelEntry {
             id: id.into(),
             name: format!("Qwen 3.5 {} (MTP)", name_size),
             family: "qwen3.5".into(),
             hf_repo: format!("unsloth/Qwen3.5-{}-MTP-GGUF", hf_size),
-            hf_filename: format!("Qwen3.5-{}-MTP-UD-Q4_K_XL.gguf", gguf_size),
+            hf_filename,
             parameters: params.into(),
             architecture: if is_moe {
                 ModelArchitecture::Qwen35Moe
@@ -3129,7 +3629,34 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
                 shared_experts,
                 params_per_expert_x10,
             }),
+            promotable: true,
+            serving: ServingProfile::default(),
+        mmproj: None,
         });
+    }
+
+    // Stamp every entry with its model-author-recommended serving profile.
+    // The literals above carry a placeholder `ServingProfile::default()`;
+    // this single pass is the source of truth for per-family sampler /
+    // template / reasoning defaults, so the knowledge lives in exactly one
+    // place rather than being duplicated across ~80 struct literals.
+    //
+    // The same pass stamps the multimodal projector (mmproj) so vision-
+    // capable families carry their projector filename in one place. Gemma 4
+    // is natively multimodal and every Unsloth Gemma-4 GGUF repo ships
+    // `mmproj-F16.gguf` alongside the language model; the tiny speculative
+    // `-mtp-draft` entries are text-only draft models and must NOT carry a
+    // projector (they're never served to the user as the vision model).
+    for entry in &mut catalog {
+        entry.serving = ServingProfile::for_family(&entry.family, entry.architecture);
+
+        if entry.architecture == ModelArchitecture::Gemma4
+            && !entry.id.ends_with("-mtp-draft")
+        {
+            entry.mmproj = Some(MmprojSpec {
+                filename: "mmproj-F16.gguf".into(),
+            });
+        }
     }
 
     catalog
@@ -3213,7 +3740,67 @@ mod tests {
             assert!(entry.size_bytes > 0, "Size is 0 for {}", entry.id);
             assert!(entry.min_ram_gb > 0, "Min RAM is 0 for {}", entry.id);
             assert!(entry.context_length > 0, "Context length is 0 for {}", entry.id);
+            // Serving profile must be stamped (the build pass overwrites the
+            // literal placeholder). Sampler values must be plausible.
+            assert!(
+                entry.serving.temperature >= 0.0 && entry.serving.temperature <= 2.0,
+                "implausible temperature {} for {}",
+                entry.serving.temperature,
+                entry.id
+            );
+            assert!(
+                entry.serving.top_p > 0.0 && entry.serving.top_p <= 1.0,
+                "implausible top_p {} for {}",
+                entry.serving.top_p,
+                entry.id
+            );
         }
+    }
+
+    /// The build pass must stamp each entry's serving profile from its
+    /// family — not leave the literal `ServingProfile::default()` placeholder.
+    /// Spot-check a few families whose profiles differ from the default.
+    #[test]
+    fn test_serving_profiles_stamped_by_family() {
+        let by = |id: &str| get_model_by_id(id).expect(id).serving;
+        // Gemma uses temp 1.0 / top_k 64 — distinct from the 0.7/20 default.
+        let g = by("gemma3-4b");
+        assert_eq!(g.temperature, 1.0, "gemma3 temperature");
+        assert_eq!(g.top_k, 64, "gemma3 top_k");
+        // Mistral uses low-temp instruct 0.15.
+        if let Some(m) = get_model_by_id("mistral-nemo-12b") {
+            assert_eq!(m.serving.temperature, 0.15, "mistral temperature");
+        }
+        // Every entry must have jinja required (all are chat models).
+        for entry in get_model_catalog() {
+            assert!(entry.serving.jinja_required, "{} should require jinja", entry.id);
+        }
+    }
+
+    #[test]
+    fn test_mmproj_stamped_on_gemma4_multimodal() {
+        // Every Gemma 4 language model carries the projector; the tiny
+        // speculative drafters do not.
+        for entry in get_model_catalog() {
+            if entry.architecture == ModelArchitecture::Gemma4 {
+                if entry.id.ends_with("-mtp-draft") {
+                    assert!(
+                        entry.mmproj.is_none(),
+                        "{} is a draft model and must not carry mmproj",
+                        entry.id
+                    );
+                } else {
+                    let mm = entry
+                        .mmproj
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("{} should carry mmproj", entry.id));
+                    assert_eq!(mm.filename, "mmproj-F16.gguf", "{}", entry.id);
+                }
+            }
+        }
+        // Text-only families never carry a projector.
+        let q = get_model_by_id("qwen3-4b").expect("qwen3-4b");
+        assert!(q.mmproj.is_none(), "text-only model should have no mmproj");
     }
 
     #[test]
@@ -3675,5 +4262,183 @@ mod tests {
         assert_eq!((h.frame_size, h.embedding_dim), (256, 1280));
         let g = by("vjepa2-vitg-384");
         assert_eq!((g.frame_size, g.embedding_dim), (384, 1408));
+    }
+
+    // ── GGUF promotability / HF-resolvability verification ───────────
+    //
+    // The catalog is the single source of truth for which models we
+    // promote to users. Two failure modes have historically slipped in:
+    //   1. an entry points at a `hf_repo`/`hf_filename` that doesn't
+    //      exist on HuggingFace (sharded-path typos, dot-vs-dash quant
+    //      suffixes, renamed MTP drafts) — the user clicks download and
+    //      gets a 404.
+    //   2. an entry is left `promotable` even though its GGUF is gated
+    //      (HTTP 401) or simply not published yet.
+    //
+    // `test_promotable_entries_have_plausible_gguf_paths` runs offline
+    // on every `cargo test` and catches structural mistakes. The
+    // network-gated `verify_promotable_entries_resolve_on_hf` (marked
+    // `#[ignore]`) hits the HF API for every promotable entry and is the
+    // CI-able regression guard — run with
+    // `cargo test -p tenzro-model -- --ignored verify_promotable`.
+
+    /// Returns true if `name` looks like the first shard of a
+    /// gguf-split set (`...-00001-of-000NN.gguf`).
+    fn is_first_shard(name: &str) -> bool {
+        name.contains("-00001-of-")
+    }
+
+    #[test]
+    fn test_promotable_entries_have_plausible_gguf_paths() {
+        for entry in get_model_catalog() {
+            // GGUF entries only (skip ONNX vision/audio/embedding).
+            if !entry.hf_filename.ends_with(".gguf") {
+                continue;
+            }
+            assert!(
+                !entry.hf_repo.is_empty() && !entry.hf_filename.is_empty(),
+                "{}: empty repo/filename",
+                entry.id
+            );
+            // A filename that mentions a multi-part split MUST be the
+            // first shard — llama.cpp only auto-continues from -00001-.
+            if entry.hf_filename.contains("-of-") {
+                assert!(
+                    is_first_shard(&entry.hf_filename),
+                    "{}: sharded filename must point at the first shard \
+                     (-00001-of-...), got `{}`",
+                    entry.id,
+                    entry.hf_filename
+                );
+            }
+            // No accidental leading slash / windows separators.
+            assert!(
+                !entry.hf_filename.starts_with('/')
+                    && !entry.hf_filename.contains('\\'),
+                "{}: malformed hf_filename `{}`",
+                entry.id,
+                entry.hf_filename
+            );
+        }
+    }
+
+    #[test]
+    fn test_gated_entries_are_explicitly_known() {
+        // Keep the set of gated-out entries visible and intentional. If
+        // a new entry is gated, add it here on purpose; if a gated entry
+        // becomes downloadable, flip `promotable` and drop it here.
+        let gated: Vec<String> = get_model_catalog()
+            .into_iter()
+            .filter(|e| !e.promotable)
+            .map(|e| e.id)
+            .collect();
+        let mut gated_sorted = gated.clone();
+        gated_sorted.sort();
+        let expected = vec![
+            "deepseek-v4-pro".to_string(),
+            "minimax-m1-40b".to_string(),
+        ];
+        assert_eq!(
+            gated_sorted, expected,
+            "Gated-out set changed unexpectedly. Current gated: {:?}. \
+             If intentional, update this test.",
+            gated
+        );
+    }
+
+    /// Network-gated: verifies every promotable GGUF entry resolves on
+    /// HuggingFace (repo exists AND the exact `hf_filename` is present).
+    /// Ignored by default so offline/`cargo test` stays hermetic; run in
+    /// CI with `--ignored`.
+    #[tokio::test]
+    #[ignore = "network: hits huggingface.co — run with --ignored in CI"]
+    async fn verify_promotable_entries_resolve_on_hf() {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent("tenzro-model-catalog-verify")
+            .build()
+            .expect("build http client");
+
+        // Cache repo file-listings so we hit each repo once.
+        let mut repo_files: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut failures: Vec<String> = Vec::new();
+
+        for entry in get_model_catalog() {
+            if !entry.promotable || !entry.hf_filename.ends_with(".gguf") {
+                continue;
+            }
+            let files = if let Some(f) = repo_files.get(&entry.hf_repo) {
+                f.clone()
+            } else {
+                let url = format!(
+                    "https://huggingface.co/api/models/{}?blobs=true",
+                    entry.hf_repo
+                );
+                let resp = client.get(&url).send().await;
+                let files = match resp {
+                    Ok(r) if r.status().is_success() => {
+                        let v: serde_json::Value =
+                            r.json().await.unwrap_or(serde_json::Value::Null);
+                        v.get("siblings")
+                            .and_then(|s| s.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|s| {
+                                        s.get("rfilename")
+                                            .and_then(|n| n.as_str())
+                                            .map(String::from)
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    }
+                    Ok(r) => {
+                        failures.push(format!(
+                            "{}: repo `{}` returned HTTP {}",
+                            entry.id,
+                            entry.hf_repo,
+                            r.status()
+                        ));
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        failures.push(format!(
+                            "{}: repo `{}` request error: {}",
+                            entry.id, entry.hf_repo, e
+                        ));
+                        Vec::new()
+                    }
+                };
+                repo_files.insert(entry.hf_repo.clone(), files.clone());
+                files
+            };
+
+            if !files.is_empty() && !files.iter().any(|f| f == &entry.hf_filename) {
+                failures.push(format!(
+                    "{}: file `{}` not found in repo `{}`",
+                    entry.id, entry.hf_filename, entry.hf_repo
+                ));
+            }
+
+            // Vision-capable entries must have their projector present too,
+            // or image input silently degrades to text-only.
+            if let Some(mmproj) = entry.mmproj.as_ref()
+                && !files.is_empty()
+                && !files.iter().any(|f| f == &mmproj.filename)
+            {
+                failures.push(format!(
+                    "{}: mmproj `{}` not found in repo `{}`",
+                    entry.id, mmproj.filename, entry.hf_repo
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} promotable catalog entries failed HF verification:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
     }
 }

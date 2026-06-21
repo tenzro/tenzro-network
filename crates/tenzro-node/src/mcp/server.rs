@@ -4854,7 +4854,11 @@ impl TenzroMcpServer {
         // Get provider pricing for network cost estimation
         let pricing = self.node.provider_pricing.read();
 
-        let mut model_list: Vec<serde_json::Value> = catalog.iter().map(|entry| {
+        let mut model_list: Vec<serde_json::Value> = catalog.iter()
+            // Gate non-promotable (gated/unreleased) entries out of the
+            // user-facing list, mirroring `handle_list_models`.
+            .filter(|entry| entry.promotable)
+            .map(|entry| {
             let is_downloaded = hf_downloader
                 .map(|dl| dl.is_downloaded(&entry.id))
                 .unwrap_or(false);

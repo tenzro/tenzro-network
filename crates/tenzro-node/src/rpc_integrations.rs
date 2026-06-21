@@ -5877,8 +5877,59 @@ pub(crate) async fn handle_moe_catalog_shape(
         "is_moe": entry.moe.is_some(),
         "moe": shape,
         "architecture": entry.architecture.to_string(),
+    }))
+}
+
+/// `tenzro_modelMetadata` — full catalog metadata for `model_id`: the
+/// serving profile (sampler defaults, jinja, reasoning), multimodal
+/// projector (mmproj) flags, speculative-decoding pairing (drafter_id /
+/// mtp_kind / draft_n), MoE topology, and architecture. This is the
+/// general per-model metadata surface that clients (SDKs, CLI) read to
+/// render or apply the catalog's recommended serving config. The catalog
+/// is the single source of truth; this RPC is its read API.
+pub(crate) async fn handle_model_metadata(
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let model_id = params
+        .as_ref()
+        .and_then(|v| v.get("model_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "missing model_id".into(),
+            data: None,
+        })?;
+    let entry = tenzro_model::catalog::get_model_by_id(model_id).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("unknown model_id: {}", model_id),
+        data: None,
+    })?;
+    let moe = entry.moe.map(|s| {
+        json!({
+            "num_experts": s.num_experts,
+            "experts_per_token": s.experts_per_token,
+            "shared_experts": s.shared_experts,
+            "params_per_expert_x10": s.params_per_expert_x10,
+        })
+    });
+    Ok(json!({
+        "model_id": model_id,
+        "architecture": entry.architecture.to_string(),
+        "is_moe": entry.moe.is_some(),
+        "moe": moe,
+        "drafter_id": entry.drafter_id,
         "mtp_kind": format!("{:?}", entry.mtp_kind),
         "mtp_default_draft_n": entry.mtp_default_draft_n,
+        "multimodal": entry.mmproj.is_some(),
+        "mmproj_filename": entry.mmproj.as_ref().map(|m| m.filename.clone()),
+        "serving": {
+            "temperature": entry.serving.temperature,
+            "top_p": entry.serving.top_p,
+            "top_k": entry.serving.top_k,
+            "min_p": entry.serving.min_p,
+            "jinja_required": entry.serving.jinja_required,
+            "reasoning_default": entry.serving.reasoning_default,
+        },
     }))
 }
 

@@ -1247,6 +1247,17 @@ struct EventLoopState {
     /// cached `(ip, ephemeral_port)` from a prior outbound connection
     /// must never displace them across a bootstrap restart.
     bootstrap_peers: Vec<(PeerId, Multiaddr)>,
+
+    /// Operator-configured bootstrap multiaddrs that carry NO `/p2p/<peer_id>`
+    /// component (e.g. `/dns4/host/tcp/9000`). These can't be matched against
+    /// `Swarm::is_connected(peer_id)`, so the peer-keyed `bootstrap_peers`
+    /// re-dial sweep above skips them entirely — leaving a node with a
+    /// peerless boot config unable to recover if its single startup dial
+    /// fails. We retain them here and re-dial on the cleanup tick whenever the
+    /// node has ZERO live connections (the only connection signal available
+    /// without a peer id). The Identify handshake learns the real peer id on
+    /// the first successful connect, after which Kademlia takes over.
+    bootstrap_addrs_peerless: Vec<Multiaddr>,
 }
 
 /// Number of distinct peers that must independently report the same
@@ -1432,6 +1443,20 @@ async fn run_event_loop(
         })
         .collect();
 
+    // The complement set: configured boot addrs WITHOUT a `/p2p/<peer_id>`
+    // (e.g. `/dns4/host/tcp/9000`). The peer-keyed re-dial sweep can't touch
+    // these, so retain them for the zero-connections self-heal re-dial.
+    let bootstrap_addrs_peerless: Vec<Multiaddr> = config
+        .boot_nodes
+        .iter()
+        .filter(|addr| {
+            !addr
+                .iter()
+                .any(|proto| matches!(proto, libp2p::multiaddr::Protocol::P2p(_)))
+        })
+        .cloned()
+        .collect();
+
     // Bootstrap DHT if enabled
     if config.enable_dht && !bootstrap_peers.is_empty() {
         crate::discovery::bootstrap_dht(
@@ -1471,6 +1496,7 @@ async fn run_event_loop(
         observed_addrs: HashMap::new(),
         advertised_external_addrs: preconfigured_external,
         bootstrap_peers,
+        bootstrap_addrs_peerless,
     };
 
     // Create periodic cleanup timer (every 60 seconds)
@@ -1571,6 +1597,32 @@ async fn run_event_loop(
                                 %addr,
                                 error = %e,
                                 "Bootstrap re-dial skipped"
+                            ),
+                        }
+                    }
+                }
+
+                // Peerless boot addrs (no `/p2p/`) can't be checked against a
+                // specific peer id. The only available connection signal is the
+                // global connected count: if it's zero, the node is isolated and
+                // its single startup dial must have failed (DNS hiccup, boot node
+                // restart mid-handshake, transient timeout). Re-dial every
+                // peerless boot addr to recover. Once ANY connection is up,
+                // Identify + Kademlia take over peer discovery, so we stop —
+                // avoiding a redundant dial storm against an already-reachable
+                // fleet.
+                let live_connections = state.swarm.connected_peers().count();
+                if live_connections == 0 && !state.bootstrap_addrs_peerless.is_empty() {
+                    for addr in &state.bootstrap_addrs_peerless {
+                        match state.swarm.dial(addr.clone()) {
+                            Ok(()) => tracing::info!(
+                                %addr,
+                                "Re-dialing peerless bootstrap addr (node isolated, 0 peers)"
+                            ),
+                            Err(e) => tracing::debug!(
+                                %addr,
+                                error = %e,
+                                "Peerless bootstrap re-dial skipped"
                             ),
                         }
                     }
