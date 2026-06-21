@@ -5100,10 +5100,19 @@ async fn handle_faucet(
             data: None,
         })?;
 
-    // Default 100 TNZO (= 100 * 10^18 wei); caller may request up to 1000 TNZO worth.
-    // `amount_wei` accepts a u64 number (small values) or a decimal string (large values).
-    const DEFAULT_FAUCET_WEI: u128 = 100 * 1_000_000_000_000_000_000u128;
-    const MAX_FAUCET_WEI: u128 = 1000 * 1_000_000_000_000_000_000u128;
+    // Default 10,000 TNZO (= 10_000 * 10^18 wei); caller may request up
+    // to the same amount. This is the testnet starter-allotment so every
+    // new wallet has enough TNZO to actually use the network — chat with
+    // model providers, deposit for validation, contribute to training —
+    // without immediately running into a low-balance wall. Bumped from
+    // the historical 100/1000 defaults when Tenzro Studio's onboarding
+    // started auto-faucet'ing new wallets on creation. Per-address 24h
+    // cooldown (below) still rate-limits abuse.
+    //
+    // `amount_wei` accepts a u64 number (small values) or a decimal
+    // string (large values, since 10_000 TNZO = 10^22 wei overflows u64).
+    const DEFAULT_FAUCET_WEI: u128 = 10_000 * 1_000_000_000_000_000_000u128;
+    const MAX_FAUCET_WEI: u128 = 10_000 * 1_000_000_000_000_000_000u128;
     let amount_wei: u128 = match params.get("amount_wei") {
         Some(v) => {
             if let Some(n) = v.as_u64() {
