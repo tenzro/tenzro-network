@@ -117,6 +117,28 @@ pub struct HfModelEntry {
     /// so image input actually works instead of being silently dropped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mmproj: Option<MmprojSpec>,
+    /// Reasoning / thinking-mode policy. Universal policy the serving
+    /// runtime resolves per-request. Stamped by the catalog build pass
+    /// from [`ReasoningPolicy::for_family`] so every entry carries the
+    /// correct policy without per-id app code.
+    #[serde(default)]
+    pub reasoning: ReasoningPolicy,
+    /// Chat-template fix policy. `TemplateFix::None` for entries whose
+    /// embedded GGUF jinja is correct as-is; `TemplateFix::Vendored {
+    /// filename }` when the inference client should load a vendored
+    /// fix from its bundled templates dir. Stamped by the catalog
+    /// build pass from [`TemplateFix::for_family`].
+    #[serde(default)]
+    pub template_fix: TemplateFix,
+    /// Flat filename the network's HF downloader writes to
+    /// `~/.tenzro/models/`. Always `<id>.gguf` for unshared models.
+    /// Distinct from `hf_filename` (which is the canonical Unsloth
+    /// name and may include a sharded subdir prefix). The serving
+    /// runtime's filename matcher should key off THIS field — eliminating
+    /// the dual-stem lookup the inference client used to do.
+    /// Stamped by the catalog build pass from `id` + `hf_filename`.
+    #[serde(default)]
+    pub download_filename: String,
 }
 
 /// Multimodal projector descriptor for a vision-capable GGUF.
@@ -393,6 +415,254 @@ impl ServingProfile {
             _ => Self::default(),
         }
     }
+}
+
+/// Universal reasoning/thinking-mode policy for a catalog entry.
+///
+/// Replaces the older `ServingProfile::reasoning_default` bool with a
+/// policy that the serving runtime can resolve per-request based on
+/// (a) whether the family supports thinking mode at all, (b) the model
+/// size, and (c) the caller's `max_tokens` budget. See
+/// `docs/serving-policy.md` in tenzro-inference for the design rationale
+/// and the per-family threshold table.
+///
+/// The runtime contract: when `supports_thinking == false`, never inject
+/// `chat_template_kwargs.enable_thinking`. When true and `default_mode ==
+/// Auto`, resolve to thinking-ON iff the model size is at least
+/// `thinking_safe_min_b` AND the caller's budget (or default budget) is
+/// at least `thinking_min_budget_tokens`. Below either threshold,
+/// thinking-OFF — small models / small budgets in thinking mode are the
+/// documented Qwen3.5-0.8B/2B failure mode (model spends the entire
+/// budget in `<think>`, emits empty content).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ReasoningPolicy {
+    /// Whether the family supports hybrid thinking/non-thinking mode.
+    /// False for instruct-only families (mistral, ministral,
+    /// mistral-nemo, phi without -reasoning, gemma3-it, gemma4-it,
+    /// granite4 instruct). True for qwen3 / qwen3.5 / qwen3.6, gpt-oss,
+    /// glm5+, deepseek-v3+, kimi-k2+, minimax-m1/m3, nemotron reasoning,
+    /// phi-N-reasoning.
+    pub supports_thinking: bool,
+    /// Default mode for fresh requests. `Auto` resolves per the size +
+    /// budget thresholds below. `Always` / `Never` are escape hatches
+    /// for entries where the family-default doesn't apply (e.g. a
+    /// distilled instruct of a thinking model).
+    pub default_mode: ReasoningMode,
+    /// Below this parameter count (in billions; for MoE entries, use
+    /// active-parameter count) thinking is OFF even when the family
+    /// supports it. Qwen team's own model cards explicitly warn about
+    /// qwen3.5-0.8B/2B entering thinking loops; this threshold codifies
+    /// the warning across the family.
+    pub thinking_safe_min_b: f32,
+    /// Minimum total max_tokens budget when thinking is ON. Below this
+    /// the runtime forces non-thinking. Qwen's reference code uses
+    /// 32_768 as the published min for thinking-mode generation; we
+    /// default to family-tuned values (16K for qwen3.5/qwen3.6, 32K
+    /// for deepseek/kimi, 8K for gpt-oss/qwen3-original).
+    pub thinking_min_budget_tokens: u32,
+}
+
+/// Default mode for [`ReasoningPolicy`]. `Auto` is the common case;
+/// `Always` / `Never` are explicit overrides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningMode {
+    Auto,
+    Always,
+    Never,
+}
+
+impl Default for ReasoningMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl Default for ReasoningPolicy {
+    /// Safe non-thinking default. Used as the placeholder before
+    /// [`ReasoningPolicy::for_family`] fills in the family-correct
+    /// values, and for any family without a published policy.
+    fn default() -> Self {
+        Self {
+            supports_thinking: false,
+            default_mode: ReasoningMode::Auto,
+            thinking_safe_min_b: 0.0,
+            thinking_min_budget_tokens: 0,
+        }
+    }
+}
+
+impl ReasoningPolicy {
+    /// Recommended reasoning policy for a catalog `family`. Encodes the
+    /// per-family published guidance (Qwen team model-card warnings,
+    /// Unsloth docs, llama.cpp issue tracker for known thinking-mode
+    /// bugs).
+    pub fn for_family(family: &str) -> Self {
+        match family {
+            // Qwen 3 (original): every published size operates in
+            // thinking mode by default per the Qwen team's model cards
+            // and Unsloth's docs. Smallest is 0.6B — no documented
+            // failure mode at that size. Use a low safe-min so all
+            // sizes get thinking-on; budget min matches the original
+            // Qwen3 reference of 8K.
+            "qwen3" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 0.0,
+                thinking_min_budget_tokens: 8_192,
+            },
+            // Qwen 3.5 / 3.6: thinking-on by default but small sizes
+            // (0.8B, 2B) carry an explicit thinking-loop warning on
+            // their own model cards — reproduced locally on 0.8B with
+            // a 200-token budget producing empty content. Safe-min 4B
+            // matches Unsloth's published "Small series" carve-out;
+            // budget min 16K is the empirically-safe floor for
+            // thinking-mode multi-turn at these sizes (Qwen's reference
+            // uses 32K for hard problems, 8K is too tight for chat).
+            "qwen3.5" | "qwen3.6" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 4.0,
+                thinking_min_budget_tokens: 16_384,
+            },
+            // gpt-oss Harmony: defaults thinking-on; smallest published
+            // sizes are well above any concerning threshold.
+            "gpt-oss" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 0.0,
+                thinking_min_budget_tokens: 8_192,
+            },
+            // GLM 5 / 6: thinking-on for the 9B+ chat variants per the
+            // model cards.
+            "glm" | "glm5" | "glm6" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 9.0,
+                thinking_min_budget_tokens: 16_384,
+            },
+            // DeepSeek V3 / V4: pure-reasoning, dense or MoE. Largest
+            // sizes only — set the safe-min conservatively at 13B
+            // (smallest published distill) and require the larger 32K
+            // budget the model card recommends.
+            "deepseek" | "deepseek-v3" | "deepseek-v4" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 13.0,
+                thinking_min_budget_tokens: 32_768,
+            },
+            // Kimi K2 family: all MoE, all thinking. K2.6 is the hybrid
+            // variant. 32K budget matches the published guidance.
+            "kimi" | "kimi-k2" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 0.0,
+                thinking_min_budget_tokens: 32_768,
+            },
+            // MiniMax M1 / M3: reasoning MoE. M1 is dense-equivalent
+            // 40B, M3 is MoE — both safe with thinking on.
+            "minimax" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 0.0,
+                thinking_min_budget_tokens: 16_384,
+            },
+            // Nemotron Nano: reasoning is the explicit purpose of the
+            // -Nano series. Match Unsloth's guidance.
+            "nemotron" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 4.0,
+                thinking_min_budget_tokens: 16_384,
+            },
+            // Phi-N-reasoning variants: thinking-mode only when the id
+            // carries a -reasoning suffix; the catalog's family for
+            // those is "phi-reasoning". Plain "phi" is instruct.
+            "phi-reasoning" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 4.0,
+                thinking_min_budget_tokens: 16_384,
+            },
+            // Everything else: instruct-only families. Don't touch
+            // enable_thinking at all (the GGUF template handles it).
+            _ => Self::default(),
+        }
+    }
+}
+
+/// Per-entry chat-template fix policy. Replaces the inference-client's
+/// hand-maintained `TEMPLATE_OVERRIDES` map. The catalog publishes
+/// which fix (if any) each family needs; the client maps logical
+/// filenames to its bundled `templates/` directory.
+///
+/// Adding a new known-broken family: add the row in
+/// [`TemplateFix::for_family`] and drop the vendored jinja in the
+/// inference client's `templates/` dir.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "spec")]
+pub enum TemplateFix {
+    /// Use the GGUF's embedded jinja as-is. The common case.
+    None,
+    /// Use a vendored fix shipped in the inference client. The string
+    /// is the bundled jinja filename (e.g.
+    /// `"qwen3.5-3.6-froggeric-v20.jinja"`). The catalog declares
+    /// WHICH fix; the client supplies the file.
+    Vendored { filename: String },
+}
+
+impl Default for TemplateFix {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl TemplateFix {
+    /// Recommended chat-template fix for a catalog `family`. Currently
+    /// only Qwen 3.5 / 3.6 ship a known-bad embedded template; froggeric
+    /// v20 patches the prompt-drop + empty-think bugs that otherwise
+    /// produce empty-content multi-turn output. See
+    /// <https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates> and
+    /// <https://github.com/ggml-org/llama.cpp/issues/13178>.
+    pub fn for_family(family: &str) -> Self {
+        match family {
+            "qwen3.5" | "qwen3.6" => Self::Vendored {
+                filename: "qwen3.5-3.6-froggeric-v20.jinja".to_string(),
+            },
+            _ => Self::None,
+        }
+    }
+}
+
+/// Parse a catalog `parameters` string (e.g. "0.8B", "27B",
+/// "30B-A3B", "1T (MoE, 32B active)") into a billions-of-active-params
+/// float that the [`ReasoningPolicy`] threshold check can compare
+/// against. For MoE entries we use the **active** parameter count, not
+/// the total — thinking-mode coherence correlates with active path
+/// width, not total parameters.
+pub fn parse_params_active_b(parameters: &str) -> f32 {
+    // Look for "(... XB active)" first — MoE form.
+    if let Some(idx) = parameters.find("active") {
+        let prefix = &parameters[..idx];
+        if let Some(num_start) = prefix.rfind(|c: char| !c.is_ascii_digit() && c != '.') {
+            let num_part = prefix[num_start + 1..].trim_end_matches(['B', 'b', ' ']);
+            if let Ok(v) = num_part.trim().parse::<f32>() {
+                return v;
+            }
+        }
+    }
+    // Look for "<N>B-A<M>B" (e.g. "30B-A3B") — take the A part.
+    if let Some(a_idx) = parameters.find("-A") {
+        let after = &parameters[a_idx + 2..];
+        let num_end = after.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(after.len());
+        if let Ok(v) = after[..num_end].parse::<f32>() {
+            return v;
+        }
+    }
+    // Plain "<N>B" — dense.
+    let trimmed = parameters.trim().trim_end_matches(['B', 'b']);
+    let num_end = trimmed.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(trimmed.len());
+    trimmed[..num_end].parse::<f32>().unwrap_or(0.0)
 }
 
 /// Model architecture — informational only.
@@ -1670,6 +1940,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     }];
     catalog.push(HfModelEntry {
         id: "qwen3-1.7b".into(),
@@ -1692,6 +1965,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3-4b".into(),
@@ -1714,6 +1990,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3-8b".into(),
@@ -1736,6 +2015,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3-14b".into(),
@@ -1758,6 +2040,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3-32b".into(),
@@ -1780,6 +2065,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3-30b-a3b".into(),
@@ -1807,6 +2095,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── Qwen 3.5 (Apache 2.0, ungated, unsloth GGUF) ──────────────────
@@ -1831,6 +2122,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-2b".into(),
@@ -1853,6 +2147,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-4b".into(),
@@ -1875,6 +2172,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-9b".into(),
@@ -1897,6 +2197,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-27b".into(),
@@ -1919,6 +2222,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-35b-a3b".into(),
@@ -1946,6 +2252,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-122b-a10b".into(),
@@ -1973,6 +2282,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3.5-397b-a17b".into(),
@@ -2000,6 +2312,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── Gemma 3 (Google, ungated via unsloth GGUF) ─────────────────────
@@ -2024,6 +2339,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma3-1b".into(),
@@ -2046,6 +2364,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma3-4b".into(),
@@ -2068,6 +2389,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma3-12b".into(),
@@ -2090,6 +2414,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma3-27b".into(),
@@ -2112,6 +2439,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── Gemma 4 (Gemma License, via unsloth GGUF) ──────────────────────
@@ -2143,6 +2473,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-12b-mtp-draft".into(),
@@ -2165,6 +2498,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e4b-mtp-draft".into(),
@@ -2187,6 +2523,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-26b-a4b-mtp-draft".into(),
@@ -2214,6 +2553,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-31b-mtp-draft".into(),
@@ -2236,6 +2578,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e2b".into(),
@@ -2258,6 +2603,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e4b".into(),
@@ -2280,6 +2628,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-26b-a4b".into(),
@@ -2307,6 +2658,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-12b".into(),
@@ -2329,6 +2683,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-31b".into(),
@@ -2351,6 +2708,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── Gemma 4 QAT (Quantization-Aware Training) ──────────────────────
@@ -2381,6 +2741,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-e4b-qat".into(),
@@ -2403,6 +2766,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-12b-qat".into(),
@@ -2425,6 +2791,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-26b-a4b-qat".into(),
@@ -2452,6 +2821,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gemma4-31b-qat".into(),
@@ -2474,6 +2846,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── DiffusionGemma (Gemma License, via unsloth GGUF) ───────────────
@@ -2512,6 +2887,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── Mistral (Apache 2.0, ungated) ──────────────────────────────────
@@ -2536,6 +2914,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "mistral-nemo-12b".into(),
@@ -2558,6 +2939,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-24b".into(),
@@ -2580,6 +2964,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── Ministral 3 (Mistral AI, Apache 2.0, ungated) ──────────────────
@@ -2604,6 +2991,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "ministral3-8b".into(),
@@ -2626,6 +3016,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "ministral3-14b".into(),
@@ -2648,6 +3041,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── Phi 4 (Microsoft, MIT, ungated) ─────────────────────────────
@@ -2672,6 +3068,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "phi4".into(),
@@ -2694,6 +3093,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "phi4-reasoning".into(),
@@ -2716,6 +3118,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "phi4-mini-reasoning".into(),
@@ -2738,6 +3143,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── SmolLM (HuggingFace, Apache 2.0, ungated) ───────────────────
@@ -2762,6 +3170,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "smollm3-3b".into(),
@@ -2784,6 +3195,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── Qwen 3 Coder (Apache 2.0, ungated, unsloth GGUF) ───────────────
@@ -2813,6 +3227,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── Nemotron (NVIDIA Open, ungated, unsloth GGUF) ────────────────
@@ -2837,6 +3254,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "nemotron-nano-30b-a3b".into(),
@@ -2864,6 +3284,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── GLM-4 (Apache 2.0, via bartowski GGUF) ─────────────────────────
@@ -2888,6 +3311,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── Kimi K2 (MIT, via unsloth GGUF) ──────────────────────────────
@@ -2917,6 +3343,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "kimi-k2.6".into(),
@@ -2944,6 +3373,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── MiniMax M1 (superseded — Unsloth jumped to M2.x/M3) ──────────
@@ -2976,6 +3408,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: false,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     // ── MiniMax M2.7 (current frontier MiniMax, via unsloth GGUF) ────
     catalog.push(HfModelEntry {
@@ -3004,6 +3439,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── DeepSeek V3 (MIT, via unsloth GGUF) ──────────────────────────
@@ -3033,6 +3471,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // NOTE: Llama models removed — not supported on Tenzro Network.
@@ -3063,6 +3504,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3.6-35b-a3b".into(),
@@ -3094,6 +3538,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     // ── Qwen 3.6 MTP variants ─────────────────────────────────────────
     // Unsloth ships dedicated `-MTP-GGUF` repos for Qwen 3.6 where the
@@ -3122,6 +3569,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "qwen3.6-35b-a3b-mtp".into(),
@@ -3149,6 +3599,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── Mistral Small 3.1 / 3.2 (Apache 2.0, via unsloth GGUF) ───────
@@ -3177,6 +3630,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-3.1-24b".into(),
@@ -3199,6 +3655,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "mistral-small-3.2-24b".into(),
@@ -3221,6 +3680,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── GPT-OSS (Apache 2.0, OpenAI's open-weights release) ──────────
@@ -3245,6 +3707,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "gpt-oss-120b".into(),
@@ -3272,6 +3737,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── IBM Granite 4.0 (Apache 2.0) ─────────────────────────────────
@@ -3296,6 +3764,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "granite4-1b".into(),
@@ -3318,6 +3789,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "granite4-h-tiny".into(),
@@ -3340,6 +3814,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "granite4-h-small".into(),
@@ -3362,6 +3839,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── GLM 5 / 5.1 / 5.2 (MIT, via unsloth + zai-org GGUF) ──────────
@@ -3391,6 +3871,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "glm-5.1".into(),
@@ -3418,6 +3901,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "glm-5.2".into(),
@@ -3445,6 +3931,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── MiniMax M3 (MIT, via unsloth GGUF) ───────────────────────────
@@ -3474,6 +3963,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── DeepSeek V4 (MIT, via unsloth — safetensors mirrors; GGUF community ports) ──
@@ -3508,6 +4000,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "deepseek-v4-pro".into(),
@@ -3541,6 +4036,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: false,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── Kimi K2.5 + K2.7-Code (MIT, via moonshotai/unsloth) ──────────
@@ -3570,6 +4068,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
     catalog.push(HfModelEntry {
         id: "kimi-k2.7-code".into(),
@@ -3597,6 +4098,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         promotable: true,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
     });
 
     // ── Qwen 3.5 MTP variants (Apache 2.0, via unsloth GGUF) ──────────
@@ -3652,6 +4156,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             promotable: true,
             serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
         });
     }
 
@@ -3667,33 +4174,44 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
     // `mmproj-F16.gguf` alongside the language model; the tiny speculative
     // `-mtp-draft` entries are text-only draft models and must NOT carry a
     // projector (they're never served to the user as the vision model).
+    // Catalog build pass — derive every serving-runtime field from the
+    // entry's published facts. The runtime contract: clients READ this
+    // catalog and configure llama.cpp accordingly; they NEVER decide.
+    // Adding a new model = adding an HfModelEntry literal + (if needed)
+    // adding a row in ServingProfile::for_family / ReasoningPolicy::
+    // for_family / TemplateFix::for_family. Never per-id conditionals.
+    // See docs/serving-policy.md in tenzro-inference for the rationale.
     for entry in &mut catalog {
+        // 1. Sampler defaults — model-author-recommended (Unsloth /
+        //    upstream model card guidance), family-keyed.
         entry.serving = ServingProfile::for_family(&entry.family, entry.architecture);
 
-        // Per-id overrides for Qwen 3.5 sizes Qwen's own model card warns
-        // about. Verbatim from huggingface.co/Qwen/Qwen3.5-0.8B and -2B:
-        //
-        //   "In thinking mode, we have observed that when using the
-        //    recommended sampling parameters, Qwen3.5-0.8B is more prone
-        //    to entering thinking loops compared to other Qwen3.5 models,
-        //    which may prevent it from terminating generation properly."
-        //
-        // Reproduced locally on qwen3.5-0.8b multi-turn with the froggeric
-        // v20 template + Unsloth thinking-mode samplers: a 200-token budget
-        // is consumed entirely inside <think>, finish_reason=length,
-        // assistant content is the empty string. Forcing thinking-OFF
-        // produces clean answers at the same budget. Until we expose
-        // enable_thinking as a per-request override and bump default
-        // max_tokens to Qwen's recommended 32k+, default the two
-        // explicitly-flagged sizes to non-thinking.
-        //
-        // Larger Qwen 3.5 sizes (4B+) are NOT measured-broken on this
-        // hardware so they keep the family default (thinking-ON). Qwen
-        // 3.6 ships no Small series → no override needed.
-        if matches!(entry.id.as_str(), "qwen3.5-0.8b" | "qwen3.5-2b") {
-            entry.serving.reasoning_default = false;
-        }
+        // 2. Reasoning policy — universal across all clients. The
+        //    runtime resolves Auto -> thinking-ON iff size >= threshold
+        //    AND budget >= threshold, otherwise thinking-OFF. Replaces
+        //    the per-id `if matches!("qwen3.5-0.8b" | "qwen3.5-2b")`
+        //    override the catalog used to carry — the threshold-based
+        //    policy now covers the Qwen 3.5 Small-series carve-out
+        //    universally (and for any future model with the same
+        //    size-vs-thinking-coherence shape).
+        entry.reasoning = ReasoningPolicy::for_family(&entry.family);
 
+        // 3. Chat-template fix — declares which (if any) vendored jinja
+        //    the inference client should load for this entry. Replaces
+        //    the client's hand-maintained TEMPLATE_OVERRIDES map.
+        entry.template_fix = TemplateFix::for_family(&entry.family);
+
+        // 4. Download filename — flat name the HF downloader writes to
+        //    `~/.tenzro/models/`. Eliminates the client's dual-stem
+        //    catalog index (which existed to handle the case where the
+        //    downloader wrote `<id>.gguf` while hf_filename was the
+        //    canonical Unsloth mixed-case name). With this field
+        //    published, the matcher reads exactly one filename.
+        entry.download_filename = format!("{}.gguf", entry.id);
+
+        // Vision: every Gemma 4 GGUF ships a mmproj-F16.gguf alongside
+        // the language model. Speculative draft entries (-mtp-draft)
+        // are text-only and must NOT carry a projector.
         if entry.architecture == ModelArchitecture::Gemma4
             && !entry.id.ends_with("-mtp-draft")
         {
