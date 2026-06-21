@@ -49,7 +49,7 @@ spec:
               mountPath: /data/tenzro
       containers:
         - name: tenzro-node
-          image: us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:79567e7
+          image: us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:20260507-100757
           imagePullPolicy: Always
           env:
             - name: TENZRO_SIMULATE_SEV
