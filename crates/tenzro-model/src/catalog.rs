@@ -3670,6 +3670,30 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
     for entry in &mut catalog {
         entry.serving = ServingProfile::for_family(&entry.family, entry.architecture);
 
+        // Per-id overrides for Qwen 3.5 sizes Qwen's own model card warns
+        // about. Verbatim from huggingface.co/Qwen/Qwen3.5-0.8B and -2B:
+        //
+        //   "In thinking mode, we have observed that when using the
+        //    recommended sampling parameters, Qwen3.5-0.8B is more prone
+        //    to entering thinking loops compared to other Qwen3.5 models,
+        //    which may prevent it from terminating generation properly."
+        //
+        // Reproduced locally on qwen3.5-0.8b multi-turn with the froggeric
+        // v20 template + Unsloth thinking-mode samplers: a 200-token budget
+        // is consumed entirely inside <think>, finish_reason=length,
+        // assistant content is the empty string. Forcing thinking-OFF
+        // produces clean answers at the same budget. Until we expose
+        // enable_thinking as a per-request override and bump default
+        // max_tokens to Qwen's recommended 32k+, default the two
+        // explicitly-flagged sizes to non-thinking.
+        //
+        // Larger Qwen 3.5 sizes (4B+) are NOT measured-broken on this
+        // hardware so they keep the family default (thinking-ON). Qwen
+        // 3.6 ships no Small series → no override needed.
+        if matches!(entry.id.as_str(), "qwen3.5-0.8b" | "qwen3.5-2b") {
+            entry.serving.reasoning_default = false;
+        }
+
         if entry.architecture == ModelArchitecture::Gemma4
             && !entry.id.ends_with("-mtp-draft")
         {
