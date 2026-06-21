@@ -261,6 +261,51 @@ impl ModelInfoCmd {
                     );
                 }
 
+                // Multimodal (vision-language) — carries a separate mmproj
+                // projector that llama.cpp loads via --mmproj for image input.
+                if let Some(mmproj) = m.mmproj.as_ref() {
+                    println!();
+                    output::print_field("Multimodal", "Yes (text + image)");
+                    output::print_field("Projector (mmproj)", &mmproj.filename);
+                }
+
+                // Speculative decoding — drafter pairing + flavour.
+                if let Some(drafter) = m.drafter_id.as_ref() {
+                    println!();
+                    let flavour = match m.mtp_kind {
+                        tenzro_model::catalog::MtpKind::DraftMtp => "MTP (joint draft head)",
+                        tenzro_model::catalog::MtpKind::Generic => "Generic (two-model)",
+                        tenzro_model::catalog::MtpKind::None => "None",
+                    };
+                    output::print_field("Speculative Decoding", flavour);
+                    output::print_field("Drafter", drafter);
+                    if let Some(n) = m.mtp_default_draft_n {
+                        output::print_field("Draft n (default)", &n.to_string());
+                    }
+                }
+
+                // Serving profile — the catalog's model-author-recommended
+                // sampler defaults (Unsloth per-family guidance). Requests may
+                // override these; they're the defaults, not a ceiling.
+                println!();
+                let s = &m.serving;
+                output::print_field("Serving — Temperature", &s.temperature.to_string());
+                output::print_field("Serving — Top-P", &s.top_p.to_string());
+                if s.top_k > 0 {
+                    output::print_field("Serving — Top-K", &s.top_k.to_string());
+                }
+                if s.min_p > 0.0 {
+                    output::print_field("Serving — Min-P", &s.min_p.to_string());
+                }
+                output::print_field(
+                    "Serving — Chat Template (jinja)",
+                    if s.jinja_required { "required" } else { "optional" },
+                );
+                output::print_field(
+                    "Serving — Reasoning",
+                    if s.reasoning_default { "on by default" } else { "off by default" },
+                );
+
                 println!();
                 output::print_field("HF Repo", &m.hf_repo);
                 output::print_field("Description", &m.description);

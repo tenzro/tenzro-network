@@ -82,6 +82,10 @@ Tenzro wires MTP through the full path:
 
 Shipped in the catalog with `mtp_kind: DraftMtp`: DeepSeek V3 (native MTP head), DeepSeek V4 Pro / Flash, GLM 5.2, Gemma 4 (E2B / E4B / 12B / 26B-A4B / 31B), Qwen 3.5 every size (0.8B / 2B / 4B / 9B / 27B / 35B-A3B / 122B-A10B / 397B-A17B), Qwen 3.6 27B and 35B-A3B. For dense models without a joint head, classical two-model speculative decoding (`MtpKind::Generic`) is wired through the same path.
 
+### 2.5 Per-model serving profile
+
+The catalog is the single source of truth for serving behaviour. Each `HfModelEntry` carries a `serving: ServingProfile` (temperature, top_p, top_k, min_p, `jinja_required`, `reasoning_default`) stamped from the model author's recommended values (Unsloth per-family guidance) by a single post-construction pass keyed on family + architecture — the per-family knowledge lives in one `ServingProfile::for_family` function rather than being duplicated across the struct literals. Clients consume the profile two ways: the `tenzro_modelMetadata` RPC returns it (alongside `drafter_id`, `mtp_kind`, MoE shape, and multimodal/`mmproj` flags) so any client can render or apply the recommended config, and the local serving sidecar stamps each on-disk GGUF's preset section with the profile's samplers, `--jinja`, speculative (`spec-type`), and MoE-offload (`n-cpu-moe`) flags. Request-level parameters override the profile; the profile is the default, not a ceiling.
+
 ---
 
 ## 3. Mixture-of-Experts serving
@@ -127,6 +131,7 @@ The view exposes `under_replicated(policy)` and `hot_experts(policy)` so a sched
 - `tenzro_moePlanDispatch` — given a list of per-token routing decisions, returns the per-holder batch plan plus token-level assignment so the caller can reassemble per-token outputs
 - `tenzro_moeReplicationPolicy` — current policy snapshot
 - `tenzro_moeCatalogShape` — catalog-side MoE topology for a model: `num_experts`, `experts_per_token`, `shared_experts`, `params_per_expert_x10`
+- `tenzro_modelMetadata` — full catalog metadata for a model: `serving` profile (samplers, jinja, reasoning), `multimodal` + `mmproj_filename`, `drafter_id` / `mtp_kind` / `mtp_default_draft_n`, MoE `moe` shape, and `architecture`. The read API over the catalog's single source of truth, consumed by the CLI and SDKs.
 
 ### 3.6 Catalog coverage
 
@@ -171,6 +176,14 @@ The catalog covers seven ONNX runtimes plus the llama.cpp language path. All ent
 | Video | Vision-fallback encoder over uniformly-sampled frames | `tenzro_videoEmbed` | |
 
 Each modality has a dedicated runtime in `tenzro-model` with model-specific preprocessing (mel-spectrogram for ASR, ImageNet / CLIP / SigLIP normalization for vision, BPE tokenization for text-embed). The runtime dispatch hides the per-family ABI differences (SAM 1 vs SAM 2 decoder, RF-DETR vs D-FINE post-processing, Parakeet RNN-T vs Canary NeMo Conformer-AED).
+
+### 4.1 Vision-language GGUFs (mmproj)
+
+Natively-multimodal chat models (the Gemma 4 family) run on the same llama.cpp language path as text-only models but accept image input. llama.cpp loads two files for these: the language GGUF plus a separate **multimodal projector** (mmproj) that encodes images into the model's embedding space. The catalog carries this on `HfModelEntry::mmproj` (`Some(MmprojSpec { filename })`); the projector ships in the model's own `hf_repo`, so only the filename is stored. The post-construction catalog pass stamps `mmproj-F16.gguf` onto every Gemma 4 language model (the tiny speculative `-mtp-draft` entries are text-only and stay `None`). The downloader fetches the projector alongside the model into `<models_dir>/<id>.mmproj.gguf`, and the serving client emits llama.cpp `--mmproj <path>`. When the projector is declared but absent on disk, the model degrades gracefully to text-only rather than failing the load.
+
+### 4.2 Sharded (gguf-split) downloads
+
+Frontier-scale GGUFs (Kimi K2, DeepSeek V3, GLM 5, MiniMax M3, the largest Qwen 3.5 MoE quants) ship as `gguf-split` sets where the catalog `hf_filename` points at the first shard (`...-00001-of-000NN.gguf`). The downloader detects this pattern, enumerates all `NN` shards from the self-describing suffix, and downloads them into a per-model directory (`<models_dir>/<id>/`) preserving their original filenames — llama.cpp only auto-continues a split set when every shard sits in one directory under its split name. `model_path`/`is_downloaded`/`downloaded_size`/`delete_model` all recognize the per-model-directory layout; single-file models keep the flat `<id>.gguf` form.
 
 ---
 

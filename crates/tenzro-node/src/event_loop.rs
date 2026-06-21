@@ -1104,11 +1104,14 @@ impl EventLoop {
         // This is how finalized blocks flow from HotStuff-2 into the execution pipeline.
         let mut finality_rx = self.consensus.as_ref().map(|c| c.subscribe_finality());
 
-        // Periodic peer-count refresh: runs every 30 seconds regardless of block production.
+        // Periodic peer-count refresh: runs every 3 seconds regardless of block production.
         // Without this, non-validator nodes (model-provider, light clients) that never call
         // handle_block_finalized() would always report peer_count=0 in /status even when
-        // they have active P2P connections.
-        let mut peer_refresh = tokio::time::interval(std::time::Duration::from_secs(30));
+        // they have active P2P connections. The interval is deliberately short (was 30s) so
+        // the desktop UI status bar flips from "Connecting · Peers 0" to "Connected" within a
+        // few seconds of the first peer handshake instead of lagging up to half a minute —
+        // `connected_peers()` is a cheap in-memory swarm query, so polling at 3s is fine.
+        let mut peer_refresh = tokio::time::interval(std::time::Duration::from_secs(3));
         peer_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         // Heartbeat: re-announce locally served models every 60s so peers know they're still alive.

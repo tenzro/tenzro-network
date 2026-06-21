@@ -226,9 +226,40 @@ impl HfDownloader {
     }
 
     /// Get the local file path for a model.
+    ///
+    /// Single-file GGUFs live at `<storage>/<id>.gguf`. Sharded
+    /// (gguf-split) GGUFs live at `<storage>/<id>/<...-00001-of-000NN.gguf>`
+    /// — when that directory exists, return its first shard so callers
+    /// (sidecar, loaders) get the path llama.cpp auto-continues from.
     pub fn model_path(&self, model_id: &str) -> PathBuf {
-        // Store as <storage_path>/<model_id>.gguf
+        if let Some(first_shard) = self.sharded_first_shard(model_id) {
+            return first_shard;
+        }
         self.storage_path.join(format!("{}.gguf", model_id))
+    }
+
+    /// Local path for a model's multimodal projector (mmproj). Stored flat
+    /// as `<storage>/<id>.mmproj.gguf` regardless of whether the language
+    /// model is single-file or sharded, so the sidecar can resolve it from
+    /// the model id alone. Only present for vision-capable entries whose
+    /// catalog `mmproj` is `Some`.
+    pub fn mmproj_path(&self, model_id: &str) -> PathBuf {
+        self.storage_path.join(format!("{}.mmproj.gguf", model_id))
+    }
+
+    /// If `model_id` was downloaded as a shard set, return the path to its
+    /// first shard inside `<storage>/<id>/`. Returns `None` for single-file
+    /// or absent models.
+    fn sharded_first_shard(&self, model_id: &str) -> Option<PathBuf> {
+        let dir = self.storage_path.join(model_id);
+        if !dir.is_dir() {
+            return None;
+        }
+        std::fs::read_dir(&dir).ok()?.filter_map(|e| e.ok()).find_map(|e| {
+            let name = e.file_name();
+            let name = name.to_str()?;
+            (name.contains("-00001-of-") && name.ends_with(".gguf")).then(|| e.path())
+        })
     }
 
     /// Check if a model is already downloaded locally.
@@ -236,7 +267,10 @@ impl HfDownloader {
     /// Also cleans up broken symlinks left over from previous versions that
     /// symlinked to the ephemeral HF cache inside the container.
     pub fn is_downloaded(&self, model_id: &str) -> bool {
-        let path = self.model_path(model_id);
+        if self.sharded_first_shard(model_id).is_some() {
+            return true;
+        }
+        let path = self.storage_path.join(format!("{}.gguf", model_id));
         // Clean up broken symlinks (target gone after container restart)
         #[cfg(unix)]
         {
@@ -249,9 +283,21 @@ impl HfDownloader {
         path.exists()
     }
 
-    /// Get the file size of a downloaded model, if present.
+    /// Get the file size of a downloaded model, if present. For sharded
+    /// models this sums every shard so callers see the full on-disk size.
     pub fn downloaded_size(&self, model_id: &str) -> Option<u64> {
-        let path = self.model_path(model_id);
+        if self.sharded_first_shard(model_id).is_some() {
+            let dir = self.storage_path.join(model_id);
+            let total: u64 = std::fs::read_dir(&dir)
+                .ok()?
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.metadata().ok())
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+                .sum();
+            return Some(total);
+        }
+        let path = self.storage_path.join(format!("{}.gguf", model_id));
         std::fs::metadata(&path).ok().map(|m| m.len())
     }
 
@@ -273,6 +319,18 @@ impl HfDownloader {
         peer_hint: Option<&PeerHint>,
         progress_tx: watch::Sender<DownloadProgress>,
     ) -> Result<PathBuf> {
+        // Sharded (gguf-split) GGUFs: the catalog `hf_filename` points at
+        // the first shard (`...-00001-of-000NN.gguf`). llama.cpp only
+        // auto-continues a split set when every shard sits in the same
+        // directory under its original name, so we can't flatten to
+        // `<id>.gguf` like a single-file model. Download all NN shards
+        // into `<storage>/<id>/` and return the first-shard path.
+        if let Some((prefix, total, ext_suffix)) = parse_shard_spec(&entry.hf_filename) {
+            return self
+                .download_sharded(entry, &prefix, total, &ext_suffix, progress_tx)
+                .await;
+        }
+
         let dest_path = self.model_path(&entry.id);
         let tmp_path = dest_path.with_extension("gguf.tmp");
 
@@ -374,7 +432,154 @@ impl HfDownloader {
             }
         }
 
+        self.download_mmproj(entry, &progress_tx).await?;
+
         Ok(dest_path)
+    }
+
+    /// Download a vision-capable model's multimodal projector (mmproj)
+    /// from the model's own repo into `<storage>/<id>.mmproj.gguf`. No-op
+    /// when the entry has no `mmproj`. A projector failure is logged but
+    /// NOT fatal — the language model still serves text-only, which is
+    /// strictly better than failing the whole download.
+    async fn download_mmproj(
+        &self,
+        entry: &HfModelEntry,
+        progress_tx: &watch::Sender<DownloadProgress>,
+    ) -> Result<()> {
+        let Some(mmproj) = entry.mmproj.as_ref() else {
+            return Ok(());
+        };
+        let dest_path = self.mmproj_path(&entry.id);
+        if dest_path.exists() {
+            return Ok(());
+        }
+        let tmp_path = dest_path.with_extension("gguf.tmp");
+
+        if let Err(e) = download_one_file(
+            &format!("{}/mmproj", entry.id),
+            &entry.hf_repo,
+            &mmproj.filename,
+            0,
+            &dest_path,
+            &tmp_path,
+            progress_tx,
+        )
+        .await
+        {
+            warn!(
+                "{}: mmproj projector download failed ({}); model will serve text-only",
+                entry.id, e
+            );
+        }
+        Ok(())
+    }
+
+    /// Download a gguf-split shard set into `<storage>/<id>/`, preserving
+    /// the original shard filenames so llama.cpp auto-continues from the
+    /// first shard. `prefix`/`total`/`ext_suffix` come from
+    /// [`parse_shard_spec`] on the first-shard `hf_filename`. The remote
+    /// path may carry a subdir (e.g. `Q4_K_M/Model-...-00001-of-000NN.gguf`)
+    /// but every shard lands flat in the model dir under its bare name.
+    /// Returns the path to the first shard.
+    async fn download_sharded(
+        &self,
+        entry: &HfModelEntry,
+        prefix: &str,
+        total: u32,
+        ext_suffix: &str,
+        progress_tx: watch::Sender<DownloadProgress>,
+    ) -> Result<PathBuf> {
+        // Remote dir prefix (everything before the bare shard filename),
+        // kept so we can rebuild each shard's remote path.
+        let remote_dir = entry
+            .hf_filename
+            .rsplit_once('/')
+            .map(|(d, _)| format!("{}/", d))
+            .unwrap_or_default();
+
+        let dest_dir = self.storage_path.join(&entry.id);
+        let tmp_dir = self.storage_path.join(format!("{}.tmp", entry.id));
+
+        if tmp_dir.exists() {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+        }
+        std::fs::create_dir_all(&tmp_dir).map_err(|e| {
+            ModelError::DownloadError(format!(
+                "Failed to create shard tmp dir {}: {}",
+                tmp_dir.display(),
+                e
+            ))
+        })?;
+
+        let per_shard_hint = if total > 0 {
+            entry.size_bytes / total as u64
+        } else {
+            0
+        };
+
+        for idx in 1..=total {
+            let shard_name = format!("{}-{:05}-of-{:05}{}", prefix, idx, total, ext_suffix);
+            let remote_filename = format!("{}{}", remote_dir, shard_name);
+            let shard_dest = tmp_dir.join(&shard_name);
+            let shard_tmp = tmp_dir.join(format!("{}.tmp", shard_name));
+
+            download_one_file(
+                &format!("{}/{}", entry.id, shard_name),
+                &entry.hf_repo,
+                &remote_filename,
+                per_shard_hint,
+                &shard_dest,
+                &shard_tmp,
+                &progress_tx,
+            )
+            .await
+            .inspect_err(|_| {
+                // Tear down the partial set — never expose a split GGUF
+                // missing shards (llama.cpp would fail to load it).
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+            })?;
+        }
+
+        if dest_dir.exists() {
+            std::fs::remove_dir_all(&dest_dir).map_err(|e| {
+                ModelError::DownloadError(format!(
+                    "Failed to clear existing shard dir {}: {}",
+                    dest_dir.display(),
+                    e
+                ))
+            })?;
+        }
+        std::fs::rename(&tmp_dir, &dest_dir).map_err(|e| {
+            ModelError::DownloadError(format!(
+                "Failed to finalize shard dir {} -> {}: {}",
+                tmp_dir.display(),
+                dest_dir.display(),
+                e
+            ))
+        })?;
+
+        let first_shard =
+            dest_dir.join(format!("{}-{:05}-of-{:05}{}", prefix, 1, total, ext_suffix));
+
+        let _ = progress_tx.send(DownloadProgress {
+            model_id: entry.id.clone(),
+            status: DownloadState::Completed,
+            progress_percent: 100.0,
+            downloaded_bytes: entry.size_bytes,
+            total_bytes: entry.size_bytes,
+        });
+
+        info!(
+            "Sharded download completed: {} ({} shards in {})",
+            entry.id,
+            total,
+            dest_dir.display()
+        );
+
+        self.download_mmproj(entry, &progress_tx).await?;
+
+        Ok(first_shard)
     }
 
     /// Verify a downloaded model file against expected metadata.
@@ -436,7 +641,28 @@ impl HfDownloader {
     /// Removes the GGUF file from the persistent models directory and any
     /// partial `.tmp` download files.
     pub fn delete_model(&self, model_id: &str) -> Result<()> {
-        let path = self.model_path(model_id);
+        // Sharded models live in a per-id directory — remove the whole set
+        // (shards + any leftover .tmp) in one shot.
+        let shard_dir = self.storage_path.join(model_id);
+        if shard_dir.is_dir() {
+            std::fs::remove_dir_all(&shard_dir).map_err(|e| {
+                ModelError::DownloadError(format!("Failed to delete shard dir: {}", e))
+            })?;
+            info!("Deleted sharded model dir: {}", shard_dir.display());
+        }
+        let shard_tmp_dir = self.storage_path.join(format!("{}.tmp", model_id));
+        if shard_tmp_dir.is_dir() {
+            let _ = std::fs::remove_dir_all(&shard_tmp_dir);
+        }
+
+        // Multimodal projector, if any.
+        let mmproj = self.mmproj_path(model_id);
+        if mmproj.exists() {
+            let _ = std::fs::remove_file(&mmproj);
+            info!("Deleted mmproj projector: {}", mmproj.display());
+        }
+
+        let path = self.storage_path.join(format!("{}.gguf", model_id));
 
         // Clean up any .tmp partial download files
         let tmp_path = self.storage_path.join(format!("{}.gguf.tmp", model_id));
@@ -896,6 +1122,32 @@ async fn write_bytes_atomic(
 /// Stream a single HF Hub file to disk via a tmp-rename. Shared between
 /// the [`HfDownloader::download_model`] path and the
 /// [`HfArtifactDownloader::download`] path.
+/// Parse a gguf-split first-shard filename into its `(prefix, total, ext)`
+/// parts. Accepts the bare name or a subdir-prefixed remote path; the
+/// returned `prefix` is the model stem WITHOUT the `-00001-of-000NN`
+/// segment and WITHOUT any leading directory, and `ext` is everything
+/// after the shard segment (normally `.gguf`).
+///
+/// Returns `None` for non-sharded names or any shard other than the
+/// first — only the first shard is a valid catalog entry point.
+///
+/// `Q4_K_M/Kimi-K2-Instruct-Q4_K_M-00001-of-00013.gguf`
+///   → `("Kimi-K2-Instruct-Q4_K_M", 13, ".gguf")`
+fn parse_shard_spec(hf_filename: &str) -> Option<(String, u32, String)> {
+    let bare = hf_filename.rsplit('/').next().unwrap_or(hf_filename);
+    let marker = bare.find("-00001-of-")?;
+    let prefix = bare[..marker].to_string();
+    // After the marker: "-00001-of-" then NNNNN then the extension.
+    let rest = &bare[marker + "-00001-of-".len()..];
+    let digits_end = rest.find(|c: char| !c.is_ascii_digit())?;
+    let total: u32 = rest[..digits_end].parse().ok()?;
+    if total == 0 {
+        return None;
+    }
+    let ext_suffix = rest[digits_end..].to_string();
+    Some((prefix, total, ext_suffix))
+}
+
 async fn download_one_file(
     progress_label: &str,
     hf_repo: &str,
@@ -1045,6 +1297,61 @@ mod tests {
     fn test_download_state_display() {
         assert_eq!(DownloadState::Downloading.to_string(), "downloading");
         assert_eq!(DownloadState::Completed.to_string(), "completed");
+    }
+
+    #[test]
+    fn parse_shard_spec_first_shard_with_subdir() {
+        let (prefix, total, ext) =
+            parse_shard_spec("Q4_K_M/Kimi-K2-Instruct-Q4_K_M-00001-of-00013.gguf")
+                .expect("should parse first shard");
+        assert_eq!(prefix, "Kimi-K2-Instruct-Q4_K_M");
+        assert_eq!(total, 13);
+        assert_eq!(ext, ".gguf");
+    }
+
+    #[test]
+    fn parse_shard_spec_bare_first_shard() {
+        let (prefix, total, ext) =
+            parse_shard_spec("DeepSeek-V3-0324-Q4_K_M-00001-of-00009.gguf")
+                .expect("should parse bare first shard");
+        assert_eq!(prefix, "DeepSeek-V3-0324-Q4_K_M");
+        assert_eq!(total, 9);
+        assert_eq!(ext, ".gguf");
+    }
+
+    #[test]
+    fn parse_shard_spec_rejects_single_file() {
+        assert!(parse_shard_spec("Qwen3.5-4B-Q4_K_M.gguf").is_none());
+    }
+
+    #[test]
+    fn parse_shard_spec_rejects_non_first_shard() {
+        // Only the first shard is a valid catalog entry point.
+        assert!(parse_shard_spec("Q4_K_M/Model-00002-of-00009.gguf").is_none());
+    }
+
+    #[test]
+    fn sharded_model_path_prefers_first_shard() {
+        let tmp = std::env::temp_dir().join(format!(
+            "ipnops-shard-test-{}",
+            std::process::id()
+        ));
+        let dir = tmp.join("kimi-k2");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Write shards out of order to confirm we pick shard 1.
+        std::fs::write(dir.join("Kimi-K2-00002-of-00003.gguf"), b"x").unwrap();
+        std::fs::write(dir.join("Kimi-K2-00001-of-00003.gguf"), b"x").unwrap();
+        std::fs::write(dir.join("Kimi-K2-00003-of-00003.gguf"), b"x").unwrap();
+
+        let dl = HfDownloader::new(tmp.clone());
+        assert_eq!(
+            dl.model_path("kimi-k2"),
+            dir.join("Kimi-K2-00001-of-00003.gguf")
+        );
+        assert!(dl.is_downloaded("kimi-k2"));
+        assert_eq!(dl.downloaded_size("kimi-k2"), Some(3));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
