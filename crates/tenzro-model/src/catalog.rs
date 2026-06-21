@@ -278,15 +278,35 @@ impl ServingProfile {
                 jinja_required: true,
                 reasoning_default: false,
             },
-            // Qwen 3 / 3.5 / 3.6: non-thinking 0.7 / 0.8 / 20 by default;
-            // reasoning off out of the box (Unsloth's small-model guidance).
-            "qwen3" | "qwen3.5" | "qwen3.6" => Self {
-                temperature: 0.7,
-                top_p: 0.8,
+            // Qwen 3 (original): Unsloth thinking-mode defaults — temp 0.6 /
+            // top_p 0.95 / top_k 20 / min_p 0.0. Qwen 3 ships thinking-ON
+            // by default; the non-thinking row (0.7 / 0.8 / 20) is for the
+            // explicit instruct mode. See https://unsloth.ai/docs/models/tutorials/qwen3-how-to-run-and-fine-tune
+            // and the upstream Qwen3 model card. Thinking is on by default
+            // so the chat template emits a `<think>` prefix.
+            "qwen3" => Self {
+                temperature: 0.6,
+                top_p: 0.95,
                 top_k: 20,
                 min_p: 0.0,
                 jinja_required: true,
-                reasoning_default: false,
+                reasoning_default: true,
+            },
+            // Qwen 3.5 / 3.6: Unsloth thinking-general defaults — temp 1.0 /
+            // top_p 0.95 / top_k 20 / min_p 0.0. Both families ship
+            // thinking-ON by default and use a vendored chat-template
+            // override (froggeric v20) because the upstream embedded
+            // jinja has the prompt-drop bug (minja `replace()` swallows
+            // user prompt at idx 0). Override is wired in
+            // tenzro-inference sidecar.rs TEMPLATE_OVERRIDES — the
+            // catalog only carries the sampler profile.
+            "qwen3.5" | "qwen3.6" => Self {
+                temperature: 1.0,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                jinja_required: true,
+                reasoning_default: true,
             },
             // gpt-oss Harmony: temp 1.0, top_p 1.0, top_k disabled.
             "gpt-oss" => Self {
