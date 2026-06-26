@@ -123,7 +123,7 @@ pub mod workflow_runtime;
 // Re-export commonly used types
 pub use config::NodeConfig;
 pub use error::{NodeError, Result};
-pub use handle::{spawn_in_background, NodeHandle};
+pub use handle::{spawn_in_background, spawn_in_background_with_unlocker, NodeHandle};
 pub use health::{HealthMonitor, HealthStatus, OverallHealth, SubsystemStatus};
 pub use metrics::{MetricsCollector, NodeMetrics};
 pub use node::{TenzroNode, NodeStatus};

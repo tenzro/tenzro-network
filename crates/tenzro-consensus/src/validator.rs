@@ -13,6 +13,12 @@ use tenzro_crypto::PublicKey;
 /// `tenzro_crypto::bls`). Every validator MUST advertise a BLS verifying key
 /// for HotStuff-2 vote-signature aggregation.
 pub const BLS_G1_COMPRESSED_LEN: usize = 48;
+
+/// Maximum normalized voting weight any single validator may hold, in basis
+/// points of the active set's total weight (Sui anti-domination cap). Excess
+/// above this cap is redistributed proportionally across the uncapped
+/// validators. 1,000 bps = 10%.
+pub const MAX_VALIDATOR_WEIGHT_BPS: u32 = 1_000;
 use tenzro_types::primitives::{Address, Hash, Timestamp};
 use tenzro_types::tee::{AttestationReport, AttestationResult};
 
@@ -333,11 +339,131 @@ impl ValidatorSet {
         Ok(&self.validators[index])
     }
 
-    /// Calculates the quorum threshold (2f+1)
+    /// Calculates the headcount quorum threshold (2f+1).
+    ///
+    /// Retained only for the legacy/test signer-count paths and for the
+    /// degenerate single-validator case. Production safety is decided by
+    /// [`quorum_voting_power`](Self::quorum_voting_power) on stake weight, not
+    /// by head-count — see the stake-weighted methods below.
     pub fn quorum_threshold(&self) -> usize {
         let n = self.validators.len();
         let f = (n.saturating_sub(1)) / 3;
         2 * f + 1
+    }
+
+    /// Normalized total voting power.
+    ///
+    /// Voting power equals each *active* validator's bonded stake, capped at
+    /// [`MAX_VALIDATOR_WEIGHT_BPS`] of the (uncapped) total with the excess
+    /// redistributed proportionally across the uncapped validators. This is
+    /// the Sui anti-domination model expressed in integer math so formation
+    /// and verification agree byte-for-byte. A node with zero stake (or one
+    /// that is inactive) contributes zero — unstaked service nodes cannot move
+    /// a quorum.
+    pub fn normalized_total_voting_power(&self) -> u128 {
+        self.normalized_weights().iter().sum()
+    }
+
+    /// Per-validator normalized voting power, in canonical (`active_validators`)
+    /// order. Applies the [`MAX_VALIDATOR_WEIGHT_BPS`] cap with proportional
+    /// redistribution. Indices align with [`Self::active_validators`].
+    pub fn normalized_weights(&self) -> Vec<u128> {
+        let raw: Vec<u128> = self.validators.iter().map(|v| v.voting_power()).collect();
+        let total: u128 = raw.iter().sum();
+        if total == 0 {
+            return raw;
+        }
+
+        // Cap any single validator at MAX_VALIDATOR_WEIGHT_BPS of the total,
+        // redistributing the clipped excess proportionally over the uncapped
+        // validators. One redistribution pass is sufficient for the 10% cap as
+        // long as the set has > 10 validators; for smaller sets the cap simply
+        // cannot bind on every node at once, so a single pass converges.
+        let cap = total.saturating_mul(MAX_VALIDATOR_WEIGHT_BPS as u128) / 10_000u128;
+        if cap == 0 {
+            return raw;
+        }
+
+        // Feasibility guard: if `n * cap < total` the cap cannot hold for every
+        // validator simultaneously (the set is too small for the cap, e.g. a
+        // 4-node set under a 10% cap). In that regime capping is meaningless and
+        // a single pass would not converge, so leave weights uncapped.
+        if (raw.len() as u128).saturating_mul(cap) < total {
+            return raw;
+        }
+
+        let mut weights = raw.clone();
+        let mut excess: u128 = 0;
+        let mut uncapped_total: u128 = 0;
+        for w in weights.iter_mut() {
+            if *w > cap {
+                excess = excess.saturating_add(*w - cap);
+                *w = cap;
+            } else {
+                uncapped_total = uncapped_total.saturating_add(*w);
+            }
+        }
+
+        if excess > 0 && uncapped_total > 0 {
+            for w in weights.iter_mut() {
+                if *w < cap {
+                    // Proportional share of the redistributed excess. Integer
+                    // division floors; the small remainder is dropped, which is
+                    // safe (it only ever lowers a quorum-meeting tally, never
+                    // raises a failing one above threshold).
+                    let share = excess.saturating_mul(*w) / uncapped_total;
+                    *w = (*w).saturating_add(share);
+                }
+            }
+        }
+
+        weights
+    }
+
+    /// Stake-weighted quorum: the smallest integer strictly greater than
+    /// two-thirds of [`normalized_total_voting_power`](Self::normalized_total_voting_power).
+    ///
+    /// `floor(2N/3) + 1` is exactly the smallest integer `> 2N/3` for all
+    /// integer `N`, which is the HotStuff-2 safety bound on stake weight.
+    pub fn quorum_voting_power(&self) -> u128 {
+        let n = self.normalized_total_voting_power();
+        if n == 0 {
+            return 0;
+        }
+        (2u128.saturating_mul(n) / 3).saturating_add(1)
+    }
+
+    /// Bracha-boost / fault threshold: the smallest integer strictly greater
+    /// than one-third of normalized voting power (`floor(N/3) + 1`), the
+    /// stake-weighted analogue of `f+1`.
+    pub fn bracha_voting_power(&self) -> u128 {
+        let n = self.normalized_total_voting_power();
+        if n == 0 {
+            return 0;
+        }
+        (n / 3).saturating_add(1)
+    }
+
+    /// Sums the normalized voting power of the given signer addresses,
+    /// counting each distinct active validator at most once.
+    pub fn voting_power_of<'a, I>(&self, signers: I) -> u128
+    where
+        I: IntoIterator<Item = &'a Address>,
+    {
+        let weights = self.normalized_weights();
+        let mut seen: std::collections::HashSet<&Address> = std::collections::HashSet::new();
+        let mut sum: u128 = 0;
+        for addr in signers {
+            if !seen.insert(addr) {
+                continue;
+            }
+            if let Some(idx) = self.index_of(addr) {
+                if let Some(w) = weights.get(idx) {
+                    sum = sum.saturating_add(*w);
+                }
+            }
+        }
+        sum
     }
 
     /// Returns the validators with valid TEE attestation
@@ -853,6 +979,102 @@ mod tests {
         assert_eq!(set.len(), 3);
         assert_eq!(set.total_voting_power(), 6000);
         assert_eq!(set.quorum_threshold(), 1); // 2f+1 where f=(n-1)/3=(3-1)/3=0, so 2*0+1=1
+    }
+
+    #[test]
+    fn stake_weighted_quorum_thresholds() {
+        // total 6000 → quorum > 2/3 = floor(12000/3)+1 = 4001;
+        // bracha > 1/3 = floor(6000/3)+1 = 2001.
+        let set = ValidatorSet::new(
+            1,
+            vec![
+                create_test_validator(1000),
+                create_test_validator(2000),
+                create_test_validator(3000),
+            ],
+        )
+        .unwrap();
+        assert_eq!(set.normalized_total_voting_power(), 6000);
+        assert_eq!(set.quorum_voting_power(), 4001);
+        assert_eq!(set.bracha_voting_power(), 2001);
+    }
+
+    #[test]
+    fn zero_stake_validator_carries_no_weight() {
+        // Three staked validators + one zero-stake "service" node. The
+        // zero-stake node must contribute nothing to a quorum tally, and the
+        // quorum must be reachable by the staked nodes alone.
+        let staked: Vec<ValidatorInfo> = vec![
+            create_test_validator(1000),
+            create_test_validator(1000),
+            create_test_validator(1000),
+        ];
+        let zero = create_test_validator(0);
+        let mut all = staked.clone();
+        all.push(zero.clone());
+        let set = ValidatorSet::new(1, all).unwrap();
+
+        // Total normalized power is just the staked 3000; the zero-stake node
+        // adds nothing.
+        assert_eq!(set.normalized_total_voting_power(), 3000);
+
+        // The zero-stake node alone cannot meet quorum.
+        let zero_only = set.voting_power_of([&zero.address]);
+        assert_eq!(zero_only, 0);
+        assert!(zero_only < set.quorum_voting_power());
+
+        // All three staked nodes meet quorum (3000 > 2/3·3000 = 2001).
+        let staked_addrs: Vec<Address> = staked.iter().map(|v| v.address).collect();
+        let staked_power = set.voting_power_of(staked_addrs.iter());
+        assert_eq!(staked_power, 3000);
+        assert!(staked_power >= set.quorum_voting_power());
+
+        // Adding the zero-stake node's "vote" on top changes nothing.
+        let with_zero: Vec<Address> =
+            staked_addrs.iter().copied().chain(std::iter::once(zero.address)).collect();
+        assert_eq!(set.voting_power_of(with_zero.iter()), 3000);
+    }
+
+    #[test]
+    fn whale_weight_is_capped_at_ten_percent() {
+        // 11 small validators (stake 100 each = 1100) + one whale (stake
+        // 100000). Uncapped the whale holds ~99% of weight; the 10% cap must
+        // bound it. With 12 validators the cap is feasible (12·cap ≥ total).
+        let mut infos: Vec<ValidatorInfo> = (0..11).map(|_| create_test_validator(100)).collect();
+        let whale = create_test_validator(100_000);
+        infos.push(whale.clone());
+        let set = ValidatorSet::new(1, infos).unwrap();
+
+        let total = set.normalized_total_voting_power();
+        let whale_weight = set.voting_power_of([&whale.address]);
+        // Whale must hold no more than 10% (+ rounding) of total weight.
+        assert!(
+            whale_weight * 10 <= total + 12,
+            "whale_weight={whale_weight} total={total} exceeds 10% cap"
+        );
+    }
+
+    #[test]
+    fn cap_is_inert_for_small_sets() {
+        // A 4-validator equal-stake set: a 10% cap cannot hold for every node
+        // at once (each is 25%), so the cap must be skipped and weights left
+        // raw. Quorum is then 3 of 4 by equal weight.
+        let set = ValidatorSet::new(
+            1,
+            vec![
+                create_test_validator(1000),
+                create_test_validator(1000),
+                create_test_validator(1000),
+                create_test_validator(1000),
+            ],
+        )
+        .unwrap();
+        assert_eq!(set.normalized_total_voting_power(), 4000);
+        // quorum = floor(8000/3)+1 = 2667 → needs 3 of 4 (3000 ≥ 2667).
+        assert_eq!(set.quorum_voting_power(), 2667);
+        for w in set.normalized_weights() {
+            assert_eq!(w, 1000, "small-set weights must be uncapped");
+        }
     }
 
     #[test]

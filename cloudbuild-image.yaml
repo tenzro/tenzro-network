@@ -1,0 +1,64 @@
+# Cloud Build pipeline for building + pushing the production `tenzro-node`
+# image to Artifact Registry. Replaces local `docker build && docker push`
+# from scripts/deploy-testnet.sh so the deploy never burns operator-laptop
+# disk or CPU.
+#
+# Usage:
+#
+#   gcloud builds submit \
+#     --config=cloudbuild-image.yaml \
+#     --project=tenzro-infra \
+#     --substitutions=_TAG=$(git rev-parse --short HEAD) \
+#     .
+#
+# Substitutions:
+#   _REGISTRY  Artifact Registry path (default matches deploy-testnet.sh)
+#   _IMAGE     Image name (default: tenzro-node)
+#   _TAG       Image tag (default: latest). Pass git SHA for pinnable digest.
+#
+# Cost: ~$2-3 per cold build on n1-highcpu-32 (~20 min). The Dockerfile is
+# multi-stage, so only the runtime layer is pushed.
+
+steps:
+  # Build the production image directly from the repo Dockerfile. The
+  # Dockerfile self-stubs the desktop app (apps/) which is excluded by
+  # .gcloudignore — no extra setup needed here.
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build'
+    args:
+      - 'build'
+      - '--tag'
+      - '${_REGISTRY}/${_IMAGE}:${_TAG}'
+      - '--tag'
+      - '${_REGISTRY}/${_IMAGE}:latest'
+      - '.'
+
+  # Push both tags atomically (same digest).
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-tag'
+    args: ['push', '${_REGISTRY}/${_IMAGE}:${_TAG}']
+    waitFor: ['build']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-latest'
+    args: ['push', '${_REGISTRY}/${_IMAGE}:latest']
+    waitFor: ['build']
+
+# Surface both tags in the build summary so the caller can pin by digest later.
+images:
+  - '${_REGISTRY}/${_IMAGE}:${_TAG}'
+  - '${_REGISTRY}/${_IMAGE}:latest'
+
+substitutions:
+  _REGISTRY: 'us-central1-docker.pkg.dev/tenzro-infra/tenzro'
+  _IMAGE: 'tenzro-node'
+  _TAG: 'latest'
+
+# n1-highcpu-32 matches cloudbuild-test.yaml so cold build time stays in the
+# ~20 min range. 200 GB disk is plenty for the multi-stage cargo build.
+options:
+  machineType: 'N1_HIGHCPU_32'
+  diskSizeGb: 200
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: '3600s'

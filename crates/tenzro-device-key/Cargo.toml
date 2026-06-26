@@ -1,0 +1,33 @@
+[package]
+name = "tenzro-device-key"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Hardware-backed device keys for Tenzro — macOS/iOS Secure Enclave P-256 signing + ECIES secret-wrapping, with a biometric KeystoreUnlocker for passkey-gated wallet persistence"
+documentation = "https://docs.rs/tenzro-device-key"
+readme = "README.md"
+keywords = ["tenzro", "secure-enclave", "passkey", "ecies", "keystore"]
+categories = ["cryptography", "authentication", "hardware-support"]
+
+[dependencies]
+tenzro-keystore-unlock = { path = "../tenzro-keystore-unlock", version = "0.1.0" }
+# ML-DSA-65 (FIPS-204) keygen/sign for the post-quantum companion key that
+# rides alongside the Secure Enclave P-256 passkey. The seed is sealed at rest
+# by ECIES-wrapping it to the SE key (same primitive as `SecureEnclaveUnlocker`).
+tenzro-crypto = { path = "../tenzro-crypto", version = "0.1.0" }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+
+# OSX_10_15 enables `Location::DataProtectionKeychain` + `ignore_legacy_keychains`,
+# which a Secure Enclave key MUST use to persist across restarts (requires the
+# app to ship a keychain-access-groups entitlement + provisioning profile).
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3", features = ["OSX_10_15"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+security-framework = { version = "3", features = ["OSX_10_15"] }

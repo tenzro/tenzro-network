@@ -133,7 +133,30 @@ impl NodeHandle {
 /// reference, or invoke [`crate::dispatch_embedded`] directly without
 /// exposing any HTTP surface at all.
 pub async fn spawn_in_background(config: NodeConfig) -> Result<NodeHandle> {
+    spawn_in_background_inner(config, None).await
+}
+
+/// Like [`spawn_in_background`], but injects a keystore-password source so the
+/// wallet PERSISTS across restarts (FROST key shares written to / loaded from
+/// the encrypted on-disk keystore). The unlocker is a trait object, so the node
+/// stays platform-agnostic: desktop apps pass a biometric Secure-Enclave
+/// unlocker (`tenzro-device-key`), headless nodes an env/file/KMS one. See
+/// [`TenzroNode::with_keystore_unlocker`] for the contract.
+pub async fn spawn_in_background_with_unlocker(
+    config: NodeConfig,
+    unlocker: Arc<dyn tenzro_keystore_unlock::KeystoreUnlocker>,
+) -> Result<NodeHandle> {
+    spawn_in_background_inner(config, Some(unlocker)).await
+}
+
+async fn spawn_in_background_inner(
+    config: NodeConfig,
+    unlocker: Option<Arc<dyn tenzro_keystore_unlock::KeystoreUnlocker>>,
+) -> Result<NodeHandle> {
     let mut node = TenzroNode::new(config).await?;
+    if let Some(unlocker) = unlocker {
+        node.set_keystore_unlocker(unlocker);
+    }
     node.start().await?;
 
     let initial_status = node.status().await;

@@ -427,19 +427,26 @@ impl QuorumCertificate {
             total_voting_power = total_voting_power.saturating_add(validator.voting_power());
         }
 
-        // (7) Aggregated voting power must meet quorum threshold.
-        let threshold = validator_set.quorum_threshold();
-        if seen_voters.len() < threshold {
+        // (7) Aggregated *stake-weighted* voting power must meet the quorum.
+        // Safety is decided on normalized stake weight (Sui model), not on a
+        // head-count of signers: a node with zero stake contributes zero, so
+        // unstaked service nodes cannot move a quorum.
+        let signed_power = validator_set.voting_power_of(seen_voters.iter());
+        let quorum_power = validator_set.quorum_voting_power();
+        if signed_power < quorum_power {
             return Err(ConsensusError::InvalidSignature(format!(
-                "QC has {} valid votes, below quorum threshold {}",
+                "QC carries {} stake-weight from {} signers, below quorum power {}",
+                signed_power,
                 seen_voters.len(),
-                threshold
+                quorum_power
             )));
         }
 
-        // Sanity check: the QC's claimed voting_power must agree with what we
-        // re-tallied. A mismatch is a data-integrity error, not a signature
-        // forgery, but it indicates the QC was tampered with after formation.
+        // Sanity check: the QC's claimed voting_power must agree with the raw
+        // (uncapped) stake we re-tallied. A mismatch is a data-integrity error,
+        // not a signature forgery, but it indicates the QC was tampered with
+        // after formation. (This field is raw stake, not normalized weight, so
+        // it stays comparable to the formation-time sum.)
         if self.voting_power != total_voting_power {
             return Err(ConsensusError::InvalidSignature(format!(
                 "QC claims voting_power={} but votes total {}",
@@ -485,9 +492,13 @@ impl QuorumCertificate {
             )));
         }
 
-        // Walk bitmap, collect signer pubkeys + tally voting power.
+        // Walk bitmap, collect signer pubkeys + tally voting power. Normalized
+        // weights are indexed identically to `active`, so we tally signed
+        // stake-weight by bit index.
+        let normalized = validator_set.normalized_weights();
         let mut signer_pks: Vec<BlsPublicKey> = Vec::new();
         let mut total_voting_power: u128 = 0;
+        let mut signed_power: u128 = 0;
         for bit_index in 0..(expected_bitmap_bytes * 8) {
             let byte = self.signer_bitmap[bit_index / 8];
             if (byte >> (bit_index % 8)) & 1 == 0 {
@@ -508,6 +519,9 @@ impl QuorumCertificate {
             })?;
             signer_pks.push(pk);
             total_voting_power = total_voting_power.saturating_add(validator.voting_power());
+            if let Some(w) = normalized.get(bit_index) {
+                signed_power = signed_power.saturating_add(*w);
+            }
         }
 
         if signer_pks.is_empty() {
@@ -516,12 +530,14 @@ impl QuorumCertificate {
             ));
         }
 
-        let threshold = validator_set.quorum_threshold();
-        if signer_pks.len() < threshold {
+        // Stake-weighted quorum on normalized weight (Sui model), not headcount.
+        let quorum_power = validator_set.quorum_voting_power();
+        if signed_power < quorum_power {
             return Err(ConsensusError::InvalidSignature(format!(
-                "QC BLS aggregate has {} signers, below quorum threshold {}",
+                "QC BLS aggregate carries {} stake-weight from {} signers, below quorum power {}",
+                signed_power,
                 signer_pks.len(),
-                threshold
+                quorum_power
             )));
         }
 
@@ -794,18 +810,22 @@ impl VoteCollector {
 
         votes_entry.push(vote.clone());
 
-        // Calculate total voting power
+        // Raw (uncapped) stake sum — stored in the QC's `voting_power` field
+        // and re-checked at verification time for tamper detection.
         let total_voting_power: u128 = votes_entry
             .iter()
             .filter_map(|v| self.validator_set.get_by_address(&v.voter))
             .map(|v| v.voting_power())
             .sum();
 
-        let vote_count = votes_entry.len();
-        let threshold = self.validator_set.quorum_threshold();
+        // Quorum is decided on normalized stake weight (Sui model), not on a
+        // head-count of voters. Zero-stake signers add zero weight.
+        let voter_addrs: Vec<Address> = votes_entry.iter().map(|v| v.voter).collect();
+        let signed_power = self.validator_set.voting_power_of(voter_addrs.iter());
+        let quorum_power = self.validator_set.quorum_voting_power();
 
         // Check if we have quorum
-        if vote_count >= threshold {
+        if signed_power >= quorum_power {
             // ROADMAP B.1: collapse the per-vote BLS signatures into a single
             // 96-byte aggregate plus a signer bitmap indexed against the
             // active validator set. Every signature was already verified in
@@ -853,8 +873,9 @@ impl VoteCollector {
                 view = vote.view,
                 height = vote.height.0,
                 vote_type = ?vote.vote_type,
-                votes = vote_count,
-                threshold = threshold,
+                signers = votes_entry.len(),
+                signed_power = signed_power,
+                quorum_power = quorum_power,
                 "Quorum certificate formed"
             );
 
@@ -864,8 +885,9 @@ impl VoteCollector {
                 view = vote.view,
                 height = vote.height.0,
                 vote_type = ?vote.vote_type,
-                votes = vote_count,
-                threshold = threshold,
+                signers = votes_entry.len(),
+                signed_power = signed_power,
+                quorum_power = quorum_power,
                 "Vote collected, waiting for quorum"
             );
             Ok(None)
@@ -1025,13 +1047,19 @@ mod tests {
         let result = collector.add_vote(vote2).unwrap();
         assert!(result.is_none());
 
-        // Add third vote - should reach quorum
+        // Third vote: cumulative stake 1000+2000+3000 = 6000 of 10000 = 60%,
+        // still below the > 2/3 (6667) stake-weighted quorum — no QC yet.
         let vote3 = create_signed_vote(view, height, validators[2].info.address, VoteType::Prepare, &validators[2].signer, &validators[2].bls);
         let result = collector.add_vote(vote3).unwrap();
+        assert!(result.is_none());
+
+        // Fourth vote: cumulative stake 10000 = 100% ≥ quorum → QC forms.
+        let vote4 = create_signed_vote(view, height, validators[3].info.address, VoteType::Prepare, &validators[3].signer, &validators[3].bls);
+        let result = collector.add_vote(vote4).unwrap();
         assert!(result.is_some());
 
         let qc = result.unwrap();
-        assert_eq!(qc.vote_count(), 3);
+        assert_eq!(qc.vote_count(), 4);
         assert_eq!(qc.view, view);
     }
 

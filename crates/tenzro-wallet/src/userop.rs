@@ -40,12 +40,54 @@ use tenzro_crypto::keccak256;
 
 use crate::error::{Result, WalletError};
 
+/// 2-D nonce per EIP-4337 v0.8 — wire-identical to the node's
+/// `tenzro_vm::account_abstraction::Nonce`. Duplicated here so the
+/// wallet crate stays independent of `tenzro-vm`; the bytes are
+/// EIP-712 byte-for-byte equivalent (asserted by
+/// `userop_hash_consistency.rs` cross-crate test).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Nonce {
+    pub key: [u8; 24],
+    pub seq: u64,
+}
+
+impl Nonce {
+    /// Default-key nonce: `key = 0`, given `seq`. The legacy ordered-
+    /// stream form most wallets use.
+    pub const fn from_seq(seq: u64) -> Self {
+        Self { key: [0u8; 24], seq }
+    }
+
+    /// Pack `(key, seq)` into 32-byte big-endian uint256.
+    pub fn to_bytes(self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out[..24].copy_from_slice(&self.key);
+        out[24..].copy_from_slice(&self.seq.to_be_bytes());
+        out
+    }
+
+    /// Unpack a 32-byte big-endian uint256 into `(key, seq)`.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        let mut key = [0u8; 24];
+        key.copy_from_slice(&bytes[..24]);
+        let mut seq_buf = [0u8; 8];
+        seq_buf.copy_from_slice(&bytes[24..]);
+        Self { key, seq: u64::from_be_bytes(seq_buf) }
+    }
+
+    /// Hex form of the key portion (48 chars).
+    pub fn key_hex(&self) -> String {
+        hex::encode(self.key)
+    }
+}
+
 /// ERC-4337 v0.8 UserOperation — wire-identical to the node's
 /// `tenzro_vm::account_abstraction::UserOperation`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserOp {
     pub sender: Vec<u8>,
-    pub nonce: u64,
+    /// 32-byte big-endian uint256 — 2-D packed `(key << 64) | seq`.
+    pub nonce: [u8; 32],
     pub factory: Vec<u8>,
     pub factory_data: Vec<u8>,
     pub call_data: Vec<u8>,
@@ -79,7 +121,10 @@ impl UserOp {
     pub fn to_rpc_json(&self) -> serde_json::Value {
         serde_json::json!({
             "sender": hex0x(&self.sender),
-            "nonce": format!("0x{:x}", self.nonce),
+            // Nonce is a uint256 — emit as 0x-prefixed lowercase hex
+            // with leading-zero stripping (EVM RPC convention,
+            // matching `0x{:x}` semantics for u256).
+            "nonce": uint256_hex(&self.nonce),
             "factory": hex0x(&self.factory),
             "factoryData": hex0x(&self.factory_data),
             "callData": hex0x(&self.call_data),
@@ -99,6 +144,19 @@ impl UserOp {
 
 fn hex0x(b: &[u8]) -> String {
     format!("0x{}", hex::encode(b))
+}
+
+/// Format a 32-byte big-endian uint256 as 0x-prefixed lowercase hex
+/// with leading zeros stripped (Ethereum RPC convention). Zero
+/// renders as `"0x0"`.
+fn uint256_hex(bytes: &[u8; 32]) -> String {
+    let s = hex::encode(bytes);
+    let trimmed = s.trim_start_matches('0');
+    if trimmed.is_empty() {
+        "0x0".to_string()
+    } else {
+        format!("0x{}", trimmed)
+    }
 }
 
 /// Standalone EIP-712 v0.8 hash function. Identical bytes to
@@ -176,7 +234,9 @@ fn user_op_struct_hash(op: &UserOp) -> [u8; 32] {
     let mut data = Vec::with_capacity(32 * 15);
     data.extend_from_slice(&type_hash);
     data.extend_from_slice(&encode_address(&op.sender));
-    data.extend_from_slice(&encode_u64_as_uint256(op.nonce));
+    // Nonce is already a 32-byte big-endian uint256 (2-D packed) —
+    // copy verbatim, no re-encoding needed.
+    data.extend_from_slice(&op.nonce);
     data.extend_from_slice(&encode_address(&op.factory));
     data.extend_from_slice(&keccak256_of(&op.factory_data));
     data.extend_from_slice(&keccak256_of(&op.call_data));
@@ -237,7 +297,7 @@ impl Default for UserOpBuilder {
         Self {
             op: UserOp {
                 sender: vec![],
-                nonce: 0,
+                nonce: Nonce::from_seq(0).to_bytes(),
                 factory: vec![],
                 factory_data: vec![],
                 call_data: vec![],
@@ -265,8 +325,24 @@ impl UserOpBuilder {
         self.op.sender = addr.into();
         self
     }
-    pub fn nonce(mut self, n: u64) -> Self {
-        self.op.nonce = n;
+    /// Default-key convenience: takes a u64 seq, packs under key 0.
+    /// For per-session keys use [`UserOpBuilder::nonce_2d`].
+    pub fn nonce(mut self, seq: u64) -> Self {
+        self.op.nonce = Nonce::from_seq(seq).to_bytes();
+        self
+    }
+
+    /// Full 2-D nonce setter — pass an explicit 192-bit key for
+    /// parallel offline sessions per EIP-4337 v0.8 semantics.
+    pub fn nonce_2d(mut self, key: [u8; 24], seq: u64) -> Self {
+        self.op.nonce = Nonce { key, seq }.to_bytes();
+        self
+    }
+
+    /// Raw 32-byte setter — for callers that already have the packed
+    /// uint256 bytes.
+    pub fn nonce_bytes(mut self, bytes: [u8; 32]) -> Self {
+        self.op.nonce = bytes;
         self
     }
     pub fn factory(mut self, addr: impl Into<Vec<u8>>, data: impl Into<Vec<u8>>) -> Self {

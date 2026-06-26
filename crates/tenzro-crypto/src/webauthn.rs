@@ -141,6 +141,10 @@ pub fn verify_webauthn_assertion(
             "authenticatorData User Present (UP) flag not set".to_string(),
         ));
     }
+    // UV is enforced via the `_require_uv` wrapper variant — call sites
+    // that need biometric assurance (high-value ops) go through that
+    // path. Plain `verify_webauthn_assertion` allows UP-only because
+    // some flows (low-value reads, recovery setup) accept it.
 
     // 3. Compute the hash the authenticator signed.
     let prehash = webauthn_signed_hash(&assertion.authenticator_data, &assertion.client_data_json);
@@ -150,6 +154,37 @@ pub fn verify_webauthn_assertion(
     let p256_sig = P256Signature::from_bytes(raw_sig);
     let verifier = P256Verifier::from_public_key_bytes(public_key_xy)?;
     verifier.verify_prehash(&prehash, &p256_sig)
+}
+
+/// Same as [`verify_webauthn_assertion`] but additionally enforces the
+/// UV (User Verification) flag in `authenticatorData.flags`. Call this
+/// for any signing flow whose security model depends on user identity
+/// being proven (biometric / PIN) rather than mere physical presence
+/// (a touch). Reference: WebAuthn L3 §5.2.4, CTAP 2.2 §6.1, CTRAPS
+/// arXiv:2412.02349.
+pub fn verify_webauthn_assertion_require_uv(
+    assertion: &WebAuthnAssertion,
+    public_key_xy: &[u8],
+    expected_challenge_b64url: &str,
+    expected_origin: &str,
+    expected_type: WebAuthnCeremonyType,
+) -> Result<()> {
+    verify_webauthn_assertion(
+        assertion,
+        public_key_xy,
+        expected_challenge_b64url,
+        expected_origin,
+        expected_type,
+    )?;
+    let flags = assertion.authenticator_data[AUTHENTICATOR_DATA_FLAGS_OFFSET];
+    if flags & AUTH_DATA_FLAG_UV == 0 {
+        return Err(CryptoError::InvalidSignature(
+            "authenticatorData User Verification (UV) flag not set — \
+             biometric or PIN required for this operation"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// WebAuthn ceremony discriminator written to `clientDataJSON.type`.
@@ -188,6 +223,12 @@ struct ClientDataJson {
 /// authenticatorData layout: `rpIdHash(32) ‖ flags(1) ‖ signCount(4) ‖ …`.
 const AUTHENTICATOR_DATA_MIN_LEN: usize = 37;
 const AUTHENTICATOR_DATA_FLAGS_OFFSET: usize = 32;
+/// User Verification flag bit per the WebAuthn L3 / CTAP 2.2 spec.
+/// Set by platform authenticators that successfully completed a
+/// biometric / PIN ceremony with the user. UP alone (User Present)
+/// only proves a touch — UV proves identity. High-value ops must
+/// enforce UV; UP-only is insufficient (CTRAPS / arXiv 2412.02349).
+pub const AUTH_DATA_FLAG_UV: u8 = 0x04;
 
 /// authenticatorData flag bits (WebAuthn L3 §6.1).
 const AUTH_DATA_FLAG_UP: u8 = 0x01; // User Present

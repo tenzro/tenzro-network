@@ -123,12 +123,59 @@ use crate::state_adapter::StateAdapter;
 use crate::traits::{VmState, VmType};
 use crate::types::VmTransaction;
 
-/// Persistence prefix for per-sender AA nonces in `CF_AGENTS`.
-/// Layout: `aa/nonce/{20-byte sender hex}` -> 8-byte big-endian u64.
+/// Persistence prefix for per-sender, per-key AA nonces in `CF_AGENTS`.
+/// Layout: `aa/nonce/{20-byte sender hex}/{24-byte key hex}` ->
+/// 8-byte big-endian u64 sequence (next-expected seq).
+///
+/// EIP-4337 v0.8 wire nonce is a `uint256` packed as
+/// `(uint192 key << 64) | uint64 seq`. The EntryPoint enforces strict
+/// monotonic `seq` per `(sender, key)` pair — different keys are
+/// independent and may execute in any order. Studio uses one key per
+/// session so parallel offline signing doesn't stomp seq.
 const AA_NONCE_PREFIX: &str = "aa/nonce/";
 
 /// Gas penalty threshold for v0.8: if unused gas is below this value, no penalty applies.
 const GAS_PENALTY_THRESHOLD: u64 = 40_000;
+
+/// 2-D nonce per EIP-4337 v0.8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Nonce {
+    /// 24-byte (192-bit) key, big-endian.
+    pub key: [u8; 24],
+    /// 8-byte (64-bit) sequence portion.
+    pub seq: u64,
+}
+
+impl Nonce {
+    /// A nonce with `key = 0` and the given `seq` — the default-key
+    /// ordered stream every legacy wallet uses.
+    pub const fn from_seq(seq: u64) -> Self {
+        Self { key: [0u8; 24], seq }
+    }
+
+    /// Pack `(key, seq)` into the 32-byte big-endian uint256 the wire
+    /// expects: `[key[0..24] ‖ seq.to_be_bytes()]`.
+    pub fn to_bytes(self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out[..24].copy_from_slice(&self.key);
+        out[24..].copy_from_slice(&self.seq.to_be_bytes());
+        out
+    }
+
+    /// Unpack a 32-byte big-endian uint256 into `(key, seq)`.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        let mut key = [0u8; 24];
+        key.copy_from_slice(&bytes[..24]);
+        let mut seq_buf = [0u8; 8];
+        seq_buf.copy_from_slice(&bytes[24..]);
+        Self { key, seq: u64::from_be_bytes(seq_buf) }
+    }
+
+    /// Hex form of the key portion (48 chars) for storage paths.
+    pub fn key_hex(&self) -> String {
+        hex::encode(self.key)
+    }
+}
 
 /// Error types for account abstraction operations
 #[derive(Debug, Error, Clone, Serialize, Deserialize)]
@@ -145,9 +192,9 @@ pub enum AccountAbstractionError {
     #[error("Invalid signature")]
     InvalidSignature,
 
-    /// Invalid nonce
-    #[error("Invalid nonce: expected {expected}, got {got}")]
-    InvalidNonce { expected: u64, got: u64 },
+    /// Invalid nonce — strict monotonic seq enforced per `(sender, key)`.
+    #[error("Invalid nonce: expected seq {expected}, got seq {got} (key 0x{key_hex})")]
+    InvalidNonce { expected: u64, got: u64, key_hex: String },
 
     /// Paymaster error
     #[error("Paymaster error: {0}")]
@@ -181,8 +228,11 @@ pub struct UserOperation {
     /// The account making the operation
     pub sender: Vec<u8>,
 
-    /// Anti-replay parameter; also used as the salt for first-time account creation
-    pub nonce: u64,
+    /// Anti-replay parameter — 32-byte big-endian uint256 per EIP-4337
+    /// v0.8, packed `(uint192 key << 64) | uint64 seq`. Use [`Nonce`]
+    /// helpers to read the key/seq fields; storage of the raw bytes
+    /// keeps EIP-712 encoding a direct copy.
+    pub nonce: [u8; 32],
 
     /// The factory address for deploying the account (empty if account already deployed).
     /// In v0.6 this was combined with factory_data as `init_code`.
@@ -334,7 +384,8 @@ impl UserOperation {
         let mut data = Vec::with_capacity(32 * 15); // type_hash + 14 fields
         data.extend_from_slice(&type_hash);
         data.extend_from_slice(&encode_address(&self.sender));
-        data.extend_from_slice(&encode_u64_as_uint256(self.nonce));
+        // Nonce is already the 32-byte big-endian uint256 (2-D packed).
+        data.extend_from_slice(&self.nonce);
         data.extend_from_slice(&encode_address(&self.factory));
         data.extend_from_slice(&keccak256_bytes(&self.factory_data));
         data.extend_from_slice(&keccak256_bytes(&self.call_data));
@@ -451,8 +502,9 @@ pub struct PackedUserOperation {
     /// The account making the operation
     pub sender: Vec<u8>,
 
-    /// Anti-replay parameter
-    pub nonce: u64,
+    /// Anti-replay parameter — 32-byte big-endian uint256 per EIP-4337
+    /// v0.8, packed `(uint192 key << 64) | uint64 seq`.
+    pub nonce: [u8; 32],
 
     /// Combined factory address (first 20 bytes) + factory calldata
     pub init_code: Vec<u8>,
@@ -593,10 +645,13 @@ pub struct EntryPoint {
     /// Supported account factory addresses
     pub supported_account_factories: Vec<Vec<u8>>,
 
-    /// Nonces for each account. Persisted to `CF_AGENTS` under the
-    /// `aa/nonce/` prefix when `storage` is set, hydrated on construction
-    /// via `hydrate_nonces()`.
-    pub nonces: DashMap<Vec<u8>, u64>,
+    /// 2-D nonces keyed by `(sender, nonce_key)`. EIP-4337 v0.8: each
+    /// `(sender, key)` pair owns its own strict-monotonic `seq`. The
+    /// stored `u64` is the **next expected** seq under that pair.
+    /// Persisted to `CF_AGENTS` under
+    /// `aa/nonce/{sender_hex}/{key_hex}` when `storage` is set;
+    /// hydrated via `hydrate_nonces()`.
+    pub nonces: DashMap<(Vec<u8>, [u8; 24]), u64>,
 
     /// Total operations processed
     pub total_ops_processed: AtomicU64,
@@ -722,10 +777,10 @@ impl EntryPoint {
         self
     }
 
-    /// Restore the in-memory nonce table from storage. Iterates all keys
-    /// under the `aa/nonce/` prefix in `CF_AGENTS` and decodes the trailing
-    /// 20-byte sender from the hex-encoded suffix. No-op when storage is
-    /// not attached.
+    /// Restore the in-memory 2-D nonce table from storage. Walks all
+    /// keys under `aa/nonce/` in `CF_AGENTS`, parses the
+    /// `{sender_hex}/{key_hex}` path, and reads the 8-byte big-endian
+    /// next-seq value. No-op when storage isn't attached.
     pub fn hydrate_nonces(&self) -> Result<usize, AccountAbstractionError> {
         let Some(storage) = self.storage.as_ref() else {
             return Ok(0);
@@ -737,17 +792,34 @@ impl EntryPoint {
                 "hydrate_nonces: list keys failed: {e}"
             )))?;
         let mut count = 0usize;
-        for key in keys {
-            // key = "aa/nonce/{hex}"; strip the prefix, decode hex.
-            let suffix = match std::str::from_utf8(&key[prefix.len()..]) {
+        for storage_key in keys {
+            // storage_key = "aa/nonce/{sender_hex}/{key_hex}"
+            let suffix = match std::str::from_utf8(&storage_key[prefix.len()..]) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let sender = match hex::decode(suffix) {
+            let mut parts = suffix.splitn(2, '/');
+            let sender_hex = match parts.next() {
+                Some(s) => s,
+                None => continue,
+            };
+            let key_hex = match parts.next() {
+                Some(s) => s,
+                None => continue, // legacy 1-D row — skip
+            };
+            let sender = match hex::decode(sender_hex) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let value = match storage.get(CF_AGENTS, &key) {
+            let key_bytes = match hex::decode(key_hex) {
+                Ok(v) if v.len() == 24 => {
+                    let mut arr = [0u8; 24];
+                    arr.copy_from_slice(&v);
+                    arr
+                }
+                _ => continue,
+            };
+            let value = match storage.get(CF_AGENTS, &storage_key) {
                 Ok(Some(v)) => v,
                 _ => continue,
             };
@@ -756,25 +828,31 @@ impl EntryPoint {
             }
             let mut buf = [0u8; 8];
             buf.copy_from_slice(&value);
-            let nonce = u64::from_be_bytes(buf);
-            self.nonces.insert(sender, nonce);
+            let seq = u64::from_be_bytes(buf);
+            self.nonces.insert((sender, key_bytes), seq);
             count += 1;
         }
         Ok(count)
     }
 
-    /// Persist a sender's nonce to storage. No-op when storage is not
-    /// attached. Errors are logged but do not fail the UserOp — the
-    /// in-memory state still reflects the increment.
-    fn persist_nonce(&self, sender: &[u8], nonce: u64) {
+    /// Persist the next-expected seq under `(sender, key)`. No-op when
+    /// storage isn't attached. Errors logged but don't fail the UserOp
+    /// — in-memory state still reflects the increment.
+    fn persist_nonce(&self, sender: &[u8], nonce_key: &[u8; 24], seq: u64) {
         let Some(storage) = self.storage.as_ref() else {
             return;
         };
-        let key = format!("{}{}", AA_NONCE_PREFIX, hex::encode(sender));
-        if let Err(e) = storage.put(CF_AGENTS, key.as_bytes(), &nonce.to_be_bytes()) {
+        let storage_key = format!(
+            "{}{}/{}",
+            AA_NONCE_PREFIX,
+            hex::encode(sender),
+            hex::encode(nonce_key),
+        );
+        if let Err(e) = storage.put(CF_AGENTS, storage_key.as_bytes(), &seq.to_be_bytes()) {
             tracing::warn!(
                 sender = %hex::encode(sender),
-                nonce,
+                key = %hex::encode(nonce_key),
+                seq,
                 error = %e,
                 "failed to persist AA nonce"
             );
@@ -819,17 +897,27 @@ impl EntryPoint {
         }
     }
 
-    /// Get the current nonce for an account
-    pub fn get_nonce(&self, sender: &[u8]) -> u64 {
+    /// Get the next-expected seq under `(sender, key)`. Returns `0`
+    /// when never used. EIP-4337 `getNonce(sender, key)` equivalent:
+    /// callers pack `(key, seq)` via [`Nonce`] for the on-chain shape.
+    pub fn get_nonce(&self, sender: &[u8], key: &[u8; 24]) -> u64 {
         self.nonces
-            .get(sender)
+            .get(&(sender.to_vec(), *key))
             .map(|n| *n)
             .unwrap_or(0)
     }
 
-    /// Increment and return the next nonce for an account
-    fn increment_nonce(&self, sender: &[u8]) -> u64 {
-        let mut entry = self.nonces.entry(sender.to_vec()).or_insert(0);
+    /// Default-key convenience: `get_nonce(sender, &[0u8; 24])`. The
+    /// pattern most ordered-stream wallets use. Tests that pre-date
+    /// the 2-D migration land here.
+    pub fn get_nonce_default_key(&self, sender: &[u8]) -> u64 {
+        self.get_nonce(sender, &[0u8; 24])
+    }
+
+    /// Increment and return the **previous** seq under `(sender, key)`.
+    /// Stored value advances to `seq + 1`.
+    fn increment_nonce(&self, sender: &[u8], key: &[u8; 24]) -> u64 {
+        let mut entry = self.nonces.entry((sender.to_vec(), *key)).or_insert(0);
         let current = *entry;
         *entry += 1;
         current
@@ -844,12 +932,17 @@ impl EntryPoint {
     /// - Sufficient balance/deposit for gas
     /// - Paymaster approval (if applicable)
     pub fn validate_user_op(&self, op: &UserOperation) -> Result<(), AccountAbstractionError> {
-        // Validate nonce
-        let expected_nonce = self.get_nonce(&op.sender);
-        if op.nonce != expected_nonce {
+        // Validate 2-D nonce: unpack, look up next expected seq under
+        // (sender, key), require strict equality. Different keys are
+        // independent — a UserOp under key A doesn't affect seq under
+        // key B.
+        let op_nonce = Nonce::from_bytes(op.nonce);
+        let expected_seq = self.get_nonce(&op.sender, &op_nonce.key);
+        if op_nonce.seq != expected_seq {
             return Err(AccountAbstractionError::InvalidNonce {
-                expected: expected_nonce,
-                got: op.nonce,
+                expected: expected_seq,
+                got: op_nonce.seq,
+                key_hex: op_nonce.key_hex(),
             });
         }
 
@@ -1010,7 +1103,9 @@ impl EntryPoint {
                     data: sub_data,
                     gas_limit: op.call_gas_limit,
                     gas_price: op.max_fee_per_gas,
-                    nonce: op.nonce,
+                    // Inner-tx counter is EOA-style u64; pass the seq
+                    // portion of the outer UserOp's 2-D nonce.
+                    nonce: Nonce::from_bytes(op.nonce).seq,
                     vm_type: VmType::Evm,
                     chain_id: self.chain_id,
                     signature: None,
@@ -1160,11 +1255,13 @@ impl EntryPoint {
         }
 
         if success {
-            // Replay protection: increment + persist nonce only on accepted
-            // UserOps. Failed validation/execution leaves the nonce intact
-            // so the user can retry with a corrected op.
-            let new_nonce = self.increment_nonce(&op.sender) + 1;
-            self.persist_nonce(&op.sender, new_nonce);
+            // Replay protection: increment + persist seq only under
+            // THIS op's (sender, key). Failed ops leave seq intact so
+            // the user retries with the same (key, seq).
+            let op_key = Nonce::from_bytes(op.nonce).key;
+            self.increment_nonce(&op.sender, &op_key);
+            let next_seq = self.get_nonce(&op.sender, &op_key);
+            self.persist_nonce(&op.sender, &op_key, next_seq);
             self.total_ops_processed.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -1954,7 +2051,7 @@ mod tests {
     fn test_entry_point_creation() {
         let entry_point = EntryPoint::new(vec![0x01; 20]);
         assert_eq!(entry_point.address, vec![0x01; 20]);
-        assert_eq!(entry_point.get_nonce(&[0x02; 20]), 0);
+        assert_eq!(entry_point.get_nonce_default_key(&[0x02; 20]), 0);
     }
 
     #[test]
@@ -2014,7 +2111,7 @@ mod tests {
 
         // Invalid nonce should fail
         let mut invalid_op = user_op.clone();
-        invalid_op.nonce = 5;
+        invalid_op.nonce = Nonce::from_seq(5).to_bytes();
         assert!(entry_point.validate_user_op(&invalid_op).is_err());
 
         // Missing signature should fail
@@ -2257,7 +2354,7 @@ mod tests {
 
         let user_op = UserOperation {
             sender: vec![0x01; 20],
-            nonce: 42,
+            nonce: Nonce::from_seq(42).to_bytes(),
             factory: vec![0x02; 20],
             factory_data: vec![0x02; 12],
             call_data: vec![0x03; 64],
@@ -2282,7 +2379,7 @@ mod tests {
 
         // Different operation should produce different hash
         let mut user_op2 = user_op.clone();
-        user_op2.nonce = 43;
+        user_op2.nonce = Nonce::from_seq(43).to_bytes();
         let hash3 = user_op2.hash(chain_id, &entry_point_addr);
         assert_ne!(hash1, hash3);
 
@@ -2299,7 +2396,7 @@ mod tests {
     fn test_user_operation_helpers() {
         let mut user_op = UserOperation {
             sender: vec![0x01; 20],
-            nonce: 0,
+            nonce: Nonce::from_seq(0).to_bytes(),
             factory: vec![0x02; 20],
             factory_data: vec![0x02; 12],
             call_data: vec![0x03; 64],
@@ -2416,7 +2513,7 @@ mod tests {
     fn test_packed_user_operation_roundtrip() {
         let user_op = UserOperation {
             sender: vec![0x01; 20],
-            nonce: 42,
+            nonce: Nonce::from_seq(42).to_bytes(),
             factory: vec![0x02; 20],
             factory_data: vec![0xAA, 0xBB, 0xCC],
             call_data: vec![0x03; 64],
@@ -2589,7 +2686,7 @@ mod tests {
         let auth = Eip7702Authorization {
             chain_id: 1337,
             delegate_address: delegate_addr.clone(),
-            nonce: 0,
+            nonce: Nonce::from_seq(0).to_bytes(),
             signature,
         };
 
@@ -2622,7 +2719,7 @@ mod tests {
         let auth = Eip7702Authorization {
             chain_id: 9999,
             delegate_address: delegate,
-            nonce: 0,
+            nonce: Nonce::from_seq(0).to_bytes(),
             signature,
         };
 
@@ -2636,7 +2733,7 @@ mod tests {
         let auth = Eip7702Authorization {
             chain_id: 1337,
             delegate_address: vec![0xDE; 20],
-            nonce: 0,
+            nonce: Nonce::from_seq(0).to_bytes(),
             signature: vec![],
         };
         assert!(process_7702_authorizations(&[auth], 1337, &mut state).is_err());
@@ -2648,7 +2745,7 @@ mod tests {
         let auth = Eip7702Authorization {
             chain_id: 1337,
             delegate_address: vec![0xDE; 20],
-            nonce: 0,
+            nonce: Nonce::from_seq(0).to_bytes(),
             signature: vec![0x01; 64], // should be 65 bytes (r||s||y_parity)
         };
         assert!(process_7702_authorizations(&[auth], 1337, &mut state).is_err());
@@ -2665,7 +2762,7 @@ mod tests {
         let auth1 = Eip7702Authorization {
             chain_id: 1337,
             delegate_address: delegate.clone(),
-            nonce: 0,
+            nonce: Nonce::from_seq(0).to_bytes(),
             signature,
         };
         let auth2 = auth1.clone();
@@ -2685,7 +2782,7 @@ mod tests {
         let auth = Eip7702Authorization {
             chain_id: 1337,
             delegate_address: delegate,
-            nonce: 5,
+            nonce: Nonce::from_seq(5).to_bytes(),
             signature,
         };
 
@@ -2701,7 +2798,7 @@ mod tests {
         let auth = Eip7702Authorization {
             chain_id: 1337,
             delegate_address: vec![0xDE; 20],
-            nonce: 0,
+            nonce: Nonce::from_seq(0).to_bytes(),
             signature: vec![],
         };
         let preimage = auth.signing_data();
@@ -2919,7 +3016,7 @@ mod tests {
 
         let op = UserOperation {
             sender: sender.clone(),
-            nonce: 0,
+            nonce: Nonce::from_seq(0).to_bytes(),
             factory: vec![0xFA; 20],
             factory_data: vec![],
             call_data: vec![],
@@ -2963,7 +3060,7 @@ mod tests {
 
         // Second attempt for the same sender must fail (one-shot exhausted).
         let mut op2 = op;
-        op2.nonce = 1;
+        op2.nonce = Nonce::from_seq(1).to_bytes();
         let receipt2 = entry_point.handle_single_op(op2).await;
         // The op may still "succeed" at the execution layer (no-op runtime)
         // but the paymaster must have refused — meaning the receipt records

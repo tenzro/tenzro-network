@@ -1,0 +1,30 @@
+[package]
+name = "tenzro-storage-market"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Decentralized storage market for Tenzro Network — provider daemon, proof-of-retrievability challenges, erasure-coded redundancy, and per-byte settlement over the iroh content-addressed transport"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-iroh = { workspace = true }
+tenzro-settlement = { workspace = true }
+
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
+dashmap = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+reed-solomon-erasure = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -1,6 +1,6 @@
 # TNZO Token Economics
 
-## Version 1.0
+## Version 1.1
 
 TNZO is the gas, settlement, staking, and governance token of Tenzro Network. The supply is fixed at one billion. The model is designed for the agentic decade: demand is multi-sourced (gas, settlement, bonds, governance), burn channels track real usage rather than emission schedules, providers and validators earn from real economic activity rather than speculative yield, and human users retain control over agent spending through scope and policy primitives that are part of the protocol layer.
 
@@ -68,7 +68,7 @@ Supply is fixed. There is no protocol-level mint authority beyond the genesis di
 
 | Path | How value flows back as TNZO |
 |---|---|
-| Running a validator | Run a node that meets the resource profile (hardware, bandwidth, uptime, optional TEE attestation) and participate in HotStuff-2 consensus. Two tiers: resource-only validators earn priority fees and a base reward share with no stake required; staked validators bond TNZO on top of meeting the profile and earn higher reward multipliers, full leader-election eligibility, and governance weight (section 7) |
+| Running a validator | Bond TNZO and run a node that meets the resource profile (hardware, bandwidth, uptime, optional TEE attestation) to finalize blocks in HotStuff-2. Voting power is stake-weighted; earn priority fees, leader-election rewards, and governance weight. Optional TEE attestation adds a 1.5× leader-selection multiplier. Consensus is staked-only; serving capacity is a separate open role (next row) that does not require stake (section 7) |
 | Serving compute or hardware | Run a model provider, TEE provider, storage provider, distributed-training participant, or any other resource-serving role; earn per-call / per-token / per-service / per-attestation / per-byte fees, plus the provider class reward multiplier on staking rewards |
 | Operating an RPC provider | Run a public or gated RPC endpoint that brokers access to network resources (Canton, regulated bridge routes, KYC-tier-gated services, admin-gated cross-chain mint/burn). Mint scoped API keys for tenants, manage per-tenant party allocation and identity-provider provisioning, expose per-tenant analytics; earn from tenant access fees, per-call fees, and commission on the underlying flow routed through your endpoint |
 | Building and running apps on Tenzro | Ship an application that drives transactions through the network — settlements, payments, inference billing, marketplace flows; earn from the underlying activity (provider fees, marketplace commissions, agent template invocations, AP2 / MPP / x402 settlement flow your app routes) |
@@ -286,42 +286,37 @@ A fixed burn fraction works well at one usage band. As the network grows, the bu
 
 ---
 
-## 7. Staking and validator participation
+## 7. Consensus, staking, and service roles
 
-Validators secure the network through HotStuff-2 consensus. Tenzro uses a two-tier validator model: eligibility is open to anyone meeting the resource profile, and staking is optional but unlocks additional benefits.
+Tenzro decouples **consensus** from **service**. Block finality is produced by a staked validator set running HotStuff-2 with stake-weighted voting. Serving compute, storage, and security is a separate set of roles that earn through proof-of-service — they do not need to stake, and they do not vote in consensus. A single operator can do both: stake to validate *and* serve capacity, earning on both tracks at once.
 
-### Tier 1 — Resource-only validators
+This mirrors the "one stake, many roles" pattern (EigenLayer-style restaking): consensus security is anchored to bonded stake, while service capacity scales openly without diluting that security. The four roles — validator, AI provider, security provider, storage provider — are **reward tiers, not eligibility gates**. Nothing about serving requires a stake, and nothing about staking requires a TEE.
 
-Open entry, no stake required. Eligibility is based on:
+### Consensus is stake-weighted
 
-- **Hardware profile.** CPU cores, memory, disk, bandwidth, and storage IOPS thresholds checked at admission. Continuous monitoring confirms the validator continues to meet the profile during operation.
-- **Stability profile.** Demonstrated uptime over a probation window, no equivocation history, no slashed peers in the operator's history.
-- **TEE attestation (optional).** Hardware attestation through any supported vendor (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC, Intel Tiber). Not required, but attested validators receive the 1.5× multiplier on their leader-selection draw.
-- **Geographic and network diversity.** The protocol's admission process favors validators that add geographic, ISP, or jurisdictional diversity to the existing set.
+The validator set finalizes blocks. Voting power equals bonded stake, normalized so the active set sums to a fixed total (10,000 units in the consensus config). A quorum certificate forms at **6,667 / 10,000** — the smallest integer strictly greater than two-thirds of weight. To prevent any single validator from dominating, per-validator weight is capped at 10% with the excess redistributed proportionally across the remaining set. The Byzantine fault bound `f` is measured as a **fraction of stake**, not a head-count of nodes, and all threshold math is integer to avoid floating-point edge cases.
 
-Resource-only validators are full participants in the BFT set: they vote in HotStuff-2 PREPARE / COMMIT / DECIDE, they propose blocks when elected, and they sign quorum certificates with hybrid Ed25519 + ML-DSA-65 + BLS12-381 signatures.
+A consequence of stake-weighting: a node with zero stake carries zero finality weight. There is no head-count vote to capture — adding unstaked nodes cannot move a quorum. This is what makes open service participation safe alongside a bonded consensus set.
 
-**Earnings.** Priority fees on blocks they propose, plus a base reward share. The base reward share scales with reputation (uptime, block-production success, no-equivocation history) and the provider class multiplier. Resource-only validators cap at a base reward multiplier and are excluded from leader election for the highest-trust block classes (e.g., blocks that include large-value institutional settlement or training round finalization) — those require staked tier validators.
+Validators sign quorum certificates with hybrid Ed25519 + ML-DSA-65 + BLS12-381 signatures, propose blocks when elected, and are exposed to slashing:
 
-**No slashing exposure.** Without bonded stake, a misbehaving resource-only validator can be removed from the set and have their reputation collapse, but cannot be financially slashed. This is the trade-off for open entry: the protocol's economic security on high-value blocks depends on the staked tier (below).
+- **Stake requirement.** Bonded TNZO above the governance-set minimum.
+- **Slashing exposure.** 10% bond burn on equivocation, additional slashing on withholding training results, invalid TEE attestations, or persistent SLA failures.
+- **Leader election** across every block class, including the highest-trust classes (large-value institutional settlement, training-round finalization).
+- **Governance weight**, stake-weighted (section 16).
+- **High-trust role eligibility:** witness committee for training-round finalization (`tenzro-training`); high-value bridge duties (Hyperlane Tenzro-set ISM, Wormhole Guardian-quorum when configured, threshold MPC bridge signer); AP2 high-value mandate validation; institutional Canton route operator.
 
-### Tier 2 — Staked validators
+**TEE is an optional capability, not a gate.** Hardware attestation through any supported vendor (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC, Intel Tiber) earns a 1.5× multiplier on the leader-selection draw. A validator never *needs* a TEE to validate; an attested one simply draws leadership more often. The multiplier is multiplicative on top of stake-weight, so a staked, TEE-attested validator has the highest combined draw probability.
 
-Resource-only eligibility plus bonded TNZO. Staked validators get:
+### Service roles are open and reward-tiered
 
-- **Full leader-election eligibility** across every block class.
-- **Higher reward multiplier** on top of the resource-only base.
-- **Governance weight** — voting weight is stake-weighted (section 16). Resource-only validators do not have governance voting weight independent of their staking.
-- **Slashing exposure** as the cost of higher trust: 10% bond burn on equivocation, additional slashing on withholding training results, invalid TEE attestations, or persistent SLA failures.
+AI providers, storage providers, and security providers do not stake and do not vote. They register against a resource profile and earn through proof-of-service:
 
-Stake also makes the validator eligible for high-trust roles:
+- **Admission profile.** Hardware thresholds (CPU, memory, disk, bandwidth, storage IOPS) checked at registration, continuous monitoring during operation, and a stability/uptime probation window. The protocol favors operators that add geographic, ISP, or jurisdictional diversity.
+- **Earnings.** Pay-per-use inference fees, time-based rental revenue, and storage/bandwidth fees, settled per the mechanisms in section 9. A reputation-weighted reward share scales with uptime, successful service, and the provider-class and TEE-capability multipliers.
+- **No financial slashing, ejection-only.** Without bonded stake, a misbehaving service provider loses reputation and is ejected from the serving set, but is not financially slashed. Renters and payers are protected by escrow and streaming settlement (section 9), not by provider stake — *except* where an operator chooses to stake their served capacity as rental collateral, which lets them serve higher-value rentals (section 9.x).
 
-- Witness committee membership for training round finalization (`tenzro-training`)
-- High-value bridge node duties (Hyperlane Tenzro-set ISM, Wormhole Guardian-quorum participation when configured, threshold MPC bridge signer)
-- AP2 high-value mandate validation surface
-- Institutional Canton route operator
-
-The TEE attestation multiplier (1.5×) is multiplicative and applies to both tiers. A staked TEE-attested validator has the highest combined leader-election draw probability.
+The clean line: **economic finality lives in the staked validator set; service availability lives in the open provider set; escrow bridges the trust gap for paid service.**
 
 ### Parameters
 
@@ -333,11 +328,12 @@ The TEE attestation multiplier (1.5×) is multiplicative and applies to both tie
 | Epoch duration | 14,400 blocks (~1 day at 6-second block target) | `tenzro-token/rewards.rs` |
 | Epochs per year | 365 | |
 | Equivocation slash | 10% of stake | `tenzro-consensus + tenzro-token` |
+| Consensus quorum threshold | 6,667 / 10,000 stake-weight (smallest integer > 2/3) | `tenzro-consensus/config.rs` |
+| Per-validator weight cap | 10% of active set, excess redistributed proportionally | `tenzro-consensus` |
 | TEE-attested validator multiplier | 1.5× on leader-selection draw | `tenzro-consensus` |
-| Resource-only base reward share | Reputation-weighted base | Governance-set |
-| Staked validator multiplier on base | Up to 2× the resource-only base, plus stake-weighted share of commission | Governance-set |
+| Service-provider reward share | Reputation-weighted, proof-of-service (no stake required) | Governance-set |
 
-The minimum stake, unbonding period, resource profile thresholds, and reward share between tiers are governance-adjustable.
+The minimum stake, unbonding period, resource profile thresholds, quorum/cap parameters, and reward shares are governance-adjustable.
 
 ### Reward calculation
 
@@ -439,7 +435,7 @@ A model provider:
 - Stakes TNZO (min stake configurable; see section 7).
 - Registers in the model registry with one or more model identifiers, modalities, and pricing.
 - Serves inference requests routed by the inference router (price, latency, reputation, or weighted strategy).
-- Earns per call or per token (the unit depends on modality).
+- Earns in either of two billing modes (see "Capacity rental and reservation" below): **pay-per-use** (per call or per token, the unit depends on modality) for on-demand consumption, or **time-based rental** (hourly through annual) when a consumer reserves dedicated capacity.
 - Is rate-limited by their reputation score (250–1000 range).
 
 Reputation is asymmetric: success on settled payment increments reputation by +1 (capped at 1,000); failure decrements by -5 (floored at 0). The split between "successful HTTP 200" and "settled payment" matters: HTTP 200 alone updates latency only. Reputation gain is gated to settled-payment-only so providers cannot game reputation without taking a real payment.
@@ -486,6 +482,55 @@ A creator who publishes an agent template:
 
 Skill and tool authors register entries in the skill / tool registries. Discovery is permissionless; usage is settled through the same micropayment substrate.
 
+### Capacity rental and reservation
+
+A consumer can reach a provider's capacity two ways. **Pay-per-use** meters consumption after the fact — a user finds a served model, calls it, and the provider earns per token or per call (above). **Time-based rental** lets a consumer reserve a provider's capacity for a fixed term — hourly, daily, weekly, monthly, or annual — at an agreed rate, with that capacity prioritized or held exclusive for them over the term. Both modes settle in TNZO, draw from the same consumer balance, and rest on the same provider stake; the difference is only *when* and *how* value moves.
+
+The hard problem in rental is timing. Pay-per-use is naturally safe — the provider serves a unit, then earns for that unit, so neither side is ever exposed for more than one unit. Rental breaks that symmetry: the consumer is paying for *future* capacity, so paying fully upfront exposes the renter if the provider vanishes mid-term, while paying at the end exposes the provider if the renter walks. Escrow with streaming release resolves this so that neither party is ever exposed for more than one settlement epoch.
+
+#### Renter deposit
+
+To rent (or to draw pay-per-use without a per-request payment round-trip), a consumer funds a **deposit** — a prepaid TNZO balance held on-chain. The deposit is the consumer-side counterpart to the provider's stake:
+
+- It lets escrow **debit without a live payment** each epoch — the funds are already posted, so a streaming release is a debit against locked balance, not a fresh transfer the renter must be online to authorize.
+- It **gates Sybil/grief behavior** — booking capacity you cannot pay for is impossible, because the escrow lock fails at booking time if the deposit cannot cover the committed term.
+- It is **shared across both modes** — the same deposit funds metered pay-per-use (each usage receipt debits it) and rental (the rental lock draws against it). One balance, two billing modes.
+
+The deposit is never spent up front. Booking **locks** the rental amount inside the deposit (it cannot be double-booked), then **streams** to the provider as service is delivered. The renter's withdrawable balance always equals exactly what the provider has not yet earned.
+
+#### Provider stake is the rental collateral
+
+A provider is a staked validator (§7) — and that single stake does triple duty: it secures consensus, it gates serving eligibility, and **it collateralizes every serving obligation the provider takes on.** There is no separate per-rental bond. When a provider fails to deliver a rented term, the renter is made whole *from the provider's standing stake*. This is what finally gives the validator deposit a complete economic rationale: the capital a node locks to validate is the same capital that backs every promise it makes to renters, and staking now earns serving revenue, not only block rewards.
+
+Required coverage is sized to bound exposure, not to lock the full term:
+
+- **Floor.** A provider must hold at least the §7 minimum stake to serve or take rentals at all.
+- **Concurrent-exposure coverage.** At any moment, a provider's stake must cover the sum of **one settlement epoch of value across all of their active rentals** — their total at-risk window — not the full value of every term. A provider holding ten rentals must cover ten epochs of exposure, not ten full terms.
+- **Booking admission.** A new rental is only offered to a provider if accepting it keeps `stake ≥ Σ(active per-epoch exposure)`. A provider who wants more concurrent rentals simply stakes more; stake is the market-clearing knob on serving capacity.
+
+This composes the floor (capital-light), proportional security (scales with real concurrent obligations), and a bounded per-epoch window into one rule, driven by what the provider has actually committed rather than a guessed per-rental figure.
+
+#### Streaming escrow with per-epoch settlement
+
+A rental term is divided into **settlement epochs** (e.g. hourly). Each epoch runs a deterministic loop:
+
+1. **Epoch tick.** For each active rental, the provider owes a signed **availability proof** — heartbeat plus capacity attestation (and, where the rental is for confidential capacity, a TEE attestation per §9).
+2. **Proof valid** → that epoch's slice **unlocks from the renter's deposit to the provider's allocation.** The provider earns continuously, in lockstep with delivery.
+3. **Proof missing or invalid** → the epoch is a **miss**. The renter is made whole for that epoch *immediately from the provider's stake* (no waiting on a dispute), and the renter's own locked slice for that epoch returns to their deposit. Repeated misses past a governance-set threshold auto-terminate the rental and free the slot.
+4. **Coverage re-check after any slash.** A slash reduces the provider's stake. If the remainder no longer covers all active rentals' per-epoch exposure, the provider has a grace epoch to top up; failing that, rentals are shed (newest-first) until coverage holds again — protecting the provider's *other* renters from a failure on one.
+
+At term end, any unlocked-but-unearned remainder returns to the renter's withdrawable deposit. Because settlement is per-epoch, a dispute collapses from "did the provider honor a week" into "did the heartbeat land in this hour — yes/no," which the chain adjudicates from signed receipts (provider's served-receipts versus renter's signed proof of refusal). No subjective arbitration.
+
+#### Underfunded rentals
+
+If a renter's deposit cannot fund the next epoch of an active rental, the rental **terminates cleanly at the epoch boundary** — the provider keeps everything earned to that point, the slot frees, and no debt is ever created. (A grace-and-top-up window is a governance-adjustable softening of this; the default is clean termination so the system never carries renter debt.)
+
+#### Settlement and audit
+
+Rental settlement is on-chain in TNZO per the standard fee architecture (§4): each epoch's release pays the 0.5% network commission split 40% treasury / 30% burn / 30% stakers, identical to pay-per-use settlement. Each epoch's batch of usage and availability receipts is hashed into a Merkle tree whose **root is anchored on-chain and crossed to Canton** (§11, §19) — so any individual receipt is provable against the published root for audit without putting every per-token count on the main chain. The money settles per-transaction on Tenzro; the evidence anchors as periodic Merkle roots.
+
+> **Implementation status.** Pay-per-use serving, provider staking, the 0.5% commission split, slashing, and the Canton audit anchor are existing primitives (§4, §7, §9, §10). The rental-specific surfaces — renter deposit accounting, the streaming per-epoch escrow state machine, concurrent-exposure coverage admission, and the availability-proof receipt format — are specified here and tracked for implementation; their parameters (rental epoch length, coverage ratio, miss threshold, grace window) are governance-set and not yet pinned to on-chain defaults.
+
 ---
 
 ## 10. Bonds and slashing
@@ -495,7 +540,7 @@ Every provider class carries a bond. The bond size is proportional to the econom
 | Class | Bond size guideline | Slashing event |
 |---|---|---|
 | Validator stake | Min 1,000 TNZO (governance-set) | Equivocation: 10% |
-| Model provider | Stake + AgentBond (per agent) | Persistent inference failure: reputation collapse + bond withholding |
+| Model provider | Stake + AgentBond (per agent) | Persistent inference failure: reputation collapse + bond withholding; missed rental epoch: per-epoch slash to make the renter whole (§9, *Capacity rental and reservation*) |
 | TEE provider | Stake | Forged attestation: bond slash |
 | Training participant | Per-task escrow | Invalid outer gradient / withholding: per-task slash |
 | Bridge node | Per-bridge configurable | Quorum dishonesty: bond slash |
@@ -838,12 +883,9 @@ At 5.0–5.5% nominal with potential native-burn deflation at moderate-to-high a
 
 **Stress check — yield collapse.** If real yield drops below ~3% APY (e.g., rewards pool depletes or commission revenue stalls), participation falls. The security budget falls. At what participation level does the network become Byzantine-vulnerable?
 
-HotStuff-2 BFT requires `> 2/3` of validator-weight honest. Tenzro's two-tier validator model splits this budget:
+HotStuff-2 BFT requires `> 2/3` of validator-weight honest, and in Tenzro **all** consensus weight is staked weight — voting power equals bonded stake, and unstaked service nodes carry zero finality weight (section 7). Because consensus is decoupled from service, the security budget is exactly the staked supply; running additional unstaked nodes cannot move a quorum. An attacker breaking liveness (`>1/3`) or safety (`>2/3`) must acquire and bond the required share of currently-staked TNZO at market price.
 
-- **High-value blocks** (training round finalization, institutional settlement, high-value bridge messages, Canton DvP) are restricted to staked validators only. The 2/3 safety bound on these blocks is measured on staked weight. An attacker breaking liveness or safety on a high-value block must acquire and bond the required share of *staked* TNZO at market price.
-- **Standard blocks** are open to both tiers. The 2/3 safety bound is measured on combined validator-weight (staked + resource-only). An attacker can theoretically break liveness on standard blocks by running enough resource-only nodes to control 1/3 of validator weight, but admission gates (hardware profile, stability profile, geographic diversity) and per-block staked weight requirements bound this.
-
-For the high-value block path, the cost to mount an attack is the cost to acquire and bond the required share of currently-staked TNZO at market price.
+High-trust block classes (training round finalization, institutional settlement, high-value bridge messages, Canton DvP) further restrict *leader election* to validators above a higher stake and reputation bar, raising the bonded position an attacker needs to target them, but the underlying 2/3 stake-weight bound is the same.
 
 | Staking participation | Honest stake (TNZO) | Attacker cost to break liveness (>1/3 of staked) | Attacker cost to break safety (>2/3 of staked) |
 |---|---|---|---|

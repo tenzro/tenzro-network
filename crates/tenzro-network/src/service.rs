@@ -23,7 +23,7 @@ use libp2p::{
     kad::{self, QueryResult},
     ping, relay,
     request_response::{self, InboundRequestId, OutboundRequestId, ResponseChannel},
-    swarm::SwarmEvent,
+    swarm::{dial_opts::DialOpts, SwarmEvent},
     Multiaddr, PeerId, Swarm,
 };
 use parking_lot::Mutex;
@@ -36,6 +36,41 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, MissedTickBehavior};
 use tenzro_types::network::PeerStatus;
+
+/// Builds `DialOpts` for an outbound dial that forces a freshly-allocated
+/// source port (`PortUse::New`) instead of libp2p's default best-effort reuse
+/// of the listen port.
+///
+/// Port reuse binds the dial socket to our listen port (e.g. 9000). When the
+/// remote peer also dials us back on that same port — which the boot nodes do
+/// via the Identify-driven `add_peer_address` + `dial` path below — the two
+/// SYNs cross and the OS fuses them into a single TCP *simultaneous open*
+/// socket. On a fused socket BOTH ends believe they are the dialer, so both
+/// libp2p-tls halves send a ClientHello and the handshake desyncs with
+/// `rustls: Received a ClientHello while expecting [ServerHello]` →
+/// `Failed to upgrade client connection`. This is invisible on a LAN/loopback
+/// (timing rarely collides) but reproduces reliably against an internet peer
+/// that dials back. Allocating a new ephemeral source port per dial removes
+/// the shared 5-tuple and makes simultaneous open impossible.
+///
+/// A `/p2p/<peer-id>` suffix in `addr`, if present, is preserved so the dial
+/// is still authenticated against the expected peer.
+fn dial_opts_new_port(addr: Multiaddr) -> DialOpts {
+    let peer_id = addr.iter().find_map(|proto| match proto {
+        libp2p::multiaddr::Protocol::P2p(peer_id) => Some(peer_id),
+        _ => None,
+    });
+    match peer_id {
+        Some(peer_id) => DialOpts::peer_id(peer_id)
+            .addresses(vec![addr])
+            .allocate_new_port()
+            .build(),
+        None => DialOpts::unknown_peer_id()
+            .address(addr)
+            .allocate_new_port()
+            .build(),
+    }
+}
 
 /// Loads a persistent Ed25519 keypair from disk, or generates and saves a new one.
 ///
@@ -1467,7 +1502,7 @@ async fn run_event_loop(
 
     // Dial boot nodes
     for addr in &config.boot_nodes {
-        if let Err(e) = swarm.dial(addr.clone()) {
+        if let Err(e) = swarm.dial(dial_opts_new_port(addr.clone())) {
             tracing::warn!("Failed to dial boot node {}: {}", addr, e);
         } else {
             tracing::info!("Dialing boot node: {}", addr);
@@ -1586,7 +1621,7 @@ async fn run_event_loop(
                 // try it in addition to whatever was learned via Identify.
                 for (peer_id, addr) in &state.bootstrap_peers {
                     if !state.swarm.is_connected(peer_id) {
-                        match state.swarm.dial(addr.clone()) {
+                        match state.swarm.dial(dial_opts_new_port(addr.clone())) {
                             Ok(()) => tracing::info!(
                                 %peer_id,
                                 %addr,
@@ -1614,7 +1649,7 @@ async fn run_event_loop(
                 let live_connections = state.swarm.connected_peers().count();
                 if live_connections == 0 && !state.bootstrap_addrs_peerless.is_empty() {
                     for addr in &state.bootstrap_addrs_peerless {
-                        match state.swarm.dial(addr.clone()) {
+                        match state.swarm.dial(dial_opts_new_port(addr.clone())) {
                             Ok(()) => tracing::info!(
                                 %addr,
                                 "Re-dialing peerless bootstrap addr (node isolated, 0 peers)"
@@ -2421,7 +2456,12 @@ async fn handle_swarm_event(
                         state.swarm.add_peer_address(peer_id, addr.clone());
 
                         if !already_connected {
-                            match state.swarm.dial(addr.clone()) {
+                            match state.swarm.dial(
+                                DialOpts::peer_id(peer_id)
+                                    .addresses(vec![addr.clone()])
+                                    .allocate_new_port()
+                                    .build(),
+                            ) {
                                 Ok(()) => tracing::info!(
                                     %peer_id,
                                     %addr,
@@ -2900,7 +2940,7 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
         NetworkCommand::Dial { addr, response } => {
             let result = state
                 .swarm
-                .dial(addr)
+                .dial(dial_opts_new_port(addr))
                 .map_err(|e| NetworkError::Connection(e.to_string()));
             let _ = response.send(result);
         }
