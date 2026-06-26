@@ -169,9 +169,11 @@ A QC is a single 96-byte BLS aggregate plus a participation bitmap; the per-vote
 
 Leader selection is reputation-weighted rather than VRF-only. A validator's reputation is its historical block-production success times its TEE attestation multiplier (1.5× for hardware-attested validators) times a tip-following weight. The 1.5× multiplier is multiplicative, not additive: a chronically flaky TEE-attested validator is still dwarfed by a non-TEE active one. Hardware-secured participation becomes the economically rational default without ever gating liveness on TEE possession.
 
-### Two-tier validator model
+### Stake-weighted consensus, decoupled from service
 
-Validator entry is open to anyone meeting the resource profile (hardware, bandwidth, uptime, optional TEE attestation). Bonded TNZO stake is optional and unlocks additional benefits — full leader-election eligibility across every block class, higher reward multipliers, governance voting weight, and eligibility for high-trust roles (training witness committees, high-value bridge node duties, institutional settlement routes). Resource-only validators earn priority fees and a reputation-weighted base reward share without stake; staked validators add slashing exposure as the cost of higher trust. The two tiers run the same consensus protocol; safety on high-value blocks depends on the staked tier, and standard blocks are open to both. This lowers the barrier to validator participation while preserving the economic security budget where it matters most.
+Consensus and service are decoupled. Block finality is produced by a staked validator set whose voting power equals bonded TNZO: quorum certificates form at the smallest integer weight strictly above two-thirds (6,667 / 10,000 normalized), with a 10% per-validator cap and proportional redistribution, and the Byzantine bound `f` measured as a fraction of stake rather than a head-count of nodes. A node with zero stake carries zero finality weight, so unstaked participants cannot move a quorum — this is what lets service participation stay open without diluting consensus security.
+
+Serving compute, storage, and security is a separate, open set of roles that earn through proof-of-service (pay-per-use, rental, and per-byte fees, section 15) and require no stake and no vote. One operator may both stake to validate and serve capacity, earning on both tracks. TEE attestation is an optional capability that adds a 1.5× leader-selection multiplier; it is never an admission or voting gate. High-trust block classes (training witness committees, high-value bridge duties, institutional settlement routes) restrict leader election to validators above a higher stake and reputation bar, but rest on the same stake-weighted 2/3 bound. The result lowers the barrier to *serving* the network while concentrating the economic security budget entirely in bonded stake.
 
 ### Slashing and tail-fork resistance
 
@@ -327,7 +329,7 @@ Every catalog entry carries a license tier (Permissive / Attribution / Commercia
 
 ### Provider economics
 
-A provider runs the node with `--role model_provider`, registers under the model registry, and stakes TNZO bonded to their identity. Inference requests route to providers via the strategy the caller selects. Settlement is per-call or per-token through a micropayment channel; reputation tracks fast on success (latency only on HTTP 200), slow on failure (-5 per fault), and is gated to "settled-success only" on reputation gain so providers cannot game reputation without taking a real payment.
+A provider runs the node with `--role model_provider`, registers under the model registry, and stakes TNZO bonded to their identity. Inference requests route to providers via the strategy the caller selects. Settlement is per-call or per-token through a micropayment channel; reputation tracks fast on success (latency only on HTTP 200), slow on failure (-5 per fault), and is gated to "settled-success only" on reputation gain so providers cannot game reputation without taking a real payment. Providers can also rent capacity for fixed terms backed by streaming escrow against their stake — see §15, *Capacity rental and escrow*.
 
 ### Heterogeneous hardware
 
@@ -502,6 +504,14 @@ TNZO is the network's gas, settlement, staking, and governance token. The maximu
 - **Bonds** — providers (validators, model providers, TEE providers, trainers, bridge nodes, agents) bond TNZO. Misbehavior is slashed against the bond.
 
 Every demand source grows with usage. Burn channels are demand-driven: more network activity means more burn means more deflationary pressure on circulating supply.
+
+### Capacity rental and escrow
+
+A consumer can reach provider capacity two ways: **pay-per-use** (metered per call or per token, paid after the unit is served) and **time-based rental** (reserving a provider's capacity for a fixed term — hourly through annual — at an agreed rate). Both settle in TNZO from the same consumer deposit and rest on the same provider stake.
+
+Rental introduces a timing asymmetry pay-per-use does not have: the consumer is paying for future capacity. Paying upfront exposes the renter if the provider vanishes; paying at the end exposes the provider if the renter walks. Tenzro resolves this with **streaming escrow**. The renter funds an on-chain deposit; booking locks the term's value inside it; each settlement epoch a valid availability proof (heartbeat plus capacity attestation) unlocks that epoch's slice to the provider. A missed proof makes the renter whole *immediately from the provider's stake* — no dispute window — and repeated misses auto-terminate the rental. Neither party is ever exposed for more than one epoch.
+
+The provider's stake does triple duty: it secures consensus, gates serving eligibility, and collateralizes every rental obligation. There is no separate per-rental bond. A provider may hold concurrent rentals only while `stake ≥ Σ(active per-epoch exposure)`; staking more is the market knob on serving capacity. Each epoch's release pays the standard 0.5% commission, and the batch of usage and availability receipts is Merkle-rooted on-chain and crossed to Canton for audit — the money settles per-transaction, the evidence anchors as periodic roots.
 
 ### Adaptive burn dial
 

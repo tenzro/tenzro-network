@@ -1654,6 +1654,18 @@ pub struct TenzroNode {
     /// `CortexWorker` so per-request counters are aggregated across the
     /// whole node and exposed on the `/metrics` endpoint.
     pub cortex_metrics: tenzro_cortex::CortexMetrics,
+
+    /// Optional source of the wallet-keystore password. When set, the wallet
+    /// service is configured with `default_password` so FROST key shares are
+    /// written to / loaded from the encrypted keystore on disk and the wallet
+    /// PERSISTS across restarts. When `None`, the wallet is ephemeral
+    /// (recreated every launch) — the historical behaviour.
+    ///
+    /// This is a trait object so `tenzro-node` stays platform-agnostic: the
+    /// embedding app injects the implementation. Desktop apps inject a
+    /// biometric Secure-Enclave unlocker (`tenzro-device-key`); headless nodes
+    /// inject an env/file/KMS unlocker (`EnvUnlocker`, `StaticUnlocker`).
+    keystore_unlocker: Option<Arc<dyn tenzro_keystore_unlock::KeystoreUnlocker>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1834,7 +1846,30 @@ impl TenzroNode {
             cortex_workers: Arc::new(DashMap::new()),
             remote_cortex_workers: Arc::new(tenzro_cortex::RemoteWorkerRegistry::new()),
             cortex_metrics: tenzro_cortex::CortexMetrics::new(),
+            keystore_unlocker: None,
         })
+    }
+
+    /// Inject the keystore-password source that makes the wallet persistent
+    /// across restarts. Call this BEFORE [`start`](Self::start) /
+    /// [`init_wallet`](Self::init_wallet). See the `keystore_unlocker` field
+    /// docs for the trait contract. Returns `self` for builder chaining.
+    pub fn with_keystore_unlocker(
+        mut self,
+        unlocker: Arc<dyn tenzro_keystore_unlock::KeystoreUnlocker>,
+    ) -> Self {
+        self.keystore_unlocker = Some(unlocker);
+        self
+    }
+
+    /// Set the keystore-password source on an already-constructed node (e.g.
+    /// from an embedding app that built the node, then resolves the unlocker
+    /// asynchronously). Same effect as [`with_keystore_unlocker`](Self::with_keystore_unlocker).
+    pub fn set_keystore_unlocker(
+        &mut self,
+        unlocker: Arc<dyn tenzro_keystore_unlock::KeystoreUnlocker>,
+    ) {
+        self.keystore_unlocker = Some(unlocker);
     }
 
     /// Returns the live chain tip height maintained by the event loop.
@@ -3256,11 +3291,38 @@ impl TenzroNode {
         // arbitrary cwd locations when it isn't.
         let wallet_dir = self.config.data_dir.join("wallets");
         let contacts_path = self.config.data_dir.join("contacts.json");
-        let wallet_config = tenzro_wallet::service::WalletServiceConfig {
+
+        // Resolve the keystore password from the injected unlocker, if any.
+        // With a password, the wallet service writes/loads FROST key shares
+        // from the encrypted on-disk keystore, so wallets PERSIST across
+        // restarts. Without an unlocker (or if it's unavailable — e.g. an
+        // un-provisioned desktop build that can't reopen its Secure Enclave
+        // key after a restart), the wallet stays EPHEMERAL and is recreated
+        // each launch. We never fail node init over wallet persistence — a
+        // node without a usable unlocker should still boot.
+        let mut wallet_config = tenzro_wallet::service::WalletServiceConfig {
             keystore_path: wallet_dir,
             contacts_path,
             ..Default::default()
         };
+        if let Some(unlocker) = &self.keystore_unlocker {
+            match unlocker.unlock_password() {
+                Ok(pw) => {
+                    info!("Wallet keystore unlocked — wallets will persist across restarts");
+                    wallet_config = wallet_config.with_default_password((*pw).clone());
+                }
+                Err(tenzro_keystore_unlock::UnlockError::Unavailable(reason)) => {
+                    warn!(
+                        "Wallet keystore unlock source unavailable ({reason}); wallet will be \
+                         ephemeral (recreated each launch)"
+                    );
+                }
+                Err(e) => {
+                    warn!("Wallet keystore unlock failed ({e}); wallet will be ephemeral");
+                }
+            }
+        }
+
         let wallet_service = Arc::new(TenzroWalletService::with_config(wallet_config)?);
         self.wallet_service = Some(wallet_service);
         self.health_monitor.mark_healthy("wallet");

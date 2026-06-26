@@ -323,15 +323,6 @@ impl TimeoutCertificate {
             )));
         }
 
-        let quorum = validator_set.quorum_threshold();
-        if self.signers.len() < quorum {
-            return Err(ConsensusError::InvalidSignature(format!(
-                "TC has {} signers, below 2f+1 quorum threshold {}",
-                self.signers.len(),
-                quorum
-            )));
-        }
-
         let mut seen: HashSet<Address> = HashSet::with_capacity(self.signers.len());
         for signer in &self.signers {
             if !seen.insert(signer.voter) {
@@ -394,6 +385,19 @@ impl TimeoutCertificate {
                     signer.voter, e
                 ))
             })?;
+        }
+
+        // Stake-weighted quorum (Sui model): the TC must carry > 2/3 of
+        // normalized voting power, not merely 2f+1 signers by head-count.
+        let signed_power = validator_set.voting_power_of(seen.iter());
+        let quorum_power = validator_set.quorum_voting_power();
+        if signed_power < quorum_power {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "TC carries {} stake-weight from {} signers, below quorum power {}",
+                signed_power,
+                self.signers.len(),
+                quorum_power
+            )));
         }
 
         Ok(())
@@ -462,26 +466,30 @@ pub struct TimeoutCollector {
     /// Per-view collector state, keyed by view number.
     views: DashMap<u64, Arc<Mutex<PerViewCollector>>>,
 
-    /// Quorum threshold (2f+1) snapshotted at construction. The collector
-    /// must be re-built on validator set rotation; see
-    /// `replace_validator_set`.
-    quorum_threshold: usize,
+    /// Validator set this collector is bound to. Used to map each signer to
+    /// its normalized stake weight. The collector must be re-built on
+    /// validator-set rotation.
+    validator_set: Arc<ValidatorSet>,
 
-    /// f+1 threshold. f = (n-1)/3, so f+1 = (n+2)/3 rounded down.
-    bracha_threshold: usize,
+    /// Stake-weighted quorum: > 2/3 of normalized voting power. Snapshotted at
+    /// construction from the bound validator set.
+    quorum_power: u128,
+
+    /// Stake-weighted Bracha-boost threshold: > 1/3 of normalized voting power
+    /// (the f+1 analogue).
+    bracha_power: u128,
 }
 
 impl TimeoutCollector {
     /// Builds a collector for the given validator set.
     pub fn new(validator_set: Arc<ValidatorSet>) -> Self {
-        let n = validator_set.len();
-        let f = (n.saturating_sub(1)) / 3;
-        let quorum_threshold = 2 * f + 1;
-        let bracha_threshold = f + 1;
+        let quorum_power = validator_set.quorum_voting_power();
+        let bracha_power = validator_set.bracha_voting_power();
         Self {
             views: DashMap::new(),
-            quorum_threshold,
-            bracha_threshold,
+            validator_set,
+            quorum_power,
+            bracha_power,
         }
     }
 
@@ -541,20 +549,23 @@ impl TimeoutCollector {
             },
         );
 
-        let count = state.by_voter.len();
+        // Tally signed stake weight (Sui model), not a head-count of signers.
+        let signed_power = self
+            .validator_set
+            .voting_power_of(state.by_voter.keys());
 
-        // Check 2f+1 first — if we crossed both thresholds in one shot
-        // (small n), prefer reporting the stronger event.
-        if count >= self.quorum_threshold {
+        // Check the quorum first — if we crossed both thresholds in one shot
+        // (concentrated stake), prefer reporting the stronger event.
+        if signed_power >= self.quorum_power {
             state.tc_formed = true;
-            // Mark Bracha boost as fired too, since by definition 2f+1 ≥ f+1.
+            // Mark Bracha boost as fired too: quorum power ≥ bracha power.
             state.bracha_fired = true;
             let signers: Vec<TcSigner> = state.by_voter.values().cloned().collect();
             let tc = TimeoutCertificate::new(view, signers);
             return CollectOutcome::CertificateFormed(tc);
         }
 
-        if !state.bracha_fired && count >= self.bracha_threshold {
+        if !state.bracha_fired && signed_power >= self.bracha_power {
             state.bracha_fired = true;
             return CollectOutcome::BrachaBoost;
         }
@@ -570,14 +581,15 @@ impl TimeoutCollector {
         self.views.retain(|view, _| *view >= min_view);
     }
 
-    /// 2f+1 quorum threshold this collector was built with.
-    pub fn quorum_threshold(&self) -> usize {
-        self.quorum_threshold
+    /// Stake-weighted quorum power (> 2/3 of normalized voting power) this
+    /// collector was built with.
+    pub fn quorum_power(&self) -> u128 {
+        self.quorum_power
     }
 
-    /// f+1 Bracha-boost threshold this collector was built with.
-    pub fn bracha_threshold(&self) -> usize {
-        self.bracha_threshold
+    /// Stake-weighted Bracha-boost power (> 1/3 of normalized voting power).
+    pub fn bracha_power(&self) -> u128 {
+        self.bracha_power
     }
 }
 
@@ -820,18 +832,6 @@ impl NoEndorsementCertificate {
             ));
         }
 
-        // f+1 threshold: f = (n-1)/3, so f+1 = (n+2)/3 floored.
-        let n = validator_set.len();
-        let f = n.saturating_sub(1) / 3;
-        let bracha = f + 1;
-        if self.signers.len() < bracha {
-            return Err(ConsensusError::InvalidSignature(format!(
-                "NEC has {} signers, below f+1 threshold {}",
-                self.signers.len(),
-                bracha
-            )));
-        }
-
         let mut seen: HashSet<Address> = HashSet::with_capacity(self.signers.len());
         for signer in &self.signers {
             if !seen.insert(signer.voter) {
@@ -884,6 +884,19 @@ impl NoEndorsementCertificate {
             })?;
         }
 
+        // Stake-weighted f+1 analogue: the NEC must carry > 1/3 of normalized
+        // voting power, not merely f+1 signers by head-count.
+        let signed_power = validator_set.voting_power_of(seen.iter());
+        let bracha_power = validator_set.bracha_voting_power();
+        if signed_power < bracha_power {
+            return Err(ConsensusError::InvalidSignature(format!(
+                "NEC carries {} stake-weight from {} signers, below bracha power {}",
+                signed_power,
+                self.signers.len(),
+                bracha_power
+            )));
+        }
+
         Ok(())
     }
 }
@@ -924,19 +937,22 @@ pub enum NecCollectOutcome {
 pub struct NoEndorsementCollector {
     views: DashMap<u64, Arc<Mutex<PerViewNecCollector>>>,
 
-    /// f+1 threshold snapshotted at construction.
-    bracha_threshold: usize,
+    /// Validator set this collector is bound to, for per-signer stake weight.
+    validator_set: Arc<ValidatorSet>,
+
+    /// Stake-weighted f+1 analogue (> 1/3 of normalized voting power),
+    /// snapshotted at construction.
+    bracha_power: u128,
 }
 
 impl NoEndorsementCollector {
     /// Builds a collector for the given validator set.
     pub fn new(validator_set: Arc<ValidatorSet>) -> Self {
-        let n = validator_set.len();
-        let f = n.saturating_sub(1) / 3;
-        let bracha_threshold = f + 1;
+        let bracha_power = validator_set.bracha_voting_power();
         Self {
             views: DashMap::new(),
-            bracha_threshold,
+            validator_set,
+            bracha_power,
         }
     }
 
@@ -982,9 +998,11 @@ impl NoEndorsementCollector {
             },
         );
 
-        let count = state.by_voter.len();
+        let signed_power = self
+            .validator_set
+            .voting_power_of(state.by_voter.keys());
 
-        if count >= self.bracha_threshold {
+        if signed_power >= self.bracha_power {
             state.nec_formed = true;
             let signers: Vec<NecSigner> = state.by_voter.values().cloned().collect();
             let nec = NoEndorsementCertificate::new(view, signers);
@@ -999,9 +1017,10 @@ impl NoEndorsementCollector {
         self.views.retain(|view, _| *view >= min_view);
     }
 
-    /// f+1 threshold this collector was built with.
-    pub fn bracha_threshold(&self) -> usize {
-        self.bracha_threshold
+    /// Stake-weighted f+1 power (> 1/3 of normalized voting power) this
+    /// collector was built with.
+    pub fn bracha_power(&self) -> u128 {
+        self.bracha_power
     }
 }
 
@@ -1342,9 +1361,11 @@ mod tests {
         let (vset, _keys, timeouts) =
             build_n_signed_timeouts(4, 100, &[80, 90, 95, 99]);
         let collector = TimeoutCollector::new(vset);
-        // n=4: f=1, bracha_threshold=2, quorum=3
-        assert_eq!(collector.bracha_threshold(), 2);
-        assert_eq!(collector.quorum_threshold(), 3);
+        // n=4 validators each stake 1000 → total 4000; quorum_power=2667 (3 of
+        // 4), bracha_power=1334 (2 of 4). (The slice arg is high_qc_views, not
+        // stake.)
+        assert_eq!(collector.bracha_power(), 1334);
+        assert_eq!(collector.quorum_power(), 2667);
 
         let outcome = collector.add(&timeouts[0]);
         assert_eq!(outcome, CollectOutcome::Added);
@@ -1367,17 +1388,18 @@ mod tests {
         // Once Bracha-boost has fired for a view, subsequent timeouts that
         // do not cross the 2f+1 threshold must be classified as `Added`,
         // not as a second BrachaBoost.
+        // n=7 validators each stake 1000 → total 7000; quorum_power=4667 (5 of
+        // 7), bracha_power=2334 (3 of 7). Equal stake → power maps to count.
         let (vset, _keys, timeouts) =
             build_n_signed_timeouts(7, 100, &[10, 20, 30, 40, 50, 60, 70]);
-        // n=7: f=2, bracha=3, quorum=5
         let collector = TimeoutCollector::new(vset);
-        assert_eq!(collector.bracha_threshold(), 3);
-        assert_eq!(collector.quorum_threshold(), 5);
+        assert_eq!(collector.bracha_power(), 2334);
+        assert_eq!(collector.quorum_power(), 4667);
 
         assert_eq!(collector.add(&timeouts[0]), CollectOutcome::Added);
         assert_eq!(collector.add(&timeouts[1]), CollectOutcome::Added);
         assert_eq!(collector.add(&timeouts[2]), CollectOutcome::BrachaBoost);
-        // 4th timeout: above bracha but below 2f+1=5 — must be Added, not BrachaBoost
+        // 4th timeout: above bracha but below quorum — must be Added, not BrachaBoost
         assert_eq!(collector.add(&timeouts[3]), CollectOutcome::Added);
     }
 
@@ -1468,8 +1490,10 @@ mod tests {
         // CertificateFormed.)
         let (vset, _keys, timeouts) = build_n_signed_timeouts(1, 50, &[10]);
         let collector = TimeoutCollector::new(vset.clone());
-        assert_eq!(collector.bracha_threshold(), 1);
-        assert_eq!(collector.quorum_threshold(), 1);
+        // n=1 stake 1000 → total 1000; the single validator meets both
+        // bracha_power=334 and quorum_power=667, so the first timeout forms the TC.
+        assert_eq!(collector.bracha_power(), 334);
+        assert_eq!(collector.quorum_power(), 667);
 
         let outcome = collector.add(&timeouts[0]);
         match outcome {
@@ -1674,8 +1698,8 @@ mod tests {
     fn nec_collector_emits_added_for_first_msg() {
         let (vset, _keys, msgs) = build_n_signed_no_endorsements(4, 100);
         let collector = NoEndorsementCollector::new(vset);
-        // n=4: f=1, bracha_threshold=2
-        assert_eq!(collector.bracha_threshold(), 2);
+        // n=4 × 1000 = 4000; bracha_power=1334 (needs 2 of the equal-stake set).
+        assert_eq!(collector.bracha_power(), 1334);
         let outcome = collector.add(&msgs[0]);
         assert_eq!(outcome, NecCollectOutcome::Added);
     }
@@ -1731,7 +1755,8 @@ mod tests {
         // n=1: f=0, bracha=1 — first message forms the NEC immediately.
         let (vset, _keys, msgs) = build_n_signed_no_endorsements(1, 50);
         let collector = NoEndorsementCollector::new(vset.clone());
-        assert_eq!(collector.bracha_threshold(), 1);
+        // n=1 × 1000; the single validator (weight 1000) meets bracha_power=334.
+        assert_eq!(collector.bracha_power(), 334);
         let outcome = collector.add(&msgs[0]);
         match outcome {
             NecCollectOutcome::CertificateFormed(nec) => {

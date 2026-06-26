@@ -18,6 +18,7 @@ tenzro-zk = { workspace = true }
 tenzro-network = { workspace = true }
 tenzro-storage = { workspace = true }
 tenzro-wallet = { workspace = true }
+tenzro-keystore-unlock = { workspace = true }
 tenzro-consensus = { workspace = true }
 tenzro-vm = { workspace = true }
 tenzro-token = { workspace = true }

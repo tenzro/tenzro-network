@@ -8,6 +8,8 @@ members = [
     "crates/tenzro-network",
     "crates/tenzro-storage",
     "crates/tenzro-wallet",
+    "crates/tenzro-keystore-unlock",
+    "crates/tenzro-device-key",
     "crates/tenzro-consensus",
     "crates/tenzro-vm",
     "crates/tenzro-token",
@@ -24,6 +26,7 @@ members = [
     "crates/tenzro-cortex",
     "crates/tenzro-training",
     "crates/tenzro-iroh",
+    "crates/tenzro-storage-market",
     "crates/tenzro-wasm",
     "crates/tenzro-node",
     "crates/tenzro-cli",
@@ -71,6 +74,8 @@ tenzro-zk = { path = "crates/tenzro-zk", version = "0.1.0" }
 tenzro-network = { path = "crates/tenzro-network", version = "0.1.0" }
 tenzro-storage = { path = "crates/tenzro-storage", version = "0.1.0" }
 tenzro-wallet = { path = "crates/tenzro-wallet", version = "0.1.0" }
+tenzro-keystore-unlock = { path = "crates/tenzro-keystore-unlock", version = "0.1.0" }
+tenzro-device-key = { path = "crates/tenzro-device-key", version = "0.1.0" }
 tenzro-consensus = { path = "crates/tenzro-consensus", version = "0.1.0" }
 tenzro-vm = { path = "crates/tenzro-vm", version = "0.1.0" }
 tenzro-token = { path = "crates/tenzro-token", version = "0.1.0" }
@@ -82,6 +87,7 @@ tenzro-events = { path = "crates/tenzro-events", version = "0.1.0" }
 tenzro-cortex = { path = "crates/tenzro-cortex", version = "0.1.0" }
 tenzro-training = { path = "crates/tenzro-training", version = "0.1.0" }
 tenzro-iroh = { path = "crates/tenzro-iroh", version = "0.1.0" }
+tenzro-storage-market = { path = "crates/tenzro-storage-market", version = "0.1.0" }
 tenzro-wasm = { path = "crates/tenzro-wasm", version = "0.1.0" }
 tenzro-identity = { path = "crates/tenzro-identity", version = "0.1.0" }
 tenzro-payments = { path = "crates/tenzro-payments", version = "0.1.0" }
@@ -214,6 +220,11 @@ libc = "0.2"
 
 # Compression
 zstd = "0.13"
+
+# Reed-Solomon erasure coding for the storage market (tenzro-storage-market).
+# Systematic RS over GF(2^8): k data shards + m parity shards, any k of n
+# reconstruct the object. Pure-Rust, no SIMD intrinsics required.
+reed-solomon-erasure = "6"
 
 # CARv1 (Content Addressable aRchive) for portable identity export bundles
 # (C.6). We roll a minimal ~40-LOC CARv1 writer directly on top of `cid` +

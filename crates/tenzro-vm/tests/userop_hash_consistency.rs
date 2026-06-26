@@ -10,7 +10,7 @@ use tenzro_wallet::userop::{user_op_hash, UserOp as WalletUserOp};
 fn paired_ops() -> (WalletUserOp, VmUserOp) {
     let wallet = WalletUserOp {
         sender: vec![0x11; 20],
-        nonce: 42,
+        nonce: tenzro_vm::account_abstraction::Nonce::from_seq(42).to_bytes(),
         factory: vec![0x22; 20],
         factory_data: vec![0xaa, 0xbb, 0xcc],
         call_data: vec![0x42; 32],
@@ -65,7 +65,7 @@ fn wallet_hash_matches_entry_point_hash_typical_op() {
 fn wallet_hash_matches_for_minimal_op() {
     let wallet = WalletUserOp {
         sender: vec![0x01; 20],
-        nonce: 0,
+        nonce: tenzro_vm::account_abstraction::Nonce::from_seq(0).to_bytes(),
         factory: vec![],
         factory_data: vec![],
         call_data: vec![0xff],

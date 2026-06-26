@@ -313,7 +313,7 @@ mod tests {
     fn bootstrap_op(sender: Vec<u8>, paymaster_data: Vec<u8>) -> UserOperation {
         UserOperation {
             sender,
-            nonce: 0,
+            nonce: tenzro_vm::account_abstraction::Nonce::from_seq(0).to_bytes(),
             factory: vec![0xFA; 20],
             factory_data: vec![],
             call_data: vec![],

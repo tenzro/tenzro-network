@@ -26,7 +26,7 @@ fn deterministic_signing_key(seed: u8) -> SigningKey {
 fn dummy_user_op(sender: Vec<u8>, sig: Vec<u8>) -> tenzro_vm::account_abstraction::UserOperation {
     tenzro_vm::account_abstraction::UserOperation {
         sender,
-        nonce: 0,
+        nonce: tenzro_vm::account_abstraction::Nonce::from_seq(0).to_bytes(),
         factory: vec![],
         factory_data: vec![],
         call_data: vec![],

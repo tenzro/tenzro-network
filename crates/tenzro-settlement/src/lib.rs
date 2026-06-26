@@ -153,6 +153,7 @@ pub mod fee_collector;
 pub mod intent_7683_fills;
 pub mod kill_switch;
 pub mod micropayments;
+pub mod rental;
 
 // Re-export commonly used types
 pub use batch::{BatchProcessor, BatchSettlementResult, BatchStats, BatchStatus, SettlementBatch};
@@ -169,6 +170,10 @@ pub use micropayments::{
     ChannelDispute, ChannelManager, ChannelState, ChannelStats, ChannelStatus, ChannelStorage,
     DisputeStatus, InMemoryChannelStorage, MicropaymentChannel,
     NanopaymentBatcher, NanopaymentBatchResult, NanopaymentEntry, RocksDbChannelStorage,
+};
+pub use rental::{
+    EpochOutcome, RentalAgreement, RentalManager, RentalStatus, StakeLedger, TerminationReason,
+    DEFAULT_MISS_TERMINATION_THRESHOLD,
 };
 
 #[cfg(test)]

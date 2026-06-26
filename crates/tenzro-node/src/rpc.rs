@@ -1094,6 +1094,8 @@ async fn dispatch_request(
     let result = match request.method.as_str() {
         // Chain methods
         "tenzro_blockNumber" => handle_block_number(node).await,
+        "tenzro_currentHeader" => handle_current_header(node).await,
+        "tenzro_revalidateUserOp" => handle_revalidate_user_op(node, request.params).await,
         "tenzro_getBlock" => handle_get_block(node, request.params).await,
         "tenzro_getBlockRange" => handle_get_block_range(node, request.params).await,
         "tenzro_getTransaction" => handle_get_transaction(node, request.params).await,
@@ -2237,6 +2239,181 @@ async fn handle_block_number(node: &Arc<TenzroNode>) -> std::result::Result<Valu
     Ok(serde_json::json!(format!("0x{:x}", h)))
 }
 
+/// Return the latest finalized header + its age in seconds.
+///
+/// Clients use the age to render staleness tiers:
+/// - `age_secs < 384` (1 epoch): **live**, balances trusted.
+/// - `age_secs < 3600` (1 hour): **stale (yellow)**, signing allowed
+///   with a warning.
+/// - `age_secs < 1_209_600` (14 days): **stale (red)**, value
+///   transfers blocked.
+/// - otherwise: **invalid**, force resync against a fresh checkpoint.
+///
+/// These thresholds match Helios's `--strict-checkpoint-age 14` and
+/// the SOTA wallet-UX practice documented in
+/// `project_offline_wallet_security_playbook.md`.
+async fn handle_current_header(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let h = node.chain_tip_height();
+    // Pull the block to surface its timestamp + hash. Fall back to
+    // height-only when the store can't serve the height (genesis-only
+    // bootstrap, mid-prune, etc.) — the client can still gate signing
+    // on `height` alone.
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Storage backend not initialised".to_string(),
+        data: None,
+    })?;
+    let block_store = tenzro_storage::block_store::BlockStoreImpl::new(storage.clone())
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("BlockStore init: {}", e),
+            data: None,
+        })?;
+    use tenzro_storage::BlockStore;
+    use tenzro_types::BlockHeight;
+    let block = block_store
+        .get_block_by_height(BlockHeight::new(h))
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("get_block_by_height: {}", e),
+            data: None,
+        })?;
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (hash_hex, ts_secs, age_secs, tier) = if let Some(b) = block {
+        let ts = b.header.timestamp.as_secs().max(0) as u64;
+        let age = now_secs.saturating_sub(ts);
+        let tier = classify_header_age(age);
+        (
+            format!("0x{}", hex::encode(b.header.hash().as_bytes())),
+            ts,
+            age,
+            tier,
+        )
+    } else {
+        // No block at height — pre-genesis or store fault. Report
+        // tier = "unknown" so the client defers to height-only.
+        (String::new(), 0u64, u64::MAX, "unknown")
+    };
+    Ok(serde_json::json!({
+        "height": h,
+        "hash": hash_hex,
+        "timestamp_secs": ts_secs,
+        "now_secs": now_secs,
+        "age_secs": age_secs,
+        "tier": tier,
+    }))
+}
+
+/// Re-validate a previously-built UserOp against the current
+/// canonical chain state, WITHOUT admitting it.
+///
+/// Client flow (offline → online reconciliation):
+///   1. Client signed a UserOp offline at chain height H₀, with nonce
+///      seq S under key K, against balance B₀.
+///   2. Network returns. Client calls `tenzro_revalidateUserOp` with
+///      the persisted op JSON.
+///   3. Node checks: does on-chain `getNonce(sender, K) == S`? Is
+///      `balance(sender) >= computed_cost`? Returns one of:
+///        - `{status: "valid"}` — proceed to broadcast.
+///        - `{status: "superseded", on_chain_seq: N}` — drop the op,
+///          another op at this `(sender, K)` already executed.
+///        - `{status: "insufficient_funds", balance, required}` —
+///          drop the op, the user's balance dropped since signing.
+///        - `{status: "invalid", reason}` — drop with reason.
+///
+/// Pattern: SOTA mempool re-validation on reconnect. Helios + Argent +
+/// Coinbase Smart Wallet all do this; see
+/// `project_offline_wallet_security_playbook.md` item 8.
+async fn handle_revalidate_user_op(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let obj = params
+        .as_array()
+        .and_then(|a| a.first())
+        .cloned()
+        .unwrap_or(params);
+    let op = parse_user_operation(&obj)?;
+
+    // Look up the entry point on the node + run validate_user_op.
+    let Some(entry_point) = node.aa_entry_point() else {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: "EntryPoint not initialised on this node".to_string(),
+            data: None,
+        });
+    };
+
+    // Decode the op's 2-D nonce so we can report on-chain seq under
+    // its specific key when the op is superseded.
+    let op_nonce = tenzro_vm::account_abstraction::Nonce::from_bytes(op.nonce);
+
+    match entry_point.validate_user_op(&op) {
+        Ok(()) => Ok(serde_json::json!({
+            "status": "valid",
+            "on_chain_seq": entry_point.get_nonce(&op.sender, &op_nonce.key),
+        })),
+        Err(tenzro_vm::account_abstraction::AccountAbstractionError::InvalidNonce {
+            expected,
+            got,
+            key_hex,
+        }) => {
+            // Two sub-cases:
+            // - got < expected → superseded (a later op already ran).
+            // - got > expected → the client jumped ahead (skipped a seq).
+            let status = if got < expected { "superseded" } else { "invalid_nonce_gap" };
+            Ok(serde_json::json!({
+                "status": status,
+                "on_chain_seq": expected,
+                "op_seq": got,
+                "key": format!("0x{}", key_hex),
+            }))
+        }
+        Err(tenzro_vm::account_abstraction::AccountAbstractionError::InsufficientBalance {
+            required,
+            available,
+        }) => Ok(serde_json::json!({
+            "status": "insufficient_funds",
+            "balance": available.to_string(),
+            "required": required.to_string(),
+        })),
+        Err(e) => Ok(serde_json::json!({
+            "status": "invalid",
+            "reason": e.to_string(),
+        })),
+    }
+}
+
+/// Stale-state tier classifier — single source of truth so every
+/// caller (this RPC, the wallet UI, the bundler) agrees on
+/// thresholds. See `handle_current_header` doc-comment for the
+/// rationale.
+fn classify_header_age(age_secs: u64) -> &'static str {
+    const ONE_EPOCH_SECS: u64 = 384; // ~6.4 min — Helios live threshold
+    const ONE_HOUR_SECS: u64 = 3_600;
+    const FOURTEEN_DAYS_SECS: u64 = 14 * 24 * 3_600;
+    if age_secs < ONE_EPOCH_SECS {
+        "live"
+    } else if age_secs < ONE_HOUR_SECS {
+        "stale_yellow"
+    } else if age_secs < FOURTEEN_DAYS_SECS {
+        "stale_red"
+    } else {
+        "invalid"
+    }
+}
+
 async fn handle_get_block(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -3113,8 +3290,27 @@ async fn handle_inference_request(
 
     let max_tokens = max_tokens as u32;
 
+    // Confidential-inference gate. When the caller sets `require_tee`, the
+    // request may only be served by a TEE-attested runtime; serving it on a
+    // node with no enclave would silently downgrade a confidentiality
+    // guarantee the caller explicitly asked for. Reject rather than serve in
+    // the clear. (Remote dispatch separately routes such requests only to
+    // providers advertising TEE capability.)
+    let require_tee = params
+        .get("require_tee")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     // Check if we have a local model runtime
     if let Some(model_runtime) = &node.model_runtime {
+        if require_tee && !node.has_tee_capability() {
+            return Err(JsonRpcError {
+                code: -32021,
+                message: "require_tee requested but this node has no TEE-attested runtime"
+                    .to_string(),
+                data: None,
+            });
+        }
         // Try to generate from local runtime
         let config = GenerationConfig {
             max_tokens,
@@ -3132,25 +3328,72 @@ async fn handle_inference_request(
                             .saturating_mul(pricing.output_price_per_token_wei),
                     );
                 drop(pricing);
-                if let Some(token) = node.token()
+                // Settlement. Two paths:
+                //   1. Channel path (preferred for metered sessions): the
+                //      caller supplies `channel_id` plus `channel_update_sig`
+                //      — their Ed25519 signature over the channel's next
+                //      cumulative state. This debits the open channel
+                //      off-chain via `update_channel`, amortizing many calls
+                //      into a single on-chain open/close. The serving node
+                //      CANNOT forge this signature (update_channel verifies
+                //      against the payer key), so the per-token debit is
+                //      authorized by the payer, not the provider.
+                //   2. Direct path (single-shot): no channel — settle the
+                //      one call with an on-chain `token.transfer`.
+                if cost_wei > 0
                     && let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str())
-                        && let Ok(caller_addr) = parse_address(caller_str)
-                            && cost_wei > 0 {
-                                let provider_addr = if let Some(registry) = node.identity_registry() {
-                                    let all = registry.list_all();
-                                    if let Some((_, id)) = all.first() {
-                                        id.wallet_address
-                                    } else {
-                                        Address::default()
-                                    }
-                                } else {
-                                    Address::default()
-                                };
-                                if provider_addr != Address::default()
-                                    && let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
-                                        tracing::warn!(caller = %caller_str, "Inference billing failed: {}", e);
-                                    }
+                    && let Ok(caller_addr) = parse_address(caller_str)
+                {
+                    let channel_id = params.get("channel_id").and_then(|v| v.as_str());
+                    let channel_sig = params
+                        .get("channel_update_sig")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| hex::decode(s.trim_start_matches("0x")).ok());
+
+                    let settled_via_channel = if let (Some(cid), Some(sig), Some(mgr)) =
+                        (channel_id, channel_sig, node.channel_manager())
+                    {
+                        match mgr.update_channel(cid, cost_wei, sig) {
+                            Ok(_) => {
+                                tracing::debug!(
+                                    channel = %cid,
+                                    cost_wei = %cost_wei,
+                                    "Inference settled via micropayment channel"
+                                );
+                                true
                             }
+                            Err(e) => {
+                                tracing::warn!(
+                                    channel = %cid,
+                                    error = %e,
+                                    "Channel settlement failed; falling back to direct transfer"
+                                );
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !settled_via_channel
+                        && let Some(token) = node.token()
+                    {
+                        let provider_addr = if let Some(registry) = node.identity_registry() {
+                            let all = registry.list_all();
+                            if let Some((_, id)) = all.first() {
+                                id.wallet_address
+                            } else {
+                                Address::default()
+                            }
+                        } else {
+                            Address::default()
+                        };
+                        if provider_addr != Address::default()
+                            && let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
+                                tracing::warn!(caller = %caller_str, "Inference billing failed: {}", e);
+                            }
+                    }
+                }
                 return Ok(serde_json::json!({
                     "model_id": model_id,
                     "output": result.text,
@@ -3160,6 +3403,10 @@ async fn handle_inference_request(
                     "tokens_per_second": result.tokens_per_second,
                     "cost_wei": cost_wei.to_string(),
                     "provider": "local",
+                    "tee": node.tee_vendor().map(|v| serde_json::json!({
+                        "attested": true,
+                        "vendor": format!("{:?}", v),
+                    })).unwrap_or(serde_json::Value::Bool(false)),
                 }));
             }
             Err(e) => {
@@ -36698,7 +36945,9 @@ fn aa_pre_sign_check(
     // op is well-formed for downstream validators that may inspect them.
     let op = tenzro_vm::UserOperation {
         sender: from_evm,
-        nonce,
+        // EOA-tx caller passes a u64 nonce → pack under the default
+        // key (0) so the AA validator sees a well-formed 2-D nonce.
+        nonce: tenzro_vm::account_abstraction::Nonce::from_seq(nonce).to_bytes(),
         factory: Vec::new(),
         factory_data: Vec::new(),
         call_data,
@@ -40106,11 +40355,39 @@ fn parse_user_operation(
     };
 
     let sender = parse_hex_bytes(get_str("sender")?)?;
-    let nonce = obj
-        .get("nonce")
-        .map(|v| parse_u64_field(v, "nonce"))
-        .transpose()?
-        .unwrap_or(0);
+    // Per EIP-4337 v0.8 the wire nonce is a uint256 (packed 2-D
+    // `(key << 64) | seq`). Accept `0x{hex}` of any width up to 64
+    // nibbles; left-pad with zeros into the canonical 32-byte buffer.
+    let nonce: [u8; 32] = match obj.get("nonce") {
+        None => [0u8; 32],
+        Some(v) => {
+            let s = v.as_str().ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "nonce must be a 0x-prefixed hex string".to_string(),
+                data: None,
+            })?;
+            let trimmed = s.trim_start_matches("0x");
+            if trimmed.len() > 64 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!(
+                        "nonce too wide: got {} hex chars, max 64 (uint256)",
+                        trimmed.len()
+                    ),
+                    data: None,
+                });
+            }
+            let padded = format!("{:0>64}", trimmed);
+            let bytes = hex::decode(&padded).map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("nonce hex decode: {e}"),
+                data: None,
+            })?;
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&bytes);
+            out
+        }
+    };
     let factory = obj
         .get("factory")
         .and_then(|v| v.as_str())

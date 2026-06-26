@@ -1260,7 +1260,7 @@ mod tests {
     fn make_user_op(sender: Vec<u8>, sig: Vec<u8>) -> UserOperation {
         UserOperation {
             sender,
-            nonce: 0,
+            nonce: tenzro_vm::account_abstraction::Nonce::from_seq(0).to_bytes(),
             factory: vec![],
             factory_data: vec![],
             call_data: vec![0x42; 4],
@@ -1779,7 +1779,7 @@ mod tests {
         };
         // Build op but bind the hash to EntryPoint's actual EIP-712 domain.
         let mut op = make_user_op(other.clone(), bincode::serialize(&session_payload).unwrap());
-        op.nonce = entry_point.get_nonce(&other);
+        op.nonce = tenzro_vm::account_abstraction::Nonce::from_seq(entry_point.get_nonce_default_key(&other)).to_bytes();
         let h = op.hash(1337, &vec![0xEEu8; 20]);
         // Re-sign with the EntryPoint-domain hash.
         let mut real_hash = [0u8; 32];
@@ -1799,7 +1799,7 @@ mod tests {
         // We craft a payload that passes SessionKey but uses call_value=200
         // which trips the SpendingLimit cap.
         let mut op2 = make_user_op(account.clone(), vec![]);
-        op2.nonce = entry_point.get_nonce(&account);
+        op2.nonce = tenzro_vm::account_abstraction::Nonce::from_seq(entry_point.get_nonce_default_key(&account)).to_bytes();
         let h2 = op2.hash(1337, &vec![0xEEu8; 20]);
         let mut real_hash2 = [0u8; 32];
         real_hash2.copy_from_slice(&h2[..32]);
@@ -1868,7 +1868,7 @@ mod tests {
         .unwrap();
 
         let mut op3 = make_user_op(other2.clone(), vec![]);
-        op3.nonce = entry_point.get_nonce(&other2);
+        op3.nonce = tenzro_vm::account_abstraction::Nonce::from_seq(entry_point.get_nonce_default_key(&other2)).to_bytes();
         let h3 = op3.hash(1337, &vec![0xEEu8; 20]);
         let mut rh3 = [0u8; 32];
         rh3.copy_from_slice(&h3[..32]);
@@ -1894,7 +1894,7 @@ mod tests {
             address: vec![0x01; 20],
             owner: vec![0x02; 20],
             factory: vec![0x03; 20],
-            nonce: 0,
+            nonce: tenzro_vm::account_abstraction::Nonce::from_seq(0).to_bytes(),
             is_deployed: true,
             modules: Vec::new(),
             validator_modules: BTreeMap::new(),
@@ -2232,7 +2232,7 @@ mod hardware_tests {
     fn dummy_user_op(sender: Vec<u8>, sig: Vec<u8>, call_data: Vec<u8>) -> UserOperation {
         UserOperation {
             sender,
-            nonce: 0,
+            nonce: tenzro_vm::account_abstraction::Nonce::from_seq(0).to_bytes(),
             factory: vec![],
             factory_data: vec![],
             call_data,

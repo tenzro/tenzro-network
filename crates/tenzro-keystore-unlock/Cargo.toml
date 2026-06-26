@@ -1,0 +1,16 @@
+[package]
+name = "tenzro-keystore-unlock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Platform-agnostic keystore-unlock trait for Tenzro wallets — lets node embedders supply the keystore password from any source (Secure Enclave, env, file, KMS)"
+documentation = "https://docs.rs/tenzro-keystore-unlock"
+readme = "README.md"
+keywords = ["tenzro", "keystore", "unlock", "wallet", "passkey"]
+categories = ["cryptography", "authentication"]
+
+[dependencies]
+thiserror = { workspace = true }
+zeroize = { workspace = true }
