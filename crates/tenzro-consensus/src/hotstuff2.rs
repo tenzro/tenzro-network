@@ -145,11 +145,12 @@ struct ViewState {
 /// ~33 views. During the transient, exponential backoff (which is
 /// PRESERVED unchanged) absorbs spikes.
 ///
-/// **Safety floor + ceiling**: `base_floor=200ms` prevents tight loops
-/// when the cluster is pathologically fast; `base_ceiling=10000ms`
-/// prevents runaway when an outlier delay would otherwise push the
-/// EWMA into the seconds range. Operators can override both via
-/// `ConsensusConfig::with_adaptive_bounds`.
+/// **Safety floor + ceiling**: `base_floor` (default 1000ms, set from
+/// `ConsensusConfig::adaptive_timeout_floor_ms`) keeps the timeout above
+/// the *tail* of cross-region quorum latency so successful-round EWMA
+/// tuning can't drive it below the slow rounds and trip spurious view
+/// changes; `base_ceiling=10000ms` prevents runaway when an outlier delay
+/// would otherwise push the EWMA into the seconds range.
 #[derive(Debug, Clone)]
 struct ViewChangeTimer {
     /// Adaptive base timeout, retuned after every successful view.
@@ -208,17 +209,22 @@ impl ViewState {
 }
 
 impl ViewChangeTimer {
-    fn new(base_timeout: Duration, max_timeout: Duration) -> Self {
+    /// Constructs the timer with an explicit adaptive base-timeout floor.
+    /// The floor must exceed the *tail* of observed quorum latency (not its
+    /// median) on the target topology, or successful-round EWMA tuning will
+    /// drive the timeout below the slow rounds and cause spurious view
+    /// changes. See `ConsensusConfig::adaptive_timeout_floor_ms`.
+    fn with_floor(base_timeout: Duration, max_timeout: Duration, base_floor: Duration) -> Self {
         Self {
-            base_timeout,
-            current_timeout: base_timeout,
+            base_timeout: base_timeout.max(base_floor),
+            current_timeout: base_timeout.max(base_floor),
             max_timeout,
             backoff_multiplier: 2.0,
             consecutive_timeouts: 0,
             observed_latency_ewma_ms: None,
             ewma_alpha: 0.15,
             safety_multiplier: 2.0,
-            base_floor: Duration::from_millis(200),
+            base_floor,
             base_ceiling: Duration::from_millis(10_000),
         }
     }
@@ -638,7 +644,8 @@ impl HotStuff2Engine {
         // a deployment overrides `view_timeout_ms` upward.
         let base_timeout = config.view_timeout();
         let max_timeout = Duration::from_secs(8);
-        let view_timer = ViewChangeTimer::new(base_timeout, max_timeout);
+        let view_timer =
+            ViewChangeTimer::with_floor(base_timeout, max_timeout, config.adaptive_timeout_floor());
 
         let composite_public_key = CompositePublicKey::new(
             keypair.public_key().clone(),
@@ -2491,10 +2498,17 @@ impl HotStuff2Engine {
     ///   1. Suppression disabled (`empty_block_heartbeat_ms == 0`) — restore
     ///      always-on production.
     ///   2. Mempool is non-empty — there's real work to commit.
-    ///   3. A timeout certificate is pending (`last_round_tc` set) — we may
-    ///      need to repropose the high_tip to flush a stranded QC, or attach
-    ///      an NEC; suppressing here would risk wedging the view. Liveness
+    ///   3. An *unhandled* timeout certificate is pending — a TC whose
+    ///      recovery view (`tc.view + 1`) we have NOT already proposed at.
+    ///      Such a TC genuinely requires a fresh proposal (repropose the
+    ///      high_tip to flush a stranded QC, or attach an NEC), so liveness
     ///      and the QC chain take priority over the empty-header budget.
+    ///      Crucially we DON'T bypass for a TC we've already extended past:
+    ///      `last_round_tc` is only cleared lazily (when `tc.view + 1 <
+    ///      new_view`), so on a chain that times out frequently a stale-but-
+    ///      not-yet-pruned TC would otherwise defeat suppression on every
+    ///      beat. Gating on `last_proposed_view` (the same monotonic guard
+    ///      the proposal-guard uses) closes that hole.
     ///   4. The heartbeat interval has elapsed since the last block — emit a
     ///      keepalive block to refresh the tip and signal leader liveness.
     ///
@@ -2507,8 +2521,13 @@ impl HotStuff2Engine {
         if !self.mempool.is_empty() {
             return true;
         }
-        if self.last_round_tc.read().is_some() {
-            return true;
+        if let Some(tc) = self.last_round_tc.read().as_ref() {
+            let recovery_view = tc.view + 1;
+            let already_handled =
+                self.last_proposed_view.load(Ordering::SeqCst) >= recovery_view;
+            if !already_handled {
+                return true;
+            }
         }
         let elapsed = self.last_block_time.read().elapsed();
         elapsed >= self.config.empty_block_heartbeat()
@@ -4171,20 +4190,40 @@ mod tests {
             "heartbeat elapsed must allow a keepalive proposal"
         );
 
-        // A pending TC must always force a proposal (QC-chain / liveness
-        // priority), even immediately after a fresh block.
+        // An UNHANDLED pending TC forces a proposal (QC-chain / liveness
+        // priority), even immediately after a fresh block. A TC at view 10
+        // has recovery view 11; last_proposed_view is still 0, so it's
+        // unhandled.
         engine.mark_block_proposed();
         assert!(!engine.should_propose_now());
         *engine.last_round_tc.write() = Some(crate::timeout::TimeoutCertificate {
             format_version: crate::timeout::TIMEOUT_CERTIFICATE_FORMAT_VERSION,
-            view: 1,
+            view: 10,
             signers: Vec::new(),
         });
         assert!(
             engine.should_propose_now(),
-            "pending TC must never be suppressed"
+            "unhandled pending TC must never be suppressed"
+        );
+
+        // But a TC we've ALREADY extended past (last_proposed_view >=
+        // tc.view + 1) must NOT keep defeating suppression — otherwise a
+        // chain that times out frequently never suppresses. With the TC at
+        // view 10 and last_proposed_view bumped to 11, the recovery is
+        // handled, so we fall through to the heartbeat check (just reset →
+        // suppress).
+        engine
+            .last_proposed_view
+            .store(11, std::sync::atomic::Ordering::SeqCst);
+        engine.mark_block_proposed();
+        assert!(
+            !engine.should_propose_now(),
+            "an already-handled (extended-past) TC must not defeat suppression"
         );
         *engine.last_round_tc.write() = None;
+        engine
+            .last_proposed_view
+            .store(0, std::sync::atomic::Ordering::SeqCst);
 
         // Disabling suppression (heartbeat = 0) restores always-on
         // production regardless of mempool/clock.

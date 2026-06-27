@@ -101,6 +101,30 @@ pub struct ConsensusConfig {
     /// (~12.5× fewer empty blocks) while view-change-driven liveness and
     /// the QC chain are untouched.
     pub empty_block_heartbeat_ms: u64,
+
+    /// Floor on the adaptive view-change base timeout, in milliseconds.
+    ///
+    /// The pacemaker self-tunes its base timeout to `safety_multiplier ×
+    /// EWMA(observed quorum latency)`, clamped to this floor. The floor
+    /// exists because the EWMA measures only *successful* rounds, so on a
+    /// wide-area fleet it converges to the median quorum latency and gives
+    /// no headroom for the tail — a single round slower than `2 × median`
+    /// (WAN jitter, GC pause, a momentarily slow peer) then trips a
+    /// spurious timeout. Each spurious timeout advances the view without
+    /// finalizing, which on this chain produced ~2 views per height and a
+    /// stream of recovery blocks that defeated empty-block suppression.
+    ///
+    /// 200ms (the previous hard-coded value) is far below realistic
+    /// cross-region quorum latency: inter-continent RTT alone is
+    /// 150–250ms, and a quorum needs a full proposal→vote round trip. For
+    /// a multi-continent validator set the floor must exceed the tail of
+    /// that round trip, not its median.
+    ///
+    /// Default: 1000ms — comfortably above observed cross-region quorum
+    /// latency (~100–400ms tail) so views stop timing out spuriously,
+    /// while still letting the adaptive tuner raise the timeout further
+    /// under genuine load. A single-region or LAN cluster can lower this.
+    pub adaptive_timeout_floor_ms: u64,
 }
 
 impl Default for ConsensusConfig {
@@ -121,6 +145,7 @@ impl Default for ConsensusConfig {
             optimistic_responsiveness: true,
             proposer_election: ProposerElectionKind::Reputation,
             empty_block_heartbeat_ms: 5000,
+            adaptive_timeout_floor_ms: 1000,
         }
     }
 }
@@ -169,6 +194,17 @@ impl ConsensusConfig {
     /// Whether empty-block suppression is active (heartbeat > 0).
     pub fn suppress_empty_blocks(&self) -> bool {
         self.empty_block_heartbeat_ms > 0
+    }
+
+    /// Sets the adaptive view-timeout floor.
+    pub fn with_adaptive_timeout_floor(mut self, floor_ms: u64) -> Self {
+        self.adaptive_timeout_floor_ms = floor_ms;
+        self
+    }
+
+    /// Returns the adaptive view-timeout floor as a Duration.
+    pub fn adaptive_timeout_floor(&self) -> Duration {
+        Duration::from_millis(self.adaptive_timeout_floor_ms)
     }
 
     /// Returns the block time as a Duration
