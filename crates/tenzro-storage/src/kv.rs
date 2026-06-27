@@ -270,26 +270,25 @@ impl RocksDbStore {
             opts.enable_statistics();
         }
 
-        // Aggregate memtable budget across ALL column families. This is the
-        // primary WAL bound on a many-CF store: when the SUM of every CF's
-        // memtable usage crosses this, RocksDB flushes the CF with the largest
-        // memtable, which steadily drains every CF so the WAL segments they
-        // pin become deletable. With 35 column families, `max_total_wal_size`
-        // alone is insufficient — it flushes only the single CF holding the
-        // oldest WAL, but that log file stays live as long as ANY of the other
-        // ~31 mostly-idle CFs still have unflushed data in it, so the WAL keeps
-        // growing (measured in production at 375–640 MB live WAL above a 256 MB
-        // cap and climbing). This is the documented many-CF limitation in
-        // facebook/rocksdb#662; the cross-CF write-buffer budget is what forces
-        // the idle CFs to flush regardless of their individual write rate.
+        // Aggregate memtable budget across all column families: bounds total
+        // memtable memory so the live WAL can't be inflated by many CFs each
+        // holding a full per-CF write buffer at once.
         opts.set_db_write_buffer_size(256 * 1024 * 1024);
-        // Cap total live WAL as a secondary trigger / hard ceiling on top of
-        // the aggregate flush above.
+        // Hard ceiling on the live WAL: once the running logs exceed this,
+        // RocksDB force-flushes the CFs pinning the oldest log so it can be
+        // deleted. The live WAL stays a single rotating file well under this.
         opts.set_max_total_wal_size(256 * 1024 * 1024);
-        // Archive housekeeping: bound retained/recyclable WAL so the archive
-        // dir can't grow on its own once a log is no longer live.
-        opts.set_wal_size_limit_mb(512);
-        opts.set_keep_log_file_num(8);
+        // Leave WAL archival OFF (wal_ttl_seconds = wal_size_limit_mb = 0, the
+        // defaults). A non-zero size limit turns ON archival: every rotated WAL
+        // is MOVED to db/archive instead of being deleted, and only purged once
+        // the archive itself exceeds the limit — so on a steadily-writing chain
+        // the archive parks at hundreds of MB of dead logs forever. This node
+        // never replays archived WAL (no WAL-based replication/PITR), so
+        // archival is pure bloat: it was the entire source of the observed
+        // on-disk growth (live WAL stayed ~55 MB while db/archive held ~284 MB).
+        // With archival off, a rotated WAL is deleted as soon as its data is
+        // flushed to SST. set_keep_log_file_num only ever governed the textual
+        // info LOG, not WAL archives, so it never bounded this and is dropped.
 
         // Attempt to open the database, handling WAL corruption gracefully
         let db = match DB::open_cf_descriptors(&opts, &config.db_path, Self::column_family_descriptors(config)) {
@@ -330,18 +329,11 @@ impl RocksDbStore {
             }
         };
 
-        // Release any WAL pinned by idle column families from a prior run.
-        // `db_write_buffer_size` only ever flushes the CF with the LARGEST live
-        // memtable, so a CF that received a few writes long ago and then went
-        // idle keeps a tiny non-empty memtable that is never chosen for flush —
-        // and the WAL segment holding its unflushed entries can never be
-        // deleted, so accumulated WAL from before this binary's options took
-        // effect would persist forever. Flushing every CF once on open forces
-        // those stale memtables to SST so the old WAL files become deletable;
-        // from then on the aggregate budget + max_total_wal_size keep it
-        // bounded. Atomic flush so the set is consistent. Best-effort: a flush
-        // failure here must not block startup (e.g. a freshly created DB with
-        // nothing to flush returns immediately).
+        // Flush every CF once on open so any data still living only in the WAL
+        // from a prior run is persisted to SST, letting RocksDB delete those
+        // logs immediately under the now-archival-off policy. Best-effort: a
+        // flush failure must not block startup (a freshly created DB has
+        // nothing to flush and returns immediately).
         {
             let handles: Vec<&ColumnFamily> = ALL_CFS
                 .iter()
@@ -351,6 +343,36 @@ impl RocksDbStore {
             fopts.set_wait(true);
             if let Err(e) = db.flush_cfs_opt(&handles, &fopts) {
                 tracing::warn!("startup flush of column families failed (non-fatal): {}", e);
+            }
+        }
+
+        // Reclaim dead archived WAL left by an earlier build that ran with WAL
+        // archival ON. Archival is now off, so RocksDB will neither add to nor
+        // purge this directory — anything in it is a rotated log whose data is
+        // already in SST and that this node never replays (no WAL-based
+        // replication/PITR). Removing it after the flush-on-open above (which
+        // guarantees live WAL data is persisted) recovers the accumulated bloat
+        // in one shot. Best-effort: failures here must never block startup.
+        let archive_dir = config.db_path.join("archive");
+        if archive_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&archive_dir) {
+                let mut freed = 0u64;
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension().and_then(|e| e.to_str()) == Some("log") {
+                        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        if std::fs::remove_file(&p).is_ok() {
+                            freed += len;
+                        }
+                    }
+                }
+                if freed > 0 {
+                    tracing::info!(
+                        "reclaimed {} MiB of dead archived WAL from {:?}",
+                        freed / (1024 * 1024),
+                        archive_dir
+                    );
+                }
             }
         }
 
