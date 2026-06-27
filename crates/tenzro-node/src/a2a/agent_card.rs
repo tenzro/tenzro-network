@@ -998,6 +998,104 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                 input_modes: vec!["application/json".to_string()],
                 output_modes: vec!["application/json".to_string()],
             },
+            AgentSkill {
+                id: "storage".to_string(),
+                name: "Decentralized Storage".to_string(),
+                description: "Content-addressed storage on the iroh data plane, billed per \
+                              byte-epoch and held to a proof of retrievability. Store an object \
+                              with an erasure-coded redundancy scheme, open a streaming deal, run \
+                              a retrievability-gated charge epoch, look up a deal, set the \
+                              byte-epoch pricing policy, and read this node's storage-provider \
+                              status. Storage and compute rental share one coverage budget per \
+                              provider — a single stake backs both."
+                    .to_string(),
+                tags: vec![
+                    "storage".to_string(),
+                    "por".to_string(),
+                    "byte-epoch".to_string(),
+                    "iroh".to_string(),
+                    "redundancy".to_string(),
+                    "provider".to_string(),
+                ],
+                examples: vec![
+                    "Open a storage deal for an object over 100 epochs".to_string(),
+                    "Charge one retrievability-gated epoch on a deal".to_string(),
+                    "Show this node's storage-provider status".to_string(),
+                ],
+                input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
+                id: "compute".to_string(),
+                name: "Compute Rental".to_string(),
+                description: "Rent this node's compute against its stake. Book a rental, settle \
+                              one epoch gated on the provider's availability proof, look up a \
+                              rental, set the per-epoch pricing policy, and read this node's \
+                              compute-rental status. Shares one coverage budget with storage."
+                    .to_string(),
+                tags: vec![
+                    "compute".to_string(),
+                    "rental".to_string(),
+                    "availability-proof".to_string(),
+                    "epoch".to_string(),
+                    "provider".to_string(),
+                ],
+                examples: vec![
+                    "Book a compute rental over 50 epochs".to_string(),
+                    "Settle one epoch of an active rental".to_string(),
+                    "Show this node's compute-rental status".to_string(),
+                ],
+                input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
+                id: "moe".to_string(),
+                name: "Distributed MoE Serving".to_string(),
+                description: "Decentralized mixture-of-experts expert-shard serving. Read the \
+                              shard map for a model, build a dispatch plan from per-token top-k \
+                              routing decisions, read the governance-tuned replication policy, \
+                              and read the catalog-side MoE topology."
+                    .to_string(),
+                tags: vec![
+                    "moe".to_string(),
+                    "expert-shard".to_string(),
+                    "dispatch".to_string(),
+                    "replication".to_string(),
+                    "inference".to_string(),
+                ],
+                examples: vec![
+                    "Show the MoE shard map for a model".to_string(),
+                    "Plan dispatch for top-k routings on a model".to_string(),
+                    "Read the catalog MoE topology for a model".to_string(),
+                ],
+                input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
+                id: "discovery".to_string(),
+                name: "Local Discovery & LAN Clustering".to_string(),
+                description: "Local-segment discovery and LAN cluster planning. List peers \
+                              discovered on this node's local segment via mDNS, read this node's \
+                              connectivity tier (direct / relay_only / unreachable), read its \
+                              hardware self-profile, and compute a deterministic layer-wise \
+                              cluster placement for a model across candidate members."
+                    .to_string(),
+                tags: vec![
+                    "discovery".to_string(),
+                    "mdns".to_string(),
+                    "lan-cluster".to_string(),
+                    "reachability".to_string(),
+                    "hardware-profile".to_string(),
+                    "pipeline-parallel".to_string(),
+                ],
+                examples: vec![
+                    "List peers on my local segment".to_string(),
+                    "What is this node's connectivity tier?".to_string(),
+                    "Plan a LAN cluster for a 32-layer model across these members".to_string(),
+                ],
+                input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
         ],
         security_schemes: vec![SecurityScheme {
             scheme_type: "bearer".to_string(),

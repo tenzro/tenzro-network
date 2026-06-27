@@ -111,8 +111,10 @@
 
 pub mod audio_runtime;
 pub mod catalog;
+pub mod cluster;
 pub mod detection_runtime;
 pub mod download;
+pub mod gguf_shape;
 pub mod error;
 pub mod hf_download;
 pub mod library;

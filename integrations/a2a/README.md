@@ -112,7 +112,7 @@ local tip against peer-reported network tips (gossiped on
 
 ## Agent Skills
 
-The Tenzro A2A agent exposes 50 skills covering blockchain, AI, identity, payments, lifecycle, bonds, capital markets, multi-party workflows, EVM primitives, cross-chain reach, BTC-secured staking, chain-agnostic discovery, Canton 3.5+ JSON Ledger API, and agent orchestration. The Agent Card at `tenzro_a2a_server/agent_card.py` is the authoritative source for skill IDs and descriptions.
+The Tenzro A2A agent exposes skills covering blockchain, AI, identity, payments, lifecycle, bonds, capital markets, multi-party workflows, EVM primitives, cross-chain reach, BTC-secured staking, chain-agnostic discovery, Canton 3.5+ JSON Ledger API, decentralized storage, compute rental, distributed MoE serving, local discovery + LAN clustering, and agent orchestration. The Agent Card at `tenzro_a2a_server/agent_card.py` is the authoritative source for skill IDs and descriptions.
 
 ### Core Blockchain
 
@@ -172,6 +172,10 @@ The Tenzro A2A agent exposes 50 skills covering blockchain, AI, identity, paymen
 | **Event Streaming** | `events` | Subscribe to blockchain events via WebSocket, webhooks, gRPC |
 | **Authentication (OAuth 2.1 + DPoP)** | `auth` | Onboard humans / delegated agents / autonomous agents (RFC 6749 + RFC 9449), refresh access tokens, link an existing wallet to an auth session, revoke JWTs/DIDs. Pass `dpop_jkt` (RFC 7638 thumbprint) to bind issued tokens to a holder key. |
 | **Join as MicroNode** | `join` | Zero-install network participation with auto-provisioned DID + wallet |
+| **Decentralized Storage** | `storage` | Content-addressed storage on the iroh data plane, billed per byte-epoch and held to a proof of retrievability — open/charge/look-up deals, set pricing, read provider status; one coverage budget shared with compute |
+| **Compute Rental** | `compute` | Rent compute against stake, settled per epoch on an availability proof — book/settle/look-up rentals, set pricing, read provider status; shares the storage coverage budget |
+| **Distributed MoE Serving** | `moe` | Decentralized expert-shard serving — shard map, top-k dispatch planning, replication policy, catalog topology |
+| **Local Discovery & LAN Clustering** | `discovery` | mDNS local-segment peers, connectivity tier (`direct` / `relay_only` / `unreachable`), hardware self-profile, and deterministic layer-wise LAN cluster planning. Serving auto-triggers the cluster when a model exceeds one host: the node reads the GGUF header for shape, discovers members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline — opt out with `force_single`. |
 
 ## A2A Methods
 

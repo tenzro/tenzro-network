@@ -2935,6 +2935,212 @@ async def handle_caip(text: str, metadata: dict = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Storage Market
+# ---------------------------------------------------------------------------
+
+async def handle_storage(text: str, metadata: dict = None) -> str:
+    """Storage-market reads and provider operations.
+
+    Deals, objects, charge epochs, and pricing carry structured fields
+    that cannot be expressed in free text, so they read from `metadata`.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "store" in t and md.get("object_id") and md.get("data"):
+        params = {
+            "object_id": md["object_id"],
+            "data": md["data"],
+            "data_shards": md.get("data_shards", 4),
+            "parity_shards": md.get("parity_shards", 2),
+        }
+        if md.get("owner"):
+            params["owner"] = md["owner"]
+        result = await rpc_call("tenzro_storageStoreObject", params)
+        return f"Object stored:\n{json.dumps(result, indent=2)}"
+
+    if ("open" in t or "deal" in t) and md.get("object_id") and md.get("renter"):
+        result = await rpc_call("tenzro_storageOpenDeal", {
+            "object_id": md["object_id"],
+            "renter": md["renter"],
+            "size_bytes": md.get("size_bytes", 0),
+            "total_epochs": md.get("total_epochs", 0),
+        })
+        return f"Storage deal opened:\n{json.dumps(result, indent=2)}"
+
+    if ("charge" in t or "epoch" in t) and md.get("deal_id"):
+        result = await rpc_call("tenzro_storageChargeEpoch", {"deal_id": md["deal_id"]})
+        return f"Storage charge epoch:\n{json.dumps(result, indent=2)}"
+
+    if md.get("deal_id"):
+        result = await rpc_call("tenzro_storageGetDeal", {"deal_id": md["deal_id"]})
+        return f"Storage deal:\n{json.dumps(result, indent=2)}"
+
+    if "pricing" in t and md.get("capacity"):
+        params = {"mode": md.get("mode", "dynamic"), "capacity": md["capacity"]}
+        if md.get("min_rate"):
+            params["min_rate"] = md["min_rate"]
+        if md.get("max_rate"):
+            params["max_rate"] = md["max_rate"]
+        result = await rpc_call("tenzro_storageSetPricing", params)
+        return f"Storage pricing set:\n{json.dumps(result, indent=2)}"
+
+    if "status" in t or "provider" in t:
+        result = await rpc_call("tenzro_storageStatus", [])
+        return f"Storage provider status:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Storage-market operations:\n"
+        "  - 'Storage status'\n"
+        "  - 'Store object' (metadata: object_id, data base64, owner?, data_shards?, parity_shards?)\n"
+        "  - 'Open storage deal' (metadata: object_id, renter, size_bytes, total_epochs)\n"
+        "  - 'Charge storage epoch' (metadata: deal_id)\n"
+        "  - 'Get storage deal' (metadata: deal_id)\n"
+        "  - 'Set storage pricing' (metadata: mode, capacity, min_rate?, max_rate?)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compute Rental
+# ---------------------------------------------------------------------------
+
+async def handle_compute(text: str, metadata: dict = None) -> str:
+    """Compute-rental reads and provider operations.
+
+    Rental bookings and settlements carry structured fields, so they read
+    from `metadata`.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "book" in t and md.get("renter"):
+        result = await rpc_call("tenzro_computeBookRental", {
+            "renter": md["renter"],
+            "total_epochs": md.get("total_epochs", 0),
+        })
+        return f"Compute rental booked:\n{json.dumps(result, indent=2)}"
+
+    if "settle" in t and md.get("rental_id"):
+        result = await rpc_call("tenzro_computeSettleEpoch", {
+            "rental_id": md["rental_id"],
+            "proof_valid": md.get("proof_valid", True),
+        })
+        return f"Compute settle epoch:\n{json.dumps(result, indent=2)}"
+
+    if md.get("rental_id"):
+        result = await rpc_call("tenzro_computeGetRental", {"rental_id": md["rental_id"]})
+        return f"Compute rental:\n{json.dumps(result, indent=2)}"
+
+    if "pricing" in t and md.get("capacity"):
+        params = {"mode": md.get("mode", "dynamic"), "capacity": md["capacity"]}
+        if md.get("min_rate"):
+            params["min_rate"] = md["min_rate"]
+        if md.get("max_rate"):
+            params["max_rate"] = md["max_rate"]
+        result = await rpc_call("tenzro_computeSetPricing", params)
+        return f"Compute pricing set:\n{json.dumps(result, indent=2)}"
+
+    if "status" in t or "provider" in t:
+        result = await rpc_call("tenzro_computeStatus", [])
+        return f"Compute provider status:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Compute-rental operations:\n"
+        "  - 'Compute status'\n"
+        "  - 'Book compute rental' (metadata: renter, total_epochs)\n"
+        "  - 'Settle compute epoch' (metadata: rental_id, proof_valid?)\n"
+        "  - 'Get compute rental' (metadata: rental_id)\n"
+        "  - 'Set compute pricing' (metadata: mode, capacity, min_rate?, max_rate?)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# MoE Expert Sharding
+# ---------------------------------------------------------------------------
+
+async def handle_moe(text: str, metadata: dict = None) -> str:
+    """MoE expert-shard map, dispatch planning, replication policy, and
+    catalog topology. The model id reads from `metadata` or free text; the
+    dispatch routings read from `metadata`.
+    """
+    t = text.lower()
+    md = metadata or {}
+    model_id = md.get("model_id")
+    if not model_id:
+        m = re.search(r"[\w./-]+", text.split()[-1]) if text.split() else None
+        model_id = m.group(0) if m else None
+
+    if "policy" in t or "replication" in t:
+        result = await rpc_call("tenzro_moeReplicationPolicy", [])
+        return f"MoE replication policy:\n{json.dumps(result, indent=2)}"
+
+    if ("dispatch" in t or "plan" in t) and model_id and md.get("routings"):
+        result = await rpc_call("tenzro_moePlanDispatch", {
+            "model_id": model_id,
+            "routings": md["routings"],
+            "allow_cold": md.get("allow_cold", False),
+        })
+        return f"MoE dispatch plan:\n{json.dumps(result, indent=2)}"
+
+    if ("shape" in t or "topology" in t or "catalog" in t) and model_id:
+        result = await rpc_call("tenzro_moeCatalogShape", {"model_id": model_id})
+        return f"MoE catalog shape:\n{json.dumps(result, indent=2)}"
+
+    if model_id:
+        result = await rpc_call("tenzro_moeShardMap", {"model_id": model_id})
+        return f"MoE shard map for {model_id}:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "MoE expert-shard operations:\n"
+        "  - 'MoE shard map <model_id>'\n"
+        "  - 'MoE catalog shape <model_id>'\n"
+        "  - 'MoE replication policy'\n"
+        "  - 'MoE plan dispatch <model_id>' (metadata: routings, allow_cold?)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Local Discovery & Cluster
+# ---------------------------------------------------------------------------
+
+async def handle_discovery(text: str, metadata: dict = None) -> str:
+    """Local mDNS peers, reachability tier, hardware self-profile, and
+    deterministic cluster placement. The cluster plan reads its model and
+    members from `metadata`.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "cluster" in t and md.get("model") and md.get("members"):
+        result = await rpc_call("tenzro_clusterPlan", {
+            "model": md["model"],
+            "members": md["members"],
+            "user_forced": md.get("user_forced", False),
+        })
+        return f"Cluster plan:\n{json.dumps(result, indent=2)}"
+
+    if "reachability" in t or "reachable" in t or "tier" in t:
+        result = await rpc_call("tenzro_nodeReachability", [])
+        return f"Node reachability:\n{json.dumps(result, indent=2)}"
+
+    if "profile" in t or "hardware" in t:
+        result = await rpc_call("tenzro_nodeProfile", [])
+        return f"Node hardware profile:\n{json.dumps(result, indent=2)}"
+
+    if "peer" in t or "discover" in t or "local" in t:
+        result = await rpc_call("tenzro_localPeers", [])
+        return f"Local peers:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Local-discovery & cluster operations:\n"
+        "  - 'Local peers'\n"
+        "  - 'Node reachability'\n"
+        "  - 'Node hardware profile'\n"
+        "  - 'Cluster plan' (metadata: model {layers, hidden_dim, total_vram_gb}, members, user_forced?)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Handler dispatch table
 # ---------------------------------------------------------------------------
 
@@ -2990,5 +3196,9 @@ HANDLERS: dict[str, callable] = {
     "axelar": handle_axelar,
     "babylon": handle_babylon,
     "caip": handle_caip,
+    "storage": handle_storage,
+    "compute": handle_compute,
+    "moe": handle_moe,
+    "discovery": handle_discovery,
     "help": handle_help,
 }

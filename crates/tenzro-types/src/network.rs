@@ -5,10 +5,13 @@
 
 use crate::primitives::{Address, Timestamp};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::fmt;
 use std::net::SocketAddr;
+use std::str::FromStr;
 
 /// The role of a node in the Tenzro Network
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum NetworkRole {
     /// Full validator node
     Validator,
@@ -58,6 +61,216 @@ impl NetworkRole {
     pub fn is_micro_node(&self) -> bool {
         matches!(self, Self::MicroNode)
     }
+
+    /// Lowercase wire/CLI token for this role.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Validator => "validator",
+            Self::FullNode => "fullnode",
+            Self::LightClient => "light",
+            Self::TeeProvider => "tee",
+            Self::ModelProvider => "ai",
+            Self::StorageProvider => "storage",
+            Self::Archive => "archive",
+            Self::Bootstrap => "bootstrap",
+            Self::MicroNode => "micro",
+        }
+    }
+}
+
+impl fmt::Display for NetworkRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for NetworkRole {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "validator" => Ok(Self::Validator),
+            "fullnode" | "full" | "full_node" => Ok(Self::FullNode),
+            "light" | "lightclient" | "light_client" => Ok(Self::LightClient),
+            "tee" | "teeprovider" | "tee_provider" => Ok(Self::TeeProvider),
+            "ai" | "model" | "modelprovider" | "model_provider" | "inference" => {
+                Ok(Self::ModelProvider)
+            }
+            "storage" | "storageprovider" | "storage_provider" => Ok(Self::StorageProvider),
+            "archive" => Ok(Self::Archive),
+            "bootstrap" | "seed" => Ok(Self::Bootstrap),
+            "micro" | "micronode" | "user" => Ok(Self::MicroNode),
+            other => Err(format!("unknown network role: {other}")),
+        }
+    }
+}
+
+/// A set of roles a single node serves simultaneously.
+///
+/// A node stakes once and may serve many roles — validating consensus while
+/// also providing AI inference and hosting storage. The roles are reward tiers
+/// layered on one identity, not separate eligibility gates. Order is
+/// normalized (sorted, deduplicated) so equal role combinations compare equal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleSet(BTreeSet<NetworkRole>);
+
+impl RoleSet {
+    /// A lightweight client/participant with no service obligations.
+    pub fn client() -> Self {
+        let mut s = BTreeSet::new();
+        s.insert(NetworkRole::MicroNode);
+        Self(s)
+    }
+
+    /// A pure validator with no extra service roles.
+    pub fn validator_only() -> Self {
+        let mut s = BTreeSet::new();
+        s.insert(NetworkRole::Validator);
+        Self(s)
+    }
+
+    /// A storage provider that does not validate.
+    pub fn storage_only() -> Self {
+        let mut s = BTreeSet::new();
+        s.insert(NetworkRole::StorageProvider);
+        Self(s)
+    }
+
+    /// A validator that also serves AI inference and storage.
+    pub fn full_provider() -> Self {
+        let mut s = BTreeSet::new();
+        s.insert(NetworkRole::Validator);
+        s.insert(NetworkRole::ModelProvider);
+        s.insert(NetworkRole::StorageProvider);
+        Self(s)
+    }
+
+    /// Builds a role set from an iterator of roles. Empty input falls back to
+    /// a client role so a node always has at least one role.
+    pub fn from_roles(roles: impl IntoIterator<Item = NetworkRole>) -> Self {
+        let set: BTreeSet<NetworkRole> = roles.into_iter().collect();
+        if set.is_empty() {
+            Self::client()
+        } else {
+            Self(set)
+        }
+    }
+
+    /// Adds a role to the set.
+    pub fn insert(&mut self, role: NetworkRole) {
+        self.0.insert(role);
+    }
+
+    /// True if the node serves the given role.
+    pub fn has(&self, role: NetworkRole) -> bool {
+        self.0.contains(&role)
+    }
+
+    /// True if the node participates in consensus.
+    pub fn is_validator(&self) -> bool {
+        self.has(NetworkRole::Validator)
+    }
+
+    /// True if the node offers AI model inference.
+    pub fn serves_ai(&self) -> bool {
+        self.has(NetworkRole::ModelProvider)
+    }
+
+    /// True if the node hosts decentralized storage.
+    pub fn serves_storage(&self) -> bool {
+        self.has(NetworkRole::StorageProvider)
+    }
+
+    /// True if the node offers TEE confidential compute.
+    pub fn serves_tee(&self) -> bool {
+        self.has(NetworkRole::TeeProvider)
+    }
+
+    /// True if the node provides any paid service (AI, storage, or TEE).
+    pub fn is_provider(&self) -> bool {
+        self.0.iter().any(NetworkRole::is_provider)
+    }
+
+    /// The primary role used where a single role is still required (peer
+    /// announcement, legacy `NodeInfo.role`). Validator wins, then any
+    /// provider role, then whatever remains.
+    pub fn primary(&self) -> NetworkRole {
+        if self.is_validator() {
+            NetworkRole::Validator
+        } else if let Some(provider) = self.0.iter().find(|r| r.is_provider()) {
+            *provider
+        } else {
+            self.0
+                .iter()
+                .next()
+                .copied()
+                .unwrap_or(NetworkRole::MicroNode)
+        }
+    }
+
+    /// Iterates over the roles in normalized order.
+    pub fn iter(&self) -> impl Iterator<Item = NetworkRole> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// Number of roles in the set.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// True if the set somehow holds no roles (should not happen via the
+    /// constructors, which always fall back to a client role).
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Default for RoleSet {
+    fn default() -> Self {
+        Self::client()
+    }
+}
+
+impl fmt::Display for RoleSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let joined = self
+            .0
+            .iter()
+            .map(NetworkRole::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        f.write_str(&joined)
+    }
+}
+
+impl FromStr for RoleSet {
+    type Err = String;
+
+    /// Parses a comma-separated role list, e.g. `"validator,storage,ai"`.
+    /// Whitespace around tokens is ignored. An empty string yields a client.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut set = BTreeSet::new();
+        for token in s.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            set.insert(NetworkRole::from_str(token)?);
+        }
+        Ok(if set.is_empty() {
+            Self::client()
+        } else {
+            Self(set)
+        })
+    }
+}
+
+impl From<NetworkRole> for RoleSet {
+    fn from(role: NetworkRole) -> Self {
+        let mut s = BTreeSet::new();
+        s.insert(role);
+        Self(s)
+    }
 }
 
 /// Information about a peer in the network
@@ -67,8 +280,9 @@ pub struct PeerInfo {
     pub peer_id: String,
     /// Peer's network addresses
     pub addresses: Vec<SocketAddr>,
-    /// Peer's role in the network
-    pub role: NetworkRole,
+    /// Every role this peer serves (a node may validate while also providing
+    /// AI/storage). Discovery and role-filtered queries match on set membership.
+    pub roles: RoleSet,
     /// Protocol version
     pub protocol_version: u32,
     /// User agent string
@@ -83,11 +297,11 @@ pub struct PeerInfo {
 
 impl PeerInfo {
     /// Creates a new PeerInfo
-    pub fn new(peer_id: String, addresses: Vec<SocketAddr>, role: NetworkRole) -> Self {
+    pub fn new(peer_id: String, addresses: Vec<SocketAddr>, roles: RoleSet) -> Self {
         Self {
             peer_id,
             addresses,
-            role,
+            roles,
             protocol_version: 1,
             user_agent: "tenzro/1.0".to_string(),
             last_seen: Timestamp::now(),
@@ -134,8 +348,10 @@ pub struct NodeInfo {
     pub node_id: String,
     /// Node's account address (if applicable)
     pub address: Option<Address>,
-    /// Node's role in the network
-    pub role: NetworkRole,
+    /// Every role this node serves. A node stakes once and may hold many roles
+    /// at once (validator + AI + storage); service roles are reward tiers on one
+    /// identity, not separate eligibility gates.
+    pub roles: RoleSet,
     /// Listen addresses
     pub listen_addresses: Vec<SocketAddr>,
     /// Public addresses (for NAT traversal)
@@ -152,11 +368,11 @@ pub struct NodeInfo {
 
 impl NodeInfo {
     /// Creates a new NodeInfo
-    pub fn new(node_id: String, role: NetworkRole) -> Self {
+    pub fn new(node_id: String, roles: RoleSet) -> Self {
         Self {
             node_id,
             address: None,
-            role,
+            roles,
             listen_addresses: Vec::new(),
             public_addresses: Vec::new(),
             protocol_version: 1,
@@ -347,4 +563,83 @@ pub enum MicroNodeParticipantType {
     Agent,
     /// An automated bot or service
     Bot,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_roundtrips_through_str() {
+        for role in [
+            NetworkRole::Validator,
+            NetworkRole::FullNode,
+            NetworkRole::LightClient,
+            NetworkRole::TeeProvider,
+            NetworkRole::ModelProvider,
+            NetworkRole::StorageProvider,
+            NetworkRole::Archive,
+            NetworkRole::Bootstrap,
+            NetworkRole::MicroNode,
+        ] {
+            assert_eq!(NetworkRole::from_str(role.as_str()).unwrap(), role);
+        }
+    }
+
+    #[test]
+    fn parses_comma_separated_roles() {
+        let set: RoleSet = "validator,storage,ai".parse().unwrap();
+        assert!(set.is_validator());
+        assert!(set.serves_storage());
+        assert!(set.serves_ai());
+        assert!(!set.serves_tee());
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn parse_is_order_and_whitespace_insensitive() {
+        let a: RoleSet = "ai, validator ,storage".parse().unwrap();
+        let b: RoleSet = "storage,validator,ai".parse().unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn display_is_normalized_and_reparses() {
+        let set: RoleSet = "storage,validator".parse().unwrap();
+        let reparsed: RoleSet = set.to_string().parse().unwrap();
+        assert_eq!(set, reparsed);
+    }
+
+    #[test]
+    fn empty_string_yields_client() {
+        let set: RoleSet = "".parse().unwrap();
+        assert_eq!(set, RoleSet::client());
+        assert!(!set.is_validator());
+    }
+
+    #[test]
+    fn unknown_role_errors() {
+        assert!("validator,bogus".parse::<RoleSet>().is_err());
+    }
+
+    #[test]
+    fn underscored_aliases_parse_to_canonical_roles() {
+        let set: RoleSet = "model_provider,storage_provider,tee_provider".parse().unwrap();
+        assert!(set.serves_ai());
+        assert!(set.serves_storage());
+        assert!(set.serves_tee());
+    }
+
+    #[test]
+    fn primary_prefers_validator_then_provider() {
+        assert_eq!(RoleSet::full_provider().primary(), NetworkRole::Validator);
+        let provider: RoleSet = "storage,ai".parse().unwrap();
+        assert!(provider.primary().is_provider());
+        assert_eq!(RoleSet::client().primary(), NetworkRole::MicroNode);
+    }
+
+    #[test]
+    fn from_empty_roles_falls_back_to_client() {
+        assert_eq!(RoleSet::from_roles([]), RoleSet::client());
+    }
 }

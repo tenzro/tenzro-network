@@ -153,6 +153,7 @@ pub mod fee_collector;
 pub mod intent_7683_fills;
 pub mod kill_switch;
 pub mod micropayments;
+pub mod obligations;
 pub mod rental;
 
 // Re-export commonly used types
@@ -171,6 +172,7 @@ pub use micropayments::{
     DisputeStatus, InMemoryChannelStorage, MicropaymentChannel,
     NanopaymentBatcher, NanopaymentBatchResult, NanopaymentEntry, RocksDbChannelStorage,
 };
+pub use obligations::{ObligationSource, ProviderObligations};
 pub use rental::{
     EpochOutcome, RentalAgreement, RentalManager, RentalStatus, StakeLedger, TerminationReason,
     DEFAULT_MISS_TERMINATION_THRESHOLD,

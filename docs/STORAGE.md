@@ -1,0 +1,118 @@
+# Tenzro Storage
+
+**Decentralized storage on Tenzro Network — content-addressed objects, billed per byte-epoch, held to a proof of retrievability, settled in TNZO.**
+
+---
+
+## Abstract
+
+A node with spare disk can hold data for the network. Tenzro Storage is the protocol surface that turns that disk into a paid service: a consumer opens a deal for an object, the provider proves each epoch that it can still return the data, and TNZO moves one byte-epoch slice at a time from the consumer to the provider.
+
+Storage is a role a node takes on, not a separate network. A node that serves AI can hold data at the same time, and the one stake that backs serving a model also backs the storage it offers. There is no second bond. Storage shares the same coverage budget as compute rental — one stake, one set of obligations.
+
+This document describes the object model, the deal lifecycle, the proof-of-retrievability gate, redundancy, the shared coverage budget, and the RPC / CLI / SDK surfaces.
+
+---
+
+## 1. Design
+
+Three properties shape the storage surface:
+
+1. **Content-addressed objects over the data plane.** Objects are stored as shards on the iroh data plane and referenced by content address. A `StorageProvider` resolves an object's `ObjectDescriptor` — its shards and their references — through an iroh resolver.
+
+2. **Retrievability is proven, not assumed.** Each epoch the provider answers a proof-of-retrievability challenge: the network samples shards, the provider returns digests over them, and only a correct answer settles the epoch. A failed or missing answer settles nothing and is recorded as a miss.
+
+3. **One stake, shared with compute.** Storage obligations register against the same `ProviderObligations` tracker that compute rental uses. A provider's stake covers everything it owes across both services at once; over-commit and it sheds deals until the rest fits.
+
+The crates that implement this:
+
+- `tenzro-storage-market` — `StorageProvider`, `ObjectDescriptor`, `StorageMeter`, `StoragePricing`, `StorageDeal`, `ChargeOutcome`, the proof-of-retrievability challenge (`por`), and redundancy
+- `tenzro-settlement` — `ProviderObligations`, the coverage tracker shared with compute
+- `tenzro-node` — the storage provider runtime that wires identity, stake, obligations, and pricing into a `StorageMeter`
+
+---
+
+## 2. The deal lifecycle
+
+`StorageMeter` owns the deal state machine.
+
+### Open
+
+A consumer opens a deal for an object:
+
+```
+open_deal(...)   // locks the consumer's exposure, registers the provider's obligation
+```
+
+The exposure is the per-epoch price (a function of object size and the provider's `rate_per_byte_epoch`) times the deal's term. Opening fails if the provider's stake cannot cover the new obligation on top of everything else it owes — compute rentals included.
+
+### Charge an epoch
+
+Each epoch, the provider settles by answering a retrievability challenge:
+
+```
+charge_epoch(deal_id, challenge_passed) -> ChargeOutcome
+```
+
+The outcome is one of three:
+
+- `Charged { slice }` — the challenge passed; one byte-epoch slice moved from the consumer to the provider.
+- `Missed` — the challenge failed or was not answered; no value moved.
+- `Closed { completed }` — the deal reached its term or ran out of coverage.
+
+### Proof of retrievability
+
+A challenge samples a subset of an object's shards. The provider answers by fetching those shards and returning a digest keyed to a per-challenge nonce, so a stale or fabricated answer does not pass. Sampling means the provider must actually hold the data to answer, without the network having to re-download the whole object.
+
+---
+
+## 3. Pricing
+
+Storage is priced per byte-epoch. A provider sets its `rate_per_byte_epoch`; the epoch price for a deal is that rate scaled by object size.
+
+- **Fixed.** A flat rate per byte-epoch.
+- **Network-dynamic.** The rate tracks storage utilization through an EIP-1559-style controller over a smoothed utilization signal. Storage uses a denominator of 16 (a per-step move bounded at ±6.25%) — a gentler curve than compute, because storage commitments are longer-lived.
+
+### Slashing and re-replication
+
+The metering loop charges an epoch only when the provider passes that epoch's retrievability challenge. A failed challenge is a *miss*: the renter is not charged and that epoch's slice returns to their withdrawable deposit. Consecutive misses past the deal's `miss_threshold` terminate the deal and refund the unearned remainder to the renter.
+
+The meter itself moves only renter↔provider value — it does not slash. Repeated misses are the *signal* the staking subsystem consumes: it slashes the provider's stake and the redundancy layer re-replicates the object onto a healthy provider. This keeps the value-transfer path (the meter) and the stake-penalty path (consensus/settlement) cleanly separated, reached through the same `StakeLedger` indirection that compute rentals use. Storage exposure and rental exposure share one coverage budget per provider, so a multi-role node's storage deals and compute rentals admit against the same stake.
+
+---
+
+## 4. Redundancy
+
+Objects can be stored with redundancy so the loss of a single provider does not lose the data. The `redundancy` module describes how an object's shards are spread; a consumer chooses a redundancy level when the durability of the object justifies the extra cost.
+
+---
+
+## 5. Money flow
+
+The invariant is the same one the whole network settles on: **the consumer pays from their TNZO balance; the provider earns into theirs.** Holding data credits the provider per byte-epoch; consuming storage debits the consumer. A missed retrievability proof moves nothing and is the network's signal that the provider is not holding what it agreed to.
+
+---
+
+## 6. Interfaces
+
+### RPC
+
+The node exposes storage endpoints for opening deals, charging epochs, querying deal state, setting pricing, and reporting storage-provider status.
+
+### CLI
+
+```
+tenzro node storage status
+tenzro node storage open-deal --object <id> --epochs <n>
+tenzro node storage deal --deal <id>
+```
+
+### SDKs
+
+Both the Rust and TypeScript SDKs expose a `storage` client mirroring the RPC surface.
+
+---
+
+## 7. How storage relates to compute
+
+Storage and compute rental are two roles against one stake. They share the same `ProviderObligations` tracker and the same balance map; they differ only in the gate. Storage settles on a proof of retrievability per byte-epoch; compute settles on an availability proof per epoch. When a provider's stake no longer covers what it owes, both shed coverage through the same recheck. See [`docs/COMPUTE.md`](COMPUTE.md) for the compute side of the same substrate.

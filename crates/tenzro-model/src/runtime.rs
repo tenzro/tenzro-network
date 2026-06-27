@@ -37,7 +37,7 @@ use crate::error::{ModelError, Result};
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::params::LlamaModelParams;
+use llama_cpp_2::model::params::{LlamaModelParams, LlamaSplitMode};
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::speculative::{MtpSpeculative, MtpSpeculativeParams};
@@ -404,6 +404,105 @@ impl ModelRuntime {
             "Model {} loaded in {:.2}s",
             model_id,
             elapsed.as_secs_f64(),
+        );
+
+        self.loaded_models
+            .insert(model_id.to_string(), Arc::new(tokio::sync::Mutex::new(loaded)));
+
+        Ok(())
+    }
+
+    /// Load a GGUF model split across a set of ggml RPC devices, in pipeline
+    /// order, for LAN cluster serving.
+    ///
+    /// `device_indices` are ggml backend-registry indices (one per pipeline
+    /// stage, in order) as returned by the cluster runtime's device resolver,
+    /// and `tensor_split` carries the per-stage proportions (the planner's
+    /// per-stage layer counts) so llama.cpp's layer split reproduces exactly
+    /// the assigned ranges. `split_mode` is forced to `Layer` — pipeline
+    /// parallelism is the only mode where solely boundary activations cross the
+    /// wire, which is what the LAN tunnel is sized for.
+    pub async fn load_model_clustered(
+        &self,
+        model_id: &str,
+        gguf_path: &Path,
+        context_length: Option<u32>,
+        device_indices: Vec<usize>,
+        tensor_split: Vec<f32>,
+    ) -> Result<()> {
+        if self.is_loaded(model_id) {
+            info!("Model {} already loaded", model_id);
+            return Ok(());
+        }
+        if device_indices.is_empty() {
+            return Err(ModelError::Other(format!(
+                "clustered load of '{}' requires at least one device",
+                model_id
+            )));
+        }
+
+        info!(
+            "Loading model {} clustered across {} devices from {}",
+            model_id,
+            device_indices.len(),
+            gguf_path.display()
+        );
+        let start = Instant::now();
+
+        let gguf_path_owned = gguf_path.to_path_buf();
+        let model_id_owned = model_id.to_string();
+        let backend = self.backend.clone();
+
+        let loaded = tokio::task::spawn_blocking(move || {
+            let model_params = LlamaModelParams::default()
+                .with_n_gpu_layers(1000)
+                .with_split_mode(LlamaSplitMode::Layer)
+                .with_devices(&device_indices)
+                .map_err(|e| {
+                    ModelError::Other(format!(
+                        "clustered load of '{}': device selection failed: {}",
+                        model_id_owned, e
+                    ))
+                })?
+                .with_tensor_split(&tensor_split);
+
+            let model =
+                LlamaModel::load_from_file(&backend, &gguf_path_owned, &model_params).map_err(
+                    |e| {
+                        ModelError::Other(format!(
+                            "Failed to load clustered GGUF model '{}': {}",
+                            model_id_owned, e
+                        ))
+                    },
+                )?;
+
+            let trained_ctx = model.n_ctx_train();
+            let effective_ctx = match context_length {
+                Some(requested) => trained_ctx.min(requested).min(MAX_CONTEXT_LENGTH),
+                None => trained_ctx.min(DEFAULT_CONTEXT_LENGTH),
+            };
+
+            info!(
+                "Model {} loaded (clustered): {} params, {} layers, effective_context={}",
+                model_id_owned,
+                model.n_params(),
+                model.n_layer(),
+                effective_ctx,
+            );
+
+            Ok::<LoadedModel, ModelError>(LoadedModel {
+                model,
+                backend,
+                context_length: effective_ctx,
+            })
+        })
+        .await
+        .map_err(|e| ModelError::Other(format!("Task join error: {}", e)))??;
+
+        info!(
+            "Model {} loaded clustered in {:.2}s",
+            model_id,
+            start.elapsed().as_secs_f64(),
         );
 
         self.loaded_models

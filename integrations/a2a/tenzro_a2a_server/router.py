@@ -152,6 +152,33 @@ def route_message(text: str) -> str:
         return "caip"
 
     # ------------------------------------------------------------------
+    # Tier 2e: Storage market, compute rental, MoE sharding, local discovery
+    #
+    # MoE and local-discovery phrases must precede the broad Tier 3 "model"
+    # and "network" routes because both share keywords.
+    # ------------------------------------------------------------------
+    if any(k in t for k in [
+        "expert", "moe", "shard map", "shard", "expert-shard",
+        "dispatch plan", "plan dispatch", "replication policy",
+    ]):
+        return "moe"
+    if any(k in t for k in [
+        "local peers", "local peer", "cluster", "discover peers",
+        "mdns", "reachability", "node profile", "hardware profile",
+    ]):
+        return "discovery"
+    if any(k in t for k in [
+        "storage", "store object", "storage deal", "store ",
+        "por challenge", "charge epoch",
+    ]):
+        return "storage"
+    if any(k in t for k in [
+        "compute rental", "compute provider", "book rental",
+        "settle epoch", "rent compute", "rental", "rent ",
+    ]):
+        return "compute"
+
+    # ------------------------------------------------------------------
     # Tier 3: Single-keyword domain routes
     # ------------------------------------------------------------------
     if any(k in t for k in ["sign", "encrypt", "decrypt", "keccak"]):

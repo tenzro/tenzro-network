@@ -18,7 +18,7 @@ This document describes the inference surface, the MoE serving primitives, MTP w
 
 The protocol layer treats AI compute as a coordinated resource. Three properties matter:
 
-1. **Provider unity.** A single provider registration covers every modality and every role. A provider declares its capacities through one `ProviderCapacity` record (`max_concurrent_requests`, `requests_per_second`, `max_batch_size`, `mtp_enabled`, `drafter_vram_gb`, `moe_holdings`, `moe_roles`, `iroh_endpoint_id`). The inference router consults the same record regardless of whether the request is dense chat, an MoE expert batch, a forecast call, or an embedding lookup.
+1. **Provider unity.** A single provider registration covers every modality and every role. A provider declares its capacities through one `ProviderCapacity` record (`max_concurrent_requests`, `requests_per_second`, `max_batch_size`, `mtp_enabled`, `drafter_vram_gb`, `moe_holdings`, `moe_roles`, `iroh_endpoint_id`). The inference router consults the same record regardless of whether the request is dense chat, an MoE expert batch, a forecast call, or an embedding lookup. The same `serves_ai()` role that lets a node serve a model also lets it rent out spare compute by the epoch — backed by the same stake. See [`docs/COMPUTE.md`](COMPUTE.md).
 2. **One settlement substrate.** Inference settles per call, per token, or through a micropayment channel — every path uses the same TDIP-bound `IdentityPaymentBinder`, the same delegation scope checks, and the same network commission.
 3. **Verifiability is co-designed with execution.** Plonky3 STARK proofs over the KoalaBear field cover inference output commitments; TEE attestation chains cover confidential inference; both anchor through on-chain commitment registries.
 
@@ -35,7 +35,7 @@ The crates that implement this:
 
 ### 2.1 Provider model
 
-A node runs as a model provider with `--role model_provider`, registers each model it can serve through `tenzro_serveModel` (or `tenzro model serve` on the CLI), and the registration writes through to `CF_MODEL_SERVICES`. The provider's TDIP identity is bound at registration; payments route to its MPC wallet.
+A node runs as a model provider with `--roles ai`, registers each model it can serve through `tenzro_serveModel` (or `tenzro model serve` on the CLI), and the registration writes through to `CF_MODEL_SERVICES`. The provider's TDIP identity is bound at registration; payments route to its MPC wallet.
 
 Provider economics:
 
@@ -125,7 +125,32 @@ MoE pipeline roles are typed on `ProviderCapacity.moe_roles: Vec<MoeProviderRole
 
 The view exposes `under_replicated(policy)` and `hot_experts(policy)` so a scheduler or governance layer can act on under-served or over-loaded experts.
 
-### 3.5 RPCs
+### 3.5 LAN clustering: layer-wise pipeline parallelism
+
+The expert-shard mode above splits a model across providers over the WAN. A single provider can also split a model across machines on its own local segment — several boxes that, jointly, hold a model none of them fits alone. To the wider network the cluster is one logical provider (`ProviderCapacity.lan_cluster: Option<LanCluster>`); internally the head fans the model across members over the LAN.
+
+The split is a layer-wise pipeline: the model's transformer layers are partitioned into contiguous ranges, one range per member, and a token flows head → member → member, each executing its range and forwarding only the boundary activation to the next. This is the deliberate choice for commodity local networks — pipeline parallelism moves only `hidden_dim × dtype_bytes` per token between members (fp16 activations regardless of weight quant), so it tolerates ordinary Ethernet/Wi-Fi RTTs. Expert-parallel all-to-all and tensor-parallel row-splits need NVLink/RDMA fabrics and collapse on a LAN.
+
+Because there is one GGUF on the head and the members are device executors, members may mix backends (CUDA, Metal, Vulkan, HIP, SYCL, CPU) in one pipeline, and quantization is not per-member. The one hard requirement is a shared llama.cpp build commit across all members — the RPC wire protocol has no version negotiation.
+
+Orchestration is deterministic; nothing in the placement path runs a model or makes a generative decision. `tenzro-model`'s `cluster` module decides:
+
+- **Fit policy** (`single_box_fit` / `should_cluster`) — a cluster is only worth forming when no single member can hold the model. The default fit policy is run-local, advise-only: if a single member fits, it serves alone and clustering is advised but not forced.
+- **Layer assignment** (`assign_layers`) — largest-remainder, VRAM-weighted bin-packing of layers into contiguous `PipelineStage { start_layer, end_layer }` ranges, floored at one layer per admitted member. More memory earns proportionally more layers.
+- **Hardware gate** (`hardware_gate`) — per-member admission: can the member load its range on its backend, and does its build commit match the cluster's. Rejections carry a typed `RejectReason` (`CommitMismatch`, `NotDataPlaneReachable`, `InsufficientVram`).
+- **Network gate / stage ordering** (`order_stages`) — a greedy nearest-neighbour chain over a probed latency/bandwidth matrix (`LinkProbe { rtt_ms, bandwidth_gbps }`), admitting only data-plane-reachable members. Members reachable only via relay or behind symmetric NAT are excluded — the relay budget carries a handful of tokens at most, never per-token pipeline traffic.
+
+Members are discovered from the runtime ggml device API (`list_llama_ggml_backend_devices()`), normalized into a `NodeProfile { llama_commit, cpu_arch, os, devices }`, and offered as `ClusterMember` candidates over local discovery (see NETWORK.md, mDNS / `LocalPeerSet`). Two members fed identical inputs compute the identical plan with no coordinator round.
+
+**From plan to running pipeline.** The deterministic plan above becomes a live pipeline in `tenzro-node`'s cluster-serving runtime. A node can act as the cluster **head**, a **member**, or both, and the runtime stays dormant until a plan activates it — a node that neither heads nor joins a cluster pays nothing.
+
+- **Member.** A member never exposes its ggml `rpc-server` socket on the network; the RPC wire protocol is unauthenticated and unsafe on an open network. Instead it subscribes to the authenticated libp2p cluster-tunnel overlay (see NETWORK.md) and, for each session a head opens, spawns a loopback `rpc-server` and splices the tunnel byte stream to that socket. One request-response pair is full-duplex: frames in, socket bytes out, return bytes piggybacked on the acknowledgement.
+- **Head.** The head consumes the plan's ordered stages. For each it opens a tunnel session to the member, binds a loopback TCP listener, bridges the accepted connection to the session, and registers `127.0.0.1:<port>` as a ggml RPC backend device. With every member registered in pipeline order it loads the single GGUF, selecting those devices with the plan's `--tensor-split` proportions so the runtime's proportional device-fill reproduces the assigned contiguous layer ranges. The loaded model is exposed to the inference path as one logical provider.
+- **Failover.** A dropped stage surfaces as a ggml load/decode failure; the serving path tears down the half-open sessions, asks the planner for a fresh plan over the still-reachable members, and reloads. Re-planning is deterministic, so two heads fed the same surviving-member set converge on the same replacement with no coordination round.
+
+**Auto-discovery.** Clustering does not require the caller to hand-supply members. An AI-serving node that is willing to join LAN clusters advertises a `ClusterProfile { llama_commit, backend, cap_key }` on its provider announcement (see NETWORK.md); nodes that omit it are never auto-clustered. When `tenzro_serveModel` is called with a `model_shape` but no explicit `cluster_members`, the head gathers candidates from gossip — itself (serving the first stage locally) plus every provider that advertised a `ClusterProfile` — and feeds them to the same fit policy and planner. A peer also seen on the local mDNS segment is treated as `LocalDirect` regardless of its announced WAN tier; the planner's hardware gate and stage ordering drop commit-mismatched, VRAM-starved, or non-data-plane-reachable candidates. Passing `force_single: true` opts out and forces a single-box load; passing explicit `cluster_members` overrides auto-discovery.
+
+### 3.6 RPCs
 
 - `tenzro_moeShardMap` — live shard map: per-expert holder list, replication factor, under-replicated experts, hot experts, role counts
 - `tenzro_moePlanDispatch` — given a list of per-token routing decisions, returns the per-holder batch plan plus token-level assignment so the caller can reassemble per-token outputs
@@ -133,7 +158,7 @@ The view exposes `under_replicated(policy)` and `hot_experts(policy)` so a sched
 - `tenzro_moeCatalogShape` — catalog-side MoE topology for a model: `num_experts`, `experts_per_token`, `shared_experts`, `params_per_expert_x10`
 - `tenzro_modelMetadata` — full catalog metadata for a model: `serving` profile (samplers, jinja, reasoning), `multimodal` + `mmproj_filename`, `drafter_id` / `mtp_kind` / `mtp_default_draft_n`, MoE `moe` shape, and `architecture`. The read API over the catalog's single source of truth, consumed by the CLI and SDKs.
 
-### 3.6 Catalog coverage
+### 3.7 Catalog coverage
 
 Catalog entries that declare a `moe: Some(MoeShape { ... })` topology:
 

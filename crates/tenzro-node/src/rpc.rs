@@ -1613,6 +1613,21 @@ async fn dispatch_request(
         "tenzro_getProviderSchedule" => handle_get_provider_schedule(node).await,
         "tenzro_setProviderPricing" => handle_set_provider_pricing(node, request.params).await,
         "tenzro_getProviderPricing" => handle_get_provider_pricing(node).await,
+        "tenzro_storageStoreObject" => handle_storage_store_object(node, request.params).await,
+        "tenzro_storageOpenDeal" => handle_storage_open_deal(node, request.params).await,
+        "tenzro_storageChargeEpoch" => handle_storage_charge_epoch(node, request.params).await,
+        "tenzro_storageDeal" | "tenzro_storageGetDeal" => handle_storage_get_deal(node, request.params).await,
+        "tenzro_storageSetPricing" => handle_storage_set_pricing(node, request.params).await,
+        "tenzro_storageStatus" => handle_storage_status(node).await,
+        "tenzro_computeBookRental" => handle_compute_book_rental(node, request.params).await,
+        "tenzro_computeSettleEpoch" => handle_compute_settle_epoch(node, request.params).await,
+        "tenzro_computeRental" | "tenzro_computeGetRental" => handle_compute_get_rental(node, request.params).await,
+        "tenzro_computeSetPricing" => handle_compute_set_pricing(node, request.params).await,
+        "tenzro_computeStatus" => handle_compute_status(node).await,
+        "tenzro_localPeers" => handle_local_peers(node).await,
+        "tenzro_nodeReachability" => handle_node_reachability(node).await,
+        "tenzro_nodeProfile" => handle_node_profile().await,
+        "tenzro_clusterPlan" => handle_cluster_plan(request.params).await,
         "tenzro_downloadModel" => handle_download_model(node, request.params).await,
         "tenzro_getDownloadProgress" => handle_get_download_progress(node, request.params).await,
         "tenzro_cancelDownload" => handle_cancel_download(node, request.params).await,
@@ -15552,44 +15567,70 @@ async fn handle_set_role(
         data: None,
     })?;
 
-    let role_str = params
-        .get("role")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "Missing 'role' parameter".to_string(),
-            data: None,
-        })?;
-
-    use tenzro_types::NetworkRole;
-
-    let new_role = match role_str {
-        "validator" => NetworkRole::Validator,
-        "model_provider" => NetworkRole::ModelProvider,
-        "tee_provider" => NetworkRole::TeeProvider,
-        "light_client" => NetworkRole::LightClient,
-        "full_node" => NetworkRole::FullNode,
-        "storage_provider" => NetworkRole::StorageProvider,
+    // Accept either a comma-separated string ("validator,storage,ai") or a
+    // JSON array of role strings (["validator","storage"]). A node may serve
+    // any combination of roles under one stake.
+    let roles_str: String = match params.get("roles") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
         _ => {
             return Err(JsonRpcError {
                 code: -32602,
-                message: format!(
-                    "Invalid role '{}'. Valid: validator, model_provider, tee_provider, light_client, full_node, storage_provider",
-                    role_str
-                ),
+                message: "Missing 'roles' parameter (comma-separated string or array of role names)".to_string(),
                 data: None,
             });
         }
     };
 
-    let previous_role = {
-        let mut role_lock = node.runtime_role.write();
-        let prev = *role_lock;
-        *role_lock = new_role;
+    use std::str::FromStr;
+    use tenzro_types::RoleSet;
+
+    let new_roles = RoleSet::from_str(&roles_str).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!(
+            "Invalid roles '{}': {}. Valid: validator, model_provider/ai, tee_provider/tee, storage, full_node, light_client",
+            roles_str, e
+        ),
+        data: None,
+    })?;
+
+    // Refuse to advertise a role this node's hardware cannot back. TEE requires
+    // detected enclave hardware; storage requires verified free disk. AI is
+    // permissionless (any node can run the smallest CPU model). Without this a
+    // node could claim to be a TEE/storage provider and collect work it can't
+    // honor.
+    node.validate_role_capability(&new_roles)
+        .await
+        .map_err(|message| JsonRpcError {
+            code: -32602,
+            message,
+            data: None,
+        })?;
+
+    // Connectivity soft-gate: a node opting into a serving role at runtime must
+    // be reachable from the network, or work routed to it would silently fail.
+    // Unlike the hardware gate above, this is meaningful only at runtime (the
+    // node has been live long enough to know its reachability), so it lives
+    // here rather than in the startup prune path.
+    node.validate_role_connectivity(&new_roles)
+        .map_err(|message| JsonRpcError {
+            code: -32602,
+            message,
+            data: None,
+        })?;
+
+    let previous_roles = {
+        let mut roles_lock = node.runtime_roles.write();
+        let prev = roles_lock.clone();
+        *roles_lock = new_roles.clone();
         prev
     };
 
-    info!("Node role changed from {:?} to {:?}", previous_role, new_role);
+    info!("Node roles changed from {} to {}", previous_roles, new_roles);
 
     // Broadcast role change via gossipsub status topic
     if let Some(network) = node.network() {
@@ -15598,8 +15639,8 @@ async fn handle_set_role(
             topic: "tenzro/status".to_string(),
             data: serde_json::to_vec(&serde_json::json!({
                 "type": "role_change",
-                "previous_role": format!("{:?}", previous_role),
-                "new_role": format!("{:?}", new_role),
+                "previous_roles": previous_roles.to_string(),
+                "new_roles": new_roles.to_string(),
             })).unwrap_or_default(),
         });
         if let Err(e) = network.broadcast("tenzro/status", status_msg).await {
@@ -15609,8 +15650,8 @@ async fn handle_set_role(
 
     Ok(serde_json::json!({
         "success": true,
-        "previous_role": format!("{:?}", previous_role),
-        "role": format!("{:?}", new_role),
+        "previous_roles": previous_roles.to_string(),
+        "roles": new_roles.to_string(),
     }))
 }
 
@@ -15724,6 +15765,638 @@ async fn handle_get_provider_pricing(node: &Arc<TenzroNode>) -> std::result::Res
         message: format!("Serialization failed: {}", e),
         data: None,
     })
+}
+
+/// Looks up this node's storage runtime, or returns a "not a storage provider"
+/// error when the StorageProvider role is not active.
+fn require_storage_runtime(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Arc<crate::storage_provider_runtime::StorageProviderRuntime>, JsonRpcError> {
+    node.storage_runtime().cloned().ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "node is not a storage provider (StorageProvider role not active or runtime unavailable)"
+            .to_string(),
+        data: None,
+    })
+}
+
+/// `tenzro_storageStoreObject` — erasure-code and publish an object's shards
+/// over the iroh transport. Params: `object_id`, `owner` (hex address),
+/// `data` (base64), optional `data_shards`/`parity_shards` (default 4+2).
+async fn handle_storage_store_object(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use base64::Engine as _;
+    let runtime = require_storage_runtime(node)?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let object_id = params
+        .get("object_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'object_id'".to_string(),
+            data: None,
+        })?
+        .to_string();
+    let owner = params
+        .get("owner")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let data_b64 = params
+        .get("data")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'data' (base64)".to_string(),
+            data: None,
+        })?;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid base64 'data': {}", e),
+            data: None,
+        })?;
+
+    let data_shards = params.get("data_shards").and_then(|v| v.as_u64()).unwrap_or(4) as usize;
+    let parity_shards = params.get("parity_shards").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+    let scheme = tenzro_storage_market::RedundancyScheme::erasure(data_shards, parity_shards)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid redundancy scheme: {}", e),
+            data: None,
+        })?;
+
+    runtime
+        .store_object(object_id.clone(), owner, &data, scheme)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("store_object failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "object_id": object_id,
+        "size_bytes": data.len(),
+        "data_shards": data_shards,
+        "parity_shards": parity_shards,
+    }))
+}
+
+/// `tenzro_storageOpenDeal` — open a streaming storage deal for a stored
+/// object. Params: `object_id`, `renter` (hex), `size_bytes`, `total_epochs`.
+/// The renter pre-funds from their deposit; per-epoch price = size × rate.
+async fn handle_storage_open_deal(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let runtime = require_storage_runtime(node)?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let object_id = params
+        .get("object_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'object_id'".to_string(),
+            data: None,
+        })?
+        .to_string();
+    let renter = parse_hex_address_param(&params, "renter")?;
+    let size_bytes = params
+        .get("size_bytes")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'size_bytes'".to_string(),
+            data: None,
+        })?;
+    let total_epochs = params
+        .get("total_epochs")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'total_epochs'".to_string(),
+            data: None,
+        })?;
+
+    let deal = runtime
+        .open_deal(object_id, renter, tenzro_types::asset::AssetId::tnzo(), size_bytes, total_epochs)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("open_deal failed: {}", e),
+            data: None,
+        })?;
+
+    serde_json::to_value(&deal).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization failed: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_storageChargeEpoch` — run one PoR-gated charge epoch for a deal.
+/// Draws/answers/verifies a retrievability challenge; charges only on a pass.
+/// Params: `deal_id`.
+async fn handle_storage_charge_epoch(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let runtime = require_storage_runtime(node)?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let deal_id = params
+        .get("deal_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'deal_id'".to_string(),
+            data: None,
+        })?;
+
+    let outcome = runtime.charge_epoch(deal_id).await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("charge_epoch failed: {}", e),
+        data: None,
+    })?;
+
+    let (status, slice) = match outcome {
+        tenzro_storage_market::ChargeOutcome::Charged { slice } => ("charged", slice),
+        tenzro_storage_market::ChargeOutcome::Missed => ("missed", 0),
+        tenzro_storage_market::ChargeOutcome::Closed { completed } => {
+            if completed {
+                ("closed_completed", 0)
+            } else {
+                ("closed_terminated", 0)
+            }
+        }
+    };
+    Ok(serde_json::json!({
+        "deal_id": deal_id,
+        "status": status,
+        "charged": status == "charged",
+        "slice_wei": slice.to_string(),
+    }))
+}
+
+/// `tenzro_storageGetDeal` — look up a storage deal by id. Params: `deal_id`.
+async fn handle_storage_get_deal(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let runtime = require_storage_runtime(node)?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let deal_id = params
+        .get("deal_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'deal_id'".to_string(),
+            data: None,
+        })?;
+
+    let deal = runtime.meter().deal(deal_id).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("deal lookup failed: {}", e),
+        data: None,
+    })?;
+    serde_json::to_value(&deal).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization failed: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_storageSetPricing` — set the byte-epoch pricing policy. Params:
+/// `mode` = "fixed" | "dynamic". For fixed: `rate` (wei/byte-epoch). For
+/// dynamic: `capacity` (byte-epochs), optional `min_rate`/`max_rate`.
+async fn handle_storage_set_pricing(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let runtime = require_storage_runtime(node)?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("fixed");
+
+    match mode {
+        "dynamic" => {
+            let capacity = parse_u128_amount(&params, "capacity").unwrap_or(0);
+            if capacity == 0 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: "dynamic pricing requires a non-zero 'capacity'".to_string(),
+                    data: None,
+                });
+            }
+            let min_rate = parse_u128_amount(&params, "min_rate").unwrap_or(1);
+            let max_rate = parse_u128_amount(&params, "max_rate").unwrap_or(u128::MAX);
+            runtime.enable_dynamic_pricing(capacity, min_rate, max_rate);
+            Ok(serde_json::json!({
+                "mode": "dynamic",
+                "capacity": capacity.to_string(),
+                "effective_rate_wei": runtime.effective_rate().to_string(),
+            }))
+        }
+        _ => Err(JsonRpcError {
+            code: -32602,
+            message: "set 'mode' to \"dynamic\"; fixed-rate is the spawn default and currently immutable via RPC"
+                .to_string(),
+            data: None,
+        }),
+    }
+}
+
+/// `tenzro_storageStatus` — summary of this node's storage-provider state.
+async fn handle_storage_status(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let runtime = require_storage_runtime(node)?;
+    Ok(serde_json::json!({
+        "is_storage_provider": true,
+        "effective_rate_wei": runtime.effective_rate().to_string(),
+        "object_count": runtime.store().object_count(),
+    }))
+}
+
+/// Looks up this node's compute-rental runtime, or returns a "not a compute
+/// provider" error when the node does not serve AI / the runtime is unavailable.
+fn require_compute_runtime(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Arc<crate::compute_rental_runtime::ComputeRentalRuntime>, JsonRpcError> {
+    node.compute_runtime().cloned().ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "node is not a compute provider (AI role not active or runtime unavailable)"
+            .to_string(),
+        data: None,
+    })
+}
+
+/// `tenzro_computeBookRental` — book a fixed-term compute rental against this
+/// provider. Params: `renter` (hex address), `total_epochs`. The renter
+/// pre-funds from their deposit; per-epoch price = the provider's effective
+/// rate. On success the consumer's locked deposit streams to the provider as
+/// epochs settle.
+async fn handle_compute_book_rental(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let runtime = require_compute_runtime(node)?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let renter = parse_hex_address_param(&params, "renter")?;
+    let total_epochs = params
+        .get("total_epochs")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'total_epochs'".to_string(),
+            data: None,
+        })?;
+
+    let rental = runtime
+        .book_rental(renter, tenzro_types::asset::AssetId::tnzo(), total_epochs)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("book_rental failed: {}", e),
+            data: None,
+        })?;
+
+    serde_json::to_value(&rental).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization failed: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_computeSettleEpoch` — settle one epoch of an active compute rental,
+/// gated on the provider's availability proof. Params: `rental_id`, optional
+/// `proof_valid` (default true). A valid proof streams the epoch's slice to the
+/// provider; an invalid/missing proof makes the renter whole from stake.
+async fn handle_compute_settle_epoch(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let runtime = require_compute_runtime(node)?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let rental_id = params
+        .get("rental_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'rental_id'".to_string(),
+            data: None,
+        })?;
+    let proof_valid = params
+        .get("proof_valid")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let outcome = runtime
+        .settle_epoch(rental_id, proof_valid)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("settle_epoch failed: {}", e),
+            data: None,
+        })?;
+
+    let (status, amount) = match outcome {
+        tenzro_settlement::rental::EpochOutcome::Settled { slice } => ("settled", slice),
+        tenzro_settlement::rental::EpochOutcome::Missed { made_whole } => ("missed", made_whole),
+        tenzro_settlement::rental::EpochOutcome::Closed { .. } => ("closed", 0),
+    };
+    Ok(serde_json::json!({
+        "rental_id": rental_id,
+        "status": status,
+        "settled": status == "settled",
+        "amount_wei": amount.to_string(),
+    }))
+}
+
+/// `tenzro_computeGetRental` — look up a compute rental by id. Params:
+/// `rental_id`.
+async fn handle_compute_get_rental(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let runtime = require_compute_runtime(node)?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let rental_id = params
+        .get("rental_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'rental_id'".to_string(),
+            data: None,
+        })?;
+
+    let rental = runtime
+        .manager()
+        .get_rental(rental_id)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("rental lookup failed: {}", e),
+            data: None,
+        })?;
+    serde_json::to_value(&rental).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization failed: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_computeSetPricing` — set the per-epoch pricing policy. Params:
+/// `mode` = "dynamic". For dynamic: `capacity` (epoch-slots), optional
+/// `min_rate`/`max_rate`. Fixed-rate is the spawn default.
+async fn handle_compute_set_pricing(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let runtime = require_compute_runtime(node)?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("fixed");
+
+    match mode {
+        "dynamic" => {
+            let capacity = parse_u128_amount(&params, "capacity").unwrap_or(0);
+            if capacity == 0 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: "dynamic pricing requires a non-zero 'capacity'".to_string(),
+                    data: None,
+                });
+            }
+            let min_rate = parse_u128_amount(&params, "min_rate").unwrap_or(1);
+            let max_rate = parse_u128_amount(&params, "max_rate").unwrap_or(u128::MAX);
+            runtime.enable_dynamic_pricing(capacity, min_rate, max_rate);
+            Ok(serde_json::json!({
+                "mode": "dynamic",
+                "capacity": capacity.to_string(),
+                "effective_rate_wei": runtime.effective_rate().to_string(),
+            }))
+        }
+        _ => Err(JsonRpcError {
+            code: -32602,
+            message: "set 'mode' to \"dynamic\"; fixed-rate is the spawn default and currently immutable via RPC"
+                .to_string(),
+            data: None,
+        }),
+    }
+}
+
+/// `tenzro_computeStatus` — summary of this node's compute-rental state.
+async fn handle_compute_status(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let runtime = require_compute_runtime(node)?;
+    let provider = node
+        .identity_registry()
+        .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+        .unwrap_or_default();
+    let active = runtime
+        .manager()
+        .get_rentals_by_provider(&provider)
+        .into_iter()
+        .filter(|r| r.status == tenzro_settlement::rental::RentalStatus::Active)
+        .count();
+    Ok(serde_json::json!({
+        "is_compute_provider": true,
+        "effective_rate_wei": runtime.effective_rate().to_string(),
+        "active_rentals": active,
+    }))
+}
+
+/// `tenzro_localPeers` — the peer IDs currently discovered on this node's
+/// local network segment via mDNS, with a count. When the network service is
+/// not running there is no local-peer set, so `available` is false and the
+/// list is empty.
+async fn handle_local_peers(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    match node.local_peers() {
+        Some(set) => {
+            let mut peers = set.snapshot();
+            peers.sort();
+            Ok(serde_json::json!({
+                "local_peers": peers,
+                "count": peers.len(),
+                "available": true,
+            }))
+        }
+        None => Ok(serde_json::json!({
+            "local_peers": [],
+            "count": 0,
+            "available": false,
+        })),
+    }
+}
+
+/// `tenzro_nodeReachability` — this node's sustained connectivity tier. When
+/// the network service is not running the tier is unknown, so `available` is
+/// false and `tier` is null.
+async fn handle_node_reachability(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    match node.reachability_tier() {
+        Some(tier) => Ok(serde_json::json!({
+            "tier": tier.as_str(),
+            "available": true,
+        })),
+        None => Ok(serde_json::json!({
+            "tier": Value::Null,
+            "available": false,
+        })),
+    }
+}
+
+/// `tenzro_nodeProfile` — the local node's hardware self-profile from the ggml
+/// runtime device API: the linked llama.cpp build commit, CPU architecture,
+/// operating system, every detected compute device, and the derived serving
+/// values (capacity in GB, backend, capability key).
+async fn handle_node_profile() -> std::result::Result<Value, JsonRpcError> {
+    let profile = tenzro_model::cluster::detect_node_profile();
+    let mut value = serde_json::to_value(&profile).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Serialization failed: {}", e),
+        data: None,
+    })?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "serving_vram_gb".to_string(),
+            serde_json::json!(profile.serving_vram_gb()),
+        );
+        obj.insert(
+            "serving_backend".to_string(),
+            serde_json::to_value(profile.serving_backend()).unwrap_or(Value::Null),
+        );
+        obj.insert(
+            "serving_cap_key".to_string(),
+            serde_json::json!(profile.serving_cap_key()),
+        );
+    }
+    Ok(value)
+}
+
+/// `tenzro_clusterPlan` — deterministic cluster placement for a model across a
+/// set of candidate members. Pure function of the params: it computes the fit
+/// decision, and when a cluster forms, the VRAM-weighted layer assignment
+/// ordered to minimize pipeline transfer cost. No node state is read.
+///
+/// Params: `{ "model": { "layers": u32, "hidden_dim": u32, "total_vram_gb":
+/// f32 }, "members": [ <ClusterMember> ... ] }`.
+async fn handle_cluster_plan(params: Option<Value>) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_model::cluster;
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let model: cluster::ModelShape = params
+        .get("model")
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model'".to_string(),
+            data: None,
+        })
+        .and_then(|m| {
+            serde_json::from_value(m.clone()).map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid 'model': {}", e),
+                data: None,
+            })
+        })?;
+
+    let members: Vec<cluster::ClusterMember> = params
+        .get("members")
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'members'".to_string(),
+            data: None,
+        })
+        .and_then(|m| {
+            serde_json::from_value(m.clone()).map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid 'members': {}", e),
+                data: None,
+            })
+        })?;
+
+    let user_forced = params
+        .get("user_forced")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let decision = cluster::should_cluster(model, members.iter(), user_forced);
+    let activation_bytes = model.activation_bytes_per_token();
+
+    let mut stages = Vec::new();
+    if decision.forms_cluster() {
+        // No probe matrix is carried in the params, so ordering falls back to
+        // the address-stable tie-break; the assignment is keyed by address.
+        let probes = std::collections::HashMap::new();
+        let head = members
+            .first()
+            .map(|m| m.address)
+            .unwrap_or_else(tenzro_types::primitives::Address::zero);
+        let gate = cluster::order_stages(head, &members, &probes, activation_bytes);
+        let assignment = cluster::assign_layers(model.layers, &members);
+        for address in &gate.ordered {
+            if let Some(stage) = assignment.get(address) {
+                stages.push(serde_json::json!({
+                    "address": hex::encode(address.as_bytes()),
+                    "start_layer": stage.start_layer,
+                    "end_layer": stage.end_layer,
+                }));
+            }
+        }
+    }
+
+    let fit = match decision {
+        cluster::FitDecision::RunLocal => "RunLocal",
+        cluster::FitDecision::ClusterRequired => "ClusterRequired",
+        cluster::FitDecision::ClusterForced => "ClusterForced",
+    };
+
+    Ok(serde_json::json!({
+        "fit": fit,
+        "forms_cluster": decision.forms_cluster(),
+        "stages": stages,
+        "activation_bytes_per_token": activation_bytes,
+    }))
 }
 
 async fn handle_download_model(
@@ -15960,10 +16633,193 @@ async fn handle_cancel_download(
     }))
 }
 
+/// Map an announced reachability tier string onto the cluster module's
+/// data-plane reachability. The gossiped `network_profile.reachability` is one
+/// of `"direct"`, `"relay_only"`, `"unreachable"`, or empty (tier not
+/// reported). A peer also seen on the local mDNS segment is promoted to
+/// `LocalDirect` regardless of its announced WAN tier — the LAN path is the
+/// one the pipeline actually uses. Unknown / unreachable tiers map to
+/// `SymmetricNat`, which the planner's stage ordering excludes.
+fn member_reachability_from_announcement(
+    tier: &str,
+    on_local_segment: bool,
+) -> tenzro_model::cluster::MemberReachability {
+    use tenzro_model::cluster::MemberReachability;
+    if on_local_segment {
+        return MemberReachability::LocalDirect;
+    }
+    match tier {
+        "direct" => MemberReachability::Direct,
+        "relay_only" => MemberReachability::RelayOnly,
+        _ => MemberReachability::SymmetricNat,
+    }
+}
+
+/// Gather LAN cluster-member candidates from gossip, including the local node
+/// itself as the head.
+///
+/// The head always serves the first pipeline stage locally, so it is added as
+/// a `LocalDirect` member built from its own ggml device profile. Every remote
+/// provider that advertised a [`ClusterProfile`](tenzro_types::ClusterProfile)
+/// becomes a candidate: address, VRAM, and serving facts come straight from
+/// the announcement, and the member endpoint carries the announcing peer's id
+/// after a `#` so the head dials it over the cluster tunnel. Per the
+/// auto-discovery policy we include every cluster-willing provider; the
+/// planner's hardware gate and stage ordering drop commit-mismatched,
+/// VRAM-starved, or non-data-plane-reachable members.
+async fn discover_cluster_members(
+    node: &Arc<TenzroNode>,
+) -> Vec<tenzro_model::cluster::ClusterMember> {
+    use tenzro_model::cluster::{self, MemberReachability};
+
+    let mut members: Vec<cluster::ClusterMember> = Vec::new();
+
+    // The head itself, serving the first stage. Built from the local device
+    // profile so its commit / backend / cap_key match what it will load with.
+    let self_address = node
+        .identity_registry()
+        .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+        .unwrap_or_else(tenzro_types::primitives::Address::zero);
+    let self_peer = match node.network() {
+        Some(net) => net.local_peer_id().await.ok().map(|p| p.to_string()),
+        None => None,
+    };
+    if let Some(self_peer) = self_peer {
+        let profile = cluster::detect_node_profile();
+        members.push(cluster::ClusterMember {
+            address: self_address,
+            vram_gb: profile.serving_vram_gb(),
+            backend: profile.serving_backend(),
+            cap_key: profile.serving_cap_key(),
+            llama_commit: profile.llama_commit.clone(),
+            // The head reaches its own stage in-process, but the endpoint
+            // still carries the peer suffix for a uniform launch-stage shape.
+            local_endpoint: format!("self#{}", self_peer),
+            reachability: MemberReachability::LocalDirect,
+        });
+    }
+
+    // Remote providers that advertised a cluster profile.
+    let local_peers = node.local_peers();
+    for entry in node.network_providers_snapshot() {
+        let ann = entry.announcement;
+        let Some(cp) = ann.cluster_profile.as_ref() else {
+            continue;
+        };
+        let Ok(address) = tenzro_types::primitives::Address::from_hex(&ann.provider_address) else {
+            continue;
+        };
+        let on_local_segment = local_peers
+            .as_ref()
+            .map(|set| set.contains(&ann.peer_id))
+            .unwrap_or(false);
+        let reachability = member_reachability_from_announcement(
+            &ann.network_profile.reachability,
+            on_local_segment,
+        );
+        // The endpoint host is cosmetic — the head dials the member over the
+        // cluster tunnel keyed by the peer id appended after `#`.
+        let endpoint_host = if ann.rpc_endpoint.is_empty() {
+            ann.peer_id.clone()
+        } else {
+            ann.rpc_endpoint.clone()
+        };
+        members.push(cluster::ClusterMember {
+            address,
+            vram_gb: ann.hardware.vram_gb as f32,
+            backend: cluster::Backend::from_ggml_name(&cp.backend),
+            cap_key: cp.cap_key.clone(),
+            llama_commit: cp.llama_commit.clone(),
+            local_endpoint: format!("{}#{}", endpoint_host, ann.peer_id),
+            reachability,
+        });
+    }
+
+    members
+}
+
+/// Parse the optional clustering inputs from a `tenzro_serveModel` request.
+///
+/// Returns `Some((shape, members, user_forced))` when clustering should be
+/// attempted. `force_single` always returns `None`. The model shape is taken
+/// from a caller-supplied `model_shape` when present, otherwise derived from
+/// the GGUF header at `gguf_path` — so clustering auto-triggers on an
+/// oversized model with no caller input. Members are caller-supplied when
+/// present; otherwise auto-discovered from LAN gossip (including the head
+/// itself). A run with no discovered members other than the head still
+/// proceeds — the fit policy simply keeps it single-box.
+async fn serve_model_cluster_plan(
+    node: &Arc<TenzroNode>,
+    params: &Value,
+    gguf_path: &std::path::Path,
+) -> Option<(
+    tenzro_model::cluster::ModelShape,
+    Vec<tenzro_model::cluster::ClusterMember>,
+    bool,
+)> {
+    if params
+        .get("force_single")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    // Caller-supplied shape wins; otherwise read it from the GGUF header. A
+    // header we can't parse means we can't size the model, so fall back to a
+    // single-box load rather than guessing.
+    let shape: tenzro_model::cluster::ModelShape = match params.get("model_shape") {
+        Some(v) => serde_json::from_value(v.clone()).ok()?,
+        None => match tenzro_model::gguf_shape::read_model_shape(gguf_path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(error = %e, "cluster: could not read model shape from GGUF; single-box");
+                return None;
+            }
+        },
+    };
+
+    // Caller-supplied members override auto-discovery; otherwise gather from
+    // gossip. The head is always present in the auto-discovered set.
+    let members: Vec<tenzro_model::cluster::ClusterMember> = match params.get("cluster_members") {
+        Some(v) => serde_json::from_value(v.clone()).ok()?,
+        None => discover_cluster_members(node).await,
+    };
+    if members.is_empty() {
+        return None;
+    }
+    let user_forced = params
+        .get("user_forced")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Some((shape, members, user_forced))
+}
+
+/// Run the deterministic planner chain to fold candidate members into an
+/// ordered, layer-assigned [`LaunchPlan`]. The head is the first member; with
+/// no live probe matrix the ordering falls back to the address-stable tie-break
+/// (identical to the `tenzro_clusterPlan` endpoint).
+fn build_launch_plan(
+    shape: tenzro_model::cluster::ModelShape,
+    members: &[tenzro_model::cluster::ClusterMember],
+) -> tenzro_model::cluster::LaunchPlan {
+    use tenzro_model::cluster;
+    let activation_bytes = shape.activation_bytes_per_token();
+    let probes = std::collections::HashMap::new();
+    let head = members
+        .first()
+        .map(|m| m.address)
+        .unwrap_or_else(tenzro_types::primitives::Address::zero);
+    let gate = cluster::order_stages(head, members, &probes, activation_bytes);
+    let assignment = cluster::assign_layers(shape.layers, members);
+    cluster::launch_plan(&gate, &assignment, members)
+}
+
 async fn handle_serve_model(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_model::cluster;
+
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
         message: "Missing params".to_string(),
@@ -16072,15 +16928,95 @@ async fn handle_serve_model(
             .unwrap_or_else(|| gguf_path.to_string_lossy().to_string())
     };
 
-    // Load model into runtime
-    model_runtime
-        .load_model_with_context(model_id, std::path::Path::new(&gguf_path), Some(entry.context_length))
-        .await
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Failed to load model: {}", e),
-            data: None,
-        })?;
+    // Decide whether to serve this model as a single-box load or split it
+    // across a LAN pipeline cluster. Clustering is opt-out: the model shape is
+    // read from the GGUF header (or a caller-supplied `model_shape`), members
+    // are auto-discovered from LAN gossip (or caller-supplied), and the fit
+    // policy forms a cluster when the model does not fit the biggest single
+    // member (or when `user_forced` is set). `force_single` overrides this
+    // back to a single-box load.
+    let cluster_attempt =
+        serve_model_cluster_plan(node, &params, std::path::Path::new(&gguf_path)).await;
+    let mut served_clustered = false;
+
+    if let Some((shape, members, user_forced)) = cluster_attempt {
+        let decision = cluster::should_cluster(shape, members.iter(), user_forced);
+        if decision.forms_cluster() {
+            let runtime = node
+                .cluster_serving_runtime
+                .as_ref()
+                .ok_or_else(|| JsonRpcError {
+                    code: -32000,
+                    message: "Cluster-serving runtime not initialized (node not serving AI?)"
+                        .to_string(),
+                    data: None,
+                })?;
+
+            let plan = build_launch_plan(shape, &members);
+            if plan.stages.is_empty() {
+                return Err(JsonRpcError {
+                    code: -32000,
+                    message: "Cluster plan produced no serviceable stages".to_string(),
+                    data: None,
+                });
+            }
+
+            let endpoints = runtime.head_attach_members(&plan).await.map_err(|e| {
+                JsonRpcError {
+                    code: -32000,
+                    message: format!("Failed to attach cluster members: {}", e),
+                    data: None,
+                }
+            })?;
+            let device_indices = runtime.head_device_indices(&endpoints).map_err(|e| {
+                JsonRpcError {
+                    code: -32000,
+                    message: format!("Failed to resolve cluster RPC devices: {}", e),
+                    data: None,
+                }
+            })?;
+            let tensor_split: Vec<f32> =
+                plan.tensor_split.iter().map(|&w| w as f32).collect();
+
+            if let Err(e) = model_runtime
+                .load_model_clustered(
+                    model_id,
+                    std::path::Path::new(&gguf_path),
+                    Some(entry.context_length),
+                    device_indices,
+                    tensor_split,
+                )
+                .await
+            {
+                // The split load failed — tear down the half-open sessions so
+                // a later single-box retry starts from a clean device registry.
+                runtime.head_teardown().await;
+                return Err(JsonRpcError {
+                    code: -32000,
+                    message: format!("Failed to load clustered model: {}", e),
+                    data: None,
+                });
+            }
+            served_clustered = true;
+            tracing::info!(
+                model_id = %model_id,
+                stages = plan.stages.len(),
+                "Serving model across LAN pipeline cluster",
+            );
+        }
+    }
+
+    if !served_clustered {
+        // Single-box load (no cluster warranted, or no candidates supplied).
+        model_runtime
+            .load_model_with_context(model_id, std::path::Path::new(&gguf_path), Some(entry.context_length))
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Failed to load model: {}", e),
+                data: None,
+            })?;
+    }
 
     // Mark model as served
     node.served_models.insert(model_id.to_string(), true);
@@ -18677,6 +19613,7 @@ async fn handle_list_providers(
                 "rpc_endpoint": entry.announcement.rpc_endpoint,
                 "status": entry.announcement.status,
                 "timestamp": entry.announcement.timestamp,
+                "reachability": entry.announcement.network_profile.reachability,
                 "source": "network",
             }));
         }
@@ -36418,13 +37355,14 @@ async fn handle_vrf_generate_keypair(
     }))
 }
 
-/// Returns the node's current runtime role plus the local peer identity
-/// (when the network layer is up). Useful for operators verifying which role
-/// a deployed pod has settled into after `--role` plus any runtime promotion.
+/// Returns the node's current runtime roles plus the local peer identity
+/// (when the network layer is up). Useful for operators verifying which roles
+/// a deployed pod has settled into after `--roles` plus any runtime promotion.
 async fn handle_get_role(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
-    let role = *node.runtime_role.read();
+    let roles = node.runtime_roles.read().clone();
     let mut out = serde_json::json!({
-        "role": format!("{:?}", role),
+        "roles": roles.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
+        "roles_str": roles.to_string(),
     });
     if let Some(network) = node.network()
         && let Ok(peer_id) = network.local_peer_id().await {
@@ -41068,7 +42006,7 @@ mod aa_pre_sign_tests {
     fn make_user_op(sender: &[u8; 20], call_data: Vec<u8>) -> tenzro_vm::UserOperation {
         tenzro_vm::UserOperation {
             sender: sender.to_vec(),
-            nonce: 0,
+            nonce: [0u8; 32],
             factory: Vec::new(),
             factory_data: Vec::new(),
             call_data,
@@ -41435,5 +42373,45 @@ mod canton_auth_gate_tests {
     fn canton_my_analytics_is_not_admin_gated() {
         // Subject self-read.
         assert!(!requires_admin_token("tenzro_canton_getMyAnalytics"));
+    }
+}
+
+#[cfg(test)]
+mod cluster_discovery_tests {
+    use super::member_reachability_from_announcement;
+    use tenzro_model::cluster::MemberReachability;
+
+    #[test]
+    fn local_segment_overrides_announced_tier() {
+        // A peer seen on mDNS is LocalDirect even if it only announced relay.
+        let r = member_reachability_from_announcement("relay_only", true);
+        assert_eq!(r, MemberReachability::LocalDirect);
+    }
+
+    #[test]
+    fn direct_tier_maps_to_direct() {
+        let r = member_reachability_from_announcement("direct", false);
+        assert_eq!(r, MemberReachability::Direct);
+    }
+
+    #[test]
+    fn relay_tier_maps_to_relay_only() {
+        let r = member_reachability_from_announcement("relay_only", false);
+        assert_eq!(r, MemberReachability::RelayOnly);
+    }
+
+    #[test]
+    fn unknown_or_empty_tier_is_excluded_by_planner() {
+        // Empty / unreachable tiers map to SymmetricNat, which order_stages
+        // drops from the data plane.
+        assert_eq!(
+            member_reachability_from_announcement("", false),
+            MemberReachability::SymmetricNat
+        );
+        assert_eq!(
+            member_reachability_from_announcement("unreachable", false),
+            MemberReachability::SymmetricNat
+        );
+        assert!(!member_reachability_from_announcement("unreachable", false).data_plane_eligible());
     }
 }

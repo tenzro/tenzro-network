@@ -71,7 +71,7 @@ pub use transaction::{Transaction, TransactionType, SignedTransaction};
 pub use block::{Block, BlockHeader, ConsensusProof};
 pub use account::{Account, AccountState};
 pub use asset::{AssetId, AssetType, StablecoinType, AssetInfo};
-pub use network::{NetworkRole, PeerInfo, NodeInfo};
+pub use network::{NetworkRole, NodeInfo, PeerInfo, RoleSet};
 pub use tee::{TeeVendor, AttestationReport, AttestationResult, TeeCapacity, TeeProviderInfo};
 pub use agent::{AgentIdentity, AgentConfig, AgentMessage, AgentMessageType, Capability};
 pub use model::{ModelInfo, ModelLoadInfo, ModelModality, MoeMetadata, MoeRoutingStrategy, MoeExpertHolding, MoeExpertResidency, MoeProviderRole, InferenceRequest, InferenceResponse, InferenceParameters, InferenceProvider, ProvenanceManifest, ProviderCapacity, PricingConfig};
@@ -119,7 +119,7 @@ pub use constants::*;
 pub use runtime::{
     ModelClass, ExecutionMode, ArtifactCompleteness, ArtifactType, KVProfile, WorkerRole,
     ExecutionSupport, ModelTopology, PlacementConstraints, RoutingPolicy, RequiredExecution,
-    RuntimeSupport, TrustProfile, NodeNetworkProfile, ArtifactMetadata,
+    RuntimeSupport, TrustProfile, NodeNetworkProfile, ClusterProfile, ArtifactMetadata,
     ExecutionPlan, ExecutionReceipt, CapabilityResolution,
 };
 pub use cortex::{

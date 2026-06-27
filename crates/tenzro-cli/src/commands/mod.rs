@@ -93,6 +93,8 @@ pub mod institution;
 pub mod global_supply;
 pub mod presign;
 pub mod moe;
+pub mod discover;
+pub mod cluster;
 
 // Re-export command types
 pub use node::NodeCommand;
@@ -171,3 +173,5 @@ pub use hyperlane::HyperlaneCommand;
 pub use axelar::AxelarCommand;
 pub use babylon::BabylonCommand;
 pub use caip::CaipCommand;
+pub use discover::DiscoverCommand;
+pub use cluster::ClusterCommand;

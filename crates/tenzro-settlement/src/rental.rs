@@ -41,6 +41,7 @@
 //! only requests make-whole debits against the provider's bonded stake.
 
 use crate::error::{Result, SettlementError};
+use crate::obligations::{ObligationSource, ProviderObligations};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -204,6 +205,11 @@ pub struct RentalManager {
     miss_threshold: u32,
     /// Optional persistent backend; write-through to `CF_SETTLEMENTS`.
     storage: Option<Arc<dyn KvStore>>,
+    /// Optional shared cross-service coverage view. When set, this manager
+    /// publishes each provider's *rental* per-epoch exposure here so a
+    /// multi-role node's storage deals admit against stake net of rentals
+    /// (and vice versa). When unset, coverage is rental-only (legacy behavior).
+    obligations: Option<Arc<ProviderObligations>>,
 }
 
 impl std::fmt::Debug for RentalManager {
@@ -232,6 +238,7 @@ impl RentalManager {
             stake_ledger,
             miss_threshold: DEFAULT_MISS_TERMINATION_THRESHOLD,
             storage: None,
+            obligations: None,
         }
     }
 
@@ -250,8 +257,10 @@ impl RentalManager {
             stake_ledger,
             miss_threshold: DEFAULT_MISS_TERMINATION_THRESHOLD,
             storage: Some(storage),
+            obligations: None,
         };
         mgr.hydrate();
+        mgr.republish_all_exposure();
         mgr
     }
 
@@ -259,6 +268,40 @@ impl RentalManager {
     pub fn with_miss_threshold(mut self, threshold: u32) -> Self {
         self.miss_threshold = threshold;
         self
+    }
+
+    /// Attaches a shared cross-service coverage tracker. After attaching, the
+    /// manager publishes every provider's current rental exposure so storage
+    /// (or other services) admit against the combined window. Call once at
+    /// construction, before booking.
+    pub fn with_obligations(mut self, obligations: Arc<ProviderObligations>) -> Self {
+        self.obligations = Some(obligations);
+        self.republish_all_exposure();
+        self
+    }
+
+    /// Pushes a provider's current rental per-epoch exposure into the shared
+    /// tracker, if one is attached. No-op otherwise.
+    fn publish_exposure(&self, provider: &Address) {
+        if let Some(obs) = &self.obligations {
+            obs.set(provider, ObligationSource::Rental, self.active_exposure(provider));
+        }
+    }
+
+    /// Recomputes and publishes exposure for every provider with rentals.
+    /// Used after hydration or when a tracker is first attached.
+    fn republish_all_exposure(&self) {
+        if self.obligations.is_none() {
+            return;
+        }
+        let providers: Vec<Address> = self
+            .rentals_by_provider
+            .iter()
+            .map(|e| *e.key())
+            .collect();
+        for provider in providers {
+            self.publish_exposure(&provider);
+        }
     }
 
     fn rental_storage_key(rental_id: &str) -> Vec<u8> {
@@ -409,14 +452,26 @@ impl RentalManager {
         let total_value = price_per_epoch.saturating_mul(total_epochs as u128);
 
         // Coverage admission: provider stake must cover this new rental's
-        // per-epoch slice on top of all existing active exposure.
-        let projected_exposure = self
+        // per-epoch slice on top of all existing active rental exposure AND any
+        // exposure from other services (storage) sharing the same stake.
+        let new_rental_exposure = self
             .active_exposure(&provider)
             .saturating_add(price_per_epoch);
         let stake = self.stake_ledger.available_stake(&provider);
-        if stake < projected_exposure {
+        let admitted = match &self.obligations {
+            Some(obs) => {
+                obs.can_admit(&provider, ObligationSource::Rental, new_rental_exposure, stake)
+            }
+            None => stake >= new_rental_exposure,
+        };
+        if !admitted {
+            let other = self
+                .obligations
+                .as_ref()
+                .map(|o| o.exposure_excluding(&provider, ObligationSource::Rental))
+                .unwrap_or(0);
             return Err(SettlementError::InsufficientFunds {
-                required: projected_exposure,
+                required: new_rental_exposure.saturating_add(other),
                 available: stake,
             });
         }
@@ -464,6 +519,7 @@ impl RentalManager {
             .push(rental_id.clone());
 
         self.persist_rental_atomic(&rental, true)?;
+        self.publish_exposure(&provider);
 
         info!(
             "Booked rental {} renter={} provider={} {}x{} (total {})",
@@ -560,6 +616,9 @@ impl RentalManager {
         };
 
         self.persist_rental_atomic(&snapshot, indices_changed)?;
+        if snapshot.status != RentalStatus::Active {
+            self.publish_exposure(&snapshot.provider);
+        }
 
         match &outcome {
             EpochOutcome::Settled { slice } => debug!(
@@ -620,6 +679,7 @@ impl RentalManager {
             rental.clone()
         };
         self.persist_rental_atomic(&snapshot, false)?;
+        self.publish_exposure(&snapshot.provider);
         info!("Rental {} terminated: renter underfunded", rental_id);
         Ok(true)
     }
@@ -694,6 +754,7 @@ impl RentalManager {
         }
 
         if !shed.is_empty() {
+            self.publish_exposure(provider);
             warn!(
                 "Coverage shed {} rental(s) for provider {} after stake drop to {}",
                 shed.len(),
@@ -984,6 +1045,52 @@ mod tests {
             RentalStatus::Terminated
         );
         assert_eq!(mgr.active_exposure(&provider), 1_000);
+    }
+
+    #[test]
+    fn shared_obligations_admit_rental_net_of_storage() {
+        // Provider stake 1500. A storage source has pre-registered 1000 of
+        // per-epoch exposure on the SAME provider. A new 1000/epoch rental must
+        // be rejected (1000 storage + 1000 rental = 2000 > 1500), while a
+        // 400/epoch rental fits (1000 + 400 = 1400 <= 1500).
+        let renter = Address::new([1u8; 32]);
+        let provider = Address::new([2u8; 32]);
+        let balances = Arc::new(DashMap::new());
+        balances.insert((renter, AssetId::tnzo()), 1_000_000);
+        let ledger = TestStakeLedger::with_stake(provider, 1_500);
+        let obligations = Arc::new(ProviderObligations::new());
+        obligations.set(&provider, ObligationSource::Storage, 1_000);
+
+        let mgr = RentalManager::new(balances, ledger).with_obligations(obligations.clone());
+
+        let err = mgr
+            .book_rental(renter, provider, AssetId::tnzo(), 1_000, 5)
+            .unwrap_err();
+        assert!(matches!(err, SettlementError::InsufficientFunds { .. }));
+
+        let ok = mgr.book_rental(renter, provider, AssetId::tnzo(), 400, 5);
+        assert!(ok.is_ok());
+        // Rental exposure is now published into the shared tracker.
+        assert_eq!(obligations.exposure_for(&provider, ObligationSource::Rental), 400);
+        assert_eq!(obligations.total_exposure(&provider), 1_400);
+    }
+
+    #[test]
+    fn closing_rental_clears_published_exposure() {
+        let renter = Address::new([1u8; 32]);
+        let provider = Address::new([2u8; 32]);
+        let balances = Arc::new(DashMap::new());
+        balances.insert((renter, AssetId::tnzo()), 100_000);
+        let ledger = TestStakeLedger::with_stake(provider, 10_000);
+        let obligations = Arc::new(ProviderObligations::new());
+        let mgr = RentalManager::new(balances, ledger).with_obligations(obligations.clone());
+
+        let r = mgr
+            .book_rental(renter, provider, AssetId::tnzo(), 1_000, 1)
+            .unwrap();
+        assert_eq!(obligations.exposure_for(&provider, ObligationSource::Rental), 1_000);
+        mgr.settle_epoch(&r.rental_id, true).unwrap(); // completes term
+        assert_eq!(obligations.exposure_for(&provider, ObligationSource::Rental), 0);
     }
 
     #[test]

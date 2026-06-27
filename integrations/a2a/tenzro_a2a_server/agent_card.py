@@ -1384,6 +1384,118 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "inputModes": ["application/json"],
                 "outputModes": ["application/json"],
             },
+            {
+                "id": "storage",
+                "name": "Decentralized Storage",
+                "description": (
+                    "Content-addressed storage on the iroh data plane, billed per "
+                    "byte-epoch and held to a proof of retrievability. Store an "
+                    "object with an erasure-coded redundancy scheme, open a "
+                    "streaming deal (the renter pre-funds total epochs from their "
+                    "deposit), run a retrievability-gated charge epoch, look up a "
+                    "deal, set the byte-epoch pricing policy (fixed or "
+                    "network-dynamic), and read this node's storage-provider "
+                    "status. Storage and compute rental register against one "
+                    "shared coverage budget per provider — a single stake backs "
+                    "both."
+                ),
+                "tags": [
+                    "storage", "por", "byte-epoch", "iroh", "redundancy",
+                    "deal", "provider",
+                ],
+                "examples": [
+                    "Store an object with a 4+2 redundancy scheme",
+                    "Open a storage deal for object <id> over 100 epochs",
+                    "Charge one retrievability-gated epoch on deal <id>",
+                    "Look up storage deal <id>",
+                    "Set dynamic byte-epoch pricing with capacity 1e12",
+                    "Show this node's storage-provider status",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "compute",
+                "name": "Compute Rental",
+                "description": (
+                    "Rent this node's compute against its stake. Book a rental "
+                    "(the renter pre-funds total epochs from their deposit), "
+                    "settle one epoch gated on the provider's availability proof "
+                    "(a valid proof streams the epoch slice to the provider; an "
+                    "invalid or missing proof makes the renter whole from stake), "
+                    "look up a rental, set the per-epoch pricing policy (fixed or "
+                    "network-dynamic), and read this node's compute-rental "
+                    "status. Shares one coverage budget with storage."
+                ),
+                "tags": [
+                    "compute", "rental", "availability-proof", "epoch",
+                    "pricing", "provider",
+                ],
+                "examples": [
+                    "Book a compute rental over 50 epochs",
+                    "Settle epoch 7 of rental <id>",
+                    "Look up compute rental <id>",
+                    "Set dynamic compute pricing with capacity 1e9",
+                    "Show this node's compute-rental status",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "moe",
+                "name": "Distributed MoE Serving",
+                "description": (
+                    "Decentralized mixture-of-experts expert-shard serving. Read "
+                    "the shard map for a model (which providers hold each "
+                    "(layer, expert), per-expert replication, under-replicated "
+                    "and hot experts, role counts), build a dispatch plan from "
+                    "per-token top-k routing decisions, read the "
+                    "governance-tuned replication policy, and read the "
+                    "catalog-side MoE topology (num_experts, experts_per_token, "
+                    "shared_experts)."
+                ),
+                "tags": [
+                    "moe", "expert-shard", "dispatch", "replication",
+                    "routing", "inference",
+                ],
+                "examples": [
+                    "Show the MoE shard map for model <id>",
+                    "Plan dispatch for top-k routings on model <id>",
+                    "Read the current MoE replication policy",
+                    "Read the catalog MoE topology for model <id>",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "discovery",
+                "name": "Local Discovery & LAN Clustering",
+                "description": (
+                    "Local-segment discovery and LAN cluster planning. List "
+                    "peers discovered on this node's local segment via mDNS, "
+                    "read this node's sustained connectivity tier (direct / "
+                    "relay_only / unreachable), read this node's hardware "
+                    "self-profile (runtime build commit, CPU architecture, OS, "
+                    "detected compute devices, derived serving capacity / "
+                    "backend / capability key), and compute a deterministic "
+                    "layer-wise cluster placement for a model across candidate "
+                    "members — the fit decision and, when a cluster forms, the "
+                    "VRAM-weighted per-member layer assignment ordered to "
+                    "minimize pipeline transfer cost."
+                ),
+                "tags": [
+                    "discovery", "mdns", "lan-cluster", "reachability",
+                    "hardware-profile", "pipeline-parallel",
+                ],
+                "examples": [
+                    "List peers on my local segment",
+                    "What is this node's connectivity tier?",
+                    "Show this node's hardware profile",
+                    "Plan a LAN cluster for a 32-layer model across these members",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
         ],
         "defaultInputModes": ["text/plain", "application/json"],
         "defaultOutputModes": ["text/plain", "application/json"],

@@ -64,6 +64,11 @@ pub struct ProviderAnnouncementContext {
     /// TTL in seconds for each announcement record. Receivers evict entries
     /// whose `last_seen + ttl_secs < now`.
     pub ttl_secs: u64,
+    /// LAN-cluster serving profile, present only when this node serves AI and
+    /// is willing to join LAN pipeline clusters. `None` means single-box
+    /// serving only — peers will not auto-cluster this node. Captured once at
+    /// startup from the local ggml device profile + linked llama.cpp commit.
+    pub cluster_profile: Option<tenzro_types::ClusterProfile>,
 }
 
 /// Event types flowing through the node
@@ -1477,11 +1482,15 @@ impl EventLoop {
                             timestamp: chrono::Utc::now().timestamp_millis(),
                             ttl_secs: ctx.ttl_secs,
                             runtime_support: tenzro_types::RuntimeSupport::default(),
-                            network_profile: tenzro_types::NodeNetworkProfile::default(),
+                            network_profile: tenzro_types::NodeNetworkProfile {
+                                reachability: network.reachability().tier().as_str().to_string(),
+                                ..Default::default()
+                            },
                             trust_profile: tenzro_types::TrustProfile::default(),
                             worker_roles: Vec::new(),
                             hardware: ctx.hardware.clone(),
                             geography: ctx.geography.clone(),
+                            cluster_profile: ctx.cluster_profile.clone(),
                         };
                         let broadcast_msg = tenzro_network::NetworkMessage::new(
                             tenzro_network::MessagePayload::ProviderAnnouncement(ann),

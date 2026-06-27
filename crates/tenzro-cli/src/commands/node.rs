@@ -2,9 +2,10 @@
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
-use tenzro_types::NetworkRole;
+use tenzro_types::RoleSet;
 use crate::output::{self};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 /// Node management commands
 #[derive(Debug, Subcommand)]
@@ -29,6 +30,12 @@ pub enum NodeCommand {
     MempoolLane(NodeMempoolLaneCmd),
     /// Show network-layer counters and gauges (gossip, connections, peer-address migrations)
     Stats(NodeStatsCmd),
+    /// Storage-provider operations (store objects, open/charge streaming deals, pricing)
+    #[command(subcommand)]
+    Storage(StorageCommand),
+    /// Compute-provider operations (book/settle fixed-term CPU/GPU rentals, pricing)
+    #[command(subcommand)]
+    Compute(ComputeCommand),
 }
 
 impl NodeCommand {
@@ -44,6 +51,8 @@ impl NodeCommand {
             Self::MempoolStats(cmd) => cmd.execute().await,
             Self::MempoolLane(cmd) => cmd.execute().await,
             Self::Stats(cmd) => cmd.execute().await,
+            Self::Storage(cmd) => cmd.execute().await,
+            Self::Compute(cmd) => cmd.execute().await,
         }
     }
 }
@@ -51,9 +60,11 @@ impl NodeCommand {
 /// Start a Tenzro Network node
 #[derive(Debug, Parser)]
 pub struct NodeStartCmd {
-    /// Node role (validator, model-provider, tee-provider, user)
+    /// Comma-separated node roles. One stake backs every role.
+    /// Tokens: validator, ai, storage, tee, user. Examples:
+    /// "validator", "validator,storage,ai", "storage".
     #[arg(long, default_value = "user")]
-    role: String,
+    roles: String,
 
     /// Path to configuration file
     #[arg(long)]
@@ -80,8 +91,9 @@ impl NodeStartCmd {
     pub async fn execute(&self) -> Result<()> {
         output::print_header("Starting Tenzro Network Node");
 
-        // Parse role
-        let role = self.parse_role()?;
+        // Parse roles (validate before spawning the node binary)
+        let roles = RoleSet::from_str(&self.roles)
+            .map_err(|e| anyhow::anyhow!("Invalid --roles \"{}\": {}", self.roles, e))?;
 
         // Create spinner
         let spinner = output::create_spinner("Initializing node...");
@@ -95,7 +107,7 @@ impl NodeStartCmd {
         // Print node info
         output::print_success("Node started successfully!");
         println!();
-        output::print_field("Role", &format!("{:?}", role));
+        output::print_field("Roles", &roles.to_string());
         output::print_field("Data Directory", &self.data_dir.display().to_string());
         output::print_field("RPC Address", &self.rpc_addr);
         output::print_field("P2P Address", &self.p2p_addr);
@@ -112,7 +124,7 @@ impl NodeStartCmd {
         // Start the actual node process
         output::print_info("Starting tenzro-node binary...");
         let mut args = vec![
-            "--role".to_string(), self.role.clone(),
+            "--roles".to_string(), roles.to_string(),
             "--rpc-addr".to_string(), self.rpc_addr.clone(),
             "--listen-addr".to_string(), format!("/ip4/{}/tcp/{}",
                 self.p2p_addr.split(':').next().unwrap_or("0.0.0.0"),
@@ -137,16 +149,6 @@ impl NodeStartCmd {
         }
 
         Ok(())
-    }
-
-    fn parse_role(&self) -> Result<NetworkRole> {
-        match self.role.to_lowercase().as_str() {
-            "validator" => Ok(NetworkRole::Validator),
-            "model-provider" => Ok(NetworkRole::ModelProvider),
-            "tee-provider" | "tee" => Ok(NetworkRole::TeeProvider),
-            "user" | "light-client" => Ok(NetworkRole::LightClient),
-            _ => Err(anyhow::anyhow!("Invalid role: {}. Must be one of: validator, model-provider, tee-provider, user", self.role)),
-        }
     }
 }
 
@@ -195,7 +197,7 @@ impl NodeStatusCmd {
         if self.format == "json" {
             let status = serde_json::json!({
                 "node_id": node_info.get("node_id").and_then(|v| v.as_str()).unwrap_or("unknown"),
-                "role": node_info.get("role").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                "roles": node_info.get("roles").cloned().unwrap_or(serde_json::json!([])),
                 "version": node_info.get("version").and_then(|v| v.as_str()).unwrap_or("unknown"),
                 "chain": node_info.get("chain").and_then(|v| v.as_str()).unwrap_or("unknown"),
                 "status": api_status.get("node_state").or_else(|| api_status.get("status")).and_then(|v| v.as_str()).unwrap_or("unknown"),
@@ -211,8 +213,11 @@ impl NodeStatusCmd {
             if let Some(node_id) = node_info.get("node_id").and_then(|v| v.as_str()) {
                 output::print_field("Node ID", &output::format_address(node_id));
             }
-            if let Some(role) = node_info.get("role").and_then(|v| v.as_str()) {
-                output::print_field("Role", role);
+            if let Some(roles) = node_info.get("roles").and_then(|v| v.as_array()) {
+                let names: Vec<&str> = roles.iter().filter_map(|v| v.as_str()).collect();
+                if !names.is_empty() {
+                    output::print_field("Roles", &names.join(", "));
+                }
             }
             if let Some(version) = node_info.get("version").and_then(|v| v.as_str()) {
                 output::print_field("Version", version);
@@ -828,6 +833,440 @@ impl NodeStatsCmd {
             &field("peer_address_migrations_total").to_string(),
         );
 
+        Ok(())
+    }
+}
+
+/// Storage-provider operations.
+///
+/// These RPCs only succeed on a node started with the `storage` role, which
+/// spawns the storage-provider runtime. A renter pre-funds a streaming deal;
+/// each epoch is charged only when a retrievability challenge passes.
+#[derive(Debug, Subcommand)]
+pub enum StorageCommand {
+    /// Erasure-code an object and publish its shards over the transport
+    Store(StorageStoreCmd),
+    /// Open a streaming storage deal for a stored object
+    OpenDeal(StorageOpenDealCmd),
+    /// Run one proof-of-retrievability-gated charge epoch for a deal
+    ChargeEpoch(StorageChargeEpochCmd),
+    /// Look up a storage deal by id
+    Deal(StorageDealCmd),
+    /// Switch the provider to network-dynamic byte-epoch pricing
+    SetPricing(StorageSetPricingCmd),
+    /// Show this node's storage-provider state (rate, object count)
+    Status(StorageStatusCmd),
+}
+
+impl StorageCommand {
+    pub async fn execute(&self) -> Result<()> {
+        match self {
+            Self::Store(cmd) => cmd.execute().await,
+            Self::OpenDeal(cmd) => cmd.execute().await,
+            Self::ChargeEpoch(cmd) => cmd.execute().await,
+            Self::Deal(cmd) => cmd.execute().await,
+            Self::SetPricing(cmd) => cmd.execute().await,
+            Self::Status(cmd) => cmd.execute().await,
+        }
+    }
+}
+
+/// Store an object (read from a file, erasure-coded, shards published).
+#[derive(Debug, Parser)]
+pub struct StorageStoreCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+    /// Logical object id (content key the renter will reference)
+    #[arg(long)]
+    object_id: String,
+    /// Owner address (hex, 0x-prefixed or bare)
+    #[arg(long)]
+    owner: String,
+    /// Path to the file whose bytes are stored
+    #[arg(long)]
+    file: PathBuf,
+    /// Data shards (default 4)
+    #[arg(long, default_value = "4")]
+    data_shards: u64,
+    /// Parity shards (default 2)
+    #[arg(long, default_value = "2")]
+    parity_shards: u64,
+}
+
+impl StorageStoreCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        use base64::Engine as _;
+
+        let bytes = std::fs::read(&self.file)
+            .map_err(|e| anyhow::anyhow!("reading {}: {}", self.file.display(), e))?;
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+        output::print_header("Store Object");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_storageStoreObject",
+                serde_json::json!([{
+                    "object_id": self.object_id,
+                    "owner": self.owner,
+                    "data": data_b64,
+                    "data_shards": self.data_shards,
+                    "parity_shards": self.parity_shards,
+                }]),
+            )
+            .await?;
+        output::print_json(&result)?;
+        Ok(())
+    }
+}
+
+/// Open a streaming storage deal.
+#[derive(Debug, Parser)]
+pub struct StorageOpenDealCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+    /// Object id of an already-stored object
+    #[arg(long)]
+    object_id: String,
+    /// Renter address (hex) — pays from their pre-funded deposit
+    #[arg(long)]
+    renter: String,
+    /// Object size in bytes (sets per-epoch price = size × rate)
+    #[arg(long)]
+    size_bytes: u64,
+    /// Total epochs the deal runs
+    #[arg(long)]
+    total_epochs: u64,
+}
+
+impl StorageOpenDealCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Open Storage Deal");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_storageOpenDeal",
+                serde_json::json!([{
+                    "object_id": self.object_id,
+                    "renter": self.renter,
+                    "size_bytes": self.size_bytes,
+                    "total_epochs": self.total_epochs,
+                }]),
+            )
+            .await?;
+        output::print_json(&result)?;
+        Ok(())
+    }
+}
+
+/// Charge one PoR-gated epoch for a deal.
+#[derive(Debug, Parser)]
+pub struct StorageChargeEpochCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+    /// Deal id to charge
+    #[arg(long)]
+    deal_id: String,
+}
+
+impl StorageChargeEpochCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Charge Storage Epoch");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_storageChargeEpoch",
+                serde_json::json!([{ "deal_id": self.deal_id }]),
+            )
+            .await?;
+        output::print_json(&result)?;
+        Ok(())
+    }
+}
+
+/// Look up a deal by id.
+#[derive(Debug, Parser)]
+pub struct StorageDealCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+    /// Deal id to look up
+    #[arg(long)]
+    deal_id: String,
+}
+
+impl StorageDealCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Storage Deal");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_storageGetDeal",
+                serde_json::json!([{ "deal_id": self.deal_id }]),
+            )
+            .await?;
+        output::print_json(&result)?;
+        Ok(())
+    }
+}
+
+/// Switch the provider to network-dynamic byte-epoch pricing.
+#[derive(Debug, Parser)]
+pub struct StorageSetPricingCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+    /// Provider capacity in byte-epochs (utilization target = 50% of this)
+    #[arg(long)]
+    capacity: u128,
+    /// Minimum byte-epoch rate (wei)
+    #[arg(long, default_value = "1")]
+    min_rate: u128,
+    /// Maximum byte-epoch rate (wei)
+    #[arg(long)]
+    max_rate: Option<u128>,
+}
+
+impl StorageSetPricingCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Set Storage Pricing (network-dynamic)");
+        let rpc = RpcClient::new(&self.rpc);
+        let mut params = serde_json::json!({
+            "mode": "dynamic",
+            "capacity": self.capacity.to_string(),
+            "min_rate": self.min_rate.to_string(),
+        });
+        if let Some(max) = self.max_rate {
+            params["max_rate"] = serde_json::json!(max.to_string());
+        }
+        let result: serde_json::Value = rpc
+            .call("tenzro_storageSetPricing", serde_json::json!([params]))
+            .await?;
+        output::print_json(&result)?;
+        Ok(())
+    }
+}
+
+/// Show storage-provider state.
+#[derive(Debug, Parser)]
+pub struct StorageStatusCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl StorageStatusCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Storage Provider Status");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value =
+            rpc.call("tenzro_storageStatus", serde_json::json!([])).await?;
+
+        output::print_field(
+            "Effective Rate (wei/byte-epoch)",
+            result.get("effective_rate_wei").and_then(|v| v.as_str()).unwrap_or("0"),
+        );
+        output::print_field(
+            "Objects Stored",
+            &result.get("object_count").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+        );
+        Ok(())
+    }
+}
+
+/// Compute-provider operations. A node serving the `ai` role rents out its
+/// CPU/GPU capacity for fixed terms; each epoch settles only when an
+/// availability proof passes.
+#[derive(Debug, Subcommand)]
+pub enum ComputeCommand {
+    /// Book a fixed-term compute rental against this provider
+    BookRental(ComputeBookRentalCmd),
+    /// Settle one availability-gated epoch of a rental
+    SettleEpoch(ComputeSettleEpochCmd),
+    /// Look up a compute rental by id
+    Rental(ComputeRentalCmd),
+    /// Switch the provider to network-dynamic per-epoch pricing
+    SetPricing(ComputeSetPricingCmd),
+    /// Show this node's compute-provider state (rate, active rentals)
+    Status(ComputeStatusCmd),
+}
+
+impl ComputeCommand {
+    pub async fn execute(&self) -> Result<()> {
+        match self {
+            Self::BookRental(cmd) => cmd.execute().await,
+            Self::SettleEpoch(cmd) => cmd.execute().await,
+            Self::Rental(cmd) => cmd.execute().await,
+            Self::SetPricing(cmd) => cmd.execute().await,
+            Self::Status(cmd) => cmd.execute().await,
+        }
+    }
+}
+
+/// Book a fixed-term compute rental.
+#[derive(Debug, Parser)]
+pub struct ComputeBookRentalCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+    /// Renter address (hex) — pays from their pre-funded deposit
+    #[arg(long)]
+    renter: String,
+    /// Total epochs the rental runs (per-epoch price = provider's effective rate)
+    #[arg(long)]
+    total_epochs: u64,
+}
+
+impl ComputeBookRentalCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Book Compute Rental");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_computeBookRental",
+                serde_json::json!([{
+                    "renter": self.renter,
+                    "total_epochs": self.total_epochs,
+                }]),
+            )
+            .await?;
+        output::print_json(&result)?;
+        Ok(())
+    }
+}
+
+/// Settle one availability-gated epoch of a rental.
+#[derive(Debug, Parser)]
+pub struct ComputeSettleEpochCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+    /// Rental id to settle
+    #[arg(long)]
+    rental_id: String,
+    /// Whether the provider's availability proof for this epoch is valid
+    #[arg(long, default_value = "true")]
+    proof_valid: bool,
+}
+
+impl ComputeSettleEpochCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Settle Compute Epoch");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_computeSettleEpoch",
+                serde_json::json!([{
+                    "rental_id": self.rental_id,
+                    "proof_valid": self.proof_valid,
+                }]),
+            )
+            .await?;
+        output::print_json(&result)?;
+        Ok(())
+    }
+}
+
+/// Look up a rental by id.
+#[derive(Debug, Parser)]
+pub struct ComputeRentalCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+    /// Rental id to look up
+    #[arg(long)]
+    rental_id: String,
+}
+
+impl ComputeRentalCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Compute Rental");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_computeGetRental",
+                serde_json::json!([{ "rental_id": self.rental_id }]),
+            )
+            .await?;
+        output::print_json(&result)?;
+        Ok(())
+    }
+}
+
+/// Switch the provider to network-dynamic per-epoch pricing.
+#[derive(Debug, Parser)]
+pub struct ComputeSetPricingCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+    /// Provider capacity in epoch-slots (utilization target = 50% of this)
+    #[arg(long)]
+    capacity: u128,
+    /// Minimum per-epoch rate (wei)
+    #[arg(long, default_value = "1")]
+    min_rate: u128,
+    /// Maximum per-epoch rate (wei)
+    #[arg(long)]
+    max_rate: Option<u128>,
+}
+
+impl ComputeSetPricingCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Set Compute Pricing (network-dynamic)");
+        let rpc = RpcClient::new(&self.rpc);
+        let mut params = serde_json::json!({
+            "mode": "dynamic",
+            "capacity": self.capacity.to_string(),
+            "min_rate": self.min_rate.to_string(),
+        });
+        if let Some(max) = self.max_rate {
+            params["max_rate"] = serde_json::json!(max.to_string());
+        }
+        let result: serde_json::Value = rpc
+            .call("tenzro_computeSetPricing", serde_json::json!([params]))
+            .await?;
+        output::print_json(&result)?;
+        Ok(())
+    }
+}
+
+/// Show compute-provider state.
+#[derive(Debug, Parser)]
+pub struct ComputeStatusCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ComputeStatusCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Compute Provider Status");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value =
+            rpc.call("tenzro_computeStatus", serde_json::json!([])).await?;
+
+        output::print_field(
+            "Effective Rate (wei/epoch)",
+            result.get("effective_rate_wei").and_then(|v| v.as_str()).unwrap_or("0"),
+        );
+        output::print_field(
+            "Active Rentals",
+            &result.get("active_rentals").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+        );
         Ok(())
     }
 }

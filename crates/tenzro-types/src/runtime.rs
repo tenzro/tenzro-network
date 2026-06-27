@@ -286,9 +286,42 @@ pub struct NodeNetworkProfile {
     /// Median latency to known peers in milliseconds.
     #[serde(default)]
     pub latency_ms_to_peers: u32,
-    /// Whether the node is reachable from the public internet.
+    /// Sustained connectivity tier this node has *earned* through observed
+    /// reachability, not a self-asserted flag: `direct` (a public address has
+    /// held across repeated confirmation), `relay_only` (reachable solely via
+    /// a circuit relay — usable but latency-added and resource-limited), or
+    /// `unreachable`. Empty string means the announcing node did not report a
+    /// tier; consumers should treat that as the weakest tier for routing.
+    /// Request routers prefer `direct` providers and treat `relay_only` as a
+    /// fallback.
     #[serde(default)]
-    pub is_public: bool,
+    pub reachability: String,
+}
+
+/// LAN-cluster serving profile for a provider node.
+///
+/// Carries exactly the facts a head needs to admit this node as a pipeline
+/// member that the rest of the announcement does not already supply: the
+/// llama.cpp build commit (the ggml RPC wire protocol has no version
+/// negotiation, so every member must match) and the serving device's
+/// backend and capability key. The head reaches the member's loopback
+/// `rpc-server` over the authenticated libp2p cluster tunnel keyed by the
+/// announcement's `peer_id`, so no serving socket is advertised. A node only
+/// emits this when it is willing to join LAN clusters; absence means
+/// "single-box serving only" and the node will not be auto-clustered.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClusterProfile {
+    /// llama.cpp build commit this node links against. Members must match.
+    #[serde(default)]
+    pub llama_commit: String,
+    /// Backend the serving device runs on (`cuda`, `metal`, `vulkan`,
+    /// `rocm`, `cpu`, …) — lower-case ggml family name.
+    #[serde(default)]
+    pub backend: String,
+    /// Capability key of the serving device (CUDA compute capability, AMD
+    /// gfx target, Apple chip family, or CPU arch when serving on CPU).
+    #[serde(default)]
+    pub cap_key: String,
 }
 
 /// Descriptor for a single downloadable model artifact.

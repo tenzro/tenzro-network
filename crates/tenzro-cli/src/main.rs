@@ -33,6 +33,7 @@ use commands::{
     KeyCommand,
     WorkflowCommand, Eip7702Command, Permit2Command, SecureMintCommand,
     HyperlaneCommand, AxelarCommand, BabylonCommand, CaipCommand,
+    DiscoverCommand, ClusterCommand,
     urwa::UrwaCommand, ivms101::Ivms101Command, attested_clock::AttestedClockCommand,
     bridge_fee::BridgeFeeCommand, wormhole_ntt::WormholeNttCommand,
 };
@@ -443,6 +444,14 @@ enum Command {
     #[command(subcommand)]
     Moe(commands::moe::MoeCommand),
 
+    /// Local-network discovery: local peers, reachability, node profile
+    #[command(subcommand)]
+    Discover(DiscoverCommand),
+
+    /// Local-network cluster planning
+    #[command(subcommand)]
+    Cluster(ClusterCommand),
+
     /// Interactive chat with AI models
     Chat(ChatCmd),
 
@@ -643,6 +652,8 @@ async fn main() -> Result<()> {
         Command::GlobalSupply(cmd) => cmd.execute().await?,
         Command::Presign(cmd) => cmd.execute().await?,
         Command::Moe(cmd) => cmd.execute().await?,
+        Command::Discover(cmd) => cmd.execute().await?,
+        Command::Cluster(cmd) => cmd.execute().await?,
         Command::Faucet(cmd) => execute_faucet(cmd).await?,
         Command::Chat(cmd) => execute_chat(cmd).await?,
         Command::Hardware(cmd) => commands::hardware::execute(&cmd.format).await?,

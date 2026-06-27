@@ -21,7 +21,7 @@ use libp2p::{
     gossipsub::{self, IdentTopic, TopicHash},
     identify,
     kad::{self, QueryResult},
-    ping, relay,
+    mdns, ping, relay,
     request_response::{self, InboundRequestId, OutboundRequestId, ResponseChannel},
     swarm::{dial_opts::DialOpts, SwarmEvent},
     Multiaddr, PeerId, Swarm,
@@ -347,6 +347,37 @@ impl From<request_response::OutboundFailure> for BlockSyncOutboundError {
     }
 }
 
+/// An inbound cluster-tunnel frame received from a head peer.
+///
+/// The cluster member's serving runtime MUST eventually call
+/// [`TenzroNetworkService::send_cluster_tunnel_response`] with the matching
+/// `request_id`, supplying any return-path frames its local `rpc-server`
+/// produced. Dropping the value without responding leaves the head's request
+/// to time out, which it treats as a stage failure.
+#[derive(Debug)]
+pub struct InboundClusterTunnel {
+    pub peer: PeerId,
+    pub request_id: InboundRequestId,
+    pub request: crate::cluster_tunnel_proto::ClusterTunnelRequest,
+}
+
+/// Outbound cluster-tunnel result delivered asynchronously to the head's
+/// serving runtime after it issues `send_cluster_tunnel_frame`.
+///
+/// `result` carries either the peer's `ClusterTunnelResponse` (an `Ack` whose
+/// `return_frames` are the member's return-path bytes, or an `Error`) or a
+/// typed transport failure. The runtime drops the session on either error
+/// class and fails over.
+#[derive(Debug)]
+pub struct OutboundClusterTunnelResult {
+    pub peer: PeerId,
+    pub request_id: OutboundRequestId,
+    pub result: std::result::Result<
+        crate::cluster_tunnel_proto::ClusterTunnelResponse,
+        BlockSyncOutboundError,
+    >,
+}
+
 /// Network service trait
 #[async_trait]
 pub trait NetworkService: Send + Sync {
@@ -473,6 +504,52 @@ pub trait NetworkService: Send + Sync {
     async fn subscribe_mpc_relay(
         &self,
     ) -> Result<mpsc::UnboundedReceiver<crate::mpc_relay::MpcRelayRequest>>;
+
+    /// Sends one cluster-tunnel frame to a member peer over the
+    /// `cluster-tunnel` request-response overlay.
+    ///
+    /// Used by the pipeline head's serving runtime to relay its local ggml
+    /// `rpc-server` byte stream to a member. Returns the `OutboundRequestId`
+    /// synchronously; the member's `Ack` (carrying any return-path frames) or
+    /// a transport failure is delivered later through the channel registered
+    /// with `subscribe_cluster_tunnel_results`. The head addresses the member
+    /// by `PeerId` directly — no DID resolution, since cluster membership is
+    /// established out of band by the cluster planner.
+    async fn send_cluster_tunnel_frame(
+        &self,
+        peer: PeerId,
+        request: crate::cluster_tunnel_proto::ClusterTunnelRequest,
+    ) -> Result<OutboundRequestId>;
+
+    /// Answers an inbound cluster-tunnel frame identified by `request_id`.
+    ///
+    /// Called by a member's serving runtime after it splices the frame into
+    /// its local `rpc-server` socket. The `response` is an `Ack` whose
+    /// `return_frames` carry bytes read back from that socket, or an `Error`
+    /// describing why the frame could not be served. If the parked channel
+    /// has been dropped (head disconnected, stream timed out) the call
+    /// returns `Err(NetworkError::ChannelSend)`.
+    async fn send_cluster_tunnel_response(
+        &self,
+        request_id: InboundRequestId,
+        response: crate::cluster_tunnel_proto::ClusterTunnelResponse,
+    ) -> Result<()>;
+
+    /// Subscribes to inbound cluster-tunnel frames. Only one subscriber is
+    /// supported at a time — calling twice replaces the previous channel.
+    /// Used by a member's serving runtime to receive frames a head relays to
+    /// its loopback `rpc-server`.
+    async fn subscribe_cluster_tunnel_requests(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<InboundClusterTunnel>>;
+
+    /// Subscribes to outbound cluster-tunnel results. Only one subscriber is
+    /// supported at a time. Used by the head's serving runtime to correlate
+    /// `OutboundRequestId`s from `send_cluster_tunnel_frame` with the
+    /// member's response or a transport error.
+    async fn subscribe_cluster_tunnel_results(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<OutboundClusterTunnelResult>>;
 }
 
 /// Commands sent to the network service
@@ -617,6 +694,29 @@ enum NetworkCommand {
             Result<mpsc::UnboundedReceiver<crate::mpc_relay::MpcRelayRequest>>,
         >,
     },
+    /// Sends one cluster-tunnel frame to `peer`. Returns the
+    /// `OutboundRequestId`; the member's `Ack`/`Error` or a transport
+    /// failure is delivered through `SubscribeClusterTunnelResults`.
+    SendClusterTunnelFrame {
+        peer: PeerId,
+        request: crate::cluster_tunnel_proto::ClusterTunnelRequest,
+        response: oneshot::Sender<Result<OutboundRequestId>>,
+    },
+    /// Answers an inbound cluster-tunnel frame parked under `request_id`.
+    SendClusterTunnelResponse {
+        request_id: InboundRequestId,
+        response_payload: crate::cluster_tunnel_proto::ClusterTunnelResponse,
+        response: oneshot::Sender<Result<()>>,
+    },
+    /// Subscribes to inbound cluster-tunnel frames. One subscriber per node —
+    /// calling twice replaces the previous channel.
+    SubscribeClusterTunnelRequests {
+        response: oneshot::Sender<Result<mpsc::UnboundedReceiver<InboundClusterTunnel>>>,
+    },
+    /// Subscribes to outbound cluster-tunnel results. One subscriber per node.
+    SubscribeClusterTunnelResults {
+        response: oneshot::Sender<Result<mpsc::UnboundedReceiver<OutboundClusterTunnelResult>>>,
+    },
     Shutdown {
         response: oneshot::Sender<Result<()>>,
     },
@@ -630,6 +730,17 @@ pub struct TenzroNetworkService {
     /// Metrics registry — exposed so the node can add its own subsystems
     /// and serialize all metrics to the Prometheus text format.
     metrics_registry: Arc<Mutex<Registry>>,
+    /// Sustained connectivity verdict for THIS node. Written by the event loop
+    /// from AutoNAT / external-address / relay events; read by role admission
+    /// and the request router to decide whether this node is reachable enough
+    /// to serve traffic.
+    reachability: Arc<crate::reachability::ReachabilityTracker>,
+    /// Peer IDs (as strings) currently discovered on THIS node's local network
+    /// segment via mDNS. Written by the event loop's mDNS handler; read by the
+    /// request router to prefer a same-LAN provider over any WAN provider for
+    /// the same model. A local provider avoids the public internet entirely —
+    /// lowest latency and no relay budget — so it is the strongest pick.
+    local_peers: Arc<crate::reachability::LocalPeerSet>,
 }
 
 impl TenzroNetworkService {
@@ -653,10 +764,22 @@ impl TenzroNetworkService {
 
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let loop_metrics = metrics.clone();
+        let reachability = Arc::new(crate::reachability::ReachabilityTracker::new());
+        let loop_reachability = reachability.clone();
+        let local_peers = Arc::new(crate::reachability::LocalPeerSet::new());
+        let loop_local_peers = local_peers.clone();
 
         // Spawn the event loop
         tokio::spawn(async move {
-            if let Err(e) = run_event_loop(config, command_rx, loop_metrics).await {
+            if let Err(e) = run_event_loop(
+                config,
+                command_rx,
+                loop_metrics,
+                loop_reachability,
+                loop_local_peers,
+            )
+            .await
+            {
                 tracing::error!("Network event loop error: {}", e);
             }
         });
@@ -665,6 +788,8 @@ impl TenzroNetworkService {
             command_tx,
             metrics,
             metrics_registry,
+            reachability,
+            local_peers,
         })
     }
 
@@ -680,6 +805,20 @@ impl TenzroNetworkService {
     /// the Prometheus text format.
     pub fn metrics_registry(&self) -> Arc<Mutex<Registry>> {
         self.metrics_registry.clone()
+    }
+
+    /// Returns the sustained reachability tracker for this node. Role
+    /// admission reads the tier to gate serving roles; the request router
+    /// reads it to prefer directly-reachable providers over relay-only ones.
+    pub fn reachability(&self) -> Arc<crate::reachability::ReachabilityTracker> {
+        self.reachability.clone()
+    }
+
+    /// Returns the set of peer IDs currently on this node's local network
+    /// segment (mDNS-discovered). The request router consults it to prefer a
+    /// same-LAN provider over any WAN provider for the same model.
+    pub fn local_peers(&self) -> Arc<crate::reachability::LocalPeerSet> {
+        self.local_peers.clone()
     }
 
     /// Signals the event loop to shut down gracefully.
@@ -1178,6 +1317,46 @@ impl NetworkService for TenzroNetworkService {
         self.send_command(|response| NetworkCommand::SubscribeMpcRelay { response })
             .await
     }
+
+    async fn send_cluster_tunnel_frame(
+        &self,
+        peer: PeerId,
+        request: crate::cluster_tunnel_proto::ClusterTunnelRequest,
+    ) -> Result<OutboundRequestId> {
+        self.send_command(move |response| NetworkCommand::SendClusterTunnelFrame {
+            peer,
+            request,
+            response,
+        })
+        .await
+    }
+
+    async fn send_cluster_tunnel_response(
+        &self,
+        request_id: InboundRequestId,
+        response: crate::cluster_tunnel_proto::ClusterTunnelResponse,
+    ) -> Result<()> {
+        self.send_command(move |resp| NetworkCommand::SendClusterTunnelResponse {
+            request_id,
+            response_payload: response,
+            response: resp,
+        })
+        .await
+    }
+
+    async fn subscribe_cluster_tunnel_requests(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<InboundClusterTunnel>> {
+        self.send_command(|response| NetworkCommand::SubscribeClusterTunnelRequests { response })
+            .await
+    }
+
+    async fn subscribe_cluster_tunnel_results(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<OutboundClusterTunnelResult>> {
+        self.send_command(|response| NetworkCommand::SubscribeClusterTunnelResults { response })
+            .await
+    }
 }
 
 /// Event loop state
@@ -1189,6 +1368,12 @@ struct EventLoopState {
     deduplicator: MessageDeduplicator,
     /// Prometheus metrics bundle (shared across the event loop and the service handle).
     metrics: Arc<NetworkMetrics>,
+    /// Sustained reachability verdict, fed from AutoNAT / external-address /
+    /// relay events and read by role admission + the request router.
+    reachability: Arc<crate::reachability::ReachabilityTracker>,
+    /// Peer IDs on this node's local segment, fed from mDNS discover/expire
+    /// events and read by the request router to prefer same-LAN providers.
+    local_peers: Arc<crate::reachability::LocalPeerSet>,
     /// Multiaddrs bound by the swarm's listeners. Populated from
     /// `SwarmEvent::NewListenAddr` and removed on `ExpiredListenAddr`.
     /// Surfaced via `NetworkCommand::ListenAddresses` so callers (especially
@@ -1252,6 +1437,28 @@ struct EventLoopState {
     /// rejected with `MpcRelayError::UnknownSender` — the relay is
     /// fail-closed.
     mpc_did_resolver: Option<std::sync::Arc<dyn crate::mpc_relay::MpcDidResolver>>,
+    /// Pending inbound cluster-tunnel response channels keyed by
+    /// `InboundRequestId`. Parked here until the member's serving runtime
+    /// answers via `SendClusterTunnelResponse`. Same rationale as
+    /// `pending_inbound_block_sync`.
+    pending_inbound_cluster_tunnel:
+        HashMap<InboundRequestId, ResponseChannel<crate::cluster_tunnel_proto::ClusterTunnelResponse>>,
+    /// Subscriber channel for inbound cluster-tunnel frames. `None` until a
+    /// member's serving runtime attaches via `SubscribeClusterTunnelRequests`.
+    /// Inbound frames arriving while this is `None` are answered with
+    /// `ClusterTunnelError::NoMember` so the head fails over.
+    cluster_tunnel_request_subscriber: Option<mpsc::UnboundedSender<InboundClusterTunnel>>,
+    /// Latched once `SubscribeClusterTunnelRequests` runs — separates the
+    /// bootstrap-pre-attach debug case from the dropped-channel warn case.
+    cluster_tunnel_request_subscriber_ever_attached: bool,
+    /// Subscriber channel for outbound cluster-tunnel results. `None` until
+    /// the head's serving runtime attaches via `SubscribeClusterTunnelResults`.
+    cluster_tunnel_result_subscriber: Option<mpsc::UnboundedSender<OutboundClusterTunnelResult>>,
+    /// Per-peer count of currently-in-flight inbound cluster-tunnel streams.
+    /// Enforces `cluster_tunnel_proto::MAX_INBOUND_STREAMS_PER_PEER`; overflow
+    /// is rejected with `ClusterTunnelError::ServerBusy`. Decremented on
+    /// `ResponseSent` / `InboundFailure`.
+    cluster_tunnel_inbound_inflight: HashMap<PeerId, usize>,
     /// Tally of `observed_addr` reports received via Identify, keyed by the
     /// reported external multiaddr → set of distinct peer IDs that have
     /// reported it. Once a candidate accumulates reports from at least
@@ -1315,6 +1522,8 @@ async fn run_event_loop(
     config: NetworkConfig,
     mut command_rx: mpsc::UnboundedReceiver<NetworkCommand>,
     metrics: Arc<NetworkMetrics>,
+    reachability: Arc<crate::reachability::ReachabilityTracker>,
+    local_peers: Arc<crate::reachability::LocalPeerSet>,
 ) -> Result<()> {
     // Load or generate keypair (persistent for stable peer IDs)
     let local_key = load_or_generate_keypair(&config.data_dir)?;
@@ -1344,6 +1553,7 @@ async fn run_event_loop(
     // on/off inside `TenzroBehaviour::new()`.
     let enable_relay = config.enable_relay;
     let enable_hole_punching = config.enable_hole_punching;
+    let enable_mdns = config.enable_mdns;
     let protocol_version = config.protocol_version.clone();
     let user_agent = config.user_agent.clone();
     let idle_timeout = config.connection_idle_timeout;
@@ -1374,6 +1584,7 @@ async fn run_event_loop(
                 user_agent,
                 enable_relay,
                 enable_hole_punching,
+                enable_mdns,
                 Some(relay_client),
             )
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
@@ -1511,6 +1722,8 @@ async fn run_event_loop(
 
     let mut state = EventLoopState {
         swarm,
+        reachability,
+        local_peers,
         peer_manager,
         subscribers: HashMap::new(),
         deduplicator: MessageDeduplicator::default(),
@@ -1528,6 +1741,11 @@ async fn run_event_loop(
         mpc_relay_subscriber_ever_attached: false,
         mpc_relay_inbound_inflight: HashMap::new(),
         mpc_did_resolver: None,
+        pending_inbound_cluster_tunnel: HashMap::new(),
+        cluster_tunnel_request_subscriber: None,
+        cluster_tunnel_request_subscriber_ever_attached: false,
+        cluster_tunnel_result_subscriber: None,
+        cluster_tunnel_inbound_inflight: HashMap::new(),
         observed_addrs: HashMap::new(),
         advertised_external_addrs: preconfigured_external,
         bootstrap_peers,
@@ -2276,6 +2494,193 @@ fn handle_mpc_relay_event(
     }
 }
 
+/// Handles inbound and outbound events from the cluster-tunnel
+/// request-response codec (`/tenzro/cluster-tunnel/1.0.0`).
+///
+/// Mirrors `handle_block_sync_event` (full-duplex parked-channel pattern):
+///   * Inbound `Request` — enforce the per-peer concurrency cap (reject
+///     overflow with `ServerBusy`), then park the response channel and notify
+///     the member's runtime subscriber. No subscriber means this node is not
+///     a cluster member, so reply `NoMember` and let the head fail over.
+///   * Inbound `Response` (the member's `Ack`/`Error`) — forward to the head's
+///     result subscriber so its splice loop can consume the piggybacked
+///     return frames.
+///   * `OutboundFailure` — surface as a transport error on the result channel.
+///   * `InboundFailure` — drop the parked channel and decrement in-flight.
+///   * `ResponseSent` — decrement in-flight.
+fn handle_cluster_tunnel_event(
+    state: &mut EventLoopState,
+    event: request_response::Event<
+        crate::cluster_tunnel_proto::ClusterTunnelRequest,
+        crate::cluster_tunnel_proto::ClusterTunnelResponse,
+    >,
+) {
+    use crate::cluster_tunnel_proto::{
+        ClusterTunnelError, ClusterTunnelResponse, MAX_INBOUND_STREAMS_PER_PEER,
+    };
+    use request_response::{Event as RrEvent, Message};
+    match event {
+        RrEvent::Message {
+            peer,
+            message: Message::Request {
+                request_id,
+                request,
+                channel,
+            },
+            ..
+        } => {
+            // Per-peer inbound concurrency cap. Reject overflow synchronously
+            // — the head's splice loop pipelines frames, so a backlog would
+            // stall its session past the request timeout.
+            let inflight = state
+                .cluster_tunnel_inbound_inflight
+                .entry(peer)
+                .or_insert(0);
+            if *inflight >= MAX_INBOUND_STREAMS_PER_PEER {
+                tracing::warn!(
+                    %peer,
+                    limit = MAX_INBOUND_STREAMS_PER_PEER,
+                    "cluster-tunnel: rejecting overflow inbound stream"
+                );
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .cluster_tunnel
+                    .send_response(
+                        channel,
+                        ClusterTunnelResponse::Error(ClusterTunnelError::ServerBusy {
+                            limit: MAX_INBOUND_STREAMS_PER_PEER,
+                        }),
+                    );
+                return;
+            }
+
+            // No subscriber attached — this node is not running a cluster
+            // member runtime, so there is no local rpc-server to splice to.
+            // Reply NoMember so the head stops dialing this peer's tunnel.
+            let Some(tx) = state.cluster_tunnel_request_subscriber.as_ref() else {
+                if state.cluster_tunnel_request_subscriber_ever_attached {
+                    tracing::warn!(
+                        %peer,
+                        "cluster-tunnel: subscriber was dropped — replying NoMember"
+                    );
+                } else {
+                    tracing::debug!(
+                        %peer,
+                        "cluster-tunnel: inbound before member runtime attached \
+                         — replying NoMember"
+                    );
+                }
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .cluster_tunnel
+                    .send_response(
+                        channel,
+                        ClusterTunnelResponse::Error(ClusterTunnelError::NoMember),
+                    );
+                return;
+            };
+
+            state
+                .pending_inbound_cluster_tunnel
+                .insert(request_id, channel);
+
+            let inbound = InboundClusterTunnel {
+                peer,
+                request_id,
+                request,
+            };
+            if tx.send(inbound).is_err() {
+                tracing::warn!(
+                    %peer,
+                    "cluster-tunnel: request subscriber dropped — replying NoMember"
+                );
+                state.cluster_tunnel_request_subscriber = None;
+                if let Some(channel) = state.pending_inbound_cluster_tunnel.remove(&request_id) {
+                    let _ = state
+                        .swarm
+                        .behaviour_mut()
+                        .cluster_tunnel
+                        .send_response(
+                            channel,
+                            ClusterTunnelResponse::Error(ClusterTunnelError::NoMember),
+                        );
+                }
+                return;
+            }
+
+            *inflight += 1;
+        }
+        RrEvent::Message {
+            peer,
+            message: Message::Response {
+                request_id,
+                response,
+            },
+            ..
+        } => {
+            if let Some(tx) = state.cluster_tunnel_result_subscriber.as_ref() {
+                let item = OutboundClusterTunnelResult {
+                    peer,
+                    request_id,
+                    result: Ok(response),
+                };
+                if tx.send(item).is_err() {
+                    tracing::warn!("cluster-tunnel: result subscriber dropped");
+                    state.cluster_tunnel_result_subscriber = None;
+                }
+            } else {
+                tracing::warn!(
+                    %peer,
+                    %request_id,
+                    "cluster-tunnel: response received but no result subscriber attached"
+                );
+            }
+        }
+        RrEvent::OutboundFailure {
+            peer,
+            request_id,
+            error,
+            ..
+        } => {
+            tracing::warn!(%peer, %request_id, %error, "cluster-tunnel outbound failure");
+            if let Some(tx) = state.cluster_tunnel_result_subscriber.as_ref() {
+                let item = OutboundClusterTunnelResult {
+                    peer,
+                    request_id,
+                    result: Err(error.into()),
+                };
+                if tx.send(item).is_err() {
+                    state.cluster_tunnel_result_subscriber = None;
+                }
+            }
+        }
+        RrEvent::InboundFailure {
+            peer,
+            request_id,
+            error,
+            ..
+        } => {
+            tracing::debug!(%peer, %request_id, %error, "cluster-tunnel inbound failure");
+            state.pending_inbound_cluster_tunnel.remove(&request_id);
+            if let Some(count) = state.cluster_tunnel_inbound_inflight.get_mut(&peer)
+                && *count > 0
+            {
+                *count -= 1;
+            }
+        }
+        RrEvent::ResponseSent { peer, request_id, .. } => {
+            tracing::trace!(%peer, %request_id, "cluster-tunnel response flushed to wire");
+            if let Some(count) = state.cluster_tunnel_inbound_inflight.get_mut(&peer)
+                && *count > 0
+            {
+                *count -= 1;
+            }
+        }
+    }
+}
+
 /// Handles swarm events
 async fn handle_swarm_event(
     state: &mut EventLoopState,
@@ -2598,6 +3003,9 @@ async fn handle_swarm_event(
             TenzroBehaviourEvent::MpcRelay(rr_event) => {
                 handle_mpc_relay_event(state, rr_event);
             }
+            TenzroBehaviourEvent::ClusterTunnel(rr_event) => {
+                handle_cluster_tunnel_event(state, rr_event);
+            }
             TenzroBehaviourEvent::AutonatClient(autonat::v2::client::Event {
                 tested_addr,
                 bytes_sent,
@@ -2609,19 +3017,29 @@ async fn handle_swarm_event(
                 // emits `SwarmEvent::ExternalAddrConfirmed` on success
                 // independently, so we just log here for observability.
                 match result {
-                    Ok(()) => tracing::info!(
-                        %server,
-                        address = %tested_addr,
-                        bytes_sent,
-                        "AutoNAT probe succeeded — address reachable"
-                    ),
-                    Err(e) => tracing::debug!(
-                        %server,
-                        address = %tested_addr,
-                        bytes_sent,
-                        error = %e,
-                        "AutoNAT probe failed — address not reachable from server"
-                    ),
+                    Ok(()) => {
+                        tracing::info!(
+                            %server,
+                            address = %tested_addr,
+                            bytes_sent,
+                            "AutoNAT probe succeeded — address reachable"
+                        );
+                        state
+                            .reachability
+                            .record(crate::reachability::ReachabilityEvent::DirectConfirmed);
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            %server,
+                            address = %tested_addr,
+                            bytes_sent,
+                            error = %e,
+                            "AutoNAT probe failed — address not reachable from server"
+                        );
+                        state
+                            .reachability
+                            .record(crate::reachability::ReachabilityEvent::DirectLost);
+                    }
                 }
             }
             TenzroBehaviourEvent::AutonatServer(_) => {
@@ -2641,6 +3059,11 @@ async fn handle_swarm_event(
                         "Circuit-Relay v2 reservation accepted — this node is now \
                          reachable via /p2p/<relay>/p2p-circuit/p2p/<self>"
                     );
+                    // Reachable via relay even if no direct path holds — enough
+                    // to serve as a fallback tier.
+                    state
+                        .reachability
+                        .record(crate::reachability::ReachabilityEvent::RelayReserved);
                 }
                 relay::client::Event::OutboundCircuitEstablished {
                     relay_peer_id,
@@ -2672,16 +3095,75 @@ async fn handle_swarm_event(
                 remote_peer_id,
                 result,
             }) => match result {
-                Ok(conn_id) => tracing::info!(
-                    %remote_peer_id,
-                    ?conn_id,
-                    "DCUtR hole-punch succeeded — direct connection upgraded from relayed"
-                ),
+                Ok(conn_id) => {
+                    tracing::info!(
+                        %remote_peer_id,
+                        ?conn_id,
+                        "DCUtR hole-punch succeeded — direct connection upgraded from relayed"
+                    );
+                    // A hole-punched direct path is, empirically, as reliable
+                    // as a born-public address — corroborate direct reachability.
+                    state
+                        .reachability
+                        .record(crate::reachability::ReachabilityEvent::DirectConfirmed);
+                }
                 Err(e) => tracing::debug!(
                     %remote_peer_id,
                     error = %e,
                     "DCUtR hole-punch failed — will continue using relayed connection"
                 ),
+            },
+            TenzroBehaviourEvent::Mdns(mdns_event) => match mdns_event {
+                mdns::Event::Discovered(peers) => {
+                    // A Tenzro node on the same L2 segment. Dial it directly on
+                    // its private/link-local address and seed it into Kademlia
+                    // so the local peer is reachable through the same paths as
+                    // any other. Reachability records a local-direct signal so
+                    // a node behind NAT — Unreachable on the public lane — can
+                    // still serve roles to peers it can reach on the LAN.
+                    for (peer_id, addr) in peers {
+                        tracing::info!(
+                            %peer_id,
+                            %addr,
+                            "mDNS discovered a local-network peer"
+                        );
+                        state
+                            .swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, addr.clone());
+                        if !state.swarm.is_connected(&peer_id) {
+                            if let Err(e) = state.swarm.dial(dial_opts_new_port(addr.clone())) {
+                                tracing::debug!(
+                                    %peer_id,
+                                    %addr,
+                                    error = %e,
+                                    "mDNS local-peer dial skipped"
+                                );
+                            }
+                        }
+                        state
+                            .reachability
+                            .record(crate::reachability::ReachabilityEvent::LocalDirectConfirmed);
+                        state.local_peers.insert(peer_id.to_string());
+                    }
+                }
+                mdns::Event::Expired(peers) => {
+                    // mDNS TTLs lapsed for these peers. The swarm keeps any
+                    // live connection; this only means they stopped announcing
+                    // on the local segment, so drop the local-direct signal.
+                    for (peer_id, addr) in peers {
+                        tracing::debug!(
+                            %peer_id,
+                            %addr,
+                            "mDNS local-network peer record expired"
+                        );
+                        state
+                            .reachability
+                            .record(crate::reachability::ReachabilityEvent::LocalDirectLost);
+                        state.local_peers.remove(&peer_id.to_string());
+                    }
+                }
             },
             _ => {}
         },
@@ -2845,6 +3327,11 @@ async fn handle_swarm_event(
             // observed_addr tally doesn't waste cycles re-counting.
             state.advertised_external_addrs.insert(address.clone());
             state.observed_addrs.remove(&address);
+            // A confirmed direct external address is the strongest reachability
+            // signal; fold it into the sustained verdict.
+            state
+                .reachability
+                .record(crate::reachability::ReachabilityEvent::DirectConfirmed);
         }
         SwarmEvent::ExternalAddrExpired { address } => {
             tracing::info!(
@@ -2852,6 +3339,11 @@ async fn handle_swarm_event(
                 "External address expired — stopping advertisement"
             );
             state.advertised_external_addrs.remove(&address);
+            // Contrary evidence — decrements confidence rather than flipping
+            // the tier, so a brief NAT-mapping lapse doesn't drop a stable node.
+            state
+                .reachability
+                .record(crate::reachability::ReachabilityEvent::DirectLost);
         }
         _ => {}
     }
@@ -3112,6 +3604,44 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
             let (tx, rx) = mpsc::unbounded_channel();
             state.mpc_relay_subscriber = Some(tx);
             state.mpc_relay_subscriber_ever_attached = true;
+            let _ = response.send(Ok(rx));
+        }
+        NetworkCommand::SendClusterTunnelFrame { peer, request, response } => {
+            let request_id = state
+                .swarm
+                .behaviour_mut()
+                .cluster_tunnel
+                .send_request(&peer, request);
+            let _ = response.send(Ok(request_id));
+        }
+        NetworkCommand::SendClusterTunnelResponse {
+            request_id,
+            response_payload,
+            response,
+        } => {
+            let result = match state.pending_inbound_cluster_tunnel.remove(&request_id) {
+                Some(channel) => state
+                    .swarm
+                    .behaviour_mut()
+                    .cluster_tunnel
+                    .send_response(channel, response_payload)
+                    .map_err(|_| NetworkError::ChannelSend),
+                None => Err(NetworkError::PeerNotFound(format!(
+                    "no parked inbound cluster-tunnel frame for id {}",
+                    request_id
+                ))),
+            };
+            let _ = response.send(result);
+        }
+        NetworkCommand::SubscribeClusterTunnelRequests { response } => {
+            let (tx, rx) = mpsc::unbounded_channel();
+            state.cluster_tunnel_request_subscriber = Some(tx);
+            state.cluster_tunnel_request_subscriber_ever_attached = true;
+            let _ = response.send(Ok(rx));
+        }
+        NetworkCommand::SubscribeClusterTunnelResults { response } => {
+            let (tx, rx) = mpsc::unbounded_channel();
+            state.cluster_tunnel_result_subscriber = Some(tx);
             let _ = response.send(Ok(rx));
         }
         NetworkCommand::Shutdown { response } => {

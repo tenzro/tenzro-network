@@ -202,7 +202,7 @@ The same registration semantics are mirrored to two non-EVM backends from a sing
 - `list_model_endpoints` — List model service endpoints
 - `discover_models` — Discover models on network
 - `download_model` — Download model from registry
-- `serve_model` — Start serving a model
+- `serve_model` — Start serving a model. Auto-clusters when one host cannot hold the model: reads the GGUF header for layer count and hidden dimension, discovers LAN members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline across them. Pass `force_single` to keep it on one host, or `cluster_members` to override discovery.
 - `stop_model` — Stop serving a model
 - `delete_model` — Delete a downloaded model
 - `get_download_progress` — Check model download progress
@@ -472,6 +472,37 @@ Per-tenant analytics:
 
 - `open_7683_order`, `get_7683_order`, `list_7683_orders` — Origin-side opener + reads
 - `record_fill_7683`, `get_fill_7683`, `list_fills_7683` — Destination-side fill registry (idempotent)
+
+### Decentralized Storage (6 tools)
+
+- `storage_store_object` — Store an object with an erasure-coded redundancy scheme
+- `storage_open_deal` — Open a streaming deal (renter pre-funds total epochs from deposit)
+- `storage_charge_epoch` — Run one proof-of-retrievability-gated charge epoch
+- `storage_get_deal` — Look up a storage deal by id
+- `storage_set_pricing` — Set the byte-epoch pricing policy (fixed or network-dynamic)
+- `storage_status` — Read this node's storage-provider status
+
+### Compute Rental (5 tools)
+
+- `compute_book_rental` — Book a rental (renter pre-funds total epochs from deposit)
+- `compute_settle_epoch` — Settle one epoch, gated on the provider's availability proof
+- `compute_get_rental` — Look up a compute rental by id
+- `compute_set_pricing` — Set the per-epoch pricing policy (fixed or network-dynamic)
+- `compute_status` — Read this node's compute-rental status
+
+### Distributed MoE Serving (4 tools)
+
+- `moe_shard_map` — Providers holding each (layer, expert), replication, hot / under-replicated experts, role counts
+- `moe_plan_dispatch` — Build a dispatch plan from per-token top-k routing decisions
+- `moe_replication_policy` — Read the governance-tuned replication policy
+- `moe_catalog_shape` — Read the catalog-side MoE topology for a model
+
+### Local Discovery & LAN Clustering (4 tools)
+
+- `local_peers` — Peers discovered on this node's local segment via mDNS
+- `node_reachability` — Sustained connectivity tier (`direct` / `relay_only` / `unreachable`)
+- `node_profile` — Hardware self-profile: build commit, CPU arch, OS, devices, derived serving capacity / backend / capability key
+- `cluster_plan` — Deterministic layer-wise LAN cluster placement for a model across candidate members
 
 ## Ecosystem MCP Servers
 

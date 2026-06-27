@@ -231,7 +231,7 @@ mod tests {
 
         // Status channel produces an initial snapshot synchronously.
         let s = handle.current_status();
-        assert_eq!(s.role, handle.current_status().role);
+        assert_eq!(s.roles, handle.current_status().roles);
 
         // node() returns an Arc to the running node — the in-process
         // counterpart to `main.rs`'s `Arc::new(node)` post-start.

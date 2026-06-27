@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tenzro_network::NetworkConfig;
 use tenzro_consensus::ConsensusConfig;
-use tenzro_types::NetworkRole;
+use tenzro_types::{NetworkRole, RoleSet};
 
 use crate::error::{NodeError, Result};
 
@@ -1039,8 +1039,10 @@ impl CantonIdentityProvidersConfig {
 /// Node configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
-    /// Node role (Validator, InferenceProvider, TeeProvider, or User)
-    pub role: NetworkRole,
+    /// Every role this node serves. A node stakes once and may hold many roles
+    /// at once (e.g. validator + AI + storage). Parsed from `--roles
+    /// validator,storage,ai`.
+    pub roles: RoleSet,
 
     /// Data directory for storage
     pub data_dir: PathBuf,
@@ -1274,7 +1276,7 @@ impl NodeConfig {
             ..NetworkConfig::default()
         };
         Self {
-            role: NetworkRole::Validator,
+            roles: RoleSet::validator_only(),
             data_dir: PathBuf::from("./data/validator"),
             network,
             consensus: Some(ConsensusConfig::default()),
@@ -1318,7 +1320,7 @@ impl NodeConfig {
     /// Create a default inference provider configuration
     pub fn default_provider() -> Self {
         Self {
-            role: NetworkRole::ModelProvider,
+            roles: RoleSet::from(NetworkRole::ModelProvider),
             data_dir: PathBuf::from("./data/provider"),
             network: NetworkConfig::default(),
             consensus: None,
@@ -1356,7 +1358,7 @@ impl NodeConfig {
     /// Create a default TEE provider configuration
     pub fn default_tee_provider() -> Self {
         Self {
-            role: NetworkRole::TeeProvider,
+            roles: RoleSet::from(NetworkRole::TeeProvider),
             data_dir: PathBuf::from("./data/tee-provider"),
             network: NetworkConfig::default(),
             consensus: None,
@@ -1394,7 +1396,7 @@ impl NodeConfig {
     /// Create a default user node configuration
     pub fn default_user() -> Self {
         Self {
-            role: NetworkRole::LightClient,
+            roles: RoleSet::from(NetworkRole::LightClient),
             data_dir: PathBuf::from("./data/user"),
             network: NetworkConfig::default(),
             consensus: None,
@@ -1460,15 +1462,15 @@ impl NodeConfig {
         }
 
         // Validators must have consensus config
-        if self.role == NetworkRole::Validator && self.consensus.is_none() {
+        if self.roles.is_validator() && self.consensus.is_none() {
             return Err(NodeError::Config(
                 "Validators must have consensus configuration".to_string(),
             ));
         }
 
         // Model providers should have models directory
-        if self.role == NetworkRole::ModelProvider && self.models_dir.is_none() {
-            tracing::warn!("Model provider without models directory");
+        if self.roles.serves_ai() && self.models_dir.is_none() {
+            tracing::warn!("AI provider role without models directory");
         }
 
         // Validate log level
@@ -1560,15 +1562,15 @@ mod tests {
     #[test]
     fn test_default_configs() {
         let validator = NodeConfig::default_validator();
-        assert_eq!(validator.role, NetworkRole::Validator);
+        assert!(validator.roles.is_validator());
         assert!(validator.consensus.is_some());
 
         let provider = NodeConfig::default_provider();
-        assert_eq!(provider.role, NetworkRole::ModelProvider);
+        assert!(provider.roles.serves_ai());
         assert!(provider.models_dir.is_some());
 
         let user = NodeConfig::default_user();
-        assert_eq!(user.role, NetworkRole::LightClient);
+        assert!(user.roles.has(NetworkRole::LightClient));
         assert!(user.consensus.is_none());
     }
 
@@ -1606,10 +1608,10 @@ mod tests {
     fn test_node_config_toml_roundtrip() {
         let config = NodeConfig::default_validator();
         let toml_str = toml::to_string_pretty(&config).unwrap();
-        assert!(toml_str.contains("role"));
+        assert!(toml_str.contains("roles"));
         // Parse it back
         let parsed: NodeConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(parsed.role, config.role);
+        assert_eq!(parsed.roles, config.roles);
     }
 
     #[test]
@@ -1624,7 +1626,7 @@ mod tests {
 
         // Load it back
         let loaded = NodeConfig::load_from_file(&temp_file).unwrap();
-        assert_eq!(loaded.role, config.role);
+        assert_eq!(loaded.roles, config.roles);
         assert_eq!(loaded.rpc_addr, config.rpc_addr);
 
         // Clean up
