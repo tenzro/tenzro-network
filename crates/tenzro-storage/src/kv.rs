@@ -175,46 +175,81 @@ pub struct RocksDbStore {
     db: Arc<DB>,
 }
 
+/// Every column family this store manages. Single source of truth so the
+/// descriptor builder and any per-CF maintenance iterate the same set.
+const ALL_CFS: &[&str] = &[
+    CF_BLOCKS,
+    CF_STATE,
+    CF_ACCOUNTS,
+    CF_TRANSACTIONS,
+    CF_METADATA,
+    CF_SNAPSHOTS,
+    CF_IDENTITIES,
+    CF_DELEGATIONS,
+    CF_CREDENTIALS,
+    CF_CHANNELS,
+    CF_AGENTS,
+    CF_MODELS,
+    CF_PROVIDERS,
+    CF_TASKS,
+    CF_AGENT_TEMPLATES,
+    CF_SKILLS,
+    CF_TOOLS,
+    CF_KNOWLEDGE,
+    CF_WORKFLOW_TEMPLATES,
+    CF_TOKENS,
+    CF_SETTLEMENTS,
+    CF_MODEL_SERVICES,
+    CF_NFTS,
+    CF_EVENTS,
+    CF_WEBHOOKS,
+    CF_COMPLIANCE,
+    CF_TRAINING_RUNS,
+    CF_TRAINING_RECEIPTS,
+    CF_AUDIT,
+    CF_APPROVALS,
+    CF_API_KEYS,
+    CF_MPC_KEYSHARES,
+    CF_CANTON_ANALYTICS,
+    CF_BRIDGE_ANALYTICS,
+    CF_VALIDATOR_MODULES,
+];
+
+/// Force a file through compaction at least this often even when write
+/// volume is too low to trigger leveled compaction on its own. Without this,
+/// a validator that overwrites the same handful of hot keys every block (the
+/// idle-chain steady state) never compacts: superseded key versions and
+/// tombstones live forever at L0 and the on-disk footprint grows without
+/// bound relative to the live key set. 24h matches RocksDB's own default
+/// for TTL-style periodic compaction. See RocksDB wiki "Leveled Compaction"
+/// and issue facebook/rocksdb#23248 (Solana) for the same failure mode.
+const PERIODIC_COMPACTION_SECS: u64 = 24 * 60 * 60;
+
 impl RocksDbStore {
+    /// Per-CF options shared by every column family. The defaults
+    /// (`Options::default()`) leave compaction entirely demand-driven, which
+    /// never fires on a low-write chain — so we add a periodic-compaction
+    /// floor plus dynamic level sizing so reclamation keeps pace with the
+    /// hot-key churn regardless of write volume.
+    fn cf_options(config: &StorageConfig) -> Options {
+        let mut o = Options::default();
+        o.set_periodic_compaction_seconds(PERIODIC_COMPACTION_SECS);
+        o.set_level_compaction_dynamic_level_bytes(true);
+        o.set_write_buffer_size(config.write_buffer_size);
+        o.set_max_write_buffer_number(config.max_write_buffer_number);
+        o.set_target_file_size_base(config.target_file_size_base);
+        if config.compression {
+            o.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        }
+        o
+    }
+
     /// Creates the column family descriptors for all storage column families
-    fn column_family_descriptors() -> Vec<ColumnFamilyDescriptor> {
-        vec![
-            ColumnFamilyDescriptor::new(CF_BLOCKS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_STATE, Options::default()),
-            ColumnFamilyDescriptor::new(CF_ACCOUNTS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_TRANSACTIONS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_METADATA, Options::default()),
-            ColumnFamilyDescriptor::new(CF_SNAPSHOTS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_IDENTITIES, Options::default()),
-            ColumnFamilyDescriptor::new(CF_DELEGATIONS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_CREDENTIALS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_CHANNELS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_AGENTS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_MODELS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_PROVIDERS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_TASKS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_AGENT_TEMPLATES, Options::default()),
-            ColumnFamilyDescriptor::new(CF_SKILLS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_TOOLS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_KNOWLEDGE, Options::default()),
-            ColumnFamilyDescriptor::new(CF_WORKFLOW_TEMPLATES, Options::default()),
-            ColumnFamilyDescriptor::new(CF_TOKENS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_SETTLEMENTS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_MODEL_SERVICES, Options::default()),
-            ColumnFamilyDescriptor::new(CF_NFTS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_EVENTS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_WEBHOOKS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_COMPLIANCE, Options::default()),
-            ColumnFamilyDescriptor::new(CF_TRAINING_RUNS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_TRAINING_RECEIPTS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_AUDIT, Options::default()),
-            ColumnFamilyDescriptor::new(CF_APPROVALS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_API_KEYS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_MPC_KEYSHARES, Options::default()),
-            ColumnFamilyDescriptor::new(CF_CANTON_ANALYTICS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_BRIDGE_ANALYTICS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_VALIDATOR_MODULES, Options::default()),
-        ]
+    fn column_family_descriptors(config: &StorageConfig) -> Vec<ColumnFamilyDescriptor> {
+        ALL_CFS
+            .iter()
+            .map(|name| ColumnFamilyDescriptor::new(*name, Self::cf_options(config)))
+            .collect()
     }
 
     /// Opens a RocksDB store with the given configuration
@@ -235,8 +270,23 @@ impl RocksDbStore {
             opts.enable_statistics();
         }
 
+        // Cap total live WAL. RocksDB treats `max_total_wal_size` as a flush
+        // trigger: once the sum of WAL across all column families crosses it,
+        // the CFs holding the oldest WAL are flushed so those log files can be
+        // deleted. Without this cap, a low-write chain whose memtables fill
+        // slowly never flushes, so WAL accumulates unbounded — measured at
+        // 100k idle blocks producing ~130 MB of pure WAL with 0 bytes flushed
+        // to SST, the exact mechanism behind the testnet's multi-GB growth.
+        // See RocksDB wiki "Write Ahead Log" and issue facebook/rocksdb#662
+        // (low-write CFs growing WAL to 100 GB).
+        opts.set_max_total_wal_size(256 * 1024 * 1024);
+        // Archive housekeeping: bound retained/recyclable WAL so the archive
+        // dir can't grow on its own once a log is no longer live.
+        opts.set_wal_size_limit_mb(512);
+        opts.set_keep_log_file_num(8);
+
         // Attempt to open the database, handling WAL corruption gracefully
-        let db = match DB::open_cf_descriptors(&opts, &config.db_path, Self::column_family_descriptors()) {
+        let db = match DB::open_cf_descriptors(&opts, &config.db_path, Self::column_family_descriptors(config)) {
             Ok(db) => db,
             Err(e) => {
                 let error_str = e.to_string();
@@ -262,7 +312,7 @@ impl RocksDbStore {
                     tracing::info!("Database repair completed, reopening...");
 
                     // Try opening again after repair with fresh descriptors
-                    DB::open_cf_descriptors(&opts, &config.db_path, Self::column_family_descriptors())
+                    DB::open_cf_descriptors(&opts, &config.db_path, Self::column_family_descriptors(config))
                         .map_err(|e| StorageError::DatabaseError(format!(
                             "Failed to open database after repair: {}",
                             e
