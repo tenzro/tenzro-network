@@ -270,15 +270,21 @@ impl RocksDbStore {
             opts.enable_statistics();
         }
 
-        // Cap total live WAL. RocksDB treats `max_total_wal_size` as a flush
-        // trigger: once the sum of WAL across all column families crosses it,
-        // the CFs holding the oldest WAL are flushed so those log files can be
-        // deleted. Without this cap, a low-write chain whose memtables fill
-        // slowly never flushes, so WAL accumulates unbounded — measured at
-        // 100k idle blocks producing ~130 MB of pure WAL with 0 bytes flushed
-        // to SST, the exact mechanism behind the testnet's multi-GB growth.
-        // See RocksDB wiki "Write Ahead Log" and issue facebook/rocksdb#662
-        // (low-write CFs growing WAL to 100 GB).
+        // Aggregate memtable budget across ALL column families. This is the
+        // primary WAL bound on a many-CF store: when the SUM of every CF's
+        // memtable usage crosses this, RocksDB flushes the CF with the largest
+        // memtable, which steadily drains every CF so the WAL segments they
+        // pin become deletable. With 35 column families, `max_total_wal_size`
+        // alone is insufficient — it flushes only the single CF holding the
+        // oldest WAL, but that log file stays live as long as ANY of the other
+        // ~31 mostly-idle CFs still have unflushed data in it, so the WAL keeps
+        // growing (measured in production at 375–640 MB live WAL above a 256 MB
+        // cap and climbing). This is the documented many-CF limitation in
+        // facebook/rocksdb#662; the cross-CF write-buffer budget is what forces
+        // the idle CFs to flush regardless of their individual write rate.
+        opts.set_db_write_buffer_size(256 * 1024 * 1024);
+        // Cap total live WAL as a secondary trigger / hard ceiling on top of
+        // the aggregate flush above.
         opts.set_max_total_wal_size(256 * 1024 * 1024);
         // Archive housekeeping: bound retained/recyclable WAL so the archive
         // dir can't grow on its own once a log is no longer live.
