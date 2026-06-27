@@ -6,7 +6,7 @@
 
 ## Abstract
 
-A coordination layer is only as good as the substrate underneath it. Tenzro Network is the protocol layer that lets thousands of independently operated peers — validators, model providers, TEE providers, light clients, agents behind home / mobile / corporate NAT — find each other, propagate messages efficiently, distinguish validator traffic from non-validator traffic, and exchange large content-addressed payloads without going through a central broker.
+A coordination layer is only as good as the substrate underneath it. Tenzro Network is the protocol layer that lets thousands of independently operated peers — validators, model providers, compute providers, storage providers, TEE providers, light clients, agents behind home / mobile / corporate NAT — find each other, propagate messages efficiently, distinguish validator traffic from non-validator traffic, and exchange large content-addressed payloads without going through a central broker. A single peer can take on several of these roles at once against one stake; the roles describe what a node serves, not how many nodes there are.
 
 The design has two planes. The **control plane** (`tenzro-network`) is libp2p — gossipsub for topic-based pub/sub, Kademlia DHT for peer discovery, request/response protocols for direct exchanges (block sync, consensus messages, MPC relay), Identify for protocol negotiation, AutoNAT v2 + Circuit-Relay v2 + DCUtR for NAT traversal. The **data plane** (`tenzro-iroh`) is iroh — content-addressed transport over QUIC, used for model weights, training gradients, sealed shards, agent memory archives, and A2A + MCP-over-iroh ALPNs.
 
@@ -114,6 +114,7 @@ Some message flows are too sensitive to gossipsub's lossy fanout. Tenzro carries
 - **`/tenzro/block-sync/1.0.0`** — a lagging node requests a contiguous range of blocks from a chosen peer. The provider streams the response in framed chunks. Modeled on Sui's `state_sync` and Aptos's `storage-service`. The wire types live in `block_sync_proto.rs`.
 - **`/tenzro/consensus-direct/1.0.0`** — validators exchange HotStuff-2 vote messages and quorum certificates directly without going through gossipsub. Bounded latency, validator-only.
 - **`/tenzro/mpc/req-resp/1.0.0`** — DKLS23 round messages between MPC committee members. Pairs with the `/tenzro/mpc/session/<instance_id>` gossipsub topic for broadcast rounds.
+- **`/tenzro/cluster-tunnel/1.0.0`** — the authenticated transport for intra-cluster pipeline traffic. A LAN cluster head opens one tunnel session per member; framed payloads carry the ggml RPC byte stream between the head's loopback bridge and the member's loopback `rpc-server` (see AI.md §3.5). The member never binds its `rpc-server` on a network interface — the tunnel is the only way in, so the unauthenticated RPC protocol is wrapped in libp2p's authenticated transport. Sessions are demultiplexed by a session id carried on each frame; one request-response pair is full-duplex with return bytes piggybacked on the acknowledgement.
 
 Each protocol uses a separate `request_response::Behaviour` instance with its own codec and concurrency cap.
 
@@ -129,6 +130,20 @@ A new node finds the network through a multi-source bootstrap path:
 - **Identify observed_addr tally** — Identify reports back what a peer sees as the local node's external address. With N≥3 confirmations from independent peers, the node treats the address as confirmed and updates its `external_addrs` so future Identify exchanges propagate the address forward.
 
 The result is permissionless joining: a node with the binary, the genesis, and a DNS name (or one explicit peer) becomes a network participant without any operator-side allowlisting.
+
+### mDNS local discovery and `LocalPeerSet`
+
+The four sources above find peers across the WAN. On the local segment a node also runs libp2p mDNS inside `TenzroBehaviour`, so machines on the same LAN find each other with zero configuration — no boot node, no DNS, no DHT round. This is the discovery substrate for two local-network features: forming a LAN cluster that jointly serves an oversized model (see AI.md §3.5), and preferring a local provider when one is present.
+
+mDNS results are tracked in a `LocalPeerSet` — a concurrent set of peer IDs the node currently sees on its local segment. The mDNS `Discovered` event inserts a peer; the `Expired` event removes it. Membership is one orthogonal signal layered onto the existing reachability tier: a peer can be both WAN-reachable and local-direct, and local-direct membership is what marks it eligible to carry per-token cluster pipeline traffic.
+
+`LocalPeerSet` is exposed up the stack — `TenzroNetworkService::local_peers()` → `Node::local_peers()` — so the routing and orchestration layers can consult it without re-deriving membership.
+
+An AI-serving node willing to join LAN clusters attaches a `ClusterProfile { llama_commit, backend, cap_key }` to its periodic provider announcement. This is what lets a cluster head auto-discover members from gossip rather than requiring a hand-supplied roster (see AI.md §3.5): the head folds every provider that advertised a `ClusterProfile`, plus itself, into the planner. A node that omits the field is never auto-clustered. No serving socket is advertised — the head reaches each member's loopback `rpc-server` over the `/tenzro/cluster-tunnel/1.0.0` protocol keyed by the announcing peer's id.
+
+### Local-first routing
+
+When a node resolves which provider serves a request (`resolve_execution`), a provider that is a current `LocalPeerSet` member is preferred over an equally-capable remote provider. The preference is a prefer-local-with-fallback ordering, not a hard pin: the resolver sorts candidates by `(is_local, reachability_rank)`, so a local provider wins ties but the request still falls back to the best remote provider when no local one is eligible. This mirrors Kubernetes `trafficDistribution: PreferSameZone` (prefer-local, fall back to anywhere) rather than the request-dropping `internalTrafficPolicy: Local`. Local-first keeps latency and egress low when capacity exists nearby, without ever stranding a request that only a remote provider can serve.
 
 ---
 

@@ -15,7 +15,7 @@ use libp2p::{
         self, IdentTopic, MessageAuthenticity, MessageId,
         PeerScoreParams, PeerScoreThresholds, ValidationMode,
     },
-    identify, kad, ping, relay,
+    identify, kad, mdns, ping, relay,
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
     PeerId,
 };
@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::block_sync_proto::{self, BlockSyncBehaviour};
+use crate::cluster_tunnel_proto::{self, ClusterTunnelBehaviour};
 use crate::consensus_direct_proto::{self, ConsensusDirectBehaviour};
 use crate::gossip::{validate_gossip_message, MessageDeduplicator, MessageValidation};
 use crate::mpc_relay::{self, MpcRelayBehaviour};
@@ -81,6 +82,17 @@ pub struct TenzroBehaviour {
     /// `mpc_relay.rs` for the wire types and concurrency limits.
     pub mpc_relay: MpcRelayBehaviour,
 
+    /// Cluster-tunnel request/response protocol
+    /// (`/tenzro/cluster-tunnel/1.0.0`). Relays a cluster member's loopback
+    /// `rpc-server` byte stream to the pipeline head over the same
+    /// peer-ID-authenticated, encrypted transport as the rest of the swarm,
+    /// so the insecure ggml RPC socket is never exposed on the LAN. Frames
+    /// are tagged with a session id and a monotonic sequence number; the Ack
+    /// piggybacks return-path bytes for full-duplex over a single
+    /// request-response pair. See `cluster_tunnel_proto.rs` for the wire
+    /// types and concurrency limits.
+    pub cluster_tunnel: ClusterTunnelBehaviour,
+
     // ─── NAT traversal stack (libp2p 2026 reference design) ────────────────
     //
     // Validators with a confirmed public address run the **server** halves
@@ -130,6 +142,18 @@ pub struct TenzroBehaviour {
     /// signalling channel, then upgrades the connection from relayed to
     /// direct. Gated by `enable_hole_punching`.
     pub dcutr: Toggle<dcutr::Behaviour>,
+
+    /// mDNS local-network discovery (`spec/libp2p/mdns`). Announces this
+    /// node and discovers other Tenzro nodes on the same L2 segment without
+    /// any public infrastructure — no DHT walk, no bootstrap round-trip,
+    /// works on an air-gapped LAN. Gated by `enable_mdns`: on for the
+    /// `local()` preset and edge/desktop deployments, off for cloud /
+    /// hardened nodes (mDNS broadcasts LAN presence, which a public VM has no
+    /// reason to do). Discovered peers are private-addressed (`10.x`,
+    /// `192.168.x`, link-local) and feed the same dial path as bootstrap;
+    /// those addresses are never re-advertised to the global mesh (Identify
+    /// still hides listen addrs), so the local lane stays local.
+    pub mdns: Toggle<mdns::tokio::Behaviour>,
 }
 
 /// Wrapper providing application-level message deduplication on top of TenzroBehaviour
@@ -156,6 +180,11 @@ impl TenzroBehaviour {
     /// `enable_hole_punching` enables the relay-client + AutoNAT v2 client +
     /// DCUtR triple, which is what NATed nodes need to reach the network
     /// from behind a residential / mobile / corporate firewall.
+    ///
+    /// `enable_mdns` enables mDNS local-network discovery — finds other
+    /// Tenzro nodes on the same L2 segment with no public infrastructure.
+    /// Leave off for cloud / hardened nodes that should not broadcast LAN
+    /// presence.
     pub fn new(
         local_peer_id: PeerId,
         local_key: &libp2p::identity::Keypair,
@@ -163,6 +192,7 @@ impl TenzroBehaviour {
         user_agent: String,
         enable_relay: bool,
         enable_hole_punching: bool,
+        enable_mdns: bool,
         relay_client_behaviour: Option<relay::client::Behaviour>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Gossipsub config tuned for small validator sets. Mesh params must be
@@ -327,6 +357,14 @@ impl TenzroBehaviour {
         // session driver.
         let mpc_relay = mpc_relay::new_behaviour();
 
+        // Cluster-tunnel protocol: relays a cluster member's loopback
+        // rpc-server byte stream to the pipeline head over the encrypted
+        // swarm transport. Always constructed — it is a no-op on a node that
+        // neither heads nor joins a LAN cluster, since no peer ever dials its
+        // tunnel. The serving runtime is what splices accepted frames to a
+        // local rpc-server socket.
+        let cluster_tunnel = cluster_tunnel_proto::new_behaviour();
+
         // ─── NAT traversal stack ──────────────────────────────────────────
         //
         // Build only the halves the role asked for. Fields are wrapped in
@@ -390,6 +428,27 @@ impl TenzroBehaviour {
             Toggle::from(None)
         };
 
+        // mDNS — local-network discovery. Construction can fail if the
+        // platform refuses to bind the mDNS multicast socket (e.g. a
+        // container with no multicast route); treat that as "no local lane"
+        // rather than a fatal error, since the WAN discovery paths still
+        // work. Off entirely when `enable_mdns` is false.
+        let mdns = if enable_mdns {
+            match mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id) {
+                Ok(behaviour) => Toggle::from(Some(behaviour)),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "mDNS enabled but failed to bind multicast socket; \
+                         continuing without local-network discovery"
+                    );
+                    Toggle::from(None)
+                }
+            }
+        } else {
+            Toggle::from(None)
+        };
+
         Ok(Self {
             gossipsub,
             kademlia,
@@ -400,11 +459,13 @@ impl TenzroBehaviour {
             block_sync,
             consensus_direct,
             mpc_relay,
+            cluster_tunnel,
             relay,
             relay_client,
             autonat_client,
             autonat_server,
             dcutr,
+            mdns,
         })
     }
 
@@ -477,6 +538,7 @@ impl TenzroNetwork {
             user_agent,
             false, // enable_relay
             false, // enable_hole_punching
+            false, // enable_mdns
             None,  // relay_client_behaviour
         )?;
 
@@ -565,6 +627,7 @@ mod tests {
             "tenzro-network/0.1.0".to_string(),
             false, // enable_relay
             false, // enable_hole_punching
+            false, // enable_mdns
             None,  // relay_client_behaviour
         );
 
@@ -583,6 +646,7 @@ mod tests {
             "tenzro-network/0.1.0".to_string(),
             false, // enable_relay
             false, // enable_hole_punching
+            false, // enable_mdns
             None,  // relay_client_behaviour
         )
         .unwrap();

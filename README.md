@@ -1,6 +1,6 @@
 # Tenzro Network
 
-**Tenzro is the decentralized economic and compute substrate where AI agents and humans discover, transact, settle, and orchestrate intelligence across networks, VMs, and rails** — EVM, SVM, Canton/DAML, cross-chain bridges, AP2 and x402 payments, decentralized AI inference, decentralized GPU training, TEE-backed confidential compute — under one identity (TDIP) and one settlement asset (TNZO).
+**Tenzro is the open, distributed execution layer for AI.** Inference, agents, and workflows run across a network of independent nodes instead of one company's servers. Any machine can serve a model, rent out spare compute, and hold data — one stake covers every role, and TNZO settles all of it: consumers pay from their balance, providers earn into theirs. Underneath sit the substrate layers that make execution open — multi-VM settlement (EVM, SVM, Canton/DAML), cross-chain reach, one identity (TDIP), and one settlement asset (TNZO).
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-51%20suites%2C%200%20failures-brightgreen)]()
@@ -9,9 +9,10 @@
 
 ## What is Tenzro?
 
-**The economic substrate for AI agents and humans. Tenzro is the economic and compute infrastructure where AI agents live, transact, and collaborate** — across every VM, every external chain, and every protocol. The thesis is straightforward: agents and humans need a single self-sovereign identity, a single threshold-secured wallet, a single settlement asset, and **a single discovery and orchestration surface for decentralized AI and compute** that work uniformly across every VM and every external chain they touch. Today they don't — agents hold one wallet per chain, identity is rebound at every protocol boundary, AI inference and GPU compute live behind opaque centralized APIs, and value can't cross from EVM to Canton without giving up custody. Tenzro fixes this at the protocol layer.
+**The open, distributed execution layer for AI.** Tenzro is where inference happens, where agents act, and where workflows run — across a network of independent nodes rather than one company's servers. The thesis is straightforward: AI needs somewhere to run that no single provider controls. That means nodes anyone can join, a way to pay for what you use and earn for what you serve, and proofs anyone can check. Today inference and compute live behind opaque centralized APIs, identity is rebound at every protocol boundary, and value can't cross from EVM to Canton without giving up custody. Tenzro fixes this at the protocol layer.
 
-- **Decentralized AI + compute orchestration**: agents and humans discover and access AI inference (chat, vision, audio, forecasting, embeddings, segmentation, detection — 7 ONNX runtimes), GPU training capacity (Tenzro Train), and TEE-backed confidential compute (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC) through a single protocol-level marketplace with per-token billing, reputation scoring, and on-chain verifiability. Providers are sovereign — anyone can run a model, expose an endpoint, or contribute compute, and earn TNZO directly. The inference router (price / latency / reputation / weighted strategies) and the agent-spawning + swarm-orchestration primitives let agents compose multi-model, multi-provider workflows without trusting any one party.
+- **Multi-role nodes**: one node, one stake, many roles. A node can serve AI models, rent out spare compute, and hold data at the same time — a single stake covers every role it takes on. Compute rental is availability-proof-gated and billed per epoch; storage is proof-of-retrievability-gated and billed per byte-epoch. In every case the consumer pays from their TNZO balance and the provider earns into theirs.
+- **Decentralized AI + compute orchestration**: agents and humans discover and access AI inference (chat, vision, audio, forecasting, embeddings, segmentation, detection), rentable compute capacity, and TEE-backed confidential compute (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC) through a single protocol-level marketplace with per-use billing, reputation scoring, and on-chain verifiability. Providers are sovereign — anyone can run a model, expose an endpoint, or contribute compute, and earn TNZO directly. The inference router (price / latency / reputation / weighted strategies) and the agent-spawning + swarm-orchestration primitives let agents compose multi-model, multi-provider workflows without trusting any one party.
 - **Universal identity (TDIP)**: one DID for humans, delegated agents, and autonomous agents that works on EVM (via ERC-8004 mirror), SVM, Canton (CIP-26 user binding), AP2 mandates, x402 micropayments, and OAuth/DPoP — same identity, same delegation scope, same revocation surface.
 - **Universal wallet (FROST-Ed25519 + ML-DSA-65 hybrid PQ)**: threshold-secured, hardware-attestable, and one balance shared across three VM views — wTNZO ERC-20 on EVM, SPL adapter on SVM, CIP-56 holding on Canton. No bridge risk, no liquidity fragmentation. Pointer-model native asset.
 - **Universal settlement (TNZO)**: bridge fees, inference fees, escrow, micropayment channels, training-run grants, and cross-chain destination-native fees (via the Chainlink-backed bridge fee oracle) all denominated and accounted in TNZO.
@@ -30,17 +31,17 @@ Tenzro turns AI compute into a unit of economic exchange — denominated, settle
 - **Tokenized AI training (Tenzro Train).** Decentralized verifiable training using a Decoupled DiLoCo–style protocol. GPU providers contribute compute and earn TNZO; sponsors fund runs from on-chain escrow. Every accepted outer gradient produces a signed receipt, and every run finalizes a run-root commitment on-chain. Phase 1 ships timeseries-first with simple mean aggregation, stake bonding, and the Open trust tier; Byzantine-robust aggregation, multi-region scale, and TEE-resident data are roadmap.
 - **Agentic finance.** Autonomous agents discover providers, negotiate, pay, and settle in TNZO using the same TDIP identity, FROST-Ed25519 threshold wallet, and delegation scope. AP2 mandates, x402 micropayments, ERC-8004 trustless-agent registries (mirrored across EVM, SVM, and DAML from a single TDIP write), and ERC-4337 v0.8 smart accounts all run inside Tenzro consensus.
 
-Verifiability is not optional. Inference results, settlements, and identity claims can be proven via Plonky3 STARKs over the KoalaBear field (transparent setup, post-quantum-conjectured soundness) or attested by hardware enclaves — both anchored on-chain via the `ZK_VERIFY` and `TEE_VERIFY` precompiles. Where Render rents raw GPUs and Bittensor coordinates subnet intelligence, Tenzro unifies inference, training, agent settlement, identity, verification, and cross-chain reach under one tokenized substrate.
+Verifiability is not optional. Inference results, settlements, and identity claims can be proven via Plonky3 STARKs over the KoalaBear field (transparent setup, post-quantum-conjectured soundness) or attested by hardware enclaves — both anchored on-chain via the `ZK_VERIFY` and `TEE_VERIFY` precompiles. Tenzro unifies inference, compute rental, storage, training, agent settlement, identity, verification, and cross-chain reach under one open execution layer — not raw GPU rental and not subnet coordination, but the full surface where AI runs.
 
 ## What Tenzro Does That No Other Network Does
 
-Tenzro is the only protocol in 2026 that combines **EVM + SVM + Canton/DAML** in a single network. The closest analog (Fluent, mainnet 2026-04-24) ships EVM + SVM + Wasm but no DAML — and DAML is the execution environment the institutional RWA surface (regulated tokenized treasuries, bank deposit tokens, CIP-56 settlement) is converging on.
+Tenzro combines **EVM + SVM + Canton/DAML** in a single network — and DAML is the execution environment the institutional RWA surface (regulated tokenized treasuries, bank deposit tokens, CIP-56 settlement) is converging on. That breadth is the substrate; the execution layer for AI is what rides on top of it.
 
 That makes Tenzro the only network that natively bridges **retail-agent rails** (AP2 mandates, x402 micropayments, ERC-8004 trustless agents, ERC-4337 v0.8 smart accounts) and **institutional-RWA rails** (Canton DAML, CIP-56 tokens, DvP settlement) under one identity (TDIP), one settlement asset (TNZO), and one consensus layer.
 
 Two more architectural calls worth flagging:
 
-- **Confidential agent compute is a consensus primitive, not a sidecar.** TEE-attested validators get a 1.5× multiplier on their reputation-weighted leader-selection draw; the `TEE_VERIFY` precompile verifies real Intel TDX, AMD SEV-SNP, AWS Nitro, and NVIDIA GPU CC quotes on-chain. Phala, Oasis Sapphire/ROFL, and NEAR AI all run TEE compute as middleware over a non-TEE chain. Tenzro consensus is two-phase HotStuff-2 with reputation-weighted proposer election, no-endorsement certificates for tail-fork resistance, and Ed25519 + ML-DSA-65 hybrid post-quantum signatures on every safety-critical message — full spec at [`docs/papers/tenzro-consensus.md`](docs/papers/tenzro-consensus.md).
+- **Confidential agent compute is a consensus primitive, not a sidecar.** TEE-attested validators get a 1.5× multiplier on their reputation-weighted leader-selection draw; the `TEE_VERIFY` precompile verifies real Intel TDX, AMD SEV-SNP, AWS Nitro, and NVIDIA GPU CC quotes on-chain — attested execution is built into consensus, not bolted on as middleware over a non-TEE chain. Tenzro consensus is two-phase HotStuff-2 with reputation-weighted proposer election, no-endorsement certificates for tail-fork resistance, and Ed25519 + ML-DSA-65 hybrid post-quantum signatures on every safety-critical message — full spec at [`docs/papers/tenzro-consensus.md`](docs/papers/tenzro-consensus.md).
 - **TNZO is a pointer-model native asset.** One balance, three VM views (wTNZO ERC-20 on EVM, SPL adapter on SVM, CIP-56 holding on Canton) — no bridge risk, no liquidity fragmentation. Registered upstream via CAIP-2 (`tenzro` namespace), SLIP-44 (`1414421071` / `0xd44e5a4f`), and W3C DID (`did:tenzro`).
 
 For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md).
@@ -74,7 +75,7 @@ For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`d
    +----------+--------+---------------+-----------+------------+
 ```
 
-## Workspace — 26 Crates
+## Workspace — 27 Crates
 
 | Crate | Description |
 |-------|-------------|
@@ -87,7 +88,7 @@ For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`d
 | **tenzro-storage** | RocksDB with column families, Merkle Patricia Trie, snapshots, fsync durability |
 | **tenzro-wallet** | FROST-Ed25519 (RFC 9591) 2-of-3 threshold wallets + ML-DSA-65 hybrid PQ leg, Argon2id keystore, transaction builder, nonce management, key zeroization |
 | **tenzro-auth** | Authentication engine: AAP (Agent Authentication Protocol), DPoP, RAR (Rich Authorization Requests) |
-| **tenzro-consensus** | HotStuff-2 BFT: three-phase PREPARE → COMMIT → DECIDE, TEE-weighted leader selection (1.5×), equivocation detection + slashing |
+| **tenzro-consensus** | HotStuff-2 BFT: three-phase PREPARE → COMMIT → DECIDE, stake-weighted quorum with a 10% per-validator cap (consensus voting reserved for staked validators; service roles earn proof-of-service rewards), TEE-weighted leader selection (1.5×), equivocation detection + slashing |
 | **tenzro-vm** | Multi-VM: EVM (revm) + SVM (solana_rbpf) + DAML, Block-STM parallel execution, EIP-1559, ERC-4337 AA, ERC-7579 modular validators, **EIP-7702 Type-4 delegation registry**, **Permit2 SignatureTransfer + witness** (ERC-7683-ready gasless flows), **Secure-Mint precompile** (1:1 reserve-attestation invariant for tokenized assets), standard EVM + EIP-2537 BLS12-381 + Tenzro precompiles (TEE_VERIFY, ZK_VERIFY, VRF_VERIFY at 0x1007) |
 | **tenzro-token** | TNZO token economics: treasury, staking, governance, epoch rewards, liquid staking (stTNZO) |
 | **tenzro-identity** | TDIP: unified human/machine identity, W3C DID documents, verifiable credentials, delegation scopes, GDPR Article 17 right-to-erasure (`tenzro_forgetIdentity`) |
@@ -97,7 +98,8 @@ For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`d
 | **tenzro-model** | Model registry, modality-aware inference routing (price/latency/reputation), HuggingFace downloads (`HfArtifactDownloader` single-file + bundle), durable catalog. Multi-modal ONNX runtimes: forecast (TimesFM 2.5), vision (CLIP, SigLIP2, DINOv3, DINOv2), text-embedding (Qwen3-Embedding, EmbeddingGemma, BGE-M3, Snowflake Arctic), segmentation (SAM 3 / 3.1, SAM 2, EdgeSAM, MobileSAM), detection (RF-DETR, D-FINE), audio ASR (Moonshine v2, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT, Canary-1B-Flash), video (encoder scaffold). License-tier gating: Permissive / Attribution / CommercialCustom / NonCommercial. |
 | **tenzro-cortex** | Recurrent-depth reasoning workers (RDT/MoE): HTTP sidecar architecture, signed receipts, attestation suite, gossip-based worker discovery, depth-priced billing |
 | **tenzro-training** | Tenzro Train protocol layer (Decoupled DiLoCo): aggregation rules (Mean, TrimmedMean, CoordinateMedian, Krum), Nesterov outer optimizer, syncer state machine, on-chain run-root commitments. Pairs with the Python reference trainer at `integrations/trainer/`. |
-| **tenzro-settlement** | Escrow, micropayment channels, batch settlement, dispute resolution |
+| **tenzro-settlement** | Escrow, micropayment channels, batch settlement, dispute resolution, and streaming rental escrow: time-based capacity rental with renter deposit + per-epoch streaming release gated on signed availability proof; provider stake collateralizes one-epoch exposure across active rentals, make-whole-from-stake on miss |
+| **tenzro-storage-market** | Decentralized storage over the iroh content-addressed transport: provider daemon (accept / serve objects), nonce-bound proof-of-retrievability challenges, systematic Reed-Solomon erasure coding (replication as the k=1 case), per-byte streaming metering gated on a passing retrievability proof (`ServiceType::Storage`) |
 | **tenzro-bridge** | Cross-chain: Wormhole NTT (Guardian quorum verifier), LayerZero V2, Chainlink CCIP + CCT, deBridge DLN, Li.Fi, Canton DAML, Hyperlane V3 (sovereign Tenzro-ISM), Axelar GMP (Cosmos / Move / Stellar reach), Babylon Bitcoin staking |
 | **tenzro-events** | Event sourcing and subscription system with replay, webhooks, websockets |
 | **tenzro-workflow** | Multi-party workflow runtime: orchestrates Canton DAML receipts, on-chain transaction selectors `0x01000040`–`0x0100004B` |
@@ -151,13 +153,13 @@ tenzro interactive
 
 ```bash
 # Validator node
-./target/release/tenzro-node --role validator --data-dir ./data
+./target/release/tenzro-node --roles validator --data-dir ./data
 
 # Light client
-./target/release/tenzro-node --role user --data-dir ./data
+./target/release/tenzro-node --roles light --data-dir ./data
 
-# Model provider
-./target/release/tenzro-node --role model-provider --data-dir ./data
+# One node serving inference and holding storage under one stake
+./target/release/tenzro-node --roles ai,storage --data-dir ./data
 ```
 
 ### AI Inference
@@ -223,6 +225,8 @@ A chain that picks one VM forces every workload to fit that VM. Tenzro runs thre
 The protocol layer treats AI compute as a coordinated resource, not a centralized service.
 
 - **Distributed Mixture-of-Experts serving.** MoE models (Qwen 3.5 122B-A10B / 397B-A17B, DeepSeek V3 / V4 Pro 1.6T-A49B / V4 Flash, GLM 5.1 / 5.2, Kimi K2 / K2.6, MiniMax M3, Gemma 4 26B-A4B) serve in two modes. **Full-replica** when one provider's hardware fits the model. **Decentralized expert shards** when it doesn't — providers declare which experts they hold via `ProviderCapacity.moe_holdings`, and the dispatch planner aggregates per-token top-k routing decisions into per-holder batches dispatched directly over the holder's iroh QUIC endpoint. The shard view is a derived view over the existing provider registry — MoE providers are the same network providers that serve dense models. Replication is governance-tunable (default ≥ 2 holders per expert, up to 8 for popular experts). Typed pipeline roles: `Replica`, `Router`, `ExpertHolder`, `PrefillDecode`, `Prefill`, `Decode`. RPCs: `tenzro_moeShardMap`, `tenzro_moePlanDispatch`, `tenzro_moeReplicationPolicy`, `tenzro_moeCatalogShape`.
+- **LAN clustering — layer-wise pipeline parallelism.** When no single member fits a model, a set of machines on the same LAN serve it together as a pipeline: the model's layers are partitioned into contiguous stages, one stage per member, and only the boundary activation (`hidden_dim × dtype_bytes` per token, fp16) crosses the wire between adjacent stages. Placement is deterministic — VRAM-weighted largest-remainder layer assignment, greedy nearest-neighbour stage ordering, and a reachability gate that excludes members that cannot hold a data-plane link — with no model in the hot path. Members must share one runtime build commit (no wire-version negotiation); mixed backends across members are fine. RPC `tenzro_clusterPlan` returns the fit decision and, when a cluster forms, the ordered per-member layer stages. Serving auto-triggers the pipeline: `tenzro_serveModel` reads the GGUF header for the model shape, discovers members from gossiped `ClusterProfile` announcements, and runs the cluster when one host cannot hold the model — pass `force_single` to keep it on one host, or supply `cluster_members` to override discovery.
+- **Local-first discovery and routing.** Nodes discover peers on their own LAN segment via mDNS (`tenzro_localPeers`) and publish a sustained connectivity tier — `direct` / `relay_only` / `unreachable` (`tenzro_nodeReachability`). The execution resolver prefers a local provider and falls back to the wider network only when none is reachable (prefer-local-with-fallback), so a request served by a machine on the same LAN never leaves it. Each node also exposes a hardware self-profile — runtime build commit, CPU architecture, OS, detected compute devices, and derived serving capacity / backend / capability key (`tenzro_nodeProfile`) — which feeds both single-box fit and cluster planning.
 - **Multi-Token Prediction (MTP) — full path wired.** Speculative decoding wired through the catalog → provider capacity → router → llama.cpp `--spec-type draft-mtp` path. Wired for DeepSeek V3 (native, ~80% accept rate, ~1.8× decode), DeepSeek V4 Pro / Flash, GLM 5.2, Gemma 4 (all sizes), Qwen 3.5 (0.8B/2B/4B/9B/27B/35B-A3B/122B-A10B/397B-A17B), and Qwen 3.6 27B + 35B-A3B. Providers advertise drafter co-load via `ProviderCapacity.mtp_enabled`; the inference router filters MTP-eligible requests to MTP-capable providers when `draft_n` is set.
 - **Decentralized training — Tenzro Train (Decoupled DiLoCo).** Rust protocol layer (`tenzro-training`) owns the syncer state machine, four aggregation rules (Mean / TrimmedMean / CoordinateMedian / Krum), Nesterov outer optimizer, fragment commitment, training receipts, and on-chain run-root commitments. Python reference trainer wraps PyTorch FSDP2 + Hivemind + safetensors for per-modality inner loops (transformers, native PyTorch, gluonts, timm). k-of-N witness committee with idempotent finalization and no-endorsement certificates handles multi-syncer coordination across regions. Confidential tier uses HPKE RFC 9180 base-mode wrapping of per-shard data keys to enclave-resident trainers (data unsealed only inside the trainer's TEE). Three trust tiers: Open (Mean only), Verified, Confidential.
 - **Cortex.** Recurrent-depth-Transformer reasoning workers exposed as a separate compute lane — HTTP sidecar architecture, signed receipts, attestation suite, gossip-based worker discovery, depth-priced billing.
@@ -370,7 +374,7 @@ cargo test --workspace
 cargo clippy --workspace
 
 # Run node locally
-cargo run --bin tenzro-node -- --role validator --data-dir ./data
+cargo run --bin tenzro-node -- --roles validator --data-dir ./data
 
 # Run CLI
 cargo run --bin tenzro -- --help
@@ -414,7 +418,7 @@ docker build -t tenzro-node .
 # Run node
 docker run -p 8545:8545 -p 8080:8080 -p 3001:3001 -p 3002:3002 \
   -v tenzro-data:/data/tenzro \
-  tenzro-node --role validator --data-dir /data/tenzro
+  tenzro-node --roles validator --data-dir /data/tenzro
 ```
 
 ### Kubernetes
@@ -439,6 +443,8 @@ kubectl apply -f deploy/kubernetes/
 | [`docs/TOKENOMICS.md`](docs/TOKENOMICS.md) | TNZO token economics: supply, fee model, staking, rewards (testnet phase) |
 | [`docs/TDIP.md`](docs/TDIP.md) | Tenzro Decentralized Identity Protocol — unified identity over W3C DID across four classes: human, delegated agent, autonomous agent, institution (LEI-anchored) |
 | [`docs/AI.md`](docs/AI.md) | Tenzro AI — decentralized inference (single-replica + sharded MoE + MTP + multi-modal), Cortex reasoning, confidential inference, and Tenzro Train (Decoupled DiLoCo) training |
+| [`docs/COMPUTE.md`](docs/COMPUTE.md) | Tenzro Compute — rentable compute capacity: per-epoch booking, availability-proof gate, streaming escrow, fixed or network-dynamic pricing, shared coverage with storage |
+| [`docs/STORAGE.md`](docs/STORAGE.md) | Tenzro Storage — decentralized content-addressed storage: byte-epoch billing, proof of retrievability, redundancy, and one stake shared with compute |
 | [`docs/NETWORK.md`](docs/NETWORK.md) | Tenzro Network — decentralized networking: libp2p control plane (gossipsub topics, NAT traversal, validator-only topic authentication, request/response protocols) + iroh QUIC data plane (DA, model weights, gradients, sealed shards, agent memory, A2A + MCP ALPNs) |
 | [`docs/GUIDE.md`](docs/GUIDE.md) | Operator and developer guide: build, run, deploy, troubleshoot |
 | [`docs/did-method-tenzro.md`](docs/did-method-tenzro.md) | `did:tenzro` DID method specification (W3C registration submission) |

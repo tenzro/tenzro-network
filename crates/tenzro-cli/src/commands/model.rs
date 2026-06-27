@@ -464,6 +464,17 @@ pub struct ModelServeCmd {
     /// RPC endpoint to serve on a remote node (omit to serve locally)
     #[arg(long)]
     rpc: Option<String>,
+
+    /// Force a LAN cluster even when the model fits one machine. By default
+    /// the node forms a cluster only when the model is too large for the
+    /// biggest single member; this requests one regardless.
+    #[arg(long, conflicts_with = "force_single")]
+    cluster: bool,
+
+    /// Never form a cluster — load the whole model on this node even if it is
+    /// too large for one machine (the load will fail if it does not fit).
+    #[arg(long)]
+    force_single: bool,
 }
 
 impl ModelServeCmd {
@@ -487,7 +498,9 @@ impl ModelServeCmd {
         let spinner = output::create_spinner("Loading model on node...");
 
         let result: serde_json::Value = rpc.call("tenzro_serveModel", serde_json::json!({
-            "model_id": self.model_id
+            "model_id": self.model_id,
+            "user_forced": self.cluster,
+            "force_single": self.force_single,
         })).await.map_err(|e| anyhow::anyhow!("Serve request failed: {}", e))?;
 
         spinner.finish_and_clear();

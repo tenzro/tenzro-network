@@ -3518,6 +3518,256 @@ async def workflow_set_step_deadline(
 
 
 # ---------------------------------------------------------------------------
+# Storage Market (6 tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def storage_store_object(
+    object_id: str,
+    data: str,
+    owner: str = "",
+    data_shards: int = 4,
+    parity_shards: int = 2,
+) -> dict:
+    """Store an object on this node's storage provider with erasure coding.
+
+    `data` is the base64-encoded payload. `data_shards`/`parity_shards`
+    set the Reed-Solomon redundancy scheme.
+    """
+    params = {
+        "object_id": object_id,
+        "data": data,
+        "data_shards": data_shards,
+        "parity_shards": parity_shards,
+    }
+    if owner:
+        params["owner"] = owner
+    return await rpc_call("tenzro_storageStoreObject", params)
+
+
+@mcp.tool
+async def storage_open_deal(
+    object_id: str,
+    renter: str,
+    size_bytes: int,
+    total_epochs: int,
+) -> dict:
+    """Open a streaming storage deal for a stored object.
+
+    `renter` is a hex address that pre-funds from its deposit; the
+    per-epoch price is `size_bytes` times the byte-epoch rate.
+    """
+    return await rpc_call(
+        "tenzro_storageOpenDeal",
+        {
+            "object_id": object_id,
+            "renter": renter,
+            "size_bytes": size_bytes,
+            "total_epochs": total_epochs,
+        },
+    )
+
+
+@mcp.tool
+async def storage_charge_epoch(deal_id: str) -> dict:
+    """Run one proof-of-retrievability-gated charge epoch for a storage deal.
+
+    Charges the deal only when the retrievability challenge passes.
+    """
+    return await rpc_call("tenzro_storageChargeEpoch", {"deal_id": deal_id})
+
+
+@mcp.tool
+async def storage_get_deal(deal_id: str) -> dict:
+    """Look up a storage deal by its id."""
+    return await rpc_call("tenzro_storageGetDeal", {"deal_id": deal_id})
+
+
+@mcp.tool
+async def storage_set_pricing(
+    mode: str = "dynamic",
+    capacity: str = "0",
+    min_rate: str = "",
+    max_rate: str = "",
+) -> dict:
+    """Set the byte-epoch storage pricing policy.
+
+    `mode` is "dynamic"; `capacity` is the byte-epoch capacity. `min_rate`
+    and `max_rate` bound the dynamic rate when provided.
+    """
+    params = {"mode": mode, "capacity": capacity}
+    if min_rate:
+        params["min_rate"] = min_rate
+    if max_rate:
+        params["max_rate"] = max_rate
+    return await rpc_call("tenzro_storageSetPricing", params)
+
+
+@mcp.tool
+async def storage_status() -> dict:
+    """Return a summary of this node's storage-provider state."""
+    return await rpc_call("tenzro_storageStatus", [])
+
+
+# ---------------------------------------------------------------------------
+# Compute Rental (5 tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def compute_book_rental(renter: str, total_epochs: int) -> dict:
+    """Book a fixed-term compute rental against this provider.
+
+    `renter` is a hex address that pre-funds from its deposit; the
+    per-epoch price is the provider's effective rate.
+    """
+    return await rpc_call(
+        "tenzro_computeBookRental",
+        {"renter": renter, "total_epochs": total_epochs},
+    )
+
+
+@mcp.tool
+async def compute_settle_epoch(rental_id: str, proof_valid: bool = True) -> dict:
+    """Settle one epoch of an active compute rental, gated on the availability proof.
+
+    A valid proof streams the epoch slice to the provider; an invalid or
+    missing proof makes the renter whole from stake.
+    """
+    return await rpc_call(
+        "tenzro_computeSettleEpoch",
+        {"rental_id": rental_id, "proof_valid": proof_valid},
+    )
+
+
+@mcp.tool
+async def compute_get_rental(rental_id: str) -> dict:
+    """Look up a compute rental by its id."""
+    return await rpc_call("tenzro_computeGetRental", {"rental_id": rental_id})
+
+
+@mcp.tool
+async def compute_set_pricing(
+    mode: str = "dynamic",
+    capacity: str = "0",
+    min_rate: str = "",
+    max_rate: str = "",
+) -> dict:
+    """Set the per-epoch compute pricing policy.
+
+    `mode` is "dynamic"; `capacity` is the epoch-slot capacity. `min_rate`
+    and `max_rate` bound the dynamic rate when provided.
+    """
+    params = {"mode": mode, "capacity": capacity}
+    if min_rate:
+        params["min_rate"] = min_rate
+    if max_rate:
+        params["max_rate"] = max_rate
+    return await rpc_call("tenzro_computeSetPricing", params)
+
+
+@mcp.tool
+async def compute_status() -> dict:
+    """Return a summary of this node's compute-rental state."""
+    return await rpc_call("tenzro_computeStatus", [])
+
+
+# ---------------------------------------------------------------------------
+# MoE Expert Sharding (4 tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def moe_shard_map(model_id: str) -> dict:
+    """Return the expert-shard map for a MoE model across known providers.
+
+    Reports per-expert holders, replication counts, role counts, and the
+    under-replicated and hot experts under the current replication policy.
+    """
+    return await rpc_call("tenzro_moeShardMap", {"model_id": model_id})
+
+
+@mcp.tool
+async def moe_plan_dispatch(
+    model_id: str,
+    routings: list,
+    allow_cold: bool = False,
+) -> dict:
+    """Plan the per-holder dispatch for a list of per-token top-k routings.
+
+    Each routing is `{"token_index": int, "experts": [{"layer": int,
+    "expert": int}, ...]}`. Set `allow_cold` to include providers that do
+    not currently hold the expert resident.
+    """
+    return await rpc_call(
+        "tenzro_moePlanDispatch",
+        {"model_id": model_id, "routings": routings, "allow_cold": allow_cold},
+    )
+
+
+@mcp.tool
+async def moe_replication_policy() -> dict:
+    """Return the current replication policy used by shard-view consumers."""
+    return await rpc_call("tenzro_moeReplicationPolicy", [])
+
+
+@mcp.tool
+async def moe_catalog_shape(model_id: str) -> dict:
+    """Return the catalog-side MoE topology for a model.
+
+    Reports num_experts, experts_per_token, shared_experts, and
+    params_per_expert; null for dense models.
+    """
+    return await rpc_call("tenzro_moeCatalogShape", {"model_id": model_id})
+
+
+# ---------------------------------------------------------------------------
+# Local Discovery & Cluster (4 tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def local_peers() -> dict:
+    """Return peer IDs discovered on this node's local network segment via mDNS."""
+    return await rpc_call("tenzro_localPeers", [])
+
+
+@mcp.tool
+async def node_reachability() -> dict:
+    """Return this node's sustained connectivity tier."""
+    return await rpc_call("tenzro_nodeReachability", [])
+
+
+@mcp.tool
+async def node_profile() -> dict:
+    """Return the local node's hardware self-profile and derived serving values.
+
+    Reports the linked runtime build, CPU architecture, operating system,
+    detected compute devices, serving VRAM, backend, and capability key.
+    """
+    return await rpc_call("tenzro_nodeProfile", [])
+
+
+@mcp.tool
+async def cluster_plan(
+    model: dict,
+    members: list,
+    user_forced: bool = False,
+) -> dict:
+    """Compute a deterministic cluster placement for a model across candidate members.
+
+    `model` is `{"layers": int, "hidden_dim": int, "total_vram_gb": float}`.
+    `members` is a list of cluster member descriptors. Returns the fit
+    decision and, when a cluster forms, the VRAM-weighted layer assignment.
+    """
+    return await rpc_call(
+        "tenzro_clusterPlan",
+        {"model": model, "members": members, "user_forced": user_forced},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

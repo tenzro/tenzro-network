@@ -84,7 +84,7 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 
 **Identity (TDIP):** `register_identity`, `resolve_did`, `set_username`, `resolve_username`, `import_identity`, `list_identities`
 
-**AI Models & Inference:** `list_models`, `chat`, `inference_request`, `serve_model`, `stop_model`, `download_model`, `list_model_endpoints`
+**AI Models & Inference:** `list_models`, `chat`, `inference_request`, `serve_model`, `stop_model`, `download_model`, `list_model_endpoints`. `serve_model` auto-clusters a model that exceeds one host — it reads the GGUF header for shape, discovers LAN members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline; pass `force_single` to pin it to one host.
 
 **Multi-Modal Inference (17 wrappers across 7 modalities):**
 - **Forecast** — `list_forecast_catalog`, `list_forecast_models`, `load_forecast_model`, `forecast` (TimesFM 2.5)
@@ -120,6 +120,14 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 **ERC-8004 Trustless Agents (cross-VM trio):** `register_8004_agent`, `lookup_8004_agent`, `submit_8004_feedback`, `request_8004_validation`, `submit_8004_validation`. Each `register_8004_agent` call fans out from one TDIP write to canonical EVM proxies (deployed at genesis), the QuantuLabs Anchor program on SVM, and the Tenzro-authored Canton package on DAML. `agentId` shape is per-backend: `uint256` on EVM, 32-byte Pubkey on SVM, 8-byte LE u64 on DAML.
 
 **Network & Node:** `node_status`, `node_info`, `get_block_number`, `get_block`, `peer_count`, `syncing`
+
+**Decentralized Storage:** `storage_store_object`, `storage_open_deal`, `storage_charge_epoch`, `storage_get_deal`, `storage_set_pricing`, `storage_status` — content-addressed objects on the data plane, byte-epoch deal billing gated by proof-of-retrievability.
+
+**Compute Rental:** `compute_book_rental`, `compute_settle_epoch`, `compute_get_rental`, `compute_set_pricing`, `compute_status` — availability-proof-gated per-epoch settlement; a missed proof makes the renter whole from the provider's stake.
+
+**Distributed MoE Serving:** `moe_shard_map`, `moe_plan_dispatch`, `moe_replication_policy`, `moe_catalog_shape` — expert-shard placement, top-k dispatch planning, and replication policy across providers.
+
+**Local Discovery & LAN Clustering:** `local_peers`, `node_reachability`, `node_profile`, `cluster_plan` — same-segment peers via mDNS, the node's reachability tier, its hardware self-profile, and the layer-wise pipeline plan when a model needs more than one box.
 
 **Cryptography:** `sign_message`, `verify_signature`, `encrypt_data`, `decrypt_data`, `derive_key`, `generate_keypair`, `hash_sha256`, `hash_keccak256`, `x25519_key_exchange`
 

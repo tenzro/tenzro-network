@@ -1030,7 +1030,7 @@ pub async fn status(
         );
         Json(NodeStatusResponse {
             node_state: node_status.state,
-            role: format!("{:?}", node_status.role),
+            roles: node_status.roles.iter().map(|r| r.as_str().to_string()).collect(),
             health: format!("{:?}", node_status.health_status),
             block_height: node_status.block_height,
             peer_count: node_status.peer_count,
@@ -1041,7 +1041,7 @@ pub async fn status(
     } else {
         Json(NodeStatusResponse {
             node_state: "running".to_string(),
-            role: "unknown".to_string(),
+            roles: Vec::new(),
             health: "healthy".to_string(),
             block_height: 0,
             peer_count: 0,
@@ -1852,6 +1852,18 @@ pub async fn chat_completion(
 
 // ===== RFC-0007: Adaptive Execution — HTTP handlers =====
 
+/// Rank a provider's announced reachability tier for routing preference:
+/// higher is more reachable. `direct` outranks `relay_only`, which outranks
+/// `unreachable` or an unreported tier. Mirrors `ReachabilityTier`'s
+/// worst-to-best ordering so the request router can pick with `max_by_key`.
+fn reachability_rank(tier: &str) -> u8 {
+    match tier {
+        "direct" => 2,
+        "relay_only" => 1,
+        _ => 0,
+    }
+}
+
 /// POST /execution/resolve
 /// Resolves the best execution plan for a model given client requirements.
 pub async fn resolve_execution(
@@ -1866,16 +1878,31 @@ pub async fn resolve_execution(
 
     let resolution = if let Some(ref node) = state.node {
         let providers = node.network_providers_snapshot();
+        let local_peers = node.local_peers();
         let maybe_provider = providers
             .iter()
             .filter(|p| p.announcement.served_models.contains(&request.model_id))
-            .find(|p| {
+            .filter(|p| {
                 // Apply routing_policy: require_attestation filters to attested providers
                 if routing.is_some_and(|r| r.require_attestation) {
                     p.announcement.capabilities.iter().any(|c| c.contains("tee"))
                 } else {
                     true
                 }
+            })
+            // Prefer, in order: a provider on our own local network segment
+            // (no public internet, no relay budget, lowest latency), then the
+            // most reachable WAN provider (direct over relay-only over an
+            // unreported tier). A local provider always outranks any WAN one
+            // for the same model — that is the local-first guarantee.
+            .max_by_key(|p| {
+                let is_local = local_peers
+                    .as_ref()
+                    .is_some_and(|set| set.contains(&p.announcement.peer_id));
+                (
+                    is_local,
+                    reachability_rank(&p.announcement.network_profile.reachability),
+                )
             });
 
         if let Some(entry) = maybe_provider {

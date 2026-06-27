@@ -6904,6 +6904,161 @@ def workflow_set_step_deadline(workflow_id: str, step_idx: int,
     )
 
 
+# ── Storage Market ────────────────────────────────────────────────
+
+
+def storage_store_object(object_id: str, data: str, owner: str = "",
+                         data_shards: int = 4,
+                         parity_shards: int = 2) -> dict:
+    """Store an erasure-coded object on this node's storage provider.
+
+    `data` is the base64-encoded payload.
+    """
+    params = {
+        "object_id": object_id,
+        "data": data,
+        "data_shards": data_shards,
+        "parity_shards": parity_shards,
+    }
+    if owner:
+        params["owner"] = owner
+    return _rpc("tenzro_storageStoreObject", params)
+
+
+def storage_open_deal(object_id: str, renter: str, size_bytes: int,
+                      total_epochs: int) -> dict:
+    """Open a streaming storage deal for a stored object."""
+    return _rpc("tenzro_storageOpenDeal", {
+        "object_id": object_id,
+        "renter": renter,
+        "size_bytes": size_bytes,
+        "total_epochs": total_epochs,
+    })
+
+
+def storage_charge_epoch(deal_id: str) -> dict:
+    """Run one proof-of-retrievability-gated charge epoch for a deal."""
+    return _rpc("tenzro_storageChargeEpoch", {"deal_id": deal_id})
+
+
+def storage_get_deal(deal_id: str) -> dict:
+    """Look up a storage deal by id."""
+    return _rpc("tenzro_storageGetDeal", {"deal_id": deal_id})
+
+
+def storage_set_pricing(mode: str = "dynamic", capacity: str = "0",
+                        min_rate: str = None, max_rate: str = None) -> dict:
+    """Set the byte-epoch storage pricing policy."""
+    params = {"mode": mode, "capacity": capacity}
+    if min_rate is not None:
+        params["min_rate"] = min_rate
+    if max_rate is not None:
+        params["max_rate"] = max_rate
+    return _rpc("tenzro_storageSetPricing", params)
+
+
+def storage_status() -> dict:
+    """Summary of this node's storage-provider state."""
+    return _rpc("tenzro_storageStatus", [])
+
+
+# ── Compute Rental ────────────────────────────────────────────────
+
+
+def compute_book_rental(renter: str, total_epochs: int) -> dict:
+    """Book a fixed-term compute rental against this provider."""
+    return _rpc("tenzro_computeBookRental", {
+        "renter": renter,
+        "total_epochs": total_epochs,
+    })
+
+
+def compute_settle_epoch(rental_id: str, proof_valid: bool = True) -> dict:
+    """Settle one epoch of an active compute rental, gated on the
+    availability proof."""
+    return _rpc("tenzro_computeSettleEpoch", {
+        "rental_id": rental_id,
+        "proof_valid": proof_valid,
+    })
+
+
+def compute_get_rental(rental_id: str) -> dict:
+    """Look up a compute rental by id."""
+    return _rpc("tenzro_computeGetRental", {"rental_id": rental_id})
+
+
+def compute_set_pricing(mode: str = "dynamic", capacity: str = "0",
+                        min_rate: str = None, max_rate: str = None) -> dict:
+    """Set the per-epoch compute pricing policy."""
+    params = {"mode": mode, "capacity": capacity}
+    if min_rate is not None:
+        params["min_rate"] = min_rate
+    if max_rate is not None:
+        params["max_rate"] = max_rate
+    return _rpc("tenzro_computeSetPricing", params)
+
+
+def compute_status() -> dict:
+    """Summary of this node's compute-rental state."""
+    return _rpc("tenzro_computeStatus", [])
+
+
+# ── MoE Expert Sharding ───────────────────────────────────────────
+
+
+def moe_shard_map(model_id: str) -> dict:
+    """Return the expert-shard map for a MoE model across known providers."""
+    return _rpc("tenzro_moeShardMap", {"model_id": model_id})
+
+
+def moe_plan_dispatch(model_id: str, routings: list,
+                      allow_cold: bool = False) -> dict:
+    """Plan the per-holder dispatch for a list of per-token top-k routings."""
+    return _rpc("tenzro_moePlanDispatch", {
+        "model_id": model_id,
+        "routings": routings,
+        "allow_cold": allow_cold,
+    })
+
+
+def moe_replication_policy() -> dict:
+    """Return the current replication policy used by shard-view consumers."""
+    return _rpc("tenzro_moeReplicationPolicy", [])
+
+
+def moe_catalog_shape(model_id: str) -> dict:
+    """Return the catalog-side MoE topology for a model."""
+    return _rpc("tenzro_moeCatalogShape", {"model_id": model_id})
+
+
+# ── Local Discovery & Cluster ─────────────────────────────────────
+
+
+def local_peers() -> dict:
+    """Peer IDs discovered on this node's local network segment via mDNS."""
+    return _rpc("tenzro_localPeers", [])
+
+
+def node_reachability() -> dict:
+    """This node's sustained connectivity tier."""
+    return _rpc("tenzro_nodeReachability", [])
+
+
+def node_profile() -> dict:
+    """The local node's hardware self-profile and derived serving values."""
+    return _rpc("tenzro_nodeProfile", [])
+
+
+def cluster_plan(model: dict, members: list,
+                 user_forced: bool = False) -> dict:
+    """Deterministic cluster placement for a model across candidate members."""
+    return _rpc("tenzro_clusterPlan", {
+        "model": model,
+        "members": members,
+        "user_forced": user_forced,
+    })
+
+
 COMMANDS = {
     # Wallet & Balance
     "join_network": lambda args: join_as_micro_node(
@@ -8079,6 +8234,60 @@ COMMANDS = {
         get_agent_capability_attestations(args[0]),
     "find_best_agent_for_capability": lambda args:
         find_best_agent_for_capability(args[0]),
+    # ── Storage Market ──
+    "storage_store_object": lambda args: storage_store_object(
+        args[0],
+        args[1],
+        args[2] if len(args) > 2 and args[2] else "",
+        int(args[3]) if len(args) > 3 else 4,
+        int(args[4]) if len(args) > 4 else 2,
+    ),
+    "storage_open_deal": lambda args: storage_open_deal(
+        args[0], args[1], int(args[2]), int(args[3])
+    ),
+    "storage_charge_epoch": lambda args: storage_charge_epoch(args[0]),
+    "storage_get_deal": lambda args: storage_get_deal(args[0]),
+    "storage_set_pricing": lambda args: storage_set_pricing(
+        args[0] if len(args) > 0 and args[0] else "dynamic",
+        args[1] if len(args) > 1 else "0",
+        args[2] if len(args) > 2 and args[2] else None,
+        args[3] if len(args) > 3 and args[3] else None,
+    ),
+    "storage_status": lambda args: storage_status(),
+    # ── Compute Rental ──
+    "compute_book_rental": lambda args: compute_book_rental(
+        args[0], int(args[1])
+    ),
+    "compute_settle_epoch": lambda args: compute_settle_epoch(
+        args[0],
+        args[1].lower() in ("1", "true", "yes") if len(args) > 1 else True,
+    ),
+    "compute_get_rental": lambda args: compute_get_rental(args[0]),
+    "compute_set_pricing": lambda args: compute_set_pricing(
+        args[0] if len(args) > 0 and args[0] else "dynamic",
+        args[1] if len(args) > 1 else "0",
+        args[2] if len(args) > 2 and args[2] else None,
+        args[3] if len(args) > 3 and args[3] else None,
+    ),
+    "compute_status": lambda args: compute_status(),
+    # ── MoE Expert Sharding ──
+    "moe_shard_map": lambda args: moe_shard_map(args[0]),
+    "moe_plan_dispatch": lambda args: moe_plan_dispatch(
+        args[0],
+        json.loads(args[1]) if len(args) > 1 else [],
+        args[2].lower() in ("1", "true", "yes") if len(args) > 2 else False,
+    ),
+    "moe_replication_policy": lambda args: moe_replication_policy(),
+    "moe_catalog_shape": lambda args: moe_catalog_shape(args[0]),
+    # ── Local Discovery & Cluster ──
+    "local_peers": lambda args: local_peers(),
+    "node_reachability": lambda args: node_reachability(),
+    "node_profile": lambda args: node_profile(),
+    "cluster_plan": lambda args: cluster_plan(
+        json.loads(args[0]),
+        json.loads(args[1]),
+        args[2].lower() in ("1", "true", "yes") if len(args) > 2 else False,
+    ),
 }
 
 

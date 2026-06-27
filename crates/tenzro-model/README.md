@@ -90,6 +90,23 @@ Feature-gated ONNX runtimes covering 7 modalities. Each runtime caches sessions,
 
 `InferenceRouter::route()` reads `model.modality` from the registry and dispatches a typed `InferencePayload` enum (`Chat | Forecast | VisionEmbed | VisionSimilarity | TextEmbed | Segment | Detect | Transcribe | VideoEmbed`) to the correct runtime handle. Pricing/latency/reputation strategies apply per-modality with independent provider pools.
 
+### LAN Clustering — Layer-Wise Pipeline Parallelism
+
+When no single member fits a model, the `cluster` module places it across machines on the same LAN as a layer-wise pipeline. The model is described by a `ModelShape { layers, hidden_dim, total_vram_gb }`; candidate members are a `ClusterMember` array carrying per-member VRAM, backend, and `MemberReachability`.
+
+- `single_box_fit(model, members)` returns the lone member that fits the whole model, if any.
+- `should_cluster(model, members, user_forced)` returns a `FitDecision` — `RunLocal`, `ClusterRequired`, or `ClusterForced` — with `forms_cluster()` telling the caller whether to assemble a pipeline.
+- `assign_layers(total_layers, members)` partitions the layers into contiguous per-member stages by **VRAM-weighted largest-remainder** apportionment, returning `HashMap<Address, PipelineStage { start_layer, end_layer }>`.
+- `order_stages(head, members, probes, activation_bytes)` orders the stages greedily by nearest-neighbour link cost and emits a `NetworkGate { ordered, excluded }`; the reachability gate drops any member without a `data_plane_eligible` link.
+
+Only the boundary activation crosses the wire between adjacent stages — `hidden_dim × ACTIVATION_DTYPE_BYTES` per token, fp16 (`ModelShape::activation_bytes_per_token`). Members must share one runtime build commit (`LLAMA_CPP_COMMIT`); mixed backends across members are supported. The planner is a pure function of its inputs and reads no node state — exposed end-to-end via `tenzro_clusterPlan`.
+
+The `ModelShape` does not have to be supplied by the caller: `gguf_shape::read_model_shape(path)` parses just the GGUF metadata header (no tensor load) to pull `<arch>.block_count` and `<arch>.embedding_length`, deriving `total_vram_gb` from the file size. This lets the serving path size a model and decide whether to cluster without first loading it — see `tenzro-node`'s serve runtime, which folds this shape, the local `NodeProfile`, and gossip-discovered members into the planner and, when a cluster forms, drives the per-stage ggml `rpc-server` pipeline over the authenticated cluster tunnel (NETWORK.md).
+
+### Hardware Self-Profile
+
+`detect_node_profile()` builds this node's `NodeProfile` from the linked runtime's device API: build commit, CPU architecture, OS, the detected compute devices (enumerated through the runtime's ggml backend-device list), and the derived serving capacity (GB), backend, and capability key. The profile feeds both single-box fit and cluster planning and is published over `tenzro_nodeProfile`.
+
 ### Provider Reputation (+1 / −5 asymmetric)
 
 `ProviderManager::record_success(addr, latency)` and `record_failure(addr)`

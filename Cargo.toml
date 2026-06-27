@@ -182,7 +182,7 @@ libp2p = { version = "0.56", features = [
     "gossipsub", "kad", "identify", "tls", "yamux",
     "tcp", "quic", "dns", "ping", "relay", "rendezvous",
     "autonat", "dcutr", "request-response", "cbor",
-    "macros", "tokio", "metrics",
+    "mdns", "macros", "tokio", "metrics",
 ] }
 libp2p-metrics = "0.17"
 libp2p-connection-limits = "0.6"

@@ -188,6 +188,10 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `0.0.0.0
 - **SeedAgent Treasury**: getTreasuryEarmark, getSeedAgentCharter, listSeedAgentCharters, listSeedAgents, getNetworkActivity, getSeedAgentDaemonStatus — earmark, registry, off-chain `SeedAgentDaemon` (6h poll, monthly refill, charter-sunset pause, leader-gate), governance-executor mutation paths, and the `tenzro/seed-agents` gossipsub topic
 - **AgentBond / Insurance**: post_agent_bond / get_agent_bond / file_insurance_claim — stake-bonding for agents and insurance pool for cart-mandate fraud
 - **Training (Tenzro Train)**: tenzro_training_postTask, listRuns, getRun, getReceipt, enrollTrainer, submitOuterGradient, finalizeRound
+- **Storage**: storageStatus, storageStoreObject, storageOpenDeal, storageChargeEpoch, storageDeal, storageSetPricing — content-addressed storage on the iroh data plane, billed per byte-epoch and gated on a proof of retrievability; one coverage budget shared with compute rental
+- **Compute**: computeStatus, computeBookRental, computeSettleEpoch, computeGetRental, computeSetPricing — rentable compute against stake, settled per epoch on an availability proof; shares the storage coverage budget
+- **MoE**: moeShardMap, moePlanDispatch, moeReplicationPolicy, moeCatalogShape — decentralized expert-shard serving: shard map, top-k dispatch planning, governance-tuned replication policy, catalog topology
+- **Discovery & Clustering**: localPeers (mDNS local segment), nodeReachability (`direct` / `relay_only` / `unreachable`), nodeProfile (hardware self-profile: build commit, CPU arch, OS, devices, derived serving capacity / backend / capability key), clusterPlan (deterministic layer-wise LAN cluster placement)
 
 ### Paid Agent Marketplace
 

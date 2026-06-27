@@ -1,6 +1,6 @@
 # Tenzro Network — Protocol Specification
 
-## AI-Native, Agentic, Tokenized Settlement Layer
+## The Open, Distributed Execution Layer for AI
 
 ### Tenzro Ledger: A TEE-Native Network for Verifiable AI and Autonomous Agents
 
@@ -10,13 +10,13 @@
 
 ## Abstract
 
-**Tenzro Network** is an AI-Native, Agentic, Tokenized Settlement Layer — a decentralized protocol designed for the AI age, where agents and autonomous systems are first-class participants. The network provides two core capabilities: access to **intelligence** (AI models for inference) and access to **security** (TEE enclaves for key management, custody, and confidential computing). Providers, validators, and nodes earn by securing the network, providing intelligence (AI models), and providing security (TEE enclaves).
+**Tenzro Network** is the open, distributed execution layer for AI — a decentralized protocol where inference, agents, and workflows run across independently operated nodes rather than one provider's servers. The network provides three execution resources from those nodes: **intelligence** (AI models for inference), **compute** (rentable capacity by the epoch), and **storage** (content-addressed data held to a proof of retrievability), with **security** (TEE enclaves for key management, custody, and confidential computing) underwriting them. A single node can take on several of these roles against one stake: providers, validators, and nodes earn TNZO by securing the network, serving intelligence, renting out compute, holding data, and providing security. Consumers pay from their TNZO balance; providers earn into theirs.
 
 **Tenzro Ledger** is the purpose-built network for humans and agents, providing verifiable, on-chain primitives for the AI age: **identity** (TDIP: Tenzro Decentralized Identity Protocol for humans and machines), **security** (TEE-weighted consensus with hardware attestations), **verification** (dual ZK + TEE proof systems), and **settlement** (micropayment channels, escrow, batch processing). All fees and settlements are denominated in **TNZO**, the governance token of the Tenzro Network protocol.
 
 Built from the ground up around Trusted Execution Environments (TEEs) and zero-knowledge proofs, the Ledger provides hardware-rooted trust at every layer — TEE-attested validators receive a 1.5× multiplier on their reputation-weighted leader-selection draw, smart contracts execute within hardware enclaves, and all on-chain claims can be independently verified through cryptographic proofs or hardware attestations. The Ledger supports a multi-VM execution environment (EVM, SVM, Daml/Canton), an autonomous agent framework with self-sovereign identity and MPC wallet ownership, a multi-modal AI model marketplace covering text, vision, audio, and timeseries inference with per-token settlement, decentralized verifiable training (Tenzro Train, Decoupled DiLoCo–style with on-chain run-root commitments), recurrent-depth reasoning workers (Tenzro Cortex) priced by loop depth and bound to signed receipts, swarm orchestration for parallel agent execution, and cross-chain interoperability through Wormhole NTT, LayerZero V2, Chainlink CCIP, deBridge DLN, Li.Fi, and Canton. Multi-protocol payment support (MPP, x402, Tempo, Stripe SPT, AP2) enables HTTP 402-based machine payments with identity-bound delegation enforcement. Consensus is a two-phase HotStuff-2 BFT engine with 400ms block times, reputation-weighted proposer election, no-endorsement certificates for tail-fork resistance, and Ed25519 + ML-DSA-65 hybrid post-quantum signatures on every safety-critical message.
 
-Tenzro is the economic substrate for AI agents and humans — the economic and compute infrastructure where AI agents live, transact, and collaborate. It is the coordination layer for the decentralized AI and agentic economy, the substrate where verifiable computation, confidential execution, and agent-to-agent economic coordination are protocol-level primitives.
+Tenzro is the open, distributed execution layer for AI. The execution surface — inference, agents, workflows — runs on a substrate where verifiable computation, confidential execution, rentable compute, decentralized storage, and agent-to-agent economic coordination are protocol-level primitives. Multi-role nodes, one stake covering every role, and per-epoch streaming settlement are what make that execution layer open and trustless. See [`COMPUTE.md`](COMPUTE.md) and [`STORAGE.md`](STORAGE.md) for the rentable-compute and storage surfaces.
 
 ---
 

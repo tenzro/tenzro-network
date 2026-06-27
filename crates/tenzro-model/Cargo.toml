@@ -63,7 +63,11 @@ realfft = { workspace = true }
 tempfile = { workspace = true }
 
 [features]
-default = []
+default = ["cluster-serving"]
+# LAN layer-pipeline cluster serving: builds the ggml RPC backend + rpc-server
+# binary so a model that exceeds one machine can be served across members on
+# the local segment. Enabled by default — it is core to multi-node serving.
+cluster-serving = ["llama-cpp-2/rpc"]
 # NVIDIA CUDA — datacenter (A100/H100/B200) and consumer (RTX 3090/4090)
 cuda = ["llama-cpp-2/cuda"]
 # NVIDIA CUDA without virtual memory management (older drivers / embedded)

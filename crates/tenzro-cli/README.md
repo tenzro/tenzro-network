@@ -96,6 +96,39 @@ tenzro node mempool-stats
 tenzro node mempool-lane --address 0xabc...
 ```
 
+### Local Discovery
+
+```bash
+# Peers currently discovered on this node's local segment via mDNS
+# (calls tenzro_localPeers).
+tenzro discover local-peers
+
+# This node's sustained connectivity tier (calls tenzro_nodeReachability).
+tenzro discover reachability
+
+# This node's hardware self-profile from the ggml device API: build commit,
+# CPU arch, OS, serving VRAM, and backend (calls tenzro_nodeProfile).
+tenzro discover profile
+```
+
+### LAN Clustering
+
+```bash
+# Deterministic cluster placement for a model across a set of candidate
+# members. Computes the fit decision and, when a cluster forms, the
+# VRAM-weighted contiguous layer assignment ordered to minimize pipeline
+# transfer cost (calls tenzro_clusterPlan). --members is a JSON file holding
+# the candidate member array; --force requests a cluster even when one
+# member fits the whole model.
+tenzro cluster plan --layers 64 --hidden-dim 8192 --total-vram-gb 180 \
+  --members ./members.json
+```
+
+`cluster plan` is the explicit, inspect-the-plan path. To actually serve a
+model across a cluster you do not need to compute or pass a plan: `tenzro
+model serve` reads the model shape from the GGUF and auto-discovers members
+over local gossip (see the Model Management section above and AI.md §3.5).
+
 ### Wallet Operations
 
 ```bash
@@ -140,8 +173,16 @@ tenzro model info gemma4-9b --providers
 # Download a model (local HuggingFace + remote RPC)
 tenzro model download gemma4-9b
 
-# Start serving a model (local llama.cpp + remote tenzro_serveModel RPC)
-tenzro model serve gemma4-9b --gpus 0,1 --port 8080
+# Start serving a model locally, or on a remote node with --rpc (calls
+# tenzro_serveModel). The node reads the model's shape from the GGUF header
+# and, if it does not fit one machine, auto-forms a LAN pipeline cluster from
+# the cluster-willing providers it has discovered over local gossip — no
+# member list to hand-maintain. See AI.md §3.5.
+tenzro model serve gemma4-9b --rpc http://127.0.0.1:8545
+
+# Force a cluster even when the model fits one machine, or never cluster:
+tenzro model serve gemma4-235b --rpc http://127.0.0.1:8545 --cluster
+tenzro model serve gemma4-235b --rpc http://127.0.0.1:8545 --force-single
 
 # Stop serving (local + remote tenzro_stopModel RPC)
 tenzro model stop gemma4-9b

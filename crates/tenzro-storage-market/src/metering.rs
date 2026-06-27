@@ -18,6 +18,8 @@ use crate::error::{Result, StorageMarketError};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tenzro_settlement::obligations::{ObligationSource, ProviderObligations};
+use tenzro_settlement::rental::StakeLedger;
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::{Address, Timestamp};
 use tenzro_types::settlement::ServiceType;
@@ -128,10 +130,21 @@ pub struct StorageMeter {
     pricing: StoragePricing,
     /// Deals by id.
     deals: DashMap<String, StorageDeal>,
+    /// Per-provider index of deal ids (for exposure recomputation).
+    deals_by_provider: DashMap<Address, Vec<String>>,
     /// Shared prepaid deposit balances (same convention as settlement escrow).
     balances: Arc<DashMap<(Address, AssetId), u128>>,
     /// Consecutive failed-challenge count that terminates a deal.
     miss_threshold: u32,
+    /// Optional provider stake source. When set together with `obligations`,
+    /// `open_deal` enforces that the provider's stake covers this storage
+    /// exposure on top of everything already registered across services. When
+    /// unset, deals are admitted on deposit alone (legacy behavior).
+    stake_ledger: Option<Arc<dyn StakeLedger>>,
+    /// Optional shared cross-service coverage tracker. When set, the meter
+    /// publishes each provider's *storage* per-epoch exposure so a multi-role
+    /// node's rentals admit against stake net of storage (and vice versa).
+    obligations: Option<Arc<ProviderObligations>>,
 }
 
 impl std::fmt::Debug for StorageMeter {
@@ -140,12 +153,14 @@ impl std::fmt::Debug for StorageMeter {
             .field("pricing", &self.pricing)
             .field("deals", &self.deals.len())
             .field("miss_threshold", &self.miss_threshold)
+            .field("coverage_enforced", &self.stake_ledger.is_some())
             .finish()
     }
 }
 
 impl StorageMeter {
-    /// Creates a meter with the given pricing and miss threshold.
+    /// Creates a meter with the given pricing and miss threshold. No stake
+    /// coverage enforcement — deals admit on deposit alone.
     pub fn new(
         pricing: StoragePricing,
         balances: Arc<DashMap<(Address, AssetId), u128>>,
@@ -154,8 +169,46 @@ impl StorageMeter {
         Self {
             pricing,
             deals: DashMap::new(),
+            deals_by_provider: DashMap::new(),
             balances,
             miss_threshold,
+            stake_ledger: None,
+            obligations: None,
+        }
+    }
+
+    /// Enables cross-service stake-coverage enforcement. After this, `open_deal`
+    /// rejects a deal whose per-epoch exposure would push the provider's total
+    /// obligations (storage + rentals) past its available stake, and the meter
+    /// publishes storage exposure into the shared tracker.
+    pub fn with_coverage(
+        mut self,
+        stake_ledger: Arc<dyn StakeLedger>,
+        obligations: Arc<ProviderObligations>,
+    ) -> Self {
+        self.stake_ledger = Some(stake_ledger);
+        self.obligations = Some(obligations);
+        self
+    }
+
+    /// Sum of per-epoch exposure across a provider's currently-active deals.
+    pub fn active_exposure(&self, provider: &Address) -> u128 {
+        let ids = match self.deals_by_provider.get(provider) {
+            Some(v) => v.value().clone(),
+            None => return 0,
+        };
+        ids.iter()
+            .filter_map(|id| self.deals.get(id))
+            .filter(|d| d.value().status == StorageDealStatus::Active)
+            .map(|d| d.value().price_per_epoch)
+            .fold(0u128, |acc, e| acc.saturating_add(e))
+    }
+
+    /// Publishes the provider's current storage exposure into the shared
+    /// tracker, if one is attached.
+    fn publish_exposure(&self, provider: &Address) {
+        if let Some(obs) = &self.obligations {
+            obs.set(provider, ObligationSource::Storage, self.active_exposure(provider));
         }
     }
 
@@ -182,6 +235,26 @@ impl StorageMeter {
             ));
         }
         let total_value = price_per_epoch.saturating_mul(total_epochs as u128);
+
+        // Coverage admission (only when a stake ledger + tracker are attached):
+        // the provider's stake must cover this new storage exposure on top of
+        // everything already registered across services (rentals + storage).
+        if let (Some(ledger), Some(obs)) = (&self.stake_ledger, &self.obligations) {
+            let new_storage_total = self
+                .active_exposure(&provider)
+                .saturating_add(price_per_epoch);
+            let stake = ledger.available_stake(&provider);
+            if !obs.can_admit(&provider, ObligationSource::Storage, new_storage_total, stake) {
+                let other = obs.exposure_excluding(&provider, ObligationSource::Storage);
+                return Err(StorageMarketError::Settlement(format!(
+                    "insufficient provider stake to cover storage: need {} (storage {} + other {}), stake {}",
+                    new_storage_total.saturating_add(other),
+                    new_storage_total,
+                    other,
+                    stake
+                )));
+            }
+        }
 
         let key = (renter, asset_id.clone());
         let balance = self.balances.get(&key).map(|e| *e.value()).unwrap_or(0);
@@ -211,6 +284,11 @@ impl StorageMeter {
             status: StorageDealStatus::Active,
         };
         self.deals.insert(deal.deal_id.clone(), deal.clone());
+        self.deals_by_provider
+            .entry(provider)
+            .or_default()
+            .push(deal.deal_id.clone());
+        self.publish_exposure(&provider);
         info!(
             "Opened storage deal {} object={} {} bytes @ {}/epoch x{}",
             deal.deal_id, deal.object_id, size_bytes, price_per_epoch, total_epochs
@@ -227,64 +305,77 @@ impl StorageMeter {
     /// storage that was not proven). Repeated misses past the threshold
     /// terminate the deal and return the unearned remainder.
     pub fn charge_epoch(&self, deal_id: &str, challenge_passed: bool) -> Result<ChargeOutcome> {
-        let mut entry = self
-            .deals
-            .get_mut(deal_id)
-            .ok_or_else(|| StorageMarketError::ObjectNotFound(deal_id.to_string()))?;
-        let deal = entry.value_mut();
+        let (outcome, provider, closed) = {
+            let mut entry = self
+                .deals
+                .get_mut(deal_id)
+                .ok_or_else(|| StorageMarketError::ObjectNotFound(deal_id.to_string()))?;
+            let deal = entry.value_mut();
 
-        if deal.status != StorageDealStatus::Active {
-            return Err(StorageMarketError::InvalidRequest(format!(
-                "deal {} is not active",
-                deal_id
-            )));
-        }
-
-        let slice = deal.price_per_epoch;
-
-        if challenge_passed {
-            let key = (deal.provider, deal.asset_id.clone());
-            {
-                let mut bal = self.balances.entry(key).or_insert(0);
-                *bal = bal.saturating_add(slice);
+            if deal.status != StorageDealStatus::Active {
+                return Err(StorageMarketError::InvalidRequest(format!(
+                    "deal {} is not active",
+                    deal_id
+                )));
             }
-            deal.epochs_charged = deal.epochs_charged.saturating_add(1);
-            deal.consecutive_misses = 0;
 
-            if deal.is_complete() {
-                deal.status = StorageDealStatus::Completed;
-                debug!("Storage deal {} completed", deal_id);
-            }
-            debug!("Storage deal {} charged {} to provider", deal_id, slice);
-            Ok(ChargeOutcome::Charged { slice })
-        } else {
-            // Miss: return the renter's locked slice for this (unproven) epoch.
-            let key = (deal.renter, deal.asset_id.clone());
-            {
-                let mut bal = self.balances.entry(key).or_insert(0);
-                *bal = bal.saturating_add(slice);
-            }
-            deal.epochs_charged = deal.epochs_charged.saturating_add(1);
-            deal.consecutive_misses = deal.consecutive_misses.saturating_add(1);
-            warn!(
-                "Storage deal {} epoch missed (challenge failed); {} returned to renter",
-                deal_id, slice
-            );
+            let slice = deal.price_per_epoch;
+            let provider = deal.provider;
 
-            if deal.consecutive_misses >= self.miss_threshold {
-                let unearned = deal.locked_remaining();
-                if unearned > 0 {
-                    let rkey = (deal.renter, deal.asset_id.clone());
-                    let mut bal = self.balances.entry(rkey).or_insert(0);
-                    *bal = bal.saturating_add(unearned);
+            if challenge_passed {
+                let key = (deal.provider, deal.asset_id.clone());
+                {
+                    let mut bal = self.balances.entry(key).or_insert(0);
+                    *bal = bal.saturating_add(slice);
                 }
-                deal.status = StorageDealStatus::Terminated;
-                info!("Storage deal {} terminated after {} misses", deal_id, deal.consecutive_misses);
-            } else if deal.is_complete() {
-                deal.status = StorageDealStatus::Completed;
+                deal.epochs_charged = deal.epochs_charged.saturating_add(1);
+                deal.consecutive_misses = 0;
+
+                if deal.is_complete() {
+                    deal.status = StorageDealStatus::Completed;
+                    debug!("Storage deal {} completed", deal_id);
+                }
+                debug!("Storage deal {} charged {} to provider", deal_id, slice);
+                let closed = deal.status != StorageDealStatus::Active;
+                (ChargeOutcome::Charged { slice }, provider, closed)
+            } else {
+                // Miss: return the renter's locked slice for this (unproven) epoch.
+                let key = (deal.renter, deal.asset_id.clone());
+                {
+                    let mut bal = self.balances.entry(key).or_insert(0);
+                    *bal = bal.saturating_add(slice);
+                }
+                deal.epochs_charged = deal.epochs_charged.saturating_add(1);
+                deal.consecutive_misses = deal.consecutive_misses.saturating_add(1);
+                warn!(
+                    "Storage deal {} epoch missed (challenge failed); {} returned to renter",
+                    deal_id, slice
+                );
+
+                if deal.consecutive_misses >= self.miss_threshold {
+                    let unearned = deal.locked_remaining();
+                    if unearned > 0 {
+                        let rkey = (deal.renter, deal.asset_id.clone());
+                        let mut bal = self.balances.entry(rkey).or_insert(0);
+                        *bal = bal.saturating_add(unearned);
+                    }
+                    deal.status = StorageDealStatus::Terminated;
+                    info!("Storage deal {} terminated after {} misses", deal_id, deal.consecutive_misses);
+                } else if deal.is_complete() {
+                    deal.status = StorageDealStatus::Completed;
+                }
+                let closed = deal.status != StorageDealStatus::Active;
+                (ChargeOutcome::Missed, provider, closed)
             }
-            Ok(ChargeOutcome::Missed)
+        };
+
+        // A closed deal no longer contributes per-epoch exposure; refresh the
+        // shared tracker so the freed stake is available to other obligations.
+        if closed {
+            self.publish_exposure(&provider);
         }
+
+        Ok(outcome)
     }
 
     /// Looks up a deal.
@@ -396,5 +487,70 @@ mod tests {
         meter.charge_epoch(&deal.deal_id, true).unwrap(); // completes
         let err = meter.charge_epoch(&deal.deal_id, true).unwrap_err();
         assert!(matches!(err, StorageMarketError::InvalidRequest(_)));
+    }
+
+    /// Fixed per-provider stake map for coverage tests.
+    #[derive(Default)]
+    struct TestStakeLedger {
+        stakes: DashMap<Address, u128>,
+    }
+    impl StakeLedger for TestStakeLedger {
+        fn available_stake(&self, provider: &Address) -> u128 {
+            self.stakes.get(provider).map(|e| *e.value()).unwrap_or(0)
+        }
+        fn slash_to_make_whole(&self, provider: &Address, _renter: &Address, amount: u128) -> u128 {
+            let mut e = self.stakes.entry(*provider).or_insert(0);
+            let d = amount.min(*e);
+            *e -= d;
+            d
+        }
+    }
+
+    #[test]
+    fn coverage_admission_accounts_for_rental_exposure() {
+        // rate 2/byte. Provider stake 1500, with 1000 of rental exposure
+        // already registered on the shared tracker. A 100-byte object is
+        // 200/epoch -> 1000 + 200 = 1200 <= 1500: admitted. A 300-byte object
+        // is 600/epoch -> 1000 + 600 = 1600 > 1500: rejected.
+        let renter = Address::new([1u8; 32]);
+        let provider = Address::new([2u8; 32]);
+        let balances = Arc::new(DashMap::new());
+        balances.insert((renter, AssetId::tnzo()), 1_000_000);
+
+        let ledger = Arc::new(TestStakeLedger::default());
+        ledger.stakes.insert(provider, 1_500);
+        let obligations = Arc::new(ProviderObligations::new());
+        obligations.set(&provider, ObligationSource::Rental, 1_000);
+
+        let meter = StorageMeter::new(StoragePricing::new(2), balances, 3)
+            .with_coverage(ledger, obligations.clone());
+
+        let big = meter.open_deal("big", renter, provider, AssetId::tnzo(), 300, 5);
+        assert!(big.is_err());
+
+        let ok = meter.open_deal("ok", renter, provider, AssetId::tnzo(), 100, 5);
+        assert!(ok.is_ok());
+        assert_eq!(obligations.exposure_for(&provider, ObligationSource::Storage), 200);
+        assert_eq!(obligations.total_exposure(&provider), 1_200);
+    }
+
+    #[test]
+    fn closing_deal_frees_published_storage_exposure() {
+        let renter = Address::new([1u8; 32]);
+        let provider = Address::new([2u8; 32]);
+        let balances = Arc::new(DashMap::new());
+        balances.insert((renter, AssetId::tnzo()), 1_000_000);
+        let ledger = Arc::new(TestStakeLedger::default());
+        ledger.stakes.insert(provider, 100_000);
+        let obligations = Arc::new(ProviderObligations::new());
+        let meter = StorageMeter::new(StoragePricing::new(2), balances, 3)
+            .with_coverage(ledger, obligations.clone());
+
+        let deal = meter
+            .open_deal("obj", renter, provider, AssetId::tnzo(), 100, 1)
+            .unwrap();
+        assert_eq!(obligations.exposure_for(&provider, ObligationSource::Storage), 200);
+        meter.charge_epoch(&deal.deal_id, true).unwrap(); // completes term
+        assert_eq!(obligations.exposure_for(&provider, ObligationSource::Storage), 0);
     }
 }

@@ -76,6 +76,7 @@ deploy/terraform/main.tf
 deploy/kubernetes/
 docs/operators/
 scripts/deploy-testnet.sh
+scripts/stop-the-world-cutover.sh
 tools/genkeys/
 
 # Internal audit / planning artifacts that cite CLAUDE.md extensively as a

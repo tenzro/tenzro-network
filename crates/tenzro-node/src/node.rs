@@ -44,7 +44,7 @@ use tenzro_settlement::{
 use tenzro_storage::{KvStore, RocksDbStore, StorageConfig, CF_MODELS, CF_SKILLS, CF_TOOLS, CF_AGENT_TEMPLATES, CF_MODEL_SERVICES};
 use tenzro_tee::{detect_tee, TeeProvider, TeeRegistry};
 use tenzro_token::{TnzoToken, StakingManager, GovernanceEngine, NetworkTreasury, TokenRegistry};
-use tenzro_types::{primitives::Address, NetworkRole};
+use tenzro_types::{primitives::Address, RoleSet};
 use tenzro_types::block::Block;
 use tenzro_types::model::{ModelServiceInstance, ModelLocation, ServiceStatus};
 use tenzro_vm::{eip1559::FeeMarket, MultiVmRuntime, VmConfig};
@@ -955,6 +955,21 @@ impl Default for ProviderSchedule {
     }
 }
 
+/// Default storage byte-epoch rate (wei) a freshly-spawned storage provider
+/// charges before any operator override or dynamic-pricing switch. 1000 wei per
+/// byte-epoch ≈ 0.001 TNZO to store 1 GiB for one epoch.
+pub const DEFAULT_STORAGE_RATE_PER_BYTE_EPOCH: u128 = 1_000;
+
+/// Default compute per-epoch rate (wei) a freshly-spawned compute provider
+/// charges before any operator override or dynamic-pricing switch.
+pub const DEFAULT_COMPUTE_RATE_PER_EPOCH: u128 = 1_000_000_000_000;
+
+/// Minimum verified free disk (GB) a node must have to advertise the
+/// StorageProvider role. Below this there is no point accepting deals — the
+/// node could not honor a single redundancy slot. Storage is permissionless
+/// but capacity is the one thing it cannot fake, so this is a hard floor.
+pub const MIN_STORAGE_PROVIDER_FREE_GB: f64 = 10.0;
+
 /// Provider pricing configuration. All prices are wei per token (1 TNZO = 10^18 wei).
 /// Wire format: u128 decimal strings (matches the rest of the wei-base-unit RPC contract).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1623,7 +1638,26 @@ pub struct TenzroNode {
     pub hardware_profile: Arc<RwLock<Option<HardwareProfile>>>,
     pub user_resources: Arc<DashMap<String, UserResource>>,
     pub transaction_history: Arc<RwLock<Vec<TransactionHistoryEntry>>>,
-    pub runtime_role: Arc<RwLock<NetworkRole>>,
+    pub runtime_roles: Arc<RwLock<RoleSet>>,
+    /// Storage-provider runtime. `Some` only when this node's roles include
+    /// `StorageProvider` — owns the object store, the per-epoch billing meter
+    /// (PoR-gated), and the byte-epoch pricing policy. Spawned during startup
+    /// once the iroh resolver and staking ledger are available.
+    pub storage_runtime: Option<Arc<crate::storage_provider_runtime::StorageProviderRuntime>>,
+    /// Compute-rental runtime. `Some` only when this node serves AI — a node
+    /// that offers inference also rents out its CPU/GPU capacity for fixed
+    /// terms. Owns the streaming-rental manager (availability-gated) and the
+    /// per-epoch pricing policy. Shares one provider stake (via the same
+    /// `ProviderObligations` tracker) and one balances map with the storage
+    /// runtime. Spawned during startup once the staking ledger is available.
+    pub compute_runtime: Option<Arc<crate::compute_rental_runtime::ComputeRentalRuntime>>,
+    /// Cluster-serving runtime. `Some` only when this node serves AI — it lets
+    /// the node join a LAN layer-pipeline cluster as a member and/or head one,
+    /// serving a model too large for any single machine. Inert until a cluster
+    /// plan activates it. The member splice loop is attached at startup so an
+    /// AI-serving node can be recruited into a peer's cluster on demand.
+    pub cluster_serving_runtime:
+        Option<Arc<crate::cluster_serving_runtime::ClusterServingRuntime>>,
     /// OAuth state for onboarding key management (shared with MCP server)
     pub oauth_state: Arc<RwLock<Option<Arc<crate::mcp::oauth::OAuthState>>>>,
     /// Models discovered from gossipsub network announcements.
@@ -1688,7 +1722,7 @@ impl TenzroNode {
     /// Create a new Tenzro Network node
     pub async fn new(config: NodeConfig) -> Result<Self> {
         info!("Initializing Tenzro Network node");
-        info!("Role: {:?}", config.role);
+        info!("Roles: {}", config.roles);
         info!("Data directory: {:?}", config.data_dir);
 
         // Ensure directories exist
@@ -1698,7 +1732,7 @@ impl TenzroNode {
         // Initialize monitoring
         let health_monitor = Arc::new(HealthMonitor::new());
         let metrics = Arc::new(MetricsCollector::new());
-        let initial_role = config.role;
+        let initial_roles = config.roles.clone();
 
         // Derive chain_id from genesis (default 1337 for local). Used by the
         // peer status tracker to drop StatusMessages from peers on a different
@@ -1838,7 +1872,10 @@ impl TenzroNode {
             hardware_profile: Arc::new(RwLock::new(None)),
             user_resources: Arc::new(DashMap::new()),
             transaction_history: Arc::new(RwLock::new(Vec::new())),
-            runtime_role: Arc::new(RwLock::new(initial_role)),
+            runtime_roles: Arc::new(RwLock::new(initial_roles)),
+            storage_runtime: None,
+            compute_runtime: None,
+            cluster_serving_runtime: None,
             oauth_state: Arc::new(RwLock::new(None)),
             network_models: Arc::new(DashMap::new()),
             network_agents: Arc::new(DashMap::new()),
@@ -2019,6 +2056,13 @@ impl TenzroNode {
             self.init_tee().await?;
         }
 
+        // 3b. Drop any configured role this node's hardware can't back, so it
+        // never advertises a capability it lacks. TEE detection (above) and the
+        // disk probe decide; an operator who set `--roles tee` on a box without
+        // an enclave boots as a normal node rather than falsely claiming TEE.
+        // Validator/AI roles are unaffected (stake-gated / permissionless).
+        self.prune_unsupported_roles().await;
+
         // 4. Initialize VM runtime
         self.init_vm().await?;
 
@@ -2031,10 +2075,7 @@ impl TenzroNode {
         // 7. Initialize consensus (validators only)
         // Only validators produce blocks. All other roles (ModelProvider, TeeProvider,
         // LightClient) receive blocks from the network via gossipsub block sync.
-        let should_init_consensus = matches!(
-            self.config.role,
-            NetworkRole::Validator
-        );
+        let should_init_consensus = self.config.roles.is_validator();
         if should_init_consensus {
             self.init_consensus().await?;
         }
@@ -2080,7 +2121,7 @@ impl TenzroNode {
         // mutates per tick — convergence on other replicas happens via the
         // `tenzro/seed-agents` gossipsub topic.
         if let Some(seed_agents) = self.seed_agent_manager.clone() {
-            if matches!(self.config.role, NetworkRole::Validator) {
+            if self.config.roles.is_validator() {
                 let mut daemon =
                     tenzro_token::SeedAgentDaemon::new(seed_agents.clone());
                 if let Some(tx) = self.seed_agent_gossip_tx.clone() {
@@ -2373,7 +2414,7 @@ impl TenzroNode {
 
         NodeStatus {
             state: format!("{:?}", state),
-            role: self.config.role,
+            roles: self.config.roles.clone(),
             health_status: health.overall,
             uptime_secs: metrics.uptime_secs,
             block_height: self.chain_tip_height(),
@@ -2384,6 +2425,7 @@ impl TenzroNode {
             iroh_enabled,
             iroh_endpoint_id,
             iroh_alpns,
+            reachability: self.reachability_tier().map(|t| t.as_str().to_string()),
         }
     }
 
@@ -4208,6 +4250,97 @@ impl TenzroNode {
             }
         }
 
+        // Provider service runtimes (storage + compute rental). Both draw on the
+        // same provider stake, so they share one `ProviderObligations` tracker
+        // (cross-service coverage: storage byte-epoch exposure + compute
+        // per-epoch exposure admit against one stake) and one prepaid `balances`
+        // map (the streaming-escrow deposit ledger). The shared state is built
+        // once here and handed to whichever runtimes this node's roles enable.
+        if (self.config.roles.serves_storage() || self.config.roles.serves_ai())
+            && self.staking.is_some()
+        {
+            let staking = self.staking.as_ref().expect("checked above").clone();
+            let provider_address = self
+                .identity_registry
+                .as_ref()
+                .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+                .unwrap_or_default();
+            let stake_ledger: Arc<dyn tenzro_settlement::rental::StakeLedger> = Arc::new(
+                crate::storage_provider_runtime::StakingStakeLedger::new(staking),
+            );
+            let obligations =
+                Arc::new(tenzro_settlement::obligations::ProviderObligations::new());
+            let balances: Arc<dashmap::DashMap<(tenzro_types::primitives::Address, tenzro_types::asset::AssetId), u128>> =
+                Arc::new(dashmap::DashMap::new());
+
+            // Storage-provider runtime. Needs the iroh data plane for shard
+            // transport in addition to the staking-backed coverage above.
+            if self.config.roles.serves_storage() {
+                match &self.iroh_resolver {
+                    Some(resolver) => {
+                        let resolver: Arc<dyn tenzro_iroh::IrohResolver> = resolver.clone();
+                        let runtime = crate::storage_provider_runtime::StorageProviderRuntime::with_fixed_rate(
+                            provider_address,
+                            resolver,
+                            balances.clone(),
+                            stake_ledger.clone(),
+                            obligations.clone(),
+                            DEFAULT_STORAGE_RATE_PER_BYTE_EPOCH,
+                        );
+                        self.storage_runtime = Some(Arc::new(runtime));
+                        info!(
+                            provider = %provider_address,
+                            rate = DEFAULT_STORAGE_RATE_PER_BYTE_EPOCH,
+                            "Storage-provider runtime spawned"
+                        );
+                    }
+                    None => warn!(
+                        "StorageProvider role set but iroh resolver unavailable; storage runtime not spawned"
+                    ),
+                }
+            }
+
+            // Compute-rental runtime. A node serving AI also rents out its
+            // CPU/GPU capacity for fixed terms; no transport is needed, just the
+            // shared coverage backing.
+            if self.config.roles.serves_ai() {
+                let runtime = crate::compute_rental_runtime::ComputeRentalRuntime::with_fixed_rate(
+                    provider_address,
+                    balances.clone(),
+                    stake_ledger.clone(),
+                    obligations.clone(),
+                    DEFAULT_COMPUTE_RATE_PER_EPOCH,
+                );
+                self.compute_runtime = Some(Arc::new(runtime));
+                info!(
+                    provider = %provider_address,
+                    rate = DEFAULT_COMPUTE_RATE_PER_EPOCH,
+                    "Compute-rental runtime spawned"
+                );
+
+                // LAN cluster-serving runtime. A node serving AI also offers
+                // its layer range as a pipeline stage to head nodes on the
+                // local network, so a model too large for one machine can be
+                // split across members. Only boundary activations cross the
+                // wire, tunnelled over the cluster request-response protocol.
+                if let Some(ref network) = self.network {
+                    let net: Arc<dyn tenzro_network::NetworkService> = network.clone();
+                    let runtime =
+                        Arc::new(crate::cluster_serving_runtime::ClusterServingRuntime::new(net));
+                    if let Err(e) = runtime.serve_as_member().await {
+                        warn!(error = %e, "Cluster-serving member loop not attached");
+                    } else {
+                        self.cluster_serving_runtime = Some(runtime);
+                        info!("Cluster-serving runtime spawned (LAN pipeline member)");
+                    }
+                }
+            }
+        } else if self.config.roles.serves_storage() || self.config.roles.serves_ai() {
+            warn!(
+                "Provider role set but staking ledger unavailable; storage/compute runtimes not spawned"
+            );
+        }
+
         // Phase B agent memory tier: Lance vector + Tantivy BM25 + DA archive,
         // rooted at `{data_dir}/agent_memory/`. The text-embedding runtime is
         // shared across the node so any model loaded via
@@ -4956,7 +5089,7 @@ impl TenzroNode {
         // synchronous `ComputeBondManager` API and stamps audit-trail events
         // with the latest finalized height pulled from the consensus engine.
         // ═══════════════════════════════════════════════════════════════════════
-        if matches!(self.config.role, NetworkRole::Validator) {
+        if self.config.roles.is_validator() {
             if let (Some(consensus), Some(bonds)) =
                 (self.consensus.clone(), self.compute_bond_manager.clone())
             {
@@ -7035,13 +7168,7 @@ impl TenzroNode {
         // anonymous on this topic. Hardware is detected once at startup; the
         // served-models snapshot is re-read from the live `Arc<DashMap>` at
         // each tick.
-        if matches!(
-            self.config.role,
-            tenzro_types::NetworkRole::Validator
-                | tenzro_types::NetworkRole::ModelProvider
-                | tenzro_types::NetworkRole::TeeProvider
-                | tenzro_types::NetworkRole::StorageProvider
-        ) {
+        if self.config.roles.is_provider() || self.config.roles.is_validator() {
             let mut hardware = tenzro_types::HardwareCapabilities::detect();
             // `config.tee_enabled` is the operator's intent; presence of an
             // initialized `tee_provider` means the runtime probe at startup
@@ -7056,24 +7183,32 @@ impl TenzroNode {
                 .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
                 .unwrap_or_default();
 
-            let (provider_type, capabilities): (&str, Vec<String>) = match self.config.role {
-                tenzro_types::NetworkRole::ModelProvider => (
-                    "llm",
-                    vec!["inference".to_string()],
-                ),
-                tenzro_types::NetworkRole::TeeProvider => (
-                    "tee",
-                    vec!["tee-attestation".to_string(), "confidential-compute".to_string()],
-                ),
-                tenzro_types::NetworkRole::StorageProvider => (
-                    "storage",
-                    vec!["storage".to_string()],
-                ),
-                tenzro_types::NetworkRole::Validator => (
-                    "general",
-                    vec!["consensus".to_string(), "inference".to_string()],
-                ),
-                _ => ("general", Vec::new()),
+            // A multi-role node advertises every capability it serves. The
+            // `provider_type` string is a coarse routing hint; we pick the
+            // most specific service role the node fills (ai > tee > storage),
+            // falling back to "general" for a validator-only node.
+            let mut capabilities: Vec<String> = Vec::new();
+            if self.config.roles.serves_ai() {
+                capabilities.push("inference".to_string());
+            }
+            if self.config.roles.serves_tee() {
+                capabilities.push("tee-attestation".to_string());
+                capabilities.push("confidential-compute".to_string());
+            }
+            if self.config.roles.serves_storage() {
+                capabilities.push("storage".to_string());
+            }
+            if self.config.roles.is_validator() {
+                capabilities.push("consensus".to_string());
+            }
+            let provider_type: &str = if self.config.roles.serves_ai() {
+                "llm"
+            } else if self.config.roles.serves_tee() {
+                "tee"
+            } else if self.config.roles.serves_storage() {
+                "storage"
+            } else {
+                "general"
             };
 
             let rpc_endpoint = self
@@ -7081,6 +7216,21 @@ impl TenzroNode {
                 .external_rpc_addr
                 .clone()
                 .unwrap_or_else(|| format!("http://{}", self.config.rpc_addr));
+
+            // Cluster-serving profile: only AI-serving nodes advertise the
+            // facts a LAN pipeline head needs to admit them as a member (the
+            // llama.cpp commit + serving device backend / capability key).
+            // Absent on non-AI nodes, so they are never auto-clustered.
+            let cluster_profile = if self.config.roles.serves_ai() {
+                let profile = tenzro_model::cluster::detect_node_profile();
+                Some(tenzro_types::ClusterProfile {
+                    llama_commit: profile.llama_commit.clone(),
+                    backend: profile.serving_backend().ggml_name().to_string(),
+                    cap_key: profile.serving_cap_key(),
+                })
+            } else {
+                None
+            };
 
             let ctx = crate::event_loop::ProviderAnnouncementContext {
                 hardware,
@@ -7090,6 +7240,7 @@ impl TenzroNode {
                 capabilities,
                 rpc_endpoint,
                 ttl_secs: 120,
+                cluster_profile,
             };
             event_loop = event_loop.with_provider_announcement(ctx);
         }
@@ -8198,6 +8349,154 @@ impl TenzroNode {
         self.tee_provider.as_deref()
     }
 
+    /// Checks whether this node's hardware can back every role in `roles`,
+    /// returning a human-readable error naming the first role it cannot serve.
+    ///
+    /// The gate exists so a node cannot advertise a capability it does not
+    /// have — otherwise any peer could claim to be a TEE or storage provider
+    /// and collect work it can't honor. The policy is deliberately uneven:
+    ///
+    /// - `TeeProvider` is hard-gated: the node must have detected real TEE
+    ///   hardware at startup (`tee_provider.is_some()`). Confidential compute
+    ///   is a trust claim, so a self-report is never enough — and the quote is
+    ///   re-verified at request time regardless.
+    /// - `StorageProvider` requires verified free disk at or above
+    ///   [`MIN_STORAGE_PROVIDER_FREE_GB`]. Capacity is the one storage input a
+    ///   node cannot fake.
+    /// - `ModelProvider` is permissionless: the floor is "can run the smallest
+    ///   model on CPU" (Gemma 3 270M), which every machine that boots the node
+    ///   clears, so there is nothing to reject. A GPU only widens which larger
+    ///   models the node can serve, never whether it may join.
+    /// - Validator / full-node / client roles are gated by stake and protocol
+    ///   elsewhere, not by hardware, so they always pass here.
+    pub async fn validate_role_capability(
+        &self,
+        roles: &RoleSet,
+    ) -> std::result::Result<(), String> {
+        if roles.serves_tee() && self.tee_provider.is_none() {
+            return Err(
+                "cannot serve the 'tee' role: no TEE hardware detected on this node \
+                 (Intel TDX, AMD SEV-SNP, or AWS Nitro required)"
+                    .to_string(),
+            );
+        }
+
+        if roles.serves_storage() {
+            // The hardware profile is populated lazily (first probe RPC), so an
+            // absent profile means "not measured yet", not "zero disk" — detect
+            // and cache on demand rather than rejecting on a missing reading.
+            let free_gb = match self.hardware_profile.read().as_ref() {
+                Some(h) => Some(h.storage_available_gb),
+                None => None,
+            };
+            let free_gb = match free_gb {
+                Some(gb) => gb,
+                None => {
+                    let hw = detect_hardware(&self.config.data_dir)
+                        .await
+                        .map_err(|e| format!("hardware probe failed: {e}"))?;
+                    let gb = hw.storage_available_gb;
+                    *self.hardware_profile.write() = Some(hw);
+                    gb
+                }
+            };
+            if free_gb < MIN_STORAGE_PROVIDER_FREE_GB {
+                return Err(format!(
+                    "cannot serve the 'storage' role: {free_gb:.1} GB free disk, \
+                     need at least {MIN_STORAGE_PROVIDER_FREE_GB:.0} GB"
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Soft connectivity gate for *runtime* role changes. A node opting into a
+    /// role that serves traffic (AI, storage, TEE) must be reachable on *some*
+    /// lane, or the work routed to it would silently fail. The gate accepts any
+    /// reachable WAN tier — a directly-dialable node and a relay-reachable node
+    /// both pass — *and* a node that has only a confirmed local-network peer: a
+    /// cluster behind one NAT is unreachable on the public mesh yet fully
+    /// serveable to its own segment, which is exactly the local-MoE case. Only
+    /// a node with no confirmed path on any lane is turned away, and it can
+    /// retry once its reachability stabilizes. The request router uses the
+    /// finer tier ([`reachability_tier`]) to prefer direct providers over
+    /// relay-only ones.
+    ///
+    /// This is deliberately *not* part of [`validate_role_capability`], which
+    /// runs at startup before any reachability probe has completed — gating on
+    /// connectivity there would strip every node of its serving roles on boot.
+    /// Connectivity is only meaningful once the node has been live long enough
+    /// for AutoNAT / relay / mDNS events to arrive, which is exactly the
+    /// `setRole` case.
+    pub fn validate_role_connectivity(
+        &self,
+        roles: &RoleSet,
+    ) -> std::result::Result<(), String> {
+        let serves_traffic = roles.serves_ai() || roles.serves_storage() || roles.serves_tee();
+        if !serves_traffic {
+            return Ok(());
+        }
+        match self.network.as_ref() {
+            // No network service wired (e.g. a client-only embedding) — nothing
+            // to gate on; defer to the other checks.
+            None => Ok(()),
+            Some(network) if network.reachability().can_serve_anywhere() => Ok(()),
+            Some(_) => Err(
+                "cannot serve a traffic role yet: this node is not reachable on any lane \
+                 (no direct address confirmed, no relay reservation held, and no \
+                 local-network peer discovered). Reachability stabilizes as the node stays \
+                 connected — retry once it does, open inbound connectivity / a relay path, \
+                 or join a peer on the same local network."
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// The node's current connectivity tier, or `None` if the network service
+    /// is not running. Read by the request router to prefer directly-reachable
+    /// providers over relay-only ones.
+    pub fn reachability_tier(&self) -> Option<tenzro_network::ReachabilityTier> {
+        self.network.as_ref().map(|n| n.reachability().tier())
+    }
+
+    /// The set of peer IDs on this node's local network segment (mDNS-
+    /// discovered), or `None` if networking is not running. Read by the
+    /// request router to prefer a same-LAN provider over any WAN provider.
+    pub fn local_peers(&self) -> Option<Arc<tenzro_network::LocalPeerSet>> {
+        self.network.as_ref().map(|n| n.local_peers())
+    }
+
+    /// Removes from `config.roles` any role this node's hardware can't back,
+    /// logging each drop. Called once at startup after TEE detection so every
+    /// downstream reader (runtime spawn, capability announce, status) sees only
+    /// roles the node can honor. A node never fails to boot over this — it just
+    /// comes up serving fewer roles.
+    async fn prune_unsupported_roles(&mut self) {
+        let mut kept = Vec::new();
+        let mut dropped = false;
+        for role in self.config.roles.iter() {
+            match self
+                .validate_role_capability(&RoleSet::from_roles([role]))
+                .await
+            {
+                Ok(()) => kept.push(role),
+                Err(reason) => {
+                    warn!("Dropping role '{role}' at startup: {reason}");
+                    dropped = true;
+                }
+            }
+        }
+        if dropped {
+            // Empty input falls back to the client role, so a node that loses
+            // every configured role still has a valid identity.
+            let pruned = RoleSet::from_roles(kept);
+            info!("Roles after capability check: {pruned}");
+            self.config.roles = pruned;
+            *self.runtime_roles.write() = self.config.roles.clone();
+        }
+    }
+
     /// Returns the durable usage tracker, the producer-side recipient of
     /// every successful inference's `UsageRecord`. Used by the
     /// `tenzro_listInferenceUsage` and `tenzro_getProviderReputation`
@@ -8307,6 +8606,22 @@ impl TenzroNode {
     /// Returns the staking manager if initialized
     pub fn staking(&self) -> Option<&Arc<StakingManager>> {
         self.staking.as_ref()
+    }
+
+    /// Returns the storage-provider runtime if this node serves the
+    /// StorageProvider role and the runtime was spawned at startup.
+    pub fn storage_runtime(
+        &self,
+    ) -> Option<&Arc<crate::storage_provider_runtime::StorageProviderRuntime>> {
+        self.storage_runtime.as_ref()
+    }
+
+    /// Returns the compute-rental runtime if this node serves AI and the
+    /// runtime was spawned at startup.
+    pub fn compute_runtime(
+        &self,
+    ) -> Option<&Arc<crate::compute_rental_runtime::ComputeRentalRuntime>> {
+        self.compute_runtime.as_ref()
     }
 
     /// Returns the liquid staking pool (stTNZO) if initialized.
@@ -9654,7 +9969,7 @@ fn parse_vram(vram_str: &str) -> f64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStatus {
     pub state: String,
-    pub role: NetworkRole,
+    pub roles: RoleSet,
     pub health_status: crate::health::OverallHealth,
     pub uptime_secs: u64,
     pub block_height: u64,
@@ -9683,4 +9998,9 @@ pub struct NodeStatus {
     /// enabled. Includes `iroh-blobs` always; `tenzro/a2a` once the A2A
     /// dispatcher has been wired in `main.rs`.
     pub iroh_alpns: Vec<String>,
+    /// Sustained connectivity tier (`unreachable` / `relay_only` / `direct`),
+    /// or `None` when the network service is not running. A serving role is
+    /// only admitted once this reaches a tier that `can_serve`; the request
+    /// router prefers `direct` providers over `relay_only` ones.
+    pub reachability: Option<String>,
 }

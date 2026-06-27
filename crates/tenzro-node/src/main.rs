@@ -31,9 +31,11 @@ struct Cli {
     #[arg(short, long, value_name = "DIR")]
     data_dir: Option<PathBuf>,
 
-    /// Node role (validator, model-provider, tee-provider, user)
-    #[arg(short, long, value_name = "ROLE")]
-    role: Option<String>,
+    /// Node roles, comma-separated (e.g. "validator,storage,ai"). A node may
+    /// serve any combination of roles under a single stake. Aliases accepted:
+    /// validator, model-provider/ai, tee-provider/tee, storage, user/light.
+    #[arg(short, long, value_name = "ROLES")]
+    roles: Option<String>,
 
     /// libp2p multiaddrs to listen on. Comma-separated.
     /// When omitted, the node listens on BOTH `/ip4/0.0.0.0/tcp/9000` and
@@ -350,7 +352,7 @@ async fn main() -> Result<()> {
         print_node_info(&config);
     } else {
         info!(
-            role = ?config.role,
+            roles = %config.roles,
             data_dir = ?config.data_dir,
             rpc_addr = %config.rpc_addr,
             web_addr = %config.web_addr,
@@ -1241,41 +1243,34 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
         config.data_dir = data_dir.clone();
     }
 
-    if let Some(role_str) = &cli.role {
-        config.role = parse_role(role_str)?;
+    if let Some(roles_str) = &cli.roles {
+        config.roles = parse_roles(roles_str)?;
         // Auto-create consensus config for validators if not already set
-        if config.role == tenzro_types::NetworkRole::Validator && config.consensus.is_none() {
+        if config.roles.is_validator() && config.consensus.is_none() {
             config.consensus = Some(tenzro_consensus::ConsensusConfig::default());
         }
-        // Auto-create default genesis for validators/users if not already set
+        // Auto-create default genesis if not already set
         if config.genesis.is_none() {
             config.genesis = Some(GenesisConfig::default_testnet());
         }
     }
 
-    // Merge role-specific defaults when no config file was provided
+    // Merge role-specific defaults per served role when no config file was
+    // provided. A multi-role node accumulates the defaults of every role it
+    // fills (e.g. validator+ai pulls both consensus and models_dir defaults).
     if cli.config.is_none() {
-        match config.role {
-            tenzro_types::NetworkRole::Validator => {
-                let defaults = NodeConfig::default_validator();
-                if config.consensus.is_none() {
-                    config.consensus = defaults.consensus;
-                }
+        if config.roles.is_validator() && config.consensus.is_none() {
+            config.consensus = NodeConfig::default_validator().consensus;
+        }
+        if config.roles.serves_ai() && config.models_dir.is_none() {
+            config.models_dir = NodeConfig::default_provider().models_dir;
+        }
+        if config.roles.serves_tee() {
+            let defaults = NodeConfig::default_tee_provider();
+            if config.models_dir.is_none() {
+                config.models_dir = defaults.models_dir;
             }
-            tenzro_types::NetworkRole::ModelProvider => {
-                let defaults = NodeConfig::default_provider();
-                if config.models_dir.is_none() {
-                    config.models_dir = defaults.models_dir;
-                }
-            }
-            tenzro_types::NetworkRole::TeeProvider => {
-                let defaults = NodeConfig::default_tee_provider();
-                if config.models_dir.is_none() {
-                    config.models_dir = defaults.models_dir;
-                }
-                config.tee_enabled = defaults.tee_enabled;
-            }
-            _ => {}
+            config.tee_enabled = defaults.tee_enabled;
         }
     }
 
@@ -1481,17 +1476,12 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// Parse role string
-fn parse_role(role: &str) -> Result<tenzro_types::NetworkRole> {
-    use tenzro_types::NetworkRole;
+/// Parse a comma-separated roles string into a `RoleSet`.
+fn parse_roles(roles: &str) -> Result<tenzro_types::RoleSet> {
+    use std::str::FromStr;
 
-    match role.to_lowercase().as_str() {
-        "validator" => Ok(NetworkRole::Validator),
-        "model-provider" => Ok(NetworkRole::ModelProvider),
-        "tee-provider" => Ok(NetworkRole::TeeProvider),
-        "user" | "light-client" => Ok(NetworkRole::LightClient),
-        _ => Err(error::NodeError::Config(format!("Invalid role: {}", role))),
-    }
+    tenzro_types::RoleSet::from_str(roles)
+        .map_err(|e| error::NodeError::Config(format!("Invalid roles '{}': {}", roles, e)))
 }
 
 /// Print startup banner
@@ -1518,7 +1508,7 @@ fn print_node_info(config: &NodeConfig) {
     println!("\n{}", "=".repeat(60));
     println!("  Node Information");
     println!("{}", "=".repeat(60));
-    println!("  Role:         {:?}", config.role);
+    println!("  Roles:        {}", config.roles);
     println!("  Data Dir:     {:?}", config.data_dir);
     println!("  RPC Address:  {}", config.rpc_addr);
     println!("  Web API:      {}", config.web_addr);

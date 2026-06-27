@@ -24,7 +24,7 @@ use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tenzro_types::network::{NetworkRole, PeerStatus};
+use tenzro_types::network::{NetworkRole, PeerStatus, RoleSet};
 
 /// Type alias for a keyed rate limiter over IP addresses.
 /// Each IP gets its own token bucket; eviction is handled by governor internally.
@@ -81,8 +81,10 @@ pub const VALIDATOR_ONLY_TOPICS: &[&str] = &[
 pub struct ManagedPeer {
     /// Peer ID
     pub peer_id: PeerId,
-    /// Peer role
-    pub role: Option<NetworkRole>,
+    /// Every role this peer advertises. `None` until the peer announces. A
+    /// multi-role peer (validator + storage + ai) is matched on set membership
+    /// by `peers_by_role`.
+    pub roles: Option<RoleSet>,
     /// Reputation score (-100 to 100)
     pub reputation: i32,
     /// Connection status
@@ -110,7 +112,7 @@ impl ManagedPeer {
     pub fn new(peer_id: PeerId) -> Self {
         Self {
             peer_id,
-            role: None,
+            roles: None,
             reputation: 0,
             status: PeerStatus::Disconnected,
             last_seen: Instant::now(),
@@ -396,10 +398,10 @@ impl PeerManager {
         migrated
     }
 
-    /// Updates peer role
-    pub fn update_role(&self, peer_id: &PeerId, role: NetworkRole) {
+    /// Records the full set of roles a peer advertises.
+    pub fn update_roles(&self, peer_id: &PeerId, roles: RoleSet) {
         if let Some(mut peer) = self.peers.get_mut(peer_id) {
-            peer.role = Some(role);
+            peer.roles = Some(roles);
         }
     }
 
@@ -552,11 +554,13 @@ impl PeerManager {
             .collect()
     }
 
-    /// Gets peers by role
+    /// Gets peers that serve `role`. A multi-role peer matches if `role` is in
+    /// its advertised set, so a validator+storage node is returned by both a
+    /// `Validator` and a `StorageProvider` query.
     pub fn peers_by_role(&self, role: NetworkRole) -> Vec<PeerId> {
         self.peers
             .iter()
-            .filter(|entry| entry.role == Some(role))
+            .filter(|entry| entry.roles.as_ref().is_some_and(|r| r.has(role)))
             .map(|entry| entry.peer_id)
             .collect()
     }

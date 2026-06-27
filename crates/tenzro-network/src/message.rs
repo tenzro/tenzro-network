@@ -475,6 +475,13 @@ pub struct ProviderAnnouncementMessage {
     /// `None` as "unknown geography", not as a wildcard match.
     #[serde(default)]
     pub geography: Option<String>,
+    /// LAN-cluster serving profile, present only when this node is willing
+    /// to join LAN pipeline clusters. Carries the llama.cpp commit, serving
+    /// backend / capability key, and ggml `rpc-server` socket a head needs
+    /// to admit this node as a pipeline member. `None` means single-box
+    /// serving only — the node will not be auto-clustered.
+    #[serde(default)]
+    pub cluster_profile: Option<tenzro_types::ClusterProfile>,
 }
 
 /// Schedule for when a model is available for serving

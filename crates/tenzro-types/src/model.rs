@@ -848,6 +848,23 @@ pub struct ProviderCapacity {
     /// Required when `moe_roles` includes `Router` or `ExpertHolder`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iroh_endpoint_id: Option<String>,
+    /// Local-network cluster this node belongs to, if any. When set, the
+    /// node is one machine in a provider-owned LAN cluster that serves a
+    /// model too large for any single member by splitting it into a
+    /// layer-wise pipeline across members (see [`LanCluster`]). `None`
+    /// means the node serves standalone.
+    ///
+    /// Why layer-pipeline and not expert-parallel on the LAN: expert
+    /// all-to-all dispatch is a latency-bound collective that needs an
+    /// NVLink/RDMA-class interconnect; over commodity Ethernet it
+    /// collapses. Splitting by contiguous layer range sends only the
+    /// boundary activation between stages — point-to-point, tolerant of
+    /// millisecond LAN latency. This is the pattern llama.cpp's RPC
+    /// backend implements, and it is why MoE serves well
+    /// over a LAN: each layer's experts stay co-resident on the stage
+    /// that owns the layer, so there is no cross-machine all-to-all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan_cluster: Option<LanCluster>,
 }
 
 /// Provider's holding declaration for one MoE expert in one model.
@@ -865,6 +882,82 @@ pub struct MoeExpertHolding {
     /// Maximum tokens per second this provider commits to for this
     /// expert post-batch. `0` means "best effort" with no SLA.
     pub committed_tps: u32,
+}
+
+/// A provider-owned cluster of machines on one local network that jointly
+/// serve a model too large for any single member.
+///
+/// The cluster presents to the wider Tenzro network as a *single logical
+/// provider* — one public [`Address`] and endpoint, owned by the elected
+/// [`head`](LanCluster::head). The network neither sees nor routes to the
+/// individual member machines; the head fans the layer-pipeline across
+/// them internally over the LAN. A member may also be exposed on its own
+/// Address (the "both" model) — that is independent of cluster membership
+/// and governed by its own `InferenceProvider` registration.
+///
+/// Membership is discovered automatically: members find each other via
+/// mDNS / local-direct reachability on the same L2 segment, and the
+/// layer-range assignment is computed deterministically from each
+/// member's declared VRAM (a bin-packing over `pipeline_stage`s). Every
+/// member computes the identical assignment with no coordinator round —
+/// the determinism is deliberate, so two members never disagree on who
+/// owns which layers (a split assignment would corrupt the pipeline).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LanCluster {
+    /// Stable identifier shared by every member of this cluster. Members
+    /// with the same `cluster_id` on the same local segment form one
+    /// logical provider. Provider-chosen; opaque to the network.
+    pub cluster_id: String,
+    /// Address of the elected head — the member that owns the cluster's
+    /// public registration and drives the pipeline. When this equals the
+    /// node's own address, the node is the head. `None` during election
+    /// (before a head is settled); members serve no traffic until a head
+    /// is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<Address>,
+    /// LAN-reachable endpoint of this member, used only for intra-cluster
+    /// pipeline traffic between members — never advertised to the wider
+    /// network. Typically a private-range address (e.g. `10.x`, `192.168.x`,
+    /// or an mDNS `.local` name) on the cluster's serving port.
+    pub local_endpoint: String,
+    /// The contiguous layer range this member serves in the pipeline, once
+    /// assignment has settled. `None` until the cluster has computed the
+    /// layer→member assignment (or for the head before members report
+    /// their VRAM).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_stage: Option<PipelineStage>,
+    /// VRAM this member contributes to the cluster, in GB. The layer
+    /// assignment is a deterministic bin-packing weighted by this value,
+    /// so a member with more VRAM is assigned proportionally more layers.
+    pub vram_gb: f32,
+}
+
+/// One member's slice of a layer-wise pipeline: the half-open range of
+/// transformer layers `[start_layer, end_layer)` it executes.
+///
+/// During decode, the stage receives the boundary activation from the
+/// member owning the preceding range, runs its layers (all experts for
+/// those layers stay co-resident here), and forwards the activation to
+/// the next stage. The member owning the final range produces logits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineStage {
+    /// First layer this stage owns (inclusive).
+    pub start_layer: u32,
+    /// One past the last layer this stage owns (exclusive).
+    pub end_layer: u32,
+}
+
+impl PipelineStage {
+    /// Number of layers this stage executes.
+    pub fn layer_count(&self) -> u32 {
+        self.end_layer.saturating_sub(self.start_layer)
+    }
+
+    /// Whether this stage owns the model's first layer range (the stage
+    /// that accepts the embedded prompt).
+    pub fn is_first(&self) -> bool {
+        self.start_layer == 0
+    }
 }
 
 /// MoE expert residency state.
@@ -898,6 +991,14 @@ pub enum MoeProviderRole {
     /// Runs only the decode phase; accepts KV cache from a prefill
     /// peer over iroh.
     Decode,
+    /// Executes a contiguous layer range as one stage of a LAN
+    /// layer-pipeline (see [`LanCluster`] / [`PipelineStage`]). Distinct
+    /// from `ExpertHolder`: a pipeline stage owns *whole layers* (with all
+    /// their experts co-resident) and exchanges only boundary activations
+    /// with adjacent stages, rather than holding individual experts and
+    /// participating in cross-machine all-to-all. This is the role members
+    /// of a local-network cluster take.
+    PipelineStage,
 }
 
 impl Default for ProviderCapacity {
@@ -912,6 +1013,7 @@ impl Default for ProviderCapacity {
             moe_holdings: Vec::new(),
             moe_roles: Vec::new(),
             iroh_endpoint_id: None,
+            lan_cluster: None,
         }
     }
 }

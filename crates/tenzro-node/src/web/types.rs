@@ -113,7 +113,7 @@ pub struct VerifyInferenceRequest {
 #[derive(Serialize)]
 pub struct NodeStatusResponse {
     pub node_state: String,
-    pub role: String,
+    pub roles: Vec<String>,
     pub health: String,
     pub block_height: u64,
     pub peer_count: u64,

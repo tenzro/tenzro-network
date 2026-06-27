@@ -186,7 +186,7 @@ cargo build --release -p tenzro-node --features tenzro-model/vulkan
 
 ```bash
 ./target/release/tenzro-node \
-  --role validator \
+  --roles validator \
   --data-dir ./data \
   --listen-addr /ip4/0.0.0.0/tcp/9000
 ```
@@ -208,13 +208,13 @@ Restrict RPC to loopback with `--rpc-addr 127.0.0.1:8545`. The default binds to 
 ### 4.2 Light client / user node
 
 ```bash
-./target/release/tenzro-node --role user --data-dir ./data
+./target/release/tenzro-node --roles light --data-dir ./data
 ```
 
 ### 4.3 Model provider
 
 ```bash
-./target/release/tenzro-node --role model-provider --data-dir ./data
+./target/release/tenzro-node --roles ai --data-dir ./data
 ```
 
 ### 4.4 Verify it's running
@@ -309,7 +309,7 @@ docker build -t tenzro-node .
 docker run --rm -it \
   -p 9000:9000 -p 8545:8545 -p 8080:8080 -p 3001:3001 -p 3002:3002 \
   -v tenzro-data:/data/tenzro \
-  tenzro-node --role validator --data-dir /data/tenzro
+  tenzro-node --roles validator --data-dir /data/tenzro
 
 # Compose (includes Prometheus + Grafana)
 docker compose up
@@ -445,7 +445,7 @@ The node auto-repairs WAL on open, but on rare catastrophic crashes:
 ```bash
 # Back up state, then wipe
 mv ./data ./data.backup
-./target/release/tenzro-node --role validator --data-dir ./data
+./target/release/tenzro-node --roles validator --data-dir ./data
 ```
 
 Finalized blocks are fsync'd so re-syncing recovers state.
@@ -540,7 +540,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # Run with logs
 RUST_LOG=tenzro_node=debug,tenzro_consensus=info \
-  cargo run --bin tenzro-node -- --role validator --data-dir ./data
+  cargo run --bin tenzro-node -- --roles validator --data-dir ./data
 ```
 
 ---

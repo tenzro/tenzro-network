@@ -329,7 +329,7 @@ Every catalog entry carries a license tier (Permissive / Attribution / Commercia
 
 ### Provider economics
 
-A provider runs the node with `--role model_provider`, registers under the model registry, and stakes TNZO bonded to their identity. Inference requests route to providers via the strategy the caller selects. Settlement is per-call or per-token through a micropayment channel; reputation tracks fast on success (latency only on HTTP 200), slow on failure (-5 per fault), and is gated to "settled-success only" on reputation gain so providers cannot game reputation without taking a real payment. Providers can also rent capacity for fixed terms backed by streaming escrow against their stake — see §15, *Capacity rental and escrow*.
+A provider runs the node with `--roles ai`, registers under the model registry, and stakes TNZO bonded to their identity. Inference requests route to providers via the strategy the caller selects. Settlement is per-call or per-token through a micropayment channel; reputation tracks fast on success (latency only on HTTP 200), slow on failure (-5 per fault), and is gated to "settled-success only" on reputation gain so providers cannot game reputation without taking a real payment. Providers can also rent capacity for fixed terms backed by streaming escrow against their stake — see §15, *Capacity rental and escrow*.
 
 ### Heterogeneous hardware
 

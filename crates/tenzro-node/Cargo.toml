@@ -26,9 +26,11 @@ tenzro-agent = { workspace = true }
 tenzro-identity = { workspace = true }
 tenzro-payments = { workspace = true }
 tenzro-model = { workspace = true }
+llama-cpp-2 = { workspace = true }
 tenzro-cortex = { workspace = true }
 tenzro-training = { workspace = true }
 tenzro-settlement = { workspace = true }
+tenzro-storage-market = { workspace = true }
 tenzro-bridge = { workspace = true }
 tenzro-events = { workspace = true }
 tenzro-agent-kit = { workspace = true }
@@ -94,7 +96,12 @@ k256 = { workspace = true }
 getrandom_0_4 = { package = "getrandom", version = "0.4", features = ["std"] }
 
 [features]
-default = []
+default = ["cluster-serving"]
+# LAN layer-pipeline cluster serving. Forwards to tenzro-model, which links
+# the ggml RPC backend and builds the rpc-server sidecar used to splice a
+# member's layer range into a head node's pipeline. Enabled by default — it
+# is core to multi-node serving.
+cluster-serving = ["tenzro-model/cluster-serving", "llama-cpp-2/rpc"]
 cuda = ["tenzro-model/cuda"]
 cuda-no-vmm = ["tenzro-model/cuda-no-vmm"]
 rocm = ["tenzro-model/rocm"]

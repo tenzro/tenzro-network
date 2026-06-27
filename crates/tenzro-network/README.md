@@ -218,17 +218,27 @@ The network supports multiple peer discovery mechanisms:
 - Random walks for discovering new peers
 - Provider records for finding specific node types (validators, inference providers, etc.)
 
-### mDNS
+### mDNS and `LocalPeerSet`
 
-- Local network peer discovery
-- Enabled by default for development
-- Automatically finds peers on the same LAN
+- libp2p mDNS discovers peers on the node's own LAN segment; it is part of `TenzroBehaviour` and runs alongside Kademlia.
+- Discovered / expired events maintain a `LocalPeerSet` — a concurrent set of the peer IDs currently seen on the local segment. `insert` / `remove` track membership; `snapshot()` enumerates the current members and `len()` / `is_empty()` report size.
+- The set is reachable from the service via `TenzroNetworkService::local_peers()`, surfaced node-side as `tenzro_localPeers` (`{ local_peers, count, available }`; `available` is false when local discovery is not running).
+- This is the substrate for local-first routing: a request can prefer a provider on the same LAN before reaching out over the WAN.
 
 ### Bootstrap Nodes
 
 - Well-known nodes for initial connections
 - Configured per network (testnet/mainnet)
 - Used to bootstrap the DHT
+
+## Reachability Tiers
+
+A `ReachabilityTracker` folds connectivity observations (AutoNAT outcomes, relay use, local-direct dials) into a sustained tier so the node knows how other peers can reach it:
+
+- `tier()` returns a `ReachabilityTier` — `Direct`, `RelayOnly`, or `Unreachable` (`as_str()` yields `direct` / `relay_only` / `unreachable`).
+- `has_local_direct()` reports whether at least one peer reached this node directly on the local segment; `can_serve_anywhere()` reports whether the node is dialable beyond its LAN.
+
+The tier is published node-side via `tenzro_nodeReachability` (`{ tier, available }`) and is consumed by the cluster planner's reachability gate, which excludes members that cannot hold a data-plane link.
 
 ## Message Validation
 

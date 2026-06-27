@@ -2910,6 +2910,150 @@ pub struct FeeRoutePayoutsParams {
     pub gross_wei: String,
 }
 
+// ─── Storage market param structs ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StorageStoreObjectParams {
+    #[schemars(description = "Object identifier")]
+    pub object_id: String,
+    #[schemars(description = "Owner address (hex), optional")]
+    pub owner: Option<String>,
+    #[schemars(description = "Object bytes, base64-encoded")]
+    pub data: String,
+    #[schemars(description = "Erasure-code data shard count (default 4)")]
+    pub data_shards: Option<u32>,
+    #[schemars(description = "Erasure-code parity shard count (default 2)")]
+    pub parity_shards: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StorageOpenDealParams {
+    #[schemars(description = "Identifier of an already-stored object")]
+    pub object_id: String,
+    #[schemars(description = "Renter address (hex)")]
+    pub renter: String,
+    #[schemars(description = "Object size in bytes")]
+    pub size_bytes: u64,
+    #[schemars(description = "Number of charge epochs to pre-fund")]
+    pub total_epochs: u64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StorageChargeEpochParams {
+    #[schemars(description = "Storage deal id")]
+    pub deal_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StorageGetDealParams {
+    #[schemars(description = "Storage deal id")]
+    pub deal_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StorageSetPricingParams {
+    #[schemars(description = "Pricing mode; set to \"dynamic\" (fixed-rate is the immutable spawn default)")]
+    pub mode: String,
+    #[schemars(description = "Byte-epoch capacity for dynamic pricing (decimal string — u128)")]
+    pub capacity: Option<String>,
+    #[schemars(description = "Minimum rate floor in wei per byte-epoch (decimal string — u128)")]
+    pub min_rate: Option<String>,
+    #[schemars(description = "Maximum rate ceiling in wei per byte-epoch (decimal string — u128)")]
+    pub max_rate: Option<String>,
+}
+
+// ─── Compute rental param structs ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ComputeBookRentalParams {
+    #[schemars(description = "Renter address (hex)")]
+    pub renter: String,
+    #[schemars(description = "Number of epochs to pre-fund")]
+    pub total_epochs: u64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ComputeSettleEpochParams {
+    #[schemars(description = "Compute rental id")]
+    pub rental_id: String,
+    #[schemars(description = "Whether the provider's availability proof is valid (default true)")]
+    pub proof_valid: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ComputeGetRentalParams {
+    #[schemars(description = "Compute rental id")]
+    pub rental_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ComputeSetPricingParams {
+    #[schemars(description = "Pricing mode; set to \"dynamic\" (fixed-rate is the immutable spawn default)")]
+    pub mode: String,
+    #[schemars(description = "Epoch-slot capacity for dynamic pricing (decimal string — u128)")]
+    pub capacity: Option<String>,
+    #[schemars(description = "Minimum rate floor in wei per epoch (decimal string — u128)")]
+    pub min_rate: Option<String>,
+    #[schemars(description = "Maximum rate ceiling in wei per epoch (decimal string — u128)")]
+    pub max_rate: Option<String>,
+}
+
+// ─── MoE serving param structs ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MoeModelIdParams {
+    #[schemars(description = "Catalog model id")]
+    pub model_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MoeExpertRef {
+    #[schemars(description = "Layer index")]
+    pub layer: u32,
+    #[schemars(description = "Expert index within the layer")]
+    pub expert: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MoeTokenRouting {
+    #[schemars(description = "Token position index")]
+    pub token_index: u32,
+    #[schemars(description = "Top-k experts selected for this token")]
+    pub experts: Vec<MoeExpertRef>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MoePlanDispatchParams {
+    #[schemars(description = "Catalog model id")]
+    pub model_id: String,
+    #[schemars(description = "Per-token top-k routing decisions")]
+    pub routings: Vec<MoeTokenRouting>,
+    #[schemars(description = "Allow routing to experts that are not warm-resident (default false)")]
+    pub allow_cold: Option<bool>,
+}
+
+// ─── Local discovery / cluster param structs ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ClusterPlanModel {
+    #[schemars(description = "Transformer layer count")]
+    pub layers: u32,
+    #[schemars(description = "Hidden dimension")]
+    pub hidden_dim: u32,
+    #[schemars(description = "Total model VRAM footprint in GB")]
+    pub total_vram_gb: f32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ClusterPlanParams {
+    #[schemars(description = "Model shape to place across members")]
+    pub model: ClusterPlanModel,
+    #[schemars(description = "Candidate cluster members")]
+    pub members: Vec<serde_json::Value>,
+    #[schemars(description = "Force cluster formation even when a single member could run the model (default false)")]
+    pub user_forced: Option<bool>,
+}
+
 // ─── Tool output structs (MCP 2025-06-18 structuredContent + outputSchema) ───
 //
 // Each `#[tool]` handler that returns `Result<Json<T>, ErrorData>` makes
@@ -5410,7 +5554,7 @@ impl TenzroMcpServer {
         let status = self.node.status().await;
         json_result(serde_json::json!({
             "state": status.state,
-            "role": format!("{:?}", status.role),
+            "roles": status.roles.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
             "health": format!("{:?}", status.health_status),
             "block_height": status.block_height,
             "peer_count": status.peer_count,
@@ -6106,7 +6250,7 @@ impl TenzroMcpServer {
                 "machine": machine_count,
                 "total": human_count + machine_count,
             },
-            "node_role": format!("{:?}", self.node.config().role),
+            "node_roles": self.node.config().roles.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
         }))
     }
 
@@ -13232,6 +13376,273 @@ impl TenzroMcpServer {
         let result = rpc_dispatch(&self.node, "tenzro_listPendingRecoveries", payload)
             .await
             .map_err(|e| err_internal(format!("listPendingRecoveries failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Storage market ───
+
+    #[tool(description = "Store an object on this node's storage provider with an erasure-coded redundancy scheme. Returns the object id, stored size, and shard counts.")]
+    async fn storage_store_object(
+        &self,
+        Parameters(params): Parameters<StorageStoreObjectParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({
+            "object_id": params.object_id,
+            "owner": params.owner,
+            "data": params.data,
+            "data_shards": params.data_shards,
+            "parity_shards": params.parity_shards,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_storageStoreObject", payload)
+            .await
+            .map_err(|e| err_internal(format!("storageStoreObject failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Open a streaming storage deal for an already-stored object. The renter pre-funds total_epochs from their deposit; the per-epoch price is size × rate.")]
+    async fn storage_open_deal(
+        &self,
+        Parameters(params): Parameters<StorageOpenDealParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({
+            "object_id": params.object_id,
+            "renter": params.renter,
+            "size_bytes": params.size_bytes,
+            "total_epochs": params.total_epochs,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_storageOpenDeal", payload)
+            .await
+            .map_err(|e| err_internal(format!("storageOpenDeal failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Run one proof-of-retrievability-gated charge epoch for a storage deal. Charges only when the retrievability challenge passes.")]
+    async fn storage_charge_epoch(
+        &self,
+        Parameters(params): Parameters<StorageChargeEpochParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "deal_id": params.deal_id });
+        let result = rpc_dispatch(&self.node, "tenzro_storageChargeEpoch", payload)
+            .await
+            .map_err(|e| err_internal(format!("storageChargeEpoch failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Look up a storage deal by id.")]
+    async fn storage_get_deal(
+        &self,
+        Parameters(params): Parameters<StorageGetDealParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "deal_id": params.deal_id });
+        let result = rpc_dispatch(&self.node, "tenzro_storageGetDeal", payload)
+            .await
+            .map_err(|e| err_internal(format!("storageGetDeal failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Set the byte-epoch storage pricing policy. Use mode \"dynamic\" with a non-zero capacity and optional min_rate/max_rate bounds; fixed-rate is the spawn default.")]
+    async fn storage_set_pricing(
+        &self,
+        Parameters(params): Parameters<StorageSetPricingParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({
+            "mode": params.mode,
+            "capacity": params.capacity,
+            "min_rate": params.min_rate,
+            "max_rate": params.max_rate,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_storageSetPricing", payload)
+            .await
+            .map_err(|e| err_internal(format!("storageSetPricing failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Summary of this node's storage-provider state: effective rate and stored object count.")]
+    async fn storage_status(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_storageStatus", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("storageStatus failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Compute rental ───
+
+    #[tool(description = "Book a compute rental against this node's compute provider. The renter pre-funds total_epochs from their deposit.")]
+    async fn compute_book_rental(
+        &self,
+        Parameters(params): Parameters<ComputeBookRentalParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({
+            "renter": params.renter,
+            "total_epochs": params.total_epochs,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_computeBookRental", payload)
+            .await
+            .map_err(|e| err_internal(format!("computeBookRental failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Settle one epoch of an active compute rental, gated on the provider's availability proof. A valid proof streams the epoch slice to the provider; an invalid or missing proof makes the renter whole from stake.")]
+    async fn compute_settle_epoch(
+        &self,
+        Parameters(params): Parameters<ComputeSettleEpochParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({
+            "rental_id": params.rental_id,
+            "proof_valid": params.proof_valid,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_computeSettleEpoch", payload)
+            .await
+            .map_err(|e| err_internal(format!("computeSettleEpoch failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Look up a compute rental by id.")]
+    async fn compute_get_rental(
+        &self,
+        Parameters(params): Parameters<ComputeGetRentalParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "rental_id": params.rental_id });
+        let result = rpc_dispatch(&self.node, "tenzro_computeGetRental", payload)
+            .await
+            .map_err(|e| err_internal(format!("computeGetRental failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Set the per-epoch compute pricing policy. Use mode \"dynamic\" with a non-zero capacity and optional min_rate/max_rate bounds; fixed-rate is the spawn default.")]
+    async fn compute_set_pricing(
+        &self,
+        Parameters(params): Parameters<ComputeSetPricingParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({
+            "mode": params.mode,
+            "capacity": params.capacity,
+            "min_rate": params.min_rate,
+            "max_rate": params.max_rate,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_computeSetPricing", payload)
+            .await
+            .map_err(|e| err_internal(format!("computeSetPricing failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Summary of this node's compute-rental state: effective rate and active rental count.")]
+    async fn compute_status(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_computeStatus", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("computeStatus failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── MoE serving ───
+
+    #[tool(description = "Return the expert shard map for a model: per-expert holders, replication counts, role counts, the replication policy, and lists of under-replicated and hot experts across known providers.")]
+    async fn moe_shard_map(
+        &self,
+        Parameters(params): Parameters<MoeModelIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "model_id": params.model_id });
+        let result = rpc_dispatch(&self.node, "tenzro_moeShardMap", payload)
+            .await
+            .map_err(|e| err_internal(format!("moeShardMap failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Given per-token top-k routing decisions, return the per-holder batch plan and per-token slot assignments. Set allow_cold to permit routing to experts that are not warm-resident.")]
+    async fn moe_plan_dispatch(
+        &self,
+        Parameters(params): Parameters<MoePlanDispatchParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let routings: Vec<serde_json::Value> = params
+            .routings
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "token_index": r.token_index,
+                    "experts": r
+                        .experts
+                        .iter()
+                        .map(|e| serde_json::json!({ "layer": e.layer, "expert": e.expert }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "model_id": params.model_id,
+            "routings": routings,
+            "allow_cold": params.allow_cold,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_moePlanDispatch", payload)
+            .await
+            .map_err(|e| err_internal(format!("moePlanDispatch failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Return the current replication policy used by shard-view consumers: min/max replication and the hot-expert tokens-per-second threshold.")]
+    async fn moe_replication_policy(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_moeReplicationPolicy", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("moeReplicationPolicy failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Return the catalog MoE topology for a model (num_experts, experts_per_token, shared_experts, params_per_expert_x10) and its architecture. The moe field is null for dense models.")]
+    async fn moe_catalog_shape(
+        &self,
+        Parameters(params): Parameters<MoeModelIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "model_id": params.model_id });
+        let result = rpc_dispatch(&self.node, "tenzro_moeCatalogShape", payload)
+            .await
+            .map_err(|e| err_internal(format!("moeCatalogShape failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Local discovery / cluster ───
+
+    #[tool(description = "List the peer ids discovered on this node's local network segment, with a count. When the network service is not running the list is empty and available is false.")]
+    async fn local_peers(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_localPeers", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("localPeers failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Return this node's sustained connectivity tier. When the network service is not running the tier is null and available is false.")]
+    async fn node_reachability(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_nodeReachability", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("nodeReachability failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Return this node's hardware self-profile: linked runtime build commit, CPU architecture, operating system, detected compute devices, and derived serving values (capacity in GB, backend, capability key).")]
+    async fn node_profile(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_nodeProfile", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("nodeProfile failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Compute a deterministic cluster placement for a model across candidate members. Returns the fit decision and, when a cluster forms, the VRAM-weighted per-member layer assignment ordered to minimize pipeline transfer cost. Pure function of the params; reads no node state.")]
+    async fn cluster_plan(
+        &self,
+        Parameters(params): Parameters<ClusterPlanParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({
+            "model": {
+                "layers": params.model.layers,
+                "hidden_dim": params.model.hidden_dim,
+                "total_vram_gb": params.model.total_vram_gb,
+            },
+            "members": params.members,
+            "user_forced": params.user_forced,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_clusterPlan", payload)
+            .await
+            .map_err(|e| err_internal(format!("clusterPlan failed: {}", e)))?;
         json_result(result)
     }
 }

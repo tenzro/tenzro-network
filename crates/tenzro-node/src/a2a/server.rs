@@ -1122,6 +1122,18 @@ fn execute_task_sync(state: &A2aState, task_id: &str) -> String {
     } else if text_lower.contains("swarm") || text_lower.contains("orchestrat") {
         handle_swarm_query(state)
 
+    // --- Tier 1b: Execution-layer roles (storage / compute / MoE / LAN) -----
+    // These are RPC-backed; route here before the generic "node"/"network"/
+    // "model" keywords below can steal them.
+    } else if text_lower.contains("shard map") || text_lower.contains("expert") || text_lower.contains("moe") {
+        handle_moe_query(state)
+    } else if text_lower.contains("lan cluster") || text_lower.contains("cluster plan") || text_lower.contains("pipeline") || (text_lower.contains("local") && text_lower.contains("peer")) || text_lower.contains("reachability") || text_lower.contains("hardware profile") {
+        handle_discovery_query(state)
+    } else if text_lower.contains("storage deal") || text_lower.contains("byte-epoch") || text_lower.contains("retrievability") || (text_lower.contains("store") && text_lower.contains("object")) {
+        handle_storage_query(state)
+    } else if text_lower.contains("compute rental") || text_lower.contains("book rental") || text_lower.contains("rent compute") || text_lower.contains("settle epoch") {
+        handle_compute_query(state)
+
     // --- Tier 2: Token sub-commands (multi-keyword, before single "token") --
     } else if text_lower.contains("token") && (text_lower.contains("create") || text_lower.contains("mint")) {
         handle_create_token(state, &text, &task.metadata)
@@ -1252,12 +1264,12 @@ fn handle_block_query(state: &A2aState) -> String {
 
 fn handle_status_query(state: &A2aState) -> String {
     let config = state.node.config();
-    let role = format!("{:?}", config.role);
+    let role = config.roles.to_string();
     let metrics = state.node.metrics().get_metrics();
 
     format!(
         "Node Status:\n\
-         - Role: {}\n\
+         - Roles: {}\n\
          - Peers: {}\n\
          - Uptime: {}s\n\
          - A2A Tasks: {}\n\
@@ -1412,6 +1424,57 @@ fn handle_network_query(state: &A2aState) -> String {
     )
 }
 
+fn handle_discovery_query(state: &A2aState) -> String {
+    let tier = match state.node.reachability_tier() {
+        Some(t) => t.as_str().to_string(),
+        None => "unknown (reachability tracker not running)".to_string(),
+    };
+    let local = match state.node.local_peers() {
+        Some(set) => {
+            let peers = set.snapshot();
+            format!("{} peer(s) on the local segment", peers.len())
+        }
+        None => "local discovery not running".to_string(),
+    };
+    format!(
+        "Local Discovery & LAN Clustering:\n\
+         - Connectivity tier: {tier}\n\
+         - Local segment: {local}\n\n\
+         RPC: tenzro_localPeers, tenzro_nodeReachability, tenzro_nodeProfile, tenzro_clusterPlan\n\
+         CLI: `tenzro discover local-peers|reachability|profile`, `tenzro cluster plan`",
+    )
+}
+
+fn handle_storage_query(_state: &A2aState) -> String {
+    "Decentralized Storage (content-addressed, billed per byte-epoch, held to a proof of \
+     retrievability):\n\
+     - Open a streaming deal, then charge retrievability-gated epochs.\n\
+     - Storage and compute rental share one coverage budget per provider.\n\n\
+     RPC: tenzro_storageStatus, tenzro_storageOpenDeal, tenzro_storageChargeEpoch, \
+     tenzro_storageDeal, tenzro_storageSetPricing\n\
+     CLI: `tenzro node storage status|open-deal|deal`"
+        .to_string()
+}
+
+fn handle_compute_query(_state: &A2aState) -> String {
+    "Compute Rental (rent compute against stake, settled per epoch on an availability proof):\n\
+     - Book a rental, then settle epochs; a valid proof streams the slice, an invalid or \
+     missing proof makes the renter whole from stake.\n\
+     - Shares one coverage budget with storage.\n\n\
+     RPC: tenzro_computeStatus, tenzro_computeBookRental, tenzro_computeSettleEpoch, \
+     tenzro_computeGetRental, tenzro_computeSetPricing"
+        .to_string()
+}
+
+fn handle_moe_query(_state: &A2aState) -> String {
+    "Distributed MoE Serving (decentralized expert-shard serving):\n\
+     - Read the shard map for a model, plan dispatch from per-token top-k routings, read the \
+     replication policy and catalog topology.\n\n\
+     RPC: tenzro_moeShardMap, tenzro_moePlanDispatch, tenzro_moeReplicationPolicy, \
+     tenzro_moeCatalogShape"
+        .to_string()
+}
+
 fn handle_staking_query(state: &A2aState) -> String {
     if let Some(staking) = state.node.staking() {
         let all_stakes = staking.get_all_stakes();
@@ -1458,12 +1521,12 @@ fn handle_provider_query(state: &A2aState) -> String {
          - Models served: {}\n\
          - Total inferences: {}\n\
          - Total staked: {}\n\
-         - Role: {:?}\n\n\
+         - Roles: {}\n\n\
          To register: Use MCP tool `register_provider` or RPC `tenzro_registerProvider`",
         models_served,
         total_inferences,
         staking_info,
-        state.node.config().role,
+        state.node.config().roles,
     )
 }
 
@@ -2436,7 +2499,7 @@ pub fn build_a2a_state(
     node: Arc<TenzroNode>,
     web_state: Arc<WebState>,
 ) -> Arc<A2aState> {
-    let role = format!("{:?}", node.config().role);
+    let role = node.config().roles.to_string();
     let agent_card = agent_card::build_agent_card(listen_addr, &role);
 
     Arc::new(A2aState {
