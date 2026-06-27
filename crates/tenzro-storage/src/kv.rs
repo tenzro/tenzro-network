@@ -330,6 +330,30 @@ impl RocksDbStore {
             }
         };
 
+        // Release any WAL pinned by idle column families from a prior run.
+        // `db_write_buffer_size` only ever flushes the CF with the LARGEST live
+        // memtable, so a CF that received a few writes long ago and then went
+        // idle keeps a tiny non-empty memtable that is never chosen for flush —
+        // and the WAL segment holding its unflushed entries can never be
+        // deleted, so accumulated WAL from before this binary's options took
+        // effect would persist forever. Flushing every CF once on open forces
+        // those stale memtables to SST so the old WAL files become deletable;
+        // from then on the aggregate budget + max_total_wal_size keep it
+        // bounded. Atomic flush so the set is consistent. Best-effort: a flush
+        // failure here must not block startup (e.g. a freshly created DB with
+        // nothing to flush returns immediately).
+        {
+            let handles: Vec<&ColumnFamily> = ALL_CFS
+                .iter()
+                .filter_map(|name| db.cf_handle(name))
+                .collect();
+            let mut fopts = rocksdb::FlushOptions::default();
+            fopts.set_wait(true);
+            if let Err(e) = db.flush_cfs_opt(&handles, &fopts) {
+                tracing::warn!("startup flush of column families failed (non-fatal): {}", e);
+            }
+        }
+
         Ok(Self { db: Arc::new(db) })
     }
 
