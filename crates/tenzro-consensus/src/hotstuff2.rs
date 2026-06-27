@@ -559,6 +559,15 @@ pub struct HotStuff2Engine {
     /// can't help but block-sync wouldn't normally engage. `watch` notifies on
     /// every send, so repeated proposals keep re-arming the hint.
     behind_hint_tx: tokio::sync::watch::Sender<u64>,
+
+    /// Wall-clock instant of the last block this replica proposed or
+    /// observed finalized. Drives empty-block suppression: when the
+    /// mempool is empty the leader proposes only after
+    /// `config.empty_block_heartbeat()` has elapsed since this instant,
+    /// instead of minting an empty block on every pacemaker beat. Updated
+    /// whenever a fresh block is proposed. Initialised to engine-start so
+    /// the first heartbeat fires one interval after boot, not immediately.
+    last_block_time: Arc<RwLock<Instant>>,
 }
 
 /// Evicts the lowest-`view` cached blocks until the map holds at most
@@ -687,6 +696,7 @@ impl HotStuff2Engine {
             proposer_election,
             reputation,
             behind_hint_tx: tokio::sync::watch::Sender::new(0),
+            last_block_time: Arc::new(RwLock::new(Instant::now())),
         }
     }
 
@@ -2326,6 +2336,32 @@ impl HotStuff2Engine {
                 if is_leader && !self.is_draining() {
                     // Leader proposes a block
                     if state.proposed_block.is_none() {
+                        // EMPTY-BLOCK SUPPRESSION (CometBFT
+                        // `create_empty_blocks=false` adapted for HotStuff-2):
+                        // on an idle chain, don't mint a fresh empty block on
+                        // every pacemaker beat — that accreted ~216k
+                        // never-pruned empty headers/day of SST. Hold the view
+                        // in Prepare (still voting, still timing out) until we
+                        // either have transactions to commit OR the heartbeat
+                        // interval elapses. Liveness is unaffected: the
+                        // pacemaker's timeout-driven view change runs
+                        // independently, so a genuinely dead leader is still
+                        // detected. The heartbeat block refreshes the tip's
+                        // timestamp/state-root and gives peers a positive
+                        // "leader alive" signal. We only gate FRESH proposals;
+                        // a TC-recovery repropose (handled inside
+                        // `propose_block_internal`) must never be suppressed,
+                        // but that path is reached via the same proposal-guard
+                        // below and short-circuits before this check matters
+                        // because `last_round_tc` is set.
+                        if !self.should_propose_now() {
+                            tracing::trace!(
+                                view = state.view,
+                                height = %state.height,
+                                "empty-block suppression: idle + within heartbeat window, deferring proposal"
+                            );
+                            return Ok(());
+                        }
                         // PROPOSAL-GUARD (Aptos/Diem invariant): atomically
                         // claim the current view as the "I am proposing for
                         // view V" slot before we await the block builder. If
@@ -2448,6 +2484,42 @@ impl HotStuff2Engine {
         Ok(())
     }
 
+    /// Empty-block suppression predicate. Returns `true` when the leader
+    /// should mint a block at the current beat, `false` to defer.
+    ///
+    /// Propose iff ANY of:
+    ///   1. Suppression disabled (`empty_block_heartbeat_ms == 0`) — restore
+    ///      always-on production.
+    ///   2. Mempool is non-empty — there's real work to commit.
+    ///   3. A timeout certificate is pending (`last_round_tc` set) — we may
+    ///      need to repropose the high_tip to flush a stranded QC, or attach
+    ///      an NEC; suppressing here would risk wedging the view. Liveness
+    ///      and the QC chain take priority over the empty-header budget.
+    ///   4. The heartbeat interval has elapsed since the last block — emit a
+    ///      keepalive block to refresh the tip and signal leader liveness.
+    ///
+    /// This is the only gate; the proposal-guard `fetch_max` still enforces
+    /// the one-proposal-per-view invariant downstream.
+    fn should_propose_now(&self) -> bool {
+        if !self.config.suppress_empty_blocks() {
+            return true;
+        }
+        if !self.mempool.is_empty() {
+            return true;
+        }
+        if self.last_round_tc.read().is_some() {
+            return true;
+        }
+        let elapsed = self.last_block_time.read().elapsed();
+        elapsed >= self.config.empty_block_heartbeat()
+    }
+
+    /// Records that a fresh block was proposed, resetting the heartbeat
+    /// clock so the next idle keepalive fires one full interval later.
+    fn mark_block_proposed(&self) {
+        *self.last_block_time.write() = Instant::now();
+    }
+
     /// Internal block proposal (called by consensus loop)
     async fn propose_block_internal(&self) -> Result<Block> {
         let (height, view) = {
@@ -2547,6 +2619,13 @@ impl HotStuff2Engine {
         // Mirror into fork choice (no QC yet — it'll be recorded by
         // `try_form_qc_and_drive_phase` once 2f+1 votes aggregate).
         self.fork_choice.add_block(block.clone(), None);
+
+        // Reset the heartbeat clock: this is a freshly minted block (the
+        // TC-recovery repropose path returns earlier and intentionally does
+        // NOT reset, so a stuck-at-height view doesn't keep arming the
+        // keepalive). Whether empty or full, a real proposal restarts the
+        // idle window.
+        self.mark_block_proposed();
 
         tracing::info!(
             height = %height,
@@ -2676,6 +2755,13 @@ impl HotStuff2Engine {
             state.reset_timer();
             state.height
         };
+
+        // Reset the empty-block heartbeat clock on every finalization,
+        // self- or peer-proposed. This keeps each replica's idle window
+        // anchored to the real chain tip, so a freshly-elected leader on an
+        // idle chain waits a full heartbeat interval before minting a
+        // keepalive instead of firing one the instant it takes the view.
+        self.mark_block_proposed();
 
         // Feed LeaderReputation from committed metadata only — identical
         // inputs on every node (see record_committed_round_metadata).
@@ -3644,6 +3730,7 @@ impl Clone for HotStuff2Engine {
             proposer_election: self.proposer_election.clone(),
             reputation: self.reputation.clone(),
             behind_hint_tx: self.behind_hint_tx.clone(),
+            last_block_time: self.last_block_time.clone(),
         }
     }
 }
@@ -4056,6 +4143,63 @@ mod tests {
 
         let engine = HotStuff2Engine::new(keypair, pq, bls, config, epoch_manager);
         assert_eq!(engine.finalized_height().await, BlockHeight::from(0));
+    }
+
+    #[tokio::test]
+    async fn test_empty_block_suppression_gate() {
+        let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let pq = MlDsaSigningKey::generate();
+        let bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
+        // Short heartbeat so the test doesn't sleep for the 5s default.
+        let config = ConsensusConfig::default().with_empty_block_heartbeat(50);
+        let validators = create_test_validators(4);
+        let epoch_manager = EpochManager::new(validators, 100).unwrap();
+        let engine = HotStuff2Engine::new(keypair, pq, bls, config, epoch_manager);
+
+        // Fresh engine, empty mempool, no TC, clock just reset: within the
+        // heartbeat window → suppress.
+        engine.mark_block_proposed();
+        assert!(
+            !engine.should_propose_now(),
+            "idle + within heartbeat window must suppress"
+        );
+
+        // After the heartbeat interval elapses → propose a keepalive.
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        assert!(
+            engine.should_propose_now(),
+            "heartbeat elapsed must allow a keepalive proposal"
+        );
+
+        // A pending TC must always force a proposal (QC-chain / liveness
+        // priority), even immediately after a fresh block.
+        engine.mark_block_proposed();
+        assert!(!engine.should_propose_now());
+        *engine.last_round_tc.write() = Some(crate::timeout::TimeoutCertificate {
+            format_version: crate::timeout::TIMEOUT_CERTIFICATE_FORMAT_VERSION,
+            view: 1,
+            signers: Vec::new(),
+        });
+        assert!(
+            engine.should_propose_now(),
+            "pending TC must never be suppressed"
+        );
+        *engine.last_round_tc.write() = None;
+
+        // Disabling suppression (heartbeat = 0) restores always-on
+        // production regardless of mempool/clock.
+        let config_off = ConsensusConfig::default().with_empty_block_heartbeat(0);
+        let validators2 = create_test_validators(4);
+        let epoch2 = EpochManager::new(validators2, 100).unwrap();
+        let kp2 = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let pq2 = MlDsaSigningKey::generate();
+        let bls2 = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
+        let engine_off = HotStuff2Engine::new(kp2, pq2, bls2, config_off, epoch2);
+        engine_off.mark_block_proposed();
+        assert!(
+            engine_off.should_propose_now(),
+            "suppression disabled must always propose"
+        );
     }
 
     #[tokio::test]

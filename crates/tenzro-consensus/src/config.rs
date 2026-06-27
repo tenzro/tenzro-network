@@ -80,6 +80,27 @@ pub struct ConsensusConfig {
     /// unresponsive. [`ProposerElectionKind::RoundRobin`] is retained for
     /// tests and replay benchmarks.
     pub proposer_election: ProposerElectionKind,
+
+    /// Heartbeat interval for empty-block suppression, in milliseconds.
+    ///
+    /// When the mempool is empty the leader does NOT mint a block on every
+    /// pacemaker beat — doing so accreted ~216k empty headers/day of
+    /// monotonic, never-pruned SST on an idle chain. Instead the leader
+    /// proposes only when it has transactions to commit OR when this
+    /// interval has elapsed since the last finalized block, whichever comes
+    /// first. The heartbeat block keeps the chain tip fresh (timestamps,
+    /// state-root continuity) and gives non-leaders a positive liveness
+    /// signal so they can distinguish "idle" from "dead leader" without
+    /// waiting on the view-change timer.
+    ///
+    /// This mirrors CometBFT's `create_empty_blocks = false` +
+    /// `create_empty_blocks_interval`. Set to 0 to disable suppression and
+    /// restore always-on block production (every beat mints a block).
+    ///
+    /// Default: 5000ms. Idle-chain block rate drops from ~2.5/s to 0.2/s
+    /// (~12.5× fewer empty blocks) while view-change-driven liveness and
+    /// the QC chain are untouched.
+    pub empty_block_heartbeat_ms: u64,
 }
 
 impl Default for ConsensusConfig {
@@ -99,6 +120,7 @@ impl Default for ConsensusConfig {
             transaction_ttl_seconds: 600,
             optimistic_responsiveness: true,
             proposer_election: ProposerElectionKind::Reputation,
+            empty_block_heartbeat_ms: 5000,
         }
     }
 }
@@ -131,6 +153,22 @@ impl ConsensusConfig {
     pub fn with_proposer_election(mut self, kind: ProposerElectionKind) -> Self {
         self.proposer_election = kind;
         self
+    }
+
+    /// Sets the empty-block heartbeat interval (0 disables suppression).
+    pub fn with_empty_block_heartbeat(mut self, heartbeat_ms: u64) -> Self {
+        self.empty_block_heartbeat_ms = heartbeat_ms;
+        self
+    }
+
+    /// Returns the empty-block heartbeat interval as a Duration.
+    pub fn empty_block_heartbeat(&self) -> Duration {
+        Duration::from_millis(self.empty_block_heartbeat_ms)
+    }
+
+    /// Whether empty-block suppression is active (heartbeat > 0).
+    pub fn suppress_empty_blocks(&self) -> bool {
+        self.empty_block_heartbeat_ms > 0
     }
 
     /// Returns the block time as a Duration
