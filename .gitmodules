@@ -1,7 +1,7 @@
 [submodule "vendor/llama-cpp-rs"]
 	path = vendor/llama-cpp-rs
-	url = https://github.com/DINOZYAVIER/llama-cpp-rs
-	branch = mtp-speculative-decoding
+	url = https://github.com/hilarl/llama-cpp-rs
+	branch = tenzro-ggml-rpc
 
 [submodule "vendor/erc8004-evm"]
 	path = vendor/erc8004-evm
