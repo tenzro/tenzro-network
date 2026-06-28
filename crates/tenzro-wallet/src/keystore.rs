@@ -285,6 +285,13 @@ impl Keystore {
     pub fn list_wallets(&self) -> Result<Vec<WalletId>> {
         let mut wallet_ids = Vec::new();
 
+        // A keystore that has never persisted a wallet has no storage dir yet
+        // (created lazily on first write). Treat that as "no wallets" rather
+        // than an I/O error so callers can distinguish empty from broken.
+        if !self.storage_path.exists() {
+            return Ok(wallet_ids);
+        }
+
         for entry in std::fs::read_dir(&self.storage_path)? {
             let entry = entry?;
             let path = entry.path();
