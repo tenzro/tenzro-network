@@ -1628,6 +1628,7 @@ async fn dispatch_request(
         "tenzro_nodeReachability" => handle_node_reachability(node).await,
         "tenzro_nodeProfile" => handle_node_profile().await,
         "tenzro_clusterPlan" => handle_cluster_plan(request.params).await,
+        "tenzro_clusterPreview" => handle_cluster_preview(node, request.params).await,
         "tenzro_downloadModel" => handle_download_model(node, request.params).await,
         "tenzro_getDownloadProgress" => handle_get_download_progress(node, request.params).await,
         "tenzro_cancelDownload" => handle_cancel_download(node, request.params).await,
@@ -16814,6 +16815,196 @@ fn build_launch_plan(
     cluster::launch_plan(&gate, &assignment, members)
 }
 
+/// Resolve the on-disk GGUF path for a downloaded model, mirroring the lookup
+/// order the serve path uses: HF tracker path, then the flat
+/// `~/.tenzro/models/<id>.gguf` the CLI writes, then a `.gguf` inside
+/// `~/.tenzro/models/<id>/`. Returns `None` when the model is not on disk.
+fn resolve_gguf_path(
+    hf_downloader: &tenzro_model::HfDownloader,
+    model_id: &str,
+) -> Option<String> {
+    let tracked = hf_downloader.model_path(model_id);
+    if tracked.exists() {
+        return Some(tracked.to_string_lossy().to_string());
+    }
+    let home_models = std::path::PathBuf::from(
+            std::env::var("HOME").unwrap_or_else(|_| "/home/tenzro".to_string()),
+        )
+        .join(".tenzro/models");
+    let flat = home_models.join(format!("{}.gguf", model_id));
+    if flat.exists() {
+        return Some(flat.to_string_lossy().to_string());
+    }
+    let sub_dir = home_models.join(model_id);
+    std::fs::read_dir(&sub_dir).ok().and_then(|entries| {
+        entries
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().map(|ext| ext == "gguf").unwrap_or(false))
+            .map(|e| e.path().to_string_lossy().to_string())
+    })
+}
+
+/// `tenzro_clusterPreview` — node-state-aware dry run of the serve-path cluster
+/// planner for a downloaded model, for the assisted-setup UI. Unlike
+/// `tenzro_clusterPlan` (a pure function of caller-supplied shape + members),
+/// this reads the model shape from the on-disk GGUF and auto-discovers LAN
+/// members from gossip, then reports the same fit decision, member roster,
+/// rejections, and ordered layer split the serve path would use — without
+/// loading or serving anything.
+///
+/// Params: `{ "model_id": string, "user_forced"?: bool, "force_single"?: bool }`.
+async fn handle_cluster_preview(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_model::cluster;
+
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' parameter".to_string(),
+            data: None,
+        })?;
+    let user_forced = params.get("user_forced").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force_single = params.get("force_single").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let hf_downloader = node.hf_downloader.as_ref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "HF downloader not initialized".to_string(),
+        data: None,
+    })?;
+
+    let gguf_path = resolve_gguf_path(hf_downloader, model_id).ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Model not downloaded. Download it before previewing a cluster plan.".to_string(),
+        data: None,
+    })?;
+
+    let shape = tenzro_model::gguf_shape::read_model_shape(std::path::Path::new(&gguf_path))
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Could not read model shape from GGUF header: {}", e),
+            data: None,
+        })?;
+
+    let members = discover_cluster_members(node).await;
+    let head_address = members.first().map(|m| m.address);
+
+    // Per-layer footprint floor used to reject VRAM-starved members. The serve
+    // path enforces only reachability (via order_stages); the hardware gate
+    // adds commit / VRAM rejections so the user sees the full picture.
+    let per_layer_gb = if shape.layers > 0 {
+        shape.total_vram_gb / shape.layers as f32
+    } else {
+        shape.total_vram_gb
+    };
+    let reference_commit = cluster::LLAMA_CPP_COMMIT.to_string();
+    let gate = cluster::hardware_gate(&reference_commit, per_layer_gb, members.clone());
+
+    let decision = if force_single {
+        cluster::FitDecision::RunLocal
+    } else {
+        cluster::should_cluster(shape, members.iter(), user_forced)
+    };
+    let activation_bytes = shape.activation_bytes_per_token();
+    let single_box = cluster::single_box_fit(shape, members.iter());
+
+    let backend_name = |b: cluster::Backend| -> &'static str {
+        match b {
+            cluster::Backend::Cpu => "cpu",
+            cluster::Backend::Cuda => "cuda",
+            cluster::Backend::Metal => "metal",
+            cluster::Backend::Vulkan => "vulkan",
+            cluster::Backend::Hip => "hip",
+            cluster::Backend::Sycl => "sycl",
+        }
+    };
+    let reach_name = |r: cluster::MemberReachability| -> &'static str {
+        match r {
+            cluster::MemberReachability::LocalDirect => "local_direct",
+            cluster::MemberReachability::Direct => "direct",
+            cluster::MemberReachability::RelayOnly => "relay_only",
+            cluster::MemberReachability::SymmetricNat => "symmetric_nat",
+        }
+    };
+    let reject_json = |reason: &cluster::RejectReason| -> Value {
+        match reason {
+            cluster::RejectReason::CommitMismatch { expected, found } => serde_json::json!({
+                "kind": "commit_mismatch", "expected": expected, "found": found,
+            }),
+            cluster::RejectReason::NotDataPlaneReachable(r) => serde_json::json!({
+                "kind": "not_data_plane_reachable", "reachability": reach_name(*r),
+            }),
+            cluster::RejectReason::InsufficientVram { offered_gb, needed_gb } => serde_json::json!({
+                "kind": "insufficient_vram", "offered_gb": offered_gb, "needed_gb": needed_gb,
+            }),
+        }
+    };
+
+    let members_json: Vec<Value> = members
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "address": hex::encode(m.address.as_bytes()),
+                "vram_gb": m.vram_gb,
+                "backend": backend_name(m.backend),
+                "cap_key": m.cap_key,
+                "reachability": reach_name(m.reachability),
+                "is_head": head_address == Some(m.address),
+            })
+        })
+        .collect();
+    let rejected_json: Vec<Value> = gate
+        .rejected
+        .iter()
+        .map(|(addr, reason)| {
+            serde_json::json!({ "address": hex::encode(addr.as_bytes()), "reason": reject_json(reason) })
+        })
+        .collect();
+
+    // Ordered stages with layer ranges, from the same planner chain the serve
+    // path runs. Only data-plane-eligible members appear here.
+    let mut stages_json = Vec::new();
+    if decision.forms_cluster() {
+        let plan = build_launch_plan(shape, &members);
+        for (i, stage) in plan.stages.iter().enumerate() {
+            stages_json.push(serde_json::json!({
+                "address": hex::encode(stage.address.as_bytes()),
+                "start_layer": stage.stage.start_layer,
+                "end_layer": stage.stage.end_layer,
+                "tensor_split": plan.tensor_split.get(i).copied().unwrap_or(0),
+            }));
+        }
+    }
+
+    let fit = match decision {
+        cluster::FitDecision::RunLocal => "RunLocal",
+        cluster::FitDecision::ClusterRequired => "ClusterRequired",
+        cluster::FitDecision::ClusterForced => "ClusterForced",
+    };
+
+    Ok(serde_json::json!({
+        "model_id": model_id,
+        "model_shape": { "layers": shape.layers, "hidden_dim": shape.hidden_dim, "total_vram_gb": shape.total_vram_gb },
+        "fit": fit,
+        "forms_cluster": decision.forms_cluster(),
+        "force_single": force_single,
+        "user_forced": user_forced,
+        "single_box_fit": single_box.map(|a| hex::encode(a.as_bytes())),
+        "members": members_json,
+        "rejected": rejected_json,
+        "stages": stages_json,
+        "activation_bytes_per_token": activation_bytes,
+    }))
+}
+
 async fn handle_serve_model(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -17100,7 +17291,20 @@ async fn handle_serve_model(
         &params_str,
     );
 
-    // Publish gossipsub announcement if network is available (visibility=network by default)
+    // Provider visibility: "network" (default) gossips the model so any peer
+    // can route to it; "private" keeps the model service registered locally
+    // but skips the network announcement, so it is reachable only over a
+    // direct/LAN connection the operator arranges. The assisted-setup UI
+    // surfaces this as a public/private toggle on the logical provider.
+    let visibility = params
+        .get("visibility")
+        .and_then(|v| v.as_str())
+        .unwrap_or("network")
+        .to_string();
+
+    // Publish gossipsub announcement if network is available and the provider
+    // opted into network visibility.
+    if visibility == "network" {
     if let Some(network) = node.network() {
         let network = network.clone();
         let pricing = node.provider_pricing.read();
@@ -17135,7 +17339,7 @@ async fn handle_serve_model(
                 per_token: Some(pricing.input_price_per_token_wei.min(u64::MAX as u128) as u64),
             },
             schedule: msg_schedule,
-            visibility: "network".to_string(),
+            visibility: visibility.clone(),
             ttl_secs: 120,
             withdrawn: false,
             rpc_endpoint: api_endpoint.clone(),
@@ -17150,6 +17354,7 @@ async fn handle_serve_model(
             }
         });
     }
+    }
 
     Ok(serde_json::json!({
         "success": true,
@@ -17158,6 +17363,7 @@ async fn handle_serve_model(
         "api_endpoint": api_endpoint,
         "mcp_endpoint": mcp_endpoint,
         "status": "serving",
+        "visibility": visibility,
         "max_concurrent": max_concurrent,
     }))
 }
