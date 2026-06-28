@@ -1629,6 +1629,7 @@ async fn dispatch_request(
         "tenzro_nodeProfile" => handle_node_profile().await,
         "tenzro_clusterPlan" => handle_cluster_plan(request.params).await,
         "tenzro_clusterPreview" => handle_cluster_preview(node, request.params).await,
+        "tenzro_clusterMembers" => handle_cluster_members(node).await,
         "tenzro_downloadModel" => handle_download_model(node, request.params).await,
         "tenzro_getDownloadProgress" => handle_get_download_progress(node, request.params).await,
         "tenzro_cancelDownload" => handle_cancel_download(node, request.params).await,
@@ -16853,6 +16854,70 @@ fn resolve_gguf_path(
 /// loading or serving anything.
 ///
 /// Params: `{ "model_id": string, "user_forced"?: bool, "force_single"?: bool }`.
+/// `tenzro_clusterMembers` — model-independent discovery of the local node
+/// plus every LAN/gossip peer that has advertised a cluster profile. This is
+/// the same member set [`handle_cluster_preview`] plans against, exposed
+/// without a model so the GUI can show "who's on your local network" before
+/// the user has picked anything to serve. No fit decision, no layer split —
+/// just the head and the candidates with their hardware and reachability.
+async fn handle_cluster_members(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_model::cluster;
+
+    let members = discover_cluster_members(node).await;
+    let head_address = members.first().map(|m| m.address);
+
+    let backend_name = |b: cluster::Backend| -> &'static str {
+        match b {
+            cluster::Backend::Cpu => "cpu",
+            cluster::Backend::Cuda => "cuda",
+            cluster::Backend::Metal => "metal",
+            cluster::Backend::Vulkan => "vulkan",
+            cluster::Backend::Hip => "hip",
+            cluster::Backend::Sycl => "sycl",
+        }
+    };
+    let reach_name = |r: cluster::MemberReachability| -> &'static str {
+        match r {
+            cluster::MemberReachability::LocalDirect => "local_direct",
+            cluster::MemberReachability::Direct => "direct",
+            cluster::MemberReachability::RelayOnly => "relay_only",
+            cluster::MemberReachability::SymmetricNat => "symmetric_nat",
+        }
+    };
+
+    let members_json: Vec<Value> = members
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "address": hex::encode(m.address.as_bytes()),
+                "vram_gb": m.vram_gb,
+                "backend": backend_name(m.backend),
+                "cap_key": m.cap_key,
+                "reachability": reach_name(m.reachability),
+                "is_head": head_address == Some(m.address),
+            })
+        })
+        .collect();
+
+    // Members on the same LAN segment (LocalDirect) are the ones a "pool a
+    // local network" flow actually cares about; surface the count so the UI
+    // can lead with it without re-deriving the tier mapping in JS.
+    let local_count = members
+        .iter()
+        .filter(|m| matches!(m.reachability, cluster::MemberReachability::LocalDirect))
+        .count();
+    let total_vram_gb: f32 = members.iter().map(|m| m.vram_gb).sum();
+
+    Ok(serde_json::json!({
+        "members": members_json,
+        "member_count": members_json.len(),
+        "local_count": local_count,
+        "total_vram_gb": total_vram_gb,
+    }))
+}
+
 async fn handle_cluster_preview(
     node: &Arc<TenzroNode>,
     params: Option<Value>,

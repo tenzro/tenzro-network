@@ -122,6 +122,11 @@ tenzro discover profile
 # member fits the whole model.
 tenzro cluster plan --layers 64 --hidden-dim 8192 --total-vram-gb 180 \
   --members ./members.json
+
+# Model-independent discovery: list this node plus every LAN/gossip member it
+# can pool, with their serving memory and reachability, and the pooled total
+# (calls tenzro_clusterMembers). Answers "who's on my network right now?"
+tenzro cluster members
 ```
 
 `cluster plan` is the explicit, inspect-the-plan path. To actually serve a
