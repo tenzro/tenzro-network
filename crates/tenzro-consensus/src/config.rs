@@ -93,13 +93,14 @@ pub struct ConsensusConfig {
     /// signal so they can distinguish "idle" from "dead leader" without
     /// waiting on the view-change timer.
     ///
-    /// This mirrors CometBFT's `create_empty_blocks = false` +
-    /// `create_empty_blocks_interval`. Set to 0 to disable suppression and
-    /// restore always-on block production (every beat mints a block).
+    /// Set to 0 to disable suppression and restore always-on block
+    /// production (every beat mints a block).
     ///
-    /// Default: 5000ms. Idle-chain block rate drops from ~2.5/s to 0.2/s
-    /// (~12.5× fewer empty blocks) while view-change-driven liveness and
-    /// the QC chain are untouched.
+    /// Default: 30000ms. An idle chain mints ~2,880 keepalive headers/day
+    /// instead of ~17,280 at 5s. The heartbeat is decoupled from liveness —
+    /// followers detect a dead leader via the view-change timer, not this
+    /// interval — so raising it only trades a staler idle-tip timestamp for
+    /// fewer empty headers.
     pub empty_block_heartbeat_ms: u64,
 
     /// Floor on the adaptive view-change base timeout, in milliseconds.
@@ -144,7 +145,7 @@ impl Default for ConsensusConfig {
             transaction_ttl_seconds: 600,
             optimistic_responsiveness: true,
             proposer_election: ProposerElectionKind::Reputation,
-            empty_block_heartbeat_ms: 5000,
+            empty_block_heartbeat_ms: 30_000,
             adaptive_timeout_floor_ms: 1000,
         }
     }
