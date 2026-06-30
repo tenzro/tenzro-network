@@ -890,7 +890,20 @@ impl EventLoop {
             .map_err(|e| NodeError::Other(format!("Block store error: {}", e)))?;
 
         match block_store.latest_height().await {
-            Ok(Some(height)) => {
+            // The `latest_height` metadata key can outlive the blocks it points
+            // at after a genesis reset (the chain CF is cleared but the key is
+            // not), leaving an orphan height with no backing block. Trust the
+            // marker only when the block it names is actually present; otherwise
+            // the store is effectively empty and we resume from genesis.
+            Ok(Some(height))
+                if height.0 == 0
+                    || block_store
+                        .get_block_by_height(height)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some() =>
+            {
                 self.current_height = height.0;
                 // Publish to the shared atomic so RPC can read it without storage I/O
                 self.chain_tip.store(self.current_height, Ordering::Release);
@@ -901,6 +914,14 @@ impl EventLoop {
                     consensus.resume_from_height(height);
                 }
                 info!(height = self.current_height, "Synced block height from storage");
+            }
+            Ok(Some(orphan)) => {
+                warn!(
+                    orphan_height = orphan.0,
+                    "latest_height marker has no backing block (stale after genesis reset); resuming from height 0"
+                );
+                self.current_height = 0;
+                self.chain_tip.store(0, Ordering::Release);
             }
             Ok(None) => {
                 self.current_height = 0;
