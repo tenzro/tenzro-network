@@ -16910,11 +16910,36 @@ async fn handle_cluster_members(
         .count();
     let total_vram_gb: f32 = members.iter().map(|m| m.vram_gb).sum();
 
+    // Surface this node's own identity + the LAN addresses it advertises so
+    // the UI can show "discovering on <ip>…" and prove the machine is on the
+    // network even when no peers have answered yet. `local_count` of exactly 1
+    // means only this machine is in the pool — a working-but-empty LAN, which
+    // the UI should render as "searching", not "broken".
+    let (self_peer_id, lan_addresses) = match node.network() {
+        Some(net) => {
+            let peer = net.local_peer_id().await.ok().map(|p| p.to_string());
+            // Keep only the routable LAN addresses (drop loopback) — those are
+            // the ones another machine on the segment can actually reach.
+            let addrs: Vec<String> = net
+                .listen_addresses()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| a.to_string())
+                .filter(|a| !a.contains("/127.0.0.1/") && !a.contains("/::1/"))
+                .collect();
+            (peer, addrs)
+        }
+        None => (None, Vec::new()),
+    };
+
     Ok(serde_json::json!({
         "members": members_json,
         "member_count": members_json.len(),
         "local_count": local_count,
         "total_vram_gb": total_vram_gb,
+        "self_peer_id": self_peer_id,
+        "lan_addresses": lan_addresses,
     }))
 }
 
