@@ -462,7 +462,7 @@ Per-tenant analytics:
 
 - `install_7702_delegation`, `get_7702_delegation`, `revoke_7702_delegation` — Pectra Type-4 authority → target delegation registry
 - `permit2_domain_separator`, `permit2_digest`, `permit2_verify_and_consume`, `permit2_nonce_used` — Permit2 SignatureTransfer (optional witness for ERC-7683 origin opens)
-- `set_secure_mint_policy`, `get_secure_mint_policy`, `clear_secure_mint_policy`, `secure_mint_check`, `secure_mint_apply`, `secure_mint_record_burn` — per-token 1:1 reserve-attestation invariant for tokenized RWAs
+- `set_secure_mint_policy`, `get_secure_mint_policy`, `clear_secure_mint_policy`, `secure_mint_check`, `secure_mint_apply`, `secure_mint_record_burn`, `set_secure_mint_paused`, `set_global_issuance_pause` — per-token 1:1 reserve-attestation invariant for tokenized RWAs (token-keyed; fail-closed gate order with freshness/heartbeat/velocity guards; per-token + global issuance circuit breakers)
 
 ### Chain-agnostic discovery (CAIP)
 

@@ -1748,7 +1748,7 @@ pub struct RegisterStableAssetParams {
     )]
     pub reserve_source: serde_json::Value,
     pub por_feed_id: String,
-    #[schemars(description = "Allowed rails: x402 ap2 mpp visa_tap mastercard tempo native")]
+    #[schemars(description = "Allowed rails: x402 ap2 mpp visa_tap mastercard tempo open_standard native")]
     pub allowed_rails: Vec<String>,
     #[schemars(description = "Settlement destination address, 32-byte hex")]
     pub settlement_dst: String,

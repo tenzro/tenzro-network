@@ -82,7 +82,7 @@
       {
         "NodeRpc": {
           "method": "tenzro_secureMintCheck",
-          "params": { "token_id": "{{token_id}}", "amount": "{{mint_amount}}" }
+          "params": { "token": "{{token_id}}", "amount": "{{mint_amount}}" }
         }
       }
     ],

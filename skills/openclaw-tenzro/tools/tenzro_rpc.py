@@ -2251,13 +2251,22 @@ def permit2_nonce_used(owner: str, nonce: str) -> dict:
 # ── Secure-Mint Registry ────────────────────────────────────────
 
 
-def set_secure_mint_policy(asset_id: str, reserve: str, por_feed_id: str,
-                           attester_did: str, attestation_hash: str,
-                           attested_at: int, ttl_secs: int,
-                           circulating: str = None) -> dict:
+def set_secure_mint_policy(token: str, asset_id: str, reserve: str,
+                           por_feed_id: str, attester_did: str,
+                           attestation_hash: str, attested_at: int,
+                           ttl_secs: int, circulating: str = None,
+                           heartbeat_secs: int = None,
+                           mint_window_cap: str = None,
+                           mint_window_secs: int = None,
+                           paused: bool = False) -> dict:
     """Set or update a Secure-Mint policy for a tokenized RWA. Enforces
-    per-token 1:1 reserve attestation `circulating + amount ≤ reserve`."""
+    per-token 1:1 reserve attestation `circulating + amount ≤ reserve`.
+    `token` is the 20-byte token address (0x-hex, the policy key); `asset_id`
+    is the CAIP-19 reserve asset. Optional guards: `heartbeat_secs` (live-feed
+    gate), `mint_window_cap`/`mint_window_secs` (rolling velocity ceiling),
+    `paused` (install already tripped)."""
     params = {
+        "token": token,
         "asset_id": asset_id,
         "reserve": str(reserve),
         "por_feed_id": por_feed_id,
@@ -2265,38 +2274,57 @@ def set_secure_mint_policy(asset_id: str, reserve: str, por_feed_id: str,
         "attestation_hash": attestation_hash,
         "attested_at": int(attested_at),
         "ttl_secs": int(ttl_secs),
+        "paused": bool(paused),
     }
     if circulating is not None:
         params["circulating"] = str(circulating)
+    if heartbeat_secs is not None:
+        params["heartbeat_secs"] = int(heartbeat_secs)
+    if mint_window_cap is not None:
+        params["mint_window_cap"] = str(mint_window_cap)
+    if mint_window_secs is not None:
+        params["mint_window_secs"] = int(mint_window_secs)
     return _rpc("tenzro_setSecureMintPolicy", params)
 
 
-def get_secure_mint_policy(asset_id: str) -> dict:
-    """Read the Secure-Mint policy for an asset."""
-    return _rpc("tenzro_getSecureMintPolicy", {"asset_id": asset_id})
+def get_secure_mint_policy(token: str) -> dict:
+    """Read the Secure-Mint policy for a token (20-byte 0x-hex address)."""
+    return _rpc("tenzro_getSecureMintPolicy", {"token": token})
 
 
-def clear_secure_mint_policy(asset_id: str) -> dict:
-    """Clear the Secure-Mint policy for an asset."""
-    return _rpc("tenzro_clearSecureMintPolicy", {"asset_id": asset_id})
+def clear_secure_mint_policy(token: str) -> dict:
+    """Clear the Secure-Mint policy for a token."""
+    return _rpc("tenzro_clearSecureMintPolicy", {"token": token})
 
 
-def secure_mint_check(asset_id: str, amount: str) -> dict:
+def secure_mint_check(token: str, amount: str) -> dict:
     """Read-only invariant check for a proposed mint."""
     return _rpc("tenzro_secureMintCheck",
-                {"asset_id": asset_id, "amount": str(amount)})
+                {"token": token, "amount": str(amount)})
 
 
-def secure_mint_apply(asset_id: str, amount: str) -> dict:
+def secure_mint_apply(token: str, amount: str) -> dict:
     """Atomic check + circulating increment."""
     return _rpc("tenzro_secureMintApply",
-                {"asset_id": asset_id, "amount": str(amount)})
+                {"token": token, "amount": str(amount)})
 
 
-def secure_mint_record_burn(asset_id: str, amount: str) -> dict:
+def secure_mint_record_burn(token: str, amount: str) -> dict:
     """Record a redemption (decrement circulating)."""
     return _rpc("tenzro_secureMintRecordBurn",
-                {"asset_id": asset_id, "amount": str(amount)})
+                {"token": token, "amount": str(amount)})
+
+
+def set_secure_mint_paused(token: str, paused: bool) -> dict:
+    """Trip or clear the per-token issuance circuit breaker. Admin-gated."""
+    return _rpc("tenzro_setSecureMintPaused",
+                {"token": token, "paused": bool(paused)})
+
+
+def set_global_issuance_pause(paused: bool) -> dict:
+    """Trip or clear the global issuance circuit breaker, halting mint across
+    every token at once. Admin-gated."""
+    return _rpc("tenzro_setGlobalIssuancePause", {"paused": bool(paused)})
 
 
 def register_stable_asset(issuer: str, unit_token: str, symbol: str,

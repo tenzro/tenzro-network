@@ -65,7 +65,7 @@ pub struct RegisterCmd {
     /// Proof-of-reserve feed id
     #[arg(long)]
     por_feed_id: String,
-    /// Allowed settlement rails (repeatable): x402 ap2 mpp visa_tap mastercard tempo native
+    /// Allowed settlement rails (repeatable): x402 ap2 mpp visa_tap mastercard tempo open_standard native
     #[arg(long = "rail", required = true)]
     rails: Vec<String>,
     /// Settlement destination address, 32-byte hex

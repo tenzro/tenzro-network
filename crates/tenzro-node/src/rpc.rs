@@ -683,6 +683,10 @@ fn requires_admin_token(method: &str) -> bool {
             // backing bypass.
             | "tenzro_setSecureMintPolicy"
             | "tenzro_clearSecureMintPolicy"
+            // Issuance circuit breakers — pausing/resuming mint is as
+            // sensitive as the floor itself.
+            | "tenzro_setSecureMintPaused"
+            | "tenzro_setGlobalIssuancePause"
             // Delegation scope tweaks alter spend ceilings for
             // identities — must be operator-controlled or signed.
             | "tenzro_setDelegationScope"
@@ -1484,6 +1488,8 @@ async fn dispatch_request(
         "tenzro_secureMintCheck" => crate::rpc_integrations::handle_secure_mint_check(node, request.params).await,
         "tenzro_secureMintApply" => crate::rpc_integrations::handle_secure_mint_apply(node, request.params).await,
         "tenzro_secureMintRecordBurn" => crate::rpc_integrations::handle_secure_mint_record_burn(node, request.params).await,
+        "tenzro_setSecureMintPaused" => crate::rpc_integrations::handle_set_secure_mint_paused(node, request.params).await,
+        "tenzro_setGlobalIssuancePause" => crate::rpc_integrations::handle_set_global_issuance_pause(node, request.params).await,
         "tenzro_registerStableAsset" => crate::rpc_integrations::handle_register_stable_asset(node, request.params).await,
         "tenzro_getStableAsset" => crate::rpc_integrations::handle_get_stable_asset(node, request.params).await,
         "tenzro_mintStableAsset" => crate::rpc_integrations::handle_mint_stable_asset(node, request.params).await,

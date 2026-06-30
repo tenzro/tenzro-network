@@ -2790,29 +2790,39 @@ async def handle_permit2(text: str, metadata: dict = None) -> str:
 
 async def handle_secure_mint(text: str, metadata: dict = None) -> str:
     t = text.lower()
+    if "pause" in t and "global" in t:
+        return (
+            "Trip or clear the global issuance circuit breaker (admin-gated):\n"
+            "  RPC: tenzro_setGlobalIssuancePause { paused }"
+        )
+    if "pause" in t:
+        return (
+            "Trip or clear the per-token issuance circuit breaker (admin-gated):\n"
+            "  RPC: tenzro_setSecureMintPaused { token, paused }"
+        )
     if "set" in t and "polic" in t:
         return (
             "Set or update a Secure-Mint policy for a tokenized asset:\n"
-            "  RPC: tenzro_setSecureMintPolicy { asset_id, reserve, circulating?, por_feed_id, attester_did, attestation_hash, attested_at, ttl_secs }"
+            "  RPC: tenzro_setSecureMintPolicy { token, asset_id, reserve, circulating?, por_feed_id, attester_did, attestation_hash, attested_at, ttl_secs, heartbeat_secs?, mint_window_cap?, mint_window_secs?, paused? }"
         )
     if "get" in t and "polic" in t:
-        return "Read the Secure-Mint policy: tenzro_getSecureMintPolicy { asset_id }"
+        return "Read the Secure-Mint policy: tenzro_getSecureMintPolicy { token }"
     if "clear" in t and "polic" in t:
-        return "Clear the Secure-Mint policy: tenzro_clearSecureMintPolicy { asset_id }"
+        return "Clear the Secure-Mint policy: tenzro_clearSecureMintPolicy { token }"
     if "check" in t:
         return (
             "Read-only invariant check for a proposed mint:\n"
-            "  RPC: tenzro_secureMintCheck { asset_id, amount }"
+            "  RPC: tenzro_secureMintCheck { token, amount }"
         )
     if "apply" in t or "mint" in t:
         return (
             "Atomically check the 1:1 invariant and increment circulating:\n"
-            "  RPC: tenzro_secureMintApply { asset_id, amount }"
+            "  RPC: tenzro_secureMintApply { token, amount }"
         )
     if "burn" in t or "redemption" in t:
         return (
             "Record a redemption (decrement circulating):\n"
-            "  RPC: tenzro_secureMintRecordBurn { asset_id, amount }"
+            "  RPC: tenzro_secureMintRecordBurn { token, amount }"
         )
     return (
         "Secure-Mint registry — per-token 1:1 reserve-attestation invariant for tokenized RWAs.\n"
@@ -2820,7 +2830,9 @@ async def handle_secure_mint(text: str, metadata: dict = None) -> str:
         "  - 'Get / clear policy'   (tenzro_getSecureMintPolicy / clearSecureMintPolicy)\n"
         "  - 'Check'                (tenzro_secureMintCheck)\n"
         "  - 'Apply'                (tenzro_secureMintApply)\n"
-        "  - 'Record burn'          (tenzro_secureMintRecordBurn)"
+        "  - 'Record burn'          (tenzro_secureMintRecordBurn)\n"
+        "  - 'Pause token'          (tenzro_setSecureMintPaused)\n"
+        "  - 'Global pause'         (tenzro_setGlobalIssuancePause)"
     )
 
 
