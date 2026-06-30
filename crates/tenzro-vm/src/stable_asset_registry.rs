@@ -95,6 +95,10 @@ pub enum PaymentRail {
     Mastercard,
     /// Tempo settlement rail.
     Tempo,
+    /// Open Standard consortium settlement (OUSD and other Open Standard
+    /// units). Issuer-neutral rail; the unit settled is carried by the
+    /// reserve `asset_caip19`, not the rail tag.
+    OpenStandard,
     /// Direct on-chain transfer (no external rail).
     Native,
 }
@@ -109,6 +113,7 @@ impl PaymentRail {
             "visa_tap" | "visa-tap" => Self::VisaTap,
             "mastercard" => Self::Mastercard,
             "tempo" => Self::Tempo,
+            "open_standard" | "open-standard" | "ousd" => Self::OpenStandard,
             "native" => Self::Native,
             other => return Err(StableAssetError::UnknownRail(other.to_string())),
         })

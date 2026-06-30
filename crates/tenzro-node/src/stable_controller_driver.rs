@@ -128,8 +128,12 @@ impl StableControllerDriver {
             }
         } else if output.supply_delta < 0 {
             let amount = output.supply_delta.unsigned_abs();
-            self.secure_mint.record_burn(&unit, amount);
-            output.supply_delta
+            // A contraction larger than circulating can't be applied; record
+            // only what the bounded burn accepts (0 on rejection).
+            match self.secure_mint.record_burn(&unit, amount) {
+                Ok(_) => output.supply_delta,
+                Err(_) => 0,
+            }
         } else {
             0
         };
@@ -192,6 +196,12 @@ mod tests {
             attestation_hash: Default::default(),
             attested_at: 0,
             ttl_secs: 0,
+            heartbeat_secs: 0,
+            mint_window_cap: 0,
+            mint_window_secs: 0,
+            window_minted: 0,
+            window_started_at: 0,
+            paused: false,
         }
     }
 

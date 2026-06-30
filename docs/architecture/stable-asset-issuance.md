@@ -205,6 +205,24 @@ agent's ledger view stays in A throughout. If the agent instead wants to
 transact directly in B, it simply holds/spends B — the convert step is a
 no-op.
 
+The `allowed_rails` set is closed: `x402`, `ap2`, `mpp`, `visa_tap`,
+`mastercard`, `tempo`, `open_standard`, `native`. The `open_standard` rail
+covers consortium-governed settlement assets — e.g. Open USD (OUSD), an
+issuer-neutral USD unit backed by a broad payments-and-asset-manager
+consortium. Because the convert step is asset-agnostic (the unit
+settled is carried by the reserve `asset_caip19`, not the rail tag), an agent
+can hold a Tenzro-issued unit and settle into OUSD — or hold OUSD directly —
+without Tenzro re-implementing anything Open Standard publishes.
+
+> **Positioning note (2026-06-30).** Open Standard / OUSD launched as
+> consortium-governed neutral payment infrastructure (zero-fee mint/redeem,
+> reserve-revenue shared back to distributors, board of partners). The strategic
+> read: support it as a *settlement/reserve asset* (the `open_standard` rail,
+> done) rather than copying its single-asset governance model. There is no
+> published OUSD token interface or attestation spec yet — when one ships,
+> revisit whether to add a first-class PoR adapter resolving OUSD reserves
+> through the same Secure-Mint floor.
+
 ### AI control (the buffer)
 
 `StableController` runs each settlement epoch on integer-only inputs, per

@@ -50,6 +50,49 @@ pub enum SecureMintError {
         /// Latest attested reserve.
         reserve: u128,
     },
+
+    /// The proof-of-reserve feed has not refreshed within its heartbeat
+    /// window. Distinct from `AttestationExpired`: a feed can be inside its
+    /// attestation TTL yet frozen (the classic stale-oracle infinite-mint
+    /// vector), so mint authority gates on feed liveness independently.
+    #[error("PoR feed stale: last update {attested_at}, now {now}, heartbeat {heartbeat_secs}")]
+    FeedStale {
+        /// Unix-seconds of the last feed update.
+        attested_at: u64,
+        /// Current unix-seconds clock.
+        now: u64,
+        /// Allowed feed-liveness window.
+        heartbeat_secs: u64,
+    },
+
+    /// Issuance is paused for this token (circuit breaker). No mint may
+    /// proceed until an operator clears the pause.
+    #[error("issuance paused for token {0}")]
+    Paused(String),
+
+    /// The mint would exceed the per-window velocity cap.
+    #[error(
+        "mint exceeds velocity cap: window-minted {window_minted}, requested {amount}, cap {cap}"
+    )]
+    VelocityExceeded {
+        /// Amount already minted in the current window.
+        window_minted: u128,
+        /// Requested mint amount.
+        amount: u128,
+        /// Per-window cap.
+        cap: u128,
+    },
+
+    /// A redeem/burn would exceed the circulating supply — a desync or
+    /// double-burn. Bounded rather than silently saturated so accounting
+    /// errors surface instead of masking reserve drift.
+    #[error("redeem exceeds circulating: circulating {circulating}, requested {amount}")]
+    ExceedsCirculating {
+        /// Current circulating supply.
+        circulating: u128,
+        /// Requested burn amount.
+        amount: u128,
+    },
 }
 
 /// Per-token Secure-Mint policy.
@@ -72,12 +115,40 @@ pub struct SecureMintPolicy {
     pub attested_at: u64,
     /// Maximum allowed staleness in seconds. `0` disables the check.
     pub ttl_secs: u64,
+    /// PoR feed-liveness window in seconds. A mint is refused when the feed
+    /// has not refreshed within this window, even if the attestation is
+    /// inside its `ttl_secs`. `0` disables the check.
+    #[serde(default)]
+    pub heartbeat_secs: u64,
+    /// Per-window mint velocity cap (smallest units). `0` disables the cap.
+    /// Bounds how fast supply can ramp independent of the reserve floor — a
+    /// debt-ceiling-style guard against a rapid legitimate-looking mint.
+    #[serde(default)]
+    pub mint_window_cap: u128,
+    /// Length of the velocity window in seconds. Required when
+    /// `mint_window_cap > 0`.
+    #[serde(default)]
+    pub mint_window_secs: u64,
+    /// Amount minted in the current velocity window (running tally).
+    #[serde(default)]
+    pub window_minted: u128,
+    /// Unix-seconds start of the current velocity window.
+    #[serde(default)]
+    pub window_started_at: u64,
+    /// Circuit breaker: when true, no mint proceeds until cleared.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 impl SecureMintPolicy {
     /// Whether the policy's attestation is still fresh per `now`.
     pub fn is_fresh(&self, now: u64) -> bool {
         self.ttl_secs == 0 || now.saturating_sub(self.attested_at) <= self.ttl_secs
+    }
+
+    /// Whether the PoR feed is live per its heartbeat window.
+    pub fn feed_live(&self, now: u64) -> bool {
+        self.heartbeat_secs == 0 || now.saturating_sub(self.attested_at) <= self.heartbeat_secs
     }
 }
 
@@ -86,6 +157,10 @@ impl SecureMintPolicy {
 pub struct SecureMintRegistry {
     inner: RwLock<HashMap<[u8; 20], SecureMintPolicy>>,
     storage: Option<std::sync::Arc<dyn tenzro_storage::KvStore>>,
+    /// Global issuance circuit breaker. Trips all tokens at once for
+    /// incident response; not persisted (a restart clears it deliberately,
+    /// so a node never boots wedged on a forgotten pause).
+    global_pause: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for SecureMintRegistry {
@@ -114,6 +189,7 @@ impl SecureMintRegistry {
         let r = Self {
             inner: RwLock::new(HashMap::new()),
             storage: Some(storage),
+            global_pause: std::sync::atomic::AtomicBool::new(false),
         };
         r.hydrate();
         r
@@ -196,21 +272,20 @@ impl SecureMintRegistry {
         self.inner.read().is_empty()
     }
 
-    /// Apply the Secure-Mint invariant: `circulating + amount ≤ reserve`.
-    ///
-    /// `now` is the current unix-seconds clock; the attestation must be
-    /// fresh relative to its `ttl_secs`. On success, atomically increments
-    /// `circulating` by `amount` and returns the resulting policy.
-    pub fn check_and_mint(
-        &self,
-        token: &[u8; 20],
+    /// Run every pre-mint gate against a snapshot, returning the velocity
+    /// tally that would apply at `now`. Shared by `check_and_mint` (which
+    /// then commits) and `would_mint_succeed` (which does not) so the two
+    /// can never drift. `global_pause` short-circuits all tokens.
+    fn evaluate_mint(
+        policy: &SecureMintPolicy,
         amount: u128,
         now: u64,
-    ) -> Result<SecureMintPolicy, SecureMintError> {
-        let mut inner = self.inner.write();
-        let policy = inner
-            .get_mut(token)
-            .ok_or_else(|| SecureMintError::NotConfigured(hex::encode(token)))?;
+        token: &[u8; 20],
+        global_pause: bool,
+    ) -> Result<u128, SecureMintError> {
+        if global_pause || policy.paused {
+            return Err(SecureMintError::Paused(hex::encode(token)));
+        }
         if !policy.is_fresh(now) {
             return Err(SecureMintError::AttestationExpired {
                 attested_at: policy.attested_at,
@@ -218,6 +293,35 @@ impl SecureMintRegistry {
                 ttl_secs: policy.ttl_secs,
             });
         }
+        if !policy.feed_live(now) {
+            return Err(SecureMintError::FeedStale {
+                attested_at: policy.attested_at,
+                now,
+                heartbeat_secs: policy.heartbeat_secs,
+            });
+        }
+        // Velocity cap. A window older than `mint_window_secs` has rolled
+        // over, so the tally resets to zero before this mint is counted.
+        let window_minted = if policy.mint_window_cap == 0 {
+            0
+        } else {
+            let rolled = policy.mint_window_secs > 0
+                && now.saturating_sub(policy.window_started_at) >= policy.mint_window_secs;
+            let base = if rolled { 0 } else { policy.window_minted };
+            let next = base.checked_add(amount).ok_or(SecureMintError::VelocityExceeded {
+                window_minted: base,
+                amount,
+                cap: policy.mint_window_cap,
+            })?;
+            if next > policy.mint_window_cap {
+                return Err(SecureMintError::VelocityExceeded {
+                    window_minted: base,
+                    amount,
+                    cap: policy.mint_window_cap,
+                });
+            }
+            next
+        };
         let new_circulating = policy
             .circulating
             .checked_add(amount)
@@ -233,7 +337,37 @@ impl SecureMintRegistry {
                 reserve: policy.reserve,
             });
         }
-        policy.circulating = new_circulating;
+        Ok(window_minted)
+    }
+
+    /// Apply the full Secure-Mint gate, in order: circuit breaker →
+    /// attestation freshness → PoR feed liveness → velocity cap → reserve
+    /// floor (`circulating + amount ≤ reserve`). On success, atomically
+    /// increments `circulating` (and the velocity tally) and returns the
+    /// resulting policy. A token with no policy hard-fails with
+    /// `NotConfigured` — mint is fail-closed, never pass-through.
+    pub fn check_and_mint(
+        &self,
+        token: &[u8; 20],
+        amount: u128,
+        now: u64,
+    ) -> Result<SecureMintPolicy, SecureMintError> {
+        let global_pause = self.global_pause.load(std::sync::atomic::Ordering::Relaxed);
+        let mut inner = self.inner.write();
+        let policy = inner
+            .get_mut(token)
+            .ok_or_else(|| SecureMintError::NotConfigured(hex::encode(token)))?;
+        let window_minted = Self::evaluate_mint(policy, amount, now, token, global_pause)?;
+        policy.circulating += amount;
+        if policy.mint_window_cap > 0 {
+            // If the window rolled, restart it at `now`.
+            if window_minted == amount && policy.window_minted != 0 {
+                policy.window_started_at = now;
+            } else if policy.window_minted == 0 {
+                policy.window_started_at = now;
+            }
+            policy.window_minted = window_minted;
+        }
         let snapshot = policy.clone();
         drop(inner);
         self.persist(token, &snapshot);
@@ -241,16 +375,53 @@ impl SecureMintRegistry {
     }
 
     /// Subtract `amount` from circulating supply on burn / redemption.
-    /// Saturates at zero to guard against accounting errors but does not
-    /// fail the operation.
-    pub fn record_burn(&self, token: &[u8; 20], amount: u128) -> Option<SecureMintPolicy> {
+    /// Bounded: a burn exceeding circulating is rejected with
+    /// `ExceedsCirculating` rather than silently saturated, so a desync or
+    /// double-burn surfaces instead of masking reserve drift.
+    pub fn record_burn(
+        &self,
+        token: &[u8; 20],
+        amount: u128,
+    ) -> Result<SecureMintPolicy, SecureMintError> {
+        let mut inner = self.inner.write();
+        let policy = inner
+            .get_mut(token)
+            .ok_or_else(|| SecureMintError::NotConfigured(hex::encode(token)))?;
+        if amount > policy.circulating {
+            return Err(SecureMintError::ExceedsCirculating {
+                circulating: policy.circulating,
+                amount,
+            });
+        }
+        policy.circulating -= amount;
+        let snapshot = policy.clone();
+        drop(inner);
+        self.persist(token, &snapshot);
+        Ok(snapshot)
+    }
+
+    /// Set or clear the circuit breaker for a single token. Returns the
+    /// updated policy, or `None` if the token has no policy.
+    pub fn set_paused(&self, token: &[u8; 20], paused: bool) -> Option<SecureMintPolicy> {
         let mut inner = self.inner.write();
         let policy = inner.get_mut(token)?;
-        policy.circulating = policy.circulating.saturating_sub(amount);
+        policy.paused = paused;
         let snapshot = policy.clone();
         drop(inner);
         self.persist(token, &snapshot);
         Some(snapshot)
+    }
+
+    /// Set or clear the global issuance circuit breaker. When set, every
+    /// token's mint is refused regardless of per-token state.
+    pub fn set_global_pause(&self, paused: bool) {
+        self.global_pause
+            .store(paused, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether global issuance is currently paused.
+    pub fn global_paused(&self) -> bool {
+        self.global_pause.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Convenience read-only check (used by callers that want to know
@@ -261,32 +432,11 @@ impl SecureMintRegistry {
         amount: u128,
         now: u64,
     ) -> Result<(), SecureMintError> {
+        let global_pause = self.global_pause.load(std::sync::atomic::Ordering::Relaxed);
         let policy = self
             .policy(token)
             .ok_or_else(|| SecureMintError::NotConfigured(hex::encode(token)))?;
-        if !policy.is_fresh(now) {
-            return Err(SecureMintError::AttestationExpired {
-                attested_at: policy.attested_at,
-                now,
-                ttl_secs: policy.ttl_secs,
-            });
-        }
-        let new_circulating = policy
-            .circulating
-            .checked_add(amount)
-            .ok_or(SecureMintError::ExceedsReserve {
-                circulating: policy.circulating,
-                amount,
-                reserve: policy.reserve,
-            })?;
-        if new_circulating > policy.reserve {
-            return Err(SecureMintError::ExceedsReserve {
-                circulating: policy.circulating,
-                amount,
-                reserve: policy.reserve,
-            });
-        }
-        Ok(())
+        Self::evaluate_mint(&policy, amount, now, token, global_pause).map(|_| ())
     }
 }
 
@@ -329,6 +479,12 @@ mod tests {
             attestation_hash: Hash::default(),
             attested_at: 1_700_000_000,
             ttl_secs: 86_400,
+            heartbeat_secs: 0,
+            mint_window_cap: 0,
+            mint_window_secs: 0,
+            window_minted: 0,
+            window_started_at: 0,
+            paused: false,
         }
     }
 
@@ -371,5 +527,81 @@ mod tests {
         reg.check_and_mint(&token, 800, 1_700_000_000).unwrap();
         let after = reg.record_burn(&token, 300).unwrap();
         assert_eq!(after.circulating, 500);
+    }
+
+    #[test]
+    fn burn_exceeding_circulating_rejected() {
+        let reg = SecureMintRegistry::new();
+        let token = [5u8; 20];
+        reg.set_policy(token, policy_with_reserve(1_000));
+        reg.check_and_mint(&token, 400, 1_700_000_000).unwrap();
+        let err = reg.record_burn(&token, 401).unwrap_err();
+        assert!(matches!(err, SecureMintError::ExceedsCirculating { .. }));
+        // Circulating unchanged after a rejected burn.
+        assert_eq!(reg.policy(&token).unwrap().circulating, 400);
+    }
+
+    #[test]
+    fn mint_without_policy_is_fail_closed() {
+        let reg = SecureMintRegistry::new();
+        let err = reg.check_and_mint(&[6u8; 20], 1, 1_700_000_000).unwrap_err();
+        assert!(matches!(err, SecureMintError::NotConfigured(_)));
+    }
+
+    #[test]
+    fn frozen_feed_blocks_mint_within_ttl() {
+        let reg = SecureMintRegistry::new();
+        let token = [7u8; 20];
+        let mut policy = policy_with_reserve(1_000);
+        policy.ttl_secs = 86_400; // attestation still valid for a day
+        policy.heartbeat_secs = 60; // but feed must refresh each minute
+        reg.set_policy(token, policy);
+        // 120s later: inside TTL, past heartbeat → FeedStale.
+        let err = reg.check_and_mint(&token, 1, 1_700_000_000 + 120).unwrap_err();
+        assert!(matches!(err, SecureMintError::FeedStale { .. }));
+    }
+
+    #[test]
+    fn paused_token_blocks_mint() {
+        let reg = SecureMintRegistry::new();
+        let token = [8u8; 20];
+        reg.set_policy(token, policy_with_reserve(1_000));
+        reg.set_paused(&token, true);
+        let err = reg.check_and_mint(&token, 1, 1_700_000_000).unwrap_err();
+        assert!(matches!(err, SecureMintError::Paused(_)));
+        reg.set_paused(&token, false);
+        assert!(reg.check_and_mint(&token, 1, 1_700_000_000).is_ok());
+    }
+
+    #[test]
+    fn global_pause_blocks_all_mints() {
+        let reg = SecureMintRegistry::new();
+        let token = [9u8; 20];
+        reg.set_policy(token, policy_with_reserve(1_000));
+        reg.set_global_pause(true);
+        assert!(matches!(
+            reg.check_and_mint(&token, 1, 1_700_000_000).unwrap_err(),
+            SecureMintError::Paused(_)
+        ));
+        reg.set_global_pause(false);
+        assert!(reg.check_and_mint(&token, 1, 1_700_000_000).is_ok());
+    }
+
+    #[test]
+    fn velocity_cap_enforced_and_rolls_over() {
+        let reg = SecureMintRegistry::new();
+        let token = [10u8; 20];
+        let mut policy = policy_with_reserve(1_000_000);
+        policy.mint_window_cap = 1_000;
+        policy.mint_window_secs = 3_600;
+        reg.set_policy(token, policy);
+        let t0 = 1_700_000_000;
+        reg.check_and_mint(&token, 600, t0).unwrap();
+        reg.check_and_mint(&token, 400, t0 + 10).unwrap(); // tally = 1_000 (at cap)
+        let err = reg.check_and_mint(&token, 1, t0 + 20).unwrap_err();
+        assert!(matches!(err, SecureMintError::VelocityExceeded { .. }));
+        // After the window rolls, the tally resets.
+        let after = reg.check_and_mint(&token, 800, t0 + 3_600).unwrap();
+        assert_eq!(after.window_minted, 800);
     }
 }

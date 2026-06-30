@@ -2700,6 +2700,7 @@ async def permit2_nonce_used(owner: str, nonce: str) -> dict:
 
 @mcp.tool
 async def set_secure_mint_policy(
+    token: str,
     asset_id: str,
     reserve: str,
     por_feed_id: str,
@@ -2708,10 +2709,19 @@ async def set_secure_mint_policy(
     attested_at: int,
     ttl_secs: int,
     circulating: str | None = None,
+    heartbeat_secs: int | None = None,
+    mint_window_cap: str | None = None,
+    mint_window_secs: int | None = None,
+    paused: bool = False,
 ) -> dict:
     """Set or update a Secure-Mint policy. Enforces
-    `circulating + amount <= reserve` at every mint."""
+    `circulating + amount <= reserve` at every mint. `token` is the 20-byte
+    token address (0x-hex, the policy key); `asset_id` is the CAIP-19 reserve
+    asset. Optional guards: `heartbeat_secs` (live-feed gate, distinct from
+    `ttl_secs` staleness), `mint_window_cap`/`mint_window_secs` (rolling
+    issuance-velocity ceiling), `paused` (install already tripped)."""
     params = {
+        "token": token,
         "asset_id": asset_id,
         "reserve": reserve,
         "por_feed_id": por_feed_id,
@@ -2719,46 +2729,68 @@ async def set_secure_mint_policy(
         "attestation_hash": attestation_hash,
         "attested_at": attested_at,
         "ttl_secs": ttl_secs,
+        "paused": paused,
     }
     if circulating is not None:
         params["circulating"] = circulating
+    if heartbeat_secs is not None:
+        params["heartbeat_secs"] = heartbeat_secs
+    if mint_window_cap is not None:
+        params["mint_window_cap"] = mint_window_cap
+    if mint_window_secs is not None:
+        params["mint_window_secs"] = mint_window_secs
     return await rpc_call("tenzro_setSecureMintPolicy", params)
 
 
 @mcp.tool
-async def get_secure_mint_policy(asset_id: str) -> dict:
-    """Read the Secure-Mint policy for an asset."""
-    return await rpc_call("tenzro_getSecureMintPolicy", {"asset_id": asset_id})
+async def get_secure_mint_policy(token: str) -> dict:
+    """Read the Secure-Mint policy for a token (20-byte 0x-hex address)."""
+    return await rpc_call("tenzro_getSecureMintPolicy", {"token": token})
 
 
 @mcp.tool
-async def clear_secure_mint_policy(asset_id: str) -> dict:
-    """Clear the Secure-Mint policy for an asset."""
-    return await rpc_call("tenzro_clearSecureMintPolicy", {"asset_id": asset_id})
+async def clear_secure_mint_policy(token: str) -> dict:
+    """Clear the Secure-Mint policy for a token."""
+    return await rpc_call("tenzro_clearSecureMintPolicy", {"token": token})
 
 
 @mcp.tool
-async def secure_mint_check(asset_id: str, amount: str) -> dict:
+async def secure_mint_check(token: str, amount: str) -> dict:
     """Read-only invariant check for a proposed mint."""
     return await rpc_call(
-        "tenzro_secureMintCheck", {"asset_id": asset_id, "amount": amount}
+        "tenzro_secureMintCheck", {"token": token, "amount": amount}
     )
 
 
 @mcp.tool
-async def secure_mint_apply(asset_id: str, amount: str) -> dict:
+async def secure_mint_apply(token: str, amount: str) -> dict:
     """Atomic check + circulating increment."""
     return await rpc_call(
-        "tenzro_secureMintApply", {"asset_id": asset_id, "amount": amount}
+        "tenzro_secureMintApply", {"token": token, "amount": amount}
     )
 
 
 @mcp.tool
-async def secure_mint_record_burn(asset_id: str, amount: str) -> dict:
+async def secure_mint_record_burn(token: str, amount: str) -> dict:
     """Record a redemption (decrement circulating)."""
     return await rpc_call(
-        "tenzro_secureMintRecordBurn", {"asset_id": asset_id, "amount": amount}
+        "tenzro_secureMintRecordBurn", {"token": token, "amount": amount}
     )
+
+
+@mcp.tool
+async def set_secure_mint_paused(token: str, paused: bool) -> dict:
+    """Trip or clear the per-token issuance circuit breaker. Admin-gated."""
+    return await rpc_call(
+        "tenzro_setSecureMintPaused", {"token": token, "paused": paused}
+    )
+
+
+@mcp.tool
+async def set_global_issuance_pause(paused: bool) -> dict:
+    """Trip or clear the global issuance circuit breaker, halting mint across
+    every token at once. Admin-gated."""
+    return await rpc_call("tenzro_setGlobalIssuancePause", {"paused": paused})
 
 
 # ---------------------------------------------------------------------------

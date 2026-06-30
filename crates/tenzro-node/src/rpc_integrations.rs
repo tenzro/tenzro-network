@@ -4488,6 +4488,12 @@ fn secure_mint_policy_to_json(policy: &tenzro_vm::secure_mint::SecureMintPolicy)
         "attestation_hash": format!("0x{}", hex::encode(policy.attestation_hash.as_bytes())),
         "attested_at": policy.attested_at,
         "ttl_secs": policy.ttl_secs,
+        "heartbeat_secs": policy.heartbeat_secs,
+        "mint_window_cap": policy.mint_window_cap.to_string(),
+        "mint_window_secs": policy.mint_window_secs,
+        "window_minted": policy.window_minted.to_string(),
+        "window_started_at": policy.window_started_at,
+        "paused": policy.paused,
     })
 }
 
@@ -4535,6 +4541,26 @@ pub(crate) async fn handle_set_secure_mint_policy(
         .get("ttl_secs")
         .and_then(|v| v.as_u64())
         .unwrap_or(86_400);
+    // PoR feed-liveness window (distinct from attestation TTL). Defaults to
+    // 0 (disabled) so existing callers are unaffected; issuers gating on a
+    // live feed set it explicitly.
+    let heartbeat_secs = params
+        .get("heartbeat_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let mint_window_cap = if params.get("mint_window_cap").is_some() {
+        parse_u128_param(&params, "mint_window_cap")?
+    } else {
+        0
+    };
+    let mint_window_secs = params
+        .get("mint_window_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let paused = params
+        .get("paused")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let policy = tenzro_vm::secure_mint::SecureMintPolicy {
         asset_id,
@@ -4545,6 +4571,12 @@ pub(crate) async fn handle_set_secure_mint_policy(
         attestation_hash,
         attested_at,
         ttl_secs,
+        heartbeat_secs,
+        mint_window_cap,
+        mint_window_secs,
+        window_minted: 0,
+        window_started_at: attested_at,
+        paused,
     };
     let prior = node.secure_mint_registry().set_policy(token, policy.clone());
     Ok(json!({
@@ -4661,17 +4693,57 @@ pub(crate) async fn handle_secure_mint_record_burn(
     let token = parse_token_20(&params, "token")?;
     let amount = parse_u128_param(&params, "amount")?;
     match node.secure_mint_registry().record_burn(&token, amount) {
-        Some(policy) => Ok(json!({
+        Ok(policy) => Ok(json!({
             "recorded": true,
             "token": format!("0x{}", hex::encode(token)),
             "amount": amount.to_string(),
             "policy": secure_mint_policy_to_json(&policy),
+        })),
+        Err(err) => Err(invalid_params(format!("burn rejected: {err}"))),
+    }
+}
+
+/// `tenzro_setSecureMintPaused` — trip or clear the per-token issuance
+/// circuit breaker. Admin-gated. Params: `{ token (20-byte hex), paused }`.
+pub(crate) async fn handle_set_secure_mint_paused(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let token = parse_token_20(&params, "token")?;
+    let paused = params
+        .get("paused")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| missing("Missing paused (bool)"))?;
+    match node.secure_mint_registry().set_paused(&token, paused) {
+        Some(policy) => Ok(json!({
+            "token": format!("0x{}", hex::encode(token)),
+            "paused": policy.paused,
         })),
         None => Err(invalid_params(format!(
             "no Secure-Mint policy installed for token 0x{}",
             hex::encode(token)
         ))),
     }
+}
+
+/// `tenzro_setGlobalIssuancePause` — trip or clear the global issuance
+/// circuit breaker, halting mint across every token at once. Admin-gated.
+/// Params: `{ paused }`. Not persisted: a node restart clears it so it can
+/// never boot wedged on a forgotten pause.
+pub(crate) async fn handle_set_global_issuance_pause(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let paused = params
+        .get("paused")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| missing("Missing paused (bool)"))?;
+    node.secure_mint_registry().set_global_pause(paused);
+    Ok(json!({ "global_paused": paused }))
 }
 
 fn stable_asset_policy_to_json(
@@ -4703,6 +4775,7 @@ fn stable_asset_policy_to_json(
             PaymentRail::VisaTap => "visa_tap",
             PaymentRail::Mastercard => "mastercard",
             PaymentRail::Tempo => "tempo",
+            PaymentRail::OpenStandard => "open_standard",
             PaymentRail::Native => "native",
         })
         .collect();
@@ -4909,16 +4982,13 @@ pub(crate) async fn handle_redeem_stable_asset(
         .map_err(|e| invalid_params(e.to_string()))?;
 
     match node.secure_mint_registry().record_burn(&unit_token, amount) {
-        Some(policy) => Ok(json!({
+        Ok(policy) => Ok(json!({
             "redeemed": true,
             "unit_token": format!("0x{}", hex::encode(unit_token)),
             "amount": amount.to_string(),
             "circulating": policy.circulating.to_string(),
         })),
-        None => Err(invalid_params(format!(
-            "no Secure-Mint policy installed for unit 0x{}",
-            hex::encode(unit_token)
-        ))),
+        Err(err) => Err(invalid_params(format!("redeem rejected: {err}"))),
     }
 }
 
