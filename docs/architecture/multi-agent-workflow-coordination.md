@@ -1,6 +1,6 @@
 # Multi-Agent Workflow Coordination
 
-**Status:** Research / SOTA mapping. Not a shipped spec.
+**Status:** Research / landscape mapping. Not a shipped spec.
 **Last updated:** 2026-06-02
 
 ## Why this doc exists
@@ -22,7 +22,7 @@ Tenzro is **not building a multi-agent orchestrator**. There are already ~7 best
 
 This positions Tenzro as the equivalent of **Temporal for trusted multi-agent workflows** — the durable execution layer beneath the framework, not a competitor to the framework.
 
-## SOTA reference (2026 multi-agent workflow patterns)
+## Landscape reference (2026 multi-agent workflow patterns)
 
 | Framework | Coordination model | Checkpointing | Compensation | Cross-party |
 |---|---|---|---|---|

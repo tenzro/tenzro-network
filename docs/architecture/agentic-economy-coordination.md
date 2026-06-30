@@ -1,6 +1,6 @@
 # Tenzro as the Protocol Coordination Layer for the Agentic Economy
 
-**Status:** Master positioning + architecture gap-map (dev-tree). Folds all 2026 SOTA research into one thesis and one build plan.
+**Status:** Master positioning + architecture gap-map (dev-tree). Folds all 2026 landscape research into one thesis and one build plan.
 **Last updated:** 2026-06-06
 
 ## Thesis
@@ -12,9 +12,9 @@ The agentic economy is being built as two disconnected halves:
 
 **Neither half owns the layer between them.** Tenzro's power, stated plainly: **give an agent a single identity and a single wallet, plus every feature it needs, to do whatever is required across multiple VMs, networks, chains, and protocols (CCIP, Canton, and others) — with compliance, governance, and accountability enforced as protocol.** No other stack does this end-to-end: the asset issuers won't (not their business), the agent frameworks can't (no neutral identity/custody/compliance/cross-domain substrate), and the bridges/intent protocols only move value — they don't carry identity, mandate, or compliance with it.
 
-This doc is the consolidated map: the SOTA, why the gap is Tenzro-shaped, the architecture (what exists), and the gaps to build.
+This doc is the consolidated map: the landscape, why the gap is Tenzro-shaped, the architecture (what exists), and the gaps to build.
 
-## SOTA folded (2026)
+## Landscape folded (2026)
 
 | Domain | State of the art | Implication for the coordination layer |
 |---|---|---|
@@ -57,7 +57,7 @@ A2A, MCP (Rust + Python), **AP2** + **x402** + MPP + Visa TAP + Mastercard Agent
 
 ## Audit (2026-06-06): what already exists vs. the genuine gaps
 
-A complete codebase audit shows the coordination architecture is **essentially complete** — almost every capability the 2026 SOTA demands already ships. An earlier draft of this doc overstated the work; corrected below, grounded in modules.
+A complete codebase audit shows the coordination architecture is **essentially complete** — almost every capability the 2026 landscape demands already ships. An earlier draft of this doc overstated the work; corrected below, grounded in modules.
 
 ### Already shipped — NOT gaps
 
@@ -115,4 +115,4 @@ Not a bank, asset issuer, stablecoin issuer, exchange, or trading strategy — t
 
 ## References
 - `capital-intent.md`, `multi-agent-workflow-coordination.md`, `task-coordination-lifecycle.md`
-- SOTA sources (2026): bank deposit-token launches and announcements (industry press), BUIDL-class tokenized money-market fund rollouts (industry press), GENIUS Act, AP2 (public consortium), ERC-7683/7521/3643, agentic-trading product launches across exchanges and brokerages, NIST + Singapore agentic-AI governance, agent financial-crime research.
+- Landscape sources (2026): bank deposit-token launches and announcements (industry press), BUIDL-class tokenized money-market fund rollouts (industry press), GENIUS Act, AP2 (public consortium), ERC-7683/7521/3643, agentic-trading product launches across exchanges and brokerages, NIST + Singapore agentic-AI governance, agent financial-crime research.

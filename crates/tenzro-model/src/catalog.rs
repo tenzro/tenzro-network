@@ -1066,7 +1066,7 @@ pub struct OnnxTextEmbeddingEntry {
 
 /// Get the curated ONNX text-embedding catalog.
 ///
-/// Verified 2026 SOTA additions: Qwen3-Embedding family (#1 on MTEB
+/// Verified 2026 state-of-the-art additions: Qwen3-Embedding family (#1 on MTEB
 /// multilingual June 2025), EmbeddingGemma 300M (Matryoshka edge-tier),
 /// and BGE-M3 (multilingual retrieval classic).
 pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
@@ -1088,7 +1088,7 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             min_ram_gb: 3,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
-            description: "Qwen3-Embedding 0.6B — SOTA multilingual text embeddings, edge-tier".into(),
+            description: "Qwen3-Embedding 0.6B — state-of-the-art multilingual text embeddings, edge-tier".into(),
         },
         OnnxTextEmbeddingEntry {
             id: "qwen3-embedding-4b".into(),
@@ -1231,7 +1231,7 @@ pub fn get_segmentation_catalog() -> Vec<OnnxSegmentationEntry> {
             min_ram_gb: 2,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
-            description: "Meta SAM 2 base (community ONNX export) — previous-gen SOTA".into(),
+            description: "Meta SAM 2 base (community ONNX export) — previous-gen flagship".into(),
         },
         OnnxSegmentationEntry {
             id: "sam2-large".into(),
@@ -1409,7 +1409,7 @@ pub struct OnnxDetectionEntry {
 
 /// Get the curated ONNX detection catalog.
 ///
-/// RF-DETR is the 2026 SOTA: first real-time detector >60 AP on COCO
+/// RF-DETR is the 2026 state-of-the-art: first real-time detector >60 AP on COCO
 /// (ICLR 2026). D-FINE retained as a secondary baseline. Avoids
 /// AGPL-licensed Ultralytics YOLO and demoted RT-DETRv2.
 pub fn get_detection_catalog() -> Vec<OnnxDetectionEntry> {
@@ -3888,7 +3888,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         size_bytes: 400_000_000_000,
         min_ram_gb: 256,
         license: "MIT".into(),
-        description: "Z.ai GLM-5.1 — next-generation flagship for agentic engineering with SWE-Bench Pro SOTA; 744B total / 40B active; 200K context. `glm_moe_dsa` architecture with Dynamic Sparse Attention.".into(),
+        description: "Z.ai GLM-5.1 — next-generation flagship for agentic engineering, class-leading on SWE-Bench Pro; 744B total / 40B active; 200K context. `glm_moe_dsa` architecture with Dynamic Sparse Attention.".into(),
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,

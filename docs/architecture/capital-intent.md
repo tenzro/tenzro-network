@@ -21,7 +21,7 @@ Tenzro is **not** building an exchange, a solver, or a trading strategy. There a
 
 This positions Tenzro as the equivalent of **"ERC-7683 for capital objectives"** — one level above mechanical asset movement.
 
-## SOTA reference (2025–2026 intent landscape)
+## Landscape reference (2025–2026 intent landscape)
 
 | Standard / system | Intent scope | Solver model | Compliance-aware | Cross-chain |
 |---|---|---|---|---|

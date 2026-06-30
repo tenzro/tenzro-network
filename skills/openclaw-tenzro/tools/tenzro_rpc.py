@@ -2299,6 +2299,43 @@ def secure_mint_record_burn(asset_id: str, amount: str) -> dict:
                 {"asset_id": asset_id, "amount": str(amount)})
 
 
+def register_stable_asset(issuer: str, unit_token: str, symbol: str,
+                          reserve_source: dict, por_feed_id: str,
+                          allowed_rails: list, settlement_dst: str) -> dict:
+    """Register or replace an issuer's stable-asset policy (issuer-agnostic
+    stable-unit issuance on the Secure-Mint reserve floor). Needs the `issuer`
+    API-key scope. `reserve_source` is
+    {"kind": "custodial", "attester_did": ..., "asset_caip19": ...} or
+    {"kind": "on_chain_vault", "vault": ..., "asset_caip19": ...}."""
+    return _rpc("tenzro_registerStableAsset", {
+        "issuer": issuer,
+        "unit_token": unit_token,
+        "symbol": symbol,
+        "reserve_source": reserve_source,
+        "por_feed_id": por_feed_id,
+        "allowed_rails": list(allowed_rails),
+        "settlement_dst": settlement_dst,
+    })
+
+
+def get_stable_asset(issuer: str, unit_token: str) -> dict:
+    """Read an issuer's stable-asset policy."""
+    return _rpc("tenzro_getStableAsset",
+                {"issuer": issuer, "unit_token": unit_token})
+
+
+def mint_stable_asset(issuer: str, unit_token: str, amount: str) -> dict:
+    """Mint stable units, hard-gated by the Secure-Mint reserve floor."""
+    return _rpc("tenzro_mintStableAsset",
+                {"issuer": issuer, "unit_token": unit_token, "amount": str(amount)})
+
+
+def redeem_stable_asset(issuer: str, unit_token: str, amount: str) -> dict:
+    """Redeem (burn) stable units, decrementing circulating supply."""
+    return _rpc("tenzro_redeemStableAsset",
+                {"issuer": issuer, "unit_token": unit_token, "amount": str(amount)})
+
+
 # ── Hyperlane V3 (sovereign Tenzro-ISM) ─────────────────────────
 
 
@@ -3363,12 +3400,26 @@ def get_download_progress(model_id: str) -> dict:
     return _rpc("tenzro_getDownloadProgress", {"model_id": model_id})
 
 
-def serve_model(model_id: str) -> dict:
+def serve_model(model_id: str, force_cluster: bool = False,
+                force_single: bool = False, visibility: str = "network") -> dict:
     """Start serving a model for inference.
 
     model_id: model to serve
+    force_cluster: split across the LAN cluster even when the model fits one host
+    force_single: never form a cluster; serve single-host
+    visibility: "network" (default) gossips the model; "private" keeps it
+        local/LAN-only
+
+    When the model is too large for one host the node auto-clusters: it reads
+    the GGUF header for shape, discovers LAN members from gossip, and runs a
+    layer-wise pipeline across them. No options are required for that path.
     """
-    return _rpc("tenzro_serveModel", {"model_id": model_id})
+    params = {"model_id": model_id, "visibility": visibility}
+    if force_cluster:
+        params["user_forced"] = True
+    if force_single:
+        params["force_single"] = True
+    return _rpc("tenzro_serveModel", params)
 
 
 def stop_model(model_id: str) -> dict:
@@ -7059,6 +7110,23 @@ def cluster_plan(model: dict, members: list,
     })
 
 
+def cluster_preview(model_id: str, force_cluster: bool = False,
+                    force_single: bool = False) -> dict:
+    """Preview placement for a downloaded model from the node's live view.
+
+    Unlike cluster_plan, needs no manual dimensions or member list: the node
+    derives the model shape from the GGUF header and discovers LAN members from
+    gossip. Returns the fit decision, discovered members, any rejected members
+    (with reasons), and the proposed per-member layer stages. Call before
+    serve_model.
+    """
+    return _rpc("tenzro_clusterPreview", {
+        "model_id": model_id,
+        "user_forced": force_cluster,
+        "force_single": force_single,
+    })
+
+
 COMMANDS = {
     # Wallet & Balance
     "join_network": lambda args: join_as_micro_node(
@@ -7450,7 +7518,12 @@ COMMANDS = {
     "unregister_model_endpoint": lambda args: unregister_model_endpoint(args[0]),
     "download_model": lambda args: download_model(args[0]),
     "get_download_progress": lambda args: get_download_progress(args[0]),
-    "serve_model": lambda args: serve_model(args[0]),
+    "serve_model": lambda args: serve_model(
+        args[0],
+        args[1].lower() in ("1", "true", "yes") if len(args) > 1 else False,
+        args[2].lower() in ("1", "true", "yes") if len(args) > 2 else False,
+        args[3] if len(args) > 3 else "network",
+    ),
     "stop_model": lambda args: stop_model(args[0]),
     "delete_model": lambda args: delete_model(args[0]),
     # Token (Extended)
@@ -7583,6 +7656,17 @@ COMMANDS = {
     "secure_mint_check": lambda args: secure_mint_check(args[0], args[1]),
     "secure_mint_apply": lambda args: secure_mint_apply(args[0], args[1]),
     "secure_mint_record_burn": lambda args: secure_mint_record_burn(args[0], args[1]),
+    # ── Stable-asset issuance (issuer-agnostic, on the reserve floor) ──
+    "register_stable_asset": lambda args: register_stable_asset(
+        args[0], args[1], args[2],
+        args[3] if isinstance(args[3], dict) else json.loads(args[3]),
+        args[4],
+        args[5] if isinstance(args[5], list) else json.loads(args[5]),
+        args[6],
+    ),
+    "get_stable_asset": lambda args: get_stable_asset(args[0], args[1]),
+    "mint_stable_asset": lambda args: mint_stable_asset(args[0], args[1], args[2]),
+    "redeem_stable_asset": lambda args: redeem_stable_asset(args[0], args[1], args[2]),
     # ── Wave 7/9/12 — institutional primitives ──
     "urwa_is_kill_switched": lambda args: urwa_is_kill_switched(args[0]),
     "urwa_get_frozen_tokens": lambda args: urwa_get_frozen_tokens(args[0], args[1]),
@@ -8286,6 +8370,11 @@ COMMANDS = {
     "cluster_plan": lambda args: cluster_plan(
         json.loads(args[0]),
         json.loads(args[1]),
+        args[2].lower() in ("1", "true", "yes") if len(args) > 2 else False,
+    ),
+    "cluster_preview": lambda args: cluster_preview(
+        args[0],
+        args[1].lower() in ("1", "true", "yes") if len(args) > 1 else False,
         args[2].lower() in ("1", "true", "yes") if len(args) > 2 else False,
     ),
 }

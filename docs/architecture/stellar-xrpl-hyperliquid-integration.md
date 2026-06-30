@@ -36,7 +36,7 @@ So the work goes into `tenzro-bridge` (adapter layer), `tenzro-payments` (mandat
 
 ## State-of-the-art reference: NEAR Chain Signatures
 
-NEAR shipped the SOTA pattern in 2024 and it has held up: **one home account, derivation paths, MPC ceremony, target-chain signature**.
+NEAR shipped the leading pattern in 2024 and it has held up: **one home account, derivation paths, MPC ceremony, target-chain signature**.
 
 ```
 home_account: tenzro_did                     (Tenzro DID — controls the key share)

@@ -838,7 +838,7 @@ pub struct ProviderCapacity {
     /// inference. `Router` provides the gating-network step and fans
     /// out batched expert calls. `ExpertHolder` participates in the
     /// expert-shard pool. `PrefillDecode` runs both phases co-located
-    /// (the centralized SOTA default). Providers can declare more than
+    /// (the centralized default). Providers can declare more than
     /// one role; the router picks the matching role per request.
     #[serde(default)]
     pub moe_roles: Vec<MoeProviderRole>,
@@ -981,7 +981,7 @@ pub enum MoeProviderRole {
     Router,
     /// Holds one or more experts declared in `moe_holdings`.
     ExpertHolder,
-    /// Runs both prefill and decode phases co-located (SOTA central
+    /// Runs both prefill and decode phases co-located (the standard central
     /// pattern; the Tenzro fallback when only one provider can fit the
     /// model).
     PrefillDecode,

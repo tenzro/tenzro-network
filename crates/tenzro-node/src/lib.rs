@@ -113,6 +113,8 @@ pub mod pricing;
 pub mod storage_provider_runtime;
 pub mod rpc;
 pub mod rpc_integrations;
+pub mod stable_conversion;
+pub mod stable_controller_driver;
 pub mod sla_slashing_bridge;
 pub mod snapshot;
 pub mod spending_policy_bridge;

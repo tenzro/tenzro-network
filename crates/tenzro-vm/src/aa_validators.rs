@@ -653,7 +653,7 @@ mod tests {
     fn dummy_user_op(sender: Vec<u8>, sig: Vec<u8>) -> UserOperation {
         UserOperation {
             sender,
-            nonce: tenzro_vm::account_abstraction::Nonce::from_seq(0).to_bytes(),
+            nonce: crate::account_abstraction::Nonce::from_seq(0).to_bytes(),
             factory: vec![],
             factory_data: vec![],
             call_data: vec![0x42; 4],
@@ -961,7 +961,7 @@ mod tests {
 
         // (a) Non-empty sig: NoOp accepts → EntryPoint validate succeeds.
         let mut op = dummy_user_op(account.clone(), vec![0xAA; 65]);
-        op.nonce = tenzro_vm::account_abstraction::Nonce::from_seq(entry_point.get_nonce_default_key(&account)).to_bytes();
+        op.nonce = crate::account_abstraction::Nonce::from_seq(entry_point.get_nonce_default_key(&account)).to_bytes();
         entry_point.validate_user_op(&op).unwrap();
 
         // (b) Empty sig: NoOp returns failure → EntryPoint surfaces InvalidSignature.

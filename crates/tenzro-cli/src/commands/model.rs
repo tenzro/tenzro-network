@@ -475,6 +475,12 @@ pub struct ModelServeCmd {
     /// too large for one machine (the load will fail if it does not fit).
     #[arg(long)]
     force_single: bool,
+
+    /// Serve privately: register the model locally without gossiping it to the
+    /// network. It stays reachable over a direct or LAN connection. Omit to
+    /// announce the model so any peer can route inference to it.
+    #[arg(long)]
+    private: bool,
 }
 
 impl ModelServeCmd {
@@ -501,6 +507,7 @@ impl ModelServeCmd {
             "model_id": self.model_id,
             "user_forced": self.cluster,
             "force_single": self.force_single,
+            "visibility": if self.private { "private" } else { "network" },
         })).await.map_err(|e| anyhow::anyhow!("Serve request failed: {}", e))?;
 
         spinner.finish_and_clear();

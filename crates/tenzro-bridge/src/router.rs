@@ -62,7 +62,7 @@ impl BridgeRouter {
     /// in TNZO via [`Self::quote_fee_in_tnzo`] and route sponsorship to
     /// the per-adapter pool — without per-adapter constructor injection.
     ///
-    /// This is the SOTA cross-chain fee-abstraction pattern (Cosmos ICS-29,
+    /// This is the established cross-chain fee-abstraction pattern (Cosmos ICS-29,
     /// Hyperlane IGP, Polkadot AssetHub asset-conversion): the router is
     /// the single fee-quoting choke-point; adapters quote destination-
     /// native, the oracle converts, the sponsor escrows.

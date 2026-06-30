@@ -1733,6 +1733,45 @@ pub struct SecureMintAssetAmountParams {
     pub amount: String,
 }
 
+// ─── Stable-Asset Params ───
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RegisterStableAssetParams {
+    #[schemars(description = "Issuer address, 32-byte hex")]
+    pub issuer: String,
+    #[schemars(description = "Unit token address, 20-byte hex")]
+    pub unit_token: String,
+    #[schemars(description = "Human label for the unit (e.g. USDX)")]
+    pub symbol: String,
+    #[schemars(
+        description = "Reserve source: {kind:\"custodial\", attester_did, asset_caip19} or {kind:\"on_chain_vault\", vault, asset_caip19}"
+    )]
+    pub reserve_source: serde_json::Value,
+    pub por_feed_id: String,
+    #[schemars(description = "Allowed rails: x402 ap2 mpp visa_tap mastercard tempo native")]
+    pub allowed_rails: Vec<String>,
+    #[schemars(description = "Settlement destination address, 32-byte hex")]
+    pub settlement_dst: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StableAssetIssuerUnitParams {
+    #[schemars(description = "Issuer address, 32-byte hex")]
+    pub issuer: String,
+    #[schemars(description = "Unit token address, 20-byte hex")]
+    pub unit_token: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StableAssetMintParams {
+    #[schemars(description = "Issuer address, 32-byte hex")]
+    pub issuer: String,
+    #[schemars(description = "Unit token address, 20-byte hex")]
+    pub unit_token: String,
+    #[schemars(description = "Amount (u128 decimal string)")]
+    pub amount: String,
+}
+
 // ─── Hyperlane Params ───
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -10932,6 +10971,68 @@ impl TenzroMcpServer {
         )
         .await
         .map_err(|e| err_internal(format!("secureMintRecordBurn failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Stable-Asset Tools ───
+
+    #[tool(description = "Register or replace an issuer's stable-asset policy (issuer-agnostic stable-unit issuance on the Secure-Mint reserve floor). Requires the `issuer` API-key scope.")]
+    async fn register_stable_asset(
+        &self,
+        Parameters(params): Parameters<RegisterStableAssetParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_registerStableAsset",
+            serde_json::to_value(&params).unwrap_or(serde_json::Value::Null),
+        )
+        .await
+        .map_err(|e| err_internal(format!("registerStableAsset failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read an issuer's stable-asset policy.")]
+    async fn get_stable_asset(
+        &self,
+        Parameters(params): Parameters<StableAssetIssuerUnitParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getStableAsset",
+            serde_json::json!({ "issuer": params.issuer, "unit_token": params.unit_token }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getStableAsset failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Mint stable units, hard-gated by the Secure-Mint reserve floor so circulating can never exceed the attested reserve.")]
+    async fn mint_stable_asset(
+        &self,
+        Parameters(params): Parameters<StableAssetMintParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_mintStableAsset",
+            serde_json::json!({ "issuer": params.issuer, "unit_token": params.unit_token, "amount": params.amount }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("mintStableAsset failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Redeem (burn) stable units, decrementing circulating supply.")]
+    async fn redeem_stable_asset(
+        &self,
+        Parameters(params): Parameters<StableAssetMintParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_redeemStableAsset",
+            serde_json::json!({ "issuer": params.issuer, "unit_token": params.unit_token, "amount": params.amount }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("redeemStableAsset failed: {}", e)))?;
         json_result(result)
     }
 

@@ -363,7 +363,7 @@ mod tests {
     fn make_user_op(sender: Vec<u8>, signature: Vec<u8>) -> UserOperation {
         UserOperation {
             sender,
-            nonce: tenzro_vm::account_abstraction::Nonce::from_seq(0).to_bytes(),
+            nonce: crate::account_abstraction::Nonce::from_seq(0).to_bytes(),
             factory: vec![],
             factory_data: vec![],
             call_data: vec![],

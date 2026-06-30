@@ -1,6 +1,6 @@
 # Task Coordination Lifecycle
 
-**Status:** Research / SOTA mapping. Not a shipped spec.
+**Status:** Research / landscape mapping. Not a shipped spec.
 **Last updated:** 2026-06-02
 
 ## Why this doc exists
@@ -17,7 +17,7 @@ Tenzro is **not building a task-marketplace product**. It's building the **wire-
 
 Tenzro's job is to make the four primitives chain-anchored, framework-portable, and protocol-neutral: post a task via JSON-RPC / MCP / A2A, get quotes from any agent that speaks the wire format, assign with on-chain escrow, complete with token settlement + ERC-8004 reputation feedback. The agent on the other side can be a Letta agent, a CrewAI crew, an AutoGen GroupChat, or a hand-written Python script — Tenzro doesn't care, because the lifecycle is the contract, not the implementation.
 
-## SOTA reference (what 2026 marketplaces actually do)
+## Landscape reference (what 2026 marketplaces actually do)
 
 | Platform | Discovery | Quoting | Assignment | Settlement | Reputation | Identity |
 |---|---|---|---|---|---|---|

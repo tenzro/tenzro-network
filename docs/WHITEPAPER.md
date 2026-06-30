@@ -375,7 +375,7 @@ Frontier-quality models can be trained across operators, regions, and hardware c
 
 ### Design
 
-Tenzro Train splits cleanly into two layers. The **Rust protocol layer** (`tenzro-training`) owns the syncer state machine, aggregation rules, outer-gradient ingestion, fragment commitment, training receipts, gossip topics, on-chain commitments, fraud-proof verification, and RPC. The **Python reference trainer** (`integrations/trainer/`) wraps PyTorch FSDP2, Hivemind, and safetensors; the per-modality inner training loops use the SOTA Python ecosystem (transformers, native PyTorch, gluonts, timm). The two communicate over JSON-RPC and the gossip topics.
+Tenzro Train splits cleanly into two layers. The **Rust protocol layer** (`tenzro-training`) owns the syncer state machine, aggregation rules, outer-gradient ingestion, fragment commitment, training receipts, gossip topics, on-chain commitments, fraud-proof verification, and RPC. The **Python reference trainer** (`integrations/trainer/`) wraps PyTorch FSDP2, Hivemind, and safetensors; the per-modality inner training loops use the mainstream Python ecosystem (transformers, native PyTorch, gluonts, timm). The two communicate over JSON-RPC and the gossip topics.
 
 Inner steps are PyTorch. Outer steps — gradient aggregation, state-root finalization, receipt emission — are Rust. The Rust crate has no tensor library dependency.
 

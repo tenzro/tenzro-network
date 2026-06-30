@@ -2081,7 +2081,7 @@ mod tests {
     fn test_user_op(sender: Vec<u8>, nonce: u64) -> UserOperation {
         UserOperation {
             sender,
-            nonce,
+            nonce: Nonce::from_seq(nonce).to_bytes(),
             factory: vec![],
             factory_data: vec![],
             call_data: vec![0x42; 32],
@@ -2141,7 +2141,7 @@ mod tests {
         assert_eq!(receipts[0].gas_used, 171_000);
 
         // Nonce should be incremented
-        assert_eq!(entry_point.get_nonce(&sender), 1);
+        assert_eq!(entry_point.get_nonce_default_key(&sender), 1);
 
         // Total ops should be incremented
         assert_eq!(entry_point.total_ops_processed.load(Ordering::Relaxed), 1);
@@ -2686,7 +2686,7 @@ mod tests {
         let auth = Eip7702Authorization {
             chain_id: 1337,
             delegate_address: delegate_addr.clone(),
-            nonce: Nonce::from_seq(0).to_bytes(),
+            nonce: 0,
             signature,
         };
 
@@ -2719,7 +2719,7 @@ mod tests {
         let auth = Eip7702Authorization {
             chain_id: 9999,
             delegate_address: delegate,
-            nonce: Nonce::from_seq(0).to_bytes(),
+            nonce: 0,
             signature,
         };
 
@@ -2733,7 +2733,7 @@ mod tests {
         let auth = Eip7702Authorization {
             chain_id: 1337,
             delegate_address: vec![0xDE; 20],
-            nonce: Nonce::from_seq(0).to_bytes(),
+            nonce: 0,
             signature: vec![],
         };
         assert!(process_7702_authorizations(&[auth], 1337, &mut state).is_err());
@@ -2745,7 +2745,7 @@ mod tests {
         let auth = Eip7702Authorization {
             chain_id: 1337,
             delegate_address: vec![0xDE; 20],
-            nonce: Nonce::from_seq(0).to_bytes(),
+            nonce: 0,
             signature: vec![0x01; 64], // should be 65 bytes (r||s||y_parity)
         };
         assert!(process_7702_authorizations(&[auth], 1337, &mut state).is_err());
@@ -2762,7 +2762,7 @@ mod tests {
         let auth1 = Eip7702Authorization {
             chain_id: 1337,
             delegate_address: delegate.clone(),
-            nonce: Nonce::from_seq(0).to_bytes(),
+            nonce: 0,
             signature,
         };
         let auth2 = auth1.clone();
@@ -2782,7 +2782,7 @@ mod tests {
         let auth = Eip7702Authorization {
             chain_id: 1337,
             delegate_address: delegate,
-            nonce: Nonce::from_seq(5).to_bytes(),
+            nonce: 5,
             signature,
         };
 
@@ -2798,7 +2798,7 @@ mod tests {
         let auth = Eip7702Authorization {
             chain_id: 1337,
             delegate_address: vec![0xDE; 20],
-            nonce: Nonce::from_seq(0).to_bytes(),
+            nonce: 0,
             signature: vec![],
         };
         let preimage = auth.signing_data();

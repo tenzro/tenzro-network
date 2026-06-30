@@ -1,6 +1,6 @@
 //! Chainlink Data Feeds (`AggregatorV3Interface`) reader.
 //!
-//! SOTA 2026 production wire layer for reading Chainlink price feeds from a
+//! Production-grade 2026 wire layer for reading Chainlink price feeds from a
 //! Rust node. Used by [`crate::fee_oracle::ChainlinkFeedFeeOracle`] to derive
 //! cross-feed rates for bridge fee quoting in TNZO.
 //!

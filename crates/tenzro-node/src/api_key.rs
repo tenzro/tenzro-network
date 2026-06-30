@@ -78,6 +78,14 @@ pub enum ApiKeyScope {
     /// `ChainlinkFeedFeeOracle` backing is active. Same operator-gated
     /// model as `Canton` per the established hard rule.
     Chainlink,
+    /// Stable-asset issuance. Gates `tenzro_registerStableAsset`,
+    /// `tenzro_mintStableAsset`, `tenzro_redeemStableAsset`, and the
+    /// issuer's policy reads/updates. Held by a subject that operates a
+    /// stable unit on this node (e.g. a treasury). Mints are still
+    /// hard-bounded by the SecureMint reserve floor regardless of this
+    /// scope — the scope authorizes *who may operate* an issuer's unit, not
+    /// the reserve invariant itself.
+    Issuer,
 }
 
 impl ApiKeyScope {
@@ -92,6 +100,7 @@ impl ApiKeyScope {
             ApiKeyScope::Tee => "tee",
             ApiKeyScope::Bridge => "bridge",
             ApiKeyScope::Chainlink => "chainlink",
+            ApiKeyScope::Issuer => "issuer",
         }
     }
 }
@@ -991,6 +1000,17 @@ pub fn required_scope_for_method(method: &str) -> Option<ApiKeyScope> {
             | "tenzro_getBridgeAnalytics"
     ) {
         return Some(ApiKeyScope::Chainlink);
+    }
+    // Stable-asset issuance surface. The subject operates a stable unit on
+    // this node; the SecureMint floor still bounds every mint independently.
+    if matches!(
+        method,
+        "tenzro_registerStableAsset"
+            | "tenzro_mintStableAsset"
+            | "tenzro_redeemStableAsset"
+            | "tenzro_getStableAsset"
+    ) {
+        return Some(ApiKeyScope::Issuer);
     }
     None
 }
