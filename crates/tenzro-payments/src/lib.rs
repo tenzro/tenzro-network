@@ -44,7 +44,7 @@ pub use error::{PaymentError, Result};
 pub use traits::{PaymentProtocol, PaymentGateway};
 pub use types::{PaymentChallenge, PaymentCredential, PaymentReceipt, PaymentVerification};
 pub use challenge_store::ChallengeStore;
-pub use gateway::SettlementCallback;
+pub use gateway::{Conversion, ConversionHook, IdentityConversionHook, SettlementCallback};
 pub use identity_binding::{
     EscrowResolver, EscrowSnapshot, IdentityPaymentBinder, LifecyclePosture,
     LifecycleStateResolver, SpendingPolicyResolver, SpendingPolicySnapshot,

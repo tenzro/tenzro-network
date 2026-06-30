@@ -73,12 +73,17 @@ where RPC-side revocation is refused outright.
 | Scope    | Gated methods                                                       |
 |----------|---------------------------------------------------------------------|
 | `canton` | `tenzro_listCantonDomains`, `tenzro_listDamlContracts`, `tenzro_submitDamlCommand`, and the Canton MCP tools |
+| `issuer` | `tenzro_registerStableAsset`, `tenzro_mintStableAsset`, `tenzro_redeemStableAsset`, and the issuer's policy reads/updates |
+
+Mints under the `issuer` scope are still hard-bounded by the
+SecureMint reserve floor regardless of the key — the scope authorises
+*who may operate* an issuer's unit, not the reserve invariant itself.
 
 The subject-gated RPCs (`tenzro_revokeMyApiKey`, `tenzro_listMyApiKeys`)
 are *not* tied to a scope — any active key with a `subject` set is
-authorised to manage its own subject's keys. Future scopes (inference,
-bridge, ...) are extensions of the `ApiKeyScope` enum on the node side;
-the wire format is unchanged.
+authorised to manage its own subject's keys. Additional scopes (`evm`,
+`svm`, `inference`, `tee`, `bridge`, `chainlink`) are variants of the
+`ApiKeyScope` enum on the node side; the wire format is unchanged.
 
 ## Wire format
 

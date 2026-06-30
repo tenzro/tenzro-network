@@ -70,6 +70,9 @@ pub mod erc7943;
 pub mod eip7702;
 pub mod permit2;
 pub mod secure_mint;
+pub mod stable_rate_oracle;
+pub mod stable_controller;
+pub mod stable_asset_registry;
 pub mod global_supply;
 pub mod cross_vm_bridge;
 
@@ -141,6 +144,18 @@ pub use erc7579::{
     SELECTOR_IS_MODULE_INSTALLED as ERC7579_SELECTOR_IS_MODULE_INSTALLED,
     SELECTOR_UNINSTALL_MODULE as ERC7579_SELECTOR_UNINSTALL_MODULE,
     SELECTOR_VALIDATE_USER_OP as ERC7579_SELECTOR_VALIDATE_USER_OP,
+};
+
+pub use stable_rate_oracle::{
+    ChainlinkRateOracle, CrossRateFeed, GovernanceSetRateOracle, RateBacking, RateRow,
+    StableRateError, StableRateOracle, StableRateQuote,
+};
+pub use stable_controller::{
+    BufferAction, RiskBand, StableController, StableControllerConfig, StableControllerOutput,
+};
+pub use stable_asset_registry::{
+    PaymentRail, ReserveSource, SharedStableAssetRegistry, StableAssetError, StableAssetPolicy,
+    StableAssetRegistry,
 };
 
 /// VM module version

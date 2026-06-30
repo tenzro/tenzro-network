@@ -4674,6 +4674,254 @@ pub(crate) async fn handle_secure_mint_record_burn(
     }
 }
 
+fn stable_asset_policy_to_json(
+    policy: &tenzro_vm::stable_asset_registry::StableAssetPolicy,
+) -> Value {
+    use tenzro_vm::stable_asset_registry::{PaymentRail, ReserveSource};
+    let reserve = match &policy.reserve_source {
+        ReserveSource::Custodial {
+            attester_did,
+            asset_caip19,
+        } => json!({
+            "kind": "custodial",
+            "attester_did": attester_did,
+            "asset_caip19": asset_caip19,
+        }),
+        ReserveSource::OnChainVault { vault, asset_caip19 } => json!({
+            "kind": "on_chain_vault",
+            "vault": format!("0x{}", hex::encode(vault.0)),
+            "asset_caip19": asset_caip19,
+        }),
+    };
+    let rails: Vec<&str> = policy
+        .allowed_rails
+        .iter()
+        .map(|r| match r {
+            PaymentRail::X402 => "x402",
+            PaymentRail::Ap2 => "ap2",
+            PaymentRail::Mpp => "mpp",
+            PaymentRail::VisaTap => "visa_tap",
+            PaymentRail::Mastercard => "mastercard",
+            PaymentRail::Tempo => "tempo",
+            PaymentRail::Native => "native",
+        })
+        .collect();
+    json!({
+        "issuer": format!("0x{}", hex::encode(policy.issuer.0)),
+        "unit_token": format!("0x{}", hex::encode(policy.unit_token)),
+        "symbol": policy.symbol,
+        "reserve_source": reserve,
+        "por_feed_id": policy.por_feed_id,
+        "allowed_rails": rails,
+        "settlement_dst": format!("0x{}", hex::encode(policy.settlement_dst.0)),
+        "created_at": policy.created_at,
+    })
+}
+
+/// `tenzro_registerStableAsset` — register or replace an issuer's
+/// stable-asset policy. Gated by the `issuer` scope. Params:
+/// `{ issuer (32-byte hex), unit_token (20-byte hex), symbol,
+/// reserve_source { kind: "custodial"|"on_chain_vault", ... },
+/// por_feed_id, allowed_rails [string], settlement_dst (32-byte hex),
+/// controller? { ...gains } }`. The reserve floor itself is enforced by
+/// the SecureMint policy installed on the same `unit_token`.
+pub(crate) async fn handle_register_stable_asset(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_vm::stable_asset_registry::{
+        PaymentRail, ReserveSource, StableAssetPolicy,
+    };
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let issuer = tenzro_types::primitives::Address(parse_uint256_param(&params, "issuer")?);
+    let unit_token = parse_token_20(&params, "unit_token")?;
+    let symbol = params
+        .get("symbol")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing symbol"))?
+        .to_string();
+    let por_feed_id = params
+        .get("por_feed_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing por_feed_id"))?
+        .to_string();
+
+    let rs = params
+        .get("reserve_source")
+        .ok_or_else(|| missing("Missing reserve_source"))?;
+    let reserve_source = match rs.get("kind").and_then(|v| v.as_str()) {
+        Some("custodial") => ReserveSource::Custodial {
+            attester_did: rs
+                .get("attester_did")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| missing("reserve_source.attester_did"))?
+                .to_string(),
+            asset_caip19: rs
+                .get("asset_caip19")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| missing("reserve_source.asset_caip19"))?
+                .to_string(),
+        },
+        Some("on_chain_vault") => ReserveSource::OnChainVault {
+            vault: tenzro_types::primitives::Address(parse_uint256_param(rs, "vault")?),
+            asset_caip19: rs
+                .get("asset_caip19")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| missing("reserve_source.asset_caip19"))?
+                .to_string(),
+        },
+        _ => {
+            return Err(invalid_params(
+                "reserve_source.kind must be \"custodial\" or \"on_chain_vault\"",
+            ))
+        }
+    };
+
+    let rails_raw = params
+        .get("allowed_rails")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| missing("Missing allowed_rails"))?;
+    let mut allowed_rails = Vec::with_capacity(rails_raw.len());
+    for v in rails_raw {
+        let tag = v
+            .as_str()
+            .ok_or_else(|| invalid_params("allowed_rails entries must be strings"))?;
+        allowed_rails.push(
+            PaymentRail::parse(tag).map_err(|e| invalid_params(e.to_string()))?,
+        );
+    }
+
+    let settlement_dst =
+        tenzro_types::primitives::Address(parse_uint256_param(&params, "settlement_dst")?);
+
+    // Controller config is optional; default to the conservative profile.
+    let controller = match params.get("controller") {
+        Some(c) if !c.is_null() => serde_json::from_value(c.clone())
+            .map_err(|e| invalid_params(format!("controller config: {e}")))?,
+        _ => tenzro_vm::stable_controller::StableControllerConfig::default(),
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let policy = StableAssetPolicy {
+        issuer,
+        unit_token,
+        symbol,
+        reserve_source,
+        por_feed_id,
+        controller,
+        allowed_rails,
+        settlement_dst,
+        created_at: now,
+    };
+
+    let prior = node
+        .stable_asset_registry()
+        .register(policy.clone())
+        .map_err(|e| invalid_params(e.to_string()))?;
+
+    Ok(json!({
+        "registered": true,
+        "policy": stable_asset_policy_to_json(&policy),
+        "prior_policy": prior.as_ref().map(stable_asset_policy_to_json),
+    }))
+}
+
+/// `tenzro_getStableAsset` — read an issuer's stable-asset policy. Params:
+/// `{ issuer (32-byte hex), unit_token (20-byte hex) }`.
+pub(crate) async fn handle_get_stable_asset(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let issuer = tenzro_types::primitives::Address(parse_uint256_param(&params, "issuer")?);
+    let unit_token = parse_token_20(&params, "unit_token")?;
+    match node.stable_asset_registry().policy(&issuer, &unit_token) {
+        Some(policy) => Ok(json!({
+            "found": true,
+            "policy": stable_asset_policy_to_json(&policy),
+        })),
+        None => Ok(json!({ "found": false })),
+    }
+}
+
+/// `tenzro_mintStableAsset` — mint `amount` of the issuer's unit. The
+/// stable-asset policy must exist and the SecureMint reserve floor on the
+/// same token is the hard gate: a mint that would push circulating above
+/// the attested reserve is rejected regardless of issuer scope. Params:
+/// `{ issuer, unit_token, amount }`.
+pub(crate) async fn handle_mint_stable_asset(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let issuer = tenzro_types::primitives::Address(parse_uint256_param(&params, "issuer")?);
+    let unit_token = parse_token_20(&params, "unit_token")?;
+    let amount = parse_u128_param(&params, "amount")?;
+
+    // Require the issuer policy first so an unregistered unit can't mint.
+    node.stable_asset_registry()
+        .require(&issuer, &unit_token)
+        .map_err(|e| invalid_params(e.to_string()))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    match node
+        .secure_mint_registry()
+        .check_and_mint(&unit_token, amount, now)
+    {
+        Ok(policy) => Ok(json!({
+            "minted": true,
+            "unit_token": format!("0x{}", hex::encode(unit_token)),
+            "amount": amount.to_string(),
+            "circulating": policy.circulating.to_string(),
+            "reserve": policy.reserve.to_string(),
+        })),
+        Err(err) => Err(invalid_params(format!("mint rejected by reserve floor: {err}"))),
+    }
+}
+
+/// `tenzro_redeemStableAsset` — burn `amount` of the issuer's unit,
+/// decrementing the SecureMint circulating supply. Params:
+/// `{ issuer, unit_token, amount }`.
+pub(crate) async fn handle_redeem_stable_asset(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+    let issuer = tenzro_types::primitives::Address(parse_uint256_param(&params, "issuer")?);
+    let unit_token = parse_token_20(&params, "unit_token")?;
+    let amount = parse_u128_param(&params, "amount")?;
+
+    node.stable_asset_registry()
+        .require(&issuer, &unit_token)
+        .map_err(|e| invalid_params(e.to_string()))?;
+
+    match node.secure_mint_registry().record_burn(&unit_token, amount) {
+        Some(policy) => Ok(json!({
+            "redeemed": true,
+            "unit_token": format!("0x{}", hex::encode(unit_token)),
+            "amount": amount.to_string(),
+            "circulating": policy.circulating.to_string(),
+        })),
+        None => Err(invalid_params(format!(
+            "no Secure-Mint policy installed for unit 0x{}",
+            hex::encode(unit_token)
+        ))),
+    }
+}
+
 // =============================================================================
 // Wave 7 — Wire Wave 1-5 features as live RPC handlers
 //

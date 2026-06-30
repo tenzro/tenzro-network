@@ -1405,7 +1405,7 @@ impl TeeProvider for NvidiaGpuProvider {
 /// The architecture decides which firmware-measurement format NRAS expects
 /// and which evidence-collection path to use.
 ///
-/// Coverage spans the broader NVIDIA lineup, not just SOTA datacenter parts:
+/// Coverage spans the broader NVIDIA lineup, not just the latest datacenter parts:
 /// datacenter Hopper/Blackwell/Ada/Ampere/Turing/Volta, RTX 40/30/20 series
 /// consumer cards, and Tesla T4/V100. CC support is a separate predicate
 /// (`cc_capable`) — a GPU may be recognized but not Confidential-Computing

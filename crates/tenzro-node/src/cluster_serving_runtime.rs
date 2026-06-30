@@ -65,6 +65,25 @@ use tenzro_network::cluster_tunnel_proto::{
 };
 use tenzro_network::{InboundClusterTunnel, NetworkService, OutboundClusterTunnelResult};
 
+/// Resolve the `rpc-server` binary path, preferring the `TENZRO_RPC_SERVER_BIN`
+/// runtime override over the compile-time path baked in by `llama-cpp-2`.
+///
+/// The compile-time path points into the build's cargo `OUT_DIR`, which does
+/// not survive into a multi-stage container image. The runtime image copies
+/// rpc-server to a stable path and sets `TENZRO_RPC_SERVER_BIN` to point at it.
+/// Returns `None` if neither source yields an existing file.
+fn resolve_rpc_server_bin() -> Option<String> {
+    if let Ok(p) = std::env::var("TENZRO_RPC_SERVER_BIN") {
+        if !p.is_empty() && std::path::Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+    let compiled = llama_cpp_2::rpc_server_bin()?;
+    std::path::Path::new(compiled)
+        .exists()
+        .then(|| compiled.to_string())
+}
+
 /// Errors raised while bringing up or running a cluster pipeline.
 #[derive(Debug, thiserror::Error)]
 pub enum ClusterServingError {
@@ -149,9 +168,7 @@ impl ClusterServingRuntime {
     /// present; otherwise returns [`ClusterServingError::RpcServerUnavailable`]
     /// without subscribing (the head will see `NoMember` and fail over).
     pub async fn serve_as_member(&self) -> Result<(), ClusterServingError> {
-        let rpc_bin = llama_cpp_2::rpc_server_bin()
-            .ok_or(ClusterServingError::RpcServerUnavailable)?
-            .to_string();
+        let rpc_bin = resolve_rpc_server_bin().ok_or(ClusterServingError::RpcServerUnavailable)?;
 
         let rx = self
             .network

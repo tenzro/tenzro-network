@@ -1484,6 +1484,10 @@ async fn dispatch_request(
         "tenzro_secureMintCheck" => crate::rpc_integrations::handle_secure_mint_check(node, request.params).await,
         "tenzro_secureMintApply" => crate::rpc_integrations::handle_secure_mint_apply(node, request.params).await,
         "tenzro_secureMintRecordBurn" => crate::rpc_integrations::handle_secure_mint_record_burn(node, request.params).await,
+        "tenzro_registerStableAsset" => crate::rpc_integrations::handle_register_stable_asset(node, request.params).await,
+        "tenzro_getStableAsset" => crate::rpc_integrations::handle_get_stable_asset(node, request.params).await,
+        "tenzro_mintStableAsset" => crate::rpc_integrations::handle_mint_stable_asset(node, request.params).await,
+        "tenzro_redeemStableAsset" => crate::rpc_integrations::handle_redeem_stable_asset(node, request.params).await,
         "tenzro_peerCount" => handle_peer_count(node).await,
         "tenzro_syncing" => handle_syncing(node).await,
         "tenzro_getNetworkStats" => handle_get_network_stats(node).await,
@@ -2267,7 +2271,7 @@ async fn handle_block_number(node: &Arc<TenzroNode>) -> std::result::Result<Valu
 /// - otherwise: **invalid**, force resync against a fresh checkpoint.
 ///
 /// These thresholds match Helios's `--strict-checkpoint-age 14` and
-/// the SOTA wallet-UX practice documented in
+/// the best-practice wallet-UX documented in
 /// `project_offline_wallet_security_playbook.md`.
 async fn handle_current_header(
     node: &Arc<TenzroNode>,
@@ -2344,7 +2348,7 @@ async fn handle_current_header(
 ///          drop the op, the user's balance dropped since signing.
 ///        - `{status: "invalid", reason}` — drop with reason.
 ///
-/// Pattern: SOTA mempool re-validation on reconnect. Helios + Argent +
+/// Pattern: best-practice mempool re-validation on reconnect. Helios + Argent +
 /// Coinbase Smart Wallet all do this; see
 /// `project_offline_wallet_security_playbook.md` item 8.
 async fn handle_revalidate_user_op(
@@ -23357,10 +23361,12 @@ async fn handle_create_api_key(
             "inference" => ApiKeyScope::Inference,
             "tee" => ApiKeyScope::Tee,
             "bridge" => ApiKeyScope::Bridge,
+            "chainlink" => ApiKeyScope::Chainlink,
+            "issuer" => ApiKeyScope::Issuer,
             other => {
                 return Err(JsonRpcError {
                     code: -32602,
-                    message: format!("Unknown scope: {} (expected canton | evm | svm | inference | tee | bridge)", other),
+                    message: format!("Unknown scope: {} (expected canton | evm | svm | inference | tee | bridge | chainlink | issuer)", other),
                     data: None,
                 });
             }

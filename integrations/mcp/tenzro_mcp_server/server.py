@@ -910,9 +910,30 @@ async def download_model(model_id: str) -> dict:
 
 
 @mcp.tool
-async def serve_model(model_id: str) -> dict:
-    """Start serving a model for inference on this node."""
-    result = await rpc_call("tenzro_serveModel", {"model_id": model_id})
+async def serve_model(
+    model_id: str,
+    force_cluster: bool = False,
+    force_single: bool = False,
+    visibility: str = "network",
+) -> dict:
+    """Start serving a model for inference on this node.
+
+    When the model is too large for one host, the node auto-clusters: it reads
+    the GGUF header for layer count, discovers LAN members from gossip, and runs
+    a layer-wise pipeline across them. No options are required.
+
+    - force_cluster: split across the LAN cluster even when the model fits one
+      host.
+    - force_single: never form a cluster; serve single-host.
+    - visibility: "network" (default) gossips the model so any peer can route
+      to it; "private" registers it locally without announcing.
+    """
+    params = {"model_id": model_id, "visibility": visibility}
+    if force_cluster:
+        params["user_forced"] = True
+    if force_single:
+        params["force_single"] = True
+    result = await rpc_call("tenzro_serveModel", params)
     return result
 
 
@@ -2741,6 +2762,67 @@ async def secure_mint_record_burn(asset_id: str, amount: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Stable-Asset Issuance — issuer-agnostic stable units on the reserve floor
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def register_stable_asset(
+    issuer: str,
+    unit_token: str,
+    symbol: str,
+    reserve_source: dict,
+    por_feed_id: str,
+    allowed_rails: list[str],
+    settlement_dst: str,
+) -> dict:
+    """Register or replace an issuer's stable-asset policy (issuer-agnostic
+    stable-unit issuance on the Secure-Mint reserve floor). Requires the
+    `issuer` API-key scope. `reserve_source` is
+    `{"kind": "custodial", "attester_did": ..., "asset_caip19": ...}` or
+    `{"kind": "on_chain_vault", "vault": ..., "asset_caip19": ...}`."""
+    return await rpc_call(
+        "tenzro_registerStableAsset",
+        {
+            "issuer": issuer,
+            "unit_token": unit_token,
+            "symbol": symbol,
+            "reserve_source": reserve_source,
+            "por_feed_id": por_feed_id,
+            "allowed_rails": allowed_rails,
+            "settlement_dst": settlement_dst,
+        },
+    )
+
+
+@mcp.tool
+async def get_stable_asset(issuer: str, unit_token: str) -> dict:
+    """Read an issuer's stable-asset policy."""
+    return await rpc_call(
+        "tenzro_getStableAsset", {"issuer": issuer, "unit_token": unit_token}
+    )
+
+
+@mcp.tool
+async def mint_stable_asset(issuer: str, unit_token: str, amount: str) -> dict:
+    """Mint stable units, hard-gated by the Secure-Mint reserve floor so
+    circulating can never exceed the attested reserve."""
+    return await rpc_call(
+        "tenzro_mintStableAsset",
+        {"issuer": issuer, "unit_token": unit_token, "amount": amount},
+    )
+
+
+@mcp.tool
+async def redeem_stable_asset(issuer: str, unit_token: str, amount: str) -> dict:
+    """Redeem (burn) stable units, decrementing circulating supply."""
+    return await rpc_call(
+        "tenzro_redeemStableAsset",
+        {"issuer": issuer, "unit_token": unit_token, "amount": amount},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Hyperlane V3 (sovereign Tenzro-validator-set ISM)
 # ---------------------------------------------------------------------------
 
@@ -3764,6 +3846,31 @@ async def cluster_plan(
     return await rpc_call(
         "tenzro_clusterPlan",
         {"model": model, "members": members, "user_forced": user_forced},
+    )
+
+
+@mcp.tool
+async def cluster_preview(
+    model_id: str,
+    force_cluster: bool = False,
+    force_single: bool = False,
+) -> dict:
+    """Preview how a downloaded model would be placed using the node's live view.
+
+    Unlike cluster_plan, this needs no manual dimensions or member list: the
+    node derives the model shape from the GGUF header and discovers LAN members
+    from gossip. `force_cluster` requests a cluster even when the model fits one
+    member; `force_single` previews single-host placement. Returns the fit
+    decision, discovered members, any rejected members (with reasons), and the
+    proposed per-member layer stages. Call this before serve_model.
+    """
+    return await rpc_call(
+        "tenzro_clusterPreview",
+        {
+            "model_id": model_id,
+            "user_forced": force_cluster,
+            "force_single": force_single,
+        },
     )
 
 

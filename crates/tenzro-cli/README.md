@@ -896,6 +896,36 @@ tenzro token swap --from <token_id> --to <token_id> --amount <amount>
 tenzro token burn-quota
 ```
 
+### Stable-Asset Issuance
+
+Issuer-agnostic stable-unit policies layered on the Secure-Mint reserve floor.
+An issuer registers a unit, then mints/redeems against it; mints are hard-gated
+so circulating supply can never exceed the attested reserve. Register requires
+an API key with the `issuer` scope.
+
+```bash
+# Register an issuer's stable-asset policy (tenzro_registerStableAsset)
+tenzro stable-asset register \
+  --issuer <issuer-32b-hex> \
+  --unit-token <token-20b-hex> \
+  --symbol USDX \
+  --reserve-kind custodial \
+  --attester-did did:tenzro:... \
+  --asset-caip19 iso4217:USD \
+  --por-feed-id <feed-id> \
+  --rail x402 --rail ap2 \
+  --settlement-dst <dst-32b-hex>
+
+# Read a policy (tenzro_getStableAsset)
+tenzro stable-asset get --issuer <issuer-32b-hex> --unit-token <token-20b-hex>
+
+# Mint units, gated by the reserve floor (tenzro_mintStableAsset)
+tenzro stable-asset mint --issuer <issuer-32b-hex> --unit-token <token-20b-hex> --amount 1000000
+
+# Redeem (burn) units (tenzro_redeemStableAsset)
+tenzro stable-asset redeem --issuer <issuer-32b-hex> --unit-token <token-20b-hex> --amount 500000
+```
+
 ### Contract Operations
 
 ```bash

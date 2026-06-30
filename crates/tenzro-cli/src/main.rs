@@ -31,7 +31,7 @@ use commands::{
     AdaptiveBurnCommand, SeedAgentCommand, Erc7683Command, Erc7579Command, PqHybridCommand,
     AdminCommand,
     KeyCommand,
-    WorkflowCommand, Eip7702Command, Permit2Command, SecureMintCommand,
+    WorkflowCommand, Eip7702Command, Permit2Command, SecureMintCommand, StableAssetCommand,
     HyperlaneCommand, AxelarCommand, BabylonCommand, CaipCommand,
     DiscoverCommand, ClusterCommand,
     urwa::UrwaCommand, ivms101::Ivms101Command, attested_clock::AttestedClockCommand,
@@ -364,6 +364,10 @@ enum Command {
     #[command(subcommand)]
     SecureMint(SecureMintCommand),
 
+    /// Stable-asset issuance: register / get / mint / redeem an issuer's stable unit
+    #[command(subcommand)]
+    StableAsset(StableAssetCommand),
+
     /// ERC-7943 (uRWA) tokenized RWA compliance: kill-switch / freeze / forced-transfer
     #[command(subcommand)]
     Urwa(UrwaCommand),
@@ -632,6 +636,7 @@ async fn main() -> Result<()> {
         Command::Eip7702(cmd) => cmd.execute().await?,
         Command::Permit2(cmd) => cmd.execute().await?,
         Command::SecureMint(cmd) => cmd.execute().await?,
+        Command::StableAsset(cmd) => cmd.execute().await?,
         Command::Urwa(cmd) => cmd.execute().await?,
         Command::Ivms101(cmd) => cmd.execute().await?,
         Command::AttestedClock(cmd) => cmd.execute().await?,

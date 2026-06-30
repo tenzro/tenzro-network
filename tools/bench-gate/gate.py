@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SOTA hard-threshold gate for criterion benchmarks.
+Performance hard-threshold gate for criterion benchmarks.
 
 Walks target/criterion/<group>/<bench>/new/estimates.json after a
 cargo bench run, looks up each bench id in thresholds.toml, and exits
@@ -64,7 +64,7 @@ def main() -> int:
             if measured > cap:
                 failures.append(
                     f"{t['id']}: {measured:.0f} ns > cap {cap} ns "
-                    f"(SOTA ref: {t['reference']})"
+                    f"(ref: {t['reference']})"
                 )
             else:
                 print(
@@ -77,7 +77,7 @@ def main() -> int:
             if measured < floor:
                 failures.append(
                     f"{t['id']}: {measured:.0f} ops/s < floor {floor} "
-                    f"(SOTA ref: {t['reference']})"
+                    f"(ref: {t['reference']})"
                 )
             else:
                 print(
@@ -93,14 +93,14 @@ def main() -> int:
             print(f"  miss: {m}")
 
     if failures:
-        print(f"\n::error::{len(failures)} bench(es) breached SOTA thresholds:")
+        print(f"\n::error::{len(failures)} bench(es) breached performance thresholds:")
         for f in failures:
             print(f"  FAIL {f}")
         return 1
 
     print(
         f"\nAll {len(thresholds) - len(misses)} measured bench(es) "
-        f"within SOTA thresholds."
+        f"within performance thresholds."
     )
     return 0
 

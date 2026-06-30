@@ -375,7 +375,7 @@ pub enum TransactionType {
         amount: u128,
     },
     /// Register the signing wallet as a Candidate validator (Dynamic Validator
-    /// Set, 2026-SOTA permissionless join).
+    /// Set, modern permissionless join).
     ///
     /// On execution the VM emits a `ValidatorRegister` typed log carrying
     /// `from || stake_le || consensus_pubkey || pq_pubkey || withdrawal_address ||

@@ -89,7 +89,7 @@ drifts toward realised execution.
 
 The `BridgeAdapterId` enum carries: `layerzero`, `ccip`, `wormhole`,
 `debridge`, `hyperlane`, `axelar`, `lifi`, `canton`. Per-adapter wiring
-priority reflects the SOTA fee-token-native capability of each bridge:
+priority reflects the current fee-token-native capability of each bridge:
 
 - **CCIP** — easiest: `Router.ccipSend()` already accepts a feeToken
   argument (native or LINK); register TNZO as the Tenzro-side feeToken.

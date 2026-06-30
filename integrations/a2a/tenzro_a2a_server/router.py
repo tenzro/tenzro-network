@@ -132,6 +132,11 @@ def route_message(text: str) -> str:
     ]):
         return "secure-mint"
     if any(k in t for k in [
+        "stable-asset", "stable asset", "stable unit", "stablecoin issuance",
+        "issue stable", "mint stable", "redeem stable", "stable-unit",
+    ]):
+        return "stable-asset"
+    if any(k in t for k in [
         "hyperlane", "tenzro-ism", "hyperlane mailbox", "sovereign ism",
     ]):
         return "hyperlane"

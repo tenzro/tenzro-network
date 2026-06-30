@@ -108,7 +108,7 @@ pub struct FillInstruction {
 /// tnzo_amount_wei` to know what TNZO it's reimbursed in TNZO terms, the
 /// origin settler enforces the quote's `valid_until_ms`, and the destination
 /// settler routes the proof through whichever adapter the solver chose. This
-/// is the SOTA across-protocol pattern (Across V3 hub-and-spoke + Cosmos
+/// is the leading across-protocol pattern (Across V3 hub-and-spoke + Cosmos
 /// ICS-29 escrow fee abstraction): user signs once with one TNZO-denominated
 /// price, the solver picks the bridge based on liquidity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

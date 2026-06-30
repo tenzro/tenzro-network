@@ -1961,7 +1961,7 @@ If the Tenzro node has MCP enabled (port 3001), you can use the Model Context Pr
 - `unregister_model_endpoint` — Unregister a model service endpoint
 - `download_model` — Download a model from the registry
 - `get_download_progress` — Get download progress for a model
-- `serve_model` — Start serving a model for inference
+- `serve_model` — Start serving a model for inference (auto-clusters when it exceeds one host; `force_cluster` / `force_single` override placement, `visibility="private"` keeps it local/LAN-only)
 - `stop_model` — Stop serving a model
 - `delete_model` — Delete a downloaded model
 - `discover_models` — Discover AI models available on the network

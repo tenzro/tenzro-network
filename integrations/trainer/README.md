@@ -91,7 +91,7 @@ data parallelism among co-located trainers; the cross-fragment outer-gradient
 exchange is *not* Hivemind, it goes over the Rust syncer + the
 `tenzro/training/*` gossipsub topics.
 
-Per-modality inner loops use the SOTA Python library for the modality:
+Per-modality inner loops use the leading Python library for the modality:
 `transformers` / native PyTorch for language, `gluonts` / native PyTorch for
 timeseries, `timm` for vision. Outer gradients are packaged as safetensors
 fragments with SHA-256 hashes and Ed25519 signatures.

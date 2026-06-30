@@ -42,6 +42,65 @@ pub trait SettlementCallback: Send + Sync {
     ) -> std::result::Result<String, PaymentError>;
 }
 
+/// Outcome of converting a payer-denominated amount into the asset the
+/// payee settles in.
+#[derive(Debug, Clone)]
+pub struct Conversion {
+    /// Amount, in smallest unit, of `to_asset` the payee receives.
+    pub amount_out: u128,
+    /// The asset the on-chain settlement should record (the payee's asset).
+    pub to_asset: String,
+    /// Opaque reference to the conversion (rate quote id) for the receipt
+    /// audit trail.
+    pub quote_ref: String,
+}
+
+/// Optional conversion hook bridging a stable unit to the payee's asset.
+///
+/// An agent may choose to spend a stable unit (e.g. "USDX") while the payee
+/// is denominated in some token (e.g. "USDC"). The gateway runs this hook
+/// between protocol settlement and on-chain settle: it converts the payer's
+/// `from_asset` into the payee's `to_asset` at the oracle rate and returns
+/// the converted amount to record on-chain.
+///
+/// Direct-token mode (`from_asset == to_asset`) is the no-op default
+/// implemented by [`IdentityConversionHook`], so a gateway without a stable
+/// unit configured behaves exactly as before.
+#[async_trait]
+pub trait ConversionHook: Send + Sync {
+    /// Convert `amount` of `from_asset` into the equivalent in `to_asset`.
+    ///
+    /// Implementations must treat `from_asset == to_asset` as an identity
+    /// (no rate lookup, `amount_out == amount`).
+    async fn convert(
+        &self,
+        from_asset: &str,
+        to_asset: &str,
+        amount: u128,
+    ) -> std::result::Result<Conversion, PaymentError>;
+}
+
+/// No-op conversion hook: passes the amount through unchanged. Used when the
+/// agent transacts directly in the payee's asset (direct-token mode) or when
+/// no stable unit is configured.
+pub struct IdentityConversionHook;
+
+#[async_trait]
+impl ConversionHook for IdentityConversionHook {
+    async fn convert(
+        &self,
+        _from_asset: &str,
+        to_asset: &str,
+        amount: u128,
+    ) -> std::result::Result<Conversion, PaymentError> {
+        Ok(Conversion {
+            amount_out: amount,
+            to_asset: to_asset.to_string(),
+            quote_ref: String::new(),
+        })
+    }
+}
+
 /// Multi-protocol payment gateway for Tenzro Network
 pub struct TenzroPaymentGateway {
     protocols: DashMap<String, Arc<dyn PaymentProtocol>>,
@@ -49,6 +108,9 @@ pub struct TenzroPaymentGateway {
     challenge_store: ChallengeStore,
     /// Optional on-chain settlement callback (bridges to SettlementEngine + TnzoToken)
     settlement_callback: Option<Arc<dyn SettlementCallback>>,
+    /// Optional stable-unit conversion hook. When unset, the payer's asset
+    /// settles directly (no conversion).
+    conversion_hook: Option<Arc<dyn ConversionHook>>,
 }
 
 impl TenzroPaymentGateway {
@@ -58,6 +120,7 @@ impl TenzroPaymentGateway {
             protocols: DashMap::new(),
             challenge_store: ChallengeStore::new(),
             settlement_callback: None,
+            conversion_hook: None,
         }
     }
 
@@ -70,6 +133,7 @@ impl TenzroPaymentGateway {
             protocols: DashMap::new(),
             challenge_store: ChallengeStore::with_storage(storage),
             settlement_callback: None,
+            conversion_hook: None,
         }
     }
 
@@ -80,6 +144,16 @@ impl TenzroPaymentGateway {
     /// on the TNZO token layer.
     pub fn with_settlement_callback(mut self, callback: Arc<dyn SettlementCallback>) -> Self {
         self.settlement_callback = Some(callback);
+        self
+    }
+
+    /// Attaches a stable-unit conversion hook.
+    ///
+    /// When set, `verify_and_settle` converts the payer's asset into the
+    /// payee's asset at the oracle rate before recording the on-chain
+    /// settlement. Without it, the payer's asset settles directly.
+    pub fn with_conversion_hook(mut self, hook: Arc<dyn ConversionHook>) -> Self {
+        self.conversion_hook = Some(hook);
         self
     }
 
@@ -171,12 +245,60 @@ impl PaymentGateway for TenzroPaymentGateway {
             )
             .unwrap_or_default();
 
+            // Dual-mode settlement: if the payer spends a stable unit
+            // (`credential.asset`) different from the payee's asset
+            // (`receipt.asset`), convert at the oracle rate before recording
+            // the on-chain transfer. Direct-token mode (assets equal, or no
+            // hook configured) settles the payer's amount unchanged.
+            let (settle_amount, settle_asset) = if credential.asset != receipt.asset {
+                if let Some(hook) = &self.conversion_hook {
+                    match hook
+                        .convert(&credential.asset, &receipt.asset, receipt.amount)
+                        .await
+                    {
+                        Ok(conv) => {
+                            debug!(
+                                "Converted {} {} -> {} {} for receipt {} (quote={})",
+                                receipt.amount,
+                                credential.asset,
+                                conv.amount_out,
+                                conv.to_asset,
+                                receipt.receipt_id,
+                                conv.quote_ref
+                            );
+                            if !conv.quote_ref.is_empty() {
+                                receipt.extra.insert(
+                                    "conversion_quote".to_string(),
+                                    serde_json::Value::String(conv.quote_ref),
+                                );
+                                receipt.extra.insert(
+                                    "from_asset".to_string(),
+                                    serde_json::Value::String(credential.asset.clone()),
+                                );
+                            }
+                            (conv.amount_out, conv.to_asset)
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Conversion {}->{} failed for receipt {}: {}",
+                                credential.asset, receipt.asset, receipt.receipt_id, e
+                            );
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    (receipt.amount, receipt.asset.clone())
+                }
+            } else {
+                (receipt.amount, receipt.asset.clone())
+            };
+
             match callback
                 .settle_on_chain(
                     &payer_bytes,
                     &payee_bytes,
-                    receipt.amount,
-                    &receipt.asset,
+                    settle_amount,
+                    &settle_asset,
                     &receipt.receipt_id,
                 )
                 .await
@@ -335,6 +457,129 @@ mod tests {
         let receipt = gateway.verify_and_settle(&credential).await.unwrap();
         assert_eq!(receipt.amount, 3000);
         assert_eq!(receipt.protocol, "test");
+    }
+
+    use std::sync::Mutex;
+
+    /// Records what was handed to `settle_on_chain` so tests can assert on
+    /// the converted amount/asset.
+    struct RecordingCallback {
+        seen: Arc<Mutex<Option<(u128, String)>>>,
+    }
+
+    #[async_trait]
+    impl SettlementCallback for RecordingCallback {
+        async fn settle_on_chain(
+            &self,
+            _payer: &[u8],
+            _payee: &[u8],
+            amount: u128,
+            asset: &str,
+            _receipt_id: &str,
+        ) -> std::result::Result<String, PaymentError> {
+            *self.seen.lock().unwrap() = Some((amount, asset.to_string()));
+            Ok("0xsettled".to_string())
+        }
+    }
+
+    /// Halves the amount on convert (stand-in for a 2:1 rate) and renames the
+    /// asset to the payee's.
+    struct HalvingHook;
+
+    #[async_trait]
+    impl ConversionHook for HalvingHook {
+        async fn convert(
+            &self,
+            from_asset: &str,
+            to_asset: &str,
+            amount: u128,
+        ) -> std::result::Result<Conversion, PaymentError> {
+            if from_asset == to_asset {
+                return Ok(Conversion {
+                    amount_out: amount,
+                    to_asset: to_asset.to_string(),
+                    quote_ref: String::new(),
+                });
+            }
+            Ok(Conversion {
+                amount_out: amount / 2,
+                to_asset: to_asset.to_string(),
+                quote_ref: "quote-1".to_string(),
+            })
+        }
+    }
+
+    async fn settle_with(
+        hook: Option<Arc<dyn ConversionHook>>,
+        credential_asset: &str,
+    ) -> (u128, String, PaymentReceipt) {
+        let store = ChallengeStore::new();
+        let seen = Arc::new(Mutex::new(None));
+        let mut gateway = TenzroPaymentGateway::new()
+            .with_challenge_store(store.clone())
+            .with_settlement_callback(Arc::new(RecordingCallback { seen: seen.clone() }));
+        if let Some(h) = hook {
+            gateway = gateway.with_conversion_hook(h);
+        }
+        gateway.register_protocol(Arc::new(TestProtocol));
+
+        let challenge = gateway
+            .create_challenge("test", "/api/paid", 3000, "USDC", "0xrecipient")
+            .await
+            .unwrap();
+        store.store(&challenge);
+
+        let credential = PaymentCredential {
+            credential_id: "cred-conv".to_string(),
+            challenge_id: challenge.challenge_id.clone(),
+            protocol: "test".to_string(),
+            payer_did: "did:tenzro:human:alice".to_string(),
+            payer_address: String::new(),
+            amount: 3000,
+            asset: credential_asset.to_string(),
+            signature: Vec::new(),
+            pq_signature: Vec::new(),
+            pq_public_key: Vec::new(),
+            extra: HashMap::new(),
+        };
+
+        let receipt = gateway.verify_and_settle(&credential).await.unwrap();
+        let (amt, asset) = seen.lock().unwrap().clone().unwrap();
+        (amt, asset, receipt)
+    }
+
+    #[tokio::test]
+    async fn test_direct_mode_no_conversion() {
+        // Payer spends the same asset the payee settles in — amount passes
+        // through even with a hook attached.
+        let (amt, asset, _) = settle_with(Some(Arc::new(HalvingHook)), "USDC").await;
+        assert_eq!(amt, 3000);
+        assert_eq!(asset, "USDC");
+    }
+
+    #[tokio::test]
+    async fn test_stable_unit_conversion() {
+        // Payer spends USDX, payee settles USDC — hook halves (2:1 rate).
+        let (amt, asset, receipt) = settle_with(Some(Arc::new(HalvingHook)), "USDX").await;
+        assert_eq!(amt, 1500);
+        assert_eq!(asset, "USDC");
+        assert_eq!(
+            receipt.extra.get("conversion_quote").and_then(|v| v.as_str()),
+            Some("quote-1")
+        );
+        assert_eq!(
+            receipt.extra.get("from_asset").and_then(|v| v.as_str()),
+            Some("USDX")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mismatch_without_hook_settles_payee_asset() {
+        // Asset mismatch but no hook configured — settle the receipt's asset
+        // and amount unchanged (no silent conversion).
+        let (amt, asset, _) = settle_with(None, "USDX").await;
+        assert_eq!(amt, 3000);
+        assert_eq!(asset, "USDC");
     }
 
     #[tokio::test]

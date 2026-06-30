@@ -1513,6 +1513,18 @@ pub struct TenzroNode {
     /// [`tenzro_vm::secure_mint::SecureMintRegistry`].
     secure_mint_registry: Arc<tenzro_vm::secure_mint::SecureMintRegistry>,
 
+    /// Stable-asset registry. Holds per-issuer stable-unit policies
+    /// (reserve source, controller config, allowed rails, settlement
+    /// destination). Ties each unit to its SecureMint floor on the same
+    /// token. See [`tenzro_vm::stable_asset_registry::StableAssetRegistry`].
+    stable_asset_registry: Arc<tenzro_vm::stable_asset_registry::StableAssetRegistry>,
+
+    /// Governance-set rate oracle backing stable-unit ↔ token conversion at
+    /// settlement. Attached to the payment gateway as a
+    /// [`crate::stable_conversion::OracleConversionHook`] so an agent can
+    /// spend a stable unit while the payee settles in another asset.
+    stable_rate_oracle: Arc<tenzro_vm::stable_rate_oracle::GovernanceSetRateOracle>,
+
     /// ERC-7943 (uRWA) per-token kill-switch + per-account freeze
     /// registry. The EVM transfer hook consults `check_transfer`
     /// pre-debit so a kill-switched token cannot move and a frozen
@@ -1847,6 +1859,8 @@ impl TenzroNode {
             eip7702_delegation_registry: Arc::new(tenzro_vm::eip7702::DelegationRegistry::new()),
             permit2_nonce_bitmap: Arc::new(tenzro_vm::permit2::Permit2NonceBitmap::new()),
             secure_mint_registry: Arc::new(tenzro_vm::secure_mint::SecureMintRegistry::new()),
+            stable_asset_registry: Arc::new(tenzro_vm::stable_asset_registry::StableAssetRegistry::new()),
+            stable_rate_oracle: Arc::new(tenzro_vm::stable_rate_oracle::GovernanceSetRateOracle::new()),
             urwa_registry: Arc::new(tenzro_vm::erc7943::UrwaRegistry::new()),
             erc8004_agent_registry: None,
             erc8004_system_signer: None,
@@ -2616,6 +2630,11 @@ impl TenzroNode {
         );
         self.secure_mint_registry = Arc::new(
             tenzro_vm::secure_mint::SecureMintRegistry::with_storage(
+                store.clone() as Arc<dyn tenzro_storage::KvStore>,
+            ),
+        );
+        self.stable_asset_registry = Arc::new(
+            tenzro_vm::stable_asset_registry::StableAssetRegistry::with_storage(
                 store.clone() as Arc<dyn tenzro_storage::KvStore>,
             ),
         );
@@ -6576,6 +6595,16 @@ impl TenzroNode {
             gateway
         };
 
+        // Attach the stable-unit conversion hook so an agent can spend a
+        // stable unit while the payee settles in another asset; the gateway
+        // resolves the rate via the oracle between protocol and on-chain
+        // settle. Direct-token payments (from==to) pass through untouched.
+        let conversion_hook = Arc::new(crate::stable_conversion::OracleConversionHook::new(
+            self.stable_rate_oracle.clone(),
+        ));
+        let gateway = gateway.with_conversion_hook(conversion_hook);
+        info!("Payment gateway wired to stable-unit conversion hook");
+
         self.payment_gateway = Some(Arc::new(gateway));
         self.health_monitor.mark_healthy("payments");
 
@@ -8541,6 +8570,64 @@ impl TenzroNode {
         &self,
     ) -> Arc<tenzro_vm::secure_mint::SecureMintRegistry> {
         self.secure_mint_registry.clone()
+    }
+
+    /// Spawn the stable-unit controller driver loop. Every `period_secs` it
+    /// runs one peg/buffer epoch per registered unit, sizing supply moves
+    /// against the SecureMint floor. Price and buffer observations come from
+    /// the supplied sources, so this is only spawned once a node has live
+    /// telemetry wired — the driver never fabricates a market price.
+    pub fn start_stable_controller(
+        &self,
+        price_source: Arc<dyn crate::stable_controller_driver::MarketPriceSource>,
+        buffer_source: Arc<dyn crate::stable_controller_driver::BufferValueSource>,
+        period_secs: u64,
+    ) {
+        let driver = Arc::new(crate::stable_controller_driver::StableControllerDriver::new(
+            self.stable_asset_registry.clone(),
+            self.secure_mint_registry.clone(),
+            price_source,
+            buffer_source,
+        ));
+        tokio::spawn(async move {
+            let mut tick =
+                tokio::time::interval(std::time::Duration::from_secs(period_secs.max(1)));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await; // skip the immediate fire
+            loop {
+                tick.tick().await;
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                for step in driver.step_all(now_secs) {
+                    if step.applied_delta != 0 {
+                        info!(
+                            symbol = %step.symbol,
+                            applied_delta = step.applied_delta,
+                            band = ?step.output.band,
+                            buffer_action = ?step.output.buffer_action,
+                            "stable controller actuated supply"
+                        );
+                    }
+                }
+            }
+        });
+        info!("Stable controller driver started (every {period_secs}s)");
+    }
+
+    /// Returns the stable-asset registry handle.
+    pub fn stable_asset_registry(
+        &self,
+    ) -> Arc<tenzro_vm::stable_asset_registry::StableAssetRegistry> {
+        self.stable_asset_registry.clone()
+    }
+
+    /// Returns the stable-unit rate oracle handle.
+    pub fn stable_rate_oracle(
+        &self,
+    ) -> Arc<tenzro_vm::stable_rate_oracle::GovernanceSetRateOracle> {
+        self.stable_rate_oracle.clone()
     }
 
     /// Returns the ERC-7943 (uRWA) registry handle. EVM transfer hook

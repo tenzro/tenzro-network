@@ -73,6 +73,20 @@ RUN mkdir -p apps/tenzro-desktop/src-tauri/src && \
 # Build tenzro-node and tenzro-cli (excludes desktop app)
 RUN cargo build --release -p tenzro-node -p tenzro-cli
 
+# The `rpc` feature (on by default via cluster-serving) builds the standalone
+# ggml `rpc-server` binary into llama-cpp-sys-2's cargo OUT_DIR. That path does
+# not survive into the runtime stage, so stage it at a fixed location for COPY.
+# The final ldd guard fails the build if rpc-server links a ggml/llama shared
+# object: the slim runtime only carries libstdc++/libgomp/libssl, so a shared
+# ggml link would ENOENT at exec on the fleet. Default build is static; this
+# guards against a future dynamic-link regression.
+RUN set -eux; \
+    src="$(find target/release/build -type f -name rpc-server -perm -u+x 2>/dev/null | head -n1)"; \
+    test -n "$src"; \
+    cp "$src" /build/rpc-server; \
+    ldd /build/rpc-server || true; \
+    ! ldd /build/rpc-server | grep -qiE 'libggml|libllama|not found'
+
 # Stage 2: Runtime
 FROM debian:bookworm-slim AS runtime
 
@@ -80,6 +94,8 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     curl \
+    libstdc++6 \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -88,6 +104,11 @@ RUN groupadd -r tenzro && useradd -r -g tenzro -m -d /home/tenzro tenzro
 # Copy binaries from builder
 COPY --from=builder /build/target/release/tenzro-node /usr/local/bin/tenzro-node
 COPY --from=builder /build/target/release/tenzro /usr/local/bin/tenzro-cli
+# ggml rpc-server sidecar for LAN cluster serving; the node resolves it via
+# TENZRO_RPC_SERVER_BIN (overrides the compile-time OUT_DIR path that the
+# multi-stage build discards).
+COPY --from=builder /build/rpc-server /usr/local/bin/rpc-server
+ENV TENZRO_RPC_SERVER_BIN=/usr/local/bin/rpc-server
 
 # Create data directories
 RUN mkdir -p /data/tenzro /config /home/tenzro/.tenzro/models && chown -R tenzro:tenzro /data /config /home/tenzro/.tenzro

@@ -2824,6 +2824,35 @@ async def handle_secure_mint(text: str, metadata: dict = None) -> str:
     )
 
 
+async def handle_stable_asset(text: str, metadata: dict = None) -> str:
+    t = text.lower()
+    if "register" in t:
+        return (
+            "Register an issuer's stable-asset policy (needs the `issuer` API-key scope):\n"
+            "  RPC: tenzro_registerStableAsset { issuer, unit_token, symbol, reserve_source, por_feed_id, allowed_rails, settlement_dst }\n"
+            "  reserve_source: { kind: 'custodial', attester_did, asset_caip19 } or { kind: 'on_chain_vault', vault, asset_caip19 }"
+        )
+    if "get" in t or "read" in t or "polic" in t:
+        return "Read an issuer's stable-asset policy: tenzro_getStableAsset { issuer, unit_token }"
+    if "redeem" in t or "burn" in t:
+        return (
+            "Redeem (burn) stable units, decrementing circulating:\n"
+            "  RPC: tenzro_redeemStableAsset { issuer, unit_token, amount }"
+        )
+    if "mint" in t:
+        return (
+            "Mint stable units, hard-gated by the Secure-Mint reserve floor:\n"
+            "  RPC: tenzro_mintStableAsset { issuer, unit_token, amount }"
+        )
+    return (
+        "Stable-Asset issuance — issuer-agnostic stable units layered on the Secure-Mint reserve floor.\n"
+        "  - 'Register'   (tenzro_registerStableAsset, needs `issuer` scope)\n"
+        "  - 'Get'        (tenzro_getStableAsset)\n"
+        "  - 'Mint'       (tenzro_mintStableAsset)\n"
+        "  - 'Redeem'     (tenzro_redeemStableAsset)"
+    )
+
+
 async def handle_hyperlane(text: str, metadata: dict = None) -> str:
     t = text.lower()
     if "list" in t and "chain" in t:
@@ -3111,6 +3140,14 @@ async def handle_discovery(text: str, metadata: dict = None) -> str:
     t = text.lower()
     md = metadata or {}
 
+    if "preview" in t and md.get("model_id"):
+        result = await rpc_call("tenzro_clusterPreview", {
+            "model_id": md["model_id"],
+            "user_forced": md.get("user_forced", False),
+            "force_single": md.get("force_single", False),
+        })
+        return f"Cluster preview:\n{json.dumps(result, indent=2)}"
+
     if "cluster" in t and md.get("model") and md.get("members"):
         result = await rpc_call("tenzro_clusterPlan", {
             "model": md["model"],
@@ -3136,6 +3173,7 @@ async def handle_discovery(text: str, metadata: dict = None) -> str:
         "  - 'Local peers'\n"
         "  - 'Node reachability'\n"
         "  - 'Node hardware profile'\n"
+        "  - 'Cluster preview <model_id>' (metadata: model_id, user_forced?, force_single? — live node view, derives shape from GGUF + discovers members)\n"
         "  - 'Cluster plan' (metadata: model {layers, hidden_dim, total_vram_gb}, members, user_forced?)"
     )
 
@@ -3192,6 +3230,7 @@ HANDLERS: dict[str, callable] = {
     "eip7702": handle_eip7702,
     "permit2": handle_permit2,
     "secure-mint": handle_secure_mint,
+    "stable-asset": handle_stable_asset,
     "hyperlane": handle_hyperlane,
     "axelar": handle_axelar,
     "babylon": handle_babylon,

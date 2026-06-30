@@ -303,7 +303,7 @@ Pure-Rust crate, no networking, no consensus dependencies, **no tensor library**
 - `TrainingReceipt` — the on-chain finalization artifact
 - `TrainingTier` enum: `Open` / `Verified` / `Confidential`
 
-The crate intentionally does **not** define a `ModalityAdapter` in Rust. Modality-specific decoding, batching, and loss computation live entirely in the Python reference trainer where the SOTA libraries already exist.
+The crate intentionally does **not** define a `ModalityAdapter` in Rust. Modality-specific decoding, batching, and loss computation live entirely in the Python reference trainer where the leading libraries already exist.
 
 #### New Integration: `integrations/trainer/`
 

@@ -3,7 +3,7 @@
 //! This module is the on-chain source of truth for who is a validator. It is
 //! consulted at every epoch boundary by the consensus epoch manager to decide
 //! which validators are active in the next epoch. The registry implements a
-//! 2026-SOTA hybrid pattern combining ideas from:
+//! Modern 2026 hybrid pattern combining ideas from:
 //!
 //! - **Ethereum Pectra (EIP-7251 / EIP-7002 / EIP-8061)** — typed transactions
 //!   for register/exit, weight-based churn caps with separate activation and

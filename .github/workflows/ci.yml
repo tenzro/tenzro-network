@@ -77,7 +77,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: cargo bench --workspace --exclude tenzro-desktop -- --save-baseline main
 
-      # SOTA hard-threshold gate. Reads tools/bench-gate/thresholds.toml
+      # Performance hard-threshold gate. Reads tools/bench-gate/thresholds.toml
       # (each entry pins a public reference bound from
       # docs/operators/BENCHMARKS.md) and fails the build if any bench
       # exceeds its ceiling or falls below its floor. Runs on every PR
@@ -86,10 +86,10 @@ jobs:
         if: github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && github.event_name == 'push')
         with:
           python-version: '3.11'
-      - name: Run criterion suite for SOTA gate
+      - name: Run criterion suite for performance gate
         if: github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && github.event_name == 'push')
         run: cargo bench --workspace --exclude tenzro-desktop -- --warm-up-time 1 --measurement-time 3
-      - name: SOTA hard-threshold gate
+      - name: Performance hard-threshold gate
         if: github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && github.event_name == 'push')
         run: python3 tools/bench-gate/gate.py
 
