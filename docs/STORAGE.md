@@ -91,13 +91,17 @@ Objects can be stored with redundancy so the loss of a single provider does not 
 
 The invariant is the same one the whole network settles on: **the consumer pays from their TNZO balance; the provider earns into theirs.** Holding data credits the provider per byte-epoch; consuming storage debits the consumer. A missed retrievability proof moves nothing and is the network's signal that the provider is not holding what it agreed to.
 
+### Prepaid balances
+
+Before a deal can stream, the renter funds a prepaid balance: TNZO is locked out of their on-chain account into a key-less prepaid vault, and the locked amount becomes their spendable balance for streaming settlement. Per-epoch charges draw down that prepaid balance; any unspent remainder can be withdrawn back to the on-chain account. Prepaid balances persist across restarts and are billed once per epoch by a background loop on the node.
+
 ---
 
 ## 6. Interfaces
 
 ### RPC
 
-The node exposes storage endpoints for opening deals, charging epochs, querying deal state, setting pricing, and reporting storage-provider status.
+The node exposes storage endpoints for opening deals, charging epochs, querying deal state, setting pricing, and reporting storage-provider status. Prepaid balances are funded and read through `tenzro_prepaidDeposit`, `tenzro_prepaidWithdraw`, and `tenzro_prepaidBalance`.
 
 ### CLI
 
@@ -105,11 +109,14 @@ The node exposes storage endpoints for opening deals, charging epochs, querying 
 tenzro node storage status
 tenzro node storage open-deal --object <id> --epochs <n>
 tenzro node storage deal --deal <id>
+tenzro escrow prepaid-deposit --renter <addr> --amount <wei>
+tenzro escrow prepaid-balance --renter <addr>
+tenzro escrow prepaid-withdraw --renter <addr> --amount <wei>
 ```
 
 ### SDKs
 
-Both the Rust and TypeScript SDKs expose a `storage` client mirroring the RPC surface.
+Both the Rust and TypeScript SDKs expose a `storage` client mirroring the RPC surface. Prepaid balances are managed through the `settlement` client (`prepaid_deposit` / `prepaid_withdraw` / `prepaid_balance`).
 
 ---
 

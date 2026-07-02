@@ -111,6 +111,7 @@ pub mod compute_rental_runtime;
 pub mod cluster_serving_runtime;
 pub mod node;
 pub mod passkey_rpc;
+pub mod prepaid_account_ledger;
 pub mod pricing;
 pub mod storage_provider_runtime;
 pub mod rpc;

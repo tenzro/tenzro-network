@@ -4,11 +4,13 @@
 //! Phase A2 (#214) alongside the `DaBackend` impl in `tenzro-storage::da`.
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use dashmap::DashMap;
 use iroh::{
     address_lookup::{AddrFilter, DnsAddressLookup, PkarrPublisher, PkarrResolver},
     endpoint::presets,
@@ -17,7 +19,7 @@ use iroh::{
 };
 use iroh_blobs::{
     api::{downloader::Downloader, Store as BlobStore},
-    store::mem::MemStore,
+    store::{fs::FsStore, mem::MemStore},
     BlobsProtocol, Hash, ALPN,
 };
 use tokio::sync::Mutex;
@@ -58,13 +60,37 @@ pub trait IrohResolver: Send + Sync {
     async fn publish_bytes(&self, bytes: Bytes) -> IrohResult<TenzroUri>;
 }
 
+/// Blob store backing for the resolver. Both variants deref to
+/// [`iroh_blobs::api::Store`], so every read/write path is identical —
+/// the enum only pins which owner keeps the store actor alive.
+///
+/// - `Fs` — redb-backed persistent store rooted under the node data dir
+///   (`{data_dir}/iroh/blobs`). Used by every config-driven bind so
+///   published blobs survive process restart.
+/// - `Mem` — in-memory store for tests and ad-hoc clients bound via
+///   [`IrohBackedResolver::bind_in_memory`].
+enum ResolverStore {
+    Fs(FsStore),
+    Mem(MemStore),
+}
+
+impl Deref for ResolverStore {
+    type Target = BlobStore;
+
+    fn deref(&self) -> &BlobStore {
+        match self {
+            Self::Fs(s) => s,
+            Self::Mem(s) => s,
+        }
+    }
+}
+
 /// iroh-blobs-backed implementation of [`IrohResolver`].
 ///
-/// Owns an [`Endpoint`], a [`BlobStore`] (currently in-memory via
-/// [`MemStore`] — the filesystem-backed variant will be wired in when the
-/// node config grows a persistence flag), and a [`Router`] that registers
-/// the iroh-blobs ALPN so peers can fetch by hash. Drop / `shutdown` to
-/// release the endpoint cleanly.
+/// Owns an [`Endpoint`], a [`BlobStore`] (filesystem-backed under the node
+/// data dir for config-driven binds; in-memory for tests), and a [`Router`]
+/// that registers the iroh-blobs ALPN so peers can fetch by hash. Drop /
+/// `shutdown` to release the endpoint cleanly.
 ///
 /// # Variant support (Phase A2)
 ///
@@ -81,7 +107,7 @@ pub trait IrohResolver: Send + Sync {
 ///   on a separate surface; manifest sync arrives with Phase B2.
 pub struct IrohBackedResolver {
     endpoint: Endpoint,
-    store: MemStore,
+    store: ResolverStore,
     /// Router is kept alive (not used directly after spawn) so the
     /// iroh-blobs ALPN handler stays registered until shutdown.
     router: Mutex<Option<Router>>,
@@ -90,7 +116,19 @@ pub struct IrohBackedResolver {
     /// QUIC dial + BAO-stream pull against a provider `EndpointId` when the
     /// blob is not yet in the local store.
     downloader: Downloader,
+    /// Blob-availability hint cache: BLAKE3 hex → endpoints known to hold
+    /// the blob. Populated by the node layer from `tenzro/blobs` gossip
+    /// announcements (see `record_blob_provider`), consulted by
+    /// `fetch_bytes` when the URI carries no explicit provider hint.
+    /// Bounded per-hash at [`MAX_PROVIDERS_PER_BLOB`]; entries rotate
+    /// oldest-out so freshly announced providers win.
+    hint_cache: DashMap<String, Vec<EndpointId>>,
 }
+
+/// Upper bound on cached provider endpoints per blob hash. Announcements
+/// beyond the cap evict the oldest cached endpoint (front of the list),
+/// keeping the cache biased toward providers that announced recently.
+const MAX_PROVIDERS_PER_BLOB: usize = 8;
 
 impl IrohBackedResolver {
     /// Bind a new endpoint with default (n0) discovery and stand up an
@@ -103,15 +141,26 @@ impl IrohBackedResolver {
     /// their TDIP identity and discovery records flow through the
     /// Tenzro-operated Pkarr relay.
     ///
-    /// The persistent filesystem-backed variant (`FsStore::load(path)`)
-    /// will be added when the node config grows a persistence flag —
-    /// the in-memory store is exercisable in tests and on validators that
-    /// re-derive their receipt cache from on-chain commitments.
+    /// The blob store is in-memory and does not survive the process —
+    /// config-driven binds use the persistent filesystem store instead.
     pub async fn bind_in_memory() -> IrohResult<Arc<Self>> {
         let endpoint = Endpoint::bind(presets::N0)
             .await
             .map_err(|e| IrohError::Backend(format!("endpoint bind: {e}")))?;
-        Self::with_endpoint(endpoint, None, None, None)
+        Self::with_endpoint(endpoint, ResolverStore::Mem(MemStore::new()), None, None, None)
+    }
+
+    /// Load the persistent redb-backed blob store rooted under the
+    /// configured data dir (`{data_dir}/blobs`, i.e. `{node_data_dir}/iroh/blobs`
+    /// once `tenzro-node` rebases the iroh dir). `FsStore::load` creates the
+    /// directory tree on first boot and replays the redb manifest on
+    /// subsequent boots, so blobs published before a restart stay fetchable.
+    async fn load_fs_store(cfg: &TenzroIrohConfig) -> IrohResult<ResolverStore> {
+        let root = cfg.data_dir.join("blobs");
+        let store = FsStore::load(&root).await.map_err(|e| {
+            IrohError::Backend(format!("blob store load at {}: {e}", root.display()))
+        })?;
+        Ok(ResolverStore::Fs(store))
     }
 
     /// Bind a new endpoint using a [`TenzroIrohConfig`] — Phase C2 (#220).
@@ -131,23 +180,30 @@ impl IrohBackedResolver {
     /// be opened in firewalls ahead of time. Defaults to `0.0.0.0:9001`
     /// (one above the libp2p QUIC port at 9000). Test / local-dev callers
     /// that pass `bind_addr.port() == 0` AND set neither `pkarr_relay_url`
-    /// nor `secret_key_seed` fall through to [`Self::bind_in_memory`] for
-    /// a random ephemeral binding via the n0 preset.
+    /// nor `secret_key_seed` get a random ephemeral binding via the n0
+    /// preset — but still a persistent blob store under `cfg.data_dir`.
     pub async fn bind_with_config(cfg: &TenzroIrohConfig) -> IrohResult<Arc<Self>> {
-        // Fast path: no Tenzro-specific overrides AND port-0 bind — use the
-        // n0 preset as-is (random ephemeral port). This is the test /
-        // local-dev path; any operator who needs a deterministic port and
-        // production discovery wiring falls through to the builder path
-        // via `build_endpoint`.
+        let endpoint = Self::bind_endpoint_for_config(cfg).await?;
+        let store = Self::load_fs_store(cfg).await?;
+        Self::with_endpoint(endpoint, store, None, None, None)
+    }
+
+    /// Endpoint bind decision shared by `bind_with_config` and
+    /// `bind_with_jsonrpc`: the n0 preset as-is (random ephemeral port)
+    /// when no Tenzro-specific overrides are configured AND the bind port
+    /// is 0 (test / local-dev), otherwise the full builder path via
+    /// `build_endpoint`.
+    async fn bind_endpoint_for_config(cfg: &TenzroIrohConfig) -> IrohResult<Endpoint> {
         if cfg.pkarr_relay_url.is_none()
             && cfg.secret_key_seed.is_none()
             && cfg.bind_addr.port() == 0
         {
-            return Self::bind_in_memory().await;
+            Endpoint::bind(presets::N0)
+                .await
+                .map_err(|e| IrohError::Backend(format!("endpoint bind: {e}")))
+        } else {
+            Self::build_endpoint(cfg).await
         }
-
-        let endpoint = Self::build_endpoint(cfg).await?;
-        Self::with_endpoint(endpoint, None, None, None)
     }
 
     /// Build an iroh `Endpoint` from a [`TenzroIrohConfig`]. Shared by
@@ -261,31 +317,22 @@ impl IrohBackedResolver {
         mcp: Option<Arc<dyn McpStreamHandler>>,
         moe: Option<Arc<dyn JsonRpcDispatcher>>,
     ) -> IrohResult<Arc<Self>> {
-        // Same bind decision as `bind_with_config` — see comments there.
-        let endpoint = if cfg.pkarr_relay_url.is_none()
-            && cfg.secret_key_seed.is_none()
-            && cfg.bind_addr.port() == 0
-        {
-            Endpoint::bind(presets::N0)
-                .await
-                .map_err(|e| IrohError::Backend(format!("endpoint bind: {e}")))?
-        } else {
-            Self::build_endpoint(cfg).await?
-        };
-        Self::with_endpoint(endpoint, a2a, mcp, moe)
+        let endpoint = Self::bind_endpoint_for_config(cfg).await?;
+        let store = Self::load_fs_store(cfg).await?;
+        Self::with_endpoint(endpoint, store, a2a, mcp, moe)
     }
 
-    /// Stand up an in-memory blob store + iroh-blobs ALPN router on top of
-    /// an already-bound endpoint, optionally registering an A2A JSON-RPC
+    /// Stand up the blob store + iroh-blobs ALPN router on top of an
+    /// already-bound endpoint, optionally registering an A2A JSON-RPC
     /// dispatcher, an MCP session handler, and a MoE expert-host
     /// dispatcher on the same router.
     fn with_endpoint(
         endpoint: Endpoint,
+        store: ResolverStore,
         a2a: Option<Arc<dyn JsonRpcDispatcher>>,
         mcp: Option<Arc<dyn McpStreamHandler>>,
         moe: Option<Arc<dyn JsonRpcDispatcher>>,
     ) -> IrohResult<Arc<Self>> {
-        let store = MemStore::new();
         let blobs = BlobsProtocol::new(&store, None);
         let mut builder = Router::builder(endpoint.clone()).accept(ALPN, blobs);
         if let Some(dispatcher) = a2a {
@@ -304,7 +351,61 @@ impl IrohBackedResolver {
             store,
             router: Mutex::new(Some(router)),
             downloader,
+            hint_cache: DashMap::new(),
         }))
+    }
+
+    /// This endpoint's iroh `EndpointId` — the identity peers dial when a
+    /// blob announcement names this node as a provider.
+    pub fn endpoint_id(&self) -> EndpointId {
+        self.endpoint.id()
+    }
+
+    /// Record that `provider` holds the blob addressed by `blake3_hex`.
+    ///
+    /// Called by the node layer when a signed `tenzro/blobs` gossip
+    /// announcement arrives. Idempotent per (hash, provider); when the
+    /// per-hash list exceeds [`MAX_PROVIDERS_PER_BLOB`] the oldest entry
+    /// is evicted so recently announced providers win. Announcements for
+    /// this node's own endpoint are ignored — the local store already
+    /// covers the fast path.
+    pub fn record_blob_provider(&self, blake3_hex: &str, provider: EndpointId) {
+        if provider == self.endpoint.id() {
+            return;
+        }
+        let mut entry = self.hint_cache.entry(blake3_hex.to_string()).or_default();
+        if let Some(pos) = entry.iter().position(|p| *p == provider) {
+            // Re-announcement: move to the back (freshest position).
+            entry.remove(pos);
+        } else if entry.len() >= MAX_PROVIDERS_PER_BLOB {
+            entry.remove(0);
+        }
+        entry.push(provider);
+    }
+
+    /// Providers currently cached for `blake3_hex`, freshest last. Empty
+    /// when no announcement has been observed for the hash.
+    pub fn known_blob_providers(&self, blake3_hex: &str) -> Vec<EndpointId> {
+        self.hint_cache
+            .get(blake3_hex)
+            .map(|v| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// Enumerate the BLAKE3 hex hashes of every blob in the local store.
+    ///
+    /// Used by the node layer to build `tenzro/blobs` availability
+    /// announcements — on startup (re-announcing blobs that survived a
+    /// restart in the persistent store) and on the periodic heartbeat.
+    pub async fn local_blob_hashes(&self) -> IrohResult<Vec<String>> {
+        let hashes = self
+            .store
+            .blobs()
+            .list()
+            .hashes()
+            .await
+            .map_err(|e| IrohError::Backend(format!("blob list: {e}")))?;
+        Ok(hashes.into_iter().map(|h| h.to_string()).collect())
     }
 
     /// Access the underlying iroh endpoint — needed by higher-level
@@ -398,40 +499,46 @@ impl IrohResolver for IrohBackedResolver {
             return Ok(bytes);
         }
 
-        // Cross-node path. Two cases:
-        //   (a) the URI carries an explicit provider hint — dial that peer
-        //       directly via the shared `Downloader` and pull the blob into
-        //       the local store, then re-read.
-        //   (b) no hint — return `NotFound` with a message that names the
-        //       follow-up (Pkarr-based content discovery). We intentionally
-        //       do NOT broadcast a discovery query here: a hint-less fetch is
-        //       a caller-side bug today, and silently succeeding via discovery
-        //       would mask wiring gaps in upstream callers (publish-side
-        //       provider announcements are the right place to fix that).
-        let Some(provider) = Self::provider_hint(uri)? else {
+        // Cross-node path. Candidate providers, in priority order:
+        //   (a) the explicit provider hint on the URI, when present — the
+        //       caller named a peer, so it dials first;
+        //   (b) providers cached from signed `tenzro/blobs` gossip
+        //       announcements (freshest announcements first).
+        // Only when both sets are empty is the fetch a `NotFound`.
+        let mut candidates: Vec<EndpointId> = Vec::new();
+        if let Some(provider) = Self::provider_hint(uri)? {
+            candidates.push(provider);
+        }
+        for provider in self.known_blob_providers(hex).into_iter().rev() {
+            if !candidates.contains(&provider) {
+                candidates.push(provider);
+            }
+        }
+        if candidates.is_empty() {
             return Err(IrohError::NotFound(format!(
-                "blob {hex} not local and no provider hint on URI"
+                "blob {hex} not local, no provider hint on URI, and no announced providers"
             )));
-        };
+        }
 
-        // `Downloader::download(hash, providers)` writes the blob into the
-        // store we constructed it with. Block on completion via the
-        // `IntoFuture` impl on `DownloadProgress` (returns `Result<()>`).
+        // `Downloader::download(hash, providers)` tries the given providers
+        // and writes the blob into the store we constructed it with. Block on
+        // completion via the `IntoFuture` impl on `DownloadProgress`.
         self.downloader
-            .download(hash, vec![provider])
+            .download(hash, candidates.clone())
             .await
             .map_err(|e| {
                 IrohError::NotFound(format!(
-                    "blob {hex} not local; cross-node fetch from {provider} failed: {e}"
+                    "blob {hex} not local; cross-node fetch from {} candidate provider(s) failed: {e}",
+                    candidates.len()
                 ))
             })?;
 
-        // The download wrote into the same `MemStore` we read from. iroh-blobs
-        // verifies the BLAKE3 root on `get_bytes`, so a hashed mismatch fails
+        // The download wrote into the same store we read from. iroh-blobs
+        // verifies the BLAKE3 root on `get_bytes`, so a hash mismatch fails
         // here rather than silently returning corrupt data.
         let bytes = self.store.blobs().get_bytes(hash).await.map_err(|e| {
             IrohError::Backend(format!(
-                "blob {hex} downloaded from {provider} but get_bytes failed: {e}"
+                "blob {hex} downloaded but get_bytes failed: {e}"
             ))
         })?;
         Ok(bytes)
@@ -532,6 +639,67 @@ mod tests {
                 .expect_err("non-content variant must error");
             assert!(matches!(err, IrohError::UnsupportedVariant(_)));
         }
+        resolver.shutdown().await.ok();
+    }
+
+    #[tokio::test]
+    async fn hint_cache_records_and_rotates_providers() {
+        let resolver = IrohBackedResolver::bind_in_memory()
+            .await
+            .expect("bind in-memory resolver");
+        let hash = "a".repeat(64);
+
+        // Self-announcements are ignored.
+        resolver.record_blob_provider(&hash, resolver.endpoint_id());
+        assert!(resolver.known_blob_providers(&hash).is_empty());
+
+        // Distinct providers accumulate, freshest last.
+        let mk = |i: u8| {
+            let mut bytes = [0u8; 32];
+            bytes[0] = i;
+            // Not all byte strings are valid Ed25519 points; derive from a
+            // secret key instead so every id is well-formed.
+            iroh::SecretKey::from_bytes(&bytes).public()
+        };
+        for i in 1..=MAX_PROVIDERS_PER_BLOB as u8 {
+            resolver.record_blob_provider(&hash, mk(i));
+        }
+        let providers = resolver.known_blob_providers(&hash);
+        assert_eq!(providers.len(), MAX_PROVIDERS_PER_BLOB);
+        assert_eq!(*providers.last().unwrap(), mk(MAX_PROVIDERS_PER_BLOB as u8));
+
+        // Re-announcing an existing provider moves it to the back without
+        // growing the list.
+        resolver.record_blob_provider(&hash, mk(1));
+        let providers = resolver.known_blob_providers(&hash);
+        assert_eq!(providers.len(), MAX_PROVIDERS_PER_BLOB);
+        assert_eq!(*providers.last().unwrap(), mk(1));
+
+        // One more distinct provider evicts the oldest.
+        let extra = mk(MAX_PROVIDERS_PER_BLOB as u8 + 1);
+        resolver.record_blob_provider(&hash, extra);
+        let providers = resolver.known_blob_providers(&hash);
+        assert_eq!(providers.len(), MAX_PROVIDERS_PER_BLOB);
+        assert_eq!(*providers.last().unwrap(), extra);
+        assert!(!providers.contains(&mk(2)), "oldest entry should be evicted");
+
+        resolver.shutdown().await.ok();
+    }
+
+    #[tokio::test]
+    async fn published_blobs_are_enumerable() {
+        let resolver = IrohBackedResolver::bind_in_memory()
+            .await
+            .expect("bind in-memory resolver");
+        let uri = resolver
+            .publish_bytes(test_bytes())
+            .await
+            .expect("publish blob");
+        let TenzroUri::Blob { hash, .. } = &uri else {
+            panic!("publish_bytes returned non-Blob URI");
+        };
+        let hashes = resolver.local_blob_hashes().await.expect("list blobs");
+        assert!(hashes.contains(hash));
         resolver.shutdown().await.ok();
     }
 }

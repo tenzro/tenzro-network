@@ -32,6 +32,7 @@ use tenzro_vm::{MultiVmRuntime, StateAdapter, VmTransaction, VmType};
 use tenzro_types::block::Block;
 use tenzro_types::transaction::{SignedTransaction, TransactionType};
 use tenzro_types::primitives::{BlockHeight, Hash};
+use tenzro_iroh::IrohResolver;
 
 use crate::error::{NodeError, Result};
 use crate::metrics::MetricsCollector;
@@ -121,6 +122,15 @@ pub enum NodeEvent {
     AgentAnnouncement(tenzro_network::AgentAnnouncementMessage),
     /// Provider announcement received from gossipsub (from another node)
     ProviderAnnouncement(tenzro_network::ProviderAnnouncementMessage),
+    /// Blob availability announcement received from gossipsub (from another
+    /// node). Verified and folded into the iroh resolver's blob-provider
+    /// hint cache.
+    BlobAnnouncement(tenzro_network::BlobAnnouncementMessage),
+    /// Shard replication request received from gossipsub. Storage-serving
+    /// nodes run rendezvous (HRW) self-selection per shard and pin the
+    /// shards they rank for into their local iroh blob store, spreading the
+    /// object across independent providers.
+    ShardReplication(tenzro_network::ShardReplicationMessage),
     /// Cortex advertisement received from gossipsub (signed JSON payload).
     ///
     /// Carries the raw serde_json-encoded `CortexAdvertisement` bytes so the
@@ -383,6 +393,13 @@ pub struct EventLoop {
     /// verified Cortex advertisements received over the
     /// `tenzro/cortex` gossipsub topic.
     remote_cortex_workers: Option<Arc<tenzro_cortex::RemoteWorkerRegistry>>,
+    /// Shared reference to the node's iroh resolver. The periodic
+    /// `blob_heartbeat` tick enumerates the local blob store and broadcasts
+    /// signed `BlobAnnouncementMessage`s on `tenzro/blobs`; inbound
+    /// announcements from peers are folded into the resolver's
+    /// blob-provider hint cache so `tenzro://blob/...` URIs resolve
+    /// cross-node without an explicit provider hint.
+    iroh_resolver: Option<Arc<tenzro_iroh::IrohBackedResolver>>,
     /// Shared reference to the node's `TrainingRuntime` used to ingest
     /// `OuterGradient` payloads received on the `tenzro/training` topic
     /// and observe `SyncRound` payloads on `tenzro/training/syncer`. The
@@ -504,6 +521,14 @@ pub struct EventLoop {
     /// (the block is already finalized; halting would only break local
     /// liveness without protecting anyone).
     recent_state_roots: std::collections::VecDeque<Hash>,
+
+    /// Desired replica count per shard for storage placement. `Some(r)`
+    /// marks this node as storage-serving: inbound `ShardReplication`
+    /// requests trigger rendezvous (HRW) self-selection against the local
+    /// membership view, and shards this node ranks in the top `r` are pinned
+    /// into its iroh blob store. `None` on non-storage nodes — they ignore
+    /// replication requests entirely.
+    storage_replicas: Option<usize>,
 }
 
 /// Capacity of [`EventLoop::recent_state_roots`]. Proposer execution lag is
@@ -568,6 +593,7 @@ impl EventLoop {
             model_runtime: None,
             load_tracker: None,
             remote_cortex_workers: None,
+            iroh_resolver: None,
             training_runtime: None,
             seed_agent_manager: None,
             kill_switch_store: None,
@@ -585,7 +611,16 @@ impl EventLoop {
             last_observed_slash_burn: 0,
             snapshot_store: None,
             recent_state_roots: std::collections::VecDeque::with_capacity(STATE_ROOT_WINDOW),
+            storage_replicas: None,
         }
+    }
+
+    /// Marks this node as storage-serving with the given per-shard replica
+    /// target. Inbound `ShardReplication` requests then run rendezvous (HRW)
+    /// self-selection and pin the shards this node ranks for.
+    pub fn with_storage_replicas(mut self, replicas: usize) -> Self {
+        self.storage_replicas = Some(replicas.max(1));
+        self
     }
 
     /// Wires the snapshot ABCI store. Once set, `process_finality_notification`
@@ -829,6 +864,17 @@ impl EventLoop {
         signer: Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync>,
     ) -> Self {
         self.announce_signer = Some(signer);
+        self
+    }
+
+    /// Wires the node's iroh resolver so the `blob_heartbeat` tick can
+    /// announce locally held blobs on `tenzro/blobs` and inbound peer
+    /// announcements can populate the resolver's blob-provider hint cache.
+    pub fn with_iroh_resolver(
+        mut self,
+        resolver: Arc<tenzro_iroh::IrohBackedResolver>,
+    ) -> Self {
+        self.iroh_resolver = Some(resolver);
         self
     }
 
@@ -1223,6 +1269,12 @@ impl EventLoop {
         let mut provider_heartbeat = tokio::time::interval(std::time::Duration::from_secs(60));
         provider_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+        // Heartbeat: announce locally held iroh blobs every 60s so peers can
+        // populate their blob-provider hint caches and fetch
+        // `tenzro://blob/...` URIs without an explicit provider hint.
+        let mut blob_heartbeat = tokio::time::interval(std::time::Duration::from_secs(60));
+        blob_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         // Registry reconcile: every 5 minutes, enforce task deadlines and purge
         // stale terminal tasks (30d), inactive/deprecated tools (30d), and
         // inactive/deprecated skills (30d). Runs out of the node event loop so
@@ -1608,6 +1660,15 @@ impl EventLoop {
                             }
                         };
 
+                        // A storage-serving node advertises its iroh EndpointId
+                        // so HRW replica self-selection has a stable candidate id
+                        // per peer. Empty on nodes without a bound resolver.
+                        let iroh_endpoint_id = self
+                            .iroh_resolver
+                            .as_ref()
+                            .map(|r| r.endpoint_id().to_string())
+                            .unwrap_or_default();
+
                         let mut ann = tenzro_network::ProviderAnnouncementMessage {
                             peer_id: local_peer_id,
                             provider_address: ctx.provider_address.clone(),
@@ -1627,6 +1688,7 @@ impl EventLoop {
                             worker_roles: Vec::new(),
                             hardware: ctx.hardware.clone(),
                             geography: ctx.geography.clone(),
+                            iroh_endpoint_id,
                             cluster_profile: ctx.cluster_profile.clone(),
                             pubkey: Vec::new(),
                             signature: Vec::new(),
@@ -1644,6 +1706,66 @@ impl EventLoop {
                                 debug!(error = %e, "Failed to broadcast provider heartbeat");
                             }
                         });
+                    }
+                }
+                // Blob availability heartbeat: enumerate the local iroh blob
+                // store and broadcast signed announcements on `tenzro/blobs`.
+                // Skipped when the resolver / network / signer are not wired
+                // (unsigned announcements are rejected by every consumer).
+                _ = blob_heartbeat.tick() => {
+                    if let (Some(network), Some(resolver), Some(signer)) = (
+                        &self.network,
+                        &self.iroh_resolver,
+                        &self.announce_signer,
+                    ) {
+                        let hashes = match resolver.local_blob_hashes().await {
+                            Ok(h) => h,
+                            Err(e) => {
+                                debug!(error = %e, "Skipping blob announcement: blob enumeration failed");
+                                continue;
+                            }
+                        };
+                        if hashes.is_empty() {
+                            continue;
+                        }
+
+                        let local_peer_id = match network.local_peer_id().await {
+                            Ok(pid) => pid.to_string(),
+                            Err(e) => {
+                                debug!(error = %e, "Skipping blob announcement: local_peer_id unavailable");
+                                continue;
+                            }
+                        };
+                        let endpoint_id = resolver.endpoint_id().to_string();
+
+                        // Chunk large stores so a single announcement stays
+                        // well under gossipsub message-size limits (each hash
+                        // is 64 hex chars; 512 per message ≈ 34 KiB payload).
+                        const HASHES_PER_ANNOUNCEMENT: usize = 512;
+                        for chunk in hashes.chunks(HASHES_PER_ANNOUNCEMENT) {
+                            let mut ann = tenzro_network::BlobAnnouncementMessage {
+                                endpoint_id: endpoint_id.clone(),
+                                blob_hashes: chunk.to_vec(),
+                                origin_peer_id: local_peer_id.clone(),
+                                timestamp: chrono::Utc::now().timestamp_millis(),
+                                ttl_secs: 180,
+                                pubkey: Vec::new(),
+                                signature: Vec::new(),
+                            };
+                            if let Err(e) = ann.sign(signer.as_ref()) {
+                                warn!(error = %e, "Skipping blob announcement: signing failed");
+                                break;
+                            }
+                            let broadcast_msg = tenzro_network::NetworkMessage::new(
+                                tenzro_network::MessagePayload::BlobAnnouncement(ann),
+                            );
+                            let net = network.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = net.broadcast("tenzro/blobs", broadcast_msg).await {
+                                    debug!(error = %e, "Failed to broadcast blob heartbeat");
+                                }
+                            });
+                        }
                     }
                 }
                 // Registry reconcile (5 min): enforce task deadlines + purge
@@ -2115,6 +2237,135 @@ impl EventLoop {
                                     rpc_endpoint = %ann.rpc_endpoint,
                                     "Network provider discovered via gossipsub"
                                 );
+                            }
+                        }
+                        NodeEvent::BlobAnnouncement(ann) => {
+                            if let Err(e) = ann.verify() {
+                                warn!(
+                                    endpoint_id = %ann.endpoint_id,
+                                    error = %e,
+                                    "Rejecting blob announcement (signature verification failed)"
+                                );
+                            } else if let Err(e) = check_announcement_freshness(ann.timestamp, ann.ttl_secs) {
+                                warn!(
+                                    endpoint_id = %ann.endpoint_id,
+                                    error = %e,
+                                    "Rejecting blob announcement (replay window)"
+                                );
+                            } else if let Some(ref resolver) = self.iroh_resolver {
+                                match ann.endpoint_id.parse::<tenzro_iroh::EndpointId>() {
+                                    Ok(provider) => {
+                                        for hash in &ann.blob_hashes {
+                                            resolver.record_blob_provider(hash, provider);
+                                        }
+                                        debug!(
+                                            endpoint_id = %ann.endpoint_id,
+                                            blobs = ann.blob_hashes.len(),
+                                            "Recorded blob providers from gossipsub announcement"
+                                        );
+                                    }
+                                    Err(e) => warn!(
+                                        endpoint_id = %ann.endpoint_id,
+                                        error = %e,
+                                        "Rejecting blob announcement (unparseable endpoint id)"
+                                    ),
+                                }
+                            }
+                        }
+                        NodeEvent::ShardReplication(req) => {
+                            if let Err(e) = req.verify() {
+                                warn!(
+                                    object_id = %req.object_id,
+                                    error = %e,
+                                    "Rejecting shard replication request (signature verification failed)"
+                                );
+                            } else if let Err(e) =
+                                check_announcement_freshness(req.timestamp, req.ttl_secs)
+                            {
+                                warn!(
+                                    object_id = %req.object_id,
+                                    error = %e,
+                                    "Rejecting shard replication request (replay window)"
+                                );
+                            } else if let (Some(replicas), Some(resolver)) =
+                                (self.storage_replicas, self.iroh_resolver.as_ref())
+                            {
+                                let own_endpoint = resolver.endpoint_id().to_string();
+                                // Never pin from ourselves — the origin already
+                                // holds every shard.
+                                if own_endpoint != req.origin_endpoint_id {
+                                    // Candidate membership view: storage-capable
+                                    // providers discovered via gossip, plus the
+                                    // origin, plus self. HRW self-selection is
+                                    // computed against this local snapshot; view
+                                    // skew self-heals as heartbeats converge.
+                                    let mut candidates: Vec<String> = vec![
+                                        own_endpoint.clone(),
+                                        req.origin_endpoint_id.clone(),
+                                    ];
+                                    if let Some(ref np) = self.network_providers {
+                                        for entry in np.iter() {
+                                            let ann = &entry.value().announcement;
+                                            if ann
+                                                .capabilities
+                                                .iter()
+                                                .any(|c| c == "storage")
+                                                && !ann.iroh_endpoint_id.is_empty()
+                                            {
+                                                candidates
+                                                    .push(ann.iroh_endpoint_id.clone());
+                                            }
+                                        }
+                                    }
+
+                                    let origin = req.origin_endpoint_id.clone();
+                                    let mut pinned = 0usize;
+                                    for shard in &req.shards {
+                                        if tenzro_storage_market::should_replicate(
+                                            &shard.commitment,
+                                            &own_endpoint,
+                                            &candidates,
+                                            replicas,
+                                        ) {
+                                            resolver.record_blob_provider(
+                                                &shard.blob_hash,
+                                                match origin.parse::<tenzro_iroh::EndpointId>() {
+                                                    Ok(ep) => ep,
+                                                    Err(e) => {
+                                                        warn!(
+                                                            object_id = %req.object_id,
+                                                            origin = %origin,
+                                                            error = %e,
+                                                            "Shard replication: unparseable origin endpoint id"
+                                                        );
+                                                        break;
+                                                    }
+                                                },
+                                            );
+                                            let uri = tenzro_iroh::TenzroUri::Blob {
+                                                hash: shard.blob_hash.clone(),
+                                                provider_hint: Some(origin.clone()),
+                                            };
+                                            match resolver.fetch_bytes(&uri).await {
+                                                Ok(_) => pinned += 1,
+                                                Err(e) => warn!(
+                                                    object_id = %req.object_id,
+                                                    shard_index = shard.index,
+                                                    error = %e,
+                                                    "Shard replication: failed to pin shard"
+                                                ),
+                                            }
+                                        }
+                                    }
+                                    if pinned > 0 {
+                                        info!(
+                                            object_id = %req.object_id,
+                                            pinned,
+                                            total_shards = req.shards.len(),
+                                            "Pinned shards via rendezvous self-selection"
+                                        );
+                                    }
+                                }
                             }
                         }
                         NodeEvent::CortexAdvertisementReceived(bytes) => {

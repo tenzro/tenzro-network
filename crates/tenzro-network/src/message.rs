@@ -103,6 +103,19 @@ pub enum MessagePayload {
     /// peers can populate their network_providers cache.
     ProviderAnnouncement(ProviderAnnouncementMessage),
 
+    /// Blob availability announcement — broadcast by nodes whose iroh blob
+    /// store holds content so peers can populate their blob-provider hint
+    /// caches and fetch `tenzro://blob/...` URIs without an explicit
+    /// provider hint.
+    BlobAnnouncement(BlobAnnouncementMessage),
+
+    /// Shard replication request — broadcast by the origin node after it
+    /// erasure-encodes and stores an object, listing every shard's blob hash
+    /// and commitment. Storage-capable peers run rendezvous (HRW)
+    /// self-selection per shard and pin the shards they rank for, spreading
+    /// the object across independent providers.
+    ShardReplication(ShardReplicationMessage),
+
     /// Peer status update
     Status(StatusMessage),
 
@@ -129,6 +142,7 @@ impl MessagePayload {
             Self::ModelRegistration(_) => "tenzro/models",
             Self::AgentAnnouncement(_) => "tenzro/agents",
             Self::ProviderAnnouncement(_) => "tenzro/providers",
+            Self::BlobAnnouncement(_) | Self::ShardReplication(_) => "tenzro/blobs",
             Self::Status(_) | Self::Ping | Self::Pong => "tenzro/status",
             Self::Custom { topic, .. } => topic,
         }
@@ -408,6 +422,8 @@ pub struct ModelRegistrationMessage {
 const MODEL_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/model";
 const AGENT_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/agent";
 const PROVIDER_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/provider";
+const BLOB_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/blobs";
+const SHARD_REPLICATION_DOMAIN: &[u8] = b"tenzro/announce/shard-replication";
 
 /// Builds the canonical signing preimage for an announcement: the domain
 /// tag followed by the JSON serialization of the message. The message must
@@ -611,6 +627,12 @@ pub struct ProviderAnnouncementMessage {
     /// `None` as "unknown geography", not as a wildcard match.
     #[serde(default)]
     pub geography: Option<String>,
+    /// iroh `EndpointId` of this node (lowercase hex) — the dialable
+    /// identity on the iroh data plane. Consumers use it as the candidate
+    /// identity for rendezvous shard placement and for peer-first blob
+    /// fetches. Empty when the node has no iroh resolver bound.
+    #[serde(default)]
+    pub iroh_endpoint_id: String,
     /// LAN-cluster serving profile, present only when this node is willing
     /// to join LAN pipeline clusters. Carries the llama.cpp commit, serving
     /// backend / capability key, and ggml `rpc-server` socket a head needs
@@ -653,6 +675,153 @@ impl ProviderAnnouncementMessage {
         unsigned.signature = Vec::new();
         verify_announce_signature(
             PROVIDER_ANNOUNCE_DOMAIN,
+            &unsigned,
+            &self.pubkey,
+            &self.signature,
+        )
+    }
+}
+
+fn default_blob_ttl() -> u64 {
+    180
+}
+
+/// Blob availability announcement — broadcast over gossipsub topic
+/// "tenzro/blobs" by nodes whose iroh blob store holds content. Peers
+/// verify the signature and record `endpoint_id` as a provider for each
+/// listed hash in the resolver's hint cache, so hint-less
+/// `tenzro://blob/...` fetches can dial announced holders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobAnnouncementMessage {
+    /// iroh `EndpointId` of the announcing node, lowercase hex — the
+    /// dialable identity on the iroh data plane (distinct from the libp2p
+    /// peer id on the control plane).
+    pub endpoint_id: String,
+    /// BLAKE3 hex hashes of blobs held in the announcer's store. Producers
+    /// chunk large stores across multiple announcements.
+    pub blob_hashes: Vec<String>,
+    /// libp2p peer ID of the originating node
+    #[serde(default)]
+    pub origin_peer_id: String,
+    /// Unix timestamp (ms) when this announcement was created
+    pub timestamp: i64,
+    /// TTL in seconds — consumers reject announcements older than this
+    /// (default 180s)
+    #[serde(default = "default_blob_ttl")]
+    pub ttl_secs: u64,
+    /// Ed25519 public key (raw 32B) of the announcing node. Empty on
+    /// unsigned announcements, which consumers reject.
+    #[serde(default)]
+    pub pubkey: Vec<u8>,
+    /// Ed25519 signature over the canonical preimage. Empty on unsigned
+    /// announcements, which consumers reject.
+    #[serde(default)]
+    pub signature: Vec<u8>,
+}
+
+impl BlobAnnouncementMessage {
+    /// Sign this announcement with the node's Ed25519 announce key,
+    /// populating `pubkey` + `signature`. Call after all fields are set —
+    /// the signature covers the entire struct.
+    pub fn sign(&mut self, signer: &dyn tenzro_crypto::signatures::Signer) -> Result<(), String> {
+        self.pubkey = signer.public_key().as_bytes().to_vec();
+        self.signature = Vec::new();
+        let preimage = announce_preimage(BLOB_ANNOUNCE_DOMAIN, self)?;
+        let sig = signer.sign(&preimage).map_err(|e| e.to_string())?;
+        self.signature = sig.as_bytes().to_vec();
+        Ok(())
+    }
+
+    /// Verify the embedded signature over the whole-struct preimage. Returns
+    /// an error for unsigned (empty `pubkey`/`signature`) or tampered messages.
+    pub fn verify(&self) -> Result<(), String> {
+        if self.pubkey.is_empty() || self.signature.is_empty() {
+            return Err("unsigned blob announcement".to_string());
+        }
+        let mut unsigned = self.clone();
+        unsigned.signature = Vec::new();
+        verify_announce_signature(
+            BLOB_ANNOUNCE_DOMAIN,
+            &unsigned,
+            &self.pubkey,
+            &self.signature,
+        )
+    }
+}
+
+/// One shard entry inside a [`ShardReplicationMessage`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardReplicationEntry {
+    /// Shard index within the erasure-coded object (0-based; indices below
+    /// `k` are data shards, the rest parity).
+    pub index: usize,
+    /// BLAKE3 hex hash of the shard bytes — the iroh blob identity peers
+    /// fetch and pin.
+    pub blob_hash: String,
+    /// SHA-256 hex commitment of the shard bytes — the placement key and
+    /// retrievability-challenge identity.
+    pub commitment: String,
+}
+
+/// Shard replication request — broadcast over gossipsub topic "tenzro/blobs"
+/// by the origin node right after it erasure-encodes and stores an object.
+/// Storage-capable peers verify the signature, run rendezvous (HRW)
+/// self-selection per shard against their local membership view, and pin
+/// (fetch + publish) the shards they rank for. The blob heartbeat then
+/// re-announces the pinned shards, closing the discovery loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardReplicationMessage {
+    /// Object identifier the shards belong to.
+    pub object_id: String,
+    /// iroh `EndpointId` of the origin node (lowercase hex) — where peers
+    /// fetch the shard bytes from.
+    pub origin_endpoint_id: String,
+    /// libp2p peer ID of the originating node.
+    #[serde(default)]
+    pub origin_peer_id: String,
+    /// Every shard of the object (data + parity).
+    pub shards: Vec<ShardReplicationEntry>,
+    /// Desired holder count per shard (including the origin).
+    pub replicas: usize,
+    /// Unix timestamp (ms) when this request was created.
+    pub timestamp: i64,
+    /// TTL in seconds — consumers reject requests older than this
+    /// (default 180s).
+    #[serde(default = "default_blob_ttl")]
+    pub ttl_secs: u64,
+    /// Ed25519 public key (raw 32B) of the origin node. Empty on unsigned
+    /// requests, which consumers reject.
+    #[serde(default)]
+    pub pubkey: Vec<u8>,
+    /// Ed25519 signature over the canonical preimage. Empty on unsigned
+    /// requests, which consumers reject.
+    #[serde(default)]
+    pub signature: Vec<u8>,
+}
+
+impl ShardReplicationMessage {
+    /// Sign this request with the node's Ed25519 announce key, populating
+    /// `pubkey` + `signature`. Call after all fields are set — the signature
+    /// covers the entire struct.
+    pub fn sign(&mut self, signer: &dyn tenzro_crypto::signatures::Signer) -> Result<(), String> {
+        self.pubkey = signer.public_key().as_bytes().to_vec();
+        self.signature = Vec::new();
+        let preimage = announce_preimage(SHARD_REPLICATION_DOMAIN, self)?;
+        let sig = signer.sign(&preimage).map_err(|e| e.to_string())?;
+        self.signature = sig.as_bytes().to_vec();
+        Ok(())
+    }
+
+    /// Verify the embedded signature over the whole-struct preimage. Returns
+    /// an error for unsigned (empty `pubkey`/`signature`) or tampered messages.
+    pub fn verify(&self) -> Result<(), String> {
+        if self.pubkey.is_empty() || self.signature.is_empty() {
+            return Err("unsigned shard replication request".to_string());
+        }
+        let mut unsigned = self.clone();
+        unsigned.signature = Vec::new();
+        verify_announce_signature(
+            SHARD_REPLICATION_DOMAIN,
             &unsigned,
             &self.pubkey,
             &self.signature,

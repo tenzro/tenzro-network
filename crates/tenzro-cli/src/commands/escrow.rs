@@ -33,6 +33,12 @@ pub enum EscrowCommand {
     Settle(SettleCmd),
     /// Get settlement details
     GetSettlement(GetSettlementCmd),
+    /// Pre-fund the streaming settlement path (lock on-chain TNZO into the prepaid ledger)
+    PrepaidDeposit(PrepaidDepositCmd),
+    /// Withdraw unspent prepaid balance back to the on-chain account
+    PrepaidWithdraw(PrepaidWithdrawCmd),
+    /// Read the current prepaid balance
+    PrepaidBalance(PrepaidBalanceCmd),
 }
 
 impl EscrowCommand {
@@ -47,6 +53,9 @@ impl EscrowCommand {
             Self::Delegate(cmd) => cmd.execute().await,
             Self::Settle(cmd) => cmd.execute().await,
             Self::GetSettlement(cmd) => cmd.execute().await,
+            Self::PrepaidDeposit(cmd) => cmd.execute().await,
+            Self::PrepaidWithdraw(cmd) => cmd.execute().await,
+            Self::PrepaidBalance(cmd) => cmd.execute().await,
         }
     }
 }
@@ -646,6 +655,151 @@ impl DelegateCmd {
             output::print_field("Status", v);
         }
 
+        Ok(())
+    }
+}
+
+/// Pre-fund the streaming settlement path.
+#[derive(Debug, Parser)]
+pub struct PrepaidDepositCmd {
+    /// Renter address (hex)
+    #[arg(long)]
+    renter: String,
+
+    /// Amount in wei (smallest unit; 1 TNZO = 10^18 wei)
+    #[arg(long)]
+    amount: u128,
+
+    /// Asset id (only TNZO is streamable today)
+    #[arg(long, default_value = "TNZO")]
+    asset: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl PrepaidDepositCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Prepaid Deposit");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_prepaidDeposit",
+                serde_json::json!({
+                    "renter": self.renter,
+                    "amount": self.amount.to_string(),
+                    "asset": self.asset,
+                }),
+            )
+            .await?;
+
+        output::print_success("Prepaid balance funded");
+        println!();
+        output::print_field("Renter", &self.renter);
+        output::print_field("Asset", &self.asset);
+        output::print_field("Deposited (wei)", &self.amount.to_string());
+        if let Some(v) = result.get("balance").and_then(|v| v.as_str()) {
+            output::print_field("Balance (wei)", v);
+        }
+        Ok(())
+    }
+}
+
+/// Withdraw unspent prepaid balance back to the on-chain account.
+#[derive(Debug, Parser)]
+pub struct PrepaidWithdrawCmd {
+    /// Renter address (hex)
+    #[arg(long)]
+    renter: String,
+
+    /// Amount in wei to withdraw (capped at the available prepaid balance)
+    #[arg(long)]
+    amount: u128,
+
+    /// Asset id (only TNZO is streamable today)
+    #[arg(long, default_value = "TNZO")]
+    asset: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl PrepaidWithdrawCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Prepaid Withdraw");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_prepaidWithdraw",
+                serde_json::json!({
+                    "renter": self.renter,
+                    "amount": self.amount.to_string(),
+                    "asset": self.asset,
+                }),
+            )
+            .await?;
+
+        output::print_success("Prepaid balance withdrawn");
+        println!();
+        output::print_field("Renter", &self.renter);
+        output::print_field("Asset", &self.asset);
+        if let Some(v) = result.get("withdrawn").and_then(|v| v.as_str()) {
+            output::print_field("Withdrawn (wei)", v);
+        }
+        if let Some(v) = result.get("balance").and_then(|v| v.as_str()) {
+            output::print_field("Balance (wei)", v);
+        }
+        Ok(())
+    }
+}
+
+/// Read the current prepaid balance.
+#[derive(Debug, Parser)]
+pub struct PrepaidBalanceCmd {
+    /// Renter address (hex)
+    #[arg(long)]
+    renter: String,
+
+    /// Asset id (only TNZO is streamable today)
+    #[arg(long, default_value = "TNZO")]
+    asset: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl PrepaidBalanceCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Prepaid Balance");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_prepaidBalance",
+                serde_json::json!({
+                    "renter": self.renter,
+                    "asset": self.asset,
+                }),
+            )
+            .await?;
+
+        println!();
+        output::print_field("Renter", &self.renter);
+        output::print_field("Asset", &self.asset);
+        if let Some(v) = result.get("balance").and_then(|v| v.as_str()) {
+            output::print_field("Balance (wei)", v);
+        }
         Ok(())
     }
 }

@@ -33,7 +33,10 @@ use tracing::{info, warn};
 /// Global singleton for the llama.cpp backend — can only be initialized once per process.
 static LLAMA_BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
 
+use crate::batching::{BatchEngine, BatchPrompt, BatchRequest};
+use crate::catalog::{MtpKind, get_model_by_id};
 use crate::error::{ModelError, Result};
+use crate::external_engine::ExternalEngine;
 
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -243,6 +246,22 @@ struct LoadedModel {
 unsafe impl Send for LoadedModel {}
 unsafe impl Sync for LoadedModel {}
 
+/// How a loaded model serves requests.
+///
+/// A plain text GGUF is served through a continuous-batching [`BatchEngine`]
+/// that owns the `LlamaModel` on a dedicated scheduler thread and interleaves
+/// every in-flight sequence into one decode per step — the throughput path. A
+/// model that carries a Multi-Token-Prediction drafter, or one split across a
+/// LAN pipeline cluster, is served through the serial single-context path
+/// (`Serial`): speculative decoding runs two contexts that can't share the
+/// batch scheduler, and a clustered pipeline threads boundary activations
+/// across devices per request. The variant is chosen once at load time from
+/// the catalog's `mtp_kind` (and the clustered entry point) and never changes.
+enum LoadedEntry {
+    Batched(BatchEngine),
+    Serial(Arc<tokio::sync::Mutex<LoadedModel>>),
+}
+
 /// A loaded Multi-Token-Prediction drafter, keyed under the target's
 /// `model_id` (not the drafter's own id). The drafter is a same-
 /// architecture sidecar GGUF (e.g.
@@ -273,7 +292,7 @@ unsafe impl Sync for LoadedDrafter {}
 /// - Vulkan on any GPU (compile with `--features vulkan`)
 /// - CPU fallback (always available)
 pub struct ModelRuntime {
-    loaded_models: Arc<DashMap<String, Arc<tokio::sync::Mutex<LoadedModel>>>>,
+    loaded_models: Arc<DashMap<String, Arc<LoadedEntry>>>,
     /// Per-target Multi-Token-Prediction drafter. Key is the TARGET's
     /// `model_id` (not the drafter's). When a target is paired with a
     /// drafter in the catalog (`HfModelEntry.drafter_id` +
@@ -281,6 +300,13 @@ pub struct ModelRuntime {
     /// [`Self::load_model`] to make speculative decoding available
     /// for that target.
     loaded_drafters: Arc<DashMap<String, Arc<tokio::sync::Mutex<LoadedDrafter>>>>,
+    /// Models served through an external OpenAI-compatible engine (vLLM /
+    /// SGLang / llama-server) instead of the in-process llama.cpp runtime.
+    /// Keyed by our catalog `model_id`. When a model is registered here,
+    /// generate/chat requests route to the external endpoint; the model is
+    /// never loaded into a local context. External engines and local
+    /// `loaded_models` are mutually exclusive per `model_id`.
+    external_engines: Arc<DashMap<String, ExternalEngine>>,
     /// Per-model count of requests currently in flight or waiting on the
     /// model mutex. Gates admission at [`MAX_INFLIGHT_PER_MODEL`] so an
     /// overloaded model sheds load instead of queueing unboundedly.
@@ -330,6 +356,7 @@ impl ModelRuntime {
         Self {
             loaded_models: Arc::new(DashMap::new()),
             loaded_drafters: Arc::new(DashMap::new()),
+            external_engines: Arc::new(DashMap::new()),
             inflight: Arc::new(DashMap::new()),
             backend,
             hardware,
@@ -503,8 +530,33 @@ impl ModelRuntime {
             elapsed.as_secs_f64(),
         );
 
+        // A model paired with a Multi-Token-Prediction drafter is served on the
+        // serial single-context path: speculative decoding runs the target and
+        // drafter as two contexts that can't share one batch scheduler. Every
+        // other text model is served through the continuous-batching engine.
+        let wants_drafter = get_model_by_id(model_id)
+            .map(|e| e.mtp_kind != MtpKind::None)
+            .unwrap_or(false);
+
+        let entry = if wants_drafter {
+            LoadedEntry::Serial(Arc::new(tokio::sync::Mutex::new(loaded)))
+        } else {
+            let LoadedModel {
+                model,
+                backend,
+                context_length,
+            } = loaded;
+            let engine = BatchEngine::spawn(
+                model_id.to_string(),
+                model,
+                backend,
+                context_length,
+            )?;
+            LoadedEntry::Batched(engine)
+        };
+
         self.loaded_models
-            .insert(model_id.to_string(), Arc::new(tokio::sync::Mutex::new(loaded)));
+            .insert(model_id.to_string(), Arc::new(entry));
 
         Ok(())
     }
@@ -602,24 +654,44 @@ impl ModelRuntime {
             start.elapsed().as_secs_f64(),
         );
 
-        self.loaded_models
-            .insert(model_id.to_string(), Arc::new(tokio::sync::Mutex::new(loaded)));
+        // A clustered pipeline threads boundary activations across devices per
+        // request — served on the serial single-context path, not the batch
+        // engine.
+        self.loaded_models.insert(
+            model_id.to_string(),
+            Arc::new(LoadedEntry::Serial(Arc::new(tokio::sync::Mutex::new(loaded)))),
+        );
 
         Ok(())
     }
 
     /// Unload a model from memory.
     pub async fn unload_model(&self, model_id: &str) -> Result<()> {
-        if let Some((_, model_arc)) = self.loaded_models.remove(model_id) {
-            // Acquire the mutex to wait for any in-progress generation
-            // to finish before dropping the llama.cpp model context.
-            // Without this, the model stays in memory until the
-            // generation task completes, causing OOM when loading
-            // another model.
-            let _lock = model_arc.lock().await;
-            // Dropping _lock and model_arc frees the llama.cpp context
-            drop(_lock);
-            drop(model_arc);
+        // An externally-served model has no local context — drop the routing
+        // registration and we're done.
+        if self.external_engines.remove(model_id).is_some() {
+            info!("Unregistered external engine for model: {}", model_id);
+            return Ok(());
+        }
+        if let Some((_, entry)) = self.loaded_models.remove(model_id) {
+            match entry.as_ref() {
+                LoadedEntry::Batched(engine) => {
+                    // Stop the scheduler thread and join it, which drops the
+                    // owned model + context. In-flight requests receive an
+                    // error on their result channel.
+                    engine.shutdown();
+                }
+                LoadedEntry::Serial(model_mutex) => {
+                    // Acquire the mutex to wait for any in-progress generation
+                    // to finish before dropping the llama.cpp model context.
+                    // Without this, the model stays in memory until the
+                    // generation task completes, causing OOM when loading
+                    // another model.
+                    let _lock = model_mutex.lock().await;
+                    drop(_lock);
+                }
+            }
+            drop(entry);
             info!("Unloaded model: {} (llama.cpp context freed)", model_id);
         } else {
             warn!("Model {} was not loaded", model_id);
@@ -627,17 +699,62 @@ impl ModelRuntime {
         Ok(())
     }
 
-    /// Check if a model is currently loaded.
+    /// Check if a model is currently served — either loaded into a local
+    /// llama.cpp context or routed to a registered external engine.
     pub fn is_loaded(&self, model_id: &str) -> bool {
         self.loaded_models.contains_key(model_id)
+            || self.external_engines.contains_key(model_id)
     }
 
-    /// List all currently loaded model IDs.
+    /// List all currently served model IDs (local + external).
     pub fn list_loaded(&self) -> Vec<String> {
         self.loaded_models
             .iter()
             .map(|entry| entry.key().clone())
+            .chain(self.external_engines.iter().map(|e| e.key().clone()))
             .collect()
+    }
+
+    /// Register an external OpenAI-compatible engine as the backend for
+    /// `model_id`. Probes `/health` first so a misconfigured endpoint fails
+    /// the serve call rather than surfacing on the first inference. Refuses to
+    /// register over a model that is already loaded into a local context —
+    /// unload it first.
+    pub async fn register_external_engine(
+        &self,
+        model_id: &str,
+        engine: ExternalEngine,
+    ) -> Result<()> {
+        if self.loaded_models.contains_key(model_id) {
+            return Err(ModelError::Other(format!(
+                "`{}` is already served through the local runtime; unload it before \
+                 registering an external engine",
+                model_id
+            )));
+        }
+        engine.health().await?;
+        info!(
+            model_id = %model_id,
+            engine = engine.kind().as_str(),
+            base_url = engine.base_url(),
+            "Registered external inference engine",
+        );
+        self.external_engines.insert(model_id.to_string(), engine);
+        Ok(())
+    }
+
+    /// If `model_id` is served through an external engine, return
+    /// `(kind, base_url, upstream_model)` for endpoint listing. `None` for
+    /// locally-loaded or absent models.
+    pub fn external_engine_info(&self, model_id: &str) -> Option<(String, String, String)> {
+        self.external_engines.get(model_id).map(|e| {
+            let engine = e.value();
+            (
+                engine.kind().as_str().to_string(),
+                engine.base_url().to_string(),
+                engine.upstream_model().to_string(),
+            )
+        })
     }
 
     /// Load a Multi-Token-Prediction drafter GGUF and bind it to an
@@ -661,11 +778,26 @@ impl ModelRuntime {
         drafter_gguf_path: &Path,
         context_length: Option<u32>,
     ) -> Result<()> {
-        if !self.is_loaded(target_model_id) {
-            return Err(ModelError::Other(format!(
-                "Cannot load drafter for `{}`: target model is not loaded",
-                target_model_id
-            )));
+        match self.loaded_models.get(target_model_id) {
+            None => {
+                return Err(ModelError::Other(format!(
+                    "Cannot load drafter for `{}`: target model is not loaded",
+                    target_model_id
+                )));
+            }
+            Some(entry) => {
+                if matches!(entry.as_ref(), LoadedEntry::Batched(_)) {
+                    // Speculative decoding needs the target on the serial
+                    // two-context path. A batched target has no drafter pairing
+                    // in the catalog, so this is only reachable on a catalog
+                    // mismatch — refuse rather than silently ignore.
+                    return Err(ModelError::Other(format!(
+                        "Cannot load drafter for `{}`: target is served through the \
+                         continuous-batching engine, which has no speculative path",
+                        target_model_id
+                    )));
+                }
+            }
         }
         if self.loaded_drafters.contains_key(target_model_id) {
             info!("Drafter for {} already loaded", target_model_id);
@@ -743,6 +875,31 @@ impl ModelRuntime {
         self.loaded_drafters.contains_key(target_model_id)
     }
 
+    /// Submit a prompt to a model's continuous-batching engine and await its
+    /// terminal result, optionally streaming token pieces through `token_tx`.
+    ///
+    /// The `_guard` in-flight reservation is held for the whole await so a
+    /// cancelled caller (client disconnect) releases its slot — and, when
+    /// streaming, dropping `token_tx`'s receiver signals the scheduler to free
+    /// the sequence early.
+    async fn run_batched(
+        engine: &BatchEngine,
+        prompt: BatchPrompt,
+        config: &GenerationConfig,
+        token_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    ) -> Result<InferenceResult> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        engine.submit(BatchRequest {
+            prompt,
+            config: config.clone(),
+            token_tx,
+            result_tx,
+        })?;
+        result_rx
+            .await
+            .map_err(|_| ModelError::Other("batch engine dropped the request".into()))?
+    }
+
     /// Generate text from a raw prompt string.
     pub async fn generate(
         &self,
@@ -750,25 +907,46 @@ impl ModelRuntime {
         prompt: &str,
         config: &GenerationConfig,
     ) -> Result<InferenceResult> {
-        let model_entry = self
+        // External engine takes priority: the model is served off-box, so
+        // there is no local context. A raw prompt maps to a single user turn.
+        // Clone the engine and drop the DashMap guard before any `.await`.
+        let external = self.external_engines.get(model_id).map(|e| e.value().clone());
+        if let Some(engine) = external {
+            let _guard = self.acquire_inflight(model_id)?;
+            let messages = [ChatMessage {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+            }];
+            return engine.chat(&messages, config).await;
+        }
+
+        let entry = self
             .loaded_models
             .get(model_id)
-            .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?;
+            .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?
+            .value()
+            .clone();
 
         let _guard = self.acquire_inflight(model_id)?;
-        let model_mutex = model_entry.value().clone();
-        let prompt = prompt.to_string();
-        let config = config.clone();
 
-        let handle = tokio::task::spawn_blocking(move || {
-            let loaded = model_mutex.blocking_lock();
-            Self::generate_sync(&loaded, &prompt, &config)
-        });
-        let out = handle
-            .await
-            .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?;
-        drop(_guard);
-        out
+        match entry.as_ref() {
+            LoadedEntry::Batched(engine) => {
+                Self::run_batched(engine, BatchPrompt::Raw(prompt.to_string()), config, None)
+                    .await
+            }
+            LoadedEntry::Serial(model_mutex) => {
+                let model_mutex = model_mutex.clone();
+                let prompt = prompt.to_string();
+                let config = config.clone();
+                let handle = tokio::task::spawn_blocking(move || {
+                    let loaded = model_mutex.blocking_lock();
+                    Self::generate_sync(&loaded, &prompt, &config)
+                });
+                handle
+                    .await
+                    .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?
+            }
+        }
     }
 
     /// Generate text from structured chat messages.
@@ -782,48 +960,45 @@ impl ModelRuntime {
         messages: &[ChatMessage],
         config: &GenerationConfig,
     ) -> Result<InferenceResult> {
-        let model_entry = self
+        let external = self.external_engines.get(model_id).map(|e| e.value().clone());
+        if let Some(engine) = external {
+            let _guard = self.acquire_inflight(model_id)?;
+            return engine.chat(messages, config).await;
+        }
+
+        let entry = self
             .loaded_models
             .get(model_id)
-            .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?;
+            .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?
+            .value()
+            .clone();
 
         let _guard = self.acquire_inflight(model_id)?;
-        let model_mutex = model_entry.value().clone();
-        let messages = messages.to_vec();
-        let config = config.clone();
 
-        let handle = tokio::task::spawn_blocking(move || {
-            let loaded = model_mutex.blocking_lock();
-
-            // Convert ChatMessage to LlamaChatMessage
-            let llama_messages: Vec<LlamaChatMessage> = messages
-                .iter()
-                .map(|m| {
-                    LlamaChatMessage::new(m.role.clone(), m.content.clone()).map_err(|e| {
-                        ModelError::Other(format!("Invalid chat message: {}", e))
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-
-            // Apply the model's built-in chat template from GGUF metadata
-            let chat_template = loaded.model.chat_template(None).map_err(|e| {
-                ModelError::Other(format!("Failed to get chat template: {}", e))
-            })?;
-
-            let prompt = loaded
-                .model
-                .apply_chat_template(&chat_template, &llama_messages, true)
-                .map_err(|e| {
-                    ModelError::Other(format!("Failed to apply chat template: {}", e))
-                })?;
-
-            Self::generate_sync(&loaded, &prompt, &config)
-        });
-        let out = handle
-            .await
-            .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?;
-        drop(_guard);
-        out
+        match entry.as_ref() {
+            LoadedEntry::Batched(engine) => {
+                Self::run_batched(
+                    engine,
+                    BatchPrompt::Chat(messages.to_vec()),
+                    config,
+                    None,
+                )
+                .await
+            }
+            LoadedEntry::Serial(model_mutex) => {
+                let model_mutex = model_mutex.clone();
+                let messages = messages.to_vec();
+                let config = config.clone();
+                let handle = tokio::task::spawn_blocking(move || {
+                    let loaded = model_mutex.blocking_lock();
+                    let prompt = render_chat_prompt(&loaded.model, &messages)?;
+                    Self::generate_sync(&loaded, &prompt, &config)
+                });
+                handle
+                    .await
+                    .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?
+            }
+        }
     }
 
     /// Generate a chat completion with tool-use awareness.
@@ -848,13 +1023,21 @@ impl ModelRuntime {
         tools: &[ToolDefinition],
         config: &GenerationConfig,
     ) -> Result<ChatWithToolsResult> {
-        let model_entry = self
-            .loaded_models
-            .get(model_id)
-            .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?;
+        // Resolve the backend: external engine, or a local `LoadedEntry`.
+        let external = self.external_engines.get(model_id).map(|e| e.value().clone());
+        let entry = if external.is_some() {
+            None
+        } else {
+            Some(
+                self.loaded_models
+                    .get(model_id)
+                    .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?
+                    .value()
+                    .clone(),
+            )
+        };
 
         let _guard = self.acquire_inflight(model_id)?;
-        let model_mutex = model_entry.value().clone();
         let mut messages = messages.to_vec();
         let tools = tools.to_vec();
         let config = config.clone();
@@ -886,33 +1069,26 @@ impl ModelRuntime {
             }
         }
 
-        let inner = tokio::task::spawn_blocking(move || {
-            let loaded = model_mutex.blocking_lock();
-
-            let llama_messages: Vec<LlamaChatMessage> = messages
-                .iter()
-                .map(|m| {
-                    LlamaChatMessage::new(m.role.clone(), m.content.clone()).map_err(|e| {
-                        ModelError::Other(format!("Invalid chat message: {}", e))
+        let inner = if let Some(engine) = external {
+            engine.chat(&messages, &config).await?
+        } else {
+            match entry.as_ref().expect("local entry present when not external").as_ref() {
+                LoadedEntry::Batched(engine) => {
+                    Self::run_batched(engine, BatchPrompt::Chat(messages), &config, None).await?
+                }
+                LoadedEntry::Serial(model_mutex) => {
+                    let model_mutex = model_mutex.clone();
+                    let config = config.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let loaded = model_mutex.blocking_lock();
+                        let prompt = render_chat_prompt(&loaded.model, &messages)?;
+                        Self::generate_sync(&loaded, &prompt, &config)
                     })
-                })
-                .collect::<Result<Vec<_>>>()?;
-
-            let chat_template = loaded.model.chat_template(None).map_err(|e| {
-                ModelError::Other(format!("Failed to get chat template: {}", e))
-            })?;
-
-            let prompt = loaded
-                .model
-                .apply_chat_template(&chat_template, &llama_messages, true)
-                .map_err(|e| {
-                    ModelError::Other(format!("Failed to apply chat template: {}", e))
-                })?;
-
-            Self::generate_sync(&loaded, &prompt, &config)
-        })
-        .await
-        .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))??;
+                    .await
+                    .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))??
+                }
+            }
+        };
 
         // Parse tool-call markers from the raw output.
         let (clean_text, tool_calls) = extract_tool_calls(&inner.text);
@@ -948,65 +1124,59 @@ impl ModelRuntime {
         config: &GenerationConfig,
         token_tx: tokio::sync::mpsc::Sender<String>,
     ) -> Result<InferenceResult> {
-        let model_entry = self
+        let external = self.external_engines.get(model_id).map(|e| e.value().clone());
+        if let Some(engine) = external {
+            let _guard = self.acquire_inflight(model_id)?;
+            return engine.chat_stream(messages, config, token_tx).await;
+        }
+
+        let entry = self
             .loaded_models
             .get(model_id)
-            .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?;
-
-        let model_mutex = model_entry.value().clone();
-        // Look up the drafter only when the caller asked for
-        // speculative decoding. Avoids holding an extra lock on the
-        // happy path.
-        let drafter_mutex = if config.draft_n.is_some() {
-            self.loaded_drafters
-                .get(model_id)
-                .map(|d| d.value().clone())
-        } else {
-            None
-        };
-        let messages = messages.to_vec();
-        let config = config.clone();
+            .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?
+            .value()
+            .clone();
 
         let _guard = self.acquire_inflight(model_id)?;
-        let handle = tokio::task::spawn_blocking(move || {
-            let loaded = model_mutex.blocking_lock();
-            let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
 
-            // Convert ChatMessage to LlamaChatMessage
-            let llama_messages: Vec<LlamaChatMessage> = messages
-                .iter()
-                .map(|m| {
-                    LlamaChatMessage::new(m.role.clone(), m.content.clone()).map_err(|e| {
-                        ModelError::Other(format!("Invalid chat message: {}", e))
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-
-            // Apply the model's built-in chat template from GGUF metadata
-            let chat_template = loaded.model.chat_template(None).map_err(|e| {
-                ModelError::Other(format!("Failed to get chat template: {}", e))
-            })?;
-
-            let prompt = loaded
-                .model
-                .apply_chat_template(&chat_template, &llama_messages, true)
-                .map_err(|e| {
-                    ModelError::Other(format!("Failed to apply chat template: {}", e))
-                })?;
-
-            Self::generate_sync_streaming(
-                &loaded,
-                drafter_guard.as_deref(),
-                &prompt,
-                &config,
-                Some(&token_tx),
-            )
-        });
-        let out = handle
-            .await
-            .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?;
-        drop(_guard);
-        out
+        match entry.as_ref() {
+            LoadedEntry::Batched(engine) => {
+                Self::run_batched(
+                    engine,
+                    BatchPrompt::Chat(messages.to_vec()),
+                    config,
+                    Some(token_tx),
+                )
+                .await
+            }
+            LoadedEntry::Serial(model_mutex) => {
+                let model_mutex = model_mutex.clone();
+                // Look up the drafter only when the caller asked for speculative
+                // decoding. Avoids holding an extra lock on the happy path.
+                let drafter_mutex = if config.draft_n.is_some() {
+                    self.loaded_drafters.get(model_id).map(|d| d.value().clone())
+                } else {
+                    None
+                };
+                let messages = messages.to_vec();
+                let config = config.clone();
+                let handle = tokio::task::spawn_blocking(move || {
+                    let loaded = model_mutex.blocking_lock();
+                    let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
+                    let prompt = render_chat_prompt(&loaded.model, &messages)?;
+                    Self::generate_sync_streaming(
+                        &loaded,
+                        drafter_guard.as_deref(),
+                        &prompt,
+                        &config,
+                        Some(&token_tx),
+                    )
+                });
+                handle
+                    .await
+                    .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?
+            }
+        }
     }
 
     /// Stream text generation token-by-token from a raw prompt.
@@ -1021,39 +1191,60 @@ impl ModelRuntime {
         config: &GenerationConfig,
         token_tx: tokio::sync::mpsc::Sender<String>,
     ) -> Result<InferenceResult> {
-        let model_entry = self
+        let external = self.external_engines.get(model_id).map(|e| e.value().clone());
+        if let Some(engine) = external {
+            let _guard = self.acquire_inflight(model_id)?;
+            let messages = [ChatMessage {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+            }];
+            return engine.chat_stream(&messages, config, token_tx).await;
+        }
+
+        let entry = self
             .loaded_models
             .get(model_id)
-            .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?;
-
-        let model_mutex = model_entry.value().clone();
-        let drafter_mutex = if config.draft_n.is_some() {
-            self.loaded_drafters
-                .get(model_id)
-                .map(|d| d.value().clone())
-        } else {
-            None
-        };
-        let prompt = prompt.to_string();
-        let config = config.clone();
+            .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?
+            .value()
+            .clone();
 
         let _guard = self.acquire_inflight(model_id)?;
-        let handle = tokio::task::spawn_blocking(move || {
-            let loaded = model_mutex.blocking_lock();
-            let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
-            Self::generate_sync_streaming(
-                &loaded,
-                drafter_guard.as_deref(),
-                &prompt,
-                &config,
-                Some(&token_tx),
-            )
-        });
-        let out = handle
-            .await
-            .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?;
-        drop(_guard);
-        out
+
+        match entry.as_ref() {
+            LoadedEntry::Batched(engine) => {
+                Self::run_batched(
+                    engine,
+                    BatchPrompt::Raw(prompt.to_string()),
+                    config,
+                    Some(token_tx),
+                )
+                .await
+            }
+            LoadedEntry::Serial(model_mutex) => {
+                let model_mutex = model_mutex.clone();
+                let drafter_mutex = if config.draft_n.is_some() {
+                    self.loaded_drafters.get(model_id).map(|d| d.value().clone())
+                } else {
+                    None
+                };
+                let prompt = prompt.to_string();
+                let config = config.clone();
+                let handle = tokio::task::spawn_blocking(move || {
+                    let loaded = model_mutex.blocking_lock();
+                    let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
+                    Self::generate_sync_streaming(
+                        &loaded,
+                        drafter_guard.as_deref(),
+                        &prompt,
+                        &config,
+                        Some(&token_tx),
+                    )
+                });
+                handle
+                    .await
+                    .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?
+            }
+        }
     }
 
     /// Synchronous text generation using llama.cpp.
@@ -1571,6 +1762,27 @@ impl ModelRuntime {
             tokens_per_second,
         })
     }
+}
+
+/// Apply the model's chat template to a message list, producing the flat
+/// prompt string the serial generation path decodes. Mirrors the batched
+/// scheduler's `render_prompt` so both serving modes template identically.
+fn render_chat_prompt(model: &LlamaModel, messages: &[ChatMessage]) -> Result<String> {
+    let llama_messages: Vec<LlamaChatMessage> = messages
+        .iter()
+        .map(|m| {
+            LlamaChatMessage::new(m.role.clone(), m.content.clone())
+                .map_err(|e| ModelError::Other(format!("Invalid chat message: {}", e)))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let chat_template = model
+        .chat_template(None)
+        .map_err(|e| ModelError::Other(format!("Failed to get chat template: {}", e)))?;
+
+    model
+        .apply_chat_template(&chat_template, &llama_messages, true)
+        .map_err(|e| ModelError::Other(format!("Failed to apply chat template: {}", e)))
 }
 
 /// Render a list of tool schemas into a system-prompt preamble that

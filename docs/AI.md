@@ -58,7 +58,19 @@ Provider economics:
 
 Additional filters compose with the strategy: an MTP filter when `params.custom["draft_n"]` is set, an MoE filter when expert routing is required.
 
-### 2.3 Chat surface
+### 2.3 Tail-latency hedging and failover
+
+Once the strategy picks a primary provider, the router guards against the slow tail by hedging. It selects the next-best provider as a hedge target and starts the primary request immediately; if the primary has not answered by a short delay, the router dispatches the same request to the hedge target and returns whichever answers first, dropping the loser. Inference through the router is stateless, so a hedge is a safe duplicate — only the winning response bills the consumer and credits provider reputation.
+
+- **Hedge delay.** Derived from the primary's tracked average latency, clamped to `[hedge_delay_floor_ms, hedge_delay_ceiling_ms]` (defaults 40 ms / 500 ms). A provider with no latency history hedges at the midpoint of that band. Racing at roughly the primary's own average means a healthy primary has almost always replied by the delay, so a still-pending request is a genuine tail case — the pattern from Dean & Barroso's "The Tail at Scale".
+- **Hedge cap.** At most one hedge per request; hedges never nest.
+- **Circuit-breaker respect.** A provider whose breaker is Open (quarantined after repeated failures) is never chosen as a hedge target.
+- **Opt-out.** A caller that needs strict single-dispatch semantics sets `params.custom["no_hedge"] = "1"`.
+- **Failover.** When both the primary and the hedge fail, the router excludes both and retries with the next-best providers up to `max_retries`, matching the existing single-dispatch failover path.
+
+Counters are exposed over `tenzro_getRouterMetrics`: `requests` (total routed), `hedges_dispatched` (primary still pending past the delay), and `hedges_won` (hedge answered before its primary). A high `hedges_won / hedges_dispatched` ratio means hedging is rescuing tail requests; a high `hedges_dispatched / requests` ratio means primaries are routinely slow.
+
+### 2.4 Chat surface
 
 Language inference is exposed five ways over one runtime:
 
@@ -71,7 +83,7 @@ Language inference is exposed five ways over one runtime:
 
 Each surface is a thin wrapper over the same router and runtime — the model and provider are the same underneath.
 
-### 2.4 Multi-Token Prediction
+### 2.5 Multi-Token Prediction
 
 Speculative decoding lets a target model generate multiple tokens per inference step using a smaller drafter. **MTP** is the jointly-trained variant — an auxiliary head that shares hidden state with the target and produces tokens consistent with the target's distribution.
 
@@ -85,7 +97,7 @@ Tenzro wires MTP through the full path:
 
 Shipped in the catalog with `mtp_kind: DraftMtp`: DeepSeek V3 (native MTP head), DeepSeek V4 Pro / Flash, GLM 5.2, Gemma 4 (E2B / E4B / 12B / 26B-A4B / 31B), Qwen 3.5 every size (0.8B / 2B / 4B / 9B / 27B / 35B-A3B / 122B-A10B / 397B-A17B), Qwen 3.6 27B and 35B-A3B. For dense models without a joint head, classical two-model speculative decoding (`MtpKind::Generic`) is wired through the same path.
 
-### 2.5 Per-model serving profile
+### 2.6 Per-model serving profile
 
 The catalog is the single source of truth for serving behaviour. Each `HfModelEntry` carries a `serving: ServingProfile` (temperature, top_p, top_k, min_p, `jinja_required`, `reasoning_default`) stamped from the model author's recommended values (Unsloth per-family guidance) by a single post-construction pass keyed on family + architecture — the per-family knowledge lives in one `ServingProfile::for_family` function rather than being duplicated across the struct literals. Clients consume the profile two ways: the `tenzro_modelMetadata` RPC returns it (alongside `drafter_id`, `mtp_kind`, MoE shape, and multimodal/`mmproj` flags) so any client can render or apply the recommended config, and the local serving sidecar stamps each on-disk GGUF's preset section with the profile's samplers, `--jinja`, speculative (`spec-type`), and MoE-offload (`n-cpu-moe`) flags. Request-level parameters override the profile; the profile is the default, not a ceiling.
 

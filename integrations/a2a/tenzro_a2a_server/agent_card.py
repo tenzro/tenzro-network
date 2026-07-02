@@ -137,12 +137,15 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "name": "Settlement & Payments",
                 "description": (
                     "Settle payments for AI services using micropayment channels, "
-                    "escrow, and batch settlement on the Tenzro ledger."
+                    "escrow, prepaid streaming balances, and batch settlement on "
+                    "the Tenzro ledger."
                 ),
-                "tags": ["settlement", "payments", "escrow"],
+                "tags": ["settlement", "payments", "escrow", "prepaid", "streaming"],
                 "examples": [
                     "Check settlement status",
                     "Open a micropayment channel",
+                    "Pre-fund a streaming storage or compute rental",
+                    "Check a prepaid streaming balance",
                 ],
                 "inputModes": ["text/plain"],
                 "outputModes": ["text/plain", "application/json"],

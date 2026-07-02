@@ -128,16 +128,60 @@ impl StorageProviderRuntime {
         obligations: Arc<ProviderObligations>,
         policy: PricingPolicy,
     ) -> Self {
-        let store = Arc::new(StorageProvider::new(resolver.clone()));
+        Self::build(provider, resolver, balances, stake_ledger, obligations, policy, None)
+    }
+
+    /// Like [`new`], but persists object descriptors and streaming deals to the
+    /// given store (`CF_SETTLEMENTS`) and hydrates both on construction, so a
+    /// provider resumes serving held objects and billing open deals after a
+    /// restart.
+    ///
+    /// [`new`]: StorageProviderRuntime::new
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_storage(
+        provider: Address,
+        resolver: Arc<dyn tenzro_iroh::IrohResolver>,
+        balances: Arc<DashMap<(Address, AssetId), u128>>,
+        stake_ledger: Arc<dyn StakeLedger>,
+        obligations: Arc<ProviderObligations>,
+        policy: PricingPolicy,
+        storage: Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        Self::build(
+            provider,
+            resolver,
+            balances,
+            stake_ledger,
+            obligations,
+            policy,
+            Some(storage),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        provider: Address,
+        resolver: Arc<dyn tenzro_iroh::IrohResolver>,
+        balances: Arc<DashMap<(Address, AssetId), u128>>,
+        stake_ledger: Arc<dyn StakeLedger>,
+        obligations: Arc<ProviderObligations>,
+        policy: PricingPolicy,
+        storage: Option<Arc<dyn tenzro_storage::KvStore>>,
+    ) -> Self {
+        let store = Arc::new(match storage.clone() {
+            Some(s) => StorageProvider::with_storage(resolver.clone(), s),
+            None => StorageProvider::new(resolver.clone()),
+        });
         let pricing = StoragePricing::new(policy.effective_rate());
-        let meter = Arc::new(
-            StorageMeter::new(pricing, balances, DEFAULT_MISS_THRESHOLD)
-                .with_coverage(stake_ledger, obligations),
-        );
+        let mut meter = StorageMeter::new(pricing, balances, DEFAULT_MISS_THRESHOLD)
+            .with_coverage(stake_ledger, obligations);
+        if let Some(s) = storage {
+            meter = meter.with_storage(s);
+        }
         Self {
             provider,
             store,
-            meter,
+            meter: Arc::new(meter),
             resolver,
             pricing: Arc::new(RwLock::new(policy)),
         }
@@ -187,11 +231,10 @@ impl StorageProviderRuntime {
         owner_hex: impl Into<String>,
         data: &[u8],
         scheme: RedundancyScheme,
-    ) -> tenzro_storage_market::Result<()> {
+    ) -> tenzro_storage_market::Result<tenzro_storage_market::ObjectDescriptor> {
         self.store
             .store_object(object_id, owner_hex, data, scheme)
             .await
-            .map(|_| ())
     }
 
     /// Opens a streaming storage deal for an already-stored object. The
@@ -236,6 +279,29 @@ impl StorageProviderRuntime {
             );
         }
         self.meter.charge_epoch(deal_id, passed)
+    }
+
+    /// Runs one billing epoch across every active deal: draws a fresh
+    /// retrievability challenge per deal and charges (or misses) it. Returns
+    /// `(charged, missed, closed)` counts. Errors on individual deals are
+    /// logged and skipped so one bad deal never stalls the sweep.
+    pub async fn run_billing_epoch(&self) -> (usize, usize, usize) {
+        let deal_ids = self.meter.active_deal_ids();
+        let mut charged = 0usize;
+        let mut missed = 0usize;
+        let mut closed = 0usize;
+        for deal_id in deal_ids {
+            match self.charge_epoch(&deal_id).await {
+                Ok(ChargeOutcome::Charged { .. }) => charged += 1,
+                Ok(ChargeOutcome::Missed) => missed += 1,
+                Ok(ChargeOutcome::Closed { .. }) => closed += 1,
+                Err(e) => warn!(deal = %deal_id, error = %e, "Billing epoch charge failed"),
+            }
+        }
+        if charged + missed + closed > 0 {
+            info!(charged, missed, closed, "Storage billing epoch complete");
+        }
+        (charged, missed, closed)
     }
 
     /// Draws, answers, and verifies a retrievability challenge for `object_id`.

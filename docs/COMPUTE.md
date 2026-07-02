@@ -100,6 +100,8 @@ Pricing is the provider's call. Consumers see the effective rate before they boo
 
 The invariant is uniform across every Tenzro service: **the consumer pays from their TNZO balance; the provider earns into theirs.** Renting out compute credits the provider; consuming it debits the consumer. There is no separate settlement path for compute — it uses the same balances the rest of the network settles against.
 
+Before a rental streams, the renter funds a prepaid balance: TNZO is locked out of their on-chain account into a key-less prepaid vault and becomes their spendable balance for streaming settlement. Per-epoch charges draw down that balance; any unspent remainder can be withdrawn back. Prepaid balances persist across restarts and are billed once per epoch by a background loop on the node.
+
 ---
 
 ## 5. Interfaces
@@ -111,6 +113,7 @@ The invariant is uniform across every Tenzro service: **the consumer pays from t
 - `tenzro_computeGetRental` — fetch a rental's state
 - `tenzro_computeSetPricing` — switch between fixed and network-dynamic pricing
 - `tenzro_computeStatus` — whether this node is a compute provider, its effective rate, and its active rentals
+- `tenzro_prepaidDeposit` / `tenzro_prepaidWithdraw` / `tenzro_prepaidBalance` — fund, refund, and read the prepaid streaming balance
 
 ### CLI
 
@@ -120,11 +123,14 @@ tenzro node compute book-rental --asset <id> --epochs <n>
 tenzro node compute settle-epoch --rental <id>
 tenzro node compute rental --rental <id>
 tenzro node compute set-pricing --mode <fixed|dynamic>
+tenzro escrow prepaid-deposit --renter <addr> --amount <wei>
+tenzro escrow prepaid-balance --renter <addr>
+tenzro escrow prepaid-withdraw --renter <addr> --amount <wei>
 ```
 
 ### SDKs
 
-Both the Rust and TypeScript SDKs expose a `compute` client with `book_rental`, `settle_epoch`, `get_rental`, `set_dynamic_pricing`, and `status`.
+Both the Rust and TypeScript SDKs expose a `compute` client with `book_rental`, `settle_epoch`, `get_rental`, `set_dynamic_pricing`, and `status`. Prepaid balances are managed through the `settlement` client (`prepaid_deposit` / `prepaid_withdraw` / `prepaid_balance`).
 
 ---
 

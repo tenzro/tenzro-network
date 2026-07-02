@@ -25,9 +25,14 @@
 //! - `IrohResolver` trait — the dispatch surface that crates depend on
 //!   without pulling in the iroh runtime.
 //! - `IrohBackedResolver` — concrete implementation wrapping an
-//!   `iroh::Endpoint` + `iroh_blobs::store::mem::MemStore` + the
-//!   `BlobsProtocol` router. Handles `tenzro://blob/...` (and the other
+//!   `iroh::Endpoint` + a blob store + the `BlobsProtocol` router.
+//!   Config-driven binds use a persistent redb-backed
+//!   `iroh_blobs::store::fs::FsStore` under `{data_dir}/iroh/blobs` so
+//!   published blobs survive restart; `bind_in_memory` keeps a `MemStore`
+//!   for tests. Handles `tenzro://blob/...` (and the other
 //!   content-addressed variants that map to a single BLAKE3 hash).
+//!   Cross-node fetches consult the URI's provider hint first, then the
+//!   provider cache fed by signed `tenzro/blobs` gossip announcements.
 //! - `IrohBlobsDaBackend` — adapter that satisfies
 //!   `tenzro_storage::da::DaBackend` over the same resolver, so offloaded
 //!   receipts (inference, agent-message, channel-update) flow through
@@ -40,10 +45,6 @@
 //!
 //! # Out of scope (later phases)
 //!
-//! - Filesystem-backed blob store (`FsStore::load(path)`) — wired when
-//!   the node config grows a persistence flag. Phase A2 ships the
-//!   in-memory variant first so the receipt-offload path is exercisable
-//!   in tests and on validators that re-derive their receipt cache.
 //! - `tenzro://manifest/...` was originally penciled in as an iroh-docs
 //!   surface. Phase B2 (#217) replaced that with sponsor-DID-signed
 //!   `SealedDatasetManifest` distribution on the `tenzro/training`

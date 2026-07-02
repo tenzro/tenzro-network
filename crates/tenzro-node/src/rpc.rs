@@ -30,6 +30,7 @@ use tenzro_model::{
     get_segmentation_model_by_id, get_text_embedding_catalog, get_text_embedding_model_by_id,
     get_text_segmentation_catalog, get_text_segmentation_model_by_id, get_video_catalog,
     get_vision_catalog, get_vision_model_by_id, ChatMessage as ModelChatMessage, DetrFamily,
+    ExternalEngine, ExternalEngineKind,
     ForecastConfig, GenerationConfig, ImageEmbedConfig, ImageNormalization, SamFamily, SegmentPrompt,
     TextEmbedConfig, TextEncoderFamily, TextSegmentBoxPrompt, TextSegmentConfig,
     ToolDefinition as RuntimeToolDefinition, TranscribeConfig, VideoEmbedConfig, WhisperFamily,
@@ -1239,6 +1240,12 @@ async fn dispatch_request(
         "tenzro_getEscrow" => handle_get_escrow(node, request.params).await,
         "tenzro_listEscrowsByPayer" => handle_list_escrows_by_payer(node, request.params).await,
         "tenzro_listEscrowsByPayee" => handle_list_escrows_by_payee(node, request.params).await,
+        // Prepaid streaming-service balances. A renter pre-funds the streaming
+        // settlement path by locking on-chain TNZO into the prepaid ledger;
+        // storage/compute runtimes then stream per epoch out of that balance.
+        "tenzro_prepaidDeposit" => handle_prepaid_deposit(node, request.params).await,
+        "tenzro_prepaidWithdraw" => handle_prepaid_withdraw(node, request.params).await,
+        "tenzro_prepaidBalance" => handle_prepaid_balance(node, request.params).await,
         // Workflow read RPCs — Canton-native workflow stack. Writes flow
         // through `tenzro_signAndSendTransaction` with the privileged-VM
         // workflow selectors (`0x01000040`–`0x0100004B`); the post-block
@@ -1433,6 +1440,7 @@ async fn dispatch_request(
         "tenzro_closePaymentChannel" => handle_close_payment_channel(node, request.params).await,
         "tenzro_listInferenceUsage" => handle_list_inference_usage(node, request.params).await,
         "tenzro_getProviderReputation" => handle_get_provider_reputation(node, request.params).await,
+        "tenzro_getRouterMetrics" => handle_get_router_metrics(node, request.params).await,
         "tenzro_getProvenance" => handle_get_provenance(node, request.params).await,
         "tenzro_getDispute" => handle_get_dispute(node, request.params).await,
         "tenzro_listDisputesByChannel" => handle_list_disputes_by_channel(node, request.params).await,
@@ -6335,6 +6343,142 @@ async fn handle_list_escrows_by_payee(
     }))
 }
 
+// ---- Prepaid streaming-service balances -------------------------------------
+//
+// A renter funds the streaming settlement path by locking on-chain TNZO into
+// the prepaid ledger. The storage / compute runtimes stream per billing epoch
+// out of this balance; the renter can withdraw any unspent balance back.
+
+fn require_prepaid_ledger(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<&std::sync::Arc<tenzro_settlement::PrepaidLedger>, JsonRpcError> {
+    node.prepaid_ledger().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Prepaid ledger not initialized (node lacks storage or token subsystem)"
+            .to_string(),
+        data: None,
+    })
+}
+
+/// Reads the optional `asset` param, defaulting to TNZO (the only streamable
+/// asset today).
+fn prepaid_asset_param(params: &Value) -> tenzro_types::asset::AssetId {
+    params
+        .get("asset")
+        .and_then(|v| v.as_str())
+        .map(tenzro_types::asset::AssetId::new)
+        .unwrap_or_else(tenzro_types::asset::AssetId::tnzo)
+}
+
+/// `tenzro_prepaidDeposit` — lock `amount` of the renter's on-chain TNZO into
+/// the prepaid ledger. Returns the new prepaid balance.
+async fn handle_prepaid_deposit(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let renter = parse_address_param(&params, "renter").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing or invalid renter address".to_string(),
+        data: None,
+    })?;
+    let amount = parse_u128_amount(&params, "amount").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing or invalid amount".to_string(),
+        data: None,
+    })?;
+    let asset = prepaid_asset_param(&params);
+    let ledger = require_prepaid_ledger(node)?;
+
+    let new_balance = ledger
+        .deposit(renter, asset.clone(), amount)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Prepaid deposit failed: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "renter": format!("0x{}", hex::encode(renter.as_bytes())),
+        "asset": asset.as_str(),
+        "deposited": amount.to_string(),
+        "balance": new_balance.to_string(),
+    }))
+}
+
+/// `tenzro_prepaidWithdraw` — return up to `amount` of the renter's unspent
+/// prepaid balance to their on-chain account. Returns the amount withdrawn
+/// (capped at the available prepaid balance) and the remaining balance.
+async fn handle_prepaid_withdraw(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let renter = parse_address_param(&params, "renter").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing or invalid renter address".to_string(),
+        data: None,
+    })?;
+    let amount = parse_u128_amount(&params, "amount").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing or invalid amount".to_string(),
+        data: None,
+    })?;
+    let asset = prepaid_asset_param(&params);
+    let ledger = require_prepaid_ledger(node)?;
+
+    let withdrawn = ledger
+        .withdraw(renter, asset.clone(), amount)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Prepaid withdraw failed: {}", e),
+            data: None,
+        })?;
+    let balance = ledger.balance(&renter, &asset);
+
+    Ok(serde_json::json!({
+        "renter": format!("0x{}", hex::encode(renter.as_bytes())),
+        "asset": asset.as_str(),
+        "withdrawn": withdrawn.to_string(),
+        "balance": balance.to_string(),
+    }))
+}
+
+/// `tenzro_prepaidBalance` — read the renter's current prepaid balance.
+async fn handle_prepaid_balance(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let renter = parse_address_param(&params, "renter").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing or invalid renter address".to_string(),
+        data: None,
+    })?;
+    let asset = prepaid_asset_param(&params);
+    let ledger = require_prepaid_ledger(node)?;
+
+    let balance = ledger.balance(&renter, &asset);
+
+    Ok(serde_json::json!({
+        "renter": format!("0x{}", hex::encode(renter.as_bytes())),
+        "asset": asset.as_str(),
+        "balance": balance.to_string(),
+    }))
+}
+
 // ---- Agent memory tier (Phase B) RPCs ---------------------------------------
 //
 // `tenzro_memoryGrant`     — embed text via the configured TextEmbeddingRuntime
@@ -10818,6 +10962,33 @@ async fn handle_get_provider_reputation(
         "provider": provider_hex,
         "reputation": reputation,
     }))
+}
+
+/// Read the inference router's request/hedge counters.
+///
+/// Surfaces the tail-latency hedging telemetry: total routed requests,
+/// how many of those spawned a hedge (the primary was still pending past
+/// the hedge delay), and how many hedges beat their primary. A high
+/// `hedges_won / hedges_dispatched` ratio means the hedge is genuinely
+/// rescuing tail requests; a high `hedges_dispatched / requests` ratio
+/// means primaries are routinely slow and provider selection may need
+/// attention.
+async fn handle_get_router_metrics(
+    node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let router = node.inference_router().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Inference router not initialized".to_string(),
+        data: None,
+    })?;
+
+    let snapshot = router.metrics();
+    serde_json::to_value(snapshot).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("Failed to serialize router metrics: {}", e),
+        data: None,
+    })
 }
 
 /// Look up a cached `ProvenanceManifest` by 32-byte content hash.
@@ -16472,7 +16643,7 @@ async fn handle_storage_store_object(
             data: None,
         })?;
 
-    runtime
+    let descriptor = runtime
         .store_object(object_id.clone(), owner, &data, scheme)
         .await
         .map_err(|e| JsonRpcError {
@@ -16481,12 +16652,83 @@ async fn handle_storage_store_object(
             data: None,
         })?;
 
+    // Announce the freshly-published shards so other storage providers can
+    // self-select as replica holders (HRW placement). Each holder pins the
+    // shards it owns under its own membership view; view skew self-heals via
+    // the blob heartbeat re-announcing whatever landed locally.
+    broadcast_shard_replication(node, &descriptor);
+
     Ok(serde_json::json!({
         "object_id": object_id,
         "size_bytes": data.len(),
         "data_shards": data_shards,
         "parity_shards": parity_shards,
     }))
+}
+
+/// Builds and gossips a signed `ShardReplicationMessage` for a just-stored
+/// object. No-op unless the node has an iroh resolver, an announce signer, and
+/// a network handle. Each entry carries the shard's BLAKE3 blob hash (parsed
+/// from its `tenzro://blob/...` URI) plus its SHA-256 commitment.
+fn broadcast_shard_replication(
+    node: &Arc<TenzroNode>,
+    descriptor: &tenzro_storage_market::ObjectDescriptor,
+) {
+    let (Some(resolver), Some(signer), Some(network)) =
+        (node.iroh_resolver(), node.announce_signer(), node.network())
+    else {
+        return;
+    };
+    let origin_endpoint_id = resolver.endpoint_id().to_string();
+
+    let mut shards = Vec::with_capacity(descriptor.shards.len());
+    for shard in &descriptor.shards {
+        let blob_hash = match tenzro_types::tenzro_uri::TenzroUri::parse(&shard.uri) {
+            Ok(tenzro_types::tenzro_uri::TenzroUri::Blob { hash, .. }) => hash,
+            _ => {
+                tracing::warn!(
+                    uri = %shard.uri,
+                    "Skipping shard-replication entry: shard URI is not a tenzro://blob/ URI"
+                );
+                continue;
+            }
+        };
+        shards.push(tenzro_network::ShardReplicationEntry {
+            index: shard.index,
+            blob_hash,
+            commitment: shard.commitment.clone(),
+        });
+    }
+    if shards.is_empty() {
+        return;
+    }
+    let replicas = descriptor.scheme.total_shards();
+
+    let mut req = tenzro_network::ShardReplicationMessage {
+        object_id: descriptor.object_id.clone(),
+        origin_endpoint_id,
+        origin_peer_id: String::new(),
+        shards,
+        replicas,
+        timestamp: chrono::Utc::now().timestamp_millis(),
+        ttl_secs: 180,
+        pubkey: Vec::new(),
+        signature: Vec::new(),
+    };
+    if let Err(e) = req.sign(signer.as_ref()) {
+        tracing::warn!(error = %e, "Skipping shard-replication broadcast: signing failed");
+        return;
+    }
+
+    let broadcast_msg = tenzro_network::NetworkMessage::new(
+        tenzro_network::MessagePayload::ShardReplication(req),
+    );
+    let net = network.clone();
+    tokio::spawn(async move {
+        if let Err(e) = net.broadcast("tenzro/blobs", broadcast_msg).await {
+            tracing::debug!(error = %e, "Failed to broadcast shard replication");
+        }
+    });
 }
 
 /// `tenzro_storageOpenDeal` — open a streaming storage deal for a stored
@@ -17777,6 +18019,244 @@ async fn handle_serve_model(
             "success": true,
             "model_id": model_id,
             "status": "already_serving",
+        }));
+    }
+
+    // External engine backend: front an OpenAI-compatible server (vLLM /
+    // SGLang / llama-server / any OpenAI-compatible endpoint) instead of
+    // loading weights locally. This is the SOTA-throughput path — the GPU
+    // engine owns paged-attention batching; the node routes chat/completions
+    // over the OpenAI wire contract. No local GGUF is downloaded or loaded.
+    if let Some(engine_kind_str) = params.get("engine").and_then(|v| v.as_str()) {
+        let kind = ExternalEngineKind::parse_str(engine_kind_str).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!(
+                "Unknown engine '{}'. Expected one of: vllm, sglang, llama-server, external",
+                engine_kind_str
+            ),
+            data: None,
+        })?;
+
+        let base_url = params
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "External engine requires 'base_url' (e.g. http://127.0.0.1:8000)"
+                    .to_string(),
+                data: None,
+            })?;
+
+        // The upstream server may register the model under a different id
+        // (e.g. the HF repo path vLLM was launched with). Default to the
+        // catalog id when the caller does not override.
+        let upstream_model = params
+            .get("upstream_model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(model_id)
+            .to_string();
+        let api_key = params
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let engine = ExternalEngine::new(kind, base_url, upstream_model.clone(), api_key)
+            .map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid external engine config: {}", e),
+                data: None,
+            })?;
+
+        // Health-probe now so a misconfigured endpoint fails the serve call
+        // rather than the first inference.
+        model_runtime
+            .register_external_engine(model_id, engine)
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("External engine unreachable: {}", e),
+                data: None,
+            })?;
+
+        node.served_models.insert(model_id.to_string(), true);
+
+        // Persist to RocksDB CF_MODELS so the external binding survives restart.
+        if let Some(storage) = node.storage() {
+            let record = serde_json::json!({
+                "model_id": model_id,
+                "served_at": chrono::Utc::now().to_rfc3339(),
+                "engine": engine_kind_str,
+                "base_url": base_url,
+                "upstream_model": upstream_model,
+            });
+            if let Ok(bytes) = serde_json::to_vec(&record) {
+                if let Err(e) = storage.put(CF_MODELS, model_id.as_bytes(), &bytes) {
+                    tracing::warn!(model_id = %model_id, error = %e, "Failed to persist external-engine model to RocksDB");
+                }
+            }
+        }
+
+        // Throughput ceiling is the upstream engine's; the node does not gate
+        // concurrency for external backends. Register the model service so it
+        // shows up in endpoints/routing.
+        let cfg = node.config();
+        let api_endpoint = match cfg.external_rpc_addr.as_deref() {
+            Some(ext) if !ext.is_empty() => {
+                if ext.starts_with("http://") || ext.starts_with("https://") {
+                    if ext.trim_end_matches('/').ends_with("/v1") {
+                        ext.trim_end_matches('/').to_string()
+                    } else {
+                        format!("{}/v1", ext.trim_end_matches('/'))
+                    }
+                } else {
+                    format!("http://{}/v1", ext.trim_end_matches('/'))
+                }
+            }
+            _ => format!("http://{}/v1", cfg.rpc_addr),
+        };
+        let mcp_endpoint = match cfg.external_mcp_addr.as_deref() {
+            Some(ext) if !ext.is_empty() => {
+                if ext.starts_with("http://") || ext.starts_with("https://") {
+                    if ext.trim_end_matches('/').ends_with("/mcp") {
+                        ext.trim_end_matches('/').to_string()
+                    } else {
+                        format!("{}/mcp", ext.trim_end_matches('/'))
+                    }
+                } else {
+                    format!("http://{}/mcp", ext.trim_end_matches('/'))
+                }
+            }
+            _ => format!(
+                "http://{}:{}/mcp",
+                cfg.rpc_addr.split(':').next().unwrap_or("127.0.0.1"),
+                3001
+            ),
+        };
+        let instance_id = node.register_model_service(
+            model_id,
+            &entry.name,
+            "Local Node",
+            ModelLocation::Local,
+            &api_endpoint,
+            &mcp_endpoint,
+            &entry.parameters,
+        );
+
+        let visibility = params
+            .get("visibility")
+            .and_then(|v| v.as_str())
+            .unwrap_or("network")
+            .to_string();
+
+        if visibility == "network" {
+            if let Some(network) = node.network() {
+                let network = network.clone();
+                let (msg_schedule, per_token) = {
+                    let pricing = node.provider_pricing.read();
+                    let schedule = node.provider_schedule.read();
+                    let msg_schedule = if schedule.enabled {
+                        let days: Vec<u8> = schedule
+                            .days_of_week
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, &enabled)| if enabled { Some(i as u8) } else { None })
+                            .collect();
+                        Some(tenzro_network::ModelSchedule {
+                            enabled: true,
+                            start_hour: schedule.start_hour,
+                            end_hour: schedule.end_hour,
+                            timezone: schedule.timezone.clone(),
+                            days_of_week: days,
+                        })
+                    } else {
+                        None
+                    };
+                    let per_token =
+                        pricing.input_price_per_token_wei.min(u64::MAX as u128) as u64;
+                    (msg_schedule, per_token)
+                };
+                let provider_address = node
+                    .identity_registry()
+                    .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+                    .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
+                    .unwrap_or_default();
+                let peer_id = network
+                    .local_peer_id()
+                    .await
+                    .ok()
+                    .map(|p| p.to_string())
+                    .unwrap_or_default();
+                let signer = node.announce_signer().cloned();
+                let name = entry.name.clone();
+                let description = entry.description.clone();
+                let category = entry.family.clone();
+                let parameters = entry.parameters.clone();
+                let context_length = entry.context_length;
+                let api_endpoint_c = api_endpoint.clone();
+                let model_id_c = model_id.to_string();
+                let visibility_c = visibility.clone();
+                tokio::spawn(async move {
+                    // No local weights to hash for an external engine; peers
+                    // route to the upstream via the node's RPC, integrity is
+                    // the upstream's contract.
+                    let mut reg = tenzro_network::ModelRegistrationMessage {
+                        model_id: model_id_c,
+                        name,
+                        description,
+                        modality: "text".to_string(),
+                        category,
+                        parameters,
+                        context_length,
+                        provider: provider_address,
+                        peer_id,
+                        pricing: tenzro_network::PricingInfo {
+                            per_request: 0,
+                            per_token: Some(per_token),
+                        },
+                        schedule: msg_schedule,
+                        visibility: visibility_c,
+                        ttl_secs: 120,
+                        timestamp: chrono::Utc::now().timestamp_millis(),
+                        withdrawn: false,
+                        rpc_endpoint: api_endpoint_c,
+                        weights_sha256: String::new(),
+                        ..Default::default()
+                    };
+                    let Some(signer) = signer else {
+                        tracing::warn!("Skipping model announcement: announce signer unavailable");
+                        return;
+                    };
+                    if let Err(e) = reg.sign(signer.as_ref()) {
+                        tracing::warn!(error = %e, "Skipping model announcement: signing failed");
+                        return;
+                    }
+                    let broadcast_msg =
+                        NetworkMessage::new(MessagePayload::ModelRegistration(reg));
+                    if let Err(e) = network.broadcast("tenzro/models", broadcast_msg).await {
+                        tracing::warn!(error = %e, "Failed to broadcast external model announcement");
+                    }
+                });
+            }
+        }
+
+        tracing::info!(
+            model_id = %model_id,
+            engine = %engine_kind_str,
+            base_url = %base_url,
+            "Serving model via external OpenAI-compatible engine",
+        );
+
+        return Ok(serde_json::json!({
+            "success": true,
+            "model_id": model_id,
+            "instance_id": instance_id,
+            "api_endpoint": api_endpoint,
+            "mcp_endpoint": mcp_endpoint,
+            "status": "serving_external",
+            "engine": engine_kind_str,
+            "base_url": base_url,
+            "upstream_model": upstream_model,
+            "visibility": visibility,
         }));
     }
 
@@ -22302,6 +22782,19 @@ async fn handle_list_model_endpoints(
                     "max_concurrent": snap.max_concurrent,
                     "utilization_percent": snap.utilization_percent,
                     "load_level": snap.load_level.to_string(),
+                });
+            }
+
+            // Surface the backing engine when this model is served through an
+            // external OpenAI-compatible endpoint (vLLM / SGLang / etc.).
+            if let Some(runtime) = node.model_runtime.as_ref()
+                && let Some((kind, base_url, upstream_model)) =
+                    runtime.external_engine_info(&svc.model_id)
+            {
+                entry["engine"] = serde_json::json!({
+                    "kind": kind,
+                    "base_url": base_url,
+                    "upstream_model": upstream_model,
                 });
             }
 

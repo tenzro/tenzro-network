@@ -27,10 +27,12 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use tenzro_settlement::obligations::ProviderObligations;
-use tenzro_settlement::rental::{EpochOutcome, RentalAgreement, RentalManager, StakeLedger};
+use tenzro_settlement::rental::{
+    EpochOutcome, RentalAgreement, RentalManager, RentalStatus, StakeLedger,
+};
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::Address;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::pricing::{DynamicPricing, PricingPolicy, ResourceKind};
 
@@ -68,6 +70,30 @@ impl ComputeRentalRuntime {
     ) -> Self {
         let manager =
             Arc::new(RentalManager::new(balances, stake_ledger).with_obligations(obligations));
+        Self {
+            provider,
+            manager,
+            pricing: Arc::new(RwLock::new(policy)),
+        }
+    }
+
+    /// Like [`new`], but rehydrates open rentals from `CF_SETTLEMENTS` on
+    /// construction and writes through on every mutation, so bookings and
+    /// per-epoch settlement survive a restart.
+    ///
+    /// [`new`]: ComputeRentalRuntime::new
+    pub fn with_storage(
+        provider: Address,
+        balances: Arc<DashMap<(Address, AssetId), u128>>,
+        stake_ledger: Arc<dyn StakeLedger>,
+        obligations: Arc<ProviderObligations>,
+        policy: PricingPolicy,
+        storage: Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        let manager = Arc::new(
+            RentalManager::with_storage(balances, stake_ledger, storage)
+                .with_obligations(obligations),
+        );
         Self {
             provider,
             manager,
@@ -129,6 +155,33 @@ impl ComputeRentalRuntime {
         proof_valid: bool,
     ) -> tenzro_settlement::error::Result<EpochOutcome> {
         self.manager.settle_epoch(rental_id, proof_valid)
+    }
+
+    /// Settles one epoch across every active rental this provider owns. The
+    /// running epoch tick is itself the availability proof — a provider that is
+    /// down does not run this loop, and its rentals miss by the settlement
+    /// layer's own timeout accounting. Returns `(settled, missed, closed)`
+    /// counts; per-rental errors are logged and skipped.
+    pub fn run_billing_epoch(&self) -> (usize, usize, usize) {
+        let rentals = self.manager.get_rentals_by_provider(&self.provider);
+        let mut settled = 0usize;
+        let mut missed = 0usize;
+        let mut closed = 0usize;
+        for rental in rentals {
+            if rental.status != RentalStatus::Active {
+                continue;
+            }
+            match self.manager.settle_epoch(&rental.rental_id, true) {
+                Ok(EpochOutcome::Settled { .. }) => settled += 1,
+                Ok(EpochOutcome::Missed { .. }) => missed += 1,
+                Ok(EpochOutcome::Closed { .. }) => closed += 1,
+                Err(e) => warn!(rental = %rental.rental_id, error = %e, "Rental epoch settle failed"),
+            }
+        }
+        if settled + missed + closed > 0 {
+            info!(settled, missed, closed, "Compute rental billing epoch complete");
+        }
+        (settled, missed, closed)
     }
 
     /// Re-checks coverage after a provider's stake dropped (e.g. a slash on one

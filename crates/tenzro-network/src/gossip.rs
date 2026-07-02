@@ -42,6 +42,9 @@ impl GossipTopics {
         topics.insert("agents".to_string(), IdentTopic::new("tenzro/agents"));
         topics.insert("providers".to_string(), IdentTopic::new("tenzro/providers"));
 
+        // Iroh blob availability announcements — feeds resolver hint caches
+        topics.insert("blobs".to_string(), IdentTopic::new("tenzro/blobs"));
+
         // Cortex worker discovery (must match tenzro_cortex::CORTEX_TOPIC)
         topics.insert("cortex".to_string(), IdentTopic::new("tenzro/cortex"));
 
@@ -118,6 +121,11 @@ impl GossipTopics {
     /// Providers topic
     pub fn providers(&self) -> &IdentTopic {
         self.topics.get("providers").expect("providers topic must exist")
+    }
+
+    /// Iroh blob availability topic
+    pub fn blobs(&self) -> &IdentTopic {
+        self.topics.get("blobs").expect("blobs topic must exist")
     }
 
     /// Cortex worker-advertisement topic

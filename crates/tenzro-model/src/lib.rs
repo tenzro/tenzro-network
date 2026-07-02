@@ -110,10 +110,12 @@
 //! - Concurrent download management
 
 pub mod audio_runtime;
+pub mod batching;
 pub mod catalog;
 pub mod cluster;
 pub mod detection_runtime;
 pub mod download;
+pub mod external_engine;
 pub mod gguf_shape;
 pub mod error;
 pub mod hf_download;
@@ -144,7 +146,8 @@ pub use error::{ModelError, Result};
 pub use registry::{ModelFilter, ModelRegistry, RegistryEvent};
 pub use provider::{ProviderManager, ProviderMetrics, ProviderWithMetrics};
 pub use routing::{
-    CircuitBreaker, CircuitBreakerState, InferenceRouter, RoutingConfig, RoutingStrategy,
+    CircuitBreaker, CircuitBreakerState, InferenceRouter, RouterMetricsSnapshot, RoutingConfig,
+    RoutingStrategy,
 };
 pub use pricing::{PriceEstimate, PricingEngine};
 pub use moe_shard::{
@@ -182,6 +185,8 @@ pub use runtime::{
     ChatMessage, ChatWithToolsResult, GenerationConfig, HardwareInfo, InferenceResult,
     ModelRuntime, ToolCall, ToolDefinition,
 };
+pub use batching::{BatchEngine, BatchRequest};
+pub use external_engine::{ExternalEngine, ExternalEngineKind};
 pub use usage::{
     UsageTracker, UsageRecord, ModelUsageStats, ProviderUsageStats, GlobalUsageStats,
 };

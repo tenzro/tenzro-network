@@ -20,10 +20,14 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tenzro_settlement::obligations::{ObligationSource, ProviderObligations};
 use tenzro_settlement::rental::StakeLedger;
+use tenzro_storage::{KvStore, CF_SETTLEMENTS};
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::{Address, Timestamp};
 use tenzro_types::settlement::ServiceType;
 use tracing::{debug, info, warn};
+
+/// RocksDB key prefix for persisted storage deals (`CF_SETTLEMENTS`).
+const STORAGE_DEAL_PREFIX: &[u8] = b"storage_deal:";
 
 /// Pricing for stored bytes, in smallest TNZO units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +149,10 @@ pub struct StorageMeter {
     /// publishes each provider's *storage* per-epoch exposure so a multi-role
     /// node's rentals admit against stake net of storage (and vice versa).
     obligations: Option<Arc<ProviderObligations>>,
+    /// Optional durable backing store. When set, every deal open / charge /
+    /// termination writes through to `CF_SETTLEMENTS` under `storage_deal:<id>`
+    /// and the deal set is hydrated on construction via `with_storage`.
+    storage: Option<Arc<dyn KvStore>>,
 }
 
 impl std::fmt::Debug for StorageMeter {
@@ -174,7 +182,65 @@ impl StorageMeter {
             miss_threshold,
             stake_ledger: None,
             obligations: None,
+            storage: None,
         }
+    }
+
+    /// Attaches a durable backing store and hydrates any persisted deals. Every
+    /// subsequent open / charge / termination writes through to
+    /// `CF_SETTLEMENTS` under `storage_deal:<id>`, so a provider survives a
+    /// restart mid-deal without losing its billing state.
+    pub fn with_storage(mut self, storage: Arc<dyn KvStore>) -> Self {
+        let keys = storage
+            .get_keys_with_prefix(CF_SETTLEMENTS, STORAGE_DEAL_PREFIX)
+            .unwrap_or_default();
+        let mut hydrated = 0usize;
+        for key in keys {
+            if let Ok(Some(bytes)) = storage.get(CF_SETTLEMENTS, &key)
+                && let Ok(deal) = serde_json::from_slice::<StorageDeal>(&bytes)
+            {
+                self.deals_by_provider
+                    .entry(deal.provider)
+                    .or_default()
+                    .push(deal.deal_id.clone());
+                self.deals.insert(deal.deal_id.clone(), deal);
+                hydrated += 1;
+            }
+        }
+        if hydrated > 0 {
+            info!("Hydrated {} storage deal(s) from persistence", hydrated);
+        }
+        self.storage = Some(storage);
+        self
+    }
+
+    /// Writes a deal through to the backing store, if attached. Best-effort:
+    /// a persistence failure is logged, never fatal to the in-memory charge.
+    fn persist_deal(&self, deal: &StorageDeal) {
+        if let Some(store) = &self.storage {
+            let mut key = STORAGE_DEAL_PREFIX.to_vec();
+            key.extend_from_slice(deal.deal_id.as_bytes());
+            match serde_json::to_vec(deal) {
+                Ok(bytes) => {
+                    if let Err(e) = store.put(CF_SETTLEMENTS, &key, &bytes) {
+                        warn!(deal_id = %deal.deal_id, error = %e, "Failed to persist storage deal");
+                    }
+                }
+                Err(e) => {
+                    warn!(deal_id = %deal.deal_id, error = %e, "Failed to serialize storage deal")
+                }
+            }
+        }
+    }
+
+    /// Deal ids of every currently-active deal on this meter. The billing
+    /// daemon walks these each epoch to run the retrievability charge.
+    pub fn active_deal_ids(&self) -> Vec<String> {
+        self.deals
+            .iter()
+            .filter(|d| d.value().status == StorageDealStatus::Active)
+            .map(|d| d.key().clone())
+            .collect()
     }
 
     /// Enables cross-service stake-coverage enforcement. After this, `open_deal`
@@ -288,6 +354,7 @@ impl StorageMeter {
             .entry(provider)
             .or_default()
             .push(deal.deal_id.clone());
+        self.persist_deal(&deal);
         self.publish_exposure(&provider);
         info!(
             "Opened storage deal {} object={} {} bytes @ {}/epoch x{}",
@@ -305,7 +372,7 @@ impl StorageMeter {
     /// storage that was not proven). Repeated misses past the threshold
     /// terminate the deal and return the unearned remainder.
     pub fn charge_epoch(&self, deal_id: &str, challenge_passed: bool) -> Result<ChargeOutcome> {
-        let (outcome, provider, closed) = {
+        let (outcome, provider, closed, snapshot) = {
             let mut entry = self
                 .deals
                 .get_mut(deal_id)
@@ -322,7 +389,7 @@ impl StorageMeter {
             let slice = deal.price_per_epoch;
             let provider = deal.provider;
 
-            if challenge_passed {
+            let outcome = if challenge_passed {
                 let key = (deal.provider, deal.asset_id.clone());
                 {
                     let mut bal = self.balances.entry(key).or_insert(0);
@@ -336,8 +403,7 @@ impl StorageMeter {
                     debug!("Storage deal {} completed", deal_id);
                 }
                 debug!("Storage deal {} charged {} to provider", deal_id, slice);
-                let closed = deal.status != StorageDealStatus::Active;
-                (ChargeOutcome::Charged { slice }, provider, closed)
+                ChargeOutcome::Charged { slice }
             } else {
                 // Miss: return the renter's locked slice for this (unproven) epoch.
                 let key = (deal.renter, deal.asset_id.clone());
@@ -364,10 +430,15 @@ impl StorageMeter {
                 } else if deal.is_complete() {
                     deal.status = StorageDealStatus::Completed;
                 }
-                let closed = deal.status != StorageDealStatus::Active;
-                (ChargeOutcome::Missed, provider, closed)
-            }
+                ChargeOutcome::Missed
+            };
+            let closed = deal.status != StorageDealStatus::Active;
+            (outcome, provider, closed, deal.clone())
         };
+
+        // Persist the post-charge deal state so a restart does not re-charge
+        // an already-billed epoch or resurrect a terminated deal.
+        self.persist_deal(&snapshot);
 
         // A closed deal no longer contributes per-epoch exposure; refresh the
         // shared tracker so the freed stake is available to other obligations.

@@ -154,6 +154,7 @@ pub mod intent_7683_fills;
 pub mod kill_switch;
 pub mod micropayments;
 pub mod obligations;
+pub mod prepaid;
 pub mod rental;
 
 // Re-export commonly used types
@@ -173,6 +174,7 @@ pub use micropayments::{
     NanopaymentBatcher, NanopaymentBatchResult, NanopaymentEntry, RocksDbChannelStorage,
 };
 pub use obligations::{ObligationSource, ProviderObligations};
+pub use prepaid::{AccountLedger, PrepaidLedger};
 pub use rental::{
     EpochOutcome, RentalAgreement, RentalManager, RentalStatus, StakeLedger, TerminationReason,
     DEFAULT_MISS_TERMINATION_THRESHOLD,
